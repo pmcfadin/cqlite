@@ -1293,6 +1293,10 @@ impl DataWriter {
             encode_signed(timestamp_delta, buf);
         }
 
+        if (flags & CELL_HAS_EMPTY_VALUE) != 0 {
+            return Ok(());
+        }
+
         // Value
         let value_bytes = serialize_value(value)?;
 
@@ -1306,8 +1310,9 @@ impl DataWriter {
             )));
         }
 
-        // Write value length as UNSIGNED VInt (Cassandra uses writeUnsignedVInt)
-        encode_unsigned(value_bytes.len() as u64, buf);
+        if cell_value_uses_length_prefix(value) {
+            encode_unsigned(value_bytes.len() as u64, buf);
+        }
 
         // Write value bytes
         buf.extend_from_slice(&value_bytes);
@@ -1353,7 +1358,10 @@ impl DataWriter {
         let local_deletion_time = now_seconds.saturating_add(ttl_seconds as i32);
 
         // Cell flags - CELL_IS_EXPIRING, NO USE_ROW_TIMESTAMP or USE_ROW_TTL
-        let flags = CELL_IS_EXPIRING;
+        let mut flags = CELL_IS_EXPIRING;
+        if matches!(value, Value::Text(s) if s.is_empty()) {
+            flags |= CELL_HAS_EMPTY_VALUE;
+        }
         buf.push(flags);
 
         // Timestamp delta (required for expiring cells)
@@ -1380,6 +1388,10 @@ impl DataWriter {
         }
         encode_unsigned(ttl_delta as u64, buf);
 
+        if (flags & CELL_HAS_EMPTY_VALUE) != 0 {
+            return Ok(());
+        }
+
         // Value
         let value_bytes = serialize_value(value)?;
 
@@ -1393,8 +1405,9 @@ impl DataWriter {
             )));
         }
 
-        // Write value length as UNSIGNED VInt (Cassandra uses writeUnsignedVInt)
-        encode_unsigned(value_bytes.len() as u64, buf);
+        if cell_value_uses_length_prefix(value) {
+            encode_unsigned(value_bytes.len() as u64, buf);
+        }
 
         // Write value bytes
         buf.extend_from_slice(&value_bytes);
@@ -1745,6 +1758,19 @@ fn infer_cql_type_from_value(value: Option<&Value>) -> CqlType {
         Some(Value::Tombstone(_)) => CqlType::Text, // Tombstones shouldn't appear in UDT fields
         Some(Value::Json(_)) => CqlType::Text,      // JSON is stored as text
     }
+}
+
+fn cell_value_uses_length_prefix(value: &Value) -> bool {
+    !matches!(
+        value,
+        Value::Boolean(_)
+            | Value::Integer(_)
+            | Value::BigInt(_)
+            | Value::Float32(_)
+            | Value::Float(_)
+            | Value::Timestamp(_)
+            | Value::Uuid(_)
+    )
 }
 
 /// Serialize value for clustering key (type-specific encoding)
@@ -2221,6 +2247,34 @@ mod tests {
             0,
             "Non-empty string should NOT have HAS_EMPTY_VALUE flag"
         );
+
+        assert_eq!(buf, vec![CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE]);
+    }
+
+    #[test]
+    fn test_fixed_width_cell_omits_length_prefix() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+        let mut buf = Vec::new();
+
+        writer
+            .write_cell(&mut buf, "value", &Value::Integer(42), 1001000)
+            .unwrap();
+
+        assert_eq!(buf, vec![CELL_USE_ROW_TIMESTAMP, 0x00, 0x00, 0x00, 0x2A]);
+    }
+
+    #[test]
+    fn test_variable_width_cell_keeps_length_prefix() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+        let mut buf = Vec::new();
+
+        writer
+            .write_cell(&mut buf, "value", &Value::Text("abc".to_string()), 1001000)
+            .unwrap();
+
+        assert_eq!(buf, vec![CELL_USE_ROW_TIMESTAMP, 0x03, b'a', b'b', b'c']);
     }
 
     #[test]

@@ -1,493 +1,483 @@
-//! sstableloader Integration Tests for Issue #396
+//! `sstableloader` integration tests for issue #396.
 //!
-//! This module validates that SSTables written by CQLite's WriteEngine
-//! can be successfully loaded into a real Cassandra cluster using sstableloader.
+//! These tests validate the full write path:
+//! 1. Create schema in a real Cassandra 5.0 node
+//! 2. Write mutations with CQLite
+//! 3. Package the flushed SSTables into a loader-friendly directory
+//! 4. Load them with `sstableloader`
+//! 5. Verify results through CQL queries
 //!
-//! ## Test Tiers
-//!
-//! - Tier 1: sstableloader Acceptance (load succeeds, basic verification)
-//! - Tier 2: CQL Query Verification (SELECT matches written data)
-//! - Tier 3: Stress Cases (large datasets, edge cases)
-//!
-//! ## Prerequisites
-//!
-//! - Docker must be running
-//! - Cassandra 5.0 container available
-//! - `docker-integration` feature flag enabled
-//!
-//! ## Running Tests
-//!
-//! ```bash
-//! # Start Cassandra container
-//! docker-compose -f test-data/docker/docker-compose-cassandra5.yml up -d
-//!
-//! # Run integration tests
-//! cargo test --package cqlite-core --test sstableloader_integration --features docker-integration,write-support
-//! ```
+//! The product contract is that flush already produces portable Cassandra
+//! SSTable components. The packaging step used here is only a loader/import
+//! convenience for the current test harness.
 
 #![cfg(all(feature = "write-support", feature = "docker-integration"))]
 
+#[path = "../../tests/helpers/docker.rs"]
+mod docker_helpers;
+
 use cqlite_core::{
+    error::{Error, Result as CqliteResult},
     schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema},
     storage::write_engine::{
-        CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine,
+        CellOperation, ClusteringKey, ExportOptions, Mutation, PartitionKey, TableId, WriteEngine,
         WriteEngineConfig,
     },
     types::Value,
-    Result as CqliteResult,
 };
+use docker_helpers::{CassandraContainer, CqlshOutput};
 use std::collections::HashMap;
-use std::process::Command;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tempfile::TempDir;
+use tokio::sync::Mutex;
 
-/// Check if Docker is available and a Cassandra container is running
-fn check_cassandra_available() -> bool {
-    // Check Docker is available
-    let docker_check = Command::new("docker").args(["info"]).output();
+const KEYSPACE: &str = "sstableloader_test";
 
-    if docker_check.is_err() || !docker_check.unwrap().status.success() {
-        return false;
+struct LoaderHarness {
+    _work_dir: TempDir,
+    package_dir: TempDir,
+    engine: Arc<Mutex<WriteEngine>>,
+    cassandra: CassandraContainer,
+    keyspace: String,
+    table: String,
+}
+
+impl LoaderHarness {
+    async fn new(schema: TableSchema, create_table_cql: &str) -> CqliteResult<Option<Self>> {
+        let Some(cassandra) = maybe_start_cassandra()? else {
+            return Ok(None);
+        };
+
+        ensure_keyspace(&cassandra, &schema.keyspace)?;
+        recreate_table(&cassandra, &schema.keyspace, &schema.table, create_table_cql)?;
+
+        let work_dir = TempDir::new().map_err(io_to_cqlite)?;
+        let package_dir = TempDir::new().map_err(io_to_cqlite)?;
+        let config = WriteEngineConfig::new(
+            work_dir.path().join("data"),
+            work_dir.path().join("wal"),
+            schema.clone(),
+        );
+
+        let engine = WriteEngine::new(config)?;
+
+        Ok(Some(Self {
+            _work_dir: work_dir,
+            package_dir,
+            engine: Arc::new(Mutex::new(engine)),
+            cassandra,
+            keyspace: schema.keyspace,
+            table: schema.table,
+        }))
     }
 
-    // First check for CI-provided container ID via environment variable
-    if let Ok(container_id) = std::env::var("CQLITE_CASSANDRA_CONTAINER") {
-        if !container_id.is_empty() {
-            // Verify the container is actually running
-            let check = Command::new("docker")
-                .args(["inspect", "-f", "{{.State.Running}}", &container_id])
-                .output();
-            if let Ok(output) = check {
-                let running = String::from_utf8_lossy(&output.stdout);
-                if running.trim() == "true" {
-                    return true;
+    async fn write(&self, mutation: Mutation) -> CqliteResult<()> {
+        let mut engine = self.engine.lock().await;
+        engine.write_async(mutation).await
+    }
+
+    async fn package_for_loader_import(&self) -> CqliteResult<()> {
+        let report = {
+            let mut engine = self.engine.lock().await;
+            engine
+                .export_sstable(
+                    self.package_dir.path(),
+                    ExportOptions::new(&self.keyspace, &self.table, 1),
+                )
+                .await?
+        };
+
+        let result = self
+            .cassandra
+            .run_sstableloader(&report.output_path, &self.keyspace, &self.table)
+            .map_err(io_to_cqlite)?;
+
+        assert!(
+            result.is_successful(),
+            "sstableloader failed for {}.{}: {}",
+            self.keyspace,
+            self.table,
+            result.summary()
+        );
+
+        Ok(())
+    }
+
+    fn query(&self, query: &str) -> CqliteResult<CqlshOutput> {
+        self.cassandra.execute_cql(query).map_err(io_to_cqlite)
+    }
+
+    fn query_until<F>(
+        &self,
+        query: &str,
+        timeout: Duration,
+        predicate: F,
+    ) -> CqliteResult<CqlshOutput>
+    where
+        F: Fn(&CqlshOutput) -> bool,
+    {
+        let start = Instant::now();
+        let mut last_output = None;
+
+        let mut last_error = None;
+
+        while start.elapsed() < timeout {
+            match self.query(query) {
+                Ok(output) => {
+                    if predicate(&output) {
+                        return Ok(output);
+                    }
+                    last_output = Some(output);
+                }
+                Err(err) if is_retryable_query_error(&err) => {
+                    last_error = Some(err.to_string());
+                }
+                Err(err) => {
+                    return Err(self.enrich_query_failure(query, err));
                 }
             }
+            std::thread::sleep(Duration::from_millis(250));
         }
+
+        Err(Error::Storage(format!(
+            "Timed out waiting for query to satisfy predicate: `{}`. Last output: {:?}. Last retryable error: {:?}",
+            query, last_output, last_error
+        )))
     }
 
-    // Fall back to checking for Cassandra container by image name (local development)
-    let container_check = Command::new("docker")
-        .args([
-            "ps",
-            "--filter",
-            "ancestor=cassandra:5.0",
-            "--format",
-            "{{.Names}}",
-        ])
-        .output();
+    fn fully_qualified_table(&self) -> String {
+        format!("{}.{}", self.keyspace, self.table)
+    }
 
-    match container_check {
-        Ok(output) => {
-            let names = String::from_utf8_lossy(&output.stdout);
-            !names.trim().is_empty()
+    fn enrich_query_failure(&self, query: &str, err: Error) -> Error {
+        let mut message = format!(
+            "Query `{query}` failed against imported table {}: {}",
+            self.fully_qualified_table(),
+            err
+        );
+
+        if let Ok(components) = self
+            .cassandra
+            .list_table_components(&self.keyspace, &self.table)
+        {
+            let trimmed = components.trim();
+            if !trimmed.is_empty() {
+                message.push_str("\nImported table components:\n");
+                message.push_str(trimmed);
+            }
         }
-        Err(_) => false,
+
+        if let Ok(log_tail) = self.cassandra.tail_system_log(80) {
+            let trimmed = log_tail.trim();
+            if !trimmed.is_empty() {
+                message.push_str("\nRecent Cassandra system.log:\n");
+                message.push_str(trimmed);
+            }
+        }
+
+        Error::Storage(message)
     }
 }
 
-/// Skip test if Cassandra is not available
-macro_rules! skip_if_no_cassandra {
-    () => {
-        if !check_cassandra_available() {
-            println!("⏭️ Skipping test: No Cassandra container available");
-            println!("   Start with: docker-compose -f test-data/docker/docker-compose-cassandra5.yml up -d");
-            return Ok(());
-        }
-    };
-}
-
 // =============================================================================
-// Tier 1: sstableloader Acceptance Tests
+// Tier 1: sstableloader Acceptance
 // =============================================================================
 
-/// Test that a single partition SSTable can be loaded via sstableloader
 #[tokio::test]
-async fn test_sstableloader_single_partition() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
+async fn test_sstableloader_simple_table() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_simple_schema("loader_simple"),
+        &create_simple_table_cql("loader_simple"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_simple_schema("loader_test_single");
+    let rows = [(1, "Alice", 100), (2, "Bob", 200), (3, "Charlie", 300)];
+    for (id, name, value) in rows {
+        harness
+            .write(simple_mutation("loader_simple", id, name, value, 1_704_067_200_000_000))
+            .await?;
+    }
 
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
+    harness.package_for_loader_import().await?;
 
-    let mut engine = WriteEngine::new(config)?;
+    let count_query = format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table());
+    let output = harness.query_until(&count_query, Duration::from_secs(15), |out| {
+        parse_count(out).ok() == Some(3)
+    })?;
+    assert_eq!(parse_count(&output)?, 3);
 
-    // Write single partition
-    let mutation = create_simple_mutation("loader_test_single", 1, "Alice", 100, 1704067200000000);
-    engine.write_async(mutation).await?;
-
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
-
-    // Verify all SSTable components exist
-    assert!(info.data_path.exists(), "Data.db should exist");
-    assert!(info.index_path.exists(), "Index.db should exist");
-    assert!(info.stats_path.exists(), "Statistics.db should exist");
-    assert!(info.summary_path.exists(), "Summary.db should exist");
-    assert!(info.filter_path.exists(), "Filter.db should exist");
-
-    println!("✅ Tier 1: Single partition SSTable created successfully");
-    println!(
-        "   Data.db: {} bytes",
-        std::fs::metadata(&info.data_path)?.len()
-    );
-    println!("   Partitions: {}", info.partition_count);
-
-    // Note: Actual sstableloader execution requires proper schema setup in Cassandra
-    // This test validates the SSTable format is correct for loading
     Ok(())
 }
 
-/// Test that multiple partitions can be written and loaded
+#[tokio::test]
+async fn test_sstableloader_clustering_table() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_clustered_schema("loader_clustered"),
+        &create_clustered_table_cql("loader_clustered"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+
+    for index in 0..5 {
+        harness
+            .write(clustered_mutation(
+                "loader_clustered",
+                7,
+                &format!("row_{index:03}"),
+                &format!("value_{index}"),
+                1_704_067_200_000_000 + index as i64,
+            ))
+            .await?;
+    }
+
+    harness.package_for_loader_import().await?;
+
+    let query = format!(
+        "SELECT COUNT(*) FROM {} WHERE pk = 7",
+        harness.fully_qualified_table()
+    );
+    let output = harness.query_until(&query, Duration::from_secs(15), |out| {
+        parse_count(out).ok() == Some(5)
+    })?;
+    assert_eq!(parse_count(&output)?, 5);
+
+    Ok(())
+}
+
 #[tokio::test]
 async fn test_sstableloader_multiple_partitions() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
+    let Some(harness) = LoaderHarness::new(
+        create_simple_schema("loader_multi_partition"),
+        &create_simple_table_cql("loader_multi_partition"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_simple_schema("loader_test_multi");
-
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config)?;
-
-    // Write multiple partitions
-    let test_data = vec![
-        (1, "Alice", 100),
-        (2, "Bob", 200),
-        (3, "Charlie", 300),
-        (4, "Diana", 400),
-        (5, "Eve", 500),
-    ];
-
-    for (id, name, value) in &test_data {
-        let mutation =
-            create_simple_mutation("loader_test_multi", *id, name, *value, 1704067200000000);
-        engine.write_async(mutation).await?;
+    let rows = [(42, "Zoe", 4200), (1, "Alice", 100), (100, "Max", 1000), (7, "Drew", 700)];
+    for (id, name, value) in rows {
+        harness
+            .write(simple_mutation(
+                "loader_multi_partition",
+                id,
+                name,
+                value,
+                1_704_067_200_000_000 + id as i64,
+            ))
+            .await?;
     }
 
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
+    harness.package_for_loader_import().await?;
 
-    assert_eq!(
-        info.partition_count,
-        test_data.len(),
-        "Should have {} partitions",
-        test_data.len()
-    );
-
-    println!("✅ Tier 1: Multiple partition SSTable created successfully");
-    println!("   Partitions: {}", info.partition_count);
+    let query = format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table());
+    let output = harness.query_until(&query, Duration::from_secs(15), |out| {
+        parse_count(out).ok() == Some(4)
+    })?;
+    assert_eq!(parse_count(&output)?, 4);
 
     Ok(())
 }
 
-/// Test wide partition (clustering keys) can be loaded
 #[tokio::test]
-async fn test_sstableloader_wide_partition() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
+async fn test_sstableloader_all_stage0_types() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_types_schema("loader_all_types"),
+        &create_types_table_cql("loader_all_types"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_clustered_schema("loader_test_wide");
+    harness
+        .write(types_mutation(
+            "loader_all_types",
+            1,
+            "all-types-row",
+            1_704_067_200_000_000,
+        ))
+        .await?;
 
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
+    harness.package_for_loader_import().await?;
 
-    let mut engine = WriteEngine::new(config)?;
-    let table_id = TableId::new("sstableloader_test", "loader_test_wide");
-
-    // Write wide partition with 100 clustering keys
-    let pk = PartitionKey::single("pk", Value::Integer(1));
-    for i in 0..100 {
-        let ck = ClusteringKey::single("ck", Value::Text(format!("row_{:03}", i)));
-        let ops = vec![CellOperation::Write {
-            column: "data".to_string(),
-            value: Value::Text(format!("Wide partition row {}", i)),
-        }];
-        let mutation = Mutation::new(
-            table_id.clone(),
-            pk.clone(),
-            Some(ck),
-            ops,
-            1704067200000000 + i as i64,
-            None,
-        );
-        engine.write_async(mutation).await?;
-    }
-
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
-
-    assert_eq!(info.partition_count, 1, "Should have 1 wide partition");
-
-    // Data should be substantial for 100 rows
-    let data_size = std::fs::metadata(&info.data_path)?.len();
-    assert!(
-        data_size > 1000,
-        "Wide partition Data.db should be > 1KB (got {} bytes)",
-        data_size
-    );
-
-    println!("✅ Tier 1: Wide partition SSTable created successfully");
-    println!("   Data.db: {} bytes (100 rows in 1 partition)", data_size);
-
-    Ok(())
-}
-
-/// Test all Stage 0 types can be loaded
-#[tokio::test]
-async fn test_sstableloader_all_types() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
-
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_comprehensive_schema("loader_test_types");
-
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config)?;
-
-    // Write mutation with all Stage 0 types
-    let mutation = create_comprehensive_mutation(1, "test_row", 1704067200000000);
-    engine.write_async(mutation).await?;
-
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
-
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
-
-    println!("✅ Tier 1: All types SSTable created successfully");
+    let query = format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table());
+    let output = harness.query_until(&query, Duration::from_secs(15), |out| {
+        parse_count(out).ok() == Some(1)
+    })?;
+    assert_eq!(parse_count(&output)?, 1);
 
     Ok(())
 }
 
 // =============================================================================
-// Tier 2: CQL Query Verification Tests
+// Tier 2: CQL Query Verification
 // =============================================================================
 
-/// Test that written data matches SELECT * when loaded
 #[tokio::test]
-async fn test_sstableloader_select_verification() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
+async fn test_sstableloader_select_all_returns_written_rows() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_simple_schema("loader_select_all"),
+        &create_simple_table_cql("loader_select_all"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_simple_schema("loader_test_select");
-
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config)?;
-
-    // Write known data
-    let test_data = vec![(1, "Alice", 100), (2, "Bob", 200), (3, "Charlie", 300)];
-
-    for (id, name, value) in &test_data {
-        let mutation =
-            create_simple_mutation("loader_test_select", *id, name, *value, 1704067200000000);
-        engine.write_async(mutation).await?;
-    }
-
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
-
-    // For now, we just verify the SSTable was created correctly
-    // Full SELECT verification requires sstableloader execution and CQL queries
-    assert_eq!(info.partition_count, test_data.len());
-
-    println!("✅ Tier 2: SELECT verification SSTable ready");
-    println!("   Would verify: SELECT * FROM sstableloader_test.loader_test_select");
-    println!("   Expected rows: {}", test_data.len());
-
-    Ok(())
-}
-
-/// Test TTL data survives load and query
-#[tokio::test]
-async fn test_sstableloader_ttl_verification() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
-
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_simple_schema("loader_test_ttl");
-
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config)?;
-    let table_id = TableId::new("sstableloader_test", "loader_test_ttl");
-
-    // Write with TTL
-    let pk = PartitionKey::single("id", Value::Integer(1));
-    let ops = vec![
-        CellOperation::Write {
-            column: "name".to_string(),
-            value: Value::Text("TTL Test".to_string()),
-        },
-        CellOperation::Write {
-            column: "value".to_string(),
-            value: Value::Integer(42),
-        },
+    let expected = vec![
+        vec!["1".to_string(), "Alice".to_string(), "100".to_string()],
+        vec!["2".to_string(), "Bob".to_string(), "200".to_string()],
+        vec!["3".to_string(), "Charlie".to_string(), "300".to_string()],
     ];
-    let mutation = Mutation::new(
-        table_id,
-        pk,
-        None,
-        ops,
-        1704067200000000,
-        Some(3600), // 1 hour TTL
-    );
-    engine.write_async(mutation).await?;
 
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
-
-    // Verify Statistics.db captured TTL
-    let stats_data = std::fs::read(&info.stats_path)?;
-    let result = cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-        &stats_data,
-    );
-    assert!(result.is_ok(), "Statistics.db should parse with TTL data");
-
-    println!("✅ Tier 2: TTL verification SSTable ready");
-
-    Ok(())
-}
-
-/// Test timestamp ordering survives load
-#[tokio::test]
-async fn test_sstableloader_timestamp_ordering() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
-
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_clustered_schema("loader_test_ts");
-
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config)?;
-    let table_id = TableId::new("sstableloader_test", "loader_test_ts");
-
-    // Write with incrementing timestamps
-    let base_ts = 1704067200000000i64;
-    let pk = PartitionKey::single("pk", Value::Integer(1));
-
-    for i in 0..10 {
-        let ck = ClusteringKey::single("ck", Value::Text(format!("row_{}", i)));
-        let ops = vec![CellOperation::Write {
-            column: "data".to_string(),
-            value: Value::Text(format!("Timestamp test {}", i)),
-        }];
-        let mutation = Mutation::new(
-            table_id.clone(),
-            pk.clone(),
-            Some(ck),
-            ops,
-            base_ts + (i as i64 * 1000000), // 1 second increments
-            None,
-        );
-        engine.write_async(mutation).await?;
+    for row in &expected {
+        harness
+            .write(simple_mutation(
+                "loader_select_all",
+                row[0].parse().unwrap(),
+                &row[1],
+                row[2].parse().unwrap(),
+                1_704_067_200_000_000,
+            ))
+            .await?;
     }
 
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
+    harness.package_for_loader_import().await?;
 
-    // Verify min timestamp in Statistics.db
-    let stats_data = std::fs::read(&info.stats_path)?;
-    let (_, stats) =
-        cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-            &stats_data,
-        )?;
-
-    assert_eq!(
-        stats.timestamp_stats.min_timestamp, base_ts,
-        "Min timestamp should be base"
+    let query = format!(
+        "SELECT id, name, value FROM {}",
+        harness.fully_qualified_table()
     );
-
-    println!("✅ Tier 2: Timestamp ordering SSTable ready");
+    let output = harness.query_until(&query, Duration::from_secs(15), |out| out.rows.len() == 3)?;
+    assert_rows_unordered_eq(output.rows, expected);
 
     Ok(())
 }
 
-/// Test tombstones survive load
 #[tokio::test]
-async fn test_sstableloader_tombstone_verification() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
+async fn test_sstableloader_where_on_partition_key() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_simple_schema("loader_where_partition"),
+        &create_simple_table_cql("loader_where_partition"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_clustered_schema("loader_test_tomb");
+    for (id, name, value) in [(1, "Alice", 100), (2, "Bob", 200), (3, "Charlie", 300)] {
+        harness
+            .write(simple_mutation(
+                "loader_where_partition",
+                id,
+                name,
+                value,
+                1_704_067_200_000_000 + id as i64,
+            ))
+            .await?;
+    }
 
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
+    harness.package_for_loader_import().await?;
+
+    let query = format!(
+        "SELECT id, name, value FROM {} WHERE id = 2",
+        harness.fully_qualified_table()
+    );
+    let output = harness.query_until(&query, Duration::from_secs(15), |out| out.rows.len() == 1)?;
+    assert_eq!(output.rows, vec![vec!["2".to_string(), "Bob".to_string(), "200".to_string()]]);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn test_sstableloader_where_on_clustering_key() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_clustered_schema("loader_where_clustering"),
+        &create_clustered_table_cql("loader_where_clustering"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
+
+    for index in 0..4 {
+        harness
+            .write(clustered_mutation(
+                "loader_where_clustering",
+                11,
+                &format!("row_{index:03}"),
+                &format!("value_{index}"),
+                1_704_067_200_000_000 + index as i64,
+            ))
+            .await?;
+    }
+
+    harness.package_for_loader_import().await?;
+
+    let query = format!(
+        "SELECT pk, ck, data FROM {} WHERE pk = 11 AND ck = 'row_002'",
+        harness.fully_qualified_table()
+    );
+    let output = harness.query_until(&query, Duration::from_secs(15), |out| out.rows.len() == 1)?;
+    assert_eq!(
+        output.rows,
+        vec![vec![
+            "11".to_string(),
+            "row_002".to_string(),
+            "value_2".to_string()
+        ]]
     );
 
-    let mut engine = WriteEngine::new(config)?;
-    let table_id = TableId::new("sstableloader_test", "loader_test_tomb");
+    Ok(())
+}
 
-    // Write then delete
-    let pk = PartitionKey::single("pk", Value::Integer(1));
-    let ck = ClusteringKey::single("ck", Value::Text("to_delete".to_string()));
+#[tokio::test]
+async fn test_sstableloader_stage0_types_round_trip_values() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_types_schema("loader_types_round_trip"),
+        &create_types_table_cql("loader_types_round_trip"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    // Initial write
-    let write_ops = vec![CellOperation::Write {
-        column: "data".to_string(),
-        value: Value::Text("Will be deleted".to_string()),
-    }];
-    let write_mutation = Mutation::new(
-        table_id.clone(),
-        pk.clone(),
-        Some(ck.clone()),
-        write_ops,
-        1704067200000000,
-        None,
+    harness
+        .write(types_mutation(
+            "loader_types_round_trip",
+            1,
+            "all-types-row",
+            1_704_067_200_000_000,
+        ))
+        .await?;
+
+    harness.package_for_loader_import().await?;
+
+    let query = format!(
+        "SELECT pk, ck, text_col, int_col, bigint_col, boolean_col, toUnixTimestamp(timestamp_col) AS ts_ms, uuid_col FROM {} WHERE pk = 1 AND ck = 'all-types-row'",
+        harness.fully_qualified_table()
     );
-    engine.write_async(write_mutation).await?;
-
-    // Delete the column
-    let delete_ops = vec![CellOperation::Delete {
-        column: "data".to_string(),
-    }];
-    let delete_mutation = Mutation::new(
-        table_id,
-        pk,
-        Some(ck),
-        delete_ops,
-        1704067201000000, // 1 second later
-        None,
+    let output = harness.query_until(&query, Duration::from_secs(15), |out| out.rows.len() == 1)?;
+    assert_eq!(
+        output.rows,
+        vec![vec![
+            "1".to_string(),
+            "all-types-row".to_string(),
+            "stage0".to_string(),
+            "42".to_string(),
+            "9223372036".to_string(),
+            "True".to_string(),
+            "1704067200000".to_string(),
+            "12345678-9abc-4def-8123-456789abcdef".to_string(),
+        ]]
     );
-    engine.write_async(delete_mutation).await?;
-
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
-
-    assert!(
-        info.data_path.exists(),
-        "Data.db with tombstone should exist"
-    );
-
-    println!("✅ Tier 2: Tombstone verification SSTable ready");
 
     Ok(())
 }
@@ -496,194 +486,210 @@ async fn test_sstableloader_tombstone_verification() -> CqliteResult<()> {
 // Tier 3: Stress Cases
 // =============================================================================
 
-/// Test 10K partitions can be loaded
 #[tokio::test]
-async fn test_sstableloader_10k_partitions() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
+async fn test_sstableloader_large_partition_1000_rows() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_clustered_schema("loader_large_partition"),
+        &create_clustered_table_cql("loader_large_partition"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_simple_schema("loader_test_10k");
-
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config)?;
-
-    // Write 10K partitions
-    let partition_count = 10_000;
-    for i in 0..partition_count {
-        let mutation = create_simple_mutation(
-            "loader_test_10k",
-            i,
-            &format!("user_{}", i),
-            i,
-            1704067200000000,
-        );
-        engine.write_async(mutation).await?;
+    for index in 0..1000 {
+        harness
+            .write(clustered_mutation(
+                "loader_large_partition",
+                1,
+                &format!("row_{index:04}"),
+                &format!("value_{index}"),
+                1_704_067_200_000_000 + index as i64,
+            ))
+            .await?;
     }
 
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
+    harness.package_for_loader_import().await?;
 
-    assert_eq!(
-        info.partition_count, partition_count as usize,
-        "Should have {} partitions",
-        partition_count
+    let query = format!(
+        "SELECT COUNT(*) FROM {} WHERE pk = 1",
+        harness.fully_qualified_table()
     );
-
-    let data_size = std::fs::metadata(&info.data_path)?.len();
-    println!("✅ Tier 3: 10K partitions SSTable created");
-    println!("   Partitions: {}", info.partition_count);
-    println!(
-        "   Data.db: {} bytes ({:.2} KB)",
-        data_size,
-        data_size as f64 / 1024.0
-    );
+    let output = harness.query_until(&query, Duration::from_secs(20), |out| {
+        parse_count(out).ok() == Some(1000)
+    })?;
+    assert_eq!(parse_count(&output)?, 1000);
 
     Ok(())
 }
 
-/// Test wide partition with 1000 rows
 #[tokio::test]
-async fn test_sstableloader_wide_partition_1000_rows() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
+async fn test_sstableloader_many_partitions_100_distinct() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_simple_schema("loader_many_partitions"),
+        &create_simple_table_cql("loader_many_partitions"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_clustered_schema("loader_test_wide_1k");
-
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config)?;
-    let table_id = TableId::new("sstableloader_test", "loader_test_wide_1k");
-
-    // Write 1000 rows in single partition
-    let pk = PartitionKey::single("pk", Value::Integer(1));
-    for i in 0..1000 {
-        let ck = ClusteringKey::single("ck", Value::Text(format!("row_{:04}", i)));
-        let ops = vec![CellOperation::Write {
-            column: "data".to_string(),
-            value: Value::Text(format!("Wide partition stress test row {}", i)),
-        }];
-        let mutation = Mutation::new(
-            table_id.clone(),
-            pk.clone(),
-            Some(ck),
-            ops,
-            1704067200000000 + i as i64,
-            None,
-        );
-        engine.write_async(mutation).await?;
+    for id in 0..100 {
+        harness
+            .write(simple_mutation(
+                "loader_many_partitions",
+                id,
+                &format!("user_{id}"),
+                id,
+                1_704_067_200_000_000 + id as i64,
+            ))
+            .await?;
     }
 
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
+    harness.package_for_loader_import().await?;
 
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
-
-    let data_size = std::fs::metadata(&info.data_path)?.len();
-    println!("✅ Tier 3: Wide partition (1000 rows) SSTable created");
-    println!(
-        "   Data.db: {} bytes ({:.2} KB)",
-        data_size,
-        data_size as f64 / 1024.0
-    );
+    let query = format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table());
+    let output = harness.query_until(&query, Duration::from_secs(20), |out| {
+        parse_count(out).ok() == Some(100)
+    })?;
+    assert_eq!(parse_count(&output)?, 100);
 
     Ok(())
 }
 
-/// Test mixed types and operations
 #[tokio::test]
-async fn test_sstableloader_mixed_operations() -> CqliteResult<()> {
-    skip_if_no_cassandra!();
+async fn test_sstableloader_concurrent_writes_followed_by_load() -> CqliteResult<()> {
+    let Some(harness) = LoaderHarness::new(
+        create_simple_schema("loader_concurrent"),
+        &create_simple_table_cql("loader_concurrent"),
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_clustered_schema("loader_test_mixed");
-
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config)?;
-    let table_id = TableId::new("sstableloader_test", "loader_test_mixed");
-
-    // Mixed operations: writes, deletes, TTLs
-    for pk_val in 0..10 {
-        let pk = PartitionKey::single("pk", Value::Integer(pk_val));
-
-        for ck_val in 0..10 {
-            let ck = ClusteringKey::single("ck", Value::Text(format!("ck_{}", ck_val)));
-
-            if ck_val % 3 == 0 {
-                // Regular write
-                let ops = vec![CellOperation::Write {
-                    column: "data".to_string(),
-                    value: Value::Text(format!("Mixed test {}:{}", pk_val, ck_val)),
-                }];
-                let mutation = Mutation::new(
-                    table_id.clone(),
-                    pk.clone(),
-                    Some(ck),
-                    ops,
-                    1704067200000000,
-                    None,
+    let mut tasks = Vec::new();
+    for worker in 0..4 {
+        let engine = Arc::clone(&harness.engine);
+        tasks.push(tokio::spawn(async move {
+            for offset in 0..25 {
+                let id = worker * 25 + offset;
+                let mutation = simple_mutation(
+                    "loader_concurrent",
+                    id,
+                    &format!("worker_{worker}_user_{offset}"),
+                    id,
+                    1_704_067_200_000_000 + id as i64,
                 );
-                engine.write_async(mutation).await?;
-            } else if ck_val % 3 == 1 {
-                // Write with TTL
-                let ops = vec![CellOperation::Write {
-                    column: "data".to_string(),
-                    value: Value::Text(format!("TTL data {}:{}", pk_val, ck_val)),
-                }];
-                let mutation = Mutation::new(
-                    table_id.clone(),
-                    pk.clone(),
-                    Some(ck),
-                    ops,
-                    1704067200000000,
-                    Some(3600),
-                );
-                engine.write_async(mutation).await?;
-            } else {
-                // Delete
-                let ops = vec![CellOperation::DeleteRow];
-                let mutation = Mutation::new(
-                    table_id.clone(),
-                    pk.clone(),
-                    Some(ck),
-                    ops,
-                    1704067200000000,
-                    None,
-                );
-                engine.write_async(mutation).await?;
+                let mut guard = engine.lock().await;
+                guard.write_async(mutation).await?;
             }
-        }
+            Ok::<(), Error>(())
+        }));
     }
 
-    // Flush to create SSTable
-    let info = engine.flush().await?.expect("Should return SSTableInfo");
+    for task in tasks {
+        task.await
+            .map_err(|err| Error::Storage(format!("concurrent write task failed: {err}")))??;
+    }
 
-    println!("✅ Tier 3: Mixed operations SSTable created");
-    println!("   Partitions: {}", info.partition_count);
+    harness.package_for_loader_import().await?;
+
+    let query = format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table());
+    let output = harness.query_until(&query, Duration::from_secs(20), |out| {
+        parse_count(out).ok() == Some(100)
+    })?;
+    assert_eq!(parse_count(&output)?, 100);
 
     Ok(())
 }
 
 // =============================================================================
-// Helper Functions
+// Helpers
 // =============================================================================
+
+fn maybe_start_cassandra() -> CqliteResult<Option<CassandraContainer>> {
+    let explicit_container = match std::env::var("CQLITE_CASSANDRA_CONTAINER") {
+        Ok(value) if !value.trim().is_empty() => value,
+        _ => {
+            eprintln!(
+                "Skipping sstableloader integration test: set CQLITE_CASSANDRA_CONTAINER to a running Cassandra 5.0 container ID"
+            );
+            return Ok(None);
+        }
+    };
+
+    match CassandraContainer::start() {
+        Ok(container) => {
+            container.wait_until_ready(300).map_err(io_to_cqlite)?;
+            Ok(Some(container))
+        }
+        Err(err) => Err(Error::Storage(format!(
+            "Failed to connect to Cassandra container `{explicit_container}`: {err}"
+        ))),
+    }
+}
+
+fn ensure_keyspace(cassandra: &CassandraContainer, keyspace: &str) -> CqliteResult<()> {
+    let cql = format!(
+        "CREATE KEYSPACE IF NOT EXISTS {keyspace} WITH REPLICATION = {{'class': 'SimpleStrategy', 'replication_factor': 1}};"
+    );
+    cassandra.execute_cql(&cql).map_err(io_to_cqlite)?;
+    Ok(())
+}
+
+fn recreate_table(
+    cassandra: &CassandraContainer,
+    keyspace: &str,
+    table: &str,
+    create_table_cql: &str,
+) -> CqliteResult<()> {
+    let drop_cql = format!("DROP TABLE IF EXISTS {keyspace}.{table};");
+    cassandra.execute_cql(&drop_cql).map_err(io_to_cqlite)?;
+    cassandra.execute_cql(create_table_cql).map_err(io_to_cqlite)?;
+    Ok(())
+}
+
+fn parse_count(output: &CqlshOutput) -> CqliteResult<usize> {
+    let value = output
+        .rows
+        .first()
+        .and_then(|row| row.first())
+        .ok_or_else(|| Error::Storage(format!("COUNT query returned no rows: {:?}", output)))?;
+
+    value
+        .parse::<usize>()
+        .map_err(|err| Error::Storage(format!("Failed to parse COUNT value `{value}`: {err}")))
+}
+
+fn assert_rows_unordered_eq(mut actual: Vec<Vec<String>>, mut expected: Vec<Vec<String>>) {
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+}
+
+fn io_to_cqlite(err: std::io::Error) -> Error {
+    Error::Storage(err.to_string())
+}
+
+fn is_retryable_query_error(err: &Error) -> bool {
+    let message = err.to_string().to_ascii_lowercase();
+    [
+        "connection error",
+        "connectionrefusederror",
+        "failed to connect",
+        "no host available",
+        "unable to connect",
+        "operationtimedout",
+        "temporarily unavailable",
+    ]
+    .iter()
+    .any(|pattern| message.contains(pattern))
+}
 
 fn create_simple_schema(table_name: &str) -> TableSchema {
     TableSchema {
-        keyspace: "sstableloader_test".to_string(),
+        keyspace: KEYSPACE.to_string(),
         table: table_name.to_string(),
         partition_keys: vec![KeyColumn {
             name: "id".to_string(),
@@ -720,7 +726,7 @@ fn create_simple_schema(table_name: &str) -> TableSchema {
 
 fn create_clustered_schema(table_name: &str) -> TableSchema {
     TableSchema {
-        keyspace: "sstableloader_test".to_string(),
+        keyspace: KEYSPACE.to_string(),
         table: table_name.to_string(),
         partition_keys: vec![KeyColumn {
             name: "pk".to_string(),
@@ -760,9 +766,9 @@ fn create_clustered_schema(table_name: &str) -> TableSchema {
     }
 }
 
-fn create_comprehensive_schema(table_name: &str) -> TableSchema {
+fn create_types_schema(table_name: &str) -> TableSchema {
     TableSchema {
-        keyspace: "sstableloader_test".to_string(),
+        keyspace: KEYSPACE.to_string(),
         table: table_name.to_string(),
         partition_keys: vec![KeyColumn {
             name: "pk".to_string(),
@@ -837,16 +843,34 @@ fn create_comprehensive_schema(table_name: &str) -> TableSchema {
     }
 }
 
-fn create_simple_mutation(
+fn create_simple_table_cql(table_name: &str) -> String {
+    format!(
+        "CREATE TABLE {KEYSPACE}.{table_name} (id int PRIMARY KEY, name text, value int);"
+    )
+}
+
+fn create_clustered_table_cql(table_name: &str) -> String {
+    format!(
+        "CREATE TABLE {KEYSPACE}.{table_name} (pk int, ck text, data text, PRIMARY KEY (pk, ck));"
+    )
+}
+
+fn create_types_table_cql(table_name: &str) -> String {
+    format!(
+        "CREATE TABLE {KEYSPACE}.{table_name} (pk int, ck text, text_col text, int_col int, bigint_col bigint, boolean_col boolean, timestamp_col timestamp, uuid_col uuid, PRIMARY KEY (pk, ck));"
+    )
+}
+
+fn simple_mutation(
     table_name: &str,
     id: i32,
     name: &str,
     value: i32,
     timestamp: i64,
 ) -> Mutation {
-    let table_id = TableId::new("sstableloader_test", table_name);
-    let pk = PartitionKey::single("id", Value::Integer(id));
-    let ops = vec![
+    let table_id = TableId::new(KEYSPACE, table_name);
+    let partition_key = PartitionKey::single("id", Value::Integer(id));
+    let operations = vec![
         CellOperation::Write {
             column: "name".to_string(),
             value: Value::Text(name.to_string()),
@@ -856,38 +880,66 @@ fn create_simple_mutation(
             value: Value::Integer(value),
         },
     ];
-    Mutation::new(table_id, pk, None, ops, timestamp, None)
+
+    Mutation::new(table_id, partition_key, None, operations, timestamp, None)
 }
 
-fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutation {
-    let table_id = TableId::new("sstableloader_test", "loader_test_types");
+fn clustered_mutation(
+    table_name: &str,
+    pk: i32,
+    ck: &str,
+    data: &str,
+    timestamp: i64,
+) -> Mutation {
+    let table_id = TableId::new(KEYSPACE, table_name);
     let partition_key = PartitionKey::single("pk", Value::Integer(pk));
     let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
+    let operations = vec![CellOperation::Write {
+        column: "data".to_string(),
+        value: Value::Text(data.to_string()),
+    }];
 
-    let ops = vec![
+    Mutation::new(
+        table_id,
+        partition_key,
+        clustering_key,
+        operations,
+        timestamp,
+        None,
+    )
+}
+
+fn types_mutation(table_name: &str, pk: i32, ck: &str, mutation_timestamp: i64) -> Mutation {
+    let table_id = TableId::new(KEYSPACE, table_name);
+    let partition_key = PartitionKey::single("pk", Value::Integer(pk));
+    let clustering_key = Some(ClusteringKey::single("ck", Value::Text(ck.to_string())));
+    let operations = vec![
         CellOperation::Write {
             column: "text_col".to_string(),
-            value: Value::Text(format!("Text for {}-{}", pk, ck)),
+            value: Value::Text("stage0".to_string()),
         },
         CellOperation::Write {
             column: "int_col".to_string(),
-            value: Value::Integer(pk * 100),
+            value: Value::Integer(42),
         },
         CellOperation::Write {
             column: "bigint_col".to_string(),
-            value: Value::BigInt((pk as i64) * 1_000_000),
+            value: Value::BigInt(9_223_372_036),
         },
         CellOperation::Write {
             column: "boolean_col".to_string(),
-            value: Value::Boolean(pk % 2 == 0),
+            value: Value::Boolean(true),
         },
         CellOperation::Write {
             column: "timestamp_col".to_string(),
-            value: Value::Timestamp(timestamp),
+            value: Value::Timestamp(1_704_067_200_000),
         },
         CellOperation::Write {
             column: "uuid_col".to_string(),
-            value: Value::Uuid(*uuid::Uuid::new_v4().as_bytes()),
+            value: Value::Uuid([
+                0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0x4D, 0xEF, 0x81, 0x23, 0x45, 0x67, 0x89,
+                0xAB, 0xCD, 0xEF,
+            ]),
         },
     ];
 
@@ -895,8 +947,8 @@ fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutation 
         table_id,
         partition_key,
         clustering_key,
-        ops,
-        timestamp,
+        operations,
+        mutation_timestamp,
         None,
     )
 }

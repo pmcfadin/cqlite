@@ -1,189 +1,193 @@
-//! Docker integration utilities for testing
+//! Docker integration utilities for testing.
 //!
 //! This module provides Docker-based testing infrastructure for CQLite,
-//! including Cassandra container management and sstableloader integration.
+//! including Cassandra container management and `sstableloader` integration.
 //!
 //! Only compiled when the `docker-integration` feature is enabled.
 
-use std::io::{self, BufRead, BufReader};
+use std::io;
 use std::path::Path;
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-/// Output from CQL shell command
+const NODETOOL_BIN: &str = "/opt/cassandra/bin/nodetool";
+const SSTABLELOADER_BIN: &str = "/opt/cassandra/bin/sstableloader";
+const SYSTEM_LOG_PATH: &str = "/opt/cassandra/logs/system.log";
+
+/// Output from a `cqlsh` command.
 #[derive(Debug, Clone)]
 pub struct CqlshOutput {
     pub headers: Vec<String>,
     pub rows: Vec<Vec<String>>,
+    #[allow(dead_code)]
     pub raw_output: String,
 }
 
-/// Docker CQL shell client for executing CQL queries in containers
+/// Docker-backed `cqlsh` client for executing queries in a Cassandra container.
 #[derive(Debug)]
 pub struct DockerCqlshClient {
     container: String,
 }
 
 impl DockerCqlshClient {
-    /// Create a new Docker cqlsh client with a specific container
+    /// Create a new client for a specific container name or ID.
     pub fn new(container: String) -> Self {
         Self { container }
     }
 
-    /// Find a running Cassandra container by name or image
+    /// Find a running Cassandra 5.0 container.
     pub fn find_cassandra_container() -> io::Result<String> {
-        // Try common container names first
-        let common_names = [
-            "cassandra",
-            "cassandra-5-0",
-            "cqlite-cassandra",
-            "test-cassandra",
-        ];
-
-        for name in &common_names {
-            let output = Command::new("docker")
-                .args(["ps", "--filter", &format!("name={}", name), "--format", "{{.Names}}"])
-                .output()?;
-
-            if output.status.success() {
-                let container = String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .next()
-                    .map(|s| s.to_string());
-
-                if let Some(c) = container {
-                    if !c.is_empty() {
-                        return Ok(c);
-                    }
-                }
+        if let Ok(container) = std::env::var("CQLITE_CASSANDRA_CONTAINER") {
+            let trimmed = container.trim();
+            if !trimmed.is_empty() && Self::container_is_running(trimmed)? {
+                return Ok(trimmed.to_string());
             }
         }
 
-        // Try finding by image
-        let output = Command::new("docker")
-            .args([
+        let common_names = ["cqlite-cassandra-5-0", "cassandra-5-0"];
+
+        for name in &common_names {
+            let output = Self::docker_output(&[
                 "ps",
                 "--filter",
-                "ancestor=cassandra:5.0",
+                &format!("name={name}"),
                 "--format",
                 "{{.Names}}",
-            ])
-            .output()?;
+            ])?;
 
-        if output.status.success() {
-            let container = String::from_utf8_lossy(&output.stdout)
-                .lines()
-                .next()
-                .map(|s| s.to_string());
-
-            if let Some(c) = container {
-                if !c.is_empty() {
-                    return Ok(c);
+            if output.status.success() {
+                if let Some(container) = String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .find(|line| !line.trim().is_empty())
+                {
+                    return Ok(container.trim().to_string());
                 }
             }
         }
 
         Err(io::Error::new(
             io::ErrorKind::NotFound,
-            "No running Cassandra container found. Start one with: docker-compose -f test-data/docker/docker-compose-cassandra5.yml up -d",
+            "No running Cassandra container found. Start one with: docker compose -f test-data/docker/docker-compose-cassandra5.yml up -d cassandra-5-0",
         ))
     }
 
-    /// Wait until Cassandra is ready to accept connections
+    /// Wait until Cassandra is ready to accept CQL queries.
     pub fn wait_until_ready(&self, timeout_secs: u32) -> io::Result<()> {
         let start = Instant::now();
         let timeout = Duration::from_secs(timeout_secs as u64);
 
-        println!("⏳ Waiting for Cassandra to be ready (max {}s)...", timeout_secs);
-
         while start.elapsed() < timeout {
-            // Check if Cassandra is accepting CQL connections
-            let result = self.execute_cql("DESCRIBE KEYSPACES");
+            let readiness = Self::docker_output(&[
+                "exec",
+                &self.container,
+                "sh",
+                "-lc",
+                &format!(
+                    "cqlsh -e \"SELECT cluster_name FROM system.local;\" >/dev/null 2>&1 && {NODETOOL_BIN} status | grep -q 'UN'"
+                ),
+            ]);
 
-            match result {
-                Ok(_) => {
-                    println!("✅ Cassandra is ready ({:.1}s)", start.elapsed().as_secs_f64());
+            if let Ok(output) = readiness {
+                if output.status.success() {
                     return Ok(());
                 }
-                Err(_) => {
-                    std::thread::sleep(Duration::from_secs(2));
-                }
             }
+
+            if !Self::container_is_running(&self.container)? {
+                std::thread::sleep(Duration::from_secs(2));
+                continue;
+            }
+
+            if self.execute_cql("SELECT cluster_name FROM system.local;").is_ok() {
+                return Ok(());
+            }
+            std::thread::sleep(Duration::from_secs(2));
         }
 
         Err(io::Error::new(
             io::ErrorKind::TimedOut,
             format!(
-                "Cassandra not ready after {}s. Container: {}",
-                timeout_secs, self.container
+                "Cassandra not ready after {timeout_secs}s in container {}",
+                self.container
             ),
         ))
     }
 
-    /// Execute a CQL statement and return raw output
+    /// Execute a CQL statement and return raw stdout.
     pub fn execute_cql(&self, cql: &str) -> io::Result<String> {
-        let output = Command::new("docker")
-            .args([
-                "exec",
-                &self.container,
-                "cqlsh",
-                "-e",
-                cql,
-            ])
-            .output()?;
+        let output = Self::docker_output(&["exec", &self.container, "cqlsh", "-e", cql])?;
 
         if output.status.success() {
             Ok(String::from_utf8_lossy(&output.stdout).to_string())
         } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("CQL execution failed: {}", stderr),
-            ))
+            Err(io::Error::other(format!(
+                "CQL execution failed: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
         }
     }
 
-    /// Parse cqlsh output into structured format
+    /// Parse `cqlsh` tabular output into a structured format.
     pub fn parse_cqlsh_output(output: &str) -> CqlshOutput {
         let lines: Vec<&str> = output.lines().collect();
         let mut headers = Vec::new();
         let mut rows = Vec::new();
 
-        // Find header line (contains column separators)
         let mut header_idx = None;
-        for (i, line) in lines.iter().enumerate() {
-            if line.contains('|') && !line.starts_with('-') {
-                header_idx = Some(i);
+        for (idx, line) in lines.iter().enumerate() {
+            let trimmed = line.trim();
+            if trimmed.contains('|') && !trimmed.starts_with('-') {
+                header_idx = Some(idx);
                 break;
             }
         }
 
         if let Some(idx) = header_idx {
-            // Parse headers
             headers = lines[idx]
                 .split('|')
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
                 .collect();
 
-            // Skip separator line and parse data rows
             for line in lines.iter().skip(idx + 2) {
-                if line.starts_with('-') || line.trim().is_empty() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('-') {
                     continue;
                 }
-                if line.starts_with('(') {
-                    // End of results (e.g., "(3 rows)")
+                if trimmed.starts_with('(') {
                     break;
                 }
-                if line.contains('|') {
-                    let row: Vec<String> = line
+                if trimmed.contains('|') {
+                    let row = trimmed
                         .split('|')
-                        .map(|s| s.trim().to_string())
-                        .filter(|s| !s.is_empty())
-                        .collect();
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned)
+                        .collect::<Vec<_>>();
                     if !row.is_empty() {
                         rows.push(row);
                     }
+                }
+            }
+        } else {
+            let non_empty_lines = lines
+                .iter()
+                .map(|line| line.trim())
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>();
+
+            if non_empty_lines.len() >= 2
+                && non_empty_lines[1].chars().all(|ch| ch == '-')
+                && !non_empty_lines[0].starts_with('(')
+            {
+                headers.push(non_empty_lines[0].to_string());
+
+                for line in non_empty_lines.into_iter().skip(2) {
+                    if line.starts_with('(') {
+                        break;
+                    }
+                    rows.push(vec![line.to_string()]);
                 }
             }
         }
@@ -194,202 +198,234 @@ impl DockerCqlshClient {
             raw_output: output.to_string(),
         }
     }
+
+    fn docker_output(args: &[&str]) -> io::Result<Output> {
+        Command::new("docker").args(args).output()
+    }
+
+    fn container_is_running(container: &str) -> io::Result<bool> {
+        let output =
+            Self::docker_output(&["inspect", "-f", "{{.State.Running}}", container])?;
+        Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
+    }
 }
 
-/// Cassandra container manager for sstableloader integration tests
+/// Cassandra container manager for `sstableloader` integration tests.
 #[derive(Debug)]
 pub struct CassandraContainer {
-    /// Container name/ID
     container: String,
-    /// Whether we started the container (vs found existing)
     _started_by_us: bool,
-    /// CQL client for executing queries
     client: DockerCqlshClient,
 }
 
 impl CassandraContainer {
-    /// Start a new Cassandra container or connect to an existing one
+    /// Start a new Cassandra container or attach to an existing one.
     pub fn start() -> io::Result<Self> {
-        // First try to find an existing container
-        if let Ok(container) = DockerCqlshClient::find_cassandra_container() {
-            println!("🔗 Using existing Cassandra container: {}", container);
-            let client = DockerCqlshClient::new(container.clone());
-            return Ok(Self {
-                container,
-                _started_by_us: false,
-                client,
-            });
-        }
-
-        // Start a new container using docker-compose
-        println!("🚀 Starting new Cassandra container...");
-
-        let compose_file = Path::new("test-data/docker/docker-compose-cassandra5.yml");
-        if !compose_file.exists() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!(
-                    "Docker compose file not found: {}",
-                    compose_file.display()
-                ),
-            ));
-        }
-
-        let output = Command::new("docker-compose")
-            .args(["-f", compose_file.to_str().unwrap(), "up", "-d", "cassandra-5-0"])
-            .output()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to start Cassandra: {}", stderr),
-            ));
-        }
-
-        // Wait for container to start
-        std::thread::sleep(Duration::from_secs(5));
-
-        let container =
-            DockerCqlshClient::find_cassandra_container().map_err(|_| {
-                io::Error::new(io::ErrorKind::Other, "Failed to find started container")
-            })?;
-
+        let container = DockerCqlshClient::find_cassandra_container()?;
         let client = DockerCqlshClient::new(container.clone());
 
         Ok(Self {
             container,
-            _started_by_us: true,
+            _started_by_us: false,
             client,
         })
     }
 
-    /// Wait until Cassandra is ready
+    /// Wait until Cassandra is ready.
     pub fn wait_until_ready(&self, timeout_secs: u32) -> io::Result<()> {
         self.client.wait_until_ready(timeout_secs)
     }
 
-    /// Execute CQL statement
+    /// Execute CQL and parse the output.
     pub fn execute_cql(&self, cql: &str) -> io::Result<CqlshOutput> {
         let output = self.client.execute_cql(cql)?;
         Ok(DockerCqlshClient::parse_cqlsh_output(&output))
     }
 
-    /// Copy SSTable files into the container
-    pub fn copy_sstables(&self, local_dir: &Path, keyspace: &str, table: &str) -> io::Result<()> {
-        // Target path inside container
-        let container_path = format!(
-            "/var/lib/cassandra/data/{}/{}/",
-            keyspace, table
+    /// Resolve Cassandra's on-disk table directory name (`table-<id_without_dashes>`).
+    pub fn table_directory_name(&self, keyspace: &str, table: &str) -> io::Result<String> {
+        let cql = format!(
+            "SELECT id FROM system_schema.tables WHERE keyspace_name = '{keyspace}' AND table_name = '{table}';"
         );
+        let start = Instant::now();
+        let timeout = Duration::from_secs(20);
 
-        // Create target directory
-        let mkdir_output = Command::new("docker")
-            .args([
-                "exec",
-                &self.container,
-                "mkdir",
-                "-p",
-                &container_path,
-            ])
-            .output()?;
+        let table_id = loop {
+            let result = self.execute_cql(&cql)?;
+            if let Some(id) = result.rows.first().and_then(|row| row.first()) {
+                break id.clone();
+            }
 
-        if !mkdir_output.status.success() {
+            if start.elapsed() >= timeout {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("Could not resolve table id for {keyspace}.{table}"),
+                ));
+            }
+
+            std::thread::sleep(Duration::from_millis(250));
+        };
+
+        Ok(format!("{}-{}", table, table_id.replace('-', "")))
+    }
+
+    /// Run `sstableloader` against a packaged keyspace/table directory.
+    pub fn run_sstableloader(
+        &self,
+        local_table_dir: &Path,
+        keyspace: &str,
+        table: &str,
+    ) -> io::Result<SstableloaderResult> {
+        let table_dir_name = self.table_directory_name(keyspace, table)?;
+        let remote_dir = format!("/tmp/cqlite-loader/{keyspace}/{table_dir_name}");
+        let contact_host = self.hostname()?;
+        self.copy_sstables(local_table_dir, &remote_dir)?;
+
+        let output = DockerCqlshClient::docker_output(&[
+            "exec",
+            &self.container,
+            "sh",
+            "-lc",
+            &format!(
+                "MAX_HEAP_SIZE=128M HEAP_NEWSIZE=32M {SSTABLELOADER_BIN} -d {contact_host} {remote_dir}"
+            ),
+        ])?;
+
+        Ok(SstableloaderResult {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code(),
+        })
+    }
+
+    /// Get the container name or ID.
+    #[allow(dead_code)]
+    pub fn name(&self) -> &str {
+        &self.container
+    }
+
+    pub fn tail_system_log(&self, lines: usize) -> io::Result<String> {
+        let output = DockerCqlshClient::docker_output(&[
+            "exec",
+            &self.container,
+            "sh",
+            "-lc",
+            &format!("tail -n {lines} {SYSTEM_LOG_PATH}"),
+        ])?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(io::Error::other(format!(
+                "Failed to tail Cassandra system log: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    }
+
+    pub fn list_table_components(&self, keyspace: &str, table: &str) -> io::Result<String> {
+        let table_dir_name = self.table_directory_name(keyspace, table)?;
+        let table_dir = format!("/var/lib/cassandra/data/{keyspace}/{table_dir_name}");
+        let output = DockerCqlshClient::docker_output(&[
+            "exec",
+            &self.container,
+            "sh",
+            "-lc",
+            &format!("if [ -d {table_dir} ]; then ls -1 {table_dir} | sort; fi"),
+        ])?;
+
+        if output.status.success() {
+            Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        } else {
+            Err(io::Error::other(format!(
+                "Failed to list imported table components: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )))
+        }
+    }
+
+    fn copy_sstables(&self, local_dir: &Path, remote_dir: &str) -> io::Result<()> {
+        if !local_dir.exists() {
             return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Failed to create SSTable directory in container",
+                io::ErrorKind::NotFound,
+                format!("Local SSTable directory does not exist: {}", local_dir.display()),
             ));
         }
 
-        // Copy files
-        let copy_output = Command::new("docker")
-            .args([
-                "cp",
-                &format!("{}/*", local_dir.display()),
-                &format!("{}:{}", self.container, container_path),
-            ])
-            .output()?;
+        let cleanup = DockerCqlshClient::docker_output(&[
+            "exec",
+            &self.container,
+            "sh",
+            "-lc",
+            &format!("rm -rf {remote_dir} && mkdir -p {remote_dir}"),
+        ])?;
+        if !cleanup.status.success() {
+            return Err(io::Error::other(format!(
+                "Failed to prepare remote SSTable directory: {}",
+                String::from_utf8_lossy(&cleanup.stderr).trim()
+            )));
+        }
 
-        if !copy_output.status.success() {
-            let stderr = String::from_utf8_lossy(&copy_output.stderr);
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("Failed to copy SSTables: {}", stderr),
-            ));
+        let source = format!("{}/.", local_dir.display());
+        let destination = format!("{}:{}", self.container, remote_dir);
+        let copy = DockerCqlshClient::docker_output(&["cp", &source, &destination])?;
+        if !copy.status.success() {
+            return Err(io::Error::other(format!(
+                "Failed to copy SSTables: {}",
+                String::from_utf8_lossy(&copy.stderr).trim()
+            )));
         }
 
         Ok(())
     }
 
-    /// Run sstableloader to import SSTables
-    pub fn run_sstableloader(
-        &self,
-        sstable_dir: &Path,
-        keyspace: &str,
-    ) -> io::Result<SstableloaderResult> {
-        // First copy the SSTables to container
-        self.copy_sstables(sstable_dir, keyspace, "temp_load")?;
+    fn hostname(&self) -> io::Result<String> {
+        let output =
+            DockerCqlshClient::docker_output(&["inspect", "-f", "{{.Config.Hostname}}", &self.container])?;
 
-        let container_path = format!("/var/lib/cassandra/data/{}/temp_load", keyspace);
+        if !output.status.success() {
+            return Err(io::Error::other(format!(
+                "Failed to inspect container hostname: {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            )));
+        }
 
-        // Run sstableloader
-        let output = Command::new("docker")
-            .args([
-                "exec",
-                &self.container,
-                "sstableloader",
-                "-d",
-                "localhost",
-                &container_path,
-            ])
-            .output()?;
+        let hostname = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if hostname.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "Container hostname is empty",
+            ));
+        }
 
-        let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-        let result = SstableloaderResult {
-            success: output.status.success(),
-            stdout,
-            stderr,
-            exit_code: output.status.code(),
-        };
-
-        Ok(result)
-    }
-
-    /// Get the container name
-    pub fn name(&self) -> &str {
-        &self.container
+        Ok(hostname)
     }
 }
 
-/// Result from running sstableloader
+/// Result from running `sstableloader`.
 #[derive(Debug)]
 pub struct SstableloaderResult {
-    /// Whether the command succeeded
     pub success: bool,
-    /// Standard output
     pub stdout: String,
-    /// Standard error
     pub stderr: String,
-    /// Exit code if available
     pub exit_code: Option<i32>,
 }
 
 impl SstableloaderResult {
-    /// Check if the load was successful
     pub fn is_successful(&self) -> bool {
         self.success
     }
 
-    /// Get summary message
     pub fn summary(&self) -> String {
         if self.success {
-            format!("sstableloader completed successfully")
+            "sstableloader completed successfully".to_string()
         } else {
             format!(
-                "sstableloader failed (exit code: {:?}): {}",
-                self.exit_code, self.stderr
+                "sstableloader failed (exit code: {:?}): stdout=`{}` stderr=`{}`",
+                self.exit_code,
+                self.stdout.trim(),
+                self.stderr.trim()
             )
         }
     }
@@ -426,5 +462,23 @@ mod tests {
         let parsed = DockerCqlshClient::parse_cqlsh_output(output);
         assert!(parsed.headers.is_empty());
         assert!(parsed.rows.is_empty());
+    }
+
+    #[test]
+    fn test_parse_single_column_output() {
+        let output = r#"
+ id
+--------------------------------------
+ a6811200-1b7b-11f1-bc4b-1d58099c4029
+
+(1 rows)
+"#;
+
+        let parsed = DockerCqlshClient::parse_cqlsh_output(output);
+        assert_eq!(parsed.headers, vec!["id"]);
+        assert_eq!(
+            parsed.rows,
+            vec![vec!["a6811200-1b7b-11f1-bc4b-1d58099c4029".to_string()]]
+        );
     }
 }

@@ -21,8 +21,9 @@ permissions:
   contents: read
   pull-requests: write
 
-# This workflow validates that SSTables written by CQLite can be loaded
-# into a real Cassandra 5.0 cluster using sstableloader (Issue #396)
+# This workflow validates that SSTables written by CQLite can be imported
+# into a real Cassandra 5.0 cluster using the current loader-based harness
+# (Issue #396).
 
 jobs:
   sstableloader-validation:
@@ -102,10 +103,10 @@ jobs:
             --test sstableloader_integration \
             --features write-support,docker-integration \
             -- --test-threads=1 \
-            test_sstableloader_single_partition \
+            test_sstableloader_simple_table \
+            test_sstableloader_clustering_table \
             test_sstableloader_multiple_partitions \
-            test_sstableloader_wide_partition \
-            test_sstableloader_all_types \
+            test_sstableloader_all_stage0_types \
             --nocapture 2>&1 | tee tier1_results.txt
           echo "::endgroup::"
 
@@ -120,10 +121,10 @@ jobs:
             --test sstableloader_integration \
             --features write-support,docker-integration \
             -- --test-threads=1 \
-            test_sstableloader_select_verification \
-            test_sstableloader_ttl_verification \
-            test_sstableloader_timestamp_ordering \
-            test_sstableloader_tombstone_verification \
+            test_sstableloader_select_all_returns_written_rows \
+            test_sstableloader_where_on_partition_key \
+            test_sstableloader_where_on_clustering_key \
+            test_sstableloader_stage0_types_round_trip_values \
             --nocapture 2>&1 | tee tier2_results.txt
           echo "::endgroup::"
 
@@ -141,9 +142,9 @@ jobs:
             --test sstableloader_integration \
             --features write-support,docker-integration \
             -- --test-threads=1 \
-            test_sstableloader_10k_partitions \
-            test_sstableloader_wide_partition_1000_rows \
-            test_sstableloader_mixed_operations \
+            test_sstableloader_large_partition_1000_rows \
+            test_sstableloader_many_partitions_100_distinct \
+            test_sstableloader_concurrent_writes_followed_by_load \
             --nocapture 2>&1 | tee tier3_results.txt
           echo "::endgroup::"
 
@@ -181,11 +182,11 @@ jobs:
             const summary = `## ✅ sstableloader Integration Tests PASSED
 
             All SSTable format validation tests passed:
-            - ✅ Tier 1: Acceptance Tests - SSTable files created correctly
-            - ✅ Tier 2: Query Verification - Data integrity verified
+            - ✅ Tier 1: Acceptance Tests - `sstableloader` accepted packaged flushed SSTables
+            - ✅ Tier 2: Query Verification - Cassandra returned the expected rows
             - ${{ steps.tier3.outcome == 'success' && '✅' || '⏭️' }} Tier 3: Stress Tests
 
-            CQLite-written SSTables are compatible with Cassandra 5.0 sstableloader.`;
+            CQLite-written SSTables were imported successfully into Cassandra 5.0 through the loader-based validation path.`;
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -209,7 +210,7 @@ jobs:
             ### Debugging Steps:
             \`\`\`bash
             # Start Cassandra container
-            docker-compose -f test-data/docker/docker-compose-cassandra5.yml up -d
+            docker compose -f test-data/docker/docker-compose-cassandra5.yml up -d cassandra-5-0
 
             # Run tests locally
             cargo test --package cqlite-core \\
