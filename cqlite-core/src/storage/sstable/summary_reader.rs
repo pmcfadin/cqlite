@@ -452,12 +452,14 @@ fn normalize_entry_offsets(
 
     let usize_offsets: Vec<usize> = offsets.iter().map(|offset| *offset as usize).collect();
 
-    // Check if offsets are relative (writer-local, already zero-based into entry data)
-    if usize_offsets.iter().all(|offset| *offset < entry_data_size) {
-        return Ok(usize_offsets);
+    // Writer-local offsets are zero-based into entry_data, so the first entry must start at 0.
+    if usize_offsets[0] == 0 {
+        if usize_offsets.iter().all(|offset| *offset < entry_data_size) {
+            return Ok(usize_offsets);
+        }
     }
 
-    // Check if offsets are absolute (Cassandra layout, including offset table size)
+    // Check if offsets are relative (writer-local, already zero-based into entry data)
     if usize_offsets
         .iter()
         .all(|offset| *offset >= offset_table_size && *offset < summary_entries_size)
