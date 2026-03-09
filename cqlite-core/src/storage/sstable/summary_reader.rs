@@ -453,10 +453,8 @@ fn normalize_entry_offsets(
     let usize_offsets: Vec<usize> = offsets.iter().map(|offset| *offset as usize).collect();
 
     // Writer-local offsets are zero-based into entry_data, so the first entry must start at 0.
-    if usize_offsets[0] == 0 {
-        if usize_offsets.iter().all(|offset| *offset < entry_data_size) {
-            return Ok(usize_offsets);
-        }
+    if usize_offsets[0] == 0 && usize_offsets.iter().all(|offset| *offset < entry_data_size) {
+        return Ok(usize_offsets);
     }
 
     // Check if offsets are relative (writer-local, already zero-based into entry data)
