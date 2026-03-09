@@ -104,8 +104,10 @@ mod tests {
         let mut key_bytes = Vec::new();
         key_bytes.extend_from_slice(&[0x00, 0x04]); // length of int
         key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x2A]); // int value 42
+        key_bytes.push(0x00); // separator
         key_bytes.extend_from_slice(&[0x00, 0x05]); // length of text
         key_bytes.extend_from_slice(b"hello"); // text value
+        key_bytes.push(0x00); // end-of-component
 
         let schema_digest = computer.compute_partition_key_digest(&key_bytes, &parsing_context)?;
         let simple_digest = computer.compute_simple_digest(&key_bytes)?;
@@ -244,36 +246,37 @@ mod tests {
 
     fn create_sample_key_for_types(partition_key_defs: &[(&str, &str)]) -> Vec<u8> {
         let mut key_bytes = Vec::new();
+        let multi_component = partition_key_defs.len() > 1;
 
         for (_, data_type) in partition_key_defs {
             match *data_type {
                 "int" => {
-                    if partition_key_defs.len() > 1 {
+                    if multi_component {
                         key_bytes.extend_from_slice(&[0x00, 0x04]); // length
                     }
                     key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x2A]); // value 42
                 }
                 "text" => {
-                    if partition_key_defs.len() > 1 {
+                    if multi_component {
                         key_bytes.extend_from_slice(&[0x00, 0x05]); // length
                     }
                     key_bytes.extend_from_slice(b"hello"); // value "hello"
                 }
                 "bigint" => {
-                    if partition_key_defs.len() > 1 {
+                    if multi_component {
                         key_bytes.extend_from_slice(&[0x00, 0x08]); // length
                     }
                     key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]);
                     // value 100
                 }
                 "boolean" => {
-                    if partition_key_defs.len() > 1 {
+                    if multi_component {
                         key_bytes.extend_from_slice(&[0x00, 0x01]); // length
                     }
                     key_bytes.extend_from_slice(&[0x01]); // value true
                 }
                 "uuid" => {
-                    if partition_key_defs.len() > 1 {
+                    if multi_component {
                         key_bytes.extend_from_slice(&[0x00, 0x10]); // length
                     }
                     // Sample UUID bytes
@@ -283,18 +286,22 @@ mod tests {
                     ]);
                 }
                 "blob" => {
-                    if partition_key_defs.len() > 1 {
+                    if multi_component {
                         key_bytes.extend_from_slice(&[0x00, 0x04]); // length
                     }
                     key_bytes.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]); // sample blob
                 }
                 _ => {
                     // Fallback for unknown types
-                    if partition_key_defs.len() > 1 {
+                    if multi_component {
                         key_bytes.extend_from_slice(&[0x00, 0x04]); // length
                     }
                     key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]); // zero bytes
                 }
+            }
+
+            if multi_component {
+                key_bytes.push(0x00);
             }
         }
 

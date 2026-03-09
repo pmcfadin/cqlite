@@ -162,16 +162,19 @@ impl DataWriter {
         let partition_offset = self.buffer.len() as u64;
 
         // Write partition header (with optional tombstone)
+        let header_start = self.buffer.len();
         self.write_partition_header(key, partition_tombstone)?;
+        let mut prev_unfiltered_size = (self.buffer.len() - header_start) as u64;
 
         // Write range tombstones before rows
         for rt in range_tombstones {
-            self.write_range_tombstone(rt, schema)?;
+            prev_unfiltered_size = self.write_range_tombstone_with_size(rt, schema)? as u64;
         }
 
         // Write all rows for this partition
         for mutation in mutations {
-            self.write_row(mutation, schema)?;
+            prev_unfiltered_size =
+                self.write_row_with_prev_size(mutation, schema, prev_unfiltered_size)? as u64;
         }
 
         // Write end-of-partition marker
@@ -235,7 +238,20 @@ impl DataWriter {
     /// Write a single row
     ///
     /// This implements the V5CompressedLegacy row format with delta encoding.
+    #[allow(dead_code)]
     fn write_row(&mut self, mutation: &Mutation, schema: &TableSchema) -> Result<()> {
+        self.write_row_with_prev_size(mutation, schema, 0)?;
+        Ok(())
+    }
+
+    fn write_row_with_prev_size(
+        &mut self,
+        mutation: &Mutation,
+        schema: &TableSchema,
+        prev_size: u64,
+    ) -> Result<usize> {
+        let start_len = self.buffer.len();
+
         // Build row header flags
         let mut flags = 0u8;
 
@@ -327,8 +343,6 @@ impl DataWriter {
         // Calculate row body size (everything after row_size VInt)
         let row_body = self.build_row_body(mutation, schema, flags)?;
 
-        // prev_unfiltered_size = 0 (could track prev row for optimization)
-        let prev_size: u64 = 0;
         let prev_size_vint_len = unsigned_len(prev_size);
 
         // Write row_size (VInt) — Cassandra's serializedRowBodySize() includes
@@ -344,7 +358,7 @@ impl DataWriter {
         // Write rest of row body
         self.buffer.extend_from_slice(&row_body);
 
-        Ok(())
+        Ok(self.buffer.len() - start_len)
     }
 
     /// Write a static row for the current partition
@@ -369,6 +383,18 @@ impl DataWriter {
     /// [cell_data...]         ← Static column cells only
     /// ```
     pub fn write_static_row(&mut self, mutation: &Mutation, schema: &TableSchema) -> Result<()> {
+        self.write_static_row_with_prev_size(mutation, schema, 0)?;
+        Ok(())
+    }
+
+    fn write_static_row_with_prev_size(
+        &mut self,
+        mutation: &Mutation,
+        schema: &TableSchema,
+        prev_size: u64,
+    ) -> Result<usize> {
+        let start_len = self.buffer.len();
+
         // Build row header flags - always includes HAS_EXTENDED_FLAGS for static rows
         let mut flags = ROW_HAS_EXTENDED_FLAGS;
 
@@ -430,8 +456,6 @@ impl DataWriter {
         // Build row body
         let row_body = self.build_static_row_body(mutation, schema, flags)?;
 
-        // prev_unfiltered_size = 0
-        let prev_size: u64 = 0;
         let prev_size_vint_len = unsigned_len(prev_size);
 
         // Write row_size (VInt) — includes prev_unfiltered_size VInt + rest of body
@@ -446,7 +470,7 @@ impl DataWriter {
         // Write rest of row body
         self.buffer.extend_from_slice(&row_body);
 
-        Ok(())
+        Ok(self.buffer.len() - start_len)
     }
 
     /// Build static row body (everything after row_size VInt)
@@ -1464,11 +1488,21 @@ impl DataWriter {
     /// [deletion_time: VInt]        ← Delta from min_timestamp
     /// [local_deletion_time: VInt]  ← Delta from min_local_deletion_time
     /// ```
+    #[allow(dead_code)]
     fn write_range_tombstone(
         &mut self,
         range: &RangeTombstone,
         schema: &TableSchema,
     ) -> Result<()> {
+        self.write_range_tombstone_with_size(range, schema)?;
+        Ok(())
+    }
+
+    fn write_range_tombstone_with_size(
+        &mut self,
+        range: &RangeTombstone,
+        schema: &TableSchema,
+    ) -> Result<usize> {
         // Write opening bound
         self.write_range_bound(
             &range.start,
@@ -1479,7 +1513,7 @@ impl DataWriter {
         )?;
 
         // Write closing bound
-        self.write_range_bound(
+        let closing_size = self.write_range_bound(
             &range.end,
             false,
             range.deletion_time,
@@ -1487,7 +1521,7 @@ impl DataWriter {
             schema,
         )?;
 
-        Ok(())
+        Ok(closing_size)
     }
 
     /// Write a single range tombstone bound
@@ -1498,7 +1532,9 @@ impl DataWriter {
         deletion_time: i64,
         local_deletion_time: i32,
         schema: &TableSchema,
-    ) -> Result<()> {
+    ) -> Result<usize> {
+        let start_len = self.buffer.len();
+
         // Marker flag
         self.buffer.push(IS_MARKER);
 
@@ -1532,7 +1568,7 @@ impl DataWriter {
         let ldt_delta = (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
         encode_signed(ldt_delta, &mut self.buffer);
 
-        Ok(())
+        Ok(self.buffer.len() - start_len)
     }
 
     /// Get current file position (for Index.db offset tracking)
@@ -1655,9 +1691,10 @@ fn serialize_value(value: &Value) -> Result<Vec<u8>> {
             nanos,
         } => {
             let mut result = Vec::new();
-            result.extend_from_slice(&months.to_be_bytes());
-            result.extend_from_slice(&days.to_be_bytes());
-            result.extend_from_slice(&nanos.to_be_bytes());
+            // Cassandra DurationType stores three signed VInts, not fixed-width ints.
+            encode_signed(*months as i64, &mut result);
+            encode_signed(*days as i64, &mut result);
+            encode_signed(*nanos, &mut result);
             Ok(result)
         }
         Value::Udt(udt_value) => {

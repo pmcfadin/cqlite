@@ -188,10 +188,12 @@ mod tests {
         // Component 1: int(42) - length prefix + 4 bytes
         key_bytes.extend_from_slice(&[0x00, 0x04]); // length = 4
         key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x2A]); // value = 42
+        key_bytes.push(0x00); // separator
 
         // Component 2: text("hello") - length prefix + 5 bytes
         key_bytes.extend_from_slice(&[0x00, 0x05]); // length = 5
         key_bytes.extend_from_slice(b"hello"); // value = "hello"
+        key_bytes.push(0x00); // end-of-component
 
         let digest = computer
             .compute_partition_key_digest(&key_bytes, &context)
@@ -215,8 +217,10 @@ mod tests {
         let mut key_bytes2 = Vec::new();
         key_bytes2.extend_from_slice(&[0x00, 0x05]); // length = 5
         key_bytes2.extend_from_slice(b"hello"); // value = "hello"
+        key_bytes2.push(0x00); // separator
         key_bytes2.extend_from_slice(&[0x00, 0x04]); // length = 4
         key_bytes2.extend_from_slice(&[0x00, 0x00, 0x00, 0x2A]); // value = 42
+        key_bytes2.push(0x00); // end-of-component
 
         let digest_reversed = computer
             .compute_partition_key_digest(&key_bytes2, &context2)
@@ -244,14 +248,17 @@ mod tests {
         // Component 1: int(1)
         key_bytes.extend_from_slice(&[0x00, 0x04]); // length = 4
         key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x01]); // value = 1
+        key_bytes.push(0x00); // separator
 
         // Component 2: text("a")
         key_bytes.extend_from_slice(&[0x00, 0x01]); // length = 1
         key_bytes.extend_from_slice(b"a"); // value = "a"
+        key_bytes.push(0x00); // separator
 
         // Component 3: bigint(100)
         key_bytes.extend_from_slice(&[0x00, 0x08]); // length = 8
         key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]); // value = 100
+        key_bytes.push(0x00); // end-of-component
 
         let digest = computer
             .compute_partition_key_digest(&key_bytes, &context)

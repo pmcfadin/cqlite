@@ -14,7 +14,6 @@ use crate::error::{Error, Result};
 use crate::schema::{ClusteringOrder, TableSchema};
 use crate::types::{ComparatorType, Value};
 use std::cmp::Ordering;
-use std::io::Cursor;
 
 /// Table identifier (keyspace + table name)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -203,10 +202,11 @@ impl PartitionKey {
         }
     }
 
-    /// Serialize partition key to bytes according to Cassandra's encoding
+    /// Serialize partition key to bytes according to Cassandra's on-disk encoding.
     ///
-    /// Single-component keys: raw bytes
-    /// Multi-component keys: [len1 (2B)][bytes1][len2 (2B)][bytes2]...
+    /// Single-component keys are written as raw value bytes.
+    /// Multi-component keys use `[len][value][0x00]` per component, including a
+    /// trailing `0x00` after the final component.
     pub fn to_bytes(&self, schema: &TableSchema) -> Result<Vec<u8>> {
         if self.columns.is_empty() {
             return Err(Error::InvalidInput("Empty partition key".to_string()));
@@ -231,9 +231,8 @@ impl PartitionKey {
             return Ok(result);
         }
 
-        // Multi-component (composite) key: [len1][val1][0x00][len2][val2][0x00]...[lenN][valN][0x00]
-        // Cassandra CompositeType format: 0x00 EOC byte after EVERY component including the last
-        // (Issue #438, Cassandra CompositeType.java lines 522-542)
+        // Multi-component partition keys use a `0x00` end-of-component marker
+        // after every component, including the last one.
         for (i, (_, value)) in self.columns.iter().enumerate() {
             let value_bytes = self.serialize_value(value, &schema.partition_keys[i])?;
             let len = value_bytes.len();
@@ -246,8 +245,6 @@ impl PartitionKey {
             // 2-byte big-endian length prefix
             result.extend_from_slice(&(len as u16).to_be_bytes());
             result.extend_from_slice(&value_bytes);
-
-            // 0x00 end-of-component byte after every component (including last)
             result.push(0x00);
         }
 
@@ -418,26 +415,131 @@ impl PartialOrd for DecoratedKey {
 /// Calculate Murmur3 token from partition key bytes
 ///
 /// Uses Cassandra's Murmur3Partitioner algorithm:
-/// 1. Compute Murmur3 128-bit hash (hash3_x64_128)
-/// 2. Take first 64 bits
-/// 3. Normalize to i64 range
-///
-/// Note: The murmur3 crate's murmur3_x64_128 returns two u64 values.
-/// Cassandra uses the first value as a signed i64.
+/// 1. Compute Cassandra's `MurmurHash.hash3_x64_128`
+/// 2. Take `h1` as the signed token
+/// 3. Preserve Cassandra's wraparound semantics
 fn calculate_murmur3_token(key_bytes: &[u8]) -> Result<i64> {
     // Special case: empty key -> Long.MIN_VALUE
     if key_bytes.is_empty() {
         return Ok(i64::MIN);
     }
 
-    // Compute Murmur3 128-bit hash with seed 0
-    let mut cursor = Cursor::new(key_bytes);
-    let hash = murmur3::murmur3_x64_128(&mut cursor, 0)
-        .map_err(|e| Error::Storage(format!("Failed to compute Murmur3 hash: {}", e)))?;
+    Ok(cassandra_murmur3_hash(key_bytes).0 as i64)
+}
 
-    // Take first 64 bits and interpret as signed i64
-    // Cassandra's normalize() just returns the value as-is for Murmur3
-    Ok(hash as i64)
+fn cassandra_murmur3_hash(data: &[u8]) -> (u64, u64) {
+    const C1: u64 = 0x87c3_7b91_1142_53d5;
+    const C2: u64 = 0x4cf5_ad43_2745_937f;
+
+    let mut h1 = 0u64;
+    let mut h2 = 0u64;
+
+    let nblocks = data.len() / 16;
+    for i in 0..nblocks {
+        let offset = i * 16;
+        let mut k1 = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+        let mut k2 = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+
+        k1 = k1.wrapping_mul(C1);
+        k1 = k1.rotate_left(31);
+        k1 = k1.wrapping_mul(C2);
+        h1 ^= k1;
+        h1 = h1.rotate_left(27);
+        h1 = h1.wrapping_add(h2);
+        h1 = h1.wrapping_mul(5).wrapping_add(0x52dc_e729);
+
+        k2 = k2.wrapping_mul(C2);
+        k2 = k2.rotate_left(33);
+        k2 = k2.wrapping_mul(C1);
+        h2 ^= k2;
+        h2 = h2.rotate_left(31);
+        h2 = h2.wrapping_add(h1);
+        h2 = h2.wrapping_mul(5).wrapping_add(0x3849_5ab5);
+    }
+
+    let tail = &data[nblocks * 16..];
+    let mut k1 = 0u64;
+    let mut k2 = 0u64;
+    let signed = |byte: u8| (byte as i8 as i64) as u64;
+
+    if tail.len() == 15 {
+        k2 ^= signed(tail[14]) << 48;
+    }
+    if tail.len() >= 14 {
+        k2 ^= signed(tail[13]) << 40;
+    }
+    if tail.len() >= 13 {
+        k2 ^= signed(tail[12]) << 32;
+    }
+    if tail.len() >= 12 {
+        k2 ^= signed(tail[11]) << 24;
+    }
+    if tail.len() >= 11 {
+        k2 ^= signed(tail[10]) << 16;
+    }
+    if tail.len() >= 10 {
+        k2 ^= signed(tail[9]) << 8;
+    }
+    if tail.len() >= 9 {
+        k2 ^= signed(tail[8]);
+        k2 = k2.wrapping_mul(C2);
+        k2 = k2.rotate_left(33);
+        k2 = k2.wrapping_mul(C1);
+        h2 ^= k2;
+    }
+
+    if tail.len() >= 8 {
+        k1 ^= signed(tail[7]) << 56;
+    }
+    if tail.len() >= 7 {
+        k1 ^= signed(tail[6]) << 48;
+    }
+    if tail.len() >= 6 {
+        k1 ^= signed(tail[5]) << 40;
+    }
+    if tail.len() >= 5 {
+        k1 ^= signed(tail[4]) << 32;
+    }
+    if tail.len() >= 4 {
+        k1 ^= signed(tail[3]) << 24;
+    }
+    if tail.len() >= 3 {
+        k1 ^= signed(tail[2]) << 16;
+    }
+    if tail.len() >= 2 {
+        k1 ^= signed(tail[1]) << 8;
+    }
+    if !tail.is_empty() {
+        k1 ^= signed(tail[0]);
+        k1 = k1.wrapping_mul(C1);
+        k1 = k1.rotate_left(31);
+        k1 = k1.wrapping_mul(C2);
+        h1 ^= k1;
+    }
+
+    let len = data.len() as u64;
+    h1 ^= len;
+    h2 ^= len;
+
+    h1 = h1.wrapping_add(h2);
+    h2 = h2.wrapping_add(h1);
+
+    h1 = fmix64(h1);
+    h2 = fmix64(h2);
+
+    h1 = h1.wrapping_add(h2);
+    h2 = h2.wrapping_add(h1);
+
+    (h1, h2)
+}
+
+fn fmix64(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value ^= value >> 33;
+    value
 }
 
 /// Serialize a Value to bytes according to its CQL type
@@ -651,16 +753,15 @@ mod tests {
         ]);
 
         let bytes = pk.to_bytes(&schema).unwrap();
-        // Cassandra CompositeType format (Issue #438):
-        // [len1(2B)][val1][0x00 EOC][len2(2B)][val2][0x00 EOC]
-        // EOC byte after EVERY component including the last
+        // Multi-component partition key format:
+        // [len1(2B)][val1][0x00][len2(2B)][val2][0x00]
         let expected = vec![
             0x00, 0x04, // len1 = 4
             0x00, 0x00, 0x00, 0x2A, // int = 42
-            0x00, // EOC after component 1
+            0x00, // end-of-component after component 1
             0x00, 0x05, // len2 = 5
             b'h', b'e', b'l', b'l', b'o', // text = "hello"
-            0x00, // EOC after component 2 (required by CompositeType)
+            0x00, // end-of-component after component 2
         ];
         assert_eq!(bytes, expected);
     }
@@ -679,17 +780,17 @@ mod tests {
         ]);
 
         let bytes = pk.to_bytes(&schema).unwrap();
-        // CompositeType: [len][val][EOC] for each component
+        // Composite partition key format: end-of-component byte after every component
         let expected = vec![
             0x00, 0x04, // len1 = 4
             b'A', b'A', b'P', b'L', // "AAPL"
-            0x00, // EOC
+            0x00, // end-of-component
             0x00, 0x04, // len2 = 4
             b'N', b'Y', b'S', b'E', // "NYSE"
-            0x00, // EOC
+            0x00, // end-of-component
             0x00, 0x04, // len3 = 4
             0x00, 0x00, 0x00, 0x64, // int = 100
-            0x00, // EOC (required on last component too)
+            0x00, // end-of-component
         ];
         assert_eq!(bytes, expected);
     }
@@ -735,6 +836,20 @@ mod tests {
             token1, token2,
             "Different keys should produce different tokens"
         );
+    }
+
+    #[test]
+    fn test_murmur3_token_matches_cassandra_for_composite_uuid_key() {
+        // Verified against Cassandra 5.0:
+        // SELECT token(tenant_id, user_id) FROM issue438_probe.multi_pk_raw;
+        let key_bytes = vec![
+            0x00, 0x10, 0x0f, 0x0f, 0x0f, 0x0f, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x10, 0x0f, 0x0f, 0x0f, 0x0f, 0x00, 0x00, 0x40,
+            0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00,
+        ];
+
+        let token = calculate_murmur3_token(&key_bytes).unwrap();
+        assert_eq!(token, -5_116_541_970_184_546_410);
     }
 
     #[test]

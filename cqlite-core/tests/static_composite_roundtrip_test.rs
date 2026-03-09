@@ -258,6 +258,47 @@ fn create_composite_key_schema() -> TableSchema {
     }
 }
 
+fn create_composite_partition_with_clustering_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "issue438_probe".to_string(),
+        table: "single_probe".to_string(),
+        partition_keys: vec![
+            KeyColumn {
+                name: "tenant_id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            },
+            KeyColumn {
+                name: "user_id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 1,
+            },
+        ],
+        clustering_keys: vec![
+            ClusteringColumn {
+                name: "category".to_string(),
+                data_type: "text".to_string(),
+                position: 0,
+                order: ClusteringOrder::Asc,
+            },
+            ClusteringColumn {
+                name: "item_id".to_string(),
+                data_type: "timeuuid".to_string(),
+                position: 1,
+                order: ClusteringOrder::Asc,
+            },
+        ],
+        columns: vec![Column {
+            name: "value".to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        }],
+        comments: HashMap::new(),
+    }
+}
+
 #[test]
 fn test_composite_key_format() {
     let schema = create_composite_key_schema();
@@ -270,8 +311,7 @@ fn test_composite_key_format() {
 
     let bytes = pk.to_bytes(&schema).unwrap();
 
-    // Format: [len1][val1][0x00][len2][val2][0x00][len3][val3]
-    // No trailing 0x00 after last component
+    // Format: [len1][val1][0x00][len2][val2][0x00][len3][val3][0x00]
 
     // Component 1: len=4, val=2024
     assert_eq!(bytes[0..2], [0x00, 0x04]); // len = 4
@@ -291,12 +331,13 @@ fn test_composite_key_format() {
     assert_eq!(bytes[14..16], [0x00, 0x04]); // len = 4
     assert_eq!(bytes[16..20], [0x00, 0x00, 0x00, 0x0F]); // 15
 
-    // No trailing 0x00
-    assert_eq!(bytes.len(), 20);
+    // Trailing end-of-component marker
+    assert_eq!(bytes[20], 0x00);
+    assert_eq!(bytes.len(), 21);
 }
 
 #[test]
-fn test_composite_key_no_trailing_separator() {
+fn test_composite_key_has_trailing_separator() {
     let schema = create_composite_key_schema();
 
     let pk = PartitionKey::new(vec![
@@ -307,14 +348,12 @@ fn test_composite_key_no_trailing_separator() {
 
     let bytes = pk.to_bytes(&schema).unwrap();
 
-    // Critical: NO trailing 0x00 after last component
-    // Last 4 bytes should be the day value (31 = 0x0000001F)
-    let last_four = &bytes[bytes.len() - 4..];
-    assert_eq!(last_four, &[0x00, 0x00, 0x00, 0x1F]);
+    // Cassandra writes an end-of-component byte after the last component too.
+    let last_five = &bytes[bytes.len() - 5..];
+    assert_eq!(last_five, &[0x00, 0x00, 0x00, 0x1F, 0x00]);
 
-    // The byte before should be part of length prefix, not a separator
-    // Length is calculated as: 3 components × (2 len + 4 val) + 2 separators = 20 bytes
-    assert_eq!(bytes.len(), 20);
+    // Length is: 3 components × (2 len + 4 val + 1 separator) = 21 bytes
+    assert_eq!(bytes.len(), 21);
 }
 
 #[test]
@@ -379,8 +418,9 @@ fn test_composite_key_with_text() {
     assert_eq!(bytes[10..12], [0x00, 0x04]); // len = 4
     assert_eq!(bytes[12..16], [0x00, 0x00, 0x00, 0x64]); // 100
 
-    // No trailing separator
-    assert_eq!(bytes.len(), 16);
+    // Trailing end-of-component marker
+    assert_eq!(bytes[16], 0x00);
+    assert_eq!(bytes.len(), 17);
 }
 
 #[test]
@@ -430,4 +470,70 @@ fn test_composite_key_ordering() {
         dk1 != dk2,
         "Different keys should have different tokens/bytes"
     );
+}
+
+#[test]
+fn test_composite_partition_single_row_matches_cassandra_probe() {
+    let schema = create_composite_partition_with_clustering_schema();
+    let timestamp_micros = 1_715_011_200_000_000i64;
+
+    let partition_key = PartitionKey::new(vec![
+        (
+            "tenant_id".to_string(),
+            Value::Uuid([
+                0x0f, 0x0f, 0x0f, 0x0f, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0x01,
+            ]),
+        ),
+        (
+            "user_id".to_string(),
+            Value::Uuid([
+                0x0f, 0x0f, 0x0f, 0x0f, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0x00, 0xaa,
+            ]),
+        ),
+    ]);
+    let decorated_key = partition_key.to_decorated_key(&schema).unwrap();
+
+    let mutation = Mutation::new(
+        TableId::new("issue438_probe", "single_probe"),
+        partition_key,
+        Some(ClusteringKey::new(vec![
+            ("category".to_string(), Value::Text("analytics".to_string())),
+            (
+                "item_id".to_string(),
+                Value::Uuid([
+                    0xb4, 0x0e, 0xb2, 0xb0, 0x1b, 0x7f, 0x11, 0xef, 0x80, 0x00, 0x00, 0x00, 0x00,
+                    0x00, 0x00, 0x10,
+                ]),
+            ),
+        ])),
+        vec![CellOperation::Write {
+            column: "value".to_string(),
+            value: Value::Text("v1".to_string()),
+        }],
+        timestamp_micros,
+        None,
+    );
+
+    let mut stats = StatisticsMetadata::new();
+    stats.min_timestamp = timestamp_micros;
+    stats.max_timestamp = timestamp_micros;
+    stats.min_ttl = 0;
+    stats.max_ttl = 0;
+    stats.min_local_deletion_time = i32::MAX;
+    stats.max_local_deletion_time = i32::MAX;
+
+    let mut writer = DataWriter::new(stats);
+    writer
+        .write_partition(&decorated_key, &[mutation], &schema, None, &[])
+        .unwrap();
+
+    let bytes = writer.finish().unwrap();
+    let expected = hex::decode(
+        "002600100f0f0f0f0000400080000000000000010000100f0f0f0f0000400080000000000000aa007fffffff8000000000000000240009616e616c7974696373b40eb2b01b7f11ef80000000000000100634000802763101",
+    )
+    .unwrap();
+
+    assert_eq!(bytes, expected);
 }
