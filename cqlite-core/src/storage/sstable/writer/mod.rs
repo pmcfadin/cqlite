@@ -318,6 +318,12 @@ impl SSTableWriter {
             self.stats.update_timestamp(mutation.timestamp_micros);
             if let Some(ttl) = mutation.ttl_seconds {
                 self.stats.update_ttl(ttl as i32);
+                let now_seconds = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i32)
+                    .unwrap_or(0);
+                let local_deletion_time = now_seconds.saturating_add(ttl as i32);
+                self.stats.update_local_deletion_time(local_deletion_time);
             }
             // Track local deletion times for tombstones and TTL cells
             // TODO(Issue #401): Get proper local_deletion_time from Mutation struct

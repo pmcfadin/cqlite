@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 
 const NODETOOL_BIN: &str = "/opt/cassandra/bin/nodetool";
 const SSTABLELOADER_BIN: &str = "/opt/cassandra/bin/sstableloader";
+const SSTABLEDUMP_BIN: &str = "/opt/cassandra/tools/bin/sstabledump";
 const SYSTEM_LOG_PATH: &str = "/opt/cassandra/logs/system.log";
 
 /// Output from a `cqlsh` command.
@@ -301,6 +302,32 @@ impl CassandraContainer {
         })
     }
 
+    /// Run `sstabledump` against a locally produced SSTable directory.
+    pub fn run_sstabledump(
+        &self,
+        local_sstable_dir: &Path,
+        data_file_name: &str,
+    ) -> io::Result<SstabledumpResult> {
+        let remote_dir = format!("/tmp/cqlite-sstabledump/{}", self.container);
+        let remote_data_path = format!("{remote_dir}/{data_file_name}");
+        self.copy_sstables(local_sstable_dir, &remote_dir)?;
+
+        let output = DockerCqlshClient::docker_output(&[
+            "exec",
+            &self.container,
+            "sh",
+            "-lc",
+            &format!("{SSTABLEDUMP_BIN} {remote_data_path}"),
+        ])?;
+
+        Ok(SstabledumpResult {
+            success: output.status.success(),
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code(),
+        })
+    }
+
     /// Get the container name or ID.
     #[allow(dead_code)]
     pub fn name(&self) -> &str {
@@ -432,6 +459,34 @@ impl SstableloaderResult {
         } else {
             format!(
                 "sstableloader failed (exit code: {:?}): stdout=`{}` stderr=`{}`",
+                self.exit_code,
+                self.stdout.trim(),
+                self.stderr.trim()
+            )
+        }
+    }
+}
+
+/// Result from running `sstabledump`.
+#[derive(Debug)]
+pub struct SstabledumpResult {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: Option<i32>,
+}
+
+impl SstabledumpResult {
+    pub fn is_successful(&self) -> bool {
+        self.success
+    }
+
+    pub fn summary(&self) -> String {
+        if self.success {
+            "sstabledump completed successfully".to_string()
+        } else {
+            format!(
+                "sstabledump failed (exit code: {:?}): stdout=`{}` stderr=`{}`",
                 self.exit_code,
                 self.stdout.trim(),
                 self.stderr.trim()
