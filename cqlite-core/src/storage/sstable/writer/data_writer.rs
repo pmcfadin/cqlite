@@ -183,9 +183,11 @@ impl DataWriter {
         }
 
         if let Some(static_mutation) = static_mutations.first() {
-            prev_unfiltered_size = self
-                .write_static_row_with_prev_size(static_mutation, schema, prev_unfiltered_size)?
-                as u64;
+            prev_unfiltered_size = self.write_static_row_with_prev_size(
+                static_mutation,
+                schema,
+                prev_unfiltered_size,
+            )? as u64;
         }
 
         // Write all non-static rows for this partition
@@ -2397,8 +2399,15 @@ mod tests {
     #[test]
     fn test_serialize_clustering_date_includes_length_prefix() {
         let bytes = serialize_value_for_clustering(&Value::Date(0), &ComparatorType::Date).unwrap();
-        assert_eq!(bytes[0], 0x04, "date clustering values should be length-prefixed");
-        assert_eq!(bytes.len(), 5, "date clustering value should be 1-byte length + 4-byte payload");
+        assert_eq!(
+            bytes[0], 0x04,
+            "date clustering values should be length-prefixed"
+        );
+        assert_eq!(
+            bytes.len(),
+            5,
+            "date clustering value should be 1-byte length + 4-byte payload"
+        );
     }
 
     #[test]
@@ -3251,7 +3260,13 @@ mod tests {
         );
 
         writer
-            .write_partition(&key, &[static_mutation, regular_mutation], &schema, None, &[])
+            .write_partition(
+                &key,
+                &[static_mutation, regular_mutation],
+                &schema,
+                None,
+                &[],
+            )
             .unwrap();
         let bytes = writer.finish().unwrap();
 
