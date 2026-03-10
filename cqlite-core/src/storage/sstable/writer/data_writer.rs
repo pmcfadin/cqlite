@@ -946,18 +946,16 @@ impl DataWriter {
                                 mutation.timestamp_micros,
                                 None,
                             )?;
+                        } else if let Some(ttl_seconds) = mutation.ttl_seconds {
+                            self.write_cell_with_row_ttl(
+                                buf,
+                                column,
+                                value,
+                                mutation.timestamp_micros,
+                                ttl_seconds,
+                            )?;
                         } else {
-                            if let Some(ttl_seconds) = mutation.ttl_seconds {
-                                self.write_cell_with_row_ttl(
-                                    buf,
-                                    column,
-                                    value,
-                                    mutation.timestamp_micros,
-                                    ttl_seconds,
-                                )?;
-                            } else {
-                                self.write_cell(buf, column, value, mutation.timestamp_micros)?;
-                            }
+                            self.write_cell(buf, column, value, mutation.timestamp_micros)?;
                         }
                     }
                 }
