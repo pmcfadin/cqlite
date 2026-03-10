@@ -171,8 +171,28 @@ impl DataWriter {
             prev_unfiltered_size = self.write_range_tombstone_with_size(rt, schema)? as u64;
         }
 
-        // Write all rows for this partition
-        for mutation in mutations {
+        let static_mutations: Vec<&Mutation> = mutations
+            .iter()
+            .filter(|mutation| is_static_row_mutation(mutation, schema))
+            .collect();
+        if static_mutations.len() > 1 {
+            return Err(Error::InvalidInput(format!(
+                "Partition contains {} static row mutations; expected at most one",
+                static_mutations.len()
+            )));
+        }
+
+        if let Some(static_mutation) = static_mutations.first() {
+            prev_unfiltered_size = self
+                .write_static_row_with_prev_size(static_mutation, schema, prev_unfiltered_size)?
+                as u64;
+        }
+
+        // Write all non-static rows for this partition
+        for mutation in mutations
+            .iter()
+            .filter(|mutation| !is_static_row_mutation(mutation, schema))
+        {
             prev_unfiltered_size =
                 self.write_row_with_prev_size(mutation, schema, prev_unfiltered_size)? as u64;
         }
@@ -501,6 +521,17 @@ impl DataWriter {
                     )));
                 }
                 encode_signed(ttl_delta, &mut body);
+
+                let local_deletion_time = self.expiring_local_deletion_time(ttl)?;
+                let ldt_delta =
+                    (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+                if ldt_delta < 0 {
+                    return Err(Error::InvalidInput(format!(
+                        "Local deletion time {} is less than min_local_deletion_time {}",
+                        local_deletion_time, self.stats.min_local_deletion_time
+                    )));
+                }
+                encode_unsigned(ldt_delta as u64, &mut body);
             }
         }
 
@@ -671,6 +702,17 @@ impl DataWriter {
                     )));
                 }
                 encode_signed(ttl_delta, &mut body);
+
+                let local_deletion_time = self.expiring_local_deletion_time(ttl)?;
+                let ldt_delta =
+                    (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+                if ldt_delta < 0 {
+                    return Err(Error::InvalidInput(format!(
+                        "Local deletion time {} is less than min_local_deletion_time {}",
+                        local_deletion_time, self.stats.min_local_deletion_time
+                    )));
+                }
+                encode_unsigned(ldt_delta as u64, &mut body);
             }
         }
 
@@ -903,7 +945,17 @@ impl DataWriter {
                                 None,
                             )?;
                         } else {
-                            self.write_cell(buf, column, value, mutation.timestamp_micros)?;
+                            if let Some(ttl_seconds) = mutation.ttl_seconds {
+                                self.write_cell_with_row_ttl(
+                                    buf,
+                                    column,
+                                    value,
+                                    mutation.timestamp_micros,
+                                    ttl_seconds,
+                                )?;
+                            } else {
+                                self.write_cell(buf, column, value, mutation.timestamp_micros)?;
+                            }
                         }
                     }
                 }
@@ -1374,12 +1426,7 @@ impl DataWriter {
             )));
         }
 
-        // Calculate local_deletion_time = current_time_seconds + ttl_seconds
-        let now_seconds = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|e| Error::Storage(format!("System time error: {}", e)))?
-            .as_secs() as i32;
-        let local_deletion_time = now_seconds.saturating_add(ttl_seconds as i32);
+        let local_deletion_time = self.expiring_local_deletion_time(ttl_seconds)?;
 
         // Cell flags - CELL_IS_EXPIRING, NO USE_ROW_TIMESTAMP or USE_ROW_TTL
         let mut flags = CELL_IS_EXPIRING;
@@ -1437,6 +1484,57 @@ impl DataWriter {
         buf.extend_from_slice(&value_bytes);
 
         Ok(())
+    }
+
+    fn write_cell_with_row_ttl(
+        &self,
+        buf: &mut Vec<u8>,
+        column: &str,
+        value: &Value,
+        _timestamp: i64,
+        _ttl_seconds: u32,
+    ) -> Result<()> {
+        if matches!(value, Value::Null) {
+            return Err(Error::InvalidInput(format!(
+                "NULL values should not be written as cells (column: {}). They are represented by absence in the bitmap.",
+                column
+            )));
+        }
+
+        let mut flags = CELL_IS_EXPIRING | CELL_USE_ROW_TIMESTAMP | CELL_USE_ROW_TTL;
+        if matches!(value, Value::Text(s) if s.is_empty()) {
+            flags |= CELL_HAS_EMPTY_VALUE;
+        }
+        buf.push(flags);
+
+        if (flags & CELL_HAS_EMPTY_VALUE) != 0 {
+            return Ok(());
+        }
+
+        let value_bytes = serialize_value(value)?;
+        if value_bytes.len() > i64::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "Value too large for column '{}': {} bytes (max {})",
+                column,
+                value_bytes.len(),
+                i64::MAX
+            )));
+        }
+
+        if cell_value_uses_length_prefix(value) {
+            encode_unsigned(value_bytes.len() as u64, buf);
+        }
+
+        buf.extend_from_slice(&value_bytes);
+        Ok(())
+    }
+
+    fn expiring_local_deletion_time(&self, ttl_seconds: u32) -> Result<i32> {
+        let now_seconds = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| Error::Storage(format!("System time error: {}", e)))?
+            .as_secs() as i32;
+        Ok(now_seconds.saturating_add(ttl_seconds as i32))
     }
 
     /// Write a tombstone cell
@@ -1810,6 +1908,24 @@ fn cell_value_uses_length_prefix(value: &Value) -> bool {
     )
 }
 
+fn is_static_row_mutation(mutation: &Mutation, schema: &TableSchema) -> bool {
+    if mutation.clustering_key.is_some() || !schema.columns.iter().any(|column| column.is_static) {
+        return false;
+    }
+
+    mutation.operations.iter().all(|operation| match operation {
+        crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
+        | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { column, .. }
+        | crate::storage::write_engine::mutation::CellOperation::Delete { column } => schema
+            .columns
+            .iter()
+            .find(|candidate| candidate.name == *column)
+            .map(|candidate| candidate.is_static)
+            .unwrap_or(false),
+        crate::storage::write_engine::mutation::CellOperation::DeleteRow => true,
+    })
+}
+
 /// Serialize value for clustering key (type-specific encoding)
 ///
 /// Fixed-width types: raw bytes (no length prefix)
@@ -1828,7 +1944,10 @@ fn serialize_value_for_clustering(value: &Value, comparator: &ComparatorType) ->
         (Value::Date(days), ComparatorType::Date) => {
             // Cassandra DATE in clustering keys: stored as unsigned int with Integer.MIN_VALUE offset
             let stored = days.wrapping_sub(i32::MIN) as u32;
-            Ok(stored.to_be_bytes().to_vec())
+            let mut result = Vec::new();
+            encode_unsigned(4, &mut result);
+            result.extend_from_slice(&stored.to_be_bytes());
+            Ok(result)
         }
         (Value::Uuid(bytes), ComparatorType::Uuid) => Ok(bytes.to_vec()),
 
@@ -1908,6 +2027,41 @@ mod tests {
         stats.min_ttl = 0;
         stats.min_local_deletion_time = 0;
         stats
+    }
+
+    fn create_static_test_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                Column {
+                    name: "static_val".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: true,
+                },
+                Column {
+                    name: "regular_val".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
     }
 
     #[test]
@@ -2238,6 +2392,13 @@ mod tests {
         // VInt(4) = 0x04, then "test"
         assert_eq!(bytes[0], 0x04); // VInt length = 4
         assert_eq!(&bytes[1..], b"test");
+    }
+
+    #[test]
+    fn test_serialize_clustering_date_includes_length_prefix() {
+        let bytes = serialize_value_for_clustering(&Value::Date(0), &ComparatorType::Date).unwrap();
+        assert_eq!(bytes[0], 0x04, "date clustering values should be length-prefixed");
+        assert_eq!(bytes.len(), 5, "date clustering value should be 1-byte length + 4-byte payload");
     }
 
     #[test]
@@ -3018,6 +3179,88 @@ mod tests {
 
         assert!(!buf.is_empty());
         // Detailed validation would require parsing the encoded deltas
+    }
+
+    #[test]
+    fn test_row_ttl_uses_row_ttl_cell_flags() {
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 1001000;
+        stats.min_ttl = 7200;
+        stats.min_local_deletion_time = 1;
+        let mut writer = DataWriter::new(stats);
+        let schema = create_test_schema();
+
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("Alice".to_string()),
+                },
+                CellOperation::Write {
+                    column: "age".to_string(),
+                    value: Value::Integer(30),
+                },
+            ],
+            1001000,
+            Some(7200),
+        );
+
+        writer.write_row(&mutation, &schema).unwrap();
+        let bytes = writer.finish().unwrap();
+
+        assert_eq!(bytes[0] & ROW_HAS_TTL, ROW_HAS_TTL);
+        let expiring_row_ttl_flags = CELL_IS_EXPIRING | CELL_USE_ROW_TIMESTAMP | CELL_USE_ROW_TTL;
+        let flag_count = bytes
+            .iter()
+            .filter(|&&byte| byte == expiring_row_ttl_flags)
+            .count();
+        assert_eq!(flag_count, 2, "expected both cells to inherit row TTL");
+    }
+
+    #[test]
+    fn test_write_partition_emits_static_row_before_regular_rows() {
+        let stats = create_test_stats();
+        let mut writer = DataWriter::new(stats);
+        let schema = create_static_test_schema();
+        let key = DecoratedKey::new(1, vec![0, 0, 0, 1]);
+
+        let static_mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "static_val".to_string(),
+                value: Value::Text("static".to_string()),
+            }],
+            1001000,
+            None,
+        );
+        let regular_mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(1))),
+            vec![CellOperation::Write {
+                column: "regular_val".to_string(),
+                value: Value::Text("regular".to_string()),
+            }],
+            1002000,
+            None,
+        );
+
+        writer
+            .write_partition(&key, &[static_mutation, regular_mutation], &schema, None, &[])
+            .unwrap();
+        let bytes = writer.finish().unwrap();
+
+        let partition_header_len = 2 + key.key.len() + 4 + 8;
+        assert_eq!(
+            bytes[partition_header_len] & ROW_HAS_EXTENDED_FLAGS,
+            ROW_HAS_EXTENDED_FLAGS
+        );
+        assert_eq!(bytes[partition_header_len + 1], EXTENDED_IS_STATIC);
     }
 
     /// Verify that 64+ regular columns returns an error (not a panic from shift overflow).

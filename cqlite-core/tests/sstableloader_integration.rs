@@ -1112,7 +1112,6 @@ async fn test_issue_432_multi_partition_table_portable_sstable_round_trip() -> C
 }
 
 #[tokio::test]
-#[ignore = "Blocked by static-row artifact corruption (follow-up required)"]
 async fn test_issue_432_static_columns_table_portable_sstable_round_trip() -> CqliteResult<()> {
     let partition_a = "12345678-0000-4000-8000-000000000001";
     let partition_b = "12345678-0000-4000-8000-000000000002";
@@ -1207,7 +1206,6 @@ async fn test_issue_432_static_columns_table_portable_sstable_round_trip() -> Cq
 }
 
 #[tokio::test]
-#[ignore = "Blocked by TTL artifact corruption (follow-up required)"]
 async fn test_issue_432_ttl_test_table_portable_sstable_round_trip() -> CqliteResult<()> {
     let ttl_id = "44444444-4444-4444-8444-444444444444";
 
@@ -1474,7 +1472,6 @@ async fn test_issue_432_stock_prices_portable_sstable_round_trip() -> CqliteResu
 }
 
 #[tokio::test]
-#[ignore = "Blocked by wide-row artifact corruption (follow-up required)"]
 async fn test_issue_432_wide_partition_table_portable_sstable_round_trip() -> CqliteResult<()> {
     let partition_key = "66666666-6666-4666-8666-666666666666";
 
