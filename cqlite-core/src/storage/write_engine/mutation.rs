@@ -14,7 +14,6 @@ use crate::error::{Error, Result};
 use crate::schema::{ClusteringOrder, TableSchema};
 use crate::types::{ComparatorType, Value};
 use std::cmp::Ordering;
-use std::io::Cursor;
 
 /// Table identifier (keyspace + table name)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -52,6 +51,14 @@ impl std::fmt::Display for TableId {
 /// a single CQL INSERT/UPDATE/DELETE statement. Each mutation targets a specific
 /// row (identified by partition key + optional clustering key) and contains
 /// one or more cell operations.
+///
+/// # Tombstone Support (M5.2)
+///
+/// Mutations can represent various deletion types:
+/// - Cell tombstone: `CellOperation::Delete` for single column
+/// - Row tombstone: `CellOperation::DeleteRow` for entire row
+/// - Range tombstone: `range_tombstones` field for clustering key ranges
+/// - Partition tombstone: `partition_tombstone` field for entire partition
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Mutation {
     /// Target table
@@ -66,6 +73,10 @@ pub struct Mutation {
     pub timestamp_micros: i64,
     /// Time-to-live in seconds (None = no expiration)
     pub ttl_seconds: Option<u32>,
+    /// Partition tombstone (deletes entire partition)
+    pub partition_tombstone: Option<PartitionTombstone>,
+    /// Range tombstones (delete clustering key ranges within partition)
+    pub range_tombstones: Vec<RangeTombstone>,
 }
 
 impl Mutation {
@@ -85,6 +96,8 @@ impl Mutation {
             operations,
             timestamp_micros,
             ttl_seconds,
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
         }
     }
 
@@ -92,6 +105,50 @@ impl Mutation {
     pub fn decorated_key(&self, schema: &TableSchema) -> Result<DecoratedKey> {
         self.partition_key.to_decorated_key(schema)
     }
+}
+
+/// Partition tombstone for deleting entire partition
+///
+/// Stored in the partition header and shadows all rows in the partition
+/// when the partition deletion time is greater than the row timestamps.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct PartitionTombstone {
+    /// Deletion timestamp in microseconds since Unix epoch
+    pub deletion_time: i64,
+    /// Local deletion time in seconds since Unix epoch
+    pub local_deletion_time: i32,
+}
+
+/// Range tombstone for deleting a range of clustering keys
+///
+/// Stored as markers within the partition data and shadows all rows
+/// in the specified clustering key range.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RangeTombstone {
+    /// Start bound (inclusive or exclusive)
+    pub start: ClusteringBound,
+    /// End bound (inclusive or exclusive)
+    pub end: ClusteringBound,
+    /// Deletion timestamp in microseconds since Unix epoch
+    pub deletion_time: i64,
+    /// Local deletion time in seconds since Unix epoch
+    pub local_deletion_time: i32,
+}
+
+/// Clustering key bound for range tombstones
+///
+/// Defines the boundary of a range deletion. Can be inclusive or exclusive,
+/// or represent the minimum/maximum possible clustering key.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum ClusteringBound {
+    /// Inclusive bound (clustering key is part of the deletion range)
+    Inclusive(ClusteringKey),
+    /// Exclusive bound (clustering key is NOT part of the deletion range)
+    Exclusive(ClusteringKey),
+    /// Before all clustering keys (start of partition)
+    Bottom,
+    /// After all clustering keys (end of partition)
+    Top,
 }
 
 /// Cell-level operation within a mutation
@@ -103,6 +160,15 @@ pub enum CellOperation {
         column: String,
         /// Column value
         value: Value,
+    },
+    /// Write a value to a column with TTL (expiring cell)
+    WriteWithTtl {
+        /// Column name
+        column: String,
+        /// Column value
+        value: Value,
+        /// Time-to-live in seconds
+        ttl_seconds: u32,
     },
     /// Delete a specific column
     Delete {
@@ -136,10 +202,11 @@ impl PartitionKey {
         }
     }
 
-    /// Serialize partition key to bytes according to Cassandra's encoding
+    /// Serialize partition key to bytes according to Cassandra's on-disk encoding.
     ///
-    /// Single-component keys: raw bytes
-    /// Multi-component keys: [len1 (2B)][bytes1][len2 (2B)][bytes2]...
+    /// Single-component keys are written as raw value bytes.
+    /// Multi-component keys use `[len][value][0x00]` per component, including a
+    /// trailing `0x00` after the final component.
     pub fn to_bytes(&self, schema: &TableSchema) -> Result<Vec<u8>> {
         if self.columns.is_empty() {
             return Err(Error::InvalidInput("Empty partition key".to_string()));
@@ -164,7 +231,8 @@ impl PartitionKey {
             return Ok(result);
         }
 
-        // Multi-component key: each component has 2-byte BE length prefix
+        // Multi-component partition keys use a `0x00` end-of-component marker
+        // after every component, including the last one.
         for (i, (_, value)) in self.columns.iter().enumerate() {
             let value_bytes = self.serialize_value(value, &schema.partition_keys[i])?;
             let len = value_bytes.len();
@@ -177,6 +245,7 @@ impl PartitionKey {
             // 2-byte big-endian length prefix
             result.extend_from_slice(&(len as u16).to_be_bytes());
             result.extend_from_slice(&value_bytes);
+            result.push(0x00);
         }
 
         Ok(result)
@@ -346,26 +415,131 @@ impl PartialOrd for DecoratedKey {
 /// Calculate Murmur3 token from partition key bytes
 ///
 /// Uses Cassandra's Murmur3Partitioner algorithm:
-/// 1. Compute Murmur3 128-bit hash (hash3_x64_128)
-/// 2. Take first 64 bits
-/// 3. Normalize to i64 range
-///
-/// Note: The murmur3 crate's murmur3_x64_128 returns two u64 values.
-/// Cassandra uses the first value as a signed i64.
+/// 1. Compute Cassandra's `MurmurHash.hash3_x64_128`
+/// 2. Take `h1` as the signed token
+/// 3. Preserve Cassandra's wraparound semantics
 fn calculate_murmur3_token(key_bytes: &[u8]) -> Result<i64> {
     // Special case: empty key -> Long.MIN_VALUE
     if key_bytes.is_empty() {
         return Ok(i64::MIN);
     }
 
-    // Compute Murmur3 128-bit hash with seed 0
-    let mut cursor = Cursor::new(key_bytes);
-    let hash = murmur3::murmur3_x64_128(&mut cursor, 0)
-        .map_err(|e| Error::Storage(format!("Failed to compute Murmur3 hash: {}", e)))?;
+    Ok(cassandra_murmur3_hash(key_bytes).0 as i64)
+}
 
-    // Take first 64 bits and interpret as signed i64
-    // Cassandra's normalize() just returns the value as-is for Murmur3
-    Ok(hash as i64)
+fn cassandra_murmur3_hash(data: &[u8]) -> (u64, u64) {
+    const C1: u64 = 0x87c3_7b91_1142_53d5;
+    const C2: u64 = 0x4cf5_ad43_2745_937f;
+
+    let mut h1 = 0u64;
+    let mut h2 = 0u64;
+
+    let nblocks = data.len() / 16;
+    for i in 0..nblocks {
+        let offset = i * 16;
+        let mut k1 = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
+        let mut k2 = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+
+        k1 = k1.wrapping_mul(C1);
+        k1 = k1.rotate_left(31);
+        k1 = k1.wrapping_mul(C2);
+        h1 ^= k1;
+        h1 = h1.rotate_left(27);
+        h1 = h1.wrapping_add(h2);
+        h1 = h1.wrapping_mul(5).wrapping_add(0x52dc_e729);
+
+        k2 = k2.wrapping_mul(C2);
+        k2 = k2.rotate_left(33);
+        k2 = k2.wrapping_mul(C1);
+        h2 ^= k2;
+        h2 = h2.rotate_left(31);
+        h2 = h2.wrapping_add(h1);
+        h2 = h2.wrapping_mul(5).wrapping_add(0x3849_5ab5);
+    }
+
+    let tail = &data[nblocks * 16..];
+    let mut k1 = 0u64;
+    let mut k2 = 0u64;
+    let signed = |byte: u8| (byte as i8 as i64) as u64;
+
+    if tail.len() == 15 {
+        k2 ^= signed(tail[14]) << 48;
+    }
+    if tail.len() >= 14 {
+        k2 ^= signed(tail[13]) << 40;
+    }
+    if tail.len() >= 13 {
+        k2 ^= signed(tail[12]) << 32;
+    }
+    if tail.len() >= 12 {
+        k2 ^= signed(tail[11]) << 24;
+    }
+    if tail.len() >= 11 {
+        k2 ^= signed(tail[10]) << 16;
+    }
+    if tail.len() >= 10 {
+        k2 ^= signed(tail[9]) << 8;
+    }
+    if tail.len() >= 9 {
+        k2 ^= signed(tail[8]);
+        k2 = k2.wrapping_mul(C2);
+        k2 = k2.rotate_left(33);
+        k2 = k2.wrapping_mul(C1);
+        h2 ^= k2;
+    }
+
+    if tail.len() >= 8 {
+        k1 ^= signed(tail[7]) << 56;
+    }
+    if tail.len() >= 7 {
+        k1 ^= signed(tail[6]) << 48;
+    }
+    if tail.len() >= 6 {
+        k1 ^= signed(tail[5]) << 40;
+    }
+    if tail.len() >= 5 {
+        k1 ^= signed(tail[4]) << 32;
+    }
+    if tail.len() >= 4 {
+        k1 ^= signed(tail[3]) << 24;
+    }
+    if tail.len() >= 3 {
+        k1 ^= signed(tail[2]) << 16;
+    }
+    if tail.len() >= 2 {
+        k1 ^= signed(tail[1]) << 8;
+    }
+    if !tail.is_empty() {
+        k1 ^= signed(tail[0]);
+        k1 = k1.wrapping_mul(C1);
+        k1 = k1.rotate_left(31);
+        k1 = k1.wrapping_mul(C2);
+        h1 ^= k1;
+    }
+
+    let len = data.len() as u64;
+    h1 ^= len;
+    h2 ^= len;
+
+    h1 = h1.wrapping_add(h2);
+    h2 = h2.wrapping_add(h1);
+
+    h1 = fmix64(h1);
+    h2 = fmix64(h2);
+
+    h1 = h1.wrapping_add(h2);
+    h2 = h2.wrapping_add(h1);
+
+    (h1, h2)
+}
+
+fn fmix64(mut value: u64) -> u64 {
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value ^= value >> 33;
+    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value ^= value >> 33;
+    value
 }
 
 /// Serialize a Value to bytes according to its CQL type
@@ -471,6 +645,42 @@ fn compare_values(a: &Value, b: &Value) -> Result<Ordering> {
         (Uuid(a), Uuid(b)) => Ok(a.cmp(b)),
         (Inet(a), Inet(b)) => Ok(a.cmp(b)),
 
+        // Collection types (element-wise lexicographic comparison)
+        (List(a), List(b)) | (Set(a), Set(b)) => {
+            for (elem_a, elem_b) in a.iter().zip(b.iter()) {
+                let ord = compare_values(elem_a, elem_b)?;
+                if ord != Ordering::Equal {
+                    return Ok(ord);
+                }
+            }
+            Ok(a.len().cmp(&b.len()))
+        }
+        (Map(a), Map(b)) => {
+            for ((ka, va), (kb, vb)) in a.iter().zip(b.iter()) {
+                let key_ord = compare_values(ka, kb)?;
+                if key_ord != Ordering::Equal {
+                    return Ok(key_ord);
+                }
+                let val_ord = compare_values(va, vb)?;
+                if val_ord != Ordering::Equal {
+                    return Ok(val_ord);
+                }
+            }
+            Ok(a.len().cmp(&b.len()))
+        }
+        (Tuple(a), Tuple(b)) => {
+            for (fa, fb) in a.iter().zip(b.iter()) {
+                let ord = compare_values(fa, fb)?;
+                if ord != Ordering::Equal {
+                    return Ok(ord);
+                }
+            }
+            Ok(a.len().cmp(&b.len()))
+        }
+
+        // Frozen wrapper: compare inner values
+        (Frozen(a), Frozen(b)) => compare_values(a, b),
+
         _ => Err(Error::InvalidInput(format!(
             "Cannot compare values of different types: {:?} vs {:?}",
             a, b
@@ -543,12 +753,44 @@ mod tests {
         ]);
 
         let bytes = pk.to_bytes(&schema).unwrap();
-        // Multi-component: [len1(2B)][int(4B)][len2(2B)][text(5B)]
+        // Multi-component partition key format:
+        // [len1(2B)][val1][0x00][len2(2B)][val2][0x00]
         let expected = vec![
             0x00, 0x04, // len1 = 4
             0x00, 0x00, 0x00, 0x2A, // int = 42
+            0x00, // end-of-component after component 1
             0x00, 0x05, // len2 = 5
             b'h', b'e', b'l', b'l', b'o', // text = "hello"
+            0x00, // end-of-component after component 2
+        ];
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn test_partition_key_three_components() {
+        // Issue #438: Verify 3-component composite keys (e.g., tick_data table)
+        let schema = create_test_schema(
+            vec![("symbol", "text"), ("exchange", "text"), ("bucket", "int")],
+            vec![],
+        );
+        let pk = PartitionKey::new(vec![
+            ("symbol".to_string(), Value::Text("AAPL".to_string())),
+            ("exchange".to_string(), Value::Text("NYSE".to_string())),
+            ("bucket".to_string(), Value::Integer(100)),
+        ]);
+
+        let bytes = pk.to_bytes(&schema).unwrap();
+        // Composite partition key format: end-of-component byte after every component
+        let expected = vec![
+            0x00, 0x04, // len1 = 4
+            b'A', b'A', b'P', b'L', // "AAPL"
+            0x00, // end-of-component
+            0x00, 0x04, // len2 = 4
+            b'N', b'Y', b'S', b'E', // "NYSE"
+            0x00, // end-of-component
+            0x00, 0x04, // len3 = 4
+            0x00, 0x00, 0x00, 0x64, // int = 100
+            0x00, // end-of-component
         ];
         assert_eq!(bytes, expected);
     }
@@ -594,6 +836,20 @@ mod tests {
             token1, token2,
             "Different keys should produce different tokens"
         );
+    }
+
+    #[test]
+    fn test_murmur3_token_matches_cassandra_for_composite_uuid_key() {
+        // Verified against Cassandra 5.0:
+        // SELECT token(tenant_id, user_id) FROM issue438_probe.multi_pk_raw;
+        let key_bytes = vec![
+            0x00, 0x10, 0x0f, 0x0f, 0x0f, 0x0f, 0x00, 0x00, 0x40, 0x00, 0x80, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x10, 0x0f, 0x0f, 0x0f, 0x0f, 0x00, 0x00, 0x40,
+            0x00, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xaa, 0x00,
+        ];
+
+        let token = calculate_murmur3_token(&key_bytes).unwrap();
+        assert_eq!(token, -5_116_541_970_184_546_410);
     }
 
     #[test]
@@ -902,5 +1158,78 @@ mod tests {
         // Verify BTreeMap orders correctly
         let values: Vec<_> = map.values().copied().collect();
         assert_eq!(values, vec!["value1", "value2", "value3"]);
+    }
+
+    #[test]
+    fn test_compare_frozen_list_values() {
+        // Issue #437: Frozen collection clustering keys must be comparable
+        let list_a = Value::Frozen(Box::new(Value::List(vec![
+            Value::Text("a".to_string()),
+            Value::Text("b".to_string()),
+        ])));
+        let list_b = Value::Frozen(Box::new(Value::List(vec![
+            Value::Text("a".to_string()),
+            Value::Text("c".to_string()),
+        ])));
+        let list_c = Value::Frozen(Box::new(Value::List(vec![
+            Value::Text("a".to_string()),
+            Value::Text("b".to_string()),
+            Value::Text("c".to_string()),
+        ])));
+
+        // Same elements: equal
+        assert_eq!(compare_values(&list_a, &list_a).unwrap(), Ordering::Equal);
+        // Different second element: a < c
+        assert_eq!(compare_values(&list_a, &list_b).unwrap(), Ordering::Less);
+        assert_eq!(compare_values(&list_b, &list_a).unwrap(), Ordering::Greater);
+        // Prefix match, shorter < longer
+        assert_eq!(compare_values(&list_a, &list_c).unwrap(), Ordering::Less);
+        assert_eq!(compare_values(&list_c, &list_a).unwrap(), Ordering::Greater);
+    }
+
+    #[test]
+    fn test_frozen_list_clustering_key_btree_ordering() {
+        // Issue #437: Frozen list clustering keys must sort correctly in BTreeMap
+        use std::collections::BTreeMap;
+
+        let mut map = BTreeMap::new();
+
+        // Create clustering keys with frozen lists of varying sizes (mimics test data generator)
+        let ck_2elem = ClusteringKey::single(
+            "tags",
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Text("ck_0_0".to_string()),
+                Value::Text("ck_0_1".to_string()),
+            ]))),
+        );
+        let ck_3elem = ClusteringKey::single(
+            "tags",
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Text("ck_1_0".to_string()),
+                Value::Text("ck_1_1".to_string()),
+                Value::Text("ck_1_2".to_string()),
+            ]))),
+        );
+        let ck_4elem = ClusteringKey::single(
+            "tags",
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Text("ck_2_0".to_string()),
+                Value::Text("ck_2_1".to_string()),
+                Value::Text("ck_2_2".to_string()),
+                Value::Text("ck_2_3".to_string()),
+            ]))),
+        );
+
+        // Insert in non-sorted order
+        map.insert(ck_4elem.clone(), "4elem");
+        map.insert(ck_2elem.clone(), "2elem");
+        map.insert(ck_3elem.clone(), "3elem");
+
+        // All three should be distinct keys (no deduplication)
+        assert_eq!(map.len(), 3, "All frozen list CKs should be distinct");
+
+        // Verify ordering: ck_0_* < ck_1_* < ck_2_* (lexicographic by first element)
+        let values: Vec<_> = map.values().copied().collect();
+        assert_eq!(values, vec!["2elem", "3elem", "4elem"]);
     }
 }

@@ -55,6 +55,91 @@ tests/              # shared fixtures (Cassandra 5 SSTables)
 
 > **Revision Note (Jan 2026)**: M1 coverage revised to tiered targets per Issue #204. M4 now Python & Node.js only (sync Python first). Write Support restored as M5. WASM moved to M6. v1.0 release moved to M7.
 
+### 4.1 · M5 Write Support Architecture
+
+**Design Principle**: The write API is **mutation-based**, not CQL-dependent. CQL statement support is a convenience layer built on top of the core mutation API.
+
+#### API Layers
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  CLI / Bindings                                         │
+│  • --execute "INSERT INTO..." (optional, needs parser)  │
+│  • --mutation '{...}' (direct, no parser needed)        │
+└─────────────────────────┬───────────────────────────────┘
+                          │
+┌─────────────────────────▼───────────────────────────────┐
+│  WriteEngine (Core API)                                 │
+│  • write(mutation) ← Primary interface                  │
+│  • execute(cql) ← Convenience, depends on CQL parser    │
+│  • flush() / close()                                    │
+│  • export_sstable()                                     │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### Mutation API (Primary)
+
+The `Mutation` struct is the canonical write interface:
+
+```rust
+let mutation = Mutation::new(
+    TableId::new("keyspace", "table"),
+    PartitionKey::single("id", Value::Integer(1)),
+    None,  // Optional clustering key
+    vec![CellOperation::Write { column: "name", value: Value::Text("Alice") }],
+    timestamp,
+    None,  // Optional TTL
+);
+engine.write(mutation)?;
+```
+
+**Rationale**: Mutation-based API ensures:
+- Core write path has no parser dependency
+- Bindings can construct mutations directly (Python dict → Mutation)
+- Bulk import tools bypass CQL overhead
+- Testing doesn't require CQL parser
+
+#### CQL Statement Support (Optional Layer)
+
+CQL INSERT/UPDATE/DELETE parsing is built on top:
+
+```rust
+// Internally converts to Mutation
+engine.execute("INSERT INTO ks.users (id, name) VALUES (1, 'Alice')")?;
+```
+
+This layer depends on the CQL parser (`cqlite-core/src/cql/`) and is **optional** for write functionality.
+
+#### CLI Write Modes
+
+| Mode | Input | Parser Required | Use Case |
+|------|-------|-----------------|----------|
+| `--mutation '{...}'` | JSON | No | Programmatic, bulk import |
+| `--mutations-file` | JSONL file | No | Batch processing |
+| `--execute "INSERT..."` | CQL | Yes | Interactive, familiar syntax |
+
+#### E2E Validation Workflow
+
+The ultimate test for M5 write support:
+
+```bash
+# 1. Write data via CQLite
+cqlite --writable --schema schema.cql --write-dir ./data \
+  --mutation '{"table":"users","pk":{"id":1},"ops":[...]}'
+
+# 2. Export as Cassandra-compatible SSTable
+cqlite export --write-dir ./data --output ./export
+
+# 3. Load into Cassandra via sstableloader
+sstableloader -d localhost ./export/keyspace/table
+
+# 4. Verify via cqlsh
+cqlsh -e "SELECT * FROM keyspace.table"
+```
+
+**Exit Criteria**: Data written by CQLite can be loaded into Cassandra 5.0 and queried without errors.
+
+> **Revision Note (Feb 2026)**: M5 write API clarified as mutation-based primary, CQL optional. See Issues #392, #394, #396.
 
 ---
 

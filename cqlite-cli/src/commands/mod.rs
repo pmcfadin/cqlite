@@ -182,6 +182,7 @@ use std::sync::Arc;
 pub mod admin;
 pub mod bench;
 pub mod schema;
+pub mod write;
 
 pub mod docker;
 pub mod info;

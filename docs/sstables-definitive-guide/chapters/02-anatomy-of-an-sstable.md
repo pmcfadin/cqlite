@@ -94,6 +94,62 @@ See the BTI package for details: `org.apache.cassandra.io.sstable.format.bti`.
 - Cross-component alignment: `Index.db` positions must resolve into valid `Data.db` boundaries; `Summary.db` samples must be sorted and within token range
 - Digest validation: `Digest.crc32` matches computed digests over the appropriate component payloads
 
+### TOC.txt Canonical Component Ordering
+
+While component order in `TOC.txt` does not affect functionality, Cassandra writes components in a canonical order for consistency. The standard order is:
+
+1. **Data.db** - Primary partition and row data
+2. **Statistics.db** - SSTable-level metadata
+3. **Digest.crc32** - Integrity checksums
+4. **TOC.txt** - Table of contents (self-referential)
+5. **CompressionInfo.db** - Compression chunk metadata
+6. **Filter.db** - Bloom filter
+7. **Index.db** - Partition index
+8. **Summary.db** - Sampled index for acceleration
+
+This ordering matches the implementation in CQLite's `TocWriter` and reflects Cassandra's write patterns.
+
+### TOC.txt Self-Inclusion
+
+**Critical requirement**: `TOC.txt` must list itself as a component. This self-referential entry ensures:
+- Integrity tools can verify all components, including the TOC
+- Completeness validation accounts for the full component set
+- Deletion/archival operations have a complete manifest
+
+Writers automatically add `TOC.txt` to the component list if not explicitly included.
+
+### Publication Barrier
+
+`TOC.txt` serves as the **publication barrier** for SSTable atomicity. An SSTable is not considered complete or visible until `TOC.txt` exists on disk. This ensures:
+
+**Atomic Visibility**: Readers can detect incomplete writes by checking for `TOC.txt` presence. If the file is missing, the SSTable generation is ignored.
+
+**Crash Safety**: If a node crashes during SSTable write, partial components without a corresponding `TOC.txt` are discarded during restart/recovery. Only fully-written SSTables (with TOC) are loaded.
+
+**Write Order Guarantee**: `TOC.txt` MUST be written LAST, after all other components have been flushed and synced to disk. This ordering ensures no reader observes a partial SSTable.
+
+Implementation note: Writers use `fsync()` on each component before writing `TOC.txt`, then `fsync()` the TOC itself to guarantee durability.
+
+### Write Order Dependencies
+
+SSTable components have internal dependencies that dictate write ordering beyond the final TOC barrier:
+
+1. **Statistics.db FIRST**: Contains timestamp/tombstone metadata and delta encoding baselines. Must be written before Data.db to establish encoding parameters.
+
+2. **Data.db + Index.db**: Written in parallel or sequentially. Index.db entries reference Data.db byte offsets, so Data.db chunks must be flushed before corresponding Index entries.
+
+3. **Summary.db**: Samples Index.db entries, so Index.db must be complete before Summary generation.
+
+4. **Filter.db**: Built from partition keys during Data.db write, can be finalized once all partitions are known.
+
+5. **CompressionInfo.db**: Tracks compressed chunk boundaries in Data.db, written as Data.db chunks are compressed.
+
+6. **Digest.crc32**: Checksums over finalized components, written after all data components are complete.
+
+7. **TOC.txt LAST**: Publication barrier, written after all components are flushed and synced.
+
+Violating these dependencies results in corrupted SSTables with invalid offsets, missing metadata, or incomplete indexes.
+
 ### Sidebar: Version Differences (3.x/4.x)
 
 - File family remains multi-component; feature flags and index internals differ
