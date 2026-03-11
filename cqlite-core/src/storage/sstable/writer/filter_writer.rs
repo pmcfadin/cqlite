@@ -453,20 +453,23 @@ mod tests {
         // Verify file format matches Cassandra specification
         let data = std::fs::read(&filter_path).unwrap();
 
-        // Minimum size: 4 bytes (hash count) + 4 bytes (num longs) + at least 8 bytes (bit array)
-        assert!(data.len() >= 16, "Filter.db file too small");
+        // Minimum size: 4 bytes (hash count) + 8 bytes (bit count) + at least 8 bytes (bit array)
+        assert!(data.len() >= 20, "Filter.db file too small");
 
         // Read hash count (4 bytes, big-endian)
         let hash_count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         assert!(hash_count > 0, "Hash count should be positive");
         assert!(hash_count < 100, "Hash count should be reasonable");
 
-        // Read num longs (4 bytes, big-endian) - Cassandra OffHeapBitSet format
-        let num_longs = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
-        assert!(num_longs > 0, "Num longs should be positive");
+        // Read bit count (8 bytes, big-endian)
+        let bit_count = u64::from_be_bytes([
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+        ]);
+        assert!(bit_count > 0, "Bit count should be positive");
 
         // Verify bit array size
-        let expected_size = 8 + (num_longs as usize * 8);
+        let word_count = bit_count.div_ceil(64);
+        let expected_size = 12 + (word_count * 8) as usize;
         assert_eq!(
             data.len(),
             expected_size,

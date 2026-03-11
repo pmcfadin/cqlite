@@ -519,29 +519,6 @@ impl ReplEngine {
                 println!("Type {} for help", ":help".green());
                 Ok(ExecutionResult::Continue)
             }
-            // Issue #392: Write commands (placeholder implementations)
-            CommandType::Flush => {
-                eprintln!(
-                    "{} Flush command requires write mode. Start REPL with --writable --write-dir <path>",
-                    "Error:".red().bold()
-                );
-                Ok(ExecutionResult::Continue)
-            }
-            CommandType::WriteStats => {
-                eprintln!(
-                    "{} Write stats command requires write mode. Start REPL with --writable --write-dir <path>",
-                    "Error:".red().bold()
-                );
-                Ok(ExecutionResult::Continue)
-            }
-            CommandType::Maintenance { budget_ms } => {
-                let _ = budget_ms;
-                eprintln!(
-                    "{} Maintenance command requires write mode. Start REPL with --writable --write-dir <path>",
-                    "Error:".red().bold()
-                );
-                Ok(ExecutionResult::Continue)
-            }
         }
     }
 

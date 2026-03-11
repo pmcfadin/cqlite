@@ -513,15 +513,16 @@ fn test_partition_boundary_detection_with_zero_flags_executable() {
     data.extend_from_slice(&[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]); // Unknown 8-byte field
 
     // === ROW 1: flags=0x00 (NO timestamp, NO TTL, NO all_columns) - THE PROBLEMATIC CASE! ===
-    // This row has flags=0x00 which is <= 0x20, AND the second byte (row_size=0x09) looks
-    // like it could be key_len=9. Any heuristic approach would fail here!
+    // This row has flags=0x00 which is <= 0x20, AND the second byte (row_size=0x0A) looks
+    // like it could be key_len=10. Any heuristic approach would fail here!
     data.push(0x00); // Row flags (0x00 = no timestamp, no TTL, no HAS_ALL_COLUMNS)
 
     // Row header fields (after flags):
-    // [row_size: VInt] [prev_size: VInt] [column_bitmap: VUInt missing bitmask]
-    data.push(0x09); // row_size = 9 bytes (VInt) ← This byte looks like key_len!
+    // [row_size: VInt] [prev_size: VInt] [column_bitmap: VInt + bitmap bytes]
+    data.push(0x0A); // row_size = 10 bytes (VInt) ← This byte looks like key_len!
     data.push(0x00); // prev_size = 0
-    data.push(0x00); // column_bitmap = 0x00 (no columns missing - single VUInt)
+    data.push(0x01); // column_count = 1 (bitmap needed since NOT HAS_ALL_COLUMNS)
+    data.push(0x01); // column_bitmap = 0x01 (first column present)
 
     // Cell data: [0x08][i32 value]
     data.push(0x08); // Cell marker
@@ -546,13 +547,13 @@ fn test_partition_boundary_detection_with_zero_flags_executable() {
     data.extend_from_slice(&[0x00, 0x00, 0x00, 0x02]);
 
     // Verify buffer structure before testing parser
-    // Partition: 30 bytes, Row 1: 13 bytes, Row 2: 12 bytes = 55 bytes total
-    assert_eq!(data.len(), 55, "Buffer should be 55 bytes total");
+    // Partition: 30 bytes, Row 1: 14 bytes, Row 2: 12 bytes = 56 bytes total
+    assert_eq!(data.len(), 56, "Buffer should be 56 bytes total");
     assert_eq!(data[0], 0x00, "Partition flags at offset 0");
     assert_eq!(data[1], 0x10, "Partition key length at offset 1");
     assert_eq!(data[30], 0x00, "Row 1 flags at offset 30 - PROBLEMATIC!");
     assert_eq!(
-        data[31], 0x09,
+        data[31], 0x0A,
         "Row 1 size at offset 31 - looks like key_len!"
     );
 
@@ -565,10 +566,10 @@ fn test_partition_boundary_detection_with_zero_flags_executable() {
         None, // min_ttl
     );
 
-    println!("Testing partition boundary detection with CRITICAL case:");
+    println!("🔍 Testing partition boundary detection with CRITICAL case:");
     println!("   - Partition at offset 0: flags=0x00, key_len=0x10");
-    println!("   - Row 1 at offset 30: flags=0x00, row_size=0x09 (LOOKS like partition!)");
-    println!("   - Row 2 at offset 47: flags=0x20");
+    println!("   - Row 1 at offset 30: flags=0x00, row_size=0x0A (LOOKS like partition!)");
+    println!("   - Row 2 at offset 48: flags=0x20");
     println!();
 
     // Test 1: Parse partition header at offset 0 - should SUCCEED
@@ -604,7 +605,7 @@ fn test_partition_boundary_detection_with_zero_flags_executable() {
     );
 
     // Verify Row 2 flags=0x20 - ALSO PROBLEMATIC!
-    let row2_offset = 30 + 13; // Row 1 is 13 bytes total (flags + row_size_vint + 9 body + 4 trailing - 1 bitmap byte)
+    let row2_offset = 30 + 14; // Row 1 is 14 bytes total
     assert_eq!(
         data[row2_offset], 0x20,
         "Row 2 flags=0x20 - also passes the heuristic check!"
@@ -612,30 +613,30 @@ fn test_partition_boundary_detection_with_zero_flags_executable() {
 
     // Test 3: Verify key_len field - Row 1's row_size looks like key_len!
     assert_eq!(
-        data[31], 0x09,
-        "Row 1 byte 1 is 0x09 (row_size), but looks like key_len=9!"
+        data[31], 0x0A,
+        "Row 1 byte 1 is 0x0A (row_size), but looks like key_len=10!"
     );
 
-    println!("CRITICAL TEST PASSED - Binary structure verification:");
+    println!("✅ CRITICAL TEST PASSED - Binary structure verification:");
     println!(
-        "   Partition header at offset 0: flags=0x{:02x}, key_len=0x{:02x}",
+        "   ✓ Partition header at offset 0: flags=0x{:02x}, key_len=0x{:02x}",
         data[0], data[1]
     );
     println!(
-        "   Row 1 at offset 30: flags=0x{:02x}, row_size=0x{:02x} (LOOKS like partition!)",
+        "   ✓ Row 1 at offset 30: flags=0x{:02x}, row_size=0x{:02x} (LOOKS like partition!)",
         data[30], data[31]
     );
     println!(
-        "   Row 2 at offset {}: flags=0x{:02x} (ALSO problematic!)",
+        "   ✓ Row 2 at offset {}: flags=0x{:02x} (ALSO problematic!)",
         row2_offset, data[row2_offset]
     );
     println!();
-    println!("Why this is the HARDEST case:");
-    println!("   - Row 1: flags=0x00 (passes '<= 0x20' check)");
-    println!("   - Row 1: byte[1]=0x09 (looks like key_len=9)");
-    println!("   - Row 2: flags=0x20 (exactly at threshold)");
+    println!("🎯 Why this is the HARDEST case:");
+    println!("   - Row 1: flags=0x00 (passes '<= 0x20' check) ✓");
+    println!("   - Row 1: byte[1]=0x0A (looks like key_len=10) ✓");
+    println!("   - Row 2: flags=0x20 (exactly at threshold) ✓");
     println!();
-    println!("SOLUTION: Parser uses CONTEXT-AWARE detection:");
+    println!("🛡️  SOLUTION: Parser uses CONTEXT-AWARE detection:");
     println!("   1. Outer loop: Heuristics to find partition starts");
     println!("   2. Inner loop: Try-parse to detect NEXT partition");
     println!("   3. After parsing partition at offset 0, parser is IN the inner loop");

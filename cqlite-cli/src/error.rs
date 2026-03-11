@@ -11,7 +11,6 @@
 /// - 3: schema errors
 /// - 4: data-dir/discovery errors
 /// - 5: query execution errors
-/// - 6: write operation errors (Issue #392)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(i32)]
 #[allow(dead_code)] // Success variant used for completeness per spec
@@ -26,8 +25,6 @@ pub enum CliExitCode {
     DataDirError = 4,
     /// Query execution errors
     QueryExecutionError = 5,
-    /// Write operation errors (Issue #392)
-    WriteError = 6,
 }
 
 impl CliExitCode {
@@ -49,9 +46,6 @@ impl CliExitCode {
                 "Use ':config data-dir <path>' or '--data-dir <path>' to set data directory"
             }
             Self::QueryExecutionError => "Check query syntax and ensure required data is available",
-            Self::WriteError => {
-                "Use '--writable --write-dir <path>' to enable write operations. Check mutation JSON format."
-            }
         }
     }
 }
@@ -151,19 +145,6 @@ pub fn classify_error(err: &anyhow::Error) -> CliExitCode {
         || err_lower.contains("cannot read file")
     {
         return CliExitCode::DataDirError;
-    }
-
-    // Issue #392: Write operation errors
-    if err_lower.contains("write")
-        || err_lower.contains("mutation")
-        || err_lower.contains("memtable")
-        || err_lower.contains("wal")
-        || err_lower.contains("flush")
-        || err_lower.contains("compaction")
-        || err_lower.contains("export")
-        || err_lower.contains("writeengine")
-    {
-        return CliExitCode::WriteError;
     }
 
     // Default to query execution error for database operations

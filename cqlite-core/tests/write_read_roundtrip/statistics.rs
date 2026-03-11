@@ -35,7 +35,7 @@ fn test_statistics_roundtrip_minimal() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta, None).expect("Write should succeed");
+    writer.write(&meta).expect("Write should succeed");
 
     // Verify file exists
     assert!(stats_path.exists(), "Statistics.db should be created");
@@ -74,7 +74,7 @@ fn test_statistics_roundtrip_timestamp_range() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta, None).expect("Write should succeed");
+    writer.write(&meta).expect("Write should succeed");
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
@@ -110,7 +110,7 @@ fn test_statistics_roundtrip_with_ttl() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta, None).expect("Write should succeed");
+    writer.write(&meta).expect("Write should succeed");
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
@@ -143,7 +143,7 @@ fn test_statistics_roundtrip_with_deletion_time() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta, None).expect("Write should succeed");
+    writer.write(&meta).expect("Write should succeed");
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
@@ -238,7 +238,7 @@ fn test_statistics_hex_dump_format_comparison() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta, None).expect("Write should succeed");
+    writer.write(&meta).expect("Write should succeed");
 
     // Read the written file
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
@@ -259,11 +259,11 @@ fn test_statistics_hex_dump_format_comparison() {
         "First 4 bytes should be interpretable as num_components=4"
     );
 
-    // Verify CRC32 checksum at bytes 4-7 (CRC32 of num_components=4 = 0x26291b05)
-    let checksum1 = u32::from_be_bytes([file_data[4], file_data[5], file_data[6], file_data[7]]);
+    // Verify statistics_kind/checksum at bytes 4-7
+    let stats_kind = u32::from_be_bytes([file_data[4], file_data[5], file_data[6], file_data[7]]);
     assert_eq!(
-        checksum1, 0x26291b05,
-        "Bytes 4-7 should be CRC32(num_components=4)"
+        stats_kind, 0x26291b05,
+        "Bytes 4-7 should match Cassandra statistics_kind magic number"
     );
 
     // Verify metadata_type = 3 at offset 32 (start of EncodingStats data section)
@@ -315,7 +315,7 @@ fn test_statistics_roundtrip_extreme_timestamps() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta, None).expect("Write should succeed");
+    writer.write(&meta).expect("Write should succeed");
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");

@@ -107,17 +107,16 @@ SSTABLEDUMP_SCRIPT="$INSTALL_DIR/sstabledump"
 cat > "$SSTABLEDUMP_SCRIPT" << EOF
 #!/bin/bash
 # sstabledump wrapper for CQLite development
+export JAVA_HOME="\$(dirname "\$(dirname "\$(readlink -f "\$(command -v $JAVA_CMD)")")")" 2>/dev/null || export JAVA_HOME=""
 export CASSANDRA_HOME="$CASSANDRA_DIR"
-export CASSANDRA_INCLUDE="\$CASSANDRA_HOME/tools/bin/cassandra.in.sh"
-exec "\$CASSANDRA_HOME/tools/bin/sstabledump" "\$@"
+exec "$JAVA_CMD" -cp "\$CASSANDRA_HOME/lib/*" org.apache.cassandra.tools.SSTableDump "\$@"
 EOF
 
 chmod +x "$SSTABLEDUMP_SCRIPT"
 
 # Verify installation
 echo "🔍 Verifying sstabledump installation..."
-VERIFY_OUTPUT="$("$SSTABLEDUMP_SCRIPT" --help 2>&1 || true)"
-if echo "$VERIFY_OUTPUT" | grep -q "usage: sstabledump"; then
+if "$SSTABLEDUMP_SCRIPT" --help >/dev/null 2>&1; then
     echo "✅ sstabledump installed successfully!"
     echo ""
     echo "📝 Usage:"
@@ -133,7 +132,6 @@ if echo "$VERIFY_OUTPUT" | grep -q "usage: sstabledump"; then
     fi
 else
     echo "❌ sstabledump installation failed"
-    echo "$VERIFY_OUTPUT"
     echo "   Try running with debugging:"
     echo "   bash -x $0"
     exit 1

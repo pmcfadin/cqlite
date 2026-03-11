@@ -45,10 +45,8 @@ impl BloomFilter {
         // Ensure we have at least one hash function
         let hash_count = hash_count.max(1);
 
-        // Calculate number of u64 words needed, and align bit_count to word boundary.
-        // Cassandra uses capacity = numLongs * 64 for hash modulo, so we must match.
+        // Calculate number of u64 words needed
         let word_count = bit_count.div_ceil(64);
-        let bit_count = word_count * 64;
 
         Ok(Self {
             bits: vec![0u64; word_count as usize],
@@ -156,13 +154,13 @@ impl BloomFilter {
     pub fn serialize(&self) -> Result<Vec<u8>> {
         let mut output = Vec::new();
 
-        // Cassandra bloom filter format (BloomFilterSerializer + OffHeapBitSet):
-        // [Hash Count: 4 bytes, big-endian i32]
-        // [Num Longs: 4 bytes, big-endian i32]  (number of u64 words)
-        // [Bit Array: numLongs * 8 bytes, big-endian u64 words]
+        // Cassandra bloom filter format:
+        // [Hash Count: 4 bytes, big-endian]
+        // [Bit Count: 8 bytes, big-endian]
+        // [Bit Array: variable length, big-endian u64 words]
 
         output.extend_from_slice(&self.hash_count.to_be_bytes());
-        output.extend_from_slice(&(self.bits.len() as u32).to_be_bytes());
+        output.extend_from_slice(&self.bit_count.to_be_bytes());
 
         // Write bit array in big-endian format
         for word in &self.bits {
@@ -179,17 +177,21 @@ impl BloomFilter {
 
     /// Deserialize a bloom filter from bytes (Cassandra-compatible format)
     pub fn deserialize(data: &[u8]) -> Result<Self> {
-        if data.len() < 8 {
+        if data.len() < 12 {
             return Err(Error::serialization("Invalid bloom filter data: too short"));
         }
 
-        // Read hash count (4 bytes, big-endian i32)
+        // Read hash count (4 bytes, big-endian)
         let hash_count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 
-        // Read number of longs (4 bytes, big-endian i32)
-        let num_longs = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        // Read bit count (8 bytes, big-endian)
+        let bit_count = u64::from_be_bytes([
+            data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
+        ]);
 
-        let expected_size = 8 + (num_longs * 8);
+        // Calculate expected word count
+        let word_count = bit_count.div_ceil(64);
+        let expected_size = 12 + (word_count as usize * 8);
 
         if data.len() != expected_size {
             return Err(Error::serialization(
@@ -198,9 +200,9 @@ impl BloomFilter {
         }
 
         // Read bit array (big-endian u64 words)
-        let mut bits = Vec::with_capacity(num_longs);
-        for i in 0..num_longs {
-            let offset = 8 + (i * 8);
+        let mut bits = Vec::with_capacity(word_count as usize);
+        for i in 0..word_count {
+            let offset = 12 + (i as usize * 8);
             let word = u64::from_be_bytes([
                 data[offset],
                 data[offset + 1],
@@ -213,8 +215,6 @@ impl BloomFilter {
             ]);
             bits.push(word);
         }
-
-        let bit_count = (num_longs as u64) * 64;
 
         Ok(Self {
             bits,

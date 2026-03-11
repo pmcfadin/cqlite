@@ -3,7 +3,7 @@
 //! This module contains all the CLI command structures and enums
 //! that are used throughout the application.
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 
 use crate::cli::{ExportFormat, ImportFormat, InfoOutputFormat, OutputFormat};
@@ -130,27 +130,6 @@ pub struct Cli {
     #[arg(long, env = "CQLITE_ENABLE_SELECT_FALLBACK")]
     pub enable_select_fallback: bool,
 
-    /// Enable write mode (requires --write-dir)
-    #[arg(long, env = "CQLITE_WRITABLE", requires = "write_dir")]
-    pub writable: bool,
-
-    /// Directory for write operations (WAL and SSTable output)
-    #[arg(long, value_name = "DIR", env = "CQLITE_WRITE_DIR")]
-    pub write_dir: Option<PathBuf>,
-
-    /// JSON mutation to write (can be repeated). Requires --writable mode.
-    /// Format: {"table":"ks.tbl","partition_key":{"col":"val"},"operations":[{"Write":{"column":"c","value":"v"}}],"timestamp_micros":123}
-    #[arg(long, value_name = "JSON", requires = "writable")]
-    pub mutation: Vec<String>,
-
-    /// File containing mutations (JSONL format, one JSON mutation per line). Requires --writable mode.
-    #[arg(long, value_name = "FILE", requires = "writable")]
-    pub mutations_file: Option<PathBuf>,
-
-    /// Force flush memtable to SSTable after writes. Requires --writable mode.
-    #[arg(long, requires = "writable")]
-    pub flush: bool,
-
     #[command(subcommand)]
     pub command: Option<Commands>,
 }
@@ -271,23 +250,6 @@ pub enum Commands {
         #[arg(short, long)]
         detailed: bool,
     },
-    /// Run background maintenance (compaction) - requires --writable mode (Issue #392)
-    #[command(
-        long_about = "Perform incremental background compaction work within a time budget. Call repeatedly from a background task for continuous compaction. Example: cqlite maintenance --budget-ms 100 --writable --write-dir /path/to/data"
-    )]
-    Maintenance(MaintenanceArgs),
-    /// Display write engine statistics - requires --writable mode (Issue #392)
-    #[command(name = "write-stats")]
-    #[command(
-        long_about = "Show current write engine statistics including memtable size, row count, WAL size, and generation number. Example: cqlite write-stats --writable --write-dir /path/to/data"
-    )]
-    WriteStats,
-    /// Export SSTables for Cassandra import - requires --writable mode (Issue #392)
-    #[command(name = "export-sstable")]
-    #[command(
-        long_about = "Export data from the write engine as Cassandra-compatible SSTables. Use the maintenance subcommand to compact before export. Pre-export compaction will be available in M5.3. Example: cqlite export-sstable /tmp/export --writable --write-dir /path/to/data"
-    )]
-    ExportSstable(ExportSstableArgs),
 }
 
 #[derive(Subcommand)]
@@ -386,31 +348,4 @@ pub enum BenchCommands {
         #[arg(short, long, default_value = "1")]
         concurrency: usize,
     },
-}
-
-/// Arguments for the maintenance subcommand (Issue #392)
-#[derive(Args, Debug, Clone)]
-pub struct MaintenanceArgs {
-    /// Time budget in milliseconds for this maintenance step
-    #[arg(long, default_value = "100")]
-    pub budget_ms: u64,
-}
-
-/// Arguments for the export-sstable subcommand (Issue #392)
-#[derive(Args, Debug, Clone)]
-pub struct ExportSstableArgs {
-    /// Output directory for exported SSTables
-    pub output: PathBuf,
-    /// Keyspace name for the exported SSTable
-    #[arg(long, default_value = "export")]
-    pub keyspace: String,
-    /// Table name for the exported SSTable
-    #[arg(long, default_value = "data")]
-    pub table: String,
-    /// Skip compaction before export (no-op until M5.3, compaction is never enabled)
-    #[arg(long)]
-    pub skip_compact: bool,
-    /// Skip validation after export
-    #[arg(long)]
-    pub skip_validate: bool,
 }

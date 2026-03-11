@@ -133,5 +133,3 @@ state_machine = ["cqlite-core/state_machine"]
 experimental = ["cqlite-core/experimental"]
 # Issue #249: CLI-specific helpers (enables state_machine locally + cqlite-core/cli-helpers)
 cli-helpers = ["state_machine", "cqlite-core/cli-helpers"]
-# Issue #392: Write support (enables cqlite-core/write-support for CLI write operations)
-write-support = ["state_machine", "cqlite-core/write-support"]
