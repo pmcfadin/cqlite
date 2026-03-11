@@ -28,7 +28,7 @@ fn test_statistics_roundtrip() {
 
     // Write Statistics.db
     let writer = StatisticsWriter::new(stats_path.clone());
-    writer.write(&meta).expect("Write should succeed");
+    writer.write(&meta, None).expect("Write should succeed");
 
     // Verify file exists
     assert!(stats_path.exists());

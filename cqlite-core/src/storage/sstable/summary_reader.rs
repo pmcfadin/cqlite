@@ -318,7 +318,12 @@ fn parse_summary_data(input: &[u8]) -> Result<SummaryData> {
     let after_entries = &after_offsets[entry_data_size..];
 
     // Parse entries using offsets
-    let entries = parse_entries_from_offsets(entry_data, &offsets, entry_data_size)?;
+    let entries = parse_entries_from_offsets(
+        entry_data,
+        &offsets,
+        offset_table_size,
+        header.summary_entries_size as usize,
+    )?;
 
     // Parse first and last keys
     let (after_first, first_key) = parse_serialized_key(after_entries)
@@ -362,18 +367,25 @@ fn parse_summary_header(input: &[u8]) -> IResult<&[u8], SummaryHeader> {
 fn parse_entries_from_offsets(
     entry_data: &[u8],
     offsets: &[u32],
-    total_size: usize,
+    offset_table_size: usize,
+    summary_entries_size: usize,
 ) -> Result<Vec<SummaryEntry>> {
+    let offsets = normalize_entry_offsets(
+        offsets,
+        entry_data.len(),
+        offset_table_size,
+        summary_entries_size,
+    )?;
     let mut entries = Vec::with_capacity(offsets.len());
 
     for i in 0..offsets.len() {
-        let start = offsets[i] as usize;
+        let start = offsets[i];
 
         // End is either the next offset or the total entry data size
         let end = if i + 1 < offsets.len() {
-            offsets[i + 1] as usize
+            offsets[i + 1]
         } else {
-            total_size
+            entry_data.len()
         };
 
         if start >= end {
@@ -426,6 +438,39 @@ fn parse_entries_from_offsets(
     }
 
     Ok(entries)
+}
+
+fn normalize_entry_offsets(
+    offsets: &[u32],
+    entry_data_size: usize,
+    offset_table_size: usize,
+    summary_entries_size: usize,
+) -> Result<Vec<usize>> {
+    if offsets.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let usize_offsets: Vec<usize> = offsets.iter().map(|offset| *offset as usize).collect();
+
+    // Writer-local offsets are zero-based into entry_data, so the first entry must start at 0.
+    if usize_offsets[0] == 0 && usize_offsets.iter().all(|offset| *offset < entry_data_size) {
+        return Ok(usize_offsets);
+    }
+
+    // Check if offsets are relative (writer-local, already zero-based into entry data)
+    if usize_offsets
+        .iter()
+        .all(|offset| *offset >= offset_table_size && *offset < summary_entries_size)
+    {
+        return Ok(usize_offsets
+            .into_iter()
+            .map(|offset| offset - offset_table_size)
+            .collect());
+    }
+
+    Err(Error::corruption(format!(
+        "Summary.db offsets are invalid for both relative and absolute layouts: offsets={offsets:?}, entry_data_size={entry_data_size}, offset_table_size={offset_table_size}, summary_entries_size={summary_entries_size}"
+    )))
 }
 
 /// Parse a length-prefixed key (be_u32 size + data)
@@ -492,11 +537,32 @@ mod tests {
         entry_data.extend_from_slice(&position_bytes);
 
         let offsets = vec![0u32];
-        let entries = parse_entries_from_offsets(&entry_data, &offsets, entry_data.len()).unwrap();
+        let entries =
+            parse_entries_from_offsets(&entry_data, &offsets, 4, 4 + entry_data.len()).unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].partition_key, key_bytes);
         assert_eq!(entries[0].position, 0);
+    }
+
+    #[test]
+    fn test_entry_parsing_from_absolute_offsets() {
+        let key0 = vec![0xAA; 16];
+        let key1 = vec![0xBB; 16];
+
+        let mut entry_data = key0.clone();
+        entry_data.extend_from_slice(&0u64.to_be_bytes());
+        entry_data.extend_from_slice(&key1);
+        entry_data.extend_from_slice(&128u64.to_be_bytes());
+
+        let offsets = vec![8u32, 32u32];
+        let entries = parse_entries_from_offsets(&entry_data, &offsets, 8, 56).unwrap();
+
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].partition_key, key0);
+        assert_eq!(entries[0].position, 0);
+        assert_eq!(entries[1].partition_key, key1);
+        assert_eq!(entries[1].position, 128);
     }
 
     #[test]

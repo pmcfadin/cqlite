@@ -21,7 +21,6 @@ else
   echo "Warning: no sha256 checker found; skipping verification" >&2
 fi
 
-tar -xzf /tmp/${ASSET} -C test-data
+tar -xzf /tmp/${ASSET} -C .
 echo "Dataset extracted to test-data/datasets"
-
 

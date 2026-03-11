@@ -11,6 +11,9 @@ use tracing::info;
 #[cfg(feature = "state_machine")]
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 
+#[cfg(feature = "write-support")]
+use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
 mod cli;
 mod cli_types;
 mod commands;
@@ -21,7 +24,7 @@ mod output;
 mod script_executor;
 mod status_metrics;
 
-use cli_types::{AdminCommands, Cli, Commands, OutputMode};
+use cli_types::{AdminCommands, Cli, Commands, ExportSstableArgs, MaintenanceArgs, OutputMode};
 use commands::info::execute_info_command;
 // mod data_parser;
 // mod formatter; // New cqlsh-compatible formatter
@@ -246,6 +249,244 @@ async fn run_main() -> Result<()> {
             "{}",
             crate::output::OutputError::ParquetRequiresFile
         ));
+    }
+
+    // Issue #392: Initialize WriteEngine if write mode is enabled
+    #[cfg(feature = "write-support")]
+    let mut write_engine = if cli.writable {
+        let write_dir = cli
+            .write_dir
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("--write-dir required with --writable"))?;
+
+        // Determine target table from mutations to select correct schema
+        let target_table: Option<(String, String)> = if !cli.mutation.is_empty() {
+            // Peek at first --mutation to get target table
+            let first: serde_json::Value = serde_json::from_str(&cli.mutation[0])
+                .map_err(|e| anyhow::anyhow!("Failed to parse mutation JSON: {}", e))?;
+            let table = first
+                .get("table")
+                .ok_or_else(|| anyhow::anyhow!("Mutation missing 'table' field"))?;
+            let ks = table
+                .get("keyspace")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let tbl = table
+                .get("table")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            Some((ks, tbl))
+        } else if let Some(ref file_path) = cli.mutations_file {
+            // Peek at first line of mutations file to get target table
+            use std::io::BufRead;
+            let file = std::fs::File::open(file_path)
+                .map_err(|e| anyhow::anyhow!("Failed to open mutations file: {}", e))?;
+            let reader = std::io::BufReader::new(file);
+            let mut target = None;
+            for line in reader.lines() {
+                let line =
+                    line.map_err(|e| anyhow::anyhow!("Failed to read mutations file: {}", e))?;
+                let trimmed = line.trim();
+                if trimmed.is_empty() || trimmed.starts_with('#') {
+                    continue;
+                }
+                let first: serde_json::Value = serde_json::from_str(trimmed)
+                    .map_err(|e| anyhow::anyhow!("Failed to parse first mutation: {}", e))?;
+                let table = first
+                    .get("table")
+                    .ok_or_else(|| anyhow::anyhow!("First mutation missing 'table' field"))?;
+                let ks = table
+                    .get("keyspace")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                let tbl = table
+                    .get("table")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                target = Some((ks, tbl));
+                break;
+            }
+            target
+        } else {
+            None
+        };
+
+        // Get schema from startup ingestion result
+        let schema = if let Some(ref registry) = startup_schema_registry {
+            if let Some((ref ks, ref tbl)) = target_table {
+                // Look up specific table schema matching mutation target
+                registry
+                    .read()
+                    .await
+                    .get_schema(ks, tbl)
+                    .await
+                    .map_err(|e| {
+                        anyhow::anyhow!(
+                            "No schema found for {}.{}. Check --schema file contains this table: {}",
+                            ks,
+                            tbl,
+                            e
+                        )
+                    })?
+            } else {
+                // No mutations specified yet, fall back to first available schema
+                let schemas = registry
+                    .read()
+                    .await
+                    .list_schemas(None)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("Failed to list schemas: {}", e))?;
+
+                schemas.into_iter().next().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No schema available for write operations. \
+                         Provide --schema to load a schema."
+                    )
+                })?
+            }
+        } else if let Some(ref schema_path) = cli.schema {
+            // Write-only mode: parse schema directly from CQL file
+            use cqlite_core::schema::cql_parser::{
+                classify_statement, parse_create_table, split_cql_statements, StatementType,
+            };
+            let content = std::fs::read_to_string(schema_path)
+                .map_err(|e| anyhow::anyhow!("Failed to read schema file: {}", e))?;
+            let statements = split_cql_statements(&content);
+
+            // Extract keyspace from CREATE KEYSPACE statement (simple parser)
+            let mut file_keyspace: Option<String> = None;
+            let mut table_schemas = Vec::new();
+
+            for stmt in &statements {
+                match classify_statement(stmt) {
+                    StatementType::Other(ref kind) if kind == "use" => {
+                        // Extract keyspace from USE <keyspace>;
+                        let name = stmt
+                            .trim()
+                            .strip_prefix("USE")
+                            .or_else(|| stmt.trim().strip_prefix("use"))
+                            .unwrap_or("")
+                            .trim()
+                            .trim_end_matches(';')
+                            .trim()
+                            .to_string();
+                        if !name.is_empty() {
+                            file_keyspace = Some(name);
+                        }
+                    }
+                    StatementType::Other(ref kind) if kind == "create" => {
+                        // Extract keyspace from CREATE KEYSPACE IF NOT EXISTS <name>
+                        let lower = stmt.to_lowercase();
+                        if lower.contains("create keyspace") {
+                            let after = if let Some(pos) = lower.find("exists") {
+                                &stmt[pos + 6..]
+                            } else if let Some(pos) = lower.find("keyspace") {
+                                &stmt[pos + 8..]
+                            } else {
+                                ""
+                            };
+                            let name = after
+                                .trim()
+                                .split(|c: char| c.is_whitespace() || c == '{' || c == ';')
+                                .next()
+                                .unwrap_or("")
+                                .trim()
+                                .to_string();
+                            if !name.is_empty() {
+                                file_keyspace = Some(name);
+                            }
+                        }
+                    }
+                    StatementType::CreateTable => {
+                        if let Ok((_, mut ts)) = parse_create_table(stmt) {
+                            // Apply file-level keyspace if table doesn't have one
+                            if ts.keyspace.is_empty()
+                                || ts.keyspace == "unknown"
+                                || ts.keyspace == "default"
+                            {
+                                if let Some(ref ks) = file_keyspace {
+                                    ts.keyspace = ks.clone();
+                                }
+                            }
+                            table_schemas.push(ts);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            // Find matching schema
+            if let Some((ref ks, ref tbl)) = target_table {
+                table_schemas
+                    .into_iter()
+                    .find(|ts| ts.keyspace == *ks && ts.table == *tbl)
+                    .ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "No schema found for {}.{} in {}",
+                            ks,
+                            tbl,
+                            schema_path.display()
+                        )
+                    })?
+            } else {
+                table_schemas.into_iter().next().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No CREATE TABLE statements found in {}",
+                        schema_path.display()
+                    )
+                })?
+            }
+        } else {
+            return Err(anyhow::anyhow!(
+                "Schema required for write operations. \
+                 Provide --schema to load a schema."
+            ));
+        };
+
+        let config = WriteEngineConfig::new(write_dir.join("data"), write_dir.join("wal"), schema);
+        Some(
+            WriteEngine::new(config)
+                .map_err(|e| anyhow::anyhow!("Failed to initialize WriteEngine: {}", e))?,
+        )
+    } else {
+        None
+    };
+
+    // Issue #392: Handle --mutation flags
+    #[cfg(feature = "write-support")]
+    if !cli.mutation.is_empty() {
+        let engine = write_engine
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Mutations require --writable mode"))?;
+
+        for mutation_json in &cli.mutation {
+            let result = commands::write::handle_mutation_write(engine, mutation_json).await?;
+            result.display();
+        }
+    }
+
+    // Issue #392: Handle --mutations-file flag
+    #[cfg(feature = "write-support")]
+    if let Some(ref file_path) = cli.mutations_file {
+        let engine = write_engine
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("Mutations file requires --writable mode"))?;
+
+        let result = commands::write::handle_mutations_file(engine, file_path).await?;
+        result.display();
+    }
+
+    // Issue #392: Handle --flush flag
+    #[cfg(feature = "write-support")]
+    if cli.flush {
+        if let Some(engine) = write_engine.as_mut() {
+            let info = commands::write::handle_flush(engine).await?;
+            commands::write::display_flush_result(info.as_ref());
+        }
     }
 
     // Handle --file flag (script execution) - takes precedence over subcommands
@@ -612,6 +853,74 @@ async fn run_main() -> Result<()> {
                     println!("📋 Displaying database information");
                     commands::admin::handle_admin_command(&database, AdminCommands::Info).await
                 }
+            }
+        }
+        // Issue #392: Write support subcommands
+        Some(Commands::Maintenance(MaintenanceArgs { budget_ms })) => {
+            #[cfg(feature = "write-support")]
+            {
+                let engine = write_engine
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Maintenance requires --writable mode"))?;
+                let report = commands::write::handle_maintenance(engine, budget_ms)?;
+                commands::write::display_maintenance_report(&report);
+                Ok(())
+            }
+            #[cfg(not(feature = "write-support"))]
+            {
+                let _ = budget_ms;
+                Err(anyhow::anyhow!(
+                    "Write support is not enabled. Build with --features write-support to enable write operations."
+                ))
+            }
+        }
+        Some(Commands::WriteStats) => {
+            #[cfg(feature = "write-support")]
+            {
+                let engine = write_engine
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("Write stats requires --writable mode"))?;
+                let stats = commands::write::handle_write_stats(engine)?;
+                stats.display();
+                Ok(())
+            }
+            #[cfg(not(feature = "write-support"))]
+            {
+                Err(anyhow::anyhow!(
+                    "Write support is not enabled. Build with --features write-support to enable write operations."
+                ))
+            }
+        }
+        Some(Commands::ExportSstable(ExportSstableArgs {
+            output,
+            keyspace,
+            table,
+            skip_compact,
+            skip_validate,
+        })) => {
+            #[cfg(feature = "write-support")]
+            {
+                let engine = write_engine
+                    .as_mut()
+                    .ok_or_else(|| anyhow::anyhow!("Export requires --writable mode"))?;
+                let result = commands::write::handle_export(
+                    engine,
+                    &output,
+                    &keyspace,
+                    &table,
+                    skip_compact,
+                    skip_validate,
+                )
+                .await?;
+                result.display();
+                Ok(())
+            }
+            #[cfg(not(feature = "write-support"))]
+            {
+                let _ = (output, keyspace, table, skip_compact, skip_validate);
+                Err(anyhow::anyhow!(
+                    "Write support is not enabled. Build with --features write-support to enable write operations."
+                ))
             }
         }
         None => {
