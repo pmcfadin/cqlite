@@ -1704,6 +1704,122 @@ async fn test_issue_432_large_blob_table_portable_sstable_round_trip() -> Cqlite
 }
 
 // =============================================================================
+// Issue #439: Wide-row write path portability
+// =============================================================================
+
+#[tokio::test]
+async fn test_issue_439_mixed_simple_and_complex_columns_round_trip() -> CqliteResult<()> {
+    let row_id = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
+
+    run_issue_432_scenario(
+        schema_issue_439_mixed_columns_table(),
+        &create_issue_439_mixed_columns_table_cql(),
+        vec![issue_439_mixed_columns_mutation(
+            row_id,
+            "portable mixed row",
+            &["alpha", "beta"],
+            1_710_096_000_000_000,
+        )],
+        |dump| {
+            assert_sstabledump_counts(dump, 1, 1)?;
+            assert_sstabledump_contains(
+                dump,
+                &[
+                    "\"name\":\"z_simple\",\"value\":\"portable mixed row\"",
+                    "\"name\":\"a_complex\"",
+                    "\"path\":[\"alpha\"]",
+                    "\"path\":[\"beta\"]",
+                ],
+            )
+        },
+        move |harness| {
+            assert_query_count(
+                harness,
+                &format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table()),
+                1,
+            )?;
+
+            let query = format!(
+                "SELECT z_simple FROM {} WHERE id = {}",
+                harness.fully_qualified_table(),
+                cql_uuid(row_id)
+            );
+            let output =
+                harness.query_until(&query, Duration::from_secs(20), |out| out.rows.len() == 1)?;
+            assert_eq!(output.rows, vec![vec!["portable mixed row".to_string()]]);
+            Ok(())
+        },
+    )
+    .await
+}
+
+#[tokio::test]
+async fn test_issue_439_product_catalog_portable_sstable_round_trip() -> CqliteResult<()> {
+    let category_a = "10000000-0000-4000-8000-000000000001";
+    let category_b = "20000000-0000-4000-8000-000000000002";
+    let product_a = "30000000-0000-4000-8000-000000000003";
+    let product_b = "40000000-0000-4000-8000-000000000004";
+
+    run_issue_432_scenario(
+        schema_issue_439_product_catalog(),
+        &create_issue_439_product_catalog_cql(),
+        vec![
+            issue_439_product_catalog_mutation(
+                category_a,
+                product_a,
+                "Trail Shoes",
+                "Off-road running shoe",
+                12,
+                1_710_120_000_000_000,
+            ),
+            issue_439_product_catalog_mutation(
+                category_b,
+                product_b,
+                "Climbing Pack",
+                "Alpine day pack",
+                7,
+                1_710_120_100_000_000,
+            ),
+        ],
+        |dump| {
+            assert_sstabledump_counts(dump, 2, 2)?;
+            assert_sstabledump_contains(
+                dump,
+                &[
+                    "\"name\":\"product_name\",\"value\":\"Trail Shoes\"",
+                    "\"name\":\"product_name\",\"value\":\"Climbing Pack\"",
+                    "\"name\":\"tags\"",
+                    "\"name\":\"specifications\"",
+                    "\"name\":\"attributes\"",
+                ],
+            )
+        },
+        move |harness| {
+            assert_query_count(
+                harness,
+                &format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table()),
+                2,
+            )?;
+
+            let query = format!(
+                "SELECT product_name, availability_count FROM {} WHERE category_id = {} AND product_id = {}",
+                harness.fully_qualified_table(),
+                cql_uuid(category_a),
+                cql_uuid(product_a)
+            );
+            let output =
+                harness.query_until(&query, Duration::from_secs(20), |out| out.rows.len() == 1)?;
+            assert_eq!(
+                output.rows,
+                vec![vec!["Trail Shoes".to_string(), "12".to_string()]]
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
+// =============================================================================
 // Helpers
 // =============================================================================
 
@@ -2985,6 +3101,242 @@ fn wide_partition_table_mutation(
             CellOperation::Write {
                 column: "json_column".to_string(),
                 value: Value::Text(json_column.to_string()),
+            },
+        ],
+        timestamp_micros,
+        None,
+    )
+}
+
+fn schema_issue_439_mixed_columns_table() -> TableSchema {
+    build_schema(
+        "test_wide_rows",
+        "issue_439_mixed_columns",
+        vec![key_column("id", "uuid", 0)],
+        vec![],
+        vec![
+            regular_column("id", "uuid"),
+            regular_column("z_simple", "text"),
+            regular_column("a_complex", "set<text>"),
+        ],
+    )
+}
+
+fn create_issue_439_mixed_columns_table_cql() -> String {
+    r#"CREATE TABLE test_wide_rows.issue_439_mixed_columns (
+id UUID PRIMARY KEY,
+z_simple TEXT,
+a_complex SET<TEXT>
+);"#
+    .to_string()
+}
+
+fn issue_439_mixed_columns_mutation(
+    id: &str,
+    z_simple: &str,
+    a_complex: &[&str],
+    timestamp_micros: i64,
+) -> Mutation {
+    base_mutation(
+        "test_wide_rows",
+        "issue_439_mixed_columns",
+        PartitionKey::single("id", uuid_value(id)),
+        None,
+        vec![
+            CellOperation::Write {
+                column: "z_simple".to_string(),
+                value: Value::Text(z_simple.to_string()),
+            },
+            CellOperation::Write {
+                column: "a_complex".to_string(),
+                value: Value::Set(
+                    a_complex
+                        .iter()
+                        .map(|value| Value::Text((*value).to_string()))
+                        .collect(),
+                ),
+            },
+        ],
+        timestamp_micros,
+        None,
+    )
+}
+
+fn schema_issue_439_product_catalog() -> TableSchema {
+    build_schema(
+        "test_wide_rows",
+        "product_catalog_issue_439",
+        vec![key_column("category_id", "uuid", 0)],
+        vec![clustering_column(
+            "product_id",
+            "uuid",
+            0,
+            ClusteringOrder::Asc,
+        )],
+        vec![
+            regular_column("category_id", "uuid"),
+            regular_column("product_id", "uuid"),
+            regular_column("product_name", "text"),
+            regular_column("description", "text"),
+            regular_column("long_description", "text"),
+            regular_column("specifications", "map<text, text>"),
+            regular_column("images", "list<text>"),
+            regular_column("tags", "set<text>"),
+            regular_column("price", "decimal"),
+            regular_column("currency", "text"),
+            regular_column("availability_count", "int"),
+            regular_column("weight", "float"),
+            regular_column("dimensions", "map<text, float>"),
+            regular_column("reviews_summary", "map<text, double>"),
+            regular_column("attributes", "map<text, frozen<set<text>>>"),
+            regular_column("related_products", "set<uuid>"),
+            regular_column("created_at", "timestamp"),
+            regular_column("updated_at", "timestamp"),
+        ],
+    )
+}
+
+fn create_issue_439_product_catalog_cql() -> String {
+    r#"CREATE TABLE test_wide_rows.product_catalog_issue_439 (
+category_id UUID,
+product_id UUID,
+product_name TEXT,
+description TEXT,
+long_description TEXT,
+specifications MAP<TEXT, TEXT>,
+images LIST<TEXT>,
+tags SET<TEXT>,
+price DECIMAL,
+currency TEXT,
+availability_count INT,
+weight FLOAT,
+dimensions MAP<TEXT, FLOAT>,
+reviews_summary MAP<TEXT, DOUBLE>,
+attributes MAP<TEXT, FROZEN<SET<TEXT>>>,
+related_products SET<UUID>,
+created_at TIMESTAMP,
+updated_at TIMESTAMP,
+PRIMARY KEY (category_id, product_id)
+);"#
+    .to_string()
+}
+
+fn issue_439_product_catalog_mutation(
+    category_id: &str,
+    product_id: &str,
+    product_name: &str,
+    description: &str,
+    availability_count: i32,
+    timestamp_micros: i64,
+) -> Mutation {
+    base_mutation(
+        "test_wide_rows",
+        "product_catalog_issue_439",
+        PartitionKey::single("category_id", uuid_value(category_id)),
+        Some(ClusteringKey::single("product_id", uuid_value(product_id))),
+        vec![
+            CellOperation::Write {
+                column: "product_name".to_string(),
+                value: Value::Text(product_name.to_string()),
+            },
+            CellOperation::Write {
+                column: "description".to_string(),
+                value: Value::Text(description.to_string()),
+            },
+            CellOperation::Write {
+                column: "long_description".to_string(),
+                value: Value::Text(format!("{description} with extended specs")),
+            },
+            CellOperation::Write {
+                column: "specifications".to_string(),
+                value: Value::Map(vec![
+                    (
+                        Value::Text("material".to_string()),
+                        Value::Text("nylon".to_string()),
+                    ),
+                    (
+                        Value::Text("origin".to_string()),
+                        Value::Text("USA".to_string()),
+                    ),
+                ]),
+            },
+            CellOperation::Write {
+                column: "images".to_string(),
+                value: Value::List(vec![
+                    Value::Text("front.jpg".to_string()),
+                    Value::Text("detail.jpg".to_string()),
+                ]),
+            },
+            CellOperation::Write {
+                column: "tags".to_string(),
+                value: Value::Set(vec![
+                    Value::Text("featured".to_string()),
+                    Value::Text("seasonal".to_string()),
+                ]),
+            },
+            CellOperation::Write {
+                column: "price".to_string(),
+                value: decimal_from_i64(12_999, 2),
+            },
+            CellOperation::Write {
+                column: "currency".to_string(),
+                value: Value::Text("USD".to_string()),
+            },
+            CellOperation::Write {
+                column: "availability_count".to_string(),
+                value: Value::Integer(availability_count),
+            },
+            CellOperation::Write {
+                column: "weight".to_string(),
+                value: Value::Float32(1.25),
+            },
+            CellOperation::Write {
+                column: "dimensions".to_string(),
+                value: Value::Map(vec![
+                    (Value::Text("height".to_string()), Value::Float32(10.0)),
+                    (Value::Text("width".to_string()), Value::Float32(20.0)),
+                ]),
+            },
+            CellOperation::Write {
+                column: "reviews_summary".to_string(),
+                value: Value::Map(vec![
+                    (Value::Text("average".to_string()), Value::Float(4.8)),
+                    (Value::Text("count".to_string()), Value::Float(128.0)),
+                ]),
+            },
+            CellOperation::Write {
+                column: "attributes".to_string(),
+                value: Value::Map(vec![
+                    (
+                        Value::Text("terrain".to_string()),
+                        Value::Frozen(Box::new(Value::Set(vec![
+                            Value::Text("trail".to_string()),
+                            Value::Text("rock".to_string()),
+                        ]))),
+                    ),
+                    (
+                        Value::Text("season".to_string()),
+                        Value::Frozen(Box::new(Value::Set(vec![
+                            Value::Text("spring".to_string()),
+                            Value::Text("fall".to_string()),
+                        ]))),
+                    ),
+                ]),
+            },
+            CellOperation::Write {
+                column: "related_products".to_string(),
+                value: Value::Set(vec![
+                    uuid_value("50000000-0000-4000-8000-000000000005"),
+                    uuid_value("60000000-0000-4000-8000-000000000006"),
+                ]),
+            },
+            CellOperation::Write {
+                column: "created_at".to_string(),
+                value: Value::Timestamp(timestamp_millis("2024-03-10T18:45:30.000Z")),
+            },
+            CellOperation::Write {
+                column: "updated_at".to_string(),
+                value: Value::Timestamp(timestamp_millis("2024-03-10T18:46:30.000Z")),
             },
         ],
         timestamp_micros,

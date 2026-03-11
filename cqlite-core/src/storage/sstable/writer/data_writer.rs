@@ -183,9 +183,11 @@ impl DataWriter {
         }
 
         if let Some(static_mutation) = static_mutations.first() {
-            prev_unfiltered_size = self
-                .write_static_row_with_prev_size(static_mutation, schema, prev_unfiltered_size)?
-                as u64;
+            prev_unfiltered_size = self.write_static_row_with_prev_size(
+                static_mutation,
+                schema,
+                prev_unfiltered_size,
+            )? as u64;
         }
 
         // Write all non-static rows for this partition
@@ -573,10 +575,6 @@ impl DataWriter {
         mutation: &Mutation,
         schema: &TableSchema,
     ) -> Result<()> {
-        let mut static_columns: Vec<_> = schema.columns.iter().filter(|c| c.is_static).collect();
-        static_columns.sort_by(|a: &&Column, b: &&Column| a.name.cmp(&b.name));
-        let col_count = static_columns.len();
-
         // Collect names of columns that are present (non-NULL writes + deletes)
         let present_columns: std::collections::HashSet<&str> = mutation
             .operations
@@ -595,23 +593,8 @@ impl DataWriter {
             })
             .collect();
 
-        if col_count > 64 {
-            return Err(Error::InvalidInput(format!(
-                "Static column bitmap for >64 columns not yet supported (have {} static columns)",
-                col_count
-            )));
-        }
-
-        // Build bitmask of MISSING columns (Cassandra convention: bit=1 → missing)
-        let mut bitmap: u64 = 0;
-        for (idx, col) in static_columns.iter().enumerate() {
-            if !present_columns.contains(col.name.as_str()) {
-                bitmap |= 1u64 << idx;
-            }
-        }
-
-        encode_unsigned(bitmap, buf);
-        Ok(())
+        let static_columns = self.static_columns(schema);
+        self.write_column_subset(buf, &static_columns, &present_columns)
     }
 
     /// Write cells for static columns only
@@ -629,7 +612,7 @@ impl DataWriter {
             .map(|c| &c.name)
             .collect();
 
-        for op in &mutation.operations {
+        for op in self.sorted_operations(mutation, schema, ColumnScope::StaticOnly) {
             match op {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
                     // Only write if it's a static column
@@ -813,9 +796,6 @@ impl DataWriter {
         mutation: &Mutation,
         schema: &TableSchema,
     ) -> Result<()> {
-        let regular_cols = self.regular_columns(schema);
-        let col_count = regular_cols.len();
-
         // Collect names of columns that are present (non-NULL writes + deletes).
         // Delete operations must be marked as present so the reader parses
         // the tombstone/complex-deletion bytes that write_cells() emits.
@@ -836,44 +816,27 @@ impl DataWriter {
             })
             .collect();
 
-        if col_count > 64 {
-            // >64 columns: use large-subset delta encoding (not yet implemented)
-            return Err(Error::InvalidInput(format!(
-                "Column bitmap for >64 columns not yet supported (have {} regular columns)",
-                col_count
-            )));
-        }
-
-        // Build bitmask of MISSING columns (Cassandra convention: bit=1 → missing)
-        let mut bitmap: u64 = 0;
-        for (idx, col) in regular_cols.iter().enumerate() {
-            if !present_columns.contains(col.name.as_str()) {
-                bitmap |= 1u64 << idx;
-            }
-        }
-
-        encode_unsigned(bitmap, buf);
-        Ok(())
+        let regular_columns = self.regular_columns(schema);
+        self.write_column_subset(buf, &regular_columns, &present_columns)
     }
 
     /// Get regular (non-PK, non-CK, non-static) columns from schema.
     ///
     /// Cassandra's column bitmap only covers regular columns — partition key
     /// and clustering key columns are serialized separately in the partition
-    /// header and clustering prefix.
+    /// header and clustering prefix. Within the regular set, simple columns
+    /// sort before complex columns, then by name.
     fn regular_columns<'a>(&self, schema: &'a TableSchema) -> Vec<&'a Column> {
-        let mut cols: Vec<&'a Column> = schema
-            .columns
-            .iter()
-            .filter(|c| {
-                !c.is_static
-                    && !schema.is_partition_key(&c.name)
-                    && !schema.is_clustering_key(&c.name)
-            })
-            .collect();
-        // Cassandra sorts regular columns alphabetically by name
-        cols.sort_by(|a, b| a.name.cmp(&b.name));
-        cols
+        self.ordered_columns(schema, |column| {
+            !column.is_static
+                && !schema.is_partition_key(&column.name)
+                && !schema.is_clustering_key(&column.name)
+        })
+    }
+
+    /// Get static columns from schema in Cassandra serialization-header order.
+    fn static_columns<'a>(&self, schema: &'a TableSchema) -> Vec<&'a Column> {
+        self.ordered_columns(schema, |column| column.is_static)
     }
 
     /// Write cells for this row
@@ -886,34 +849,7 @@ impl DataWriter {
         mutation: &Mutation,
         schema: &TableSchema,
     ) -> Result<()> {
-        // Sort operations alphabetically by column name to match Cassandra ordering
-        let mut sorted_ops: Vec<_> = mutation.operations.iter().collect();
-        sorted_ops.sort_by(|a, b| {
-            let name_a = match a {
-                crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
-                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                    column,
-                    ..
-                }
-                | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                    column.as_str()
-                }
-                crate::storage::write_engine::mutation::CellOperation::DeleteRow => "",
-            };
-            let name_b = match b {
-                crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
-                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                    column,
-                    ..
-                }
-                | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                    column.as_str()
-                }
-                crate::storage::write_engine::mutation::CellOperation::DeleteRow => "",
-            };
-            name_a.cmp(name_b)
-        });
-        for op in &sorted_ops {
+        for op in self.sorted_operations(mutation, schema, ColumnScope::RegularOnly) {
             match op {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
                     // Skip NULL values - they are represented by absence in the bitmap
@@ -1673,6 +1609,99 @@ impl DataWriter {
     pub fn position(&self) -> u64 {
         self.buffer.len() as u64
     }
+
+    fn ordered_columns<'a, F>(&self, schema: &'a TableSchema, predicate: F) -> Vec<&'a Column>
+    where
+        F: Fn(&Column) -> bool,
+    {
+        let mut columns: Vec<&'a Column> = schema
+            .columns
+            .iter()
+            .filter(|column| predicate(column))
+            .collect();
+        columns.sort_by_key(|column| column_order_key(column));
+        columns
+    }
+
+    fn sorted_operations<'a>(
+        &self,
+        mutation: &'a Mutation,
+        schema: &TableSchema,
+        scope: ColumnScope,
+    ) -> Vec<&'a crate::storage::write_engine::mutation::CellOperation> {
+        let columns = match scope {
+            ColumnScope::RegularOnly => self.regular_columns(schema),
+            ColumnScope::StaticOnly => self.static_columns(schema),
+        };
+
+        let column_order: std::collections::HashMap<&str, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(idx, column)| (column.name.as_str(), idx))
+            .collect();
+
+        let mut operations: Vec<_> = mutation.operations.iter().collect();
+        operations.sort_by_key(|operation| match operation {
+            crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
+            | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                column, ..
+            }
+            | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                column_order
+                    .get(column.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX - 1)
+            }
+            crate::storage::write_engine::mutation::CellOperation::DeleteRow => usize::MAX,
+        });
+        operations
+    }
+
+    fn write_column_subset(
+        &self,
+        buf: &mut Vec<u8>,
+        columns: &[&Column],
+        present_columns: &std::collections::HashSet<&str>,
+    ) -> Result<()> {
+        let mut present_indices = Vec::new();
+        let mut missing_indices = Vec::new();
+
+        for (idx, column) in columns.iter().enumerate() {
+            if present_columns.contains(column.name.as_str()) {
+                present_indices.push(idx);
+            } else {
+                missing_indices.push(idx);
+            }
+        }
+
+        if missing_indices.is_empty() {
+            encode_unsigned(0, buf);
+            return Ok(());
+        }
+
+        if columns.len() < 64 {
+            let mut bitmap = 0u64;
+            for idx in missing_indices {
+                bitmap |= 1u64 << idx;
+            }
+            encode_unsigned(bitmap, buf);
+            return Ok(());
+        }
+
+        encode_unsigned((columns.len() - present_indices.len()) as u64, buf);
+
+        if present_indices.len() < columns.len() / 2 {
+            for idx in present_indices {
+                encode_unsigned(idx as u64, buf);
+            }
+        } else {
+            for idx in missing_indices {
+                encode_unsigned(idx as u64, buf);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Returns true if the column type is a non-frozen collection (complex column).
@@ -1702,6 +1731,16 @@ fn is_complex_column(data_type: &str) -> bool {
     }
 
     false
+}
+
+#[derive(Clone, Copy)]
+enum ColumnScope {
+    RegularOnly,
+    StaticOnly,
+}
+
+fn column_order_key(column: &Column) -> (bool, &str) {
+    (is_complex_column(&column.data_type), column.name.as_str())
 }
 
 /// Generate a version-1 TimeUUID for use as a list cell path.
@@ -2397,8 +2436,15 @@ mod tests {
     #[test]
     fn test_serialize_clustering_date_includes_length_prefix() {
         let bytes = serialize_value_for_clustering(&Value::Date(0), &ComparatorType::Date).unwrap();
-        assert_eq!(bytes[0], 0x04, "date clustering values should be length-prefixed");
-        assert_eq!(bytes.len(), 5, "date clustering value should be 1-byte length + 4-byte payload");
+        assert_eq!(
+            bytes[0], 0x04,
+            "date clustering values should be length-prefixed"
+        );
+        assert_eq!(
+            bytes.len(),
+            5,
+            "date clustering value should be 1-byte length + 4-byte payload"
+        );
     }
 
     #[test]
@@ -3251,7 +3297,13 @@ mod tests {
         );
 
         writer
-            .write_partition(&key, &[static_mutation, regular_mutation], &schema, None, &[])
+            .write_partition(
+                &key,
+                &[static_mutation, regular_mutation],
+                &schema,
+                None,
+                &[],
+            )
             .unwrap();
         let bytes = writer.finish().unwrap();
 
@@ -3263,143 +3315,16 @@ mod tests {
         assert_eq!(bytes[partition_header_len + 1], EXTENDED_IS_STATIC);
     }
 
-    /// Verify that 64+ regular columns returns an error (not a panic from shift overflow).
+    /// Cassandra switches to large-subset encoding when the superset reaches 64 columns.
     #[test]
-    fn test_column_bitmap_64_plus_regular_columns_returns_error() {
-        let stats = create_test_stats();
-        let writer = DataWriter::new(stats);
-
-        // Create schema with 65 regular columns
-        let columns: Vec<Column> = (0..65)
-            .map(|i| Column {
-                name: format!("col_{}", i),
-                data_type: "text".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            })
-            .collect();
-
-        let schema = TableSchema {
-            keyspace: "test_ks".to_string(),
-            table: "test_table".to_string(),
-            partition_keys: vec![KeyColumn {
-                name: "id".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-            }],
-            clustering_keys: vec![],
-            columns,
-            comments: HashMap::new(),
-        };
-
-        let table_id = TableId::new("test_ks", "test_table");
-        let pk = PartitionKey::single("id", Value::Integer(1));
-
-        // Only write one column — the other 64 are missing
-        let mutation = Mutation::new(
-            table_id,
-            pk,
-            None,
-            vec![CellOperation::Write {
-                column: "col_0".to_string(),
-                value: Value::Text("test".to_string()),
-            }],
-            1001000,
-            None,
-        );
-
-        let mut buf = Vec::new();
-        let result = writer.write_column_bitmap(&mut buf, &mutation, &schema);
-        assert!(
-            result.is_err(),
-            "Should return error for >64 regular columns"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains(">64 columns not yet supported"),
-            "Error message should mention >64 columns"
-        );
-    }
-
-    /// Verify that 64+ static columns returns an error (not a panic from shift overflow).
-    #[test]
-    fn test_column_bitmap_64_plus_static_columns_returns_error() {
-        let stats = create_test_stats();
-        let writer = DataWriter::new(stats);
-
-        // Create schema with 65 static columns
-        let columns: Vec<Column> = (0..65)
-            .map(|i| Column {
-                name: format!("scol_{}", i),
-                data_type: "text".to_string(),
-                nullable: true,
-                default: None,
-                is_static: true,
-            })
-            .collect();
-
-        let schema = TableSchema {
-            keyspace: "test_ks".to_string(),
-            table: "test_table".to_string(),
-            partition_keys: vec![KeyColumn {
-                name: "id".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-            }],
-            clustering_keys: vec![ClusteringColumn {
-                name: "ck".to_string(),
-                data_type: "int".to_string(),
-                position: 0,
-                order: ClusteringOrder::Asc,
-            }],
-            columns,
-            comments: HashMap::new(),
-        };
-
-        let table_id = TableId::new("test_ks", "test_table");
-        let pk = PartitionKey::single("id", Value::Integer(1));
-
-        // Only write one static column — the other 64 are missing
-        let mutation = Mutation::new(
-            table_id,
-            pk,
-            None,
-            vec![CellOperation::Write {
-                column: "scol_0".to_string(),
-                value: Value::Text("test".to_string()),
-            }],
-            1001000,
-            None,
-        );
-
-        let mut buf = Vec::new();
-        let result = writer.write_static_column_bitmap(&mut buf, &mutation, &schema);
-        assert!(
-            result.is_err(),
-            "Should return error for >64 static columns"
-        );
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains(">64 columns not yet supported"),
-            "Error message should mention >64 columns"
-        );
-    }
-
-    /// Verify that exactly 64 regular columns works (u64 can represent bits 0..63).
-    #[test]
-    fn test_column_bitmap_exactly_64_regular_columns_succeeds() {
+    fn test_column_subset_exactly_64_regular_columns_uses_large_subset_encoding() {
         let stats = create_test_stats();
         let writer = DataWriter::new(stats);
 
         // Create schema with exactly 64 regular columns
         let columns: Vec<Column> = (0..64)
             .map(|i| Column {
-                name: format!("col_{}", i),
+                name: format!("col_{:03}", i),
                 data_type: "text".to_string(),
                 nullable: true,
                 default: None,
@@ -3423,18 +3348,18 @@ mod tests {
         let table_id = TableId::new("test_ks", "test_table");
         let pk = PartitionKey::single("id", Value::Integer(1));
 
-        // Write only col_0 and col_63 — the middle 62 columns are missing
+        // Only write col_0 and col_63, forcing the large-subset path.
         let mutation = Mutation::new(
             table_id,
             pk,
             None,
             vec![
                 CellOperation::Write {
-                    column: "col_0".to_string(),
+                    column: "col_000".to_string(),
                     value: Value::Text("first".to_string()),
                 },
                 CellOperation::Write {
-                    column: "col_63".to_string(),
+                    column: "col_063".to_string(),
                     value: Value::Text("last".to_string()),
                 },
             ],
@@ -3443,27 +3368,24 @@ mod tests {
         );
 
         let mut buf = Vec::new();
-        let result = writer.write_column_bitmap(&mut buf, &mutation, &schema);
-        assert!(
-            result.is_ok(),
-            "Should succeed for exactly 64 regular columns: {:?}",
-            result.err()
-        );
+        writer
+            .write_column_bitmap(&mut buf, &mutation, &schema)
+            .unwrap();
 
-        // Verify bitmap was written (should be non-empty)
-        assert!(!buf.is_empty(), "Bitmap should be written");
+        // missing_count=62, then present indexes [0, 63]
+        assert_eq!(buf, vec![62, 0, 63]);
     }
 
-    /// Verify that exactly 64 static columns works (u64 can represent bits 0..63).
+    /// Large static-column subsets use the same delta encoding as regular columns.
     #[test]
-    fn test_column_bitmap_exactly_64_static_columns_succeeds() {
+    fn test_column_subset_65_static_columns_uses_missing_indexes_when_present_majority() {
         let stats = create_test_stats();
         let writer = DataWriter::new(stats);
 
-        // Create schema with exactly 64 static columns
-        let columns: Vec<Column> = (0..64)
+        // Create schema with 65 static columns
+        let columns: Vec<Column> = (0..65)
             .map(|i| Column {
-                name: format!("scol_{}", i),
+                name: format!("scol_{:03}", i),
                 data_type: "text".to_string(),
                 nullable: true,
                 default: None,
@@ -3492,35 +3414,228 @@ mod tests {
         let table_id = TableId::new("test_ks", "test_table");
         let pk = PartitionKey::single("id", Value::Integer(1));
 
-        // Write only scol_0 and scol_63 — the middle 62 columns are missing
+        // Write all but one static column so the encoding emits missing indexes.
+        let mut operations = Vec::new();
+        for i in 0..65 {
+            if i == 17 {
+                continue;
+            }
+            operations.push(CellOperation::Write {
+                column: format!("scol_{:03}", i),
+                value: Value::Text(format!("value-{}", i)),
+            });
+        }
+
+        let mutation = Mutation::new(table_id, pk, None, operations, 1001000, None);
+
+        let mut buf = Vec::new();
+        writer
+            .write_static_column_bitmap(&mut buf, &mutation, &schema)
+            .unwrap();
+
+        // missing_count=1, followed by the missing column index.
+        assert_eq!(buf, vec![1, 17]);
+    }
+
+    /// Smaller subsets still use the missing-column bitmap.
+    #[test]
+    fn test_column_subset_under_64_regular_columns_uses_bitmap() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let columns: Vec<Column> = (0..4)
+            .map(|i| Column {
+                name: format!("col_{}", i),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            })
+            .collect();
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns,
+            comments: HashMap::new(),
+        };
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+
+        // Only col_1 is present, so bits 0, 2, and 3 are set.
         let mutation = Mutation::new(
             table_id,
             pk,
             None,
-            vec![
-                CellOperation::Write {
-                    column: "scol_0".to_string(),
-                    value: Value::Text("first".to_string()),
-                },
-                CellOperation::Write {
-                    column: "scol_63".to_string(),
-                    value: Value::Text("last".to_string()),
-                },
-            ],
+            vec![CellOperation::Write {
+                column: "col_1".to_string(),
+                value: Value::Text("present".to_string()),
+            }],
             1001000,
             None,
         );
 
         let mut buf = Vec::new();
-        let result = writer.write_static_column_bitmap(&mut buf, &mutation, &schema);
-        assert!(
-            result.is_ok(),
-            "Should succeed for exactly 64 static columns: {:?}",
-            result.err()
-        );
+        writer
+            .write_column_bitmap(&mut buf, &mutation, &schema)
+            .unwrap();
 
-        // Verify bitmap was written (should be non-empty)
-        assert!(!buf.is_empty(), "Bitmap should be written");
+        assert_eq!(buf, vec![0b1101]);
+    }
+
+    #[test]
+    fn test_regular_columns_sort_simple_before_complex() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "z_simple".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "a_complex".to_string(),
+                    data_type: "set<text>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "m_simple".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let ordered = writer.regular_columns(&schema);
+        let names: Vec<_> = ordered.iter().map(|column| column.name.as_str()).collect();
+
+        assert_eq!(names, vec!["m_simple", "z_simple", "a_complex"]);
+    }
+
+    #[test]
+    fn test_static_columns_sort_simple_before_complex() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                Column {
+                    name: "z_static_simple".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: true,
+                },
+                Column {
+                    name: "a_static_complex".to_string(),
+                    data_type: "set<text>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: true,
+                },
+                Column {
+                    name: "m_static_simple".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: true,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let ordered = writer.static_columns(&schema);
+        let names: Vec<_> = ordered.iter().map(|column| column.name.as_str()).collect();
+
+        assert_eq!(
+            names,
+            vec!["m_static_simple", "z_static_simple", "a_static_complex"]
+        );
+    }
+
+    #[test]
+    fn test_write_column_bitmap_zero_when_all_columns_present() {
+        let stats = create_test_stats();
+        let writer = DataWriter::new(stats);
+
+        let columns: Vec<Column> = (0..65)
+            .map(|i| Column {
+                name: format!("col_{:03}", i),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            })
+            .collect();
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns,
+            comments: HashMap::new(),
+        };
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+
+        let operations: Vec<_> = (0..65)
+            .map(|i| CellOperation::Write {
+                column: format!("col_{:03}", i),
+                value: Value::Text(format!("value-{}", i)),
+            })
+            .collect();
+
+        let mutation = Mutation::new(table_id, pk, None, operations, 1001000, None);
+
+        let mut buf = Vec::new();
+        writer
+            .write_column_bitmap(&mut buf, &mutation, &schema)
+            .unwrap();
+
+        assert_eq!(buf, vec![0]);
     }
 
     #[test]
