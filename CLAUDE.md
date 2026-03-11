@@ -6,7 +6,7 @@ Guidance for Claude Code when working with CQLite.
 
 CQLite is a Rust library for local Apache Cassandra SSTable access. It reads Cassandra 5.0 data files without cluster dependencies.
 
-**Status**: M5.2 In Progress (Jan 2026) - Core reading (M1), CLI (M2), Output Writers (M3), Python Bindings (M4), and Write Support (M5.1 complete, M5.2 compaction/export in progress).
+**Status**: M4 Complete (Jan 2026) - Core reading (M1), CLI (M2), Output Writers (M3), and Python Bindings (M4) are production-ready. Next: M5 (Write Support).
 
 ## Documentation
 
@@ -119,37 +119,6 @@ const { Database } = require('@cqlite/node');
   await db.close();
 })();
 "
-
-# CLI with write support (Issue #392)
-cargo build --package cqlite-cli --features write-support
-
-# Write a mutation (requires --writable and --write-dir)
-cargo run --package cqlite-cli --features write-support -- \
-  --writable --write-dir /tmp/cqlite-write \
-  --schema test-data/schemas/basic-types.cql \
-  --mutation '{"table":{"keyspace":"test_basic","table":"simple_table"},"partition_key":[{"Uuid":[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16]}],"clustering_key":[],"operations":[{"Write":{"column":"name","value":{"Text":"Test"}}}],"timestamp_micros":1704067200000000}'
-
-# Flush memtable to SSTable
-cargo run --package cqlite-cli --features write-support -- \
-  --writable --write-dir /tmp/cqlite-write \
-  --schema test-data/schemas/basic-types.cql \
-  --flush
-
-# Write subcommands
-cargo run --package cqlite-cli --features write-support -- \
-  maintenance --budget-ms 100 \
-  --writable --write-dir /tmp/cqlite-write \
-  --schema test-data/schemas/basic-types.cql
-
-cargo run --package cqlite-cli --features write-support -- \
-  write-stats \
-  --writable --write-dir /tmp/cqlite-write \
-  --schema test-data/schemas/basic-types.cql
-
-cargo run --package cqlite-cli --features write-support -- \
-  export-sstable /tmp/export --keyspace my_ks --table my_tbl \
-  --writable --write-dir /tmp/cqlite-write \
-  --schema test-data/schemas/basic-types.cql
 ```
 
 ### CLI Output Format Precedence
@@ -335,15 +304,8 @@ cqlite-core/src/
 ├── storage/sstable/           # SSTable parsing
 │   ├── reader/parsing/        # Format parsers
 │   │   └── v5_compressed_legacy.rs  # Main V5 parser
-│   ├── writer/                # SSTable writing (M5+)
-│   │   └── data_writer.rs     # Data.db writer
 │   ├── bti/                   # BTI index support
 │   └── row_cell_state_machine.rs    # OA format parser
-├── storage/write_engine/      # Write engine (M5+)
-│   ├── mod.rs                 # WriteEngine API
-│   ├── merge.rs               # K-way merge (M5.2)
-│   ├── merge_policy.rs        # STCS compaction policy (M5.2)
-│   └── export.rs              # SSTable export (M5.2)
 ├── parser/                    # SSTable binary format parsing
 ├── cql/                       # CQL text parsing (query strings → AST)
 ├── query/                     # Query engine (M2+)

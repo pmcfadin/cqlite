@@ -4,7 +4,6 @@
 // by the REPL engine. Handles both meta-commands (:help, :quit) and CQL queries.
 
 use super::{ReplError, ReplResult};
-#[allow(unused_imports)]
 use std::fmt;
 
 /// Types of commands that can be executed in the REPL
@@ -40,12 +39,6 @@ pub enum CommandType {
     Health,
     /// Unknown command
     Unknown { input: String },
-    /// Flush memtable to SSTable (Issue #392)
-    Flush,
-    /// Show write engine statistics (Issue #392)
-    WriteStats,
-    /// Run maintenance/compaction (Issue #392)
-    Maintenance { budget_ms: Option<u64> },
 }
 
 /// Schema operation types
@@ -254,18 +247,6 @@ impl CommandParser {
             "status" => Some(CommandType::Status),
             "keyspaces" => Some(CommandType::Keyspaces),
             "health" => Some(CommandType::Health),
-
-            // Write commands (Issue #392)
-            "flush" => Some(CommandType::Flush),
-            "write-stats" | "writestats" | "wstats" | "stats" => Some(CommandType::WriteStats),
-            "maintenance" | "maint" | "compact" => {
-                let budget_ms = if parts.len() > 1 {
-                    parts[1].parse().ok()
-                } else {
-                    None
-                };
-                Some(CommandType::Maintenance { budget_ms })
-            }
 
             // Schema commands
             "schema" => {
@@ -528,25 +509,6 @@ impl CommandParser {
                 metadata.complexity = 0;
                 metadata.modifies_state = false;
                 metadata.requires_database = false;
-            }
-            // Issue #392: Write commands
-            CommandType::Flush => {
-                metadata.category = CommandCategory::System;
-                metadata.complexity = 5;
-                metadata.modifies_state = true;
-                metadata.requires_database = true;
-            }
-            CommandType::WriteStats => {
-                metadata.category = CommandCategory::System;
-                metadata.complexity = 2;
-                metadata.modifies_state = false;
-                metadata.requires_database = true;
-            }
-            CommandType::Maintenance { .. } => {
-                metadata.category = CommandCategory::System;
-                metadata.complexity = 6;
-                metadata.modifies_state = true;
-                metadata.requires_database = true;
             }
         }
 

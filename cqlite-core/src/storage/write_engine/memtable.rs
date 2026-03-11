@@ -256,14 +256,6 @@ impl Memtable {
             CellOperation::Write { column, value } => {
                 column.len() + Self::estimate_value_size(value) + 8 // +8 for overhead
             }
-            CellOperation::WriteWithTtl {
-                column,
-                value,
-                ttl_seconds: _,
-            } => {
-                // TTL cells: same as Write + 4 bytes for TTL + 4 bytes for local_deletion_time
-                column.len() + Self::estimate_value_size(value) + 16
-            }
             CellOperation::Delete { column } => column.len() + 8,
             CellOperation::DeleteRow => 8,
         }

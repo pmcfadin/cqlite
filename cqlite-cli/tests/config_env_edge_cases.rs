@@ -42,12 +42,6 @@ fn create_cli_with_flags(
         page_size,
         no_color,
         enable_select_fallback: false,
-        // Issue #392: Write support fields
-        writable: false,
-        write_dir: None,
-        mutation: Vec::new(),
-        mutations_file: None,
-        flush: false,
         command: None,
     }
 }

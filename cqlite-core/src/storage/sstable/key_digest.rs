@@ -83,13 +83,11 @@ impl KeyDigestComputer {
         }
 
         // Handle multi-component partition key
-        // Multi-component keys are encoded as:
-        //   [len][bytes][0x00][len][bytes][0x00]...
-        // with a trailing `0x00` after the final component as well.
+        // Multi-component keys are encoded with length prefixes for each component
         let mut values = Vec::new();
         let mut offset = 0;
 
-        for (index, comparator) in partition_comparators.iter().enumerate() {
+        for comparator in partition_comparators {
             if offset >= key_bytes.len() {
                 return Err(Error::corruption(
                     "Insufficient bytes for multi-component partition key".to_string(),
@@ -118,24 +116,6 @@ impl KeyDigestComputer {
             let value = self.parse_value_bytes(component_bytes, comparator)?;
             values.push(value);
             offset += component_len;
-
-            if offset >= key_bytes.len() {
-                return Err(Error::corruption(
-                    "Missing end-of-component marker in multi-component partition key".to_string(),
-                ));
-            }
-            if key_bytes[offset] != 0x00 {
-                return Err(Error::corruption(
-                    "Invalid end-of-component marker in multi-component partition key".to_string(),
-                ));
-            }
-            offset += 1;
-
-            if index + 1 == partition_comparators.len() && offset != key_bytes.len() {
-                return Err(Error::corruption(
-                    "Unexpected trailing bytes in multi-component partition key".to_string(),
-                ));
-            }
         }
 
         Ok(values)
@@ -352,14 +332,12 @@ mod tests {
         let context = create_test_parsing_context(vec![ComparatorType::Int, ComparatorType::Text]);
 
         // Multi-component key: int(42) + text("hello")
-        // Format: [len1(2 bytes)][int_bytes(4 bytes)][0x00][len2(2 bytes)][text_bytes(5 bytes)][0x00]
+        // Format: [len1(2 bytes)][int_bytes(4 bytes)][len2(2 bytes)][text_bytes(5 bytes)]
         let mut key_bytes = Vec::new();
         key_bytes.extend_from_slice(&[0x00, 0x04]); // length of int (4 bytes)
         key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x2A]); // int value 42
-        key_bytes.push(0x00); // separator
         key_bytes.extend_from_slice(&[0x00, 0x05]); // length of text (5 bytes)
         key_bytes.extend_from_slice(b"hello"); // text value
-        key_bytes.push(0x00); // separator
 
         let digest = computer
             .compute_partition_key_digest(&key_bytes, &context)
@@ -367,28 +345,6 @@ mod tests {
 
         // Digest should be 4 bytes (32-bit Murmur3 hash)
         assert_eq!(digest.len(), 4);
-    }
-
-    #[test]
-    fn test_multi_component_key_rejects_missing_final_separator() {
-        let mut computer = KeyDigestComputer::new();
-        let context = create_test_parsing_context(vec![ComparatorType::Int, ComparatorType::Text]);
-
-        let mut key_bytes = Vec::new();
-        key_bytes.extend_from_slice(&[0x00, 0x04]);
-        key_bytes.extend_from_slice(&[0x00, 0x00, 0x00, 0x2A]);
-        key_bytes.push(0x00);
-        key_bytes.extend_from_slice(&[0x00, 0x05]);
-        key_bytes.extend_from_slice(b"hello");
-
-        let err = computer
-            .compute_partition_key_digest(&key_bytes, &context)
-            .expect_err("missing final separator must be rejected");
-
-        assert!(
-            err.to_string().contains("Missing end-of-component marker"),
-            "unexpected error: {err}"
-        );
     }
 
     #[test]

@@ -11,4 +11,4 @@ pub mod docker;
 #[cfg(feature = "docker-integration")]
 pub use cassandra_test::{CassandraTestRunner, ComparisonResult, TestResult, TestSuiteResult};
 #[cfg(feature = "docker-integration")]
-pub use docker::{CassandraContainer, CqlshOutput, DockerCqlshClient, SstableloaderResult};
+pub use docker::{CqlshOutput, DockerCqlshClient};

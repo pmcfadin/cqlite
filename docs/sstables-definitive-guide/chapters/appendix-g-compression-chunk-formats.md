@@ -2,24 +2,7 @@
 
 ## Overview
 
-Cassandra 5.0 uses a chunked compression approach for Data.db files. Data is split into fixed-size chunks (typically 64KB) and each chunk is independently compressed. The compression metadata is stored in CompressionInfo.db, while the actual compressed data is stored in Data.db.
-
-### Compression Architecture
-
-**Two-File System:**
-1. **CompressionInfo.db**: Metadata file containing:
-   - Algorithm name (LZ4, Snappy, Deflate, Zstd)
-   - Chunk length (uncompressed chunk size, typically 65536 bytes)
-   - Array of chunk offsets pointing into Data.db
-   - Optional per-chunk CRC32 checksums
-   - Metadata CRC32 for integrity verification
-
-2. **Data.db**: Compressed data file containing:
-   - Concatenated compressed chunks (no length prefixes, no delimiters)
-   - Chunk boundaries defined by offsets in CompressionInfo.db
-   - Each chunk may have algorithm-specific size prefixes (see algorithm sections below)
-
-**Key Design Principle**: CompressionInfo.db acts as an index into Data.db, allowing random access to compressed chunks without scanning the entire file.
+Cassandra 5.0 uses a chunked compression approach for Data.db files. Data is split into fixed-size chunks (typically 64KB) and each chunk is independently compressed. The compression metadata is stored in CompressionInfo.db, while the actual compressed data is stored in Data.db with a 4-byte CRC checksum appended after each compressed chunk.
 
 ## Compression Metadata Format (CompressionInfo.db)
 
@@ -30,17 +13,13 @@ CompressionInfo.db contains metadata about the compressed Data.db file. The form
 ```
 [Algorithm Name Length: 2 bytes BE]
 [Algorithm Name: variable length UTF-8]
-[Padding: 4 bytes]
+[Null Terminator: 1 byte] (optional)
 [Chunk Length: 4 bytes BE]
-[Options: 4 bytes BE]
-[Compressed Data Length: 8 bytes BE]
-[Chunk Count: 4 bytes BE]
-[Chunk Offsets: 8 bytes BE * count]
-[Chunk CRCs: 4 bytes BE * count] (optional)
-[Metadata CRC: 4 bytes BE]
+[Data Length: 8 bytes BE]
+[Number of Chunks: 4 bytes BE]
+[Chunk Information: (number_of_chunks * 20 bytes)]
+[Optional Compression Dictionary: variable length]
 ```
-
-**Implementation Reference**: `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs`
 
 ### Field Descriptions
 
@@ -48,85 +27,61 @@ CompressionInfo.db contains metadata about the compressed Data.db file. The form
 |-------|------|------|-----------|-------------|
 | Algorithm Name Length | u16 | 2 | Big-Endian | Length of algorithm name in bytes (e.g., 13 for "LZ4Compressor") |
 | Algorithm Name | String | variable | UTF-8 | Full algorithm class name (e.g., "LZ4Compressor", "SnappyCompressor") |
-| Padding | Fixed | 4 | - | Fixed padding (0x00000000) for 8-byte alignment |
+| Null Terminator | u8 | 1 | - | Optional: 0x00 byte separator |
 | Chunk Length | u32 | 4 | Big-Endian | Size of uncompressed chunks (typically 65536 bytes / 64KB) |
-| Options | u32 | 4 | Big-Endian | Options/flags field (typically 0x7FFFFFFF) |
-| Compressed Data Length | u64 | 8 | Big-Endian | Total compressed Data.db file size in bytes |
-| Chunk Count | u32 | 4 | Big-Endian | Number of compressed chunks |
-| Chunk Offsets | u64[] | 8 each | Big-Endian | Byte offset of each chunk in Data.db (count entries) |
-| Chunk CRCs | u32[] | 4 each | Big-Endian | Optional: CRC32 of each compressed chunk (count entries) |
-| Metadata CRC | u32 | 4 | Big-Endian | CRC32 checksum of all preceding bytes |
+| Data Length | u64 | 8 | Big-Endian | Total uncompressed data size in bytes |
+| Number of Chunks | u32 | 4 | Big-Endian | Count of compressed chunks |
+| Chunk Info | struct | 20 each | - | See chunk info structure |
 
-### Important Notes
+### Chunk Information Structure
 
-1. **Fixed 4-byte Padding**: The padding after algorithm name is NOT alignment-based, but a fixed 4-byte field (always 0x00000000)
-2. **8-byte Offsets Only**: Chunk offsets are simple 8-byte values, NOT 20-byte structures with lengths
-3. **Optional CRCs**: Per-chunk CRCs may be present or absent; metadata CRC is always present
-4. **Compressed vs Uncompressed**: The data length field stores the total COMPRESSED size (Data.db size), not uncompressed size
-
-### Example: CompressionInfo.db with LZ4 (No Per-Chunk CRCs)
-
-Based on the implementation test case from `compression_info_writer.rs`:
+For each chunk, 20 bytes of metadata:
 
 ```
-Offset  Hex Bytes                       Decoded Field
-------  --------------------------      -------------
-0x00    00 0d                           Algorithm name length: 13
-0x02    4c 5a 34 43 6f 6d 70            "LZ4Compressor"
-        72 65 73 73 6f 72
-0x0f    00 00 00 00                     Fixed padding (4 bytes)
-0x13    00 01 00 00                     Chunk length: 65536 (0x10000)
-0x17    7f ff ff ff                     Options: 0x7FFFFFFF
-0x1b    00 00 00 00 00 00 3e 80         Compressed data length: 16000
-0x23    00 00 00 02                     Chunk count: 2
-0x27    00 00 00 00 00 00 00 00         Chunk 0 offset: 0
-0x2f    00 00 00 00 00 00 20 00         Chunk 1 offset: 8192 (0x2000)
-0x37    [4-byte CRC32]                  Metadata CRC32
+[Chunk Offset: 8 bytes BE]
+[Compressed Length: 4 bytes BE]
+[Uncompressed Length: 4 bytes BE]
 ```
 
-Total size: 59 bytes (55 bytes content + 4 bytes CRC)
+| Field | Type | Size | Byte Order | Description |
+|-------|------|------|-----------|-------------|
+| Chunk Offset | u64 | 8 | Big-Endian | Byte offset in the compressed Data.db file |
+| Compressed Length | u32 | 4 | Big-Endian | Length of compressed chunk data (excluding CRC) |
+| Uncompressed Length | u32 | 4 | Big-Endian | Length of original uncompressed data |
 
-### Example: CompressionInfo.db with Snappy (With Per-Chunk CRCs)
-
-Based on the implementation test case:
+### Example: CompressionInfo.db with LZ4
 
 ```
-Offset  Hex Bytes                       Decoded Field
-------  --------------------------      -------------
-0x00    00 10                           Algorithm name length: 16
-0x02    53 6e 61 70 70 79 43 6f         "SnappyCompressor"
-        6d 70 72 65 73 73 6f 72
-0x12    00 00 00 00                     Fixed padding (4 bytes)
-0x16    00 00 40 00                     Chunk length: 16384 (0x4000)
-0x1a    7f ff ff ff                     Options: 0x7FFFFFFF
-0x1e    00 00 00 00 00 00 1f 40         Compressed data length: 8000
-0x26    00 00 00 02                     Chunk count: 2
-0x2a    00 00 00 00 00 00 00 00         Chunk 0 offset: 0
-0x32    00 00 00 00 00 00 10 00         Chunk 1 offset: 4096 (0x1000)
-0x3a    11 22 33 44                     Chunk 0 CRC: 0x11223344
-0x3e    55 66 77 88                     Chunk 1 CRC: 0x55667788
-0x42    [4-byte CRC32]                  Metadata CRC32
+Hex:                        Decoded:
+00 0d                       Algorithm name length: 13
+4c 5a 34 43 6f 6d 70        "LZ4Compressor"
+72 65 73 73 6f 72
+00                          Null terminator
+00 00 40 00                 Chunk length: 16384 bytes (16KB)
+00 00 00 00 00 10 00 00     Data length: 1048576 bytes (1MB)
+00 00 00 01                 Number of chunks: 1
+00 00 00 00 00 00 00 00     Chunk 0 offset: 0
+00 00 20 00                 Chunk 0 compressed length: 8192 bytes
+00 00 40 00                 Chunk 0 uncompressed length: 16384 bytes
 ```
-
-Total size: 70 bytes (66 bytes content + 4 bytes CRC)
 
 ## Compressed Chunk Format in Data.db
 
-Each compressed chunk in Data.db contains only the compressed data:
+Each compressed chunk in Data.db has the structure:
 
 ```
 [Compressed Data: variable length]
+[CRC Checksum: 4 bytes BE]
 ```
 
-The actual compressed data format varies by compression algorithm (see below). The compressed data size is determined by the offset difference in CompressionInfo.db's chunk offset array.
+The actual compressed data format varies by compression algorithm (see below).
 
 ### Important Notes
 
-1. **No explicit length prefixes in Data.db**: Chunk boundaries are defined by offsets in CompressionInfo.db
-2. **CRC checksums**: Optional per-chunk CRC32 values are stored in CompressionInfo.db, not appended to Data.db chunks
-3. **Chunk alignment**: Chunks start at the byte offsets specified in the chunk offset array
-4. **Last chunk**: The last chunk may be smaller than the standard chunk size if the total data length is not evenly divisible
-5. **Metadata CRC**: A CRC32 checksum of the entire CompressionInfo.db metadata is stored at the end of CompressionInfo.db
+1. **CRC Checksum**: A 4-byte big-endian checksum is **appended after** the compressed chunk data
+2. **No Length Prefix in Data.db**: The Data.db file does NOT contain explicit length prefixes; lengths are stored only in CompressionInfo.db
+3. **Chunk Alignment**: Chunks align to the boundaries specified in the chunk offset table
+4. **Last Chunk**: The last chunk may be smaller than the standard chunk size if the total data length is not evenly divisible
 
 ## Compression Algorithm Formats
 
@@ -136,14 +91,14 @@ The actual compressed data format varies by compression algorithm (see below). T
 ```
 [Uncompressed Size: 4 bytes LE]
 [Compressed Data: variable length]
+[CRC Checksum: 4 bytes BE]
 ```
 
 **Key Details:**
 - Size prefix is **little-endian** (important!)
 - Size prefix represents the decompressed length in bytes
-- The size prefix is part of the compressed chunk data (included in chunk offset calculation)
-- Cassandra uses LZ4 block format via jpountz library (not LZ4 frame format)
-- No trailing CRC in Data.db - CRCs stored in CompressionInfo.db if present
+- The size prefix is INSIDE the compressed chunk (included in CompressionInfo.compressed_length)
+- Cassandra uses LZ4 frame format via jpountz library
 
 **Decompression Process:**
 ```java
@@ -179,18 +134,19 @@ decompress_size_prepended(data)
 **Format in Data.db (NB - NewBinary format):**
 ```
 [Compressed Data: variable length] (NO size prefix)
+[CRC Checksum: 4 bytes BE]
 ```
 
 **Key Details:**
 - Cassandra 5.0 NB format uses **raw Snappy** without a size prefix
 - The uncompressed size is determined by decompression (not from metadata)
 - Decompressed size is validated against chunk_length from CompressionInfo.db
-- No trailing CRC in Data.db - CRCs stored in CompressionInfo.db if present
 
 **Legacy Format (pre-5.0):**
 ```
 [Uncompressed Size: 4 bytes BE]
 [Compressed Data: variable length]
+[CRC Checksum: 4 bytes BE]
 ```
 
 **Decompression Process:**
@@ -228,13 +184,13 @@ let decompressed = decoder.decompress_vec(data)?;
 ```
 [Uncompressed Size: 4 bytes BE]
 [Compressed Data: variable length]
+[CRC Checksum: 4 bytes BE]
 ```
 
 **Key Details:**
 - Size prefix is **big-endian**
 - Uses standard zlib Deflate format (RFC 1951 deflate stream format)
 - Deflate level 6 is used by Cassandra
-- No trailing CRC in Data.db - CRCs stored in CompressionInfo.db if present
 
 **Decompression Process:**
 ```java
@@ -271,13 +227,13 @@ if decompressed.len() != uncompressed_size {
 ```
 [Uncompressed Size: 4 bytes BE]
 [Compressed Data: variable length]
+[CRC Checksum: 4 bytes BE]
 ```
 
 **Key Details:**
 - Size prefix is **big-endian**
 - Uses Zstd frame format with checksum enabled
 - Compression level 3 is default
-- No trailing CRC in Data.db - CRCs stored in CompressionInfo.db if present
 
 **Decompression Process:**
 ```java
@@ -315,18 +271,17 @@ To find a specific chunk in Data.db:
 ```
 chunk_index = position_in_file / chunk_length
 
-chunk_offset = chunk_offsets[chunk_index]
-next_chunk_offset = chunk_offsets[chunk_index + 1]
-    OR compressed_data_length (if last chunk)
+chunk_offset = chunks[chunk_index].offset
+next_chunk_offset = chunks[chunk_index + 1].offset
+    OR compressedFileLength (if last chunk)
 
-compressed_length = next_chunk_offset - chunk_offset
+compressed_length = next_chunk_offset - chunk_offset - 4  // Subtract CRC
 ```
 
-**Important Notes:**
-1. **Chunk offsets** are stored as a simple array of u64 values (8 bytes each)
-2. **Compressed length** is calculated by subtracting consecutive offsets
-3. **No explicit length fields** per chunk in CompressionInfo.db - lengths are derived from offset differences
-4. **Last chunk** length is `compressed_data_length - chunk_offsets[last]`
+**Important:** The 4-byte CRC checksum at the end means:
+- CRC is NOT included in CompressionInfo.compressed_length
+- When reading, you must account for the CRC: `actual_chunk_data_length = compressed_length`
+- CRC starts at offset: `chunk_offset + compressed_length`
 
 ## Memory Safety Considerations
 
@@ -383,48 +338,38 @@ CQLite normalizes these to standard names:
 
 ## CRC Checksum Format
 
-CompressionInfo.db contains two types of CRC checksums:
+The 4-byte CRC checksum appended to each chunk:
+- Uses **big-endian** byte order
+- Position: `chunk_offset + compressed_length` (in Data.db)
+- Not included in `CompressionInfo.compressed_length`
+- Used by Cassandra for integrity verification
 
-1. **Per-Chunk CRCs** (optional):
-   - Stored in CompressionInfo.db as an array of u32 values (4 bytes each, big-endian)
-   - One CRC32 value per chunk
-   - Located after the chunk offset array
-   - Used to validate individual compressed chunks
-
-2. **Metadata CRC** (required):
-   - Stored at the end of CompressionInfo.db (last 4 bytes)
-   - CRC32 of all preceding bytes in the file
-   - Uses big-endian byte order
-   - Validated during CompressionInfo.db parsing
-
-**Implementation Note**: CQLite validates the metadata CRC during parsing. Per-chunk CRC validation is optional and depends on whether the CompressionInfo.db file includes them.
+**CQLite Note:** Currently, CQLite does not validate CRC checksums when reading compressed chunks. This is acceptable for most use cases but could be added for stricter validation.
 
 ## Practical Example: Reading an LZ4 Chunk
 
 Given a file with:
-- CompressionInfo.db showing: chunk_offsets = [0, 1024], chunk_length=65536
-- Data.db with compressed data at offset 0
+- CompressionInfo.db showing chunk 0: offset=0, compressed_length=1024, uncompressed_length=65536
+- Data.db with compressed data at that location
 
 ```
 Bytes 0-3:      [0x00, 0x01, 0x00, 0x00]  = 0x00010000 LE = 65536 (uncompressed size)
 Bytes 4-1023:   Compressed data (1020 bytes)
+Bytes 1024-1027: [CRC checksum]
 ```
 
 Reading process:
-1. Determine chunk 0 offset = 0, chunk 1 offset = 1024
-2. Calculate compressed length = 1024 - 0 = 1024 bytes
-3. Seek to position 0 in Data.db
-4. Read 1024 bytes of compressed data
-5. Extract 4-byte LE prefix = 65536 (uncompressed size)
-6. Decompress remaining 1020 bytes using LZ4
-7. Verify decompressed size = 65536 matches chunk_length
+1. Read chunk metadata: offset=0, compressed_length=1024
+2. Seek to position 0 in Data.db
+3. Read 1024 bytes total
+4. Extract 4-byte LE prefix = 65536
+5. Decompress remaining 1020 bytes using LZ4
+6. Verify decompressed size = 65536
+7. (Optional) Validate CRC at offset 1024
 
 ## Related Documentation
 
 - **Chapter 5**: Data.db Format and row structure
 - **Chapter 6**: Index.db and Summary.db structure
-- **Chapter 9**: Compression and chunking details
 - **Appendix B**: Encoding cheat sheet (VInt, flags, byte order)
 - **Appendix F**: Known limitations (what's not supported yet)
-- **Implementation**: `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs`
-- **Parser**: `cqlite-core/src/storage/sstable/compression_info.rs`
