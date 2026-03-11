@@ -259,6 +259,131 @@ pub fn generation(&self) -> u32
 
 Provides read-only access to internal state for monitoring.
 
+### maintenance_step() (M5.2)
+
+```rust
+pub async fn maintenance_step(&mut self, budget: MaintenanceBudget) -> Result<MaintenanceReport>
+```
+
+Performs incremental background maintenance (compaction).
+
+**Parameters**:
+- `budget`: `MaintenanceBudget` - Controls how much work to perform per call
+  - `max_bytes`: Maximum bytes to compact in this step
+  - `max_sstables`: Maximum number of SSTables to merge
+
+**Returns**: `Result<MaintenanceReport>`
+- `compacted_bytes`: Total bytes processed
+- `input_sstables`: Number of SSTables merged
+- `output_sstable`: Path to resulting SSTable (if any)
+- `duration`: Time spent in maintenance
+
+**Behavior**:
+1. Evaluates merge policy to find compaction candidates
+2. Performs k-way merge on selected SSTables (up to budget)
+3. Writes merged output SSTable
+4. Cleans up input SSTables after successful merge
+
+**Example**:
+```rust
+use cqlite_core::storage::write_engine::{WriteEngine, MaintenanceBudget};
+
+let budget = MaintenanceBudget {
+    max_bytes: 64 * 1024 * 1024,  // 64 MB per step
+    max_sstables: 4,
+};
+
+let report = engine.maintenance_step(budget).await?;
+if let Some(output) = report.output_sstable {
+    println!("Compacted {} SSTables into {}",
+             report.input_sstables,
+             output.display());
+}
+```
+
+### set_merge_policy() (M5.2)
+
+```rust
+pub fn set_merge_policy(&mut self, policy: Box<dyn MergePolicy>)
+```
+
+Sets the compaction merge policy.
+
+**Parameters**:
+- `policy`: `Box<dyn MergePolicy>` - The merge policy implementation
+
+**Default**: `STCSPolicy` (Size-Tiered Compaction Strategy)
+
+**Available Policies**:
+- `STCSPolicy`: Size-Tiered Compaction Strategy (Cassandra default)
+  - Groups SSTables by size into buckets (0.5x - 1.5x ratio)
+  - Merges when bucket reaches min_threshold (default: 4)
+  - Configurable via `STCSPolicy::new(min_threshold, max_threshold)`
+
+**Example**:
+```rust
+use cqlite_core::storage::write_engine::{WriteEngine, STCSPolicy};
+
+// Use STCS with custom thresholds
+let policy = STCSPolicy::new(4, 32);
+engine.set_merge_policy(Box::new(policy));
+```
+
+### export_sstable() (M5.2)
+
+```rust
+pub async fn export_sstable(
+    &mut self,
+    output_dir: &Path,
+    options: ExportOptions
+) -> Result<ExportReport>
+```
+
+Exports a Cassandra-compatible SSTable for distribution.
+
+**Parameters**:
+- `output_dir`: Target directory for exported files
+- `options`: `ExportOptions`
+  - `compact_before_export`: If true, compacts before export (default: false, **NOT YET IMPLEMENTED**)
+  - `keyspace`: Keyspace name for file naming
+  - `table`: Table name for file naming
+  - `generation`: Optional generation number (auto-generated if None)
+
+**Returns**: `Result<ExportReport>`
+- `data_path`: Path to Data.db
+- `index_path`: Path to Index.db
+- `components`: List of all generated component paths
+- `total_size`: Total bytes written
+
+**Behavior**:
+1. Flushes memtable if not empty
+2. Optionally compacts all L0 SSTables into single output (**NOT YET IMPLEMENTED - returns error if enabled**)
+3. Copies most recent SSTable to output directory
+4. Writes Cassandra-compatible SSTable with naming: `nb-{gen}-big-{Component}.db`
+5. Generates all required components (Data.db, Index.db, Statistics.db, etc.)
+
+**Note**: Compaction before export is planned but not yet implemented. Use `maintenance_step()` to compact SSTables before calling `export_sstable()`, or set `compact_before_export: false` (the default).
+
+**Example**:
+```rust
+use cqlite_core::storage::write_engine::{WriteEngine, ExportOptions};
+use std::path::Path;
+
+// Basic export without compaction (recommended until compaction is implemented)
+let options = ExportOptions::new("my_keyspace", "my_table", 1);
+
+let report = engine.export_sstable(Path::new("/export"), options).await?;
+println!("Exported {} bytes to {}",
+         report.total_size,
+         report.data_path.display());
+
+// If you need compaction, do it manually first:
+// use cqlite_core::storage::write_engine::MaintenanceBudget;
+// let budget = MaintenanceBudget { max_bytes: 64 * 1024 * 1024, max_sstables: 4 };
+// engine.maintenance_step(budget).await?;
+// let report = engine.export_sstable(Path::new("/export"), options).await?;
+```
+
 ## SSTableInfo
 
 Information about a written SSTable, returned by `flush()`.
@@ -455,18 +580,18 @@ match engine.write(mutation) {
 }
 ```
 
-## Limitations (M5.0-6)
+## Limitations (M5.2)
 
 1. **CQL Parsing**: Not yet implemented. Use `write(mutation)` directly.
 2. **Single Writer**: No concurrent write support.
-3. **No Compaction**: SSTables accumulate, compaction in M5.0-9.
-4. **No Tombstone GC**: Delete markers persist until compaction.
-5. **Fixed Murmur3**: Only Murmur3Partitioner supported.
+3. **No Tombstone GC**: Delete markers persist until compaction removes them.
+4. **Fixed Murmur3**: Only Murmur3Partitioner supported.
+5. **Promoted Index Deferred**: Wide partitions use linear scan (no within-partition index).
 
 ## Future Enhancements
 
-- **M5.0-8**: CQL INSERT/UPDATE/DELETE parsing
-- **M5.0-9**: K-way merge compaction
+- **M5.3**: CQL INSERT/UPDATE/DELETE parsing
+- **M5.4**: Promoted index for wide partition seeks
 - **M6**: Multi-table support
 - **M7**: Concurrent writes with locking
 

@@ -104,6 +104,7 @@ async fn test_write_engine_end_to_end() -> Result<()> {
     assert!(info.filter_path.exists());
     assert!(info.summary_path.exists());
     assert!(info.stats_path.exists());
+    assert!(info.compression_info_path.is_none());
     assert!(info.toc_path.exists());
     assert!(info.digest_path.exists());
 
@@ -409,6 +410,7 @@ async fn test_write_engine_toc_last() -> Result<()> {
     assert!(toc_contents.contains("Filter.db"));
     assert!(toc_contents.contains("Summary.db"));
     assert!(toc_contents.contains("Statistics.db"));
+    assert!(!toc_contents.contains("CompressionInfo.db"));
     assert!(toc_contents.contains("Digest.crc32"));
     assert!(toc_contents.contains("TOC.txt"));
 
@@ -582,6 +584,10 @@ async fn test_stage0_write_read_roundtrip_simple_types() -> Result<()> {
     assert!(info.filter_path.exists(), "Filter.db exists");
     assert!(info.summary_path.exists(), "Summary.db exists");
     assert!(info.stats_path.exists(), "Statistics.db exists");
+    assert!(
+        info.compression_info_path.is_none(),
+        "CompressionInfo.db omitted for uncompressed data"
+    );
     assert!(info.toc_path.exists(), "TOC.txt exists");
     assert!(info.digest_path.exists(), "Digest.crc32 exists");
 
@@ -594,6 +600,10 @@ async fn test_stage0_write_read_roundtrip_simple_types() -> Result<()> {
     assert!(
         toc_contents.contains("Statistics.db"),
         "TOC lists Statistics.db"
+    );
+    assert!(
+        !toc_contents.contains("CompressionInfo.db"),
+        "TOC must not list CompressionInfo.db for uncompressed data"
     );
     assert!(
         toc_contents.contains("Digest.crc32"),
@@ -804,6 +814,10 @@ async fn test_stage0_sstable_format_validation() -> Result<()> {
     assert!(
         toc_lines.contains(&"Statistics.db"),
         "TOC contains Statistics.db"
+    );
+    assert!(
+        !toc_lines.contains(&"CompressionInfo.db"),
+        "TOC must not contain CompressionInfo.db for uncompressed data"
     );
     assert!(
         toc_lines.contains(&"Digest.crc32"),
