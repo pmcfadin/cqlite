@@ -7,7 +7,7 @@ Tables covered:
     collections_with_udts, frozen_collections_table, typed_collections_table,
     empty_collections_table, collection_clustering_table
   test_timeseries (4): app_metrics, user_activity, event_store, user_sessions
-  test_wide_rows (4): chat_messages, document_versions, product_catalog, multi_metric_timeseries
+  test_wide_rows (4): chat_messages, document_versions, product_catalog, sparse_data_table
 
 Output: e2e_collections/{table_name}.jsonl (16 files, 10 rows each)
 """
@@ -604,55 +604,67 @@ def generate_product_catalog() -> List[Dict]:
     return mutations
 
 
-def generate_multi_metric_timeseries() -> List[Dict]:
-    """test_wide_rows.multi_metric_timeseries - MAP<TEXT,DOUBLE>, SET<TEXT>, BLOB."""
+def generate_sparse_data_table() -> List[Dict]:
+    """test_wide_rows.sparse_data_table - sparse rows with optional collection columns."""
     mutations = []
-    for d in range(2):
-        for t in range(5):
-            i = d * 5 + t
-            pk = [["device_id", {"Uuid": make_uuid(2300 + d)}]]
-            ck = [["metric_timestamp", {"Timestamp": BASE_TS + i * 300000}]]
-            ops = [
-                {"Write": {"column": "cpu_usage_percent", "value": {"Float32": 25.0 + i * 3.5}}},
-                {"Write": {"column": "memory_usage_bytes", "value": {"BigInt": 4000000000 + i * 100000000}}},
-                {"Write": {"column": "disk_io_read_bytes", "value": {"BigInt": 1000000 + i * 50000}}},
-                {"Write": {"column": "disk_io_write_bytes", "value": {"BigInt": 500000 + i * 25000}}},
-                {"Write": {"column": "network_rx_bytes", "value": {"BigInt": 2000000 + i * 100000}}},
-                {"Write": {"column": "network_tx_bytes", "value": {"BigInt": 1500000 + i * 75000}}},
-                {"Write": {"column": "gpu_usage_percent", "value": {"Float32": 10.0 + i * 5.0}}},
-                {"Write": {"column": "gpu_memory_bytes", "value": {"BigInt": 2000000000 + i * 50000000}}},
-                {"Write": {"column": "temperature_celsius", "value": {"Float32": 55.0 + i * 2.0}}},
-                {"Write": {"column": "fan_speed_rpm", "value": {"Integer": 1200 + i * 100}}},
-                {"Write": {"column": "power_consumption_watts", "value": {"Float32": 150.0 + i * 10.0}}},
-                {"Write": {"column": "process_count", "value": {"Integer": 200 + i * 5}}},
-                {"Write": {"column": "thread_count", "value": {"Integer": 1000 + i * 20}}},
-                {"Write": {"column": "handle_count", "value": {"Integer": 5000 + i * 50}}},
-                {"Write": {"column": "uptime_seconds", "value": {"BigInt": 86400 + i * 3600}}},
-                {"Write": {"column": "load_average_1min", "value": {"Float32": 1.5 + i * 0.3}}},
-                {"Write": {"column": "load_average_5min", "value": {"Float32": 1.2 + i * 0.2}}},
-                {"Write": {"column": "load_average_15min", "value": {"Float32": 1.0 + i * 0.1}}},
-                {"Write": {"column": "disk_usage_percent", "value": {"Float32": 40.0 + i * 3.0}}},
-                {"Write": {"column": "swap_usage_bytes", "value": {"BigInt": 500000000 + i * 10000000}}},
-                {"Write": {"column": "network_connections", "value": {"Integer": 50 + i * 10}}},
-                {"Write": {"column": "active_sessions", "value": {"Integer": 10 + i}}},
-                {"Write": {"column": "error_count", "value": {"Integer": i % 3}}},
-                {"Write": {"column": "warning_count", "value": {"Integer": i * 2}}},
-                {"Write": {"column": "info_count", "value": {"Integer": 100 + i * 10}}},
-                # MAP<TEXT, DOUBLE> custom_metrics
-                {"Write": {"column": "custom_metrics", "value": {"Map": [
-                    [{"Text": "latency_p50"}, {"Float": 12.5 + i * 1.5}],
-                    [{"Text": "latency_p99"}, {"Float": 150.0 + i * 10.0}],
-                    [{"Text": "throughput"}, {"Float": 1000.0 + i * 100.0}],
-                ]}}},
-                # SET<TEXT> status_flags
-                {"Write": {"column": "status_flags", "value": {"Set": [
-                    {"Text": "healthy"},
-                    {"Text": "monitored"},
-                ] + ([{"Text": "degraded"}] if i % 4 == 3 else [])}}},
-                # BLOB diagnostic_data
-                {"Write": {"column": "diagnostic_data", "value": {"Blob": make_blob(32, i)}}},
-            ]
-            mutations.append(make_mutation("test_wide_rows", "multi_metric_timeseries", pk, ck, ops))
+    attribute_names = ["profile", "status", "metrics", "event_time", "payload"]
+
+    for entity_index in range(2):
+        entity_id = make_uuid(2300 + entity_index)
+        for attr_index, attribute_name in enumerate(attribute_names):
+            i = entity_index * len(attribute_names) + attr_index
+            pk = [["entity_id", {"Uuid": entity_id}]]
+            ck = [["attribute_name", {"Text": attribute_name}]]
+
+            if attribute_name == "profile":
+                ops = [
+                    {"Write": {"column": "string_value", "value": {"Text": f"profile_{entity_index}"}}},
+                    {"Write": {"column": "set_value", "value": {"Set": [
+                        {"Text": "blue"},
+                        {"Text": "green"},
+                        {"Text": f"tier_{entity_index}"},
+                    ]}}},
+                    {"Write": {"column": "map_value", "value": {"Map": [
+                        [{"Text": "region"}, {"Text": "us-west-2" if entity_index == 0 else "us-east-1"}],
+                        [{"Text": "segment"}, {"Text": f"segment_{entity_index}"}],
+                    ]}}},
+                ]
+            elif attribute_name == "status":
+                ops = [
+                    {"Write": {"column": "boolean_value", "value": {"Boolean": entity_index == 0}}},
+                    {"Write": {"column": "list_value", "value": {"List": [
+                        {"Text": "active"},
+                        {"Text": "verified"},
+                        {"Text": f"step_{i}"},
+                    ]}}},
+                ]
+            elif attribute_name == "metrics":
+                ops = [
+                    {"Write": {"column": "numeric_value", "value": {"Float": 98.5 + i * 1.25}}},
+                    {"Write": {"column": "map_value", "value": {"Map": [
+                        [{"Text": "cpu"}, {"Text": f"{40 + i}"}],
+                        [{"Text": "memory"}, {"Text": f"{2048 + i * 128}"}],
+                    ]}}},
+                ]
+            elif attribute_name == "event_time":
+                ops = [
+                    {"Write": {"column": "timestamp_value", "value": {"Timestamp": BASE_TS + i * 600000}}},
+                    {"Write": {"column": "list_value", "value": {"List": [
+                        {"Text": f"evt_{i}_0"},
+                        {"Text": f"evt_{i}_1"},
+                    ]}}},
+                ]
+            else:
+                ops = [
+                    {"Write": {"column": "json_value", "value": {"Text": f'{{"entity":{entity_index},"slot":"{attribute_name}"}}'}}},
+                    {"Write": {"column": "blob_value", "value": {"Blob": make_blob(12, i)}}},
+                    {"Write": {"column": "set_value", "value": {"Set": [
+                        {"Text": "raw"},
+                        {"Text": f"payload_{i}"},
+                    ]}}},
+                ]
+
+            mutations.append(make_mutation("test_wide_rows", "sparse_data_table", pk, ck, ops))
     return mutations
 
 
@@ -681,7 +693,7 @@ def main():
         ("chat_messages", generate_chat_messages),
         ("document_versions", generate_document_versions),
         ("product_catalog", generate_product_catalog),
-        ("multi_metric_timeseries", generate_multi_metric_timeseries),
+        ("sparse_data_table", generate_sparse_data_table),
     ]
 
     total = 0
