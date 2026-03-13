@@ -2446,6 +2446,23 @@ mod tests {
     }
 
     #[test]
+    fn test_serialize_clustering_frozen_list_text() {
+        let value = Value::Frozen(Box::new(Value::List(vec![Value::Text("solo".to_string())])));
+        let comparator = ComparatorType::Frozen(Box::new(ComparatorType::List(Box::new(
+            ComparatorType::Text,
+        ))));
+
+        let bytes = serialize_value_for_clustering(&value, &comparator).unwrap();
+        let expected_inner =
+            serialize_value(&Value::List(vec![Value::Text("solo".to_string())])).unwrap();
+
+        let mut expected = vec![expected_inner.len() as u8];
+        expected.extend_from_slice(&expected_inner);
+
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
     fn test_null_vs_empty_string() {
         let stats = create_test_stats();
         let writer = DataWriter::new(stats);
@@ -3663,6 +3680,20 @@ mod tests {
     }
 
     #[test]
+    fn test_serialize_single_element_list() {
+        let list = Value::List(vec![Value::Integer(42)]);
+        let bytes = serialize_value(&list).unwrap();
+        assert_eq!(
+            bytes,
+            vec![
+                0x00, 0x00, 0x00, 0x01, // count = 1
+                0x00, 0x00, 0x00, 0x04, // len = 4
+                0x00, 0x00, 0x00, 0x2A, // value = 42
+            ]
+        );
+    }
+
+    #[test]
     fn test_serialize_set() {
         let set = Value::Set(vec![
             Value::Text("alpha".to_string()),
@@ -3674,6 +3705,27 @@ mod tests {
         // First element length = 5 ("alpha")
         assert_eq!(&bytes[4..8], &5i32.to_be_bytes());
         assert_eq!(&bytes[8..13], b"alpha");
+    }
+
+    #[test]
+    fn test_serialize_single_element_set() {
+        let set = Value::Set(vec![Value::Text("alpha".to_string())]);
+        let bytes = serialize_value(&set).unwrap();
+        assert_eq!(
+            bytes,
+            vec![
+                0x00, 0x00, 0x00, 0x01, // count = 1
+                0x00, 0x00, 0x00, 0x05, // len = 5
+                b'a', b'l', b'p', b'h', b'a', // value = "alpha"
+            ]
+        );
+    }
+
+    #[test]
+    fn test_serialize_empty_set() {
+        let set = Value::Set(vec![]);
+        let bytes = serialize_value(&set).unwrap();
+        assert_eq!(bytes, 0i32.to_be_bytes().to_vec());
     }
 
     #[test]
@@ -3718,6 +3770,19 @@ mod tests {
     }
 
     #[test]
+    fn test_serialize_single_element_tuple() {
+        let tuple = Value::Tuple(vec![Value::Text("solo".to_string())]);
+        let bytes = serialize_value(&tuple).unwrap();
+        assert_eq!(
+            bytes,
+            vec![
+                0x00, 0x00, 0x00, 0x04, // len = 4
+                b's', b'o', b'l', b'o', // value = "solo"
+            ]
+        );
+    }
+
+    #[test]
     fn test_serialize_frozen() {
         let frozen = Value::Frozen(Box::new(Value::List(vec![
             Value::Integer(10),
@@ -3727,6 +3792,15 @@ mod tests {
         let list_bytes =
             serialize_value(&Value::List(vec![Value::Integer(10), Value::Integer(20)])).unwrap();
         // Frozen should produce identical bytes to inner value
+        assert_eq!(frozen_bytes, list_bytes);
+    }
+
+    #[test]
+    fn test_serialize_single_element_frozen() {
+        let frozen = Value::Frozen(Box::new(Value::List(vec![Value::Text("solo".to_string())])));
+        let frozen_bytes = serialize_value(&frozen).unwrap();
+        let list_bytes =
+            serialize_value(&Value::List(vec![Value::Text("solo".to_string())])).unwrap();
         assert_eq!(frozen_bytes, list_bytes);
     }
 
