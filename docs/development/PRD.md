@@ -120,26 +120,38 @@ This layer depends on the CQL parser (`cqlite-core/src/cql/`) and is **optional*
 
 #### E2E Validation Workflow
 
-The ultimate test for M5 write support:
+The product contract for M5 write support is:
+
+- `WriteEngine` flushes portable Cassandra SSTable components directly into the write directory.
+- Those flushed files are the primary artifact users should be able to copy into a Cassandra table data directory and have Cassandra read without any CQLite-side conversion step.
+- Loader-based workflows such as `sstableloader` may exist as convenience tooling, but they are not the acceptance path for M5 portability.
+
+The end-to-end validation therefore must prove direct Cassandra consumption of flushed files:
 
 ```bash
 # 1. Write data via CQLite
 cqlite --writable --schema schema.cql --write-dir ./data \
   --mutation '{"table":"users","pk":{"id":1},"ops":[...]}'
 
-# 2. Export as Cassandra-compatible SSTable
-cqlite export --write-dir ./data --output ./export
+# 2. Flush to portable Cassandra SSTables
+cqlite --writable --schema schema.cql --write-dir ./data --flush
 
-# 3. Load into Cassandra via sstableloader
-sstableloader -d localhost ./export/keyspace/table
+# 3. Copy the flushed SSTables into the target Cassandra table directory
+cp ./data/nb-*-big-* /var/lib/cassandra/data/keyspace/table-uuid/
 
-# 4. Verify via cqlsh
+# 4. Tell Cassandra to discover the copied SSTables
+nodetool refresh keyspace table
+
+# 5. Verify via cqlsh
 cqlsh -e "SELECT * FROM keyspace.table"
 ```
 
-**Exit Criteria**: Data written by CQLite can be loaded into Cassandra 5.0 and queried without errors.
+**Exit Criteria**:
+- After flush, CQLite has produced Cassandra-readable SSTables without any additional conversion or repackaging step.
+- Copying those SSTables into a Cassandra 5.0 table directory and invoking Cassandra's native refresh/import mechanism makes the data queryable without errors.
+- `sstableloader` compatibility is a useful secondary workflow, but passing `sstableloader` alone does not satisfy M5.
 
-> **Revision Note (Feb 2026)**: M5 write API clarified as mutation-based primary, CQL optional. See Issues #392, #394, #396.
+> **Revision Note (March 2026)**: M5 write support treats flushed SSTables as the primary portable artifact. The milestone acceptance path is now explicitly direct Cassandra readability after copy plus native refresh/import; loader workflows remain secondary convenience tooling. See Issues #392, #393, #396, #397.
 
 ---
 
@@ -150,7 +162,7 @@ cqlsh -e "SELECT * FROM keyspace.table"
 | Core        | Unit + property‑based for type/format edge cases   | Rust `cargo test`, `proptest`      |
 | CLI         | Integration & snapshot tests for commands/output   | `assert_cmd`, `insta`              |
 | Bindings    | Language‑specific unit + FFI smoke tests           | `pytest`, `jest`, web‑worker tests |
-| Integration | End‑to‑end: read → export → read‑back              | GitHub Actions matrix              |
+| Integration | End‑to‑end: write/flush portable SSTables → optional cluster import → query verification | GitHub Actions matrix |
 | CI/CD       | PR lint, fmt, unit, integration; codecov gate 75 % | GitHub Actions                     |
 
 ### 5.1 · Tiered Coverage Targets

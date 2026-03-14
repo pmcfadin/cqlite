@@ -144,15 +144,20 @@ match resolve_table_to_sstable_path(keyspace, table) {
 ### sstableloader Integration Tests (`sstableloader_integration.rs`)
 
 **Responsibilities** (Issue #396):
-- Validate CQLite-written SSTables can be loaded into Cassandra 5.0
+- Validate that portable SSTables produced by the write path can be imported into Cassandra 5.0
 - Verify data integrity after loading via CQL queries
 - Test various data patterns (single/multi partition, wide rows, all types)
+
+**Contract boundary**:
+- The write path is responsible for producing portable Cassandra SSTables at flush time.
+- The loader/import harness is responsible for validating live-cluster ingestion of those already-portable files.
+- Any packaging helper used by the tests exists to arrange loader-friendly directory layout, not to convert non-Cassandra bytes into Cassandra bytes.
 
 **Test Tiers**:
 
 | Tier | Description | Tests |
 |------|-------------|-------|
-| **Tier 1** | sstableloader Acceptance | 4 tests - Basic SSTable creation verification |
+| **Tier 1** | Import Acceptance | 4 tests - Basic cluster-ingestion verification |
 | **Tier 2** | CQL Query Verification | 4 tests - SELECT, TTL, timestamp, tombstone queries |
 | **Tier 3** | Stress Tests | 3 tests - 10K partitions, 1K rows, mixed operations |
 

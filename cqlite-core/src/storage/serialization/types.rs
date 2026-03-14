@@ -286,7 +286,12 @@ impl TypeSerializer {
     /// Format: [4-byte count][elements...]
     /// Each element: [4-byte length][bytes]
     fn serialize_list(&self, value: &Value, elem_type: &CqlType) -> Result<Vec<u8>> {
-        match value {
+        // Unwrap Frozen wrapper(s) to get the raw List value
+        let mut unwrapped = value;
+        while let Value::Frozen(inner) = unwrapped {
+            unwrapped = inner.as_ref();
+        }
+        match unwrapped {
             Value::List(elements) => self.serialize_collection_elements(elements, elem_type),
             _ => Err(Error::type_conversion(format!(
                 "Expected List value, got {:?}",
@@ -300,7 +305,12 @@ impl TypeSerializer {
     /// Format: [4-byte count][elements...]
     /// Each element: [4-byte length][bytes]
     fn serialize_set(&self, value: &Value, elem_type: &CqlType) -> Result<Vec<u8>> {
-        match value {
+        // Unwrap Frozen wrapper(s) to get the raw Set value
+        let mut unwrapped = value;
+        while let Value::Frozen(inner) = unwrapped {
+            unwrapped = inner.as_ref();
+        }
+        match unwrapped {
             Value::Set(elements) => self.serialize_collection_elements(elements, elem_type),
             _ => Err(Error::type_conversion(format!(
                 "Expected Set value, got {:?}",
@@ -319,7 +329,12 @@ impl TypeSerializer {
         key_type: &CqlType,
         val_type: &CqlType,
     ) -> Result<Vec<u8>> {
-        match value {
+        // Unwrap Frozen wrapper(s) to get the raw Map value
+        let mut unwrapped = value;
+        while let Value::Frozen(inner) = unwrapped {
+            unwrapped = inner.as_ref();
+        }
+        match unwrapped {
             Value::Map(pairs) => {
                 let mut buf = Vec::new();
 
@@ -353,7 +368,12 @@ impl TypeSerializer {
     /// Format: [elements...]
     /// Each element: [4-byte length][bytes] (length is -1 for NULL)
     fn serialize_tuple(&self, value: &Value, field_types: &[CqlType]) -> Result<Vec<u8>> {
-        match value {
+        // Unwrap Frozen wrapper(s) to get the raw Tuple value
+        let mut unwrapped = value;
+        while let Value::Frozen(inner) = unwrapped {
+            unwrapped = inner.as_ref();
+        }
+        match unwrapped {
             Value::Tuple(fields) => {
                 if fields.len() != field_types.len() {
                     return Err(Error::type_conversion(format!(
@@ -407,6 +427,9 @@ impl TypeSerializer {
     }
 
     /// Infer CqlType from a Value (used for nested UDT field type inference).
+    ///
+    /// Empty collections still fall back to `text` because there is no element
+    /// value available to inspect.
     fn infer_cql_type(value: Option<&Value>) -> CqlType {
         match value {
             None | Some(Value::Null) => CqlType::Text,
@@ -428,11 +451,48 @@ impl TypeSerializer {
             Some(Value::Decimal { .. }) => CqlType::Decimal,
             Some(Value::Duration { .. }) => CqlType::Duration,
             Some(Value::Counter(_)) => CqlType::Counter,
-            Some(Value::List(_)) => CqlType::List(Box::new(CqlType::Text)),
-            Some(Value::Set(_)) => CqlType::Set(Box::new(CqlType::Text)),
-            Some(Value::Map(_)) => CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text)),
-            Some(Value::Tuple(fields)) => CqlType::Tuple(vec![CqlType::Text; fields.len()]),
-            Some(Value::Udt(udt)) => CqlType::Udt(udt.type_name.clone(), vec![]),
+            Some(Value::List(elements)) => CqlType::List(Box::new(
+                elements
+                    .first()
+                    .map(|elem| Self::infer_cql_type(Some(elem)))
+                    .unwrap_or(CqlType::Text),
+            )),
+            Some(Value::Set(elements)) => CqlType::Set(Box::new(
+                elements
+                    .first()
+                    .map(|elem| Self::infer_cql_type(Some(elem)))
+                    .unwrap_or(CqlType::Text),
+            )),
+            Some(Value::Map(entries)) => {
+                let (key_type, value_type) = entries
+                    .first()
+                    .map(|(key, value)| {
+                        (
+                            Self::infer_cql_type(Some(key)),
+                            Self::infer_cql_type(Some(value)),
+                        )
+                    })
+                    .unwrap_or((CqlType::Text, CqlType::Text));
+                CqlType::Map(Box::new(key_type), Box::new(value_type))
+            }
+            Some(Value::Tuple(fields)) => CqlType::Tuple(
+                fields
+                    .iter()
+                    .map(|field| Self::infer_cql_type(Some(field)))
+                    .collect(),
+            ),
+            Some(Value::Udt(udt)) => CqlType::Udt(
+                udt.type_name.clone(),
+                udt.fields
+                    .iter()
+                    .map(|field| {
+                        (
+                            field.name.clone(),
+                            Self::infer_cql_type(field.value.as_ref()),
+                        )
+                    })
+                    .collect(),
+            ),
             Some(Value::Frozen(inner)) => {
                 CqlType::Frozen(Box::new(Self::infer_cql_type(Some(inner))))
             }
@@ -1022,6 +1082,270 @@ mod tests {
         expected.extend_from_slice(b"Alice");
         expected.extend_from_slice(&(list_bytes.len() as i32).to_be_bytes()); // tags len
         expected.extend_from_slice(&list_bytes);
+
+        assert_eq!(hex(&bytes), hex(&expected));
+    }
+
+    #[test]
+    fn test_serialize_udt_with_nested_collection_fields() {
+        let ser = TypeSerializer::new();
+
+        let address_schema = UdtTypeDef::new("test_ks".to_string(), "address".to_string())
+            .with_field("street".to_string(), CqlType::Text, true)
+            .with_field("city".to_string(), CqlType::Text, true);
+        let phone_schema = UdtTypeDef::new("test_ks".to_string(), "phone_number".to_string())
+            .with_field("label".to_string(), CqlType::Text, true)
+            .with_field("number".to_string(), CqlType::Text, true);
+        let person_schema = UdtTypeDef::new("test_ks".to_string(), "person".to_string())
+            .with_field("name".to_string(), CqlType::Text, true)
+            .with_field(
+                "phone_numbers".to_string(),
+                CqlType::List(Box::new(CqlType::Frozen(Box::new(CqlType::Udt(
+                    "phone_number".to_string(),
+                    vec![],
+                ))))),
+                true,
+            )
+            .with_field(
+                "home_address".to_string(),
+                CqlType::Frozen(Box::new(CqlType::Udt("address".to_string(), vec![]))),
+                true,
+            );
+        let company_schema = UdtTypeDef::new("test_ks".to_string(), "company".to_string())
+            .with_field("name".to_string(), CqlType::Text, true)
+            .with_field(
+                "employees".to_string(),
+                CqlType::List(Box::new(CqlType::Frozen(Box::new(CqlType::Udt(
+                    "person".to_string(),
+                    vec![],
+                ))))),
+                true,
+            )
+            .with_field(
+                "departments".to_string(),
+                CqlType::Map(
+                    Box::new(CqlType::Text),
+                    Box::new(CqlType::Frozen(Box::new(CqlType::List(Box::new(
+                        CqlType::Frozen(Box::new(CqlType::Udt("person".to_string(), vec![]))),
+                    ))))),
+                ),
+                true,
+            );
+
+        let phone = UdtValue::new("phone_number".to_string(), "test_ks".to_string())
+            .with_field("label".to_string(), Some(Value::Text("mobile".to_string())))
+            .with_field(
+                "number".to_string(),
+                Some(Value::Text("+1-555-0101".to_string())),
+            );
+        let address = UdtValue::new("address".to_string(), "test_ks".to_string())
+            .with_field(
+                "street".to_string(),
+                Some(Value::Text("Main St".to_string())),
+            )
+            .with_field("city".to_string(), Some(Value::Text("Seattle".to_string())));
+        let person = UdtValue::new("person".to_string(), "test_ks".to_string())
+            .with_field("name".to_string(), Some(Value::Text("Alice".to_string())))
+            .with_field(
+                "phone_numbers".to_string(),
+                Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
+                    phone.clone(),
+                )))])),
+            )
+            .with_field(
+                "home_address".to_string(),
+                Some(Value::Frozen(Box::new(Value::Udt(address.clone())))),
+            );
+        let company = UdtValue::new("company".to_string(), "test_ks".to_string())
+            .with_field("name".to_string(), Some(Value::Text("Acme".to_string())))
+            .with_field(
+                "employees".to_string(),
+                Some(Value::List(vec![Value::Frozen(Box::new(Value::Udt(
+                    person.clone(),
+                )))])),
+            )
+            .with_field(
+                "departments".to_string(),
+                Some(Value::Map(vec![(
+                    Value::Text("platform".to_string()),
+                    Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
+                        Value::Udt(person.clone()),
+                    ))]))),
+                )])),
+            );
+
+        let bytes = ser
+            .serialize_udt(&Value::Udt(company.clone()), &company_schema)
+            .unwrap();
+
+        let person_bytes = ser
+            .serialize_udt(&Value::Udt(person.clone()), &person_schema)
+            .unwrap();
+        let employees_bytes = ser
+            .serialize_typed_value(
+                &Value::List(vec![Value::Frozen(Box::new(Value::Udt(person.clone())))]),
+                &CqlType::List(Box::new(CqlType::Frozen(Box::new(CqlType::Udt(
+                    "person".to_string(),
+                    vec![],
+                ))))),
+            )
+            .unwrap();
+        let departments_bytes = ser
+            .serialize_typed_value(
+                &Value::Map(vec![(
+                    Value::Text("platform".to_string()),
+                    Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
+                        Value::Udt(person),
+                    ))]))),
+                )]),
+                &CqlType::Map(
+                    Box::new(CqlType::Text),
+                    Box::new(CqlType::Frozen(Box::new(CqlType::List(Box::new(
+                        CqlType::Frozen(Box::new(CqlType::Udt("person".to_string(), vec![]))),
+                    ))))),
+                ),
+            )
+            .unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&4i32.to_be_bytes());
+        expected.extend_from_slice(b"Acme");
+        expected.extend_from_slice(&(employees_bytes.len() as i32).to_be_bytes());
+        expected.extend_from_slice(&employees_bytes);
+        expected.extend_from_slice(&(departments_bytes.len() as i32).to_be_bytes());
+        expected.extend_from_slice(&departments_bytes);
+
+        assert_eq!(hex(&bytes), hex(&expected));
+        assert!(!person_bytes.is_empty());
+        assert!(!ser
+            .serialize_udt(&Value::Udt(address), &address_schema)
+            .unwrap()
+            .is_empty());
+        assert!(!ser
+            .serialize_udt(&Value::Udt(phone), &phone_schema)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn test_serialize_collection_containing_udts_with_unicode_keys() {
+        let ser = TypeSerializer::new();
+
+        let address_schema = UdtTypeDef::new("test_ks".to_string(), "address".to_string())
+            .with_field("street".to_string(), CqlType::Text, true)
+            .with_field("city".to_string(), CqlType::Text, true);
+        let address = UdtValue::new("address".to_string(), "test_ks".to_string())
+            .with_field(
+                "street".to_string(),
+                Some(Value::Text("Rua Sao Joao".to_string())),
+            )
+            .with_field(
+                "city".to_string(),
+                Some(Value::Text("Sao Paulo".to_string())),
+            );
+        let address_bytes = ser
+            .serialize_udt(&Value::Udt(address), &address_schema)
+            .unwrap();
+
+        let value = Value::Map(vec![(
+            Value::Text("cidade_日本".to_string()),
+            Value::Frozen(Box::new(Value::Udt(
+                UdtValue::new("address".to_string(), "test_ks".to_string())
+                    .with_field(
+                        "street".to_string(),
+                        Some(Value::Text("Rua Sao Joao".to_string())),
+                    )
+                    .with_field(
+                        "city".to_string(),
+                        Some(Value::Text("Sao Paulo".to_string())),
+                    ),
+            ))),
+        )]);
+
+        let bytes = ser
+            .serialize_typed_value(
+                &value,
+                &CqlType::Map(
+                    Box::new(CqlType::Text),
+                    Box::new(CqlType::Frozen(Box::new(CqlType::Udt(
+                        "address".to_string(),
+                        vec![],
+                    )))),
+                ),
+            )
+            .unwrap();
+
+        let key = "cidade_日本".as_bytes();
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&1i32.to_be_bytes());
+        expected.extend_from_slice(&(key.len() as i32).to_be_bytes());
+        expected.extend_from_slice(key);
+        expected.extend_from_slice(&(address_bytes.len() as i32).to_be_bytes());
+        expected.extend_from_slice(&address_bytes);
+
+        assert_eq!(hex(&bytes), hex(&expected));
+    }
+
+    #[test]
+    fn test_serialize_tuple_with_collection_fields() {
+        let ser = TypeSerializer::new();
+
+        let value = Value::Tuple(vec![
+            Value::Text("phase3".to_string()),
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3),
+            ]),
+            Value::Map(vec![
+                (
+                    Value::Text("emoji".to_string()),
+                    Value::Text("snowman".to_string()),
+                ),
+                (
+                    Value::Text("plain".to_string()),
+                    Value::Text("ascii".to_string()),
+                ),
+            ]),
+        ]);
+
+        let bytes = ser
+            .serialize_value(&value, "tuple<text, list<int>, map<text, text>>")
+            .unwrap();
+
+        let list_bytes = ser
+            .serialize_value(
+                &Value::List(vec![
+                    Value::Integer(1),
+                    Value::Integer(2),
+                    Value::Integer(3),
+                ]),
+                "list<int>",
+            )
+            .unwrap();
+        let map_bytes = ser
+            .serialize_value(
+                &Value::Map(vec![
+                    (
+                        Value::Text("emoji".to_string()),
+                        Value::Text("snowman".to_string()),
+                    ),
+                    (
+                        Value::Text("plain".to_string()),
+                        Value::Text("ascii".to_string()),
+                    ),
+                ]),
+                "map<text, text>",
+            )
+            .unwrap();
+
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&6i32.to_be_bytes());
+        expected.extend_from_slice(b"phase3");
+        expected.extend_from_slice(&(list_bytes.len() as i32).to_be_bytes());
+        expected.extend_from_slice(&list_bytes);
+        expected.extend_from_slice(&(map_bytes.len() as i32).to_be_bytes());
+        expected.extend_from_slice(&map_bytes);
 
         assert_eq!(hex(&bytes), hex(&expected));
     }

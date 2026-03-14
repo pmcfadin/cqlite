@@ -1819,6 +1819,71 @@ async fn test_issue_439_product_catalog_portable_sstable_round_trip() -> CqliteR
     .await
 }
 
+#[tokio::test]
+async fn test_issue_434_phase3_complex_type_round_trip() -> CqliteResult<()> {
+    let row_id = "70000000-0000-4000-8000-000000000007";
+
+    run_issue_432_scenario(
+        schema_issue_434_phase3_complex_table(),
+        &create_issue_434_phase3_complex_table_cql(),
+        vec![issue_434_phase3_complex_mutation(
+            row_id,
+            1_710_130_000_000_000,
+        )],
+        |dump| {
+            assert_sstabledump_counts(dump, 1, 1)?;
+            assert_sstabledump_contains(
+                dump,
+                &[
+                    "\"name\":\"nested_map_list\"",
+                    "\"name\":\"company_map\"",
+                    "\"name\":\"tuple_with_list\"",
+                    "\"name\":\"complex_tuple\"",
+                    "こんにちは",
+                ],
+            )?;
+
+            let compact = serde_json::to_string(dump).map_err(|err| {
+                Error::Storage(format!("Failed to serialize sstabledump JSON: {err}"))
+            })?;
+            assert!(
+                !compact.contains("\"name\":\"nullable_map\""),
+                "NULL collection column should be absent from sstabledump output"
+            );
+
+            Ok(())
+        },
+        move |harness| {
+            assert_query_count(
+                harness,
+                &format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table()),
+                1,
+            )?;
+
+            let query = format!(
+                "SELECT tuple_with_list, company_map, unicode_map, empty_list FROM {} WHERE id = {}",
+                harness.fully_qualified_table(),
+                cql_uuid(row_id)
+            );
+            let output = harness.query_until(&query, Duration::from_secs(20), |out| {
+                out.raw_output.contains("phase3")
+                    && out.raw_output.contains("Acme")
+                    && out.raw_output.contains("platform")
+                    && out.raw_output.contains("こんにちは")
+            })?;
+
+            assert!(output.raw_output.contains("phase3"));
+            assert!(output.raw_output.contains("Acme"));
+            assert!(output.raw_output.contains("platform"));
+            assert!(output.raw_output.contains("こんにちは"));
+            assert!(output.raw_output.contains("null"));
+
+            Ok(())
+        },
+    )
+    .await
+}
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -3337,6 +3402,184 @@ fn issue_439_product_catalog_mutation(
             CellOperation::Write {
                 column: "updated_at".to_string(),
                 value: Value::Timestamp(timestamp_millis("2024-03-10T18:46:30.000Z")),
+            },
+        ],
+        timestamp_micros,
+        None,
+    )
+}
+
+fn schema_issue_434_phase3_complex_table() -> TableSchema {
+    build_schema(
+        "test_phase3",
+        "issue_434_complex_types",
+        vec![key_column("id", "uuid", 0)],
+        vec![],
+        vec![
+            regular_column("id", "uuid"),
+            regular_column(
+                "nested_map_list",
+                "map<text, frozen<list<frozen<map<text, int>>>>>",
+            ),
+            regular_column("company_map", "map<text, frozen<company>>"),
+            regular_column("tuple_with_list", "tuple<text, list<int>>"),
+            regular_column(
+                "complex_tuple",
+                "tuple<text, frozen<list<int>>, frozen<map<text, frozen<address>>>, frozen<person>>",
+            ),
+            regular_column("unicode_map", "map<text, text>"),
+            regular_column("empty_list", "list<text>"),
+            regular_column("nullable_map", "map<text, text>"),
+        ],
+    )
+}
+
+fn create_issue_434_phase3_complex_table_cql() -> String {
+    r#"CREATE TYPE IF NOT EXISTS test_phase3.address (
+    street TEXT,
+    city TEXT
+);
+CREATE TYPE IF NOT EXISTS test_phase3.phone_number (
+    label TEXT,
+    number TEXT
+);
+CREATE TYPE IF NOT EXISTS test_phase3.person (
+    name TEXT,
+    phone_numbers LIST<FROZEN<phone_number>>,
+    home_address FROZEN<address>
+);
+CREATE TYPE IF NOT EXISTS test_phase3.company (
+    name TEXT,
+    employees LIST<FROZEN<person>>,
+    departments MAP<TEXT, FROZEN<LIST<FROZEN<person>>>>
+);
+CREATE TABLE test_phase3.issue_434_complex_types (
+    id UUID PRIMARY KEY,
+    nested_map_list MAP<TEXT, FROZEN<LIST<FROZEN<MAP<TEXT, INT>>>>>,
+    company_map MAP<TEXT, FROZEN<company>>,
+    tuple_with_list TUPLE<TEXT, LIST<INT>>,
+    complex_tuple TUPLE<TEXT, FROZEN<LIST<INT>>, FROZEN<MAP<TEXT, FROZEN<address>>>, FROZEN<person>>,
+    unicode_map MAP<TEXT, TEXT>,
+    empty_list LIST<TEXT>,
+    nullable_map MAP<TEXT, TEXT>
+);"#
+        .to_string()
+}
+
+fn issue_434_address_value(street: &str, city: &str) -> Value {
+    Value::Udt(
+        cqlite_core::types::UdtValue::new("address".to_string(), "test_phase3".to_string())
+            .with_field("street".to_string(), Some(Value::Text(street.to_string())))
+            .with_field("city".to_string(), Some(Value::Text(city.to_string()))),
+    )
+}
+
+fn issue_434_phone_value(label: &str, number: &str) -> Value {
+    Value::Udt(
+        cqlite_core::types::UdtValue::new("phone_number".to_string(), "test_phase3".to_string())
+            .with_field("label".to_string(), Some(Value::Text(label.to_string())))
+            .with_field("number".to_string(), Some(Value::Text(number.to_string()))),
+    )
+}
+
+fn issue_434_person_value(name: &str) -> Value {
+    Value::Udt(
+        cqlite_core::types::UdtValue::new("person".to_string(), "test_phase3".to_string())
+            .with_field("name".to_string(), Some(Value::Text(name.to_string())))
+            .with_field(
+                "phone_numbers".to_string(),
+                Some(Value::List(vec![Value::Frozen(Box::new(
+                    issue_434_phone_value("mobile", "+1-555-0101"),
+                ))])),
+            )
+            .with_field(
+                "home_address".to_string(),
+                Some(Value::Frozen(Box::new(issue_434_address_value(
+                    "Main St", "Seattle",
+                )))),
+            ),
+    )
+}
+
+fn issue_434_company_value() -> Value {
+    let person = issue_434_person_value("Alice");
+    Value::Udt(
+        cqlite_core::types::UdtValue::new("company".to_string(), "test_phase3".to_string())
+            .with_field("name".to_string(), Some(Value::Text("Acme".to_string())))
+            .with_field(
+                "employees".to_string(),
+                Some(Value::List(vec![Value::Frozen(Box::new(person.clone()))])),
+            )
+            .with_field(
+                "departments".to_string(),
+                Some(Value::Map(vec![(
+                    Value::Text("platform".to_string()),
+                    Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(person))]))),
+                )])),
+            ),
+    )
+}
+
+fn issue_434_phase3_complex_mutation(id: &str, timestamp_micros: i64) -> Mutation {
+    base_mutation(
+        "test_phase3",
+        "issue_434_complex_types",
+        PartitionKey::single("id", uuid_value(id)),
+        None,
+        vec![
+            CellOperation::Write {
+                column: "nested_map_list".to_string(),
+                value: Value::Map(vec![(
+                    Value::Text("outer".to_string()),
+                    Value::Frozen(Box::new(Value::List(vec![Value::Frozen(Box::new(
+                        Value::Map(vec![(Value::Text("inner".to_string()), Value::Integer(7))]),
+                    ))]))),
+                )]),
+            },
+            CellOperation::Write {
+                column: "company_map".to_string(),
+                value: Value::Map(vec![(
+                    Value::Text("primary".to_string()),
+                    Value::Frozen(Box::new(issue_434_company_value())),
+                )]),
+            },
+            CellOperation::Write {
+                column: "tuple_with_list".to_string(),
+                value: Value::Tuple(vec![
+                    Value::Text("phase3".to_string()),
+                    Value::List(vec![
+                        Value::Integer(1),
+                        Value::Integer(2),
+                        Value::Integer(3),
+                    ]),
+                ]),
+            },
+            CellOperation::Write {
+                column: "complex_tuple".to_string(),
+                value: Value::Tuple(vec![
+                    Value::Text("tuple".to_string()),
+                    Value::Frozen(Box::new(Value::List(vec![
+                        Value::Integer(3),
+                        Value::Integer(5),
+                        Value::Integer(8),
+                    ]))),
+                    Value::Frozen(Box::new(Value::Map(vec![(
+                        Value::Text("home".to_string()),
+                        Value::Frozen(Box::new(issue_434_address_value("Main St", "Seattle"))),
+                    )]))),
+                    Value::Frozen(Box::new(issue_434_person_value("Tuple User"))),
+                ]),
+            },
+            CellOperation::Write {
+                column: "unicode_map".to_string(),
+                value: Value::Map(vec![(
+                    Value::Text("挨拶".to_string()),
+                    Value::Text("こんにちは".to_string()),
+                )]),
+            },
+            CellOperation::Write {
+                column: "empty_list".to_string(),
+                value: Value::List(vec![]),
             },
         ],
         timestamp_micros,

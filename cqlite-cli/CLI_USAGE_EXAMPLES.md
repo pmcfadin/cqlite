@@ -850,9 +850,10 @@ cqlite write-stats \
 #   Generation: 3
 ```
 
-#### Export SSTable for Cassandra Import
+#### Package Flushed SSTables for Cassandra Import
 
-Export data to Cassandra-compatible SSTable format that can be loaded with `sstableloader`:
+After `cqlite` flushes data, the write directory already contains portable Cassandra SSTable components.
+Use `export-sstable` when you want those files arranged into a loader-friendly keyspace/table directory for tools like `sstableloader`:
 
 ```bash
 cqlite export-sstable /tmp/export \
@@ -869,7 +870,7 @@ cqlite export-sstable /tmp/export \
 #   Time: 45.2ms
 ```
 
-Export options:
+Packaging options:
 
 | Flag | Description |
 |------|-------------|
@@ -930,7 +931,7 @@ write-dir/
     └── wal-{timestamp}.log
 ```
 
-The exported SSTables can be imported into Cassandra using:
+The packaged keyspace/table directory can be imported into Cassandra using:
 
 ```bash
 sstableloader -d <cassandra-host> /path/to/export/keyspace/table-uuid/

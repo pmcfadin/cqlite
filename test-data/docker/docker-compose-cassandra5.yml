@@ -14,14 +14,14 @@ services:
       - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
       - CASSANDRA_START_RPC=true
       - CASSANDRA_RPC_ADDRESS=0.0.0.0
-      - CASSANDRA_LISTEN_ADDRESS=cassandra-5-0
+      - CASSANDRA_LISTEN_ADDRESS=0.0.0.0
       - CASSANDRA_BROADCAST_ADDRESS=cassandra-5-0
       - CASSANDRA_AUTHENTICATOR=AllowAllAuthenticator
       - CASSANDRA_AUTHORIZER=AllowAllAuthorizer
       - CASSANDRA_AUTO_BOOTSTRAP=false
       # Enhanced memory configuration for CI stability
-      - MAX_HEAP_SIZE=3G
-      - HEAP_NEWSIZE=600m
+      - MAX_HEAP_SIZE=1G
+      - HEAP_NEWSIZE=256m
       # Enhanced timeout configuration for reliability
       - CASSANDRA_WRITE_REQUEST_TIMEOUT_IN_MS=15000
       - CASSANDRA_READ_REQUEST_TIMEOUT_IN_MS=15000

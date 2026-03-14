@@ -1,17 +1,23 @@
 # E2E Write Path Testing Guide
 
-How to verify that CQLite-written SSTables are compatible with Apache Cassandra 5.0.
+How to verify that CQLite-written SSTables are portable Cassandra artifacts and can be imported into Apache Cassandra 5.0.
 
 ## Overview
 
-The write-path E2E test validates the full pipeline:
+The write-path E2E test validates two related guarantees:
+
+- After flush, CQLite has already produced portable Cassandra SSTable components on disk.
+- Those flushed files can be packaged for live-cluster ingestion and queried successfully after import.
+
+The practical pipeline today is:
 
 ```
 Mutations (JSONL) → CQLite CLI → Memtable → Flush → SSTable on disk
-    → Export (Cassandra naming) → nodetool import → Cassandra 5 → cqlsh queries
+    → Optional packaging for loader/import tooling → nodetool import or sstableloader
+    → Cassandra 5 → cqlsh queries
 ```
 
-This is the ultimate compatibility check. If Cassandra accepts our files and returns correct data, the SSTable format is correct.
+`export-sstable` is currently the packaging helper used by the CLI and test harness. It should not be read as a second format-conversion step; the flushed SSTables are the primary artifact.
 
 ## Prerequisites
 
@@ -38,7 +44,7 @@ python3 scripts/generate_e2e_mutations.py
 
 This produces `mutations.jsonl`. See [Mutation Format](#mutation-format) below for the schema.
 
-### 3. Write, flush, and export
+### 3. Write and flush portable SSTables
 
 ```bash
 WRITE_DIR=/tmp/cqlite-e2e
@@ -59,7 +65,10 @@ SCHEMA=test-data/schemas/basic-types.cql
   --schema $SCHEMA \
   --flush
 
-# Export with Cassandra-compatible filenames
+# The flushed files in $WRITE_DIR are the portable Cassandra SSTable artifact.
+# export-sstable is only needed when you want a loader-friendly directory layout.
+
+# Package into a loader-friendly keyspace/table directory
 ./target/release/cqlite \
   --writable \
   --write-dir $WRITE_DIR \
@@ -72,18 +81,18 @@ SCHEMA=test-data/schemas/basic-types.cql
 
 The `--skip-compact` flag is required (compaction is not yet implemented).
 
-### 4. Verify with sstabledump (optional but recommended)
+### 4. Verify the flushed artifact with sstabledump (optional but recommended)
 
-Before loading into Cassandra, validate the SSTable format:
+Before loading into Cassandra, validate the flushed SSTable format directly:
 
 ```bash
 docker run --rm \
-  -v $EXPORT_DIR:/data \
+  -v $WRITE_DIR:/data \
   cassandra:5.0 \
-  /opt/cassandra/tools/bin/sstabledump /data/test_basic-simple_table-nb-1-big-Data.db
+  sh -lc 'FILE=$(find /data -name "*-Data.db" | head -n 1); /opt/cassandra/tools/bin/sstabledump "$FILE"'
 ```
 
-This should produce valid JSON output with all partitions and rows. If sstabledump fails, fix the format issue before proceeding to import.
+This should produce valid JSON output with all partitions and rows. If `sstabledump` fails on the flushed file, the write path is not yet producing a portable Cassandra artifact and import validation is premature.
 
 ### 5. Start Cassandra and create schema
 
@@ -124,9 +133,9 @@ docker exec cassandra-e2e cqlsh -e "CREATE TABLE IF NOT EXISTS test_basic.simple
 ) WITH compression = {'class': 'SnappyCompressor'};"
 ```
 
-### 6. Import SSTables
+### 6. Import SSTables into Cassandra
 
-Use `docker cp` to copy files into the container, then `nodetool import`:
+Use `docker cp` to copy the packaged directory into the container, then `nodetool import`:
 
 ```bash
 # Find the table's data directory UUID
@@ -222,9 +231,9 @@ Same format as partition keys. Order must match the table's `PRIMARY KEY` defini
 | DECIMAL | `{"Decimal": {"scale": N, "unscaled": [bytes]}}` | `{"Decimal": {"scale": 2, "unscaled": [39,16]}}` |
 | DURATION | `{"Duration": {"months": M, "days": D, "nanos": N}}` | `{"Duration": {"months": 1, "days": 15, "nanos": 0}}` |
 
-## Exported SSTable Components
+## Flushed SSTable Components
 
-A successful export produces these files:
+A successful flush produces these SSTable components:
 
 | File | Purpose |
 |------|---------|
@@ -237,11 +246,11 @@ A successful export produces these files:
 | `{ks}-{table}-nb-{gen}-big-Digest.crc32` | CRC32 digest of Data.db |
 | `{ks}-{table}-nb-{gen}-big-TOC.txt` | Table of contents listing all components |
 
-All components must be present for Cassandra to accept the SSTable.
+All components must be present for Cassandra to accept the SSTable. Packaging steps such as `export-sstable` may rearrange the directory layout for import tooling, but they should not need to change the SSTable bytes themselves.
 
 ## Validation Tiers
 
-### Tier 1: sstabledump format check
+### Tier 1: Flushed artifact check
 
 Validates binary format correctness without a running Cassandra cluster:
 
@@ -252,7 +261,7 @@ sstabledump /path/to/nb-1-big-Data.db
 - **Pass**: Produces valid JSON with correct partition keys, column names, values
 - **Fail**: Exception traces (CorruptSSTableException, ArrayIndexOutOfBoundsException, etc.)
 
-### Tier 2: nodetool import
+### Tier 2: Cluster import acceptance
 
 Validates all SSTable components work together:
 
@@ -324,7 +333,7 @@ CQLite uses a Rust `murmur3` crate that produces different hash tokens than Cass
 
 ### No compaction
 
-The `--skip-compact` flag is required for export. Compaction (merging multiple SSTables) is not yet implemented (M5.3 scope). Each flush produces a separate SSTable.
+The `--skip-compact` flag is required for the current packaging helper. Compaction (merging multiple SSTables) is not yet implemented (M5.3 scope). Each flush produces a separate SSTable.
 
 ### Collection types (Phase 2)
 
@@ -332,14 +341,14 @@ The `--skip-compact` flag is required for export. Compaction (merging multiple S
 
 ## CI Integration
 
-The `cassandra-validation.yml` workflow automates this pipeline on every PR that touches write-path code:
+The `cassandra-validation.yml` workflow automates the import-validation half of this pipeline on every PR that touches write-path code:
 
 ```
 .github/workflows/cassandra-validation.yml
 ```
 
 It runs three tiers:
-1. **Tier 1**: sstableloader acceptance tests (single partition, multiple partitions, wide partition, all types)
+1. **Tier 1**: import acceptance tests (single partition, multiple partitions, wide partition, all types)
 2. **Tier 2**: CQL query verification (SELECT *, WHERE, row count)
 3. **Tier 3**: Stress tests (10K partitions, 1000-row wide partitions) — on push to main only
 

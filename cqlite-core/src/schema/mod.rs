@@ -938,6 +938,42 @@ impl TableSchema {
 }
 
 impl CqlType {
+    fn split_top_level_types(type_str: &str) -> Result<Vec<&str>> {
+        let mut parts = Vec::new();
+        let mut depth = 0usize;
+        let mut start = 0usize;
+
+        for (index, ch) in type_str.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    if depth == 0 {
+                        return Err(Error::schema(format!(
+                            "Invalid nested type syntax: {}",
+                            type_str
+                        )));
+                    }
+                    depth -= 1;
+                }
+                ',' if depth == 0 => {
+                    parts.push(type_str[start..index].trim());
+                    start = index + ch.len_utf8();
+                }
+                _ => {}
+            }
+        }
+
+        if depth != 0 {
+            return Err(Error::schema(format!(
+                "Unbalanced nested type syntax: {}",
+                type_str
+            )));
+        }
+
+        parts.push(type_str[start..].trim());
+        Ok(parts.into_iter().filter(|part| !part.is_empty()).collect())
+    }
+
     /// Parse CQL type string into structured type
     pub fn parse(type_str: &str) -> Result<Self> {
         let type_str = type_str.trim();
@@ -964,7 +1000,7 @@ impl CqlType {
 
         if let Some(inner) = type_str.strip_prefix("map<") {
             if let Some(inner) = inner.strip_suffix('>') {
-                let parts: Vec<&str> = inner.splitn(2, ',').collect();
+                let parts = Self::split_top_level_types(inner)?;
                 if parts.len() != 2 {
                     return Err(Error::schema(format!("Invalid map type: {}", type_str)));
                 }
@@ -978,7 +1014,7 @@ impl CqlType {
         // Handle tuple types
         if let Some(inner) = type_str.strip_prefix("tuple<") {
             if let Some(inner) = inner.strip_suffix('>') {
-                let parts: Vec<&str> = inner.split(',').collect();
+                let parts = Self::split_top_level_types(inner)?;
                 let mut types = Vec::new();
                 for part in parts {
                     types.push(Self::parse(part.trim())?);
@@ -1416,6 +1452,19 @@ mod tests {
                 assert_eq!(*value, CqlType::BigInt);
             }
             _ => panic!("Expected Map type"),
+        }
+
+        match CqlType::parse("tuple<text, list<int>, map<text, text>>").unwrap() {
+            CqlType::Tuple(fields) => {
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0], CqlType::Text);
+                assert_eq!(fields[1], CqlType::List(Box::new(CqlType::Int)));
+                assert_eq!(
+                    fields[2],
+                    CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Text))
+                );
+            }
+            _ => panic!("Expected Tuple type"),
         }
     }
 
