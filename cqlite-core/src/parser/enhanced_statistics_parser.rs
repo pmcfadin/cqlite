@@ -37,7 +37,7 @@
 //! - `docs/development/rust_developer_guide.md`: Architecture decisions
 
 use super::statistics::*;
-use super::vint::{parse_vint, parse_vuint};
+use super::vint::parse_vuint;
 use crate::error::{Error, Result};
 use nom::{bytes::complete::take, number::complete::be_u32, IResult};
 
@@ -50,6 +50,15 @@ const METADATA_TYPE_COMPACTION: u32 = 1;
 #[allow(dead_code)]
 const METADATA_TYPE_STATS: u32 = 2;
 const METADATA_TYPE_HEADER: u32 = 3; // SerializationHeader
+
+/// Epoch constants matching Cassandra's EncodingStats.java (EncodingStats.Serializer)
+/// Used for delta-encoding/decoding EncodingStats fields in Statistics.db SERIALIZATION_HEADER.
+/// Cassandra serializes: writeUnsignedVInt(value - EPOCH)
+/// Cassandra deserializes: readUnsignedVInt() + EPOCH
+const TIMESTAMP_EPOCH: i64 = 1_442_880_000_000_000; // Sept 22, 2015 00:00:00 UTC in microseconds
+const DELETION_TIME_EPOCH: i64 = 1_442_880_000; // Sept 22, 2015 00:00:00 UTC in seconds
+                                                // TTL epoch is 0 in Cassandra, but kept for consistency with the delta-encoding pattern
+const TTL_EPOCH: i64 = 0;
 
 /// Type alias for EncodingStats parse result to reduce complexity
 type EncodingStatsResult = (
@@ -1759,32 +1768,15 @@ fn parse_serialization_header_sequential(
     ))
 }
 
-/// Parse SerializationHeader.Component from TOC HEADER offset (Issue #216)
+/// Parse the schema portion of a SerializationHeader (after EncodingStats have been consumed).
 ///
-/// This parses the full HEADER component structure as written by Cassandra's
-/// SerializationHeader.Component.Serializer.serialize():
-///
-/// 1. EncodingStats (minTimestamp, minLocalDeletionTime, minTTL as VInts)
-/// 2. keyType (VInt len + type string)
-/// 3. clusteringTypes (VInt count + [VInt len + type string]*)
-/// 4. staticColumns (VInt count + [VInt name_len + name + VInt type_len + type]*)
-/// 5. regularColumns (VInt count + [VInt name_len + name + VInt type_len + type]*)
-fn parse_serialization_header_at_toc_offset(
-    input: &[u8],
-) -> IResult<&[u8], SerializationHeaderResult> {
-    log::debug!(
-        "Parsing SerializationHeader.Component from TOC offset, {} bytes available",
-        input.len()
-    );
-
-    // Step 1: Skip EncodingStats (3 VInts: minTimestamp, minLocalDeletionTime, minTTL)
-    let (input, _min_timestamp) = parse_vint(input)?;
-    let (input, _min_local_deletion_time) = parse_vint(input)?;
-    let (input, _min_ttl) = parse_vint(input)?;
-
-    log::debug!("Skipped EncodingStats in HEADER component");
-
-    // Step 2: Parse keyType (partition key type)
+/// Format:
+/// 1. keyType (VInt length + UTF-8 type string)
+/// 2. clusteringTypes (VInt count + [VInt type_len + type]*)
+/// 3. staticColumns (VInt count + [VInt name_len + name + VInt type_len + type]*)
+/// 4. regularColumns (VInt count + [VInt name_len + name + VInt type_len + type]*)
+fn parse_serialization_header_schema(input: &[u8]) -> IResult<&[u8], SerializationHeaderResult> {
+    // Parse keyType (partition key type)
     let (input, pk_type_len) = parse_vuint(input)?;
     if pk_type_len == 0 || pk_type_len > 5000 {
         log::debug!("Invalid pk_type_len: {}", pk_type_len);
@@ -2077,102 +2069,139 @@ fn parse_serialization_header_at_toc_offset(
 /// * `header_offset` - Optional offset to SerializationHeader from TOC (Issue #216)
 fn parse_minimal_encoding_stats<'a>(
     input: &'a [u8],
-    full_input: &[u8],
+    full_input: &'a [u8],
     header_offset: Option<usize>,
 ) -> IResult<&'a [u8], EncodingStatsResult> {
-    // Skip metadata_type (u32 BE) at start of data section
-    let (input, _metadata_type) = be_u32(input)?;
+    // The SERIALIZATION_HEADER component (type 3) starts with EncodingStats:
+    //   [vuint minTimestamp_delta] [vuint minLocalDeletionTime_delta] [vuint minTTL_delta]
+    // These are unsigned VInt deltas from epoch constants (see EncodingStats.Serializer).
+    // Use the TOC-based offset to read from the correct location.
 
-    // Parse data section length (VInt)
-    let (input, _data_length) = parse_vuint(input)?;
-
-    // Parse partitioner string length (VInt)
-    let (input, partitioner_len) = parse_vuint(input)?;
-
-    // Skip partitioner string (we don't need it)
-    let (input, _) = take(partitioner_len as usize)(input)?;
-
-    // The exact structure after partitioner varies, but we know EncodingStats fields appear
-    // after some metadata. Based on observed data, we need to skip past additional metadata
-    // before reaching minTimestamp, minLocalDeletionTime, and minTTL.
-    //
-    // Strategy: Parse VInts and look for patterns that match expected timestamp ranges
-    // Expected minTimestamp: ~1759713124861209 (microseconds, large positive number)
-    // Expected minLocalDeletionTime: ~1442880000 (seconds, reasonable epoch value)
-    // Expected minTTL: 0 or small positive number
-
-    // Skip additional metadata (observed: ~2 VInts before timestamp fields)
-    let (input, _metadata1) = parse_vuint(input)?;
-    let (input, _metadata2) = parse_vuint(input)?;
-
-    // Now parse the EncodingStats fields
-    // minTimestamp (VInt, signed microseconds)
-    let (input, min_timestamp) = parse_vint(input)?;
-
-    // minLocalDeletionTime (VInt, signed seconds)
-    let (input, min_deletion_time) = parse_vint(input)?;
-
-    // minTTL (VInt, signed seconds) - may be 0
-    let (input, min_ttl_value) = parse_vint(input)?;
-    let min_ttl = if min_ttl_value == 0 {
-        Some(0)
-    } else {
-        Some(min_ttl_value)
+    let Some(offset) = header_offset else {
+        log::debug!("No HEADER TOC offset, using fallback EncodingStats parsing");
+        return parse_encoding_stats_fallback(input);
     };
 
-    // Parse SerializationHeader (Issue #216)
-    // Use TOC-based offset if available, otherwise fall back to marker-based search
-    let (partition_types, clustering_types, columns) = if let Some(offset) = header_offset {
-        // Use direct offset from TOC - most reliable method
-        if offset < full_input.len() {
-            let header_data = &full_input[offset..];
-            log::debug!(
-                "Parsing SerializationHeader at TOC offset 0x{:x} ({} bytes available)",
-                offset,
-                header_data.len()
-            );
+    if offset >= full_input.len() {
+        log::warn!(
+            "TOC offset 0x{:x} exceeds input length {}, using fallback",
+            offset,
+            full_input.len()
+        );
+        return parse_encoding_stats_fallback(input);
+    }
 
-            // The HEADER component starts with some prefix data before the actual schema.
-            // Look for the partition key type marker pattern.
-            // Format at offset: [prefix VInts] [0x00]? [VInt pk_type_len] [pk_type_string...]
-            match parse_serialization_header_at_toc_offset(header_data) {
-                Ok((_, result)) => result,
-                Err(e) => {
-                    log::warn!(
-                        "TOC-based header parsing failed: {:?}, falling back to marker search",
-                        e
-                    );
-                    parse_serialization_header(input)?.1
-                }
-            }
-        } else {
+    let header_data = &full_input[offset..];
+    log::debug!(
+        "Parsing EncodingStats + SerializationHeader at TOC offset 0x{:x} ({} bytes available)",
+        offset,
+        header_data.len()
+    );
+
+    // Parse EncodingStats (3 unsigned VInts at start of SERIALIZATION_HEADER)
+    let (rest, (min_timestamp, min_deletion_time, min_ttl)) =
+        parse_encoding_stats_vuints(header_data)?;
+
+    log::debug!(
+        "EncodingStats from HEADER: min_timestamp={}, min_deletion_time={}, min_ttl={:?}",
+        min_timestamp,
+        min_deletion_time,
+        min_ttl
+    );
+
+    // Parse the rest of the SerializationHeader (schema info)
+    let (partition_types, clustering_types, columns) = match parse_serialization_header_schema(rest)
+    {
+        Ok((_, result)) => result,
+        Err(e) => {
             log::warn!(
-                "TOC offset 0x{:x} exceeds input length {}, using marker search",
-                offset,
-                full_input.len()
+                "Schema parsing after EncodingStats failed: {:?}, falling back to marker search",
+                e
             );
             parse_serialization_header(input)?.1
         }
-    } else {
-        // Fall back to marker-based search
-        parse_serialization_header(input)?.1
     };
 
-    log::debug!(
-        "Parsed SerializationHeader: {} partition keys, {} clustering keys, {} regular columns",
-        partition_types.len(),
-        clustering_types.len(),
-        columns.len()
-    );
+    let (partition_key_columns, clustering_key_columns) =
+        build_column_infos(&partition_types, &clustering_types);
 
-    let partition_key_columns = build_partition_key_columns(&partition_types);
-    let clustering_key_columns = build_clustering_key_columns(&clustering_types);
+    Ok((
+        input,
+        (
+            min_timestamp,
+            min_deletion_time,
+            min_ttl,
+            partition_key_columns,
+            clustering_key_columns,
+            columns,
+        ),
+    ))
+}
+
+/// Parse 3 EncodingStats unsigned VInt deltas and convert to absolute values by adding epochs.
+/// Returns (min_timestamp, min_deletion_time, min_ttl).
+fn parse_encoding_stats_vuints(input: &[u8]) -> IResult<&[u8], (i64, i64, Option<i64>)> {
+    let (rest, min_ts_delta) = parse_vuint(input)?;
+    let (rest, min_ldt_delta) = parse_vuint(rest)?;
+    let (rest, min_ttl_delta) = parse_vuint(rest)?;
+
+    Ok((
+        rest,
+        (
+            min_ts_delta as i64 + TIMESTAMP_EPOCH,
+            min_ldt_delta as i64 + DELETION_TIME_EPOCH,
+            Some(min_ttl_delta as i64 + TTL_EPOCH),
+        ),
+    ))
+}
+
+/// Build ColumnInfo vectors from parsed type strings.
+fn build_column_infos(
+    partition_types: &[String],
+    clustering_types: &[String],
+) -> (
+    Vec<super::header::ColumnInfo>,
+    Vec<super::header::ColumnInfo>,
+) {
+    let partition_key_columns = build_partition_key_columns(partition_types);
+    let clustering_key_columns = build_clustering_key_columns(clustering_types);
 
     log::debug!(
         "Constructed ColumnInfo entries from SerializationHeader: {} partition keys, {} clustering keys",
         partition_key_columns.len(),
         clustering_key_columns.len()
     );
+
+    (partition_key_columns, clustering_key_columns)
+}
+
+/// Fallback EncodingStats parser for when no TOC HEADER offset is available.
+/// Uses ad-hoc parsing from the data following the file header.
+fn parse_encoding_stats_fallback(input: &[u8]) -> IResult<&[u8], EncodingStatsResult> {
+    // Skip metadata_type (u32 BE) at start of data section
+    let (rest, _metadata_type) = be_u32(input)?;
+
+    // Parse data section length (VInt)
+    let (rest, _data_length) = parse_vuint(rest)?;
+
+    // Parse partitioner string length (VInt)
+    let (rest, partitioner_len) = parse_vuint(rest)?;
+
+    // Skip partitioner string
+    let (rest, _) = take(partitioner_len as usize)(rest)?;
+
+    // Skip additional metadata (observed: ~2 VInts before timestamp fields)
+    let (rest, _metadata1) = parse_vuint(rest)?;
+    let (rest, _metadata2) = parse_vuint(rest)?;
+
+    // Parse EncodingStats fields (unsigned VInt deltas from epoch)
+    let (rest, (min_timestamp, min_deletion_time, min_ttl)) = parse_encoding_stats_vuints(rest)?;
+
+    // Fall back to marker-based header search for schema
+    let (_, (partition_types, clustering_types, columns)) = parse_serialization_header(rest)?;
+
+    let (partition_key_columns, clustering_key_columns) =
+        build_column_infos(&partition_types, &clustering_types);
 
     Ok((
         input,
