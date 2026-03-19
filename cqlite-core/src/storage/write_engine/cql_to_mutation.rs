@@ -37,7 +37,6 @@ use crate::Error;
 /// - JSON INSERT syntax is used (not yet supported)
 /// - A value cannot be coerced to its schema type
 #[cfg(feature = "write-support")]
-#[allow(dead_code)] // Will be wired into WriteEngine in a follow-up task
 pub(crate) fn insert_to_mutation(
     insert: &CqlInsert,
     schema: &TableSchema,
@@ -158,7 +157,6 @@ pub(crate) fn insert_to_mutation(
 /// - A column in SET is unknown in the schema
 /// - A value cannot be coerced to its schema type
 #[cfg(feature = "write-support")]
-#[allow(dead_code)] // Will be wired into WriteEngine in a follow-up task
 pub(crate) fn update_to_mutation(
     update: &CqlUpdate,
     schema: &TableSchema,
@@ -227,7 +225,6 @@ pub(crate) fn update_to_mutation(
 /// - A required partition key column is missing from the WHERE clause
 /// - A value cannot be coerced to its schema type
 #[cfg(feature = "write-support")]
-#[allow(dead_code)] // Will be wired into WriteEngine in a follow-up task
 pub(crate) fn delete_to_mutation(
     delete: &CqlDelete,
     schema: &TableSchema,
@@ -270,6 +267,36 @@ pub(crate) fn delete_to_mutation(
         timestamp_micros,
         None, // DELETE never has TTL
     ))
+}
+
+/// Convert a CQL mutation statement string to a Mutation struct.
+///
+/// Supports INSERT, UPDATE, and DELETE statements.
+/// The statement is parsed using the existing CQL parser, then converted
+/// to a Mutation using the provided schema for type resolution.
+#[cfg(feature = "write-support")]
+pub(crate) fn convert_cql_to_mutation(
+    statement: &str,
+    schema: &TableSchema,
+) -> Result<Mutation, Error> {
+    let trimmed = statement.trim();
+    let upper = trimmed.to_uppercase();
+
+    if upper.starts_with("INSERT") {
+        let insert = crate::cql::mutation_parser::parse_insert_statement(trimmed)?;
+        insert_to_mutation(&insert, schema)
+    } else if upper.starts_with("UPDATE") {
+        let update = crate::cql::mutation_parser::parse_update_statement(trimmed)?;
+        update_to_mutation(&update, schema)
+    } else if upper.starts_with("DELETE") {
+        let delete = crate::cql::mutation_parser::parse_delete_statement(trimmed)?;
+        delete_to_mutation(&delete, schema)
+    } else {
+        Err(Error::InvalidInput(format!(
+            "Unsupported mutation statement. Expected INSERT, UPDATE, or DELETE: {}",
+            &trimmed[..trimmed.len().min(50)]
+        )))
+    }
 }
 
 /// Extract `(column_name, value_expression)` pairs from a WHERE clause expression.
@@ -1768,5 +1795,63 @@ mod tests {
             right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(18))),
         };
         assert!(extract_where_bindings(&expr).is_err());
+    }
+
+    // ── convert_cql_to_mutation integration tests ─────────────────────────────
+
+    #[test]
+    fn test_convert_cql_insert_string() {
+        let schema = test_schema();
+        let sql = "INSERT INTO test_ks.test_tbl (id, ts, name) VALUES (550e8400-e29b-41d4-a716-446655440000, 1704067200000, 'Alice')";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutation = result.unwrap();
+        assert_eq!(mutation.table.keyspace, "test_ks");
+        assert_eq!(mutation.table.table, "test_tbl");
+        assert_eq!(mutation.operations.len(), 1); // only 'name' is non-key
+    }
+
+    #[test]
+    fn test_convert_cql_update_string() {
+        let schema = test_schema();
+        let sql = "UPDATE test_ks.test_tbl SET name = 'Bob' WHERE id = 550e8400-e29b-41d4-a716-446655440000 AND ts = 1704067200000";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutation = result.unwrap();
+        assert_eq!(mutation.operations.len(), 1);
+        match &mutation.operations[0] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "name");
+                assert_eq!(*value, Value::Text("Bob".into()));
+            }
+            _ => panic!("expected Write"),
+        }
+    }
+
+    #[test]
+    fn test_convert_cql_delete_string() {
+        let schema = test_schema();
+        let sql = "DELETE FROM test_ks.test_tbl WHERE id = 550e8400-e29b-41d4-a716-446655440000";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutation = result.unwrap();
+        assert!(matches!(mutation.operations[0], CellOperation::DeleteRow));
+    }
+
+    #[test]
+    fn test_convert_unsupported_statement() {
+        let schema = test_schema();
+        let sql = "SELECT * FROM test_ks.test_tbl";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_convert_cql_insert_with_using_timestamp() {
+        let schema = test_schema();
+        let sql = "INSERT INTO test_ks.test_tbl (id, ts, name) VALUES (550e8400-e29b-41d4-a716-446655440000, 1704067200000, 'Alice') USING TIMESTAMP 1704067200000000";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        assert_eq!(result.unwrap().timestamp_micros, 1704067200000000);
     }
 }
