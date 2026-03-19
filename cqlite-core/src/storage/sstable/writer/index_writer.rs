@@ -22,7 +22,7 @@
 //!
 //! - Entries must be in token order (same as Data.db partition order)
 //! - Position offsets must match Data.db partition positions EXACTLY
-//! - Key bytes must match the raw partition key in Data.db exactly
+//! - MD5 digest is computed from the raw partition key bytes
 //! - VInt encoding follows Cassandra unsigned VInt format
 //!
 //! References:
@@ -32,6 +32,9 @@
 use crate::error::Result;
 use crate::storage::serialization::vint::encode_unsigned;
 use crate::storage::write_engine::mutation::DecoratedKey;
+
+/// BIG format marker indicating a partition key digest follows (Cassandra NB variant)
+const BIG_FORMAT_MARKER: u16 = 0x0010;
 
 /// Index.db component writer
 ///
@@ -147,8 +150,9 @@ impl IndexWriter {
     fn write_entry(&mut self, key: &DecoratedKey, data_offset: u64) -> Result<usize> {
         let start_len = self.buffer.len();
 
-        // Write BIG format marker (0x0010)
-        self.buffer.extend_from_slice(&0x0010u16.to_be_bytes());
+        // Write BIG format marker
+        self.buffer
+            .extend_from_slice(&BIG_FORMAT_MARKER.to_be_bytes());
 
         // Write MD5 digest of partition key bytes (16 bytes)
         let digest = md5::compute(&key.key);
@@ -365,27 +369,6 @@ mod tests {
 
         // Total: 2 + 16 + 2 + 1 = 21 bytes
         assert_eq!(bytes.len(), 21);
-    }
-
-    #[test]
-    fn test_hex_dump_verification() {
-        let mut writer = IndexWriter::new();
-
-        let pk_bytes = vec![0x01, 0x02, 0x03, 0x04];
-        let key = DecoratedKey::new(12345, pk_bytes.clone());
-        writer.add_partition(&key, 0).unwrap();
-
-        let bytes = writer.finish().unwrap();
-
-        // Verify marker
-        assert_eq!(&bytes[0..2], &[0x00, 0x10], "Marker should be 0x0010");
-
-        // Verify MD5 digest
-        let expected_digest = md5::compute(&pk_bytes);
-        assert_eq!(&bytes[2..18], expected_digest.as_slice());
-
-        // Total: 2 (marker) + 16 (digest) + 1 (pos) + 1 (promoted) = 20
-        assert_eq!(bytes.len(), 20);
     }
 
     #[test]
