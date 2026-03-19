@@ -367,10 +367,32 @@ pub trait SSTableRowIterator: Send {
 
 /// Adapter that wraps async SSTableReader into sync SSTableRowIterator
 ///
+/// Run an async future synchronously, reusing the current tokio runtime if available.
+///
+/// This is the standard async-to-sync bridge pattern used throughout the write engine
+/// (flush_internal, finalize_merge_blocking, SSTableRowIteratorAdapter).
+#[cfg(feature = "write-support")]
+fn block_on_async<F, T>(future: F) -> Result<T>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => handle.block_on(future),
+        Err(_) => {
+            let rt = tokio::runtime::Runtime::new()
+                .map_err(|e| Error::Storage(format!("Failed to create tokio runtime: {}", e)))?;
+            rt.block_on(future)
+        }
+    }
+}
+
+/// Adapter that wraps async SSTableReader into sync SSTableRowIterator.
+///
 /// Pre-loads all entries from an SSTable into memory, converting
-/// `(RowKey, Value)` pairs into `MergeEntry` format. Uses tokio
-/// `block_on` for async-to-sync bridging (same pattern as
-/// `flush_internal` and `finalize_merge_blocking`).
+/// `(RowKey, Value)` pairs into `MergeEntry` format.
+///
+/// TODO(#447): Implement true streaming iteration to stay within the 128MB
+/// memory budget. Currently loads all entries upfront.
 #[cfg(feature = "write-support")]
 struct SSTableRowIteratorAdapter {
     /// Pre-loaded entries
@@ -380,12 +402,7 @@ struct SSTableRowIteratorAdapter {
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
     /// Open an SSTable and load all entries as MergeEntry
-    ///
-    /// # Arguments
-    /// * `path` - Path to the Data.db file
-    /// * `_schema` - Table schema (reserved for future use)
-    /// * `run_index` - Index of this run in the merge (0 = newest)
-    fn open(path: &Path, _schema: &TableSchema, run_index: usize) -> Result<Self> {
+    fn open(path: &Path, run_index: usize) -> Result<Self> {
         use crate::platform::Platform;
         use crate::Config;
         use std::sync::Arc;
@@ -393,32 +410,15 @@ impl SSTableRowIteratorAdapter {
         let config = Config::default();
         let path_buf = path.to_path_buf();
 
-        // Open SSTable reader and load all partitions using async runtime
-        // (same pattern as finalize_merge_blocking)
-        let (reader, raw_entries) = {
-            let config_clone = config.clone();
-            let path_clone = path_buf.clone();
-            let open_and_read = async move {
-                let platform = Arc::new(Platform::new(&config_clone).await?);
-                let reader = crate::storage::sstable::reader::SSTableReader::open(
-                    &path_clone,
-                    &config_clone,
-                    platform,
-                )
-                .await?;
-                let entries = reader.iterate_all_partitions().await?;
-                Ok::<_, crate::Error>((reader, entries))
-            };
-            match tokio::runtime::Handle::try_current() {
-                Ok(handle) => handle.block_on(open_and_read)?,
-                Err(_) => {
-                    let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                        Error::Storage(format!("Failed to create tokio runtime: {}", e))
-                    })?;
-                    rt.block_on(open_and_read)?
-                }
-            }
-        };
+        // Open SSTable reader and load all partitions
+        let (reader, raw_entries) = block_on_async(async move {
+            let platform = Arc::new(Platform::new(&config).await?);
+            let reader =
+                crate::storage::sstable::reader::SSTableReader::open(&path_buf, &config, platform)
+                    .await?;
+            let entries = reader.iterate_all_partitions().await?;
+            Ok((reader, entries))
+        })?;
 
         // Convert (RowKey, Value) pairs to MergeEntry
         let mut entries = Vec::with_capacity(raw_entries.len());
@@ -426,17 +426,13 @@ impl SSTableRowIteratorAdapter {
             let key_bytes = row_key.0;
             let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
 
-            // Extract timestamp from the value
             // TODO(#447): extract_write_time_from_entry returns SystemTime::now() for live rows
             // because the reader doesn't expose per-cell timestamps. This is acceptable for
             // single-round STCS compaction (run_index breaks ties correctly) but will need
             // proper timestamp extraction for multi-round compaction correctness.
-            let timestamp = reader.extract_write_time_from_entry(
-                &crate::types::RowKey::new(decorated_key.key.clone()),
-                &value,
-            );
+            let row_key_ref = crate::types::RowKey::new(decorated_key.key.clone());
+            let timestamp = reader.extract_write_time_from_entry(&row_key_ref, &value);
 
-            // Convert Value to RowData
             let row_data = Self::value_to_row_data(&value)?;
 
             entries.push(MergeEntry::new(
@@ -448,8 +444,7 @@ impl SSTableRowIteratorAdapter {
             ));
         }
 
-        // Sort by token for correct merge ordering
-        entries.sort();
+        // SSTable data is already in token order from the reader, no sort needed
 
         Ok(Self {
             entries: entries.into_iter(),
@@ -463,9 +458,9 @@ impl SSTableRowIteratorAdapter {
                 deletion_time: info.deletion_time,
                 local_deletion_time: 0, // TombstoneInfo does not carry local_deletion_time
             }),
-            crate::types::Value::Map(entries) => {
-                let mut cells = Vec::with_capacity(entries.len());
-                for (key, val) in entries {
+            crate::types::Value::Map(map_entries) => {
+                let mut cells = Vec::with_capacity(map_entries.len());
+                for (key, val) in map_entries {
                     let column = match key {
                         crate::types::Value::Text(s) => s.clone(),
                         other => format!("{:?}", other),
@@ -572,7 +567,7 @@ impl KWayMerger {
         // Create run readers for each input SSTable (ordered newest to oldest)
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {
-            let adapter = SSTableRowIteratorAdapter::open(path, schema, run_index)?;
+            let adapter = SSTableRowIteratorAdapter::open(path, run_index)?;
             runs.push(RunReader::new(Box::new(adapter)));
         }
 
