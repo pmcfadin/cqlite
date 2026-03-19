@@ -655,15 +655,19 @@ impl WriteEngine {
 
     /// Parse a CQL statement to a Mutation
     ///
-    /// This is a placeholder for full CQL parsing integration.
-    /// For M5, we'll support basic INSERT statements.
+    /// Supports INSERT statements via `insert_to_mutation`. UPDATE and DELETE
+    /// are planned for a future milestone.
     fn parse_cql_to_mutation(&self, statement: &str) -> Result<Mutation> {
-        // TODO: Full CQL parser integration in M5.0-8
-        // For now, return error to indicate not implemented
-        Err(Error::InvalidInput(format!(
-            "CQL parsing not yet implemented: {}",
-            statement
-        )))
+        let stmt_upper = statement.trim_start().to_uppercase();
+        if stmt_upper.starts_with("INSERT") {
+            let insert = crate::cql::mutation_parser::parse_insert_statement(statement)?;
+            cql_to_mutation::insert_to_mutation(&insert, &self.config.schema)
+        } else {
+            Err(Error::InvalidInput(format!(
+                "CQL parsing not yet implemented for statement type: {}",
+                statement
+            )))
+        }
     }
 
     /// Determine the next SSTable generation number

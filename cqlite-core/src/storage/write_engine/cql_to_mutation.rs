@@ -12,7 +12,7 @@
 #[cfg(feature = "write-support")]
 use crate::cql::ast::{
     CqlCollectionLiteral, CqlExpression, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable,
-    CqlUnaryOperator, CqlUsing, CqlUdtLiteral,
+    CqlUdtLiteral, CqlUnaryOperator, CqlUsing,
 };
 #[cfg(feature = "write-support")]
 use crate::schema::{CqlType, TableSchema};
@@ -37,7 +37,10 @@ use crate::Error;
 /// - A value cannot be coerced to its schema type
 #[cfg(feature = "write-support")]
 #[allow(dead_code)] // Will be wired into WriteEngine in a follow-up task
-pub(crate) fn insert_to_mutation(insert: &CqlInsert, schema: &TableSchema) -> Result<Mutation, Error> {
+pub(crate) fn insert_to_mutation(
+    insert: &CqlInsert,
+    schema: &TableSchema,
+) -> Result<Mutation, Error> {
     validate_table(&insert.table, schema)?;
 
     // Extract (column_name, expression) pairs
@@ -163,10 +166,7 @@ fn expression_to_value(expr: &CqlExpression, target_type: &CqlType) -> Result<Va
             match operand.as_ref() {
                 CqlExpression::Literal(CqlLiteral::Integer(i)) => {
                     let negated = i.checked_neg().ok_or_else(|| {
-                        Error::InvalidInput(format!(
-                            "Integer {} cannot be negated (overflow)",
-                            i
-                        ))
+                        Error::InvalidInput(format!("Integer {} cannot be negated (overflow)", i))
                     })?;
                     literal_to_value(&CqlLiteral::Integer(negated), target_type)
                 }
@@ -254,10 +254,7 @@ fn extract_ttl(using: &Option<CqlUsing>) -> Result<Option<u32>, Error> {
             match ttl_expr {
                 CqlExpression::Literal(CqlLiteral::Integer(ttl)) => {
                     let v = u32::try_from(*ttl).map_err(|_| {
-                        Error::InvalidInput(format!(
-                            "TTL value {} is out of range for u32",
-                            ttl
-                        ))
+                        Error::InvalidInput(format!("TTL value {} is out of range for u32", ttl))
                     })?;
                     return Ok(Some(v));
                 }
@@ -594,7 +591,9 @@ fn overflow_error(value: i64, target: &str) -> Error {
 #[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
-    use crate::cql::ast::{CqlIdentifier, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUsing};
+    use crate::cql::ast::{
+        CqlIdentifier, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUsing,
+    };
     use crate::schema::CqlType;
     use crate::storage::write_engine::mutation::CellOperation;
     use crate::types::Value;
@@ -717,10 +716,7 @@ mod tests {
         let custom_ts: i64 = 1_700_000_000_000_000; // some specific microsecond timestamp
         let insert = CqlInsert {
             table: CqlTable::new("test_tbl"),
-            columns: vec![
-                CqlIdentifier::new("id"),
-                CqlIdentifier::new("ts"),
-            ],
+            columns: vec![CqlIdentifier::new("id"), CqlIdentifier::new("ts")],
             values: CqlInsertValues::Values(vec![
                 CqlExpression::Literal(CqlLiteral::Uuid(uuid_str)),
                 CqlExpression::Literal(CqlLiteral::Integer(1_000_000)),
@@ -1169,10 +1165,7 @@ mod tests {
         let result = literal_to_value(&lit, &CqlType::Set(Box::new(CqlType::Text)));
         assert_eq!(
             result.unwrap(),
-            Value::Set(vec![
-                Value::Text("a".into()),
-                Value::Text("b".into()),
-            ])
+            Value::Set(vec![Value::Text("a".into()), Value::Text("b".into()),])
         );
     }
 
@@ -1194,9 +1187,7 @@ mod tests {
 
     #[test]
     fn test_frozen_list() {
-        let lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![
-            CqlLiteral::Integer(1),
-        ]));
+        let lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![CqlLiteral::Integer(1)]));
         let result = literal_to_value(
             &lit,
             &CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Int)))),
@@ -1216,10 +1207,7 @@ mod tests {
             CqlLiteral::Integer(1),
             CqlLiteral::String("hello".into()),
         ]);
-        let result = literal_to_value(
-            &lit,
-            &CqlType::Tuple(vec![CqlType::Int, CqlType::Text]),
-        );
+        let result = literal_to_value(&lit, &CqlType::Tuple(vec![CqlType::Int, CqlType::Text]));
         assert_eq!(
             result.unwrap(),
             Value::Tuple(vec![Value::Integer(1), Value::Text("hello".into()),])
@@ -1229,10 +1217,7 @@ mod tests {
     #[test]
     fn test_tuple_wrong_arity() {
         let lit = CqlLiteral::Tuple(vec![CqlLiteral::Integer(1)]);
-        let result = literal_to_value(
-            &lit,
-            &CqlType::Tuple(vec![CqlType::Int, CqlType::Text]),
-        );
+        let result = literal_to_value(&lit, &CqlType::Tuple(vec![CqlType::Int, CqlType::Text]));
         assert!(result.is_err());
     }
 
@@ -1272,9 +1257,7 @@ mod tests {
     #[test]
     fn test_collection_type_mismatch() {
         // List literal but Map target type
-        let lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![
-            CqlLiteral::Integer(1),
-        ]));
+        let lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![CqlLiteral::Integer(1)]));
         let result = literal_to_value(
             &lit,
             &CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int)),
@@ -1289,8 +1272,7 @@ mod tests {
             CqlLiteral::Integer(1),
             CqlLiteral::Integer(2),
         ]));
-        let outer_list =
-            CqlLiteral::Collection(CqlCollectionLiteral::List(vec![inner_list]));
+        let outer_list = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![inner_list]));
         let target = CqlType::List(Box::new(CqlType::Frozen(Box::new(CqlType::List(
             Box::new(CqlType::Int),
         )))));
