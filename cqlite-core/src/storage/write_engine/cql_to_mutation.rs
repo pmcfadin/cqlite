@@ -539,7 +539,10 @@ fn extract_ttl(using: &Option<CqlUsing>) -> Result<Option<u32>, Error> {
 /// Returns `Error::InvalidInput` for type mismatches or overflow, and
 /// `Error::Parse` for malformed UUID/blob/inet strings.
 #[cfg(feature = "write-support")]
-pub(crate) fn literal_to_value(literal: &CqlLiteral, target_type: &CqlType) -> Result<Value, Error> {
+pub(crate) fn literal_to_value(
+    literal: &CqlLiteral,
+    target_type: &CqlType,
+) -> Result<Value, Error> {
     // Unwrap Frozen – it doesn't affect value representation
     if let CqlType::Frozen(inner) = target_type {
         let inner_value = literal_to_value(literal, inner)?;
@@ -949,7 +952,10 @@ mod tests {
         // Verify partition key
         assert_eq!(mutation.partition_key.columns.len(), 1);
         assert_eq!(mutation.partition_key.columns[0].0, "id");
-        assert!(matches!(mutation.partition_key.columns[0].1, Value::Uuid(_)));
+        assert!(matches!(
+            mutation.partition_key.columns[0].1,
+            Value::Uuid(_)
+        ));
 
         // Verify clustering key
         let ck = mutation.clustering_key.unwrap();

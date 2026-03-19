@@ -699,27 +699,12 @@ impl WriteEngine {
 
     /// Set the merge policy for background compaction (M5.2, Issue #383)
     ///
-    /// **NOTE**: This method is currently disabled pending SSTable reader integration (M5.3).
-    /// Calling it will return an error. Use `maintenance_step()` for flush operations only.
-    ///
     /// # Arguments
     ///
     /// * `policy` - Merge policy implementation (e.g., STCS, LCS, TWCS)
-    ///
-    /// # Returns
-    ///
-    /// Currently returns `Err` as merge policy is not yet supported.
-    pub fn set_merge_policy(&mut self, _policy: Box<dyn MergePolicy>) -> Result<()> {
-        // Guard: K-way merger not yet integrated with SSTable reader
-        Err(Error::InvalidInput(
-            "Merge policy cannot be set until SSTable reader integration is complete (M5.3). \
-             Use maintenance_step() for flush operations only."
-                .to_string(),
-        ))
-
-        // Original code (to be enabled in M5.3):
-        // self.merge_policy = Some(policy);
-        // Ok(())
+    pub fn set_merge_policy(&mut self, policy: Box<dyn MergePolicy>) -> Result<()> {
+        self.merge_policy = Some(policy);
+        Ok(())
     }
 
     /// Perform incremental maintenance work (M5.2, Issue #384)
@@ -1025,17 +1010,13 @@ impl WriteEngine {
     }
 
     /// Convert MergeEntry to Mutation (M5.2 helper)
+    ///
+    /// Delegates to `KWayMerger::merge_entry_to_mutation` to avoid duplication.
     fn merge_entry_to_mutation(
         &self,
         entry: merge::MergeEntry,
     ) -> Result<crate::storage::write_engine::mutation::Mutation> {
-        // TODO: This requires deserializing the DecoratedKey bytes back to PartitionKey
-        // For now, return a placeholder error
-        // This will be implemented when SSTable reader integration is complete
-        Err(Error::InvalidInput(format!(
-            "MergeEntry to Mutation conversion not yet implemented (token: {})",
-            entry.key.token
-        )))
+        merge::KWayMerger::merge_entry_to_mutation(entry, &self.config.schema)
     }
 }
 
@@ -1087,6 +1068,31 @@ mod tests {
         }];
 
         Mutation::new(table_id, pk, None, ops, timestamp, None)
+    }
+
+    #[test]
+    fn test_set_merge_policy() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Should succeed now (was previously returning error)
+        let policy = Box::new(crate::storage::write_engine::STCSPolicy::default());
+        engine.set_merge_policy(policy).unwrap();
+
+        // With policy set but no SSTables, should return quickly with no work
+        let report = engine
+            .maintenance_step(std::time::Duration::from_millis(100))
+            .unwrap();
+        assert!(!report.pending_compaction);
+        assert_eq!(report.rows_merged, 0);
     }
 
     #[test]
@@ -1893,34 +1899,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_merge_policy() {
-        // Mock merge policy for testing
-        #[derive(Debug)]
-        struct MockPolicy;
-        impl MergePolicy for MockPolicy {
-            fn select_merge(&self, _candidates: &[PathBuf]) -> Result<Vec<PathBuf>> {
-                Ok(vec![])
-            }
-        }
-
-        let temp_dir = TempDir::new().unwrap();
-        let schema = create_test_schema();
-
-        let config = WriteEngineConfig::new(
-            temp_dir.path().join("data"),
-            temp_dir.path().join("wal"),
-            schema,
-        );
-
-        let mut engine = WriteEngine::new(config).unwrap();
-
-        // Setting merge policy should return error until M5.3
-        let result = engine.set_merge_policy(Box::new(MockPolicy));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("M5.3"));
-    }
-
-    #[test]
     fn test_delete_sstable_files() {
         let temp_dir = TempDir::new().unwrap();
         let schema = create_test_schema();
@@ -1979,7 +1957,6 @@ mod tests {
     #[test]
     fn test_maintenance_step_with_policy_no_work() {
         // Policy that returns empty selection (no work to do)
-        // NOTE: This test is disabled until M5.3 because set_merge_policy now returns an error
         let temp_dir = TempDir::new().unwrap();
         let schema = create_test_schema();
 
@@ -1991,18 +1968,16 @@ mod tests {
 
         let mut engine = WriteEngine::new(config).unwrap();
 
-        // Try to set a policy - should fail until M5.3
+        // Set a policy that selects nothing
         let policy = TestMergePolicy {
             files_to_select: vec![],
         };
-        let result = engine.set_merge_policy(Box::new(policy));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("M5.3"));
+        engine.set_merge_policy(Box::new(policy)).unwrap();
 
-        // Call maintenance_step without a policy - should return immediately
+        // Call maintenance_step - policy selects no work
         let report = engine.maintenance_step(Duration::from_millis(100)).unwrap();
 
-        // Should return with no work done (no policy set)
+        // Should return with no work done
         assert_eq!(report.rows_merged, 0);
         assert_eq!(report.bytes_written, 0);
         assert_eq!(report.completed_merges.len(), 0);
@@ -2012,7 +1987,6 @@ mod tests {
     #[test]
     fn test_maintenance_step_budget_honored() {
         // Test that budget is approximately honored
-        // NOTE: This test is disabled until M5.3 because set_merge_policy now returns an error
         let temp_dir = TempDir::new().unwrap();
         let schema = create_test_schema();
 
@@ -2024,18 +1998,17 @@ mod tests {
 
         let mut engine = WriteEngine::new(config).unwrap();
 
-        // Try to set a policy - should fail until M5.3
+        // Set a policy that selects nothing
         let policy = TestMergePolicy {
             files_to_select: vec![],
         };
-        let result = engine.set_merge_policy(Box::new(policy));
-        assert!(result.is_err());
+        engine.set_merge_policy(Box::new(policy)).unwrap();
 
-        // Call with small budget (no policy set, should return immediately)
+        // Call with small budget - policy selects no work, should return quickly
         let budget = Duration::from_millis(10);
         let report = engine.maintenance_step(budget).unwrap();
 
-        // Should return quickly when there's no policy
+        // Should return quickly when there's no compaction work
         assert!(
             report.time_spent < budget.mul_f32(1.5),
             "Time spent {:?} exceeded budget {:?} by >50%",

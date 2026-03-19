@@ -258,6 +258,64 @@ impl PartitionKey {
         Ok(DecoratedKey::new(token, key_bytes))
     }
 
+    /// Deserialize partition key from raw bytes (inverse of `to_bytes`)
+    ///
+    /// Single-component keys are raw value bytes.
+    /// Multi-component keys use `[len:u16 BE][value bytes][0x00]` per component.
+    pub fn from_bytes(data: &[u8], schema: &TableSchema) -> Result<Self> {
+        if schema.partition_keys.is_empty() {
+            return Err(Error::InvalidInput(
+                "Schema has no partition keys".to_string(),
+            ));
+        }
+
+        if data.is_empty() {
+            return Err(Error::InvalidInput("Empty partition key bytes".to_string()));
+        }
+
+        let mut columns = Vec::with_capacity(schema.partition_keys.len());
+
+        if schema.partition_keys.len() == 1 {
+            // Single-component: raw value bytes
+            let key_col = &schema.partition_keys[0];
+            let comparator = ComparatorType::from_data_type(&key_col.data_type)?;
+            let value = deserialize_value_bytes(data, &comparator)?;
+            columns.push((key_col.name.clone(), value));
+        } else {
+            // Multi-component: [len:u16 BE][value bytes][0x00] per component
+            let mut offset = 0;
+            for key_col in &schema.partition_keys {
+                if offset + 2 > data.len() {
+                    return Err(Error::InvalidInput(format!(
+                        "Truncated multi-component partition key at offset {}",
+                        offset
+                    )));
+                }
+                let len = u16::from_be_bytes([data[offset], data[offset + 1]]) as usize;
+                offset += 2;
+
+                if offset + len > data.len() {
+                    return Err(Error::InvalidInput(format!(
+                        "Partition key component extends beyond data: offset={}, len={}, data_len={}",
+                        offset, len, data.len()
+                    )));
+                }
+
+                let comparator = ComparatorType::from_data_type(&key_col.data_type)?;
+                let value = deserialize_value_bytes(&data[offset..offset + len], &comparator)?;
+                columns.push((key_col.name.clone(), value));
+                offset += len;
+
+                // Skip 0x00 end-of-component marker
+                if offset < data.len() {
+                    offset += 1;
+                }
+            }
+        }
+
+        Ok(PartitionKey { columns })
+    }
+
     /// Serialize a single value to bytes according to its CQL type
     fn serialize_value(
         &self,
@@ -616,6 +674,137 @@ fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<V
         _ => Err(Error::InvalidInput(format!(
             "Type mismatch: value {:?} does not match comparator {:?}",
             value, comparator
+        ))),
+    }
+}
+
+/// Deserialize raw bytes to a Value according to its CQL comparator type
+///
+/// This is the inverse of `serialize_value_bytes`.
+fn deserialize_value_bytes(data: &[u8], comparator: &ComparatorType) -> Result<Value> {
+    match comparator {
+        ComparatorType::Boolean => {
+            if data.is_empty() {
+                return Err(Error::InvalidInput("Empty boolean value".to_string()));
+            }
+            Ok(Value::Boolean(data[0] != 0))
+        }
+        ComparatorType::TinyInt => {
+            if data.is_empty() {
+                return Err(Error::InvalidInput("Empty tinyint value".to_string()));
+            }
+            Ok(Value::TinyInt(data[0] as i8))
+        }
+        ComparatorType::SmallInt => {
+            let bytes: [u8; 2] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("SmallInt requires 2 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::SmallInt(i16::from_be_bytes(bytes)))
+        }
+        ComparatorType::Int => {
+            let bytes: [u8; 4] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("Int requires 4 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::Integer(i32::from_be_bytes(bytes)))
+        }
+        ComparatorType::BigInt => {
+            let bytes: [u8; 8] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("BigInt requires 8 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::BigInt(i64::from_be_bytes(bytes)))
+        }
+        ComparatorType::Counter => {
+            let bytes: [u8; 8] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("Counter requires 8 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::Counter(i64::from_be_bytes(bytes)))
+        }
+        ComparatorType::Float32 => {
+            let bytes: [u8; 4] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("Float32 requires 4 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::Float32(f32::from_bits(u32::from_be_bytes(bytes))))
+        }
+        ComparatorType::Float => {
+            let bytes: [u8; 8] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("Float requires 8 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::Float(f64::from_bits(u64::from_be_bytes(bytes))))
+        }
+        ComparatorType::Text => {
+            let s = String::from_utf8(data.to_vec())
+                .map_err(|e| Error::InvalidInput(format!("Invalid UTF-8 in text value: {}", e)))?;
+            Ok(Value::Text(s))
+        }
+        ComparatorType::Blob => Ok(Value::Blob(data.to_vec())),
+        ComparatorType::Timestamp => {
+            let bytes: [u8; 8] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("Timestamp requires 8 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::Timestamp(i64::from_be_bytes(bytes)))
+        }
+        ComparatorType::Date => {
+            let bytes: [u8; 4] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("Date requires 4 bytes, got {}", data.len()))
+            })?;
+            let stored = u32::from_be_bytes(bytes);
+            Ok(Value::Date((stored as i32).wrapping_add(i32::MIN)))
+        }
+        ComparatorType::Uuid => {
+            let bytes: [u8; 16] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("UUID requires 16 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::Uuid(bytes))
+        }
+        ComparatorType::Custom(name) if name == "time" => {
+            let bytes: [u8; 8] = data.try_into().map_err(|_| {
+                Error::InvalidInput(format!("Time requires 8 bytes, got {}", data.len()))
+            })?;
+            Ok(Value::Time(i64::from_be_bytes(bytes)))
+        }
+        ComparatorType::Custom(name) if name == "inet" => Ok(Value::Inet(data.to_vec())),
+        ComparatorType::Varint => Ok(Value::Varint(data.to_vec())),
+        ComparatorType::Decimal => {
+            if data.len() < 4 {
+                return Err(Error::InvalidInput(format!(
+                    "Decimal requires at least 4 bytes, got {}",
+                    data.len()
+                )));
+            }
+            // Length already validated above
+            let scale_bytes: [u8; 4] = data[..4]
+                .try_into()
+                .map_err(|_| Error::InvalidInput("Decimal scale conversion failed".to_string()))?;
+            let scale = i32::from_be_bytes(scale_bytes);
+            let unscaled = data[4..].to_vec();
+            Ok(Value::Decimal { scale, unscaled })
+        }
+        ComparatorType::Duration => {
+            if data.len() < 16 {
+                return Err(Error::InvalidInput(format!(
+                    "Duration requires 16 bytes, got {}",
+                    data.len()
+                )));
+            }
+            let months = i32::from_be_bytes(data[..4].try_into().map_err(|_| {
+                Error::InvalidInput("Duration months conversion failed".to_string())
+            })?);
+            let days =
+                i32::from_be_bytes(data[4..8].try_into().map_err(|_| {
+                    Error::InvalidInput("Duration days conversion failed".to_string())
+                })?);
+            let nanos = i64::from_be_bytes(data[8..16].try_into().map_err(|_| {
+                Error::InvalidInput("Duration nanos conversion failed".to_string())
+            })?);
+            Ok(Value::Duration {
+                months,
+                days,
+                nanos,
+            })
+        }
+        _ => Err(Error::InvalidInput(format!(
+            "Unsupported comparator for deserialization: {:?}",
+            comparator
         ))),
     }
 }
@@ -1231,5 +1420,118 @@ mod tests {
         // Verify ordering: ck_0_* < ck_1_* < ck_2_* (lexicographic by first element)
         let values: Vec<_> = map.values().copied().collect();
         assert_eq!(values, vec!["2elem", "3elem", "4elem"]);
+    }
+
+    #[test]
+    fn test_partition_key_from_bytes_single_int() {
+        let schema = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        let original = PartitionKey::single("id", Value::Integer(42));
+        let bytes = original.to_bytes(&schema).unwrap();
+        let decoded = PartitionKey::from_bytes(&bytes, &schema).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_partition_key_from_bytes_single_uuid() {
+        let schema = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        let uuid_bytes = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let original = PartitionKey::single("id", Value::Uuid(uuid_bytes));
+        let bytes = original.to_bytes(&schema).unwrap();
+        let decoded = PartitionKey::from_bytes(&bytes, &schema).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_partition_key_from_bytes_single_text() {
+        let schema = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        let original = PartitionKey::single("name", Value::Text("hello".to_string()));
+        let bytes = original.to_bytes(&schema).unwrap();
+        let decoded = PartitionKey::from_bytes(&bytes, &schema).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_partition_key_from_bytes_multi_component() {
+        let schema = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_keys: vec![
+                KeyColumn {
+                    name: "tenant".to_string(),
+                    data_type: "text".to_string(),
+                    position: 0,
+                },
+                KeyColumn {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    position: 1,
+                },
+            ],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        let original = PartitionKey::new(vec![
+            ("tenant".to_string(), Value::Text("acme".to_string())),
+            ("id".to_string(), Value::Integer(99)),
+        ]);
+        let bytes = original.to_bytes(&schema).unwrap();
+        let decoded = PartitionKey::from_bytes(&bytes, &schema).unwrap();
+        assert_eq!(original, decoded);
+    }
+
+    #[test]
+    fn test_partition_key_from_bytes_empty_errors() {
+        let schema = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        assert!(PartitionKey::from_bytes(&[], &schema).is_err());
     }
 }

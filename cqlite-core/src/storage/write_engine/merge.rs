@@ -44,7 +44,7 @@ use std::cmp::{Ordering, Reverse};
 #[cfg(feature = "write-support")]
 use std::collections::{BinaryHeap, VecDeque};
 #[cfg(feature = "write-support")]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 #[cfg(feature = "write-support")]
 use std::time::{Duration, Instant};
 
@@ -231,11 +231,9 @@ impl std::fmt::Debug for RunReader {
 #[cfg(feature = "write-support")]
 impl RunReader {
     /// Default buffer size (8KB worth of entries)
-    #[allow(dead_code)] // Will be used when SSTable reader integration is complete
     const DEFAULT_BUFFER_SIZE: usize = 8 * 1024;
 
     /// Create a new run reader
-    #[allow(dead_code)] // Will be used when SSTable reader integration is complete
     fn new(reader: Box<dyn SSTableRowIterator>) -> Self {
         Self {
             reader,
@@ -367,6 +365,140 @@ pub trait SSTableRowIterator: Send {
     fn next(&mut self) -> Option<Result<MergeEntry>>;
 }
 
+/// Adapter that wraps async SSTableReader into sync SSTableRowIterator
+///
+/// Pre-loads all entries from an SSTable into memory, converting
+/// `(RowKey, Value)` pairs into `MergeEntry` format. Uses tokio
+/// `block_on` for async-to-sync bridging (same pattern as
+/// `flush_internal` and `finalize_merge_blocking`).
+#[cfg(feature = "write-support")]
+struct SSTableRowIteratorAdapter {
+    /// Pre-loaded entries
+    entries: std::vec::IntoIter<MergeEntry>,
+}
+
+#[cfg(feature = "write-support")]
+impl SSTableRowIteratorAdapter {
+    /// Open an SSTable and load all entries as MergeEntry
+    ///
+    /// # Arguments
+    /// * `path` - Path to the Data.db file
+    /// * `_schema` - Table schema (reserved for future use)
+    /// * `run_index` - Index of this run in the merge (0 = newest)
+    fn open(path: &Path, _schema: &TableSchema, run_index: usize) -> Result<Self> {
+        use crate::platform::Platform;
+        use crate::Config;
+        use std::sync::Arc;
+
+        let config = Config::default();
+        let path_buf = path.to_path_buf();
+
+        // Open SSTable reader and load all partitions using async runtime
+        // (same pattern as finalize_merge_blocking)
+        let (reader, raw_entries) = {
+            let config_clone = config.clone();
+            let path_clone = path_buf.clone();
+            let open_and_read = async move {
+                let platform = Arc::new(Platform::new(&config_clone).await?);
+                let reader = crate::storage::sstable::reader::SSTableReader::open(
+                    &path_clone,
+                    &config_clone,
+                    platform,
+                )
+                .await?;
+                let entries = reader.iterate_all_partitions().await?;
+                Ok::<_, crate::Error>((reader, entries))
+            };
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => handle.block_on(open_and_read)?,
+                Err(_) => {
+                    let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                        Error::Storage(format!("Failed to create tokio runtime: {}", e))
+                    })?;
+                    rt.block_on(open_and_read)?
+                }
+            }
+        };
+
+        // Convert (RowKey, Value) pairs to MergeEntry
+        let mut entries = Vec::with_capacity(raw_entries.len());
+        for (row_key, value) in raw_entries {
+            let key_bytes = row_key.0;
+            let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
+
+            // Extract timestamp from the value
+            // TODO(#447): extract_write_time_from_entry returns SystemTime::now() for live rows
+            // because the reader doesn't expose per-cell timestamps. This is acceptable for
+            // single-round STCS compaction (run_index breaks ties correctly) but will need
+            // proper timestamp extraction for multi-round compaction correctness.
+            let timestamp = reader.extract_write_time_from_entry(
+                &crate::types::RowKey::new(decorated_key.key.clone()),
+                &value,
+            );
+
+            // Convert Value to RowData
+            let row_data = Self::value_to_row_data(&value)?;
+
+            entries.push(MergeEntry::new(
+                run_index,
+                decorated_key,
+                None, // Clustering key extraction deferred
+                timestamp,
+                row_data,
+            ));
+        }
+
+        // Sort by token for correct merge ordering
+        entries.sort();
+
+        Ok(Self {
+            entries: entries.into_iter(),
+        })
+    }
+
+    /// Convert a reader Value to RowData
+    fn value_to_row_data(value: &crate::types::Value) -> Result<RowData> {
+        match value {
+            crate::types::Value::Tombstone(info) => Ok(RowData::Tombstone {
+                deletion_time: info.deletion_time,
+                local_deletion_time: 0, // TombstoneInfo does not carry local_deletion_time
+            }),
+            crate::types::Value::Map(entries) => {
+                let mut cells = Vec::with_capacity(entries.len());
+                for (key, val) in entries {
+                    let column = match key {
+                        crate::types::Value::Text(s) => s.clone(),
+                        other => format!("{:?}", other),
+                    };
+                    cells.push(CellData {
+                        column,
+                        value: val.clone(),
+                        timestamp: 0, // Per-cell timestamps not available from reader
+                        ttl: None,
+                    });
+                }
+                Ok(RowData::Live { cells })
+            }
+            // Single value or other formats - wrap as a single cell
+            other => Ok(RowData::Live {
+                cells: vec![CellData {
+                    column: "value".to_string(),
+                    value: other.clone(),
+                    timestamp: 0,
+                    ttl: None,
+                }],
+            }),
+        }
+    }
+}
+
+#[cfg(feature = "write-support")]
+impl SSTableRowIterator for SSTableRowIteratorAdapter {
+    fn next(&mut self) -> Option<Result<MergeEntry>> {
+        self.entries.next().map(Ok)
+    }
+}
+
 /// K-way merger for combining multiple SSTables
 ///
 /// Uses a min-heap to efficiently merge k sorted SSTable runs into a single
@@ -437,15 +569,11 @@ impl KWayMerger {
             ));
         }
 
-        // Create run readers for each input SSTable
-        let runs = Vec::with_capacity(input_paths.len());
-        if let Some((run_index, path)) = input_paths.iter().enumerate().next() {
-            // TODO: Replace with actual SSTable reader creation in M5.2
-            // For now, return error indicating implementation is pending
-            return Err(Error::InvalidInput(format!(
-                "SSTable reader integration pending for run {}: {:?}",
-                run_index, path
-            )));
+        // Create run readers for each input SSTable (ordered newest to oldest)
+        let mut runs = Vec::with_capacity(input_paths.len());
+        for (run_index, path) in input_paths.iter().enumerate() {
+            let adapter = SSTableRowIteratorAdapter::open(path, schema, run_index)?;
+            runs.push(RunReader::new(Box::new(adapter)));
         }
 
         // Initialize heap (will be populated on first step)
@@ -654,22 +782,46 @@ impl KWayMerger {
     }
 
     /// Convert a MergeEntry back to Mutation for writing
-    fn merge_entry_to_mutation(
-        _entry: MergeEntry,
-        _schema: &TableSchema,
+    pub(crate) fn merge_entry_to_mutation(
+        entry: MergeEntry,
+        schema: &TableSchema,
     ) -> Result<crate::storage::write_engine::mutation::Mutation> {
-        // TODO: Reconstruct PartitionKey from DecoratedKey bytes
-        // This requires deserializing the key bytes according to schema
-        // For now, return error indicating this needs implementation
-        Err(Error::InvalidInput(
-            "PartitionKey reconstruction from DecoratedKey not yet implemented".to_string(),
-        ))
+        use crate::storage::write_engine::mutation::{
+            CellOperation, Mutation, PartitionKey, TableId,
+        };
 
-        // Future implementation will:
-        // 1. Extract table ID from schema
-        // 2. Reconstruct PartitionKey from DecoratedKey bytes
-        // 3. Convert row data to cell operations
-        // 4. Create Mutation with all components
+        let partition_key = PartitionKey::from_bytes(&entry.key.key, schema)?;
+        let table_id = TableId::new(&schema.keyspace, &schema.table);
+
+        let operations = match entry.row_data {
+            RowData::Live { cells } => cells
+                .into_iter()
+                .map(|cell| {
+                    if let Some(ttl) = cell.ttl {
+                        CellOperation::WriteWithTtl {
+                            column: cell.column,
+                            value: cell.value,
+                            ttl_seconds: ttl,
+                        }
+                    } else {
+                        CellOperation::Write {
+                            column: cell.column,
+                            value: cell.value,
+                        }
+                    }
+                })
+                .collect(),
+            RowData::Tombstone { .. } => vec![CellOperation::DeleteRow],
+        };
+
+        Ok(Mutation::new(
+            table_id,
+            partition_key,
+            entry.clustering_key,
+            operations,
+            entry.timestamp,
+            None,
+        ))
     }
 }
 
@@ -1024,5 +1176,115 @@ mod tests {
 
         assert_eq!(buffer_size_per_run, 8 * 1024); // 8KB
         assert_eq!(total_memory, 80 * 1024); // 80KB total
+    }
+
+    #[test]
+    fn test_merge_entry_to_mutation_live_cells() {
+        use crate::schema::{KeyColumn, TableSchema};
+        use crate::storage::write_engine::mutation::{CellOperation, DecoratedKey};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        // Encode key as 4-byte big-endian int (42)
+        let key_bytes = 42i32.to_be_bytes().to_vec();
+
+        let entry = MergeEntry::new(
+            0,
+            DecoratedKey::new(1000, key_bytes),
+            None,
+            999_000_000,
+            RowData::Live {
+                cells: vec![
+                    CellData {
+                        column: "name".to_string(),
+                        value: Value::Text("Alice".to_string()),
+                        timestamp: 999_000_000,
+                        ttl: None,
+                    },
+                    CellData {
+                        column: "age".to_string(),
+                        value: Value::Integer(30),
+                        timestamp: 999_000_000,
+                        ttl: Some(3600),
+                    },
+                ],
+            },
+        );
+
+        let mutation =
+            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+
+        // Partition key should have one column named "id"
+        assert_eq!(mutation.partition_key.columns.len(), 1);
+        assert_eq!(mutation.partition_key.columns[0].0, "id");
+
+        // Two operations: one Write and one WriteWithTtl
+        assert_eq!(mutation.operations.len(), 2);
+        assert_eq!(mutation.timestamp_micros, 999_000_000);
+
+        let has_write = mutation
+            .operations
+            .iter()
+            .any(|op| matches!(op, CellOperation::Write { column, .. } if column == "name"));
+        let has_ttl_write = mutation.operations.iter().any(|op| {
+            matches!(op, CellOperation::WriteWithTtl { column, ttl_seconds, .. }
+                if column == "age" && *ttl_seconds == 3600)
+        });
+        assert!(has_write, "Expected Write operation for 'name'");
+        assert!(has_ttl_write, "Expected WriteWithTtl operation for 'age'");
+    }
+
+    #[test]
+    fn test_merge_entry_to_mutation_tombstone() {
+        use crate::schema::{KeyColumn, TableSchema};
+        use crate::storage::write_engine::mutation::{CellOperation, DecoratedKey};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        let key_bytes = 7i32.to_be_bytes().to_vec();
+
+        let entry = MergeEntry::new(
+            0,
+            DecoratedKey::new(500, key_bytes),
+            None,
+            888_000_000,
+            RowData::Tombstone {
+                deletion_time: 888_000_000,
+                local_deletion_time: 1_700_000_000,
+            },
+        );
+
+        let mutation =
+            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+
+        assert_eq!(mutation.operations.len(), 1);
+        assert!(
+            matches!(mutation.operations[0], CellOperation::DeleteRow),
+            "Expected DeleteRow operation for tombstone entry"
+        );
     }
 }
