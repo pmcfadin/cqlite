@@ -4,15 +4,273 @@
 //! can persist. The primary entry point is `literal_to_value`, which performs
 //! schema-aware coercion from the CQL parser's AST types to the internal
 //! `Value` enum.
+//!
+//! The `insert_to_mutation` function converts a parsed `CqlInsert` AST node into
+//! a `Mutation` using schema information to identify partition/clustering keys and
+//! regular columns.
 
 #[cfg(feature = "write-support")]
-use crate::cql::ast::{CqlCollectionLiteral, CqlLiteral, CqlUdtLiteral};
+use crate::cql::ast::{
+    CqlCollectionLiteral, CqlExpression, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable,
+    CqlUnaryOperator, CqlUsing, CqlUdtLiteral,
+};
 #[cfg(feature = "write-support")]
-use crate::schema::CqlType;
+use crate::schema::{CqlType, TableSchema};
+#[cfg(feature = "write-support")]
+use crate::storage::write_engine::mutation::{
+    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId,
+};
 #[cfg(feature = "write-support")]
 use crate::types::{UdtField, UdtValue, Value};
 #[cfg(feature = "write-support")]
 use crate::Error;
+
+/// Convert a parsed `CqlInsert` AST node into a `Mutation` using schema information.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` when:
+/// - The INSERT targets a different table than the schema
+/// - The number of columns and values do not match
+/// - A required partition key column is missing from the INSERT
+/// - JSON INSERT syntax is used (not yet supported)
+/// - A value cannot be coerced to its schema type
+#[cfg(feature = "write-support")]
+#[allow(dead_code)] // Will be wired into WriteEngine in a follow-up task
+pub(crate) fn insert_to_mutation(insert: &CqlInsert, schema: &TableSchema) -> Result<Mutation, Error> {
+    validate_table(&insert.table, schema)?;
+
+    // Extract (column_name, expression) pairs
+    let values = match &insert.values {
+        CqlInsertValues::Values(exprs) => exprs,
+        CqlInsertValues::Json(_) => {
+            return Err(Error::InvalidInput(
+                "JSON INSERT syntax is not yet supported in mutations".to_string(),
+            ));
+        }
+    };
+
+    if insert.columns.len() != values.len() {
+        return Err(Error::InvalidInput(format!(
+            "INSERT has {} columns but {} values",
+            insert.columns.len(),
+            values.len()
+        )));
+    }
+
+    // Build a map of column_name → value for easy lookup
+    let col_val_pairs: Vec<(String, &CqlExpression)> = insert
+        .columns
+        .iter()
+        .zip(values.iter())
+        .map(|(col_id, expr)| (col_id.name.to_lowercase(), expr))
+        .collect();
+
+    // Ordered partition key columns from schema
+    let ordered_pk = schema.ordered_partition_keys();
+    // Ordered clustering key columns from schema
+    let ordered_ck = schema.ordered_clustering_keys();
+
+    // Resolve and collect partition key values (in schema order)
+    let mut pk_columns: Vec<(String, Value)> = Vec::with_capacity(ordered_pk.len());
+    for pk_col in &ordered_pk {
+        let col_name_lc = pk_col.name.to_lowercase();
+        let (_, expr) = col_val_pairs
+            .iter()
+            .find(|(name, _)| *name == col_name_lc)
+            .ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "Partition key column '{}' is missing from INSERT",
+                    pk_col.name
+                ))
+            })?;
+        let cql_type = CqlType::parse(&pk_col.data_type)?;
+        let value = expression_to_value(expr, &cql_type)?;
+        pk_columns.push((pk_col.name.clone(), value));
+    }
+    let partition_key = PartitionKey::new(pk_columns);
+
+    // Resolve and collect clustering key values (in schema order), if any
+    let clustering_key = if ordered_ck.is_empty() {
+        None
+    } else {
+        let mut ck_columns: Vec<(String, Value)> = Vec::with_capacity(ordered_ck.len());
+        for ck_col in &ordered_ck {
+            let col_name_lc = ck_col.name.to_lowercase();
+            // Clustering key columns are optional in INSERT (may be absent)
+            if let Some((_, expr)) = col_val_pairs.iter().find(|(name, _)| *name == col_name_lc) {
+                let cql_type = CqlType::parse(&ck_col.data_type)?;
+                let value = expression_to_value(expr, &cql_type)?;
+                ck_columns.push((ck_col.name.clone(), value));
+            }
+        }
+        if ck_columns.is_empty() {
+            None
+        } else {
+            Some(ClusteringKey::new(ck_columns))
+        }
+    };
+
+    // Collect regular column operations (non-PK, non-CK columns)
+    let mut operations: Vec<CellOperation> = Vec::new();
+    for (col_name, expr) in &col_val_pairs {
+        if schema.is_partition_key(col_name) || schema.is_clustering_key(col_name) {
+            continue;
+        }
+        // Look up column in schema to get type
+        let column = schema
+            .get_column(col_name)
+            .ok_or_else(|| Error::InvalidInput(format!("Unknown column '{}'", col_name)))?;
+        let cql_type = CqlType::parse(&column.data_type)?;
+        let value = expression_to_value(expr, &cql_type)?;
+        operations.push(CellOperation::Write {
+            column: column.name.clone(),
+            value,
+        });
+    }
+
+    let timestamp_micros = extract_timestamp(&insert.using)?;
+    let ttl_seconds = extract_ttl(&insert.using)?;
+
+    let table_id = TableId::new(schema.keyspace.clone(), schema.table.clone());
+    Ok(Mutation::new(
+        table_id,
+        partition_key,
+        clustering_key,
+        operations,
+        timestamp_micros,
+        ttl_seconds,
+    ))
+}
+
+/// Convert a `CqlExpression` to a `Value` for mutation purposes.
+///
+/// Only literal expressions and unary minus on literals are supported.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` for non-literal expressions, and propagates
+/// type-coercion errors from `literal_to_value`.
+#[cfg(feature = "write-support")]
+fn expression_to_value(expr: &CqlExpression, target_type: &CqlType) -> Result<Value, Error> {
+    match expr {
+        CqlExpression::Literal(lit) => literal_to_value(lit, target_type),
+        CqlExpression::Unary {
+            operator: CqlUnaryOperator::Minus,
+            operand,
+        } => {
+            // Handle negative numeric literals: -(integer) or -(float)
+            match operand.as_ref() {
+                CqlExpression::Literal(CqlLiteral::Integer(i)) => {
+                    let negated = i.checked_neg().ok_or_else(|| {
+                        Error::InvalidInput(format!(
+                            "Integer {} cannot be negated (overflow)",
+                            i
+                        ))
+                    })?;
+                    literal_to_value(&CqlLiteral::Integer(negated), target_type)
+                }
+                CqlExpression::Literal(CqlLiteral::Float(f)) => {
+                    literal_to_value(&CqlLiteral::Float(-f), target_type)
+                }
+                _ => Err(Error::InvalidInput(
+                    "Unary minus is only supported on integer or float literals".to_string(),
+                )),
+            }
+        }
+        _ => Err(Error::InvalidInput(
+            "Only literal values are supported in mutations".to_string(),
+        )),
+    }
+}
+
+/// Validate that the INSERT's table reference matches the provided schema.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` if the table name or keyspace does not match.
+#[cfg(feature = "write-support")]
+fn validate_table(table: &CqlTable, schema: &TableSchema) -> Result<(), Error> {
+    if let Some(ks) = &table.keyspace {
+        if !ks.name.eq_ignore_ascii_case(&schema.keyspace) {
+            return Err(Error::InvalidInput(format!(
+                "INSERT targets keyspace '{}' but schema is for '{}'",
+                ks.name, schema.keyspace
+            )));
+        }
+    }
+    if !table.name.name.eq_ignore_ascii_case(&schema.table) {
+        return Err(Error::InvalidInput(format!(
+            "INSERT targets table '{}' but schema is for '{}'",
+            table.name.name, schema.table
+        )));
+    }
+    Ok(())
+}
+
+/// Extract the timestamp from a USING clause.
+///
+/// If no USING TIMESTAMP is present, returns the current time in microseconds
+/// since the Unix epoch.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` if the timestamp expression is not an integer literal.
+#[cfg(feature = "write-support")]
+fn extract_timestamp(using: &Option<CqlUsing>) -> Result<i64, Error> {
+    if let Some(u) = using {
+        if let Some(ts_expr) = &u.timestamp {
+            match ts_expr {
+                CqlExpression::Literal(CqlLiteral::Integer(ts)) => return Ok(*ts),
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "USING TIMESTAMP requires an integer literal".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+    // Default: current time in microseconds
+    let micros = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| Error::InvalidInput(format!("System clock error: {}", e)))?
+        .as_micros();
+    // Cast to i64; saturate if value exceeds i64::MAX (will not happen before year 292k)
+    Ok(micros.min(i64::MAX as u128) as i64)
+}
+
+/// Extract the TTL from a USING clause.
+///
+/// Returns `None` if no USING TTL is present.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` if the TTL expression is not an integer literal or
+/// the value overflows `u32`.
+#[cfg(feature = "write-support")]
+fn extract_ttl(using: &Option<CqlUsing>) -> Result<Option<u32>, Error> {
+    if let Some(u) = using {
+        if let Some(ttl_expr) = &u.ttl {
+            match ttl_expr {
+                CqlExpression::Literal(CqlLiteral::Integer(ttl)) => {
+                    let v = u32::try_from(*ttl).map_err(|_| {
+                        Error::InvalidInput(format!(
+                            "TTL value {} is out of range for u32",
+                            ttl
+                        ))
+                    })?;
+                    return Ok(Some(v));
+                }
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "USING TTL requires an integer literal".to_string(),
+                    ))
+                }
+            }
+        }
+    }
+    Ok(None)
+}
 
 /// Convert a CQL AST literal value to an internal `Value`, guided by the
 /// target schema type.
@@ -336,9 +594,265 @@ fn overflow_error(value: i64, target: &str) -> Error {
 #[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
-    use crate::cql::ast::CqlLiteral;
+    use crate::cql::ast::{CqlIdentifier, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUsing};
     use crate::schema::CqlType;
+    use crate::storage::write_engine::mutation::CellOperation;
     use crate::types::Value;
+    use std::collections::HashMap;
+
+    // ── Test schema helper ────────────────────────────────────────────────────
+
+    fn test_schema() -> crate::schema::TableSchema {
+        crate::schema::TableSchema {
+            keyspace: "test_ks".into(),
+            table: "test_tbl".into(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: "id".into(),
+                data_type: "uuid".into(),
+                position: 0,
+            }],
+            clustering_keys: vec![crate::schema::ClusteringColumn {
+                name: "ts".into(),
+                data_type: "timestamp".into(),
+                position: 0,
+                order: crate::schema::ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                crate::schema::Column {
+                    name: "id".into(),
+                    data_type: "uuid".into(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "ts".into(),
+                    data_type: "timestamp".into(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "name".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "age".into(),
+                    data_type: "int".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    // ── insert_to_mutation tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_insert_to_mutation() {
+        let schema = test_schema();
+        // INSERT INTO test_ks.test_tbl (id, ts, name, age) VALUES (uuid, 1000, 'Alice', 30)
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000".to_string();
+        let insert = CqlInsert {
+            table: CqlTable::with_keyspace("test_ks", "test_tbl"),
+            columns: vec![
+                CqlIdentifier::new("id"),
+                CqlIdentifier::new("ts"),
+                CqlIdentifier::new("name"),
+                CqlIdentifier::new("age"),
+            ],
+            values: CqlInsertValues::Values(vec![
+                CqlExpression::Literal(CqlLiteral::Uuid(uuid_str.clone())),
+                CqlExpression::Literal(CqlLiteral::Integer(1_000_000)),
+                CqlExpression::Literal(CqlLiteral::String("Alice".to_string())),
+                CqlExpression::Literal(CqlLiteral::Integer(30)),
+            ]),
+            if_not_exists: false,
+            using: None,
+        };
+
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+
+        // Verify table
+        assert_eq!(mutation.table.keyspace, "test_ks");
+        assert_eq!(mutation.table.table, "test_tbl");
+
+        // Verify partition key
+        assert_eq!(mutation.partition_key.columns.len(), 1);
+        assert_eq!(mutation.partition_key.columns[0].0, "id");
+        matches!(mutation.partition_key.columns[0].1, Value::Uuid(_));
+
+        // Verify clustering key
+        let ck = mutation.clustering_key.unwrap();
+        assert_eq!(ck.columns.len(), 1);
+        assert_eq!(ck.columns[0].0, "ts");
+        assert_eq!(ck.columns[0].1, Value::Timestamp(1_000_000));
+
+        // Verify regular column operations (name and age)
+        assert_eq!(mutation.operations.len(), 2);
+        let op_map: std::collections::HashMap<_, _> = mutation
+            .operations
+            .into_iter()
+            .filter_map(|op| {
+                if let CellOperation::Write { column, value } = op {
+                    Some((column, value))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(op_map.get("name"), Some(&Value::Text("Alice".to_string())));
+        assert_eq!(op_map.get("age"), Some(&Value::Integer(30)));
+    }
+
+    #[test]
+    fn test_insert_with_using_timestamp() {
+        let schema = test_schema();
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000".to_string();
+        let custom_ts: i64 = 1_700_000_000_000_000; // some specific microsecond timestamp
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![
+                CqlIdentifier::new("id"),
+                CqlIdentifier::new("ts"),
+            ],
+            values: CqlInsertValues::Values(vec![
+                CqlExpression::Literal(CqlLiteral::Uuid(uuid_str)),
+                CqlExpression::Literal(CqlLiteral::Integer(1_000_000)),
+            ]),
+            if_not_exists: false,
+            using: Some(CqlUsing {
+                timestamp: Some(CqlExpression::Literal(CqlLiteral::Integer(custom_ts))),
+                ttl: None,
+            }),
+        };
+
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+        assert_eq!(mutation.timestamp_micros, custom_ts);
+        assert_eq!(mutation.ttl_seconds, None);
+    }
+
+    #[test]
+    fn test_insert_missing_partition_key() {
+        let schema = test_schema();
+        // INSERT without the partition key column 'id'
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![CqlIdentifier::new("name")],
+            values: CqlInsertValues::Values(vec![CqlExpression::Literal(CqlLiteral::String(
+                "Alice".to_string(),
+            ))]),
+            if_not_exists: false,
+            using: None,
+        };
+
+        let err = insert_to_mutation(&insert, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => {
+                assert!(msg.contains("Partition key column") && msg.contains("id"));
+            }
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_insert_json_unsupported() {
+        let schema = test_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json("{\"id\": \"...\"}".to_string()),
+            if_not_exists: false,
+            using: None,
+        };
+
+        let err = insert_to_mutation(&insert, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("JSON")),
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_insert_column_count_mismatch() {
+        let schema = test_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            // 2 columns but only 1 value
+            columns: vec![CqlIdentifier::new("id"), CqlIdentifier::new("name")],
+            values: CqlInsertValues::Values(vec![CqlExpression::Literal(CqlLiteral::Uuid(
+                "550e8400-e29b-41d4-a716-446655440000".to_string(),
+            ))]),
+            if_not_exists: false,
+            using: None,
+        };
+
+        let err = insert_to_mutation(&insert, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => {
+                assert!(msg.contains("2 columns") && msg.contains("1 values"));
+            }
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_insert_table_mismatch() {
+        let schema = test_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("wrong_table"),
+            columns: vec![],
+            values: CqlInsertValues::Values(vec![]),
+            if_not_exists: false,
+            using: None,
+        };
+
+        let err = insert_to_mutation(&insert, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => {
+                assert!(msg.contains("wrong_table") || msg.contains("test_tbl"));
+            }
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_expression_negative_integer() {
+        // expression_to_value with unary minus on an integer literal
+        let expr = CqlExpression::Unary {
+            operator: CqlUnaryOperator::Minus,
+            operand: Box::new(CqlExpression::Literal(CqlLiteral::Integer(42))),
+        };
+        let result = expression_to_value(&expr, &CqlType::Int).unwrap();
+        assert_eq!(result, Value::Integer(-42));
+    }
+
+    #[test]
+    fn test_insert_with_ttl() {
+        let schema = test_schema();
+        let uuid_str = "550e8400-e29b-41d4-a716-446655440000".to_string();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![CqlIdentifier::new("id"), CqlIdentifier::new("ts")],
+            values: CqlInsertValues::Values(vec![
+                CqlExpression::Literal(CqlLiteral::Uuid(uuid_str)),
+                CqlExpression::Literal(CqlLiteral::Integer(1_000_000)),
+            ]),
+            if_not_exists: false,
+            using: Some(CqlUsing {
+                timestamp: None,
+                ttl: Some(CqlExpression::Literal(CqlLiteral::Integer(3600))),
+            }),
+        };
+
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+        assert_eq!(mutation.ttl_seconds, Some(3600u32));
+    }
 
     // ── Null ─────────────────────────────────────────────────────────────────
 
@@ -624,5 +1138,163 @@ mod tests {
         // varint_to_bytes should produce the minimal representation: [1, 0]
         let bytes = varint_to_bytes(256);
         assert_eq!(bytes, vec![0x01, 0x00]);
+    }
+
+    // ── Additional collection tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_list_of_int() {
+        let lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![
+            CqlLiteral::Integer(1),
+            CqlLiteral::Integer(2),
+            CqlLiteral::Integer(3),
+        ]));
+        let result = literal_to_value(&lit, &CqlType::List(Box::new(CqlType::Int)));
+        assert_eq!(
+            result.unwrap(),
+            Value::List(vec![
+                Value::Integer(1),
+                Value::Integer(2),
+                Value::Integer(3),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_set_of_text() {
+        let lit = CqlLiteral::Collection(CqlCollectionLiteral::Set(vec![
+            CqlLiteral::String("a".into()),
+            CqlLiteral::String("b".into()),
+        ]));
+        let result = literal_to_value(&lit, &CqlType::Set(Box::new(CqlType::Text)));
+        assert_eq!(
+            result.unwrap(),
+            Value::Set(vec![
+                Value::Text("a".into()),
+                Value::Text("b".into()),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_map_of_text_to_int() {
+        let lit = CqlLiteral::Collection(CqlCollectionLiteral::Map(vec![(
+            CqlLiteral::String("a".into()),
+            CqlLiteral::Integer(1),
+        )]));
+        let result = literal_to_value(
+            &lit,
+            &CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int)),
+        );
+        assert_eq!(
+            result.unwrap(),
+            Value::Map(vec![(Value::Text("a".into()), Value::Integer(1)),])
+        );
+    }
+
+    #[test]
+    fn test_frozen_list() {
+        let lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![
+            CqlLiteral::Integer(1),
+        ]));
+        let result = literal_to_value(
+            &lit,
+            &CqlType::Frozen(Box::new(CqlType::List(Box::new(CqlType::Int)))),
+        );
+        // literal_to_value wraps the inner value in Value::Frozen
+        match result.unwrap() {
+            Value::Frozen(inner) => {
+                assert_eq!(*inner, Value::List(vec![Value::Integer(1)]));
+            }
+            other => panic!("expected Value::Frozen, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_tuple() {
+        let lit = CqlLiteral::Tuple(vec![
+            CqlLiteral::Integer(1),
+            CqlLiteral::String("hello".into()),
+        ]);
+        let result = literal_to_value(
+            &lit,
+            &CqlType::Tuple(vec![CqlType::Int, CqlType::Text]),
+        );
+        assert_eq!(
+            result.unwrap(),
+            Value::Tuple(vec![Value::Integer(1), Value::Text("hello".into()),])
+        );
+    }
+
+    #[test]
+    fn test_tuple_wrong_arity() {
+        let lit = CqlLiteral::Tuple(vec![CqlLiteral::Integer(1)]);
+        let result = literal_to_value(
+            &lit,
+            &CqlType::Tuple(vec![CqlType::Int, CqlType::Text]),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_smallint_overflow() {
+        let result = literal_to_value(&CqlLiteral::Integer(40000), &CqlType::SmallInt);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_int_overflow() {
+        let result = literal_to_value(&CqlLiteral::Integer(3_000_000_000), &CqlType::Int);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_timeuuid() {
+        let result = literal_to_value(
+            &CqlLiteral::Uuid("550e8400-e29b-11d4-a716-446655440000".into()),
+            &CqlType::TimeUuid,
+        );
+        assert!(result.is_ok());
+        if let Value::Uuid(bytes) = result.unwrap() {
+            assert_eq!(bytes.len(), 16);
+        } else {
+            panic!("expected Uuid");
+        }
+    }
+
+    #[test]
+    fn test_empty_list() {
+        let lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![]));
+        let result = literal_to_value(&lit, &CqlType::List(Box::new(CqlType::Int)));
+        assert_eq!(result.unwrap(), Value::List(vec![]));
+    }
+
+    #[test]
+    fn test_collection_type_mismatch() {
+        // List literal but Map target type
+        let lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![
+            CqlLiteral::Integer(1),
+        ]));
+        let result = literal_to_value(
+            &lit,
+            &CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::Int)),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_nested_collection() {
+        // list<frozen<list<int>>>
+        let inner_list = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![
+            CqlLiteral::Integer(1),
+            CqlLiteral::Integer(2),
+        ]));
+        let outer_list =
+            CqlLiteral::Collection(CqlCollectionLiteral::List(vec![inner_list]));
+        let target = CqlType::List(Box::new(CqlType::Frozen(Box::new(CqlType::List(
+            Box::new(CqlType::Int),
+        )))));
+        let result = literal_to_value(&outer_list, &target);
+        assert!(result.is_ok());
     }
 }
