@@ -12,8 +12,8 @@
 //!
 //! Each entry stores a partition's location:
 //! ```text
-//! [key_len: u16 BE]             ← writeWithShortLength prefix
-//! [key_bytes: key_len bytes]    ← Raw partition key bytes (same as Data.db)
+//! [marker: u16 BE = 0x0010]     ← Partition key digest marker
+//! [digest: 16 bytes]            ← MD5 hash of partition key bytes
 //! [position: unsigned VInt]     ← Byte offset in Data.db
 //! [promoted_index_size: unsigned VInt] ← 0 for simple partitions
 //! ```
@@ -29,10 +29,9 @@
 //! - `docs/sstables-definitive-guide/chapters/06-index-and-summary.md`
 //! - `cqlite-core/src/storage/sstable/index_reader.rs` - BIG format parser
 
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::storage::serialization::vint::encode_unsigned;
 use crate::storage::write_engine::mutation::DecoratedKey;
-use std::io::Write;
 
 /// Index.db component writer
 ///
@@ -136,10 +135,10 @@ impl IndexWriter {
 
     /// Write a single index entry to the buffer
     ///
-    /// Cassandra BigFormat Index.db entry:
+    /// Cassandra BIG format Index.db entry (NB variant):
     /// ```text
-    /// [key_len: u16 BE]              ← writeWithShortLength prefix
-    /// [key_bytes: key_len bytes]     ← raw partition key bytes
+    /// [marker: u16 BE = 0x0010]      ← Partition key digest marker
+    /// [digest: 16 bytes]             ← MD5 hash of partition key bytes
     /// [position: unsigned VInt]      ← Data.db offset
     /// [promoted_index_size: unsigned VInt] ← 0 for simple partitions
     /// ```
@@ -148,19 +147,12 @@ impl IndexWriter {
     fn write_entry(&mut self, key: &DecoratedKey, data_offset: u64) -> Result<usize> {
         let start_len = self.buffer.len();
 
-        // Write partition key with short length prefix (Cassandra's writeWithShortLength)
-        if key.key.len() > 65535 {
-            return Err(Error::Storage(format!(
-                "Partition key too large for Index.db: {} bytes (max 65535)",
-                key.key.len()
-            )));
-        }
-        self.buffer
-            .write_all(&(key.key.len() as u16).to_be_bytes())
-            .map_err(|e| Error::Storage(format!("Failed to write key length: {}", e)))?;
-        self.buffer
-            .write_all(&key.key)
-            .map_err(|e| Error::Storage(format!("Failed to write key bytes: {}", e)))?;
+        // Write BIG format marker (0x0010)
+        self.buffer.extend_from_slice(&0x0010u16.to_be_bytes());
+
+        // Write MD5 digest of partition key bytes (16 bytes)
+        let digest = md5::compute(&key.key);
+        self.buffer.extend_from_slice(digest.as_slice());
 
         // Write position (unsigned VInt encoded)
         encode_unsigned(data_offset, &mut self.buffer);
@@ -187,8 +179,8 @@ impl IndexWriter {
     ///
     /// Each entry is:
     /// ```text
-    /// [0x0010: u16 BE]              ← Marker
-    /// [digest: 16 bytes]            ← MD5 of partition key
+    /// [marker: u16 BE = 0x0010]     ← Partition key digest marker
+    /// [digest: 16 bytes]            ← MD5 of partition key bytes
     /// [position: VInt]              ← Data.db offset
     /// [promoted_length: VInt]       ← 0 (no promoted index in M5 Stage 0)
     /// ```
@@ -241,6 +233,9 @@ impl Default for IndexWriter {
 mod tests {
     use super::*;
 
+    // BIG format entry size: 2 (marker) + 16 (digest) + N (vint offset) + 1 (vint promoted=0)
+    // = 19 + vint_len(offset)
+
     #[test]
     fn test_index_writer_new() {
         let writer = IndexWriter::new();
@@ -255,8 +250,9 @@ mod tests {
         let info = writer.add_partition(&key, 0).unwrap();
 
         assert_eq!(writer.entry_count(), 1);
-        assert_eq!(info.index_offset, 0); // First entry starts at offset 0
-        assert_eq!(info.entry_size, 8); // 2 (key_len) + 4 (key) + 1 (pos) + 1 (promoted)
+        assert_eq!(info.index_offset, 0);
+        // 2 (marker) + 16 (digest) + 1 (pos=0) + 1 (promoted=0) = 20
+        assert_eq!(info.entry_size, 20);
     }
 
     #[test]
@@ -283,35 +279,32 @@ mod tests {
     }
 
     #[test]
-    fn test_finish_single_entry() {
+    fn test_big_format_marker_and_digest() {
         let mut writer = IndexWriter::new();
-        let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
+        let pk_bytes = vec![0x00, 0x00, 0x00, 0x2A];
+        let key = DecoratedKey::new(12345, pk_bytes.clone());
 
         writer.add_partition(&key, 0).unwrap();
         let bytes = writer.finish().unwrap();
 
-        // Verify structure:
-        // [key_len: 2 bytes u16 BE] = 0x00 0x04 (4 bytes)
-        // [key_bytes: 4 bytes]
-        // [position: VInt, 1 byte for 0]
-        // [promoted_size: VInt, 1 byte for 0]
-        assert!(!bytes.is_empty());
+        // BIG format: [0x0010:marker][16-byte MD5 digest][vint offset][vint promoted]
+        // Total: 2 + 16 + 1 + 1 = 20 bytes
+        assert_eq!(bytes.len(), 20);
 
-        // Check key_len (u16 BE = 4)
-        assert_eq!(bytes[0], 0x00);
-        assert_eq!(bytes[1], 0x04);
+        // Check marker
+        assert_eq!(&bytes[0..2], &[0x00, 0x10], "Marker should be 0x0010");
 
-        // Check raw key bytes
-        assert_eq!(&bytes[2..6], &[0x00, 0x00, 0x00, 0x2A]);
+        // Check MD5 digest matches
+        let expected_digest = md5::compute(&pk_bytes);
+        assert_eq!(
+            &bytes[2..18],
+            expected_digest.as_slice(),
+            "Should be MD5 of key bytes"
+        );
 
-        // Check position (VInt 0)
-        assert_eq!(bytes[6], 0x00);
-
-        // Check promoted index size (VInt 0)
-        assert_eq!(bytes[7], 0x00);
-
-        // Total: 2 + 4 + 1 + 1 = 8 bytes
-        assert_eq!(bytes.len(), 8);
+        // Check offset VInt(0) and promoted VInt(0)
+        assert_eq!(bytes[18], 0x00, "Offset should be 0");
+        assert_eq!(bytes[19], 0x00, "Promoted size should be 0");
     }
 
     #[test]
@@ -326,16 +319,16 @@ mod tests {
 
         let bytes = writer.finish().unwrap();
 
-        // Entry 1: 2 (key_len) + 4 (key) + 1 (pos=0) + 1 (promoted=0) = 8 bytes
-        // Entry 2: 2 (key_len) + 4 (key) + 2 (pos=150, VInt) + 1 (promoted=0) = 9 bytes
-        // Total: 17 bytes
-        assert_eq!(bytes.len(), 17);
+        // Entry 1: 2 (marker) + 16 (digest) + 1 (pos=0) + 1 (promoted=0) = 20
+        // Entry 2: 2 (marker) + 16 (digest) + 2 (pos=150, VInt) + 1 (promoted=0) = 21
+        // Total: 41 bytes
+        assert_eq!(bytes.len(), 41);
 
-        // Check first entry key_len
-        assert_eq!(&bytes[0..2], &[0x00, 0x04]);
+        // Check first entry marker
+        assert_eq!(&bytes[0..2], &[0x00, 0x10]);
 
-        // Check second entry key_len at offset 8
-        assert_eq!(&bytes[8..10], &[0x00, 0x04]);
+        // Check second entry marker at offset 20
+        assert_eq!(&bytes[20..22], &[0x00, 0x10]);
     }
 
     #[test]
@@ -343,17 +336,15 @@ mod tests {
         let mut writer = IndexWriter::new();
         let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
 
-        // Test various position values to verify VInt encoding
         writer.add_partition(&key, 127).unwrap(); // 1-byte VInt
 
         let bytes = writer.finish().unwrap();
 
-        // Position at byte 6 (after key_len(2) + key(4))
-        // VInt(127) = 0x7F (single byte)
-        assert_eq!(bytes[6], 0x7F);
+        // Position at byte 18 (after marker(2) + digest(16))
+        assert_eq!(bytes[18], 0x7F);
 
-        // Promoted index size at byte 7
-        assert_eq!(bytes[7], 0x00);
+        // Promoted index size at byte 19
+        assert_eq!(bytes[19], 0x00);
     }
 
     #[test]
@@ -361,48 +352,46 @@ mod tests {
         let mut writer = IndexWriter::new();
         let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
 
-        // Test large offset requiring multi-byte VInt
         writer.add_partition(&key, 12381).unwrap(); // 2-byte VInt: 0xB0 0x5D
 
         let bytes = writer.finish().unwrap();
 
-        // Position at byte 6 (after key_len(2) + key(4))
-        // VInt(12381) = 0xB0 0x5D (two bytes)
-        assert_eq!(bytes[6], 0xB0);
-        assert_eq!(bytes[7], 0x5D);
+        // Position at byte 18 (after marker(2) + digest(16))
+        assert_eq!(bytes[18], 0xB0);
+        assert_eq!(bytes[19], 0x5D);
 
-        // Promoted index size at byte 8
-        assert_eq!(bytes[8], 0x00);
+        // Promoted index size at byte 20
+        assert_eq!(bytes[20], 0x00);
 
-        // Total: 2 + 4 + 2 + 1 = 9 bytes
-        assert_eq!(bytes.len(), 9);
+        // Total: 2 + 16 + 2 + 1 = 21 bytes
+        assert_eq!(bytes.len(), 21);
     }
 
     #[test]
     fn test_hex_dump_verification() {
         let mut writer = IndexWriter::new();
 
-        // Create a simple partition key
-        let key = DecoratedKey::new(12345, vec![0x01, 0x02, 0x03, 0x04]);
+        let pk_bytes = vec![0x01, 0x02, 0x03, 0x04];
+        let key = DecoratedKey::new(12345, pk_bytes.clone());
         writer.add_partition(&key, 0).unwrap();
 
         let bytes = writer.finish().unwrap();
 
-        // Verify key_len prefix
-        assert_eq!(&bytes[0..2], &[0x00, 0x04], "Key length should be 4");
+        // Verify marker
+        assert_eq!(&bytes[0..2], &[0x00, 0x10], "Marker should be 0x0010");
 
-        // Verify raw key bytes
-        assert_eq!(&bytes[2..6], &[0x01, 0x02, 0x03, 0x04]);
+        // Verify MD5 digest
+        let expected_digest = md5::compute(&pk_bytes);
+        assert_eq!(&bytes[2..18], expected_digest.as_slice());
 
-        // Total: 2 (key_len) + 4 (key) + 1 (pos) + 1 (promoted) = 8
-        assert_eq!(bytes.len(), 8);
+        // Total: 2 (marker) + 16 (digest) + 1 (pos) + 1 (promoted) = 20
+        assert_eq!(bytes.len(), 20);
     }
 
     #[test]
     fn test_token_order_preservation() {
         let mut writer = IndexWriter::new();
 
-        // Add partitions in token order (caller's responsibility)
         let key1 = DecoratedKey::new(100, vec![0x01]);
         let key2 = DecoratedKey::new(200, vec![0x02]);
         let key3 = DecoratedKey::new(300, vec![0x03]);
@@ -413,16 +402,17 @@ mod tests {
 
         let bytes = writer.finish().unwrap();
 
-        // Entry 1: 2 (key_len) + 1 (key) + 1 (pos=0) + 1 (promoted=0) = 5 bytes
-        // Entry 2: 2 (key_len) + 1 (key) + 1 (pos=100) + 1 (promoted=0) = 5 bytes
-        // Entry 3: 2 (key_len) + 1 (key) + 2 (pos=200, VInt) + 1 (promoted=0) = 6 bytes
-        // Total: 16 bytes
-        assert_eq!(bytes.len(), 16);
+        // Each entry: 2 (marker) + 16 (digest) + vint + 1 (promoted)
+        // Entry 1: 19 + 1 = 20 bytes (pos=0, 1-byte VInt)
+        // Entry 2: 19 + 1 = 20 bytes (pos=100, 1-byte VInt)
+        // Entry 3: 19 + 2 = 21 bytes (pos=200, 2-byte VInt)
+        // Total: 61 bytes
+        assert_eq!(bytes.len(), 61);
 
-        // Verify key_len prefixes for all entries
-        assert_eq!(&bytes[0..2], &[0x00, 0x01]); // key_len=1
-        assert_eq!(&bytes[5..7], &[0x00, 0x01]); // key_len=1
-        assert_eq!(&bytes[10..12], &[0x00, 0x01]); // key_len=1
+        // Verify markers for all entries
+        assert_eq!(&bytes[0..2], &[0x00, 0x10]);
+        assert_eq!(&bytes[20..22], &[0x00, 0x10]);
+        assert_eq!(&bytes[40..42], &[0x00, 0x10]);
     }
 
     #[test]
@@ -430,221 +420,193 @@ mod tests {
         let writer = IndexWriter::new();
         let bytes = writer.finish().unwrap();
 
-        // Empty index should produce empty byte array
         assert_eq!(bytes.len(), 0);
     }
 
     #[test]
-    fn test_key_bytes_stored_correctly() {
+    fn test_digest_computed_from_key_bytes() {
         let mut writer = IndexWriter::new();
 
-        // Test that raw key bytes are stored (not hashed)
-        let key1 = DecoratedKey::new(100, vec![0x00, 0x00, 0x00, 0x01]);
-        let key2 = DecoratedKey::new(200, vec![0x00, 0x00, 0x00, 0x02]);
+        let pk1 = vec![0x00, 0x00, 0x00, 0x01];
+        let pk2 = vec![0x00, 0x00, 0x00, 0x02];
+        let key1 = DecoratedKey::new(100, pk1.clone());
+        let key2 = DecoratedKey::new(200, pk2.clone());
 
         writer.add_partition(&key1, 0).unwrap();
         writer.add_partition(&key2, 100).unwrap();
 
         let bytes = writer.finish().unwrap();
 
-        // Extract raw key bytes
-        // Entry 1: key_len(2) + key(4) + pos(1) + promoted(1) = 8
-        let key_bytes1 = &bytes[2..6];
-        // Entry 2: starts at offset 8
-        let key_bytes2 = &bytes[10..14];
+        // Extract digests (bytes 2..18 of each 20-byte entry)
+        let digest1 = &bytes[2..18];
+        let digest2 = &bytes[22..38];
 
-        // Keys should be the raw partition key bytes
-        assert_eq!(key_bytes1, &[0x00, 0x00, 0x00, 0x01]);
-        assert_eq!(key_bytes2, &[0x00, 0x00, 0x00, 0x02]);
+        assert_eq!(digest1, md5::compute(&pk1).as_slice());
+        assert_eq!(digest2, md5::compute(&pk2).as_slice());
     }
 
     #[test]
-    fn test_large_partition_key() {
+    fn test_large_partition_key_same_digest_size() {
         let mut writer = IndexWriter::new();
 
-        // Test with a larger partition key (composite key scenario)
+        // Even large keys produce a 16-byte MD5 digest
         let large_key = vec![0xFF; 100];
         let key = DecoratedKey::new(12345, large_key.clone());
 
         writer.add_partition(&key, 0).unwrap();
         let bytes = writer.finish().unwrap();
 
-        // Verify key_len = 100 (u16 BE)
-        assert_eq!(&bytes[0..2], &[0x00, 0x64]);
+        // Entry size is always based on digest, not raw key
+        // 2 (marker) + 16 (digest) + 1 (pos=0) + 1 (promoted=0) = 20
+        assert_eq!(bytes.len(), 20);
 
-        // Verify raw key bytes stored (not hashed)
-        assert_eq!(&bytes[2..102], &large_key[..]);
+        // Verify marker
+        assert_eq!(&bytes[0..2], &[0x00, 0x10]);
+
+        // Verify digest matches MD5 of large key
+        let expected_digest = md5::compute(&large_key);
+        assert_eq!(&bytes[2..18], expected_digest.as_slice());
     }
 
     #[test]
     fn test_realistic_scenario() {
         let mut writer = IndexWriter::new();
 
-        // Simulate a realistic SSTable with multiple partitions
-        // Partitions must be added in token order (caller ensures this)
-
-        // Partition 1: user_id = 1001
-        let key1 = DecoratedKey::new(-5000000000, vec![0x00, 0x00, 0x03, 0xE9]); // 1001
+        let key1 = DecoratedKey::new(-5000000000, vec![0x00, 0x00, 0x03, 0xE9]);
         writer.add_partition(&key1, 0).unwrap();
 
-        // Partition 2: user_id = 1002
-        let key2 = DecoratedKey::new(-2000000000, vec![0x00, 0x00, 0x03, 0xEA]); // 1002
+        let key2 = DecoratedKey::new(-2000000000, vec![0x00, 0x00, 0x03, 0xEA]);
         writer.add_partition(&key2, 250).unwrap();
 
-        // Partition 3: user_id = 1003
-        let key3 = DecoratedKey::new(3000000000, vec![0x00, 0x00, 0x03, 0xEB]); // 1003
+        let key3 = DecoratedKey::new(3000000000, vec![0x00, 0x00, 0x03, 0xEB]);
         writer.add_partition(&key3, 500).unwrap();
 
-        // Check entry count before finish
         assert_eq!(writer.entry_count(), 3);
 
         let bytes = writer.finish().unwrap();
 
-        // Entry 1: 2 + 4 + 1 + 1 = 8 bytes
-        // Entry 2: 2 + 4 + 2 (VInt 250) + 1 = 9 bytes
-        // Entry 3: 2 + 4 + 2 (VInt 500) + 1 = 9 bytes
-        assert_eq!(bytes.len(), 26);
+        // Entry 1: 2 + 16 + 1 (pos=0) + 1 = 20
+        // Entry 2: 2 + 16 + 2 (VInt 250) + 1 = 21
+        // Entry 3: 2 + 16 + 2 (VInt 500) + 1 = 21
+        assert_eq!(bytes.len(), 62);
 
-        // Verify key_len prefix for all entries
-        assert_eq!(&bytes[0..2], &[0x00, 0x04]); // key_len=4
-
-        // Second entry at offset 8
-        assert_eq!(&bytes[8..10], &[0x00, 0x04]); // key_len=4
+        // All entries start with marker 0x0010
+        assert_eq!(&bytes[0..2], &[0x00, 0x10]);
+        assert_eq!(&bytes[20..22], &[0x00, 0x10]);
+        assert_eq!(&bytes[41..43], &[0x00, 0x10]);
     }
 
     #[test]
     fn test_vint_encoding_boundaries() {
-        // Test VInt encoding at various boundaries to verify correct byte counts
-        let mut writer = IndexWriter::new();
         let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
 
-        // Base size: 2 (key_len) + 4 (key) = 6 bytes, + 1 (promoted) = 7 bytes + pos VInt
+        // Base size: 2 (marker) + 16 (digest) + 1 (promoted) = 19 + vint_len(offset)
+
         // Test offset at 127 (max 1-byte VInt)
+        let mut writer = IndexWriter::new();
         writer.add_partition(&key, 127).unwrap();
-        let bytes = writer.finish().unwrap();
-        assert_eq!(bytes.len(), 8); // 6 + 1 + 1
+        assert_eq!(writer.finish().unwrap().len(), 20); // 19 + 1
 
         // Test offset at 128 (min 2-byte VInt)
         let mut writer = IndexWriter::new();
         writer.add_partition(&key, 128).unwrap();
-        let bytes = writer.finish().unwrap();
-        assert_eq!(bytes.len(), 9); // 6 + 2 + 1
+        assert_eq!(writer.finish().unwrap().len(), 21); // 19 + 2
 
         // Test offset at 16383 (max 2-byte VInt)
         let mut writer = IndexWriter::new();
         writer.add_partition(&key, 16383).unwrap();
-        let bytes = writer.finish().unwrap();
-        assert_eq!(bytes.len(), 9); // 6 + 2 + 1
+        assert_eq!(writer.finish().unwrap().len(), 21); // 19 + 2
 
         // Test offset at 16384 (min 3-byte VInt)
         let mut writer = IndexWriter::new();
         writer.add_partition(&key, 16384).unwrap();
-        let bytes = writer.finish().unwrap();
-        assert_eq!(bytes.len(), 10); // 6 + 3 + 1
+        assert_eq!(writer.finish().unwrap().len(), 22); // 19 + 3
     }
 
     #[test]
     fn test_duplicate_offsets_allowed() {
-        // Multiple partitions can have the same offset (e.g., empty partitions)
         let mut writer = IndexWriter::new();
 
         let key1 = DecoratedKey::new(100, vec![0x01]);
         let key2 = DecoratedKey::new(200, vec![0x02]);
 
         writer.add_partition(&key1, 0).unwrap();
-        writer.add_partition(&key2, 0).unwrap(); // Same offset
+        writer.add_partition(&key2, 0).unwrap();
 
         let bytes = writer.finish().unwrap();
-        // 2 entries: (2+1+1+1)*2 = 10
-        assert_eq!(bytes.len(), 10); // Two entries, both with 1-byte key and offset=0
+        // 2 entries: (2+16+1+1)*2 = 40
+        assert_eq!(bytes.len(), 40);
     }
 
     #[test]
     fn test_zero_offset() {
-        // First partition should start at offset 0
         let mut writer = IndexWriter::new();
         let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
 
         writer.add_partition(&key, 0).unwrap();
         let bytes = writer.finish().unwrap();
 
-        // Position at byte 6 (after key_len(2) + key(4))
-        assert_eq!(bytes[6], 0x00);
+        // Position at byte 18 (after marker(2) + digest(16))
+        assert_eq!(bytes[18], 0x00);
     }
 
     #[test]
     fn test_index_offset_tracking() {
-        // Test that IndexEntryInfo provides accurate offsets for Summary.db
         let mut writer = IndexWriter::new();
 
-        // Entry 1: 4-byte key, position=0 (1-byte VInt)
+        // All entries have same structure: 2 (marker) + 16 (digest) + vint + 1 (promoted)
         let key1 = DecoratedKey::new(100, vec![0x01, 0x02, 0x03, 0x04]);
-        let info1 = writer.add_partition(&key1, 0).unwrap();
+        let info1 = writer.add_partition(&key1, 0).unwrap(); // 1-byte VInt
 
-        // Entry 2: 2-byte key, position=127 (1-byte VInt)
         let key2 = DecoratedKey::new(200, vec![0x05, 0x06]);
-        let info2 = writer.add_partition(&key2, 127).unwrap();
+        let info2 = writer.add_partition(&key2, 127).unwrap(); // 1-byte VInt
 
-        // Entry 3: 1-byte key, position=12381 (2-byte VInt)
         let key3 = DecoratedKey::new(300, vec![0x07]);
-        let info3 = writer.add_partition(&key3, 12381).unwrap();
+        let info3 = writer.add_partition(&key3, 12381).unwrap(); // 2-byte VInt
 
-        // Verify offsets
-        assert_eq!(info1.index_offset, 0, "First entry starts at offset 0");
-        assert_eq!(info1.entry_size, 8, "Entry 1: 2 + 4 + 1 + 1 = 8 bytes");
+        // All entries: 2 (marker) + 16 (digest) + vint + 1 (promoted)
+        assert_eq!(info1.index_offset, 0);
+        assert_eq!(info1.entry_size, 20, "Entry 1: 2 + 16 + 1 + 1 = 20");
 
-        assert_eq!(
-            info2.index_offset, 8,
-            "Second entry starts after first (8 bytes)"
-        );
-        assert_eq!(info2.entry_size, 6, "Entry 2: 2 + 2 + 1 + 1 = 6 bytes");
+        assert_eq!(info2.index_offset, 20);
+        assert_eq!(info2.entry_size, 20, "Entry 2: 2 + 16 + 1 + 1 = 20");
 
-        assert_eq!(
-            info3.index_offset, 14,
-            "Third entry starts after first two (14 bytes)"
-        );
-        assert_eq!(
-            info3.entry_size, 6,
-            "Entry 3: 2 + 1 + 2 + 1 = 6 bytes (2-byte VInt)"
-        );
+        assert_eq!(info3.index_offset, 40);
+        assert_eq!(info3.entry_size, 21, "Entry 3: 2 + 16 + 2 + 1 = 21");
 
-        // Verify that offsets match actual serialized positions
+        // Verify markers at expected offsets
         let bytes = writer.finish().unwrap();
 
-        // Check key_len prefixes at expected offsets
         assert_eq!(
             &bytes[info1.index_offset as usize..info1.index_offset as usize + 2],
-            &[0x00, 0x04],
-            "Entry 1 key_len=4 at offset 0"
+            &[0x00, 0x10],
+            "Entry 1 marker at offset 0"
         );
         assert_eq!(
             &bytes[info2.index_offset as usize..info2.index_offset as usize + 2],
-            &[0x00, 0x02],
-            "Entry 2 key_len=2 at offset 8"
+            &[0x00, 0x10],
+            "Entry 2 marker at offset 20"
         );
         assert_eq!(
             &bytes[info3.index_offset as usize..info3.index_offset as usize + 2],
-            &[0x00, 0x01],
-            "Entry 3 key_len=1 at offset 14"
+            &[0x00, 0x10],
+            "Entry 3 marker at offset 40"
         );
 
-        // Verify total size matches sum of entries
         assert_eq!(
             bytes.len(),
-            (info1.entry_size + info2.entry_size + info3.entry_size),
+            info1.entry_size + info2.entry_size + info3.entry_size,
             "Total size matches sum of entry sizes"
         );
     }
 
     #[test]
     fn test_streaming_write_memory_efficiency() {
-        // Verify that entries are written immediately, not buffered
         let mut writer = IndexWriter::new();
 
         let key1 = DecoratedKey::new(100, vec![0x01]);
         let _info1 = writer.add_partition(&key1, 0).unwrap();
 
-        // Buffer should contain data after first write
         assert!(
             !writer.buffer.is_empty(),
             "Buffer should contain data after first write"
@@ -655,7 +617,6 @@ mod tests {
         let key2 = DecoratedKey::new(200, vec![0x02]);
         let _info2 = writer.add_partition(&key2, 100).unwrap();
 
-        // Buffer should grow after second write
         assert!(
             writer.buffer.len() > buffer_size_after_one,
             "Buffer should grow after second write"
@@ -664,30 +625,28 @@ mod tests {
 
     #[test]
     fn test_variable_vint_sizes() {
-        // Test that entry sizes correctly account for variable VInt encoding
         let mut writer = IndexWriter::new();
 
-        // All keys are 1 byte, so base = 2 + 1 + 1(promoted) = 4 + pos VInt
+        // Base = 2 (marker) + 16 (digest) + 1 (promoted) = 19 + vint_len
         let key1 = DecoratedKey::new(100, vec![0x01]);
-        let info1 = writer.add_partition(&key1, 0).unwrap(); // 1-byte VInt
+        let info1 = writer.add_partition(&key1, 0).unwrap();
 
         let key2 = DecoratedKey::new(200, vec![0x02]);
-        let info2 = writer.add_partition(&key2, 127).unwrap(); // 1-byte VInt (max)
+        let info2 = writer.add_partition(&key2, 127).unwrap();
 
         let key3 = DecoratedKey::new(300, vec![0x03]);
-        let info3 = writer.add_partition(&key3, 128).unwrap(); // 2-byte VInt (min)
+        let info3 = writer.add_partition(&key3, 128).unwrap();
 
         let key4 = DecoratedKey::new(400, vec![0x04]);
-        let info4 = writer.add_partition(&key4, 16383).unwrap(); // 2-byte VInt (max)
+        let info4 = writer.add_partition(&key4, 16383).unwrap();
 
         let key5 = DecoratedKey::new(500, vec![0x05]);
-        let info5 = writer.add_partition(&key5, 16384).unwrap(); // 3-byte VInt (min)
+        let info5 = writer.add_partition(&key5, 16384).unwrap();
 
-        // Base = 2 (key_len) + 1 (key) + 1 (promoted) = 4
-        assert_eq!(info1.entry_size, 5, "1-byte VInt: 4 + 1");
-        assert_eq!(info2.entry_size, 5, "1-byte VInt: 4 + 1");
-        assert_eq!(info3.entry_size, 6, "2-byte VInt: 4 + 2");
-        assert_eq!(info4.entry_size, 6, "2-byte VInt: 4 + 2");
-        assert_eq!(info5.entry_size, 7, "3-byte VInt: 4 + 3");
+        assert_eq!(info1.entry_size, 20, "1-byte VInt: 19 + 1");
+        assert_eq!(info2.entry_size, 20, "1-byte VInt: 19 + 1");
+        assert_eq!(info3.entry_size, 21, "2-byte VInt: 19 + 2");
+        assert_eq!(info4.entry_size, 21, "2-byte VInt: 19 + 2");
+        assert_eq!(info5.entry_size, 22, "3-byte VInt: 19 + 3");
     }
 }
