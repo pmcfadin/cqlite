@@ -42,6 +42,9 @@ pub fn literal_to_value(literal: &CqlLiteral, target_type: &CqlType) -> Result<V
         CqlLiteral::Float(f) => match target_type {
             CqlType::Double => Ok(Value::Float(*f)),
             CqlType::Float => Ok(Value::Float32(*f as f32)),
+            CqlType::Decimal => Err(Error::InvalidInput(
+                "Float-to-Decimal conversion not supported; use a string literal".to_string(),
+            )),
             _ => Err(type_mismatch("float", target_type)),
         },
 
@@ -85,7 +88,15 @@ fn integer_to_value(i: i64, target: &CqlType) -> Result<Value, Error> {
             let v = i32::try_from(i).map_err(|_| overflow_error(i, "int"))?;
             Ok(Value::Integer(v))
         }
-        CqlType::BigInt | CqlType::Counter => Ok(Value::BigInt(i)),
+        CqlType::BigInt => Ok(Value::BigInt(i)),
+        CqlType::Counter => Ok(Value::Counter(i)),
+        CqlType::Duration => Err(Error::InvalidInput(
+            "Duration type requires a duration literal (e.g. '1h30m'), not an integer".to_string(),
+        )),
+        CqlType::Decimal => {
+            let unscaled = varint_to_bytes(i);
+            Ok(Value::Decimal { scale: 0, unscaled })
+        }
         CqlType::Timestamp => Ok(Value::Timestamp(i)),
         CqlType::Date => {
             let v = i32::try_from(i).map_err(|_| overflow_error(i, "date"))?;
@@ -205,14 +216,10 @@ fn hex_nibble(b: u8) -> Result<u8, Error> {
 }
 
 /// Convert a collection literal given the target CQL collection type.
+///
+/// Expects a non-Frozen target type (Frozen is unwrapped by caller).
 #[cfg(feature = "write-support")]
 fn collection_to_value(coll: &CqlCollectionLiteral, target: &CqlType) -> Result<Value, Error> {
-    // Unwrap Frozen so that frozen collections work transparently
-    if let CqlType::Frozen(inner) = target {
-        let inner_value = collection_to_value(coll, inner)?;
-        return Ok(Value::Frozen(Box::new(inner_value)));
-    }
-
     match (coll, target) {
         (CqlCollectionLiteral::List(items), CqlType::List(elem_type)) => {
             let values = items
@@ -246,14 +253,10 @@ fn collection_to_value(coll: &CqlCollectionLiteral, target: &CqlType) -> Result<
 
 /// Convert a tuple literal to `Value::Tuple`, using the positional types from
 /// `CqlType::Tuple`.
+///
+/// Expects a non-Frozen target type (Frozen is unwrapped by caller).
 #[cfg(feature = "write-support")]
 fn tuple_to_value(elements: &[CqlLiteral], target: &CqlType) -> Result<Value, Error> {
-    // Unwrap Frozen
-    if let CqlType::Frozen(inner) = target {
-        let inner_value = tuple_to_value(elements, inner)?;
-        return Ok(Value::Frozen(Box::new(inner_value)));
-    }
-
     match target {
         CqlType::Tuple(field_types) => {
             if elements.len() != field_types.len() {
@@ -276,14 +279,10 @@ fn tuple_to_value(elements: &[CqlLiteral], target: &CqlType) -> Result<Value, Er
 
 /// Convert a UDT literal to `Value::Udt`, looking up field types from
 /// `CqlType::Udt`.
+///
+/// Expects a non-Frozen target type (Frozen is unwrapped by caller).
 #[cfg(feature = "write-support")]
 fn udt_to_value(udt: &CqlUdtLiteral, target: &CqlType) -> Result<Value, Error> {
-    // Unwrap Frozen
-    if let CqlType::Frozen(inner) = target {
-        let inner_value = udt_to_value(udt, inner)?;
-        return Ok(Value::Frozen(Box::new(inner_value)));
-    }
-
     match target {
         CqlType::Udt(type_name, field_defs) => {
             let mut fields: Vec<UdtField> = Vec::with_capacity(udt.fields.len());
@@ -573,5 +572,57 @@ mod tests {
             Value::Varint(bytes) => assert!(!bytes.is_empty()),
             other => panic!("expected Value::Varint, got {:?}", other),
         }
+    }
+
+    // ── Counter ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_to_counter() {
+        let v = literal_to_value(&CqlLiteral::Integer(100), &CqlType::Counter).unwrap();
+        assert_eq!(v, Value::Counter(100));
+    }
+
+    // ── Decimal ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_to_decimal() {
+        let v = literal_to_value(&CqlLiteral::Integer(42), &CqlType::Decimal).unwrap();
+        match v {
+            Value::Decimal { scale, unscaled } => {
+                assert_eq!(scale, 0);
+                assert!(!unscaled.is_empty());
+            }
+            other => panic!("expected Value::Decimal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_float_to_decimal_returns_error() {
+        let err = literal_to_value(&CqlLiteral::Float(1.23), &CqlType::Decimal).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("Float-to-Decimal")),
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    // ── Duration ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_integer_to_duration_returns_error() {
+        let err = literal_to_value(&CqlLiteral::Integer(42), &CqlType::Duration).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("Duration")),
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    // ── varint_to_bytes correctness ───────────────────────────────────────────
+
+    #[test]
+    fn test_varint_bytes_correctness() {
+        // 256 as i64 big-endian is [0,0,0,0,0,0,1,0]
+        // varint_to_bytes should produce the minimal representation: [1, 0]
+        let bytes = varint_to_bytes(256);
+        assert_eq!(bytes, vec![0x01, 0x00]);
     }
 }
