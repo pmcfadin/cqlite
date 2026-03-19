@@ -211,6 +211,97 @@ pub fn create_comprehensive_schema() -> TableSchema {
                 default: None,
                 is_static: false,
             },
+            Column {
+                name: "tinyint_col".to_string(),
+                data_type: "tinyint".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "smallint_col".to_string(),
+                data_type: "smallint".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "float_col".to_string(),
+                data_type: "float".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "double_col".to_string(),
+                data_type: "double".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "blob_col".to_string(),
+                data_type: "blob".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "date_col".to_string(),
+                data_type: "date".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "time_col".to_string(),
+                data_type: "time".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "inet_col".to_string(),
+                data_type: "inet".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "varint_col".to_string(),
+                data_type: "varint".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "decimal_col".to_string(),
+                data_type: "decimal".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "duration_col".to_string(),
+                data_type: "duration".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "tuple_col".to_string(),
+                data_type: "tuple<int, text>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "frozen_col".to_string(),
+                data_type: "frozen<list<int>>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
         ],
         comments: HashMap::new(),
     }
@@ -284,6 +375,71 @@ pub fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutat
         CellOperation::Write {
             column: "uuid_col".to_string(),
             value: Value::Uuid(*uuid::Uuid::new_v4().as_bytes()),
+        },
+        CellOperation::Write {
+            column: "tinyint_col".to_string(),
+            value: Value::TinyInt((pk % 128) as i8),
+        },
+        CellOperation::Write {
+            column: "smallint_col".to_string(),
+            value: Value::SmallInt((pk * 10) as i16),
+        },
+        CellOperation::Write {
+            column: "float_col".to_string(),
+            value: Value::Float32(pk as f32 * 1.5),
+        },
+        CellOperation::Write {
+            column: "double_col".to_string(),
+            value: Value::Float(pk as f64 * 2.5),
+        },
+        CellOperation::Write {
+            column: "blob_col".to_string(),
+            value: Value::Blob(vec![0xDE, 0xAD, pk as u8]),
+        },
+        CellOperation::Write {
+            column: "date_col".to_string(),
+            value: Value::Date(19723 + pk),
+        },
+        CellOperation::Write {
+            column: "time_col".to_string(),
+            value: Value::Time(43_200_000_000_000 + pk as i64),
+        },
+        CellOperation::Write {
+            column: "inet_col".to_string(),
+            value: Value::Inet(vec![192, 168, 1, pk as u8]),
+        },
+        CellOperation::Write {
+            column: "varint_col".to_string(),
+            value: Value::Varint(vec![pk as u8]),
+        },
+        CellOperation::Write {
+            column: "decimal_col".to_string(),
+            value: Value::Decimal {
+                scale: 2,
+                unscaled: vec![pk as u8],
+            },
+        },
+        CellOperation::Write {
+            column: "duration_col".to_string(),
+            value: Value::Duration {
+                months: pk,
+                days: pk * 2,
+                nanos: pk as i64 * 1_000_000_000,
+            },
+        },
+        CellOperation::Write {
+            column: "tuple_col".to_string(),
+            value: Value::Tuple(vec![
+                Value::Integer(pk),
+                Value::Text(format!("tuple_{}", pk)),
+            ]),
+        },
+        CellOperation::Write {
+            column: "frozen_col".to_string(),
+            value: Value::Frozen(Box::new(Value::List(vec![
+                Value::Integer(pk),
+                Value::Integer(pk * 2),
+            ]))),
         },
     ];
 

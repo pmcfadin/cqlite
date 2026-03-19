@@ -380,6 +380,818 @@ async fn test_type_uuid_nil() {
     assert!(info.data_path.exists(), "Data.db should exist for nil uuid");
 }
 
+/// Test TinyInt type roundtrip
+#[tokio::test]
+async fn test_type_tinyint_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("tinyint_col", "tinyint");
+
+    let info = write_single_value(&temp_dir, &schema, "tinyint_col", Value::TinyInt(42)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for tinyint type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test TinyInt type with min value
+#[tokio::test]
+async fn test_type_tinyint_min() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("tinyint_col", "tinyint");
+
+    let info = write_single_value(&temp_dir, &schema, "tinyint_col", Value::TinyInt(i8::MIN)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for tinyint min"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test TinyInt type with max value
+#[tokio::test]
+async fn test_type_tinyint_max() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("tinyint_col", "tinyint");
+
+    let info = write_single_value(&temp_dir, &schema, "tinyint_col", Value::TinyInt(i8::MAX)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for tinyint max"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test SmallInt type roundtrip
+#[tokio::test]
+async fn test_type_smallint_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("smallint_col", "smallint");
+
+    let info = write_single_value(&temp_dir, &schema, "smallint_col", Value::SmallInt(1000)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for smallint type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test SmallInt type with min value
+#[tokio::test]
+async fn test_type_smallint_min() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("smallint_col", "smallint");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "smallint_col",
+        Value::SmallInt(i16::MIN),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for smallint min"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test SmallInt type with max value
+#[tokio::test]
+async fn test_type_smallint_max() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("smallint_col", "smallint");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "smallint_col",
+        Value::SmallInt(i16::MAX),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for smallint max"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Float32 type roundtrip
+#[tokio::test]
+async fn test_type_float32_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("float_col", "float");
+
+    let info = write_single_value(&temp_dir, &schema, "float_col", Value::Float32(1.234_567)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for float type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Float32 type with special value
+#[tokio::test]
+async fn test_type_float32_special() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("float_col", "float");
+
+    let info = write_single_value(&temp_dir, &schema, "float_col", Value::Float32(0.0)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for float zero"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Float32 type with min/max value
+#[tokio::test]
+async fn test_type_float32_min_max() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("float_col", "float");
+
+    let info = write_single_value(&temp_dir, &schema, "float_col", Value::Float32(f32::MIN)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for float min"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Double type roundtrip
+#[tokio::test]
+async fn test_type_double_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("double_col", "double");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "double_col",
+        Value::Float(9.876_543_210_123_456),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for double type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Double type with special value
+#[tokio::test]
+async fn test_type_double_special() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("double_col", "double");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "double_col",
+        Value::Float(f64::INFINITY),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for double infinity"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Double type with min/max value
+#[tokio::test]
+async fn test_type_double_min_max() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("double_col", "double");
+
+    let info = write_single_value(&temp_dir, &schema, "double_col", Value::Float(f64::MIN)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for double min"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Blob type roundtrip
+#[tokio::test]
+async fn test_type_blob_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("blob_col", "blob");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "blob_col",
+        Value::Blob(vec![0xDE, 0xAD, 0xBE, 0xEF]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for blob type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Blob type with empty value
+#[tokio::test]
+async fn test_type_blob_empty() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("blob_col", "blob");
+
+    let info = write_single_value(&temp_dir, &schema, "blob_col", Value::Blob(vec![])).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for empty blob"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Blob type with large value
+#[tokio::test]
+async fn test_type_blob_large() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("blob_col", "blob");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "blob_col",
+        Value::Blob(vec![0xAB; 10240]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for large blob"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    let data_size = std::fs::metadata(&info.data_path).unwrap().len();
+    assert!(
+        data_size > 10000,
+        "Data.db should be > 10000 bytes for large blob (got {} bytes)",
+        data_size
+    );
+}
+
+/// Test Date type roundtrip
+#[tokio::test]
+async fn test_type_date_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("date_col", "date");
+
+    // 2024-01-01
+    let info = write_single_value(&temp_dir, &schema, "date_col", Value::Date(19723)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for date type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Date type with epoch value
+#[tokio::test]
+async fn test_type_date_epoch() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("date_col", "date");
+
+    let info = write_single_value(&temp_dir, &schema, "date_col", Value::Date(0)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for date epoch"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Date type with negative value
+#[tokio::test]
+async fn test_type_date_negative() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("date_col", "date");
+
+    let info = write_single_value(&temp_dir, &schema, "date_col", Value::Date(-1)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for negative date"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Time type roundtrip
+#[tokio::test]
+async fn test_type_time_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("time_col", "time");
+
+    // noon: 43200 seconds in nanoseconds
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "time_col",
+        Value::Time(43_200_000_000_000),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for time type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Time type with midnight value
+#[tokio::test]
+async fn test_type_time_midnight() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("time_col", "time");
+
+    let info = write_single_value(&temp_dir, &schema, "time_col", Value::Time(0)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for time midnight"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Time type with max value
+#[tokio::test]
+async fn test_type_time_max() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("time_col", "time");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "time_col",
+        Value::Time(86_399_999_999_999),
+    )
+    .await;
+
+    assert!(info.data_path.exists(), "Data.db should exist for time max");
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Counter type roundtrip
+#[tokio::test]
+async fn test_type_counter_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("counter_col", "counter");
+
+    let info = write_single_value(&temp_dir, &schema, "counter_col", Value::Counter(100)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for counter type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Counter type with zero value
+#[tokio::test]
+async fn test_type_counter_zero() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("counter_col", "counter");
+
+    let info = write_single_value(&temp_dir, &schema, "counter_col", Value::Counter(0)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for counter zero"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Counter type with negative value
+#[tokio::test]
+async fn test_type_counter_negative() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("counter_col", "counter");
+
+    let info = write_single_value(&temp_dir, &schema, "counter_col", Value::Counter(-50)).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for negative counter"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Inet type with IPv4 address
+#[tokio::test]
+async fn test_type_inet_ipv4() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("inet_col", "inet");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "inet_col",
+        Value::Inet(vec![192, 168, 1, 1]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for inet IPv4"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Inet type with IPv6 address
+#[tokio::test]
+async fn test_type_inet_ipv6() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("inet_col", "inet");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "inet_col",
+        Value::Inet(vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for inet IPv6"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Inet type with loopback address
+#[tokio::test]
+async fn test_type_inet_loopback() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("inet_col", "inet");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "inet_col",
+        Value::Inet(vec![127, 0, 0, 1]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for inet loopback"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Varint type with small value
+#[tokio::test]
+async fn test_type_varint_small() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("varint_col", "varint");
+
+    let info =
+        write_single_value(&temp_dir, &schema, "varint_col", Value::Varint(vec![0x2A])).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for varint small"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Varint type with large value
+#[tokio::test]
+async fn test_type_varint_large() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("varint_col", "varint");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "varint_col",
+        Value::Varint(vec![0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for varint large"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Varint type with negative value
+#[tokio::test]
+async fn test_type_varint_negative() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("varint_col", "varint");
+
+    let info =
+        write_single_value(&temp_dir, &schema, "varint_col", Value::Varint(vec![0xFF])).await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for negative varint"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Decimal type roundtrip
+#[tokio::test]
+async fn test_type_decimal_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("decimal_col", "decimal");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "decimal_col",
+        Value::Decimal {
+            scale: 2,
+            unscaled: vec![0x30, 0x39],
+        },
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for decimal type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Decimal type with zero value
+#[tokio::test]
+async fn test_type_decimal_zero() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("decimal_col", "decimal");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "decimal_col",
+        Value::Decimal {
+            scale: 0,
+            unscaled: vec![0],
+        },
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for decimal zero"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Decimal type with negative scale
+#[tokio::test]
+async fn test_type_decimal_neg_scale() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("decimal_col", "decimal");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "decimal_col",
+        Value::Decimal {
+            scale: -2,
+            unscaled: vec![1],
+        },
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for decimal negative scale"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Duration type roundtrip
+#[tokio::test]
+async fn test_type_duration_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("duration_col", "duration");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "duration_col",
+        Value::Duration {
+            months: 1,
+            days: 15,
+            nanos: 3_600_000_000_000,
+        },
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for duration type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Duration type with zero value
+#[tokio::test]
+async fn test_type_duration_zero() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("duration_col", "duration");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "duration_col",
+        Value::Duration {
+            months: 0,
+            days: 0,
+            nanos: 0,
+        },
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for duration zero"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Duration type with negative value
+#[tokio::test]
+async fn test_type_duration_negative() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("duration_col", "duration");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "duration_col",
+        Value::Duration {
+            months: -1,
+            days: -5,
+            nanos: -1_000_000_000,
+        },
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for negative duration"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Tuple type roundtrip
+#[tokio::test]
+async fn test_type_tuple_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("tuple_col", "tuple<int, text>");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "tuple_col",
+        Value::Tuple(vec![Value::Integer(42), Value::Text("hello".to_string())]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for tuple type"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Tuple type with null element
+#[tokio::test]
+async fn test_type_tuple_with_null() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("tuple_col", "tuple<int, text>");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "tuple_col",
+        Value::Tuple(vec![Value::Integer(42), Value::Null]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for tuple with null"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Tuple type nested
+#[tokio::test]
+async fn test_type_tuple_nested() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("tuple_col", "tuple<int, tuple<int, text>>");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "tuple_col",
+        Value::Tuple(vec![
+            Value::Integer(1),
+            Value::Tuple(vec![Value::Integer(2), Value::Text("nested".to_string())]),
+        ]),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for nested tuple"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Frozen list type roundtrip
+#[tokio::test]
+async fn test_type_frozen_list() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("frozen_col", "frozen<list<int>>");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "frozen_col",
+        Value::Frozen(Box::new(Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]))),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for frozen list"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Frozen map type roundtrip
+#[tokio::test]
+async fn test_type_frozen_map() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("frozen_col", "frozen<map<text, int>>");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "frozen_col",
+        Value::Frozen(Box::new(Value::Map(vec![(
+            Value::Text("key".to_string()),
+            Value::Integer(42),
+        )]))),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for frozen map"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
+/// Test Frozen empty list type
+#[tokio::test]
+async fn test_type_frozen_empty() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("frozen_col", "frozen<list<int>>");
+
+    let info = write_single_value(
+        &temp_dir,
+        &schema,
+        "frozen_col",
+        Value::Frozen(Box::new(Value::List(vec![]))),
+    )
+    .await;
+
+    assert!(
+        info.data_path.exists(),
+        "Data.db should exist for frozen empty list"
+    );
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
 /// Test all types in single partition
 #[tokio::test]
 async fn test_all_types_single_partition() {
