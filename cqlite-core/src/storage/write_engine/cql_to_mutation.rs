@@ -115,7 +115,7 @@ pub(crate) fn insert_to_mutation(
     };
 
     // Collect regular column operations (non-PK, non-CK columns)
-    let mut operations: Vec<CellOperation> = Vec::new();
+    let mut operations: Vec<CellOperation> = Vec::with_capacity(col_val_pairs.len());
     for (col_name, expr) in &col_val_pairs {
         if schema.is_partition_key(col_name) || schema.is_clustering_key(col_name) {
             continue;
@@ -165,13 +165,13 @@ pub(crate) fn update_to_mutation(
 
     // Extract key bindings from WHERE clause
     let bindings = extract_where_bindings(&update.where_clause)?;
-    let (pk_columns, ck_columns) = resolve_key_bindings(&bindings, schema)?;
+    let keys = resolve_key_bindings(&bindings, schema)?;
 
-    let partition_key = PartitionKey::new(pk_columns);
-    let clustering_key = if ck_columns.is_empty() {
+    let partition_key = PartitionKey::new(keys.partition);
+    let clustering_key = if keys.clustering.is_empty() {
         None
     } else {
-        Some(ClusteringKey::new(ck_columns))
+        Some(ClusteringKey::new(keys.clustering))
     };
 
     // Convert SET assignments to CellOperation::Write
@@ -233,13 +233,13 @@ pub(crate) fn delete_to_mutation(
 
     // Extract key bindings from WHERE clause
     let bindings = extract_where_bindings(&delete.where_clause)?;
-    let (pk_columns, ck_columns) = resolve_key_bindings(&bindings, schema)?;
+    let keys = resolve_key_bindings(&bindings, schema)?;
 
-    let partition_key = PartitionKey::new(pk_columns);
-    let clustering_key = if ck_columns.is_empty() {
+    let partition_key = PartitionKey::new(keys.partition);
+    let clustering_key = if keys.clustering.is_empty() {
         None
     } else {
-        Some(ClusteringKey::new(ck_columns))
+        Some(ClusteringKey::new(keys.clustering))
     };
 
     // Build operations: row delete or per-column deletes
@@ -280,15 +280,14 @@ pub(crate) fn convert_cql_to_mutation(
     schema: &TableSchema,
 ) -> Result<Mutation, Error> {
     let trimmed = statement.trim();
-    let upper = trimmed.to_uppercase();
 
-    if upper.starts_with("INSERT") {
+    if trimmed.len() >= 6 && trimmed.as_bytes()[..6].eq_ignore_ascii_case(b"INSERT") {
         let insert = crate::cql::mutation_parser::parse_insert_statement(trimmed)?;
         insert_to_mutation(&insert, schema)
-    } else if upper.starts_with("UPDATE") {
+    } else if trimmed.len() >= 6 && trimmed.as_bytes()[..6].eq_ignore_ascii_case(b"UPDATE") {
         let update = crate::cql::mutation_parser::parse_update_statement(trimmed)?;
         update_to_mutation(&update, schema)
-    } else if upper.starts_with("DELETE") {
+    } else if trimmed.len() >= 6 && trimmed.as_bytes()[..6].eq_ignore_ascii_case(b"DELETE") {
         let delete = crate::cql::mutation_parser::parse_delete_statement(trimmed)?;
         delete_to_mutation(&delete, schema)
     } else {
@@ -334,7 +333,7 @@ fn collect_equality_bindings(
             right,
         } => match left.as_ref() {
             CqlExpression::Column(col_id) => {
-                bindings.push((col_id.name.to_lowercase(), *right.clone()));
+                bindings.push((col_id.name.to_lowercase(), (**right).clone()));
             }
             _ => {
                 return Err(Error::InvalidInput(
@@ -351,22 +350,26 @@ fn collect_equality_bindings(
     Ok(())
 }
 
+/// Resolved partition key and clustering key columns from a WHERE clause.
+#[cfg(feature = "write-support")]
+struct ResolvedKeys {
+    partition: Vec<(String, Value)>,
+    clustering: Vec<(String, Value)>,
+}
+
 /// Separate WHERE clause bindings into partition key values and clustering key values.
 ///
 /// Partition key columns are required; an error is returned if any are missing.
 /// Clustering key columns are optional (partial WHERE clauses are valid for DELETE).
 ///
-/// Returns `(pk_columns, ck_columns)` in schema order.
-///
 /// # Errors
 ///
 /// Returns `Error::InvalidInput` when a partition key column is missing from the bindings.
 #[cfg(feature = "write-support")]
-#[allow(clippy::type_complexity)]
 fn resolve_key_bindings(
     bindings: &[(String, CqlExpression)],
     schema: &TableSchema,
-) -> Result<(Vec<(String, Value)>, Vec<(String, Value)>), Error> {
+) -> Result<ResolvedKeys, Error> {
     let ordered_pk = schema.ordered_partition_keys();
     let ordered_ck = schema.ordered_clustering_keys();
 
@@ -389,7 +392,7 @@ fn resolve_key_bindings(
     }
 
     // Resolve clustering key values (optional)
-    let mut ck_columns: Vec<(String, Value)> = Vec::new();
+    let mut ck_columns: Vec<(String, Value)> = Vec::with_capacity(ordered_ck.len());
     for ck_col in &ordered_ck {
         let col_name_lc = ck_col.name.to_lowercase();
         if let Some((_, expr)) = bindings.iter().find(|(name, _)| *name == col_name_lc) {
@@ -399,7 +402,10 @@ fn resolve_key_bindings(
         }
     }
 
-    Ok((pk_columns, ck_columns))
+    Ok(ResolvedKeys {
+        partition: pk_columns,
+        clustering: ck_columns,
+    })
 }
 
 /// Convert a `CqlExpression` to a `Value` for mutation purposes.
@@ -533,7 +539,7 @@ fn extract_ttl(using: &Option<CqlUsing>) -> Result<Option<u32>, Error> {
 /// Returns `Error::InvalidInput` for type mismatches or overflow, and
 /// `Error::Parse` for malformed UUID/blob/inet strings.
 #[cfg(feature = "write-support")]
-pub fn literal_to_value(literal: &CqlLiteral, target_type: &CqlType) -> Result<Value, Error> {
+pub(crate) fn literal_to_value(literal: &CqlLiteral, target_type: &CqlType) -> Result<Value, Error> {
     // Unwrap Frozen – it doesn't affect value representation
     if let CqlType::Frozen(inner) = target_type {
         let inner_value = literal_to_value(literal, inner)?;
@@ -656,22 +662,24 @@ fn varint_to_bytes(i: i64) -> Vec<u8> {
     be[start..].to_vec()
 }
 
-/// Parse a UUID string (with or without dashes) into a 16-byte array.
+/// Parse a UUID string in standard format (8-4-4-4-12) into a 16-byte array.
 #[cfg(feature = "write-support")]
 fn parse_uuid(s: &str) -> Result<Value, Error> {
-    // Strip dashes
-    let hex: String = s.chars().filter(|c| *c != '-').collect();
-    if hex.len() != 32 {
+    let b = s.as_bytes();
+    if b.len() != 36 || b[8] != b'-' || b[13] != b'-' || b[18] != b'-' || b[23] != b'-' {
         return Err(Error::Parse(format!(
-            "invalid UUID string (expected 32 hex chars after stripping dashes): {:?}",
+            "invalid UUID string (expected 8-4-4-4-12 format): {:?}",
             s
         )));
     }
     let mut bytes = [0u8; 16];
-    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
-        let hi = hex_nibble(chunk[0])?;
-        let lo = hex_nibble(chunk[1])?;
-        bytes[i] = (hi << 4) | lo;
+    let segments: [&[u8]; 5] = [&b[0..8], &b[9..13], &b[14..18], &b[19..23], &b[24..36]];
+    let mut out = 0;
+    for seg in segments {
+        for pair in seg.chunks(2) {
+            bytes[out] = (hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?;
+            out += 1;
+        }
     }
     Ok(Value::Uuid(bytes))
 }
@@ -941,7 +949,7 @@ mod tests {
         // Verify partition key
         assert_eq!(mutation.partition_key.columns.len(), 1);
         assert_eq!(mutation.partition_key.columns[0].0, "id");
-        matches!(mutation.partition_key.columns[0].1, Value::Uuid(_));
+        assert!(matches!(mutation.partition_key.columns[0].1, Value::Uuid(_)));
 
         // Verify clustering key
         let ck = mutation.clustering_key.unwrap();
@@ -1278,57 +1286,7 @@ mod tests {
         }
     }
 
-    // ── Collections ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn test_list_conversion() {
-        let list_lit = CqlLiteral::Collection(CqlCollectionLiteral::List(vec![
-            CqlLiteral::Integer(1),
-            CqlLiteral::Integer(2),
-            CqlLiteral::Integer(3),
-        ]));
-        let target = CqlType::List(Box::new(CqlType::Int));
-        let v = literal_to_value(&list_lit, &target).unwrap();
-        assert_eq!(
-            v,
-            Value::List(vec![
-                Value::Integer(1),
-                Value::Integer(2),
-                Value::Integer(3)
-            ])
-        );
-    }
-
-    #[test]
-    fn test_set_conversion() {
-        let set_lit = CqlLiteral::Collection(CqlCollectionLiteral::Set(vec![
-            CqlLiteral::String("a".to_string()),
-            CqlLiteral::String("b".to_string()),
-        ]));
-        let target = CqlType::Set(Box::new(CqlType::Text));
-        let v = literal_to_value(&set_lit, &target).unwrap();
-        assert_eq!(
-            v,
-            Value::Set(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string())
-            ])
-        );
-    }
-
-    #[test]
-    fn test_map_conversion() {
-        let map_lit = CqlLiteral::Collection(CqlCollectionLiteral::Map(vec![(
-            CqlLiteral::String("key".to_string()),
-            CqlLiteral::Integer(99),
-        )]));
-        let target = CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::BigInt));
-        let v = literal_to_value(&map_lit, &target).unwrap();
-        assert_eq!(
-            v,
-            Value::Map(vec![(Value::Text("key".to_string()), Value::BigInt(99))])
-        );
-    }
+    // ── Collections (see also test_list_of_int, test_set_of_text, test_map_of_text_to_int) ──
 
     // ── Varint ───────────────────────────────────────────────────────────────
 
