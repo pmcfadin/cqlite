@@ -23,6 +23,8 @@
 //! On startup, the WriteEngine replays WAL entries into the memtable.
 
 #[cfg(feature = "write-support")]
+pub mod cql_to_mutation;
+#[cfg(feature = "write-support")]
 pub mod export;
 #[cfg(feature = "write-support")]
 pub mod memtable;
