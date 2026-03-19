@@ -138,7 +138,29 @@ pub fn create_clustering_schema() -> TableSchema {
     }
 }
 
-/// Create a comprehensive schema with all Stage 0 supported types
+/// Create a nullable column with standard defaults
+fn col(name: &str, data_type: &str) -> Column {
+    Column {
+        name: name.to_string(),
+        data_type: data_type.to_string(),
+        nullable: true,
+        default: None,
+        is_static: false,
+    }
+}
+
+/// Create a non-nullable column (for primary key components)
+fn key_col(name: &str, data_type: &str) -> Column {
+    Column {
+        name: name.to_string(),
+        data_type: data_type.to_string(),
+        nullable: false,
+        default: None,
+        is_static: false,
+    }
+}
+
+/// Create a comprehensive schema with all supported types
 pub fn create_comprehensive_schema() -> TableSchema {
     TableSchema {
         keyspace: "test_roundtrip".to_string(),
@@ -155,153 +177,27 @@ pub fn create_comprehensive_schema() -> TableSchema {
             order: ClusteringOrder::Asc,
         }],
         columns: vec![
-            Column {
-                name: "pk".to_string(),
-                data_type: "int".to_string(),
-                nullable: false,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "ck".to_string(),
-                data_type: "text".to_string(),
-                nullable: false,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "text_col".to_string(),
-                data_type: "text".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "int_col".to_string(),
-                data_type: "int".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "bigint_col".to_string(),
-                data_type: "bigint".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "boolean_col".to_string(),
-                data_type: "boolean".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "timestamp_col".to_string(),
-                data_type: "timestamp".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "uuid_col".to_string(),
-                data_type: "uuid".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "tinyint_col".to_string(),
-                data_type: "tinyint".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "smallint_col".to_string(),
-                data_type: "smallint".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "float_col".to_string(),
-                data_type: "float".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "double_col".to_string(),
-                data_type: "double".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "blob_col".to_string(),
-                data_type: "blob".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "date_col".to_string(),
-                data_type: "date".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "time_col".to_string(),
-                data_type: "time".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "inet_col".to_string(),
-                data_type: "inet".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "varint_col".to_string(),
-                data_type: "varint".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "decimal_col".to_string(),
-                data_type: "decimal".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "duration_col".to_string(),
-                data_type: "duration".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "tuple_col".to_string(),
-                data_type: "tuple<int, text>".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
-            Column {
-                name: "frozen_col".to_string(),
-                data_type: "frozen<list<int>>".to_string(),
-                nullable: true,
-                default: None,
-                is_static: false,
-            },
+            key_col("pk", "int"),
+            key_col("ck", "text"),
+            col("text_col", "text"),
+            col("int_col", "int"),
+            col("bigint_col", "bigint"),
+            col("boolean_col", "boolean"),
+            col("timestamp_col", "timestamp"),
+            col("uuid_col", "uuid"),
+            col("tinyint_col", "tinyint"),
+            col("smallint_col", "smallint"),
+            col("float_col", "float"),
+            col("double_col", "double"),
+            col("blob_col", "blob"),
+            col("date_col", "date"),
+            col("time_col", "time"),
+            col("inet_col", "inet"),
+            col("varint_col", "varint"),
+            col("decimal_col", "decimal"),
+            col("duration_col", "duration"),
+            col("tuple_col", "tuple<int, text>"),
+            col("frozen_col", "frozen<list<int>>"),
         ],
         comments: HashMap::new(),
     }
@@ -394,7 +290,7 @@ pub fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutat
         },
         CellOperation::Write {
             column: "blob_col".to_string(),
-            value: Value::Blob(vec![0xDE, 0xAD, pk as u8]),
+            value: Value::Blob(vec![0xDE, 0xAD, (pk & 0xFF) as u8]),
         },
         CellOperation::Write {
             column: "date_col".to_string(),
@@ -406,17 +302,17 @@ pub fn create_comprehensive_mutation(pk: i32, ck: &str, timestamp: i64) -> Mutat
         },
         CellOperation::Write {
             column: "inet_col".to_string(),
-            value: Value::Inet(vec![192, 168, 1, pk as u8]),
+            value: Value::Inet(vec![192, 168, 1, (pk & 0xFF) as u8]),
         },
         CellOperation::Write {
             column: "varint_col".to_string(),
-            value: Value::Varint(vec![pk as u8]),
+            value: Value::Varint(vec![(pk & 0xFF) as u8]),
         },
         CellOperation::Write {
             column: "decimal_col".to_string(),
             value: Value::Decimal {
                 scale: 2,
-                unscaled: vec![pk as u8],
+                unscaled: vec![(pk & 0xFF) as u8],
             },
         },
         CellOperation::Write {

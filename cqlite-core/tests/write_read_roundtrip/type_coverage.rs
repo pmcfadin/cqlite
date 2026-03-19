@@ -20,9 +20,7 @@
 #![cfg(feature = "write-support")]
 
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
-use cqlite_core::storage::write_engine::{
-    CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
-};
+use cqlite_core::storage::write_engine::{CellOperation, Mutation, PartitionKey, TableId};
 use cqlite_core::types::Value;
 use std::collections::HashMap;
 use tempfile::TempDir;
@@ -65,13 +63,8 @@ async fn write_single_value(
     col_name: &str,
     value: Value,
 ) -> cqlite_core::storage::sstable::writer::SSTableInfo {
-    let config = WriteEngineConfig::new(
-        temp_dir.path().join("data"),
-        temp_dir.path().join("wal"),
-        schema.clone(),
-    );
-
-    let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
+    let mut engine = super::create_test_engine(temp_dir, schema.clone())
+        .expect("Engine creation should succeed");
 
     let table_id = TableId::new(&schema.keyspace, &schema.table);
     let pk = PartitionKey::single("pk", Value::Integer(1));
@@ -93,6 +86,12 @@ async fn write_single_value(
         .expect("Should return SSTableInfo")
 }
 
+/// Assert that a single partition was written successfully
+fn assert_single_partition_written(info: &cqlite_core::storage::sstable::writer::SSTableInfo) {
+    super::assert_file_exists_and_nonempty(&info.data_path, "Data.db");
+    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+}
+
 /// Test Text type roundtrip
 #[tokio::test]
 async fn test_type_text_roundtrip() {
@@ -107,11 +106,7 @@ async fn test_type_text_roundtrip() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for text type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Text type with empty string
@@ -122,10 +117,7 @@ async fn test_type_text_empty() {
 
     let info = write_single_value(&temp_dir, &schema, "text_col", Value::Text(String::new())).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for empty text"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test Text type with long string
@@ -139,10 +131,7 @@ async fn test_type_text_long() {
 
     let info = write_single_value(&temp_dir, &schema, "text_col", Value::Text(long_text)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for long text"
-    );
+    assert_single_partition_written(&info);
     let data_size = std::fs::metadata(&info.data_path).unwrap().len();
     assert!(
         data_size > 10000,
@@ -159,7 +148,7 @@ async fn test_type_int_roundtrip() {
 
     let info = write_single_value(&temp_dir, &schema, "int_col", Value::Integer(42)).await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for int type");
+    assert_single_partition_written(&info);
 }
 
 /// Test Int type with min value
@@ -170,7 +159,7 @@ async fn test_type_int_min() {
 
     let info = write_single_value(&temp_dir, &schema, "int_col", Value::Integer(i32::MIN)).await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for int min");
+    assert_single_partition_written(&info);
 }
 
 /// Test Int type with max value
@@ -181,7 +170,7 @@ async fn test_type_int_max() {
 
     let info = write_single_value(&temp_dir, &schema, "int_col", Value::Integer(i32::MAX)).await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for int max");
+    assert_single_partition_written(&info);
 }
 
 /// Test Int type with zero
@@ -192,7 +181,7 @@ async fn test_type_int_zero() {
 
     let info = write_single_value(&temp_dir, &schema, "int_col", Value::Integer(0)).await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for int zero");
+    assert_single_partition_written(&info);
 }
 
 /// Test BigInt type roundtrip
@@ -201,18 +190,9 @@ async fn test_type_bigint_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("bigint_col", "bigint");
 
-    let info = write_single_value(
-        &temp_dir,
-        &schema,
-        "bigint_col",
-        Value::BigInt(9223372036854775807i64),
-    )
-    .await;
+    let info = write_single_value(&temp_dir, &schema, "bigint_col", Value::BigInt(i64::MAX)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for bigint type"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test BigInt type with min value
@@ -223,10 +203,7 @@ async fn test_type_bigint_min() {
 
     let info = write_single_value(&temp_dir, &schema, "bigint_col", Value::BigInt(i64::MIN)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for bigint min"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test BigInt type with max value
@@ -237,10 +214,7 @@ async fn test_type_bigint_max() {
 
     let info = write_single_value(&temp_dir, &schema, "bigint_col", Value::BigInt(i64::MAX)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for bigint max"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test Boolean type roundtrip (true)
@@ -251,10 +225,7 @@ async fn test_type_boolean_true() {
 
     let info = write_single_value(&temp_dir, &schema, "bool_col", Value::Boolean(true)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for boolean true"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test Boolean type roundtrip (false)
@@ -265,10 +236,7 @@ async fn test_type_boolean_false() {
 
     let info = write_single_value(&temp_dir, &schema, "bool_col", Value::Boolean(false)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for boolean false"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test Timestamp type roundtrip
@@ -283,10 +251,7 @@ async fn test_type_timestamp_roundtrip() {
     let info =
         write_single_value(&temp_dir, &schema, "ts_col", Value::Timestamp(timestamp_ms)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for timestamp type"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test Timestamp type with epoch
@@ -297,10 +262,7 @@ async fn test_type_timestamp_epoch() {
 
     let info = write_single_value(&temp_dir, &schema, "ts_col", Value::Timestamp(0)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for timestamp epoch"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test Timestamp type with far future
@@ -314,10 +276,7 @@ async fn test_type_timestamp_future() {
 
     let info = write_single_value(&temp_dir, &schema, "ts_col", Value::Timestamp(far_future)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for far future timestamp"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test UUID type roundtrip
@@ -335,10 +294,7 @@ async fn test_type_uuid_roundtrip() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for uuid type"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test UUID type with known value
@@ -356,10 +312,7 @@ async fn test_type_uuid_known() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for known uuid"
-    );
+    assert_single_partition_written(&info);
 }
 
 /// Test UUID type with nil UUID
@@ -377,7 +330,7 @@ async fn test_type_uuid_nil() {
     )
     .await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for nil uuid");
+    assert_single_partition_written(&info);
 }
 
 /// Test TinyInt type roundtrip
@@ -388,11 +341,7 @@ async fn test_type_tinyint_roundtrip() {
 
     let info = write_single_value(&temp_dir, &schema, "tinyint_col", Value::TinyInt(42)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for tinyint type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test TinyInt type with min value
@@ -403,11 +352,7 @@ async fn test_type_tinyint_min() {
 
     let info = write_single_value(&temp_dir, &schema, "tinyint_col", Value::TinyInt(i8::MIN)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for tinyint min"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test TinyInt type with max value
@@ -418,11 +363,7 @@ async fn test_type_tinyint_max() {
 
     let info = write_single_value(&temp_dir, &schema, "tinyint_col", Value::TinyInt(i8::MAX)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for tinyint max"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test SmallInt type roundtrip
@@ -433,11 +374,7 @@ async fn test_type_smallint_roundtrip() {
 
     let info = write_single_value(&temp_dir, &schema, "smallint_col", Value::SmallInt(1000)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for smallint type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test SmallInt type with min value
@@ -454,11 +391,7 @@ async fn test_type_smallint_min() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for smallint min"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test SmallInt type with max value
@@ -475,11 +408,7 @@ async fn test_type_smallint_max() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for smallint max"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Float32 type roundtrip
@@ -490,11 +419,7 @@ async fn test_type_float32_roundtrip() {
 
     let info = write_single_value(&temp_dir, &schema, "float_col", Value::Float32(1.234_567)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for float type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Float32 type with special value
@@ -505,26 +430,18 @@ async fn test_type_float32_special() {
 
     let info = write_single_value(&temp_dir, &schema, "float_col", Value::Float32(0.0)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for float zero"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
-/// Test Float32 type with min/max value
+/// Test Float32 type with min value
 #[tokio::test]
-async fn test_type_float32_min_max() {
+async fn test_type_float32_min() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("float_col", "float");
 
     let info = write_single_value(&temp_dir, &schema, "float_col", Value::Float32(f32::MIN)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for float min"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Double type roundtrip
@@ -541,11 +458,7 @@ async fn test_type_double_roundtrip() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for double type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Double type with special value
@@ -562,11 +475,7 @@ async fn test_type_double_special() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for double infinity"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Double type with min/max value
@@ -577,11 +486,7 @@ async fn test_type_double_min_max() {
 
     let info = write_single_value(&temp_dir, &schema, "double_col", Value::Float(f64::MIN)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for double min"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Blob type roundtrip
@@ -598,11 +503,7 @@ async fn test_type_blob_roundtrip() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for blob type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Blob type with empty value
@@ -613,11 +514,7 @@ async fn test_type_blob_empty() {
 
     let info = write_single_value(&temp_dir, &schema, "blob_col", Value::Blob(vec![])).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for empty blob"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Blob type with large value
@@ -634,11 +531,7 @@ async fn test_type_blob_large() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for large blob"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
     let data_size = std::fs::metadata(&info.data_path).unwrap().len();
     assert!(
         data_size > 10000,
@@ -656,11 +549,7 @@ async fn test_type_date_roundtrip() {
     // 2024-01-01
     let info = write_single_value(&temp_dir, &schema, "date_col", Value::Date(19723)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for date type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Date type with epoch value
@@ -671,11 +560,7 @@ async fn test_type_date_epoch() {
 
     let info = write_single_value(&temp_dir, &schema, "date_col", Value::Date(0)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for date epoch"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Date type with negative value
@@ -686,11 +571,7 @@ async fn test_type_date_negative() {
 
     let info = write_single_value(&temp_dir, &schema, "date_col", Value::Date(-1)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for negative date"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Time type roundtrip
@@ -708,11 +589,7 @@ async fn test_type_time_roundtrip() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for time type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Time type with midnight value
@@ -723,11 +600,7 @@ async fn test_type_time_midnight() {
 
     let info = write_single_value(&temp_dir, &schema, "time_col", Value::Time(0)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for time midnight"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Time type with max value
@@ -744,8 +617,7 @@ async fn test_type_time_max() {
     )
     .await;
 
-    assert!(info.data_path.exists(), "Data.db should exist for time max");
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Counter type roundtrip
@@ -756,11 +628,7 @@ async fn test_type_counter_roundtrip() {
 
     let info = write_single_value(&temp_dir, &schema, "counter_col", Value::Counter(100)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for counter type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Counter type with zero value
@@ -771,11 +639,7 @@ async fn test_type_counter_zero() {
 
     let info = write_single_value(&temp_dir, &schema, "counter_col", Value::Counter(0)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for counter zero"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Counter type with negative value
@@ -786,11 +650,7 @@ async fn test_type_counter_negative() {
 
     let info = write_single_value(&temp_dir, &schema, "counter_col", Value::Counter(-50)).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for negative counter"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Inet type with IPv4 address
@@ -807,11 +667,7 @@ async fn test_type_inet_ipv4() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for inet IPv4"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Inet type with IPv6 address
@@ -828,11 +684,7 @@ async fn test_type_inet_ipv6() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for inet IPv6"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Inet type with loopback address
@@ -849,11 +701,7 @@ async fn test_type_inet_loopback() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for inet loopback"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Varint type with small value
@@ -865,11 +713,7 @@ async fn test_type_varint_small() {
     let info =
         write_single_value(&temp_dir, &schema, "varint_col", Value::Varint(vec![0x2A])).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for varint small"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Varint type with large value
@@ -886,11 +730,7 @@ async fn test_type_varint_large() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for varint large"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Varint type with negative value
@@ -902,11 +742,7 @@ async fn test_type_varint_negative() {
     let info =
         write_single_value(&temp_dir, &schema, "varint_col", Value::Varint(vec![0xFF])).await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for negative varint"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Decimal type roundtrip
@@ -926,11 +762,7 @@ async fn test_type_decimal_roundtrip() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for decimal type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Decimal type with zero value
@@ -950,11 +782,7 @@ async fn test_type_decimal_zero() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for decimal zero"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Decimal type with negative scale
@@ -974,11 +802,7 @@ async fn test_type_decimal_neg_scale() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for decimal negative scale"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Duration type roundtrip
@@ -999,11 +823,7 @@ async fn test_type_duration_roundtrip() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for duration type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Duration type with zero value
@@ -1024,11 +844,7 @@ async fn test_type_duration_zero() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for duration zero"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Duration type with negative value
@@ -1049,11 +865,7 @@ async fn test_type_duration_negative() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for negative duration"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Tuple type roundtrip
@@ -1070,11 +882,7 @@ async fn test_type_tuple_roundtrip() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for tuple type"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Tuple type with null element
@@ -1091,11 +899,7 @@ async fn test_type_tuple_with_null() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for tuple with null"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Tuple type nested
@@ -1115,11 +919,7 @@ async fn test_type_tuple_nested() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for nested tuple"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Frozen list type roundtrip
@@ -1140,11 +940,7 @@ async fn test_type_frozen_list() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for frozen list"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Frozen map type roundtrip
@@ -1164,11 +960,7 @@ async fn test_type_frozen_map() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for frozen map"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test Frozen empty list type
@@ -1185,17 +977,15 @@ async fn test_type_frozen_empty() {
     )
     .await;
 
-    assert!(
-        info.data_path.exists(),
-        "Data.db should exist for frozen empty list"
-    );
-    assert_eq!(info.partition_count, 1, "Should have 1 partition");
+    assert_single_partition_written(&info);
 }
 
 /// Test all types in single partition
 #[tokio::test]
 async fn test_all_types_single_partition() {
-    use super::{create_comprehensive_mutation, create_comprehensive_schema};
+    use super::{
+        create_comprehensive_mutation, create_comprehensive_schema, WriteEngine, WriteEngineConfig,
+    };
 
     let temp_dir = TempDir::new().unwrap();
     let schema = create_comprehensive_schema();
@@ -1239,7 +1029,9 @@ async fn test_all_types_single_partition() {
 /// Test multiple rows with varying types
 #[tokio::test]
 async fn test_types_multiple_rows() {
-    use super::{create_comprehensive_mutation, create_comprehensive_schema};
+    use super::{
+        create_comprehensive_mutation, create_comprehensive_schema, WriteEngine, WriteEngineConfig,
+    };
 
     let temp_dir = TempDir::new().unwrap();
     let schema = create_comprehensive_schema();
