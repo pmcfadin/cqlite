@@ -11,8 +11,9 @@
 
 #[cfg(feature = "write-support")]
 use crate::cql::ast::{
-    CqlCollectionLiteral, CqlExpression, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable,
-    CqlUdtLiteral, CqlUnaryOperator, CqlUsing,
+    CqlAssignmentOperator, CqlBinaryOperator, CqlCollectionLiteral, CqlDelete, CqlExpression,
+    CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUdtLiteral, CqlUnaryOperator, CqlUpdate,
+    CqlUsing,
 };
 #[cfg(feature = "write-support")]
 use crate::schema::{CqlType, TableSchema};
@@ -144,6 +145,234 @@ pub(crate) fn insert_to_mutation(
         timestamp_micros,
         ttl_seconds,
     ))
+}
+
+/// Convert a parsed `CqlUpdate` AST node into a `Mutation` using schema information.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` when:
+/// - The UPDATE targets a different table than the schema
+/// - A required partition key column is missing from the WHERE clause
+/// - A SET assignment uses a compound operator (only `=` is supported)
+/// - A column in SET is unknown in the schema
+/// - A value cannot be coerced to its schema type
+#[cfg(feature = "write-support")]
+#[allow(dead_code)] // Will be wired into WriteEngine in a follow-up task
+pub(crate) fn update_to_mutation(
+    update: &CqlUpdate,
+    schema: &TableSchema,
+) -> Result<Mutation, Error> {
+    validate_table(&update.table, schema)?;
+
+    // Extract key bindings from WHERE clause
+    let bindings = extract_where_bindings(&update.where_clause)?;
+    let (pk_columns, ck_columns) = resolve_key_bindings(&bindings, schema)?;
+
+    let partition_key = PartitionKey::new(pk_columns);
+    let clustering_key = if ck_columns.is_empty() {
+        None
+    } else {
+        Some(ClusteringKey::new(ck_columns))
+    };
+
+    // Convert SET assignments to CellOperation::Write
+    let mut operations: Vec<CellOperation> = Vec::with_capacity(update.assignments.len());
+    for assignment in &update.assignments {
+        match &assignment.operator {
+            CqlAssignmentOperator::Assign => {
+                let col_name = assignment.column.name.to_lowercase();
+                let column = schema
+                    .get_column(&col_name)
+                    .ok_or_else(|| Error::InvalidInput(format!("Unknown column '{}'", col_name)))?;
+                let cql_type = CqlType::parse(&column.data_type)?;
+                let value = expression_to_value(&assignment.value, &cql_type)?;
+                operations.push(CellOperation::Write {
+                    column: column.name.clone(),
+                    value,
+                });
+            }
+            other => {
+                return Err(Error::InvalidInput(format!(
+                    "UPDATE assignment operator {:?} is not yet supported; only simple '=' assignment is allowed",
+                    other
+                )));
+            }
+        }
+    }
+
+    let timestamp_micros = extract_timestamp(&update.using)?;
+    let ttl_seconds = extract_ttl(&update.using)?;
+
+    let table_id = TableId::new(schema.keyspace.clone(), schema.table.clone());
+    Ok(Mutation::new(
+        table_id,
+        partition_key,
+        clustering_key,
+        operations,
+        timestamp_micros,
+        ttl_seconds,
+    ))
+}
+
+/// Convert a parsed `CqlDelete` AST node into a `Mutation` using schema information.
+///
+/// If `delete.columns` is empty, the result is a row tombstone (`CellOperation::DeleteRow`).
+/// Otherwise, each named column produces a `CellOperation::Delete`.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` when:
+/// - The DELETE targets a different table than the schema
+/// - A required partition key column is missing from the WHERE clause
+/// - A value cannot be coerced to its schema type
+#[cfg(feature = "write-support")]
+#[allow(dead_code)] // Will be wired into WriteEngine in a follow-up task
+pub(crate) fn delete_to_mutation(
+    delete: &CqlDelete,
+    schema: &TableSchema,
+) -> Result<Mutation, Error> {
+    validate_table(&delete.table, schema)?;
+
+    // Extract key bindings from WHERE clause
+    let bindings = extract_where_bindings(&delete.where_clause)?;
+    let (pk_columns, ck_columns) = resolve_key_bindings(&bindings, schema)?;
+
+    let partition_key = PartitionKey::new(pk_columns);
+    let clustering_key = if ck_columns.is_empty() {
+        None
+    } else {
+        Some(ClusteringKey::new(ck_columns))
+    };
+
+    // Build operations: row delete or per-column deletes
+    let operations: Vec<CellOperation> = if delete.columns.is_empty() {
+        vec![CellOperation::DeleteRow]
+    } else {
+        delete
+            .columns
+            .iter()
+            .map(|col_id| CellOperation::Delete {
+                column: col_id.name.clone(),
+            })
+            .collect()
+    };
+
+    // DELETE does not use TTL
+    let timestamp_micros = extract_timestamp(&delete.using)?;
+
+    let table_id = TableId::new(schema.keyspace.clone(), schema.table.clone());
+    Ok(Mutation::new(
+        table_id,
+        partition_key,
+        clustering_key,
+        operations,
+        timestamp_micros,
+        None, // DELETE never has TTL
+    ))
+}
+
+/// Extract `(column_name, value_expression)` pairs from a WHERE clause expression.
+///
+/// Supports AND-chained equality predicates: `col1 = val1 AND col2 = val2 ...`.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` for non-equality predicates or unexpected expression forms.
+#[cfg(feature = "write-support")]
+fn extract_where_bindings(expr: &CqlExpression) -> Result<Vec<(String, CqlExpression)>, Error> {
+    let mut bindings = Vec::new();
+    collect_equality_bindings(expr, &mut bindings)?;
+    Ok(bindings)
+}
+
+/// Recursively collect `column = value` bindings from an AND-chained expression tree.
+#[cfg(feature = "write-support")]
+fn collect_equality_bindings(
+    expr: &CqlExpression,
+    bindings: &mut Vec<(String, CqlExpression)>,
+) -> Result<(), Error> {
+    match expr {
+        CqlExpression::Binary {
+            left,
+            operator: CqlBinaryOperator::And,
+            right,
+        } => {
+            collect_equality_bindings(left, bindings)?;
+            collect_equality_bindings(right, bindings)?;
+        }
+        CqlExpression::Binary {
+            left,
+            operator: CqlBinaryOperator::Eq,
+            right,
+        } => match left.as_ref() {
+            CqlExpression::Column(col_id) => {
+                bindings.push((col_id.name.to_lowercase(), *right.clone()));
+            }
+            _ => {
+                return Err(Error::InvalidInput(
+                        "WHERE clause equality predicate must have a column reference on the left-hand side".to_string(),
+                    ));
+            }
+        },
+        _ => {
+            return Err(Error::InvalidInput(
+                "WHERE clause must consist of equality predicates joined with AND".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Separate WHERE clause bindings into partition key values and clustering key values.
+///
+/// Partition key columns are required; an error is returned if any are missing.
+/// Clustering key columns are optional (partial WHERE clauses are valid for DELETE).
+///
+/// Returns `(pk_columns, ck_columns)` in schema order.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` when a partition key column is missing from the bindings.
+#[cfg(feature = "write-support")]
+#[allow(clippy::type_complexity)]
+fn resolve_key_bindings(
+    bindings: &[(String, CqlExpression)],
+    schema: &TableSchema,
+) -> Result<(Vec<(String, Value)>, Vec<(String, Value)>), Error> {
+    let ordered_pk = schema.ordered_partition_keys();
+    let ordered_ck = schema.ordered_clustering_keys();
+
+    // Resolve partition key values (required)
+    let mut pk_columns: Vec<(String, Value)> = Vec::with_capacity(ordered_pk.len());
+    for pk_col in &ordered_pk {
+        let col_name_lc = pk_col.name.to_lowercase();
+        let (_, expr) = bindings
+            .iter()
+            .find(|(name, _)| *name == col_name_lc)
+            .ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "Partition key column '{}' is missing from WHERE clause",
+                    pk_col.name
+                ))
+            })?;
+        let cql_type = CqlType::parse(&pk_col.data_type)?;
+        let value = expression_to_value(expr, &cql_type)?;
+        pk_columns.push((pk_col.name.clone(), value));
+    }
+
+    // Resolve clustering key values (optional)
+    let mut ck_columns: Vec<(String, Value)> = Vec::new();
+    for ck_col in &ordered_ck {
+        let col_name_lc = ck_col.name.to_lowercase();
+        if let Some((_, expr)) = bindings.iter().find(|(name, _)| *name == col_name_lc) {
+            let cql_type = CqlType::parse(&ck_col.data_type)?;
+            let value = expression_to_value(expr, &cql_type)?;
+            ck_columns.push((ck_col.name.clone(), value));
+        }
+    }
+
+    Ok((pk_columns, ck_columns))
 }
 
 /// Convert a `CqlExpression` to a `Value` for mutation purposes.
@@ -592,7 +821,8 @@ fn overflow_error(value: i64, target: &str) -> Error {
 mod tests {
     use super::*;
     use crate::cql::ast::{
-        CqlIdentifier, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUsing,
+        CqlAssignment, CqlAssignmentOperator, CqlBinaryOperator, CqlDelete, CqlExpression,
+        CqlIdentifier, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUpdate, CqlUsing,
     };
     use crate::schema::CqlType;
     use crate::storage::write_engine::mutation::CellOperation;
@@ -1278,5 +1508,265 @@ mod tests {
         )))));
         let result = literal_to_value(&outer_list, &target);
         assert!(result.is_ok());
+    }
+
+    // ── update_to_mutation tests ──────────────────────────────────────────────
+
+    fn make_where_pk_and_ck() -> CqlExpression {
+        // WHERE id = <uuid> AND ts = <timestamp>
+        CqlExpression::Binary {
+            left: Box::new(CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier {
+                    name: "id".into(),
+                    quoted: false,
+                })),
+                operator: CqlBinaryOperator::Eq,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::Uuid(
+                    "550e8400-e29b-41d4-a716-446655440000".into(),
+                ))),
+            }),
+            operator: CqlBinaryOperator::And,
+            right: Box::new(CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier {
+                    name: "ts".into(),
+                    quoted: false,
+                })),
+                operator: CqlBinaryOperator::Eq,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(
+                    1_704_067_200_000,
+                ))),
+            }),
+        }
+    }
+
+    fn make_where_pk_only() -> CqlExpression {
+        // WHERE id = <uuid>
+        CqlExpression::Binary {
+            left: Box::new(CqlExpression::Column(CqlIdentifier {
+                name: "id".into(),
+                quoted: false,
+            })),
+            operator: CqlBinaryOperator::Eq,
+            right: Box::new(CqlExpression::Literal(CqlLiteral::Uuid(
+                "550e8400-e29b-41d4-a716-446655440000".into(),
+            ))),
+        }
+    }
+
+    #[test]
+    fn test_update_to_mutation() {
+        let schema = test_schema();
+        let update = CqlUpdate {
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: None,
+            assignments: vec![CqlAssignment {
+                column: CqlIdentifier {
+                    name: "name".into(),
+                    quoted: false,
+                },
+                operator: CqlAssignmentOperator::Assign,
+                value: CqlExpression::Literal(CqlLiteral::String("Updated".into())),
+            }],
+            where_clause: make_where_pk_and_ck(),
+            if_condition: None,
+        };
+
+        let mutation = update_to_mutation(&update, &schema).unwrap();
+        assert_eq!(mutation.partition_key.columns.len(), 1);
+        assert!(mutation.clustering_key.is_some());
+        assert_eq!(mutation.operations.len(), 1);
+        match &mutation.operations[0] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "name");
+                assert_eq!(*value, Value::Text("Updated".into()));
+            }
+            _ => panic!("expected Write operation"),
+        }
+    }
+
+    #[test]
+    fn test_update_compound_operator_rejected() {
+        let schema = test_schema();
+        let update = CqlUpdate {
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: None,
+            assignments: vec![CqlAssignment {
+                column: CqlIdentifier {
+                    name: "age".into(),
+                    quoted: false,
+                },
+                operator: CqlAssignmentOperator::AddAssign,
+                value: CqlExpression::Literal(CqlLiteral::Integer(1)),
+            }],
+            where_clause: make_where_pk_only(),
+            if_condition: None,
+        };
+
+        assert!(update_to_mutation(&update, &schema).is_err());
+    }
+
+    #[test]
+    fn test_update_missing_partition_key() {
+        let schema = test_schema();
+        // WHERE clause only provides clustering key, not partition key
+        let update = CqlUpdate {
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: None,
+            assignments: vec![CqlAssignment {
+                column: CqlIdentifier {
+                    name: "name".into(),
+                    quoted: false,
+                },
+                operator: CqlAssignmentOperator::Assign,
+                value: CqlExpression::Literal(CqlLiteral::String("test".into())),
+            }],
+            where_clause: CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier {
+                    name: "ts".into(),
+                    quoted: false,
+                })),
+                operator: CqlBinaryOperator::Eq,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(12345))),
+            },
+            if_condition: None,
+        };
+
+        assert!(update_to_mutation(&update, &schema).is_err());
+    }
+
+    // ── delete_to_mutation tests ──────────────────────────────────────────────
+
+    #[test]
+    fn test_delete_row_to_mutation() {
+        let schema = test_schema();
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: None,
+            where_clause: make_where_pk_only(),
+            if_condition: None,
+        };
+
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert_eq!(mutation.operations.len(), 1);
+        assert!(matches!(mutation.operations[0], CellOperation::DeleteRow));
+        assert!(mutation.ttl_seconds.is_none());
+    }
+
+    #[test]
+    fn test_delete_columns_to_mutation() {
+        let schema = test_schema();
+        let delete = CqlDelete {
+            columns: vec![
+                CqlIdentifier {
+                    name: "name".into(),
+                    quoted: false,
+                },
+                CqlIdentifier {
+                    name: "age".into(),
+                    quoted: false,
+                },
+            ],
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: None,
+            where_clause: make_where_pk_and_ck(),
+            if_condition: None,
+        };
+
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert_eq!(mutation.operations.len(), 2);
+        assert!(
+            matches!(&mutation.operations[0], CellOperation::Delete { column } if column == "name")
+        );
+        assert!(
+            matches!(&mutation.operations[1], CellOperation::Delete { column } if column == "age")
+        );
+    }
+
+    #[test]
+    fn test_delete_row_has_clustering_key_when_provided() {
+        let schema = test_schema();
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: None,
+            where_clause: make_where_pk_and_ck(),
+            if_condition: None,
+        };
+
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert!(mutation.clustering_key.is_some());
+        let ck = mutation.clustering_key.unwrap();
+        assert_eq!(ck.columns.len(), 1);
+        assert_eq!(ck.columns[0].0, "ts");
+    }
+
+    // ── extract_where_bindings / resolve_key_bindings tests ──────────────────
+
+    #[test]
+    fn test_where_bindings_single_eq() {
+        let expr = CqlExpression::Binary {
+            left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+            operator: CqlBinaryOperator::Eq,
+            right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(42))),
+        };
+        let bindings = extract_where_bindings(&expr).unwrap();
+        assert_eq!(bindings.len(), 1);
+        assert_eq!(bindings[0].0, "id");
+    }
+
+    #[test]
+    fn test_where_bindings_and_chain() {
+        let bindings = extract_where_bindings(&make_where_pk_and_ck()).unwrap();
+        assert_eq!(bindings.len(), 2);
+        let names: Vec<_> = bindings.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"id"));
+        assert!(names.contains(&"ts"));
+    }
+
+    #[test]
+    fn test_where_bindings_non_eq_rejected() {
+        let expr = CqlExpression::Binary {
+            left: Box::new(CqlExpression::Column(CqlIdentifier::new("age"))),
+            operator: CqlBinaryOperator::Gt,
+            right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(18))),
+        };
+        assert!(extract_where_bindings(&expr).is_err());
     }
 }
