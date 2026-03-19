@@ -31,7 +31,7 @@ use crate::Error;
 /// # Errors
 ///
 /// Returns `Error::InvalidInput` when:
-/// - The INSERT targets a different table than the schema
+/// - The statement targets a different table than the schema
 /// - The number of columns and values do not match
 /// - A required partition key column is missing from the INSERT
 /// - JSON INSERT syntax is used (not yet supported)
@@ -440,7 +440,7 @@ fn expression_to_value(expr: &CqlExpression, target_type: &CqlType) -> Result<Va
     }
 }
 
-/// Validate that the INSERT's table reference matches the provided schema.
+/// Validate that the statement's table reference matches the provided schema.
 ///
 /// # Errors
 ///
@@ -450,14 +450,14 @@ fn validate_table(table: &CqlTable, schema: &TableSchema) -> Result<(), Error> {
     if let Some(ks) = &table.keyspace {
         if !ks.name.eq_ignore_ascii_case(&schema.keyspace) {
             return Err(Error::InvalidInput(format!(
-                "INSERT targets keyspace '{}' but schema is for '{}'",
+                "Statement targets keyspace '{}' but schema is for '{}'",
                 ks.name, schema.keyspace
             )));
         }
     }
     if !table.name.name.eq_ignore_ascii_case(&schema.table) {
         return Err(Error::InvalidInput(format!(
-            "INSERT targets table '{}' but schema is for '{}'",
+            "Statement targets table '{}' but schema is for '{}'",
             table.name.name, schema.table
         )));
     }
