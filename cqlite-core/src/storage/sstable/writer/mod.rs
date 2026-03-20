@@ -353,6 +353,20 @@ impl SSTableWriter {
                     _ => {}
                 }
             }
+            // Track stats for partition tombstones
+            if let Some(pt) = &mutation.partition_tombstone {
+                self.stats.update_timestamp(pt.deletion_time);
+                self.stats
+                    .update_local_deletion_time(pt.local_deletion_time);
+            }
+
+            // Track stats for range tombstones
+            for rt in &mutation.range_tombstones {
+                self.stats.update_timestamp(rt.deletion_time);
+                self.stats
+                    .update_local_deletion_time(rt.local_deletion_time);
+            }
+
             self.stats.increment_row_count();
             self.stats
                 .add_column_count(mutation.operations.len() as u64);

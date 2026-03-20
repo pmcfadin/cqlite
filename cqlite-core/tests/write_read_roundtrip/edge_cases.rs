@@ -18,7 +18,8 @@
 
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::write_engine::{
-    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
+    CellOperation, ClusteringKey, Mutation, PartitionKey, PartitionTombstone, TableId, WriteEngine,
+    WriteEngineConfig,
 };
 use cqlite_core::types::Value;
 use std::collections::HashMap;
@@ -591,5 +592,90 @@ async fn test_edge_single_byte_values() {
     assert!(
         info.data_path.exists(),
         "Data.db with single byte should exist"
+    );
+}
+
+/// Test partition tombstone via full WriteEngine roundtrip
+#[tokio::test]
+async fn test_edge_partition_tombstone() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_edge_case_schema();
+
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema.clone(),
+    );
+
+    let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
+
+    let table_id = TableId::new("test_edge", "edge_cases");
+
+    // Write some rows first
+    let pk = PartitionKey::single("pk", Value::Integer(1));
+    let ck1 = ClusteringKey::single("ck", Value::Text("row1".to_string()));
+    let ops1 = vec![CellOperation::Write {
+        column: "data".to_string(),
+        value: Value::Text("Data row 1".to_string()),
+    }];
+    let mutation1 = Mutation::new(table_id.clone(), pk.clone(), Some(ck1), ops1, 1000000, None);
+    engine.write_async(mutation1).await.expect("Write should succeed");
+
+    let ck2 = ClusteringKey::single("ck", Value::Text("row2".to_string()));
+    let ops2 = vec![CellOperation::Write {
+        column: "data".to_string(),
+        value: Value::Text("Data row 2".to_string()),
+    }];
+    let mutation2 = Mutation::new(table_id.clone(), pk.clone(), Some(ck2), ops2, 1000001, None);
+    engine.write_async(mutation2).await.expect("Write should succeed");
+
+    // Delete the entire partition with a partition tombstone
+    // Use a local_deletion_time far from row timestamps to expose stats tracking gaps
+    let mut partition_delete = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![], // No cell operations needed
+        1000002,
+        None,
+    );
+    partition_delete.partition_tombstone = Some(PartitionTombstone {
+        deletion_time: 1000002,
+        local_deletion_time: 2_000_000_000, // Far future - exposes stats bug if not tracked
+    });
+    engine
+        .write_async(partition_delete)
+        .await
+        .expect("Partition tombstone should succeed");
+
+    let info = engine
+        .flush()
+        .await
+        .expect("Flush should succeed")
+        .expect("Should return SSTableInfo");
+
+    assert!(info.data_path.exists(), "Data.db should exist");
+
+    // Verify partition tombstone was written: read Data.db and check the partition header
+    // Partition header format: [key_len:u16 BE][key_bytes][local_deletion_time:i32 BE][deletion_timestamp:i64 BE]
+    // A LIVE partition has local_deletion_time = i32::MAX (0x7FFFFFFF)
+    // A tombstoned partition has local_deletion_time != i32::MAX
+    let data = std::fs::read(&info.data_path).expect("Should read Data.db");
+    let key_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+    let ldt_offset = 2 + key_len;
+    let ldt = i32::from_be_bytes([
+        data[ldt_offset],
+        data[ldt_offset + 1],
+        data[ldt_offset + 2],
+        data[ldt_offset + 3],
+    ]);
+    assert_ne!(
+        ldt,
+        i32::MAX,
+        "Partition header should have non-LIVE local_deletion_time (got i32::MAX = LIVE)"
+    );
+    assert_eq!(
+        ldt, 2_000_000_000,
+        "Partition header local_deletion_time should match tombstone"
     );
 }
