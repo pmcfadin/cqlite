@@ -390,11 +390,6 @@ pub fn read_file_bytes(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|_| panic!("Should read file: {}", path.display()))
 }
 
-/// Read back a single column value from a flushed SSTable.
-///
-/// Opens SSTableManager on the data directory, scans the table,
-/// and extracts the named column from the first (and only) row.
-/// The row is returned as Value::Map(Vec<(Text(col_name), value)>).
 /// Read back the raw row value from a flushed SSTable.
 ///
 /// Opens SSTableManager on the data directory, scans the table,
@@ -437,8 +432,8 @@ pub async fn read_back_raw_row(temp_dir: &TempDir, schema: &TableSchema) -> Valu
         results.len()
     );
 
-    let (_row_key, row_value) = &results[0];
-    row_value.clone()
+    let (_row_key, row_value) = results.into_iter().next().unwrap();
+    row_value
 }
 
 /// Read back a single column value from a flushed SSTable.

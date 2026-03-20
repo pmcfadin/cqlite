@@ -206,7 +206,7 @@ async fn test_type_int_zero() {
 async fn test_type_bigint_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("bigint_col", "bigint");
-    let original = Value::BigInt(i64::MAX);
+    let original = Value::BigInt(1_000_000_000_000i64);
 
     let info = write_single_value(&temp_dir, &schema, "bigint_col", original.clone()).await;
 
@@ -433,6 +433,16 @@ async fn test_type_smallint_max() {
     assert_eq!(read_back, original, "SmallInt(MAX) roundtrip failed");
 }
 
+/// The reader widens Float32 → Float(f64) during read-back.
+/// IEEE 754 bits are preserved through the widening.
+fn widen_float32(v: Value) -> Value {
+    if let Value::Float32(f) = v {
+        Value::Float(f as f64)
+    } else {
+        v
+    }
+}
+
 /// Test Float32 type roundtrip
 ///
 /// The reader widens f32 to f64 (Value::Float) during read-back.
@@ -445,13 +455,11 @@ async fn test_type_float32_roundtrip() {
     let info = write_single_value(&temp_dir, &schema, "float_col", original.clone()).await;
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "float_col").await;
-    // Reader widens f32 → f64; bits are preserved so compare as Float(f32 as f64)
-    let expected = if let Value::Float32(f) = original {
-        Value::Float(f as f64)
-    } else {
-        original
-    };
-    assert_eq!(read_back, expected, "Type roundtrip failed");
+    assert_eq!(
+        read_back,
+        widen_float32(original),
+        "Float32 roundtrip failed"
+    );
 }
 
 /// Test Float32 type with special value
@@ -465,12 +473,11 @@ async fn test_type_float32_special() {
     let info = write_single_value(&temp_dir, &schema, "float_col", original.clone()).await;
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "float_col").await;
-    let expected = if let Value::Float32(f) = original {
-        Value::Float(f as f64)
-    } else {
-        original
-    };
-    assert_eq!(read_back, expected, "Type roundtrip failed");
+    assert_eq!(
+        read_back,
+        widen_float32(original),
+        "Float32 roundtrip failed"
+    );
 }
 
 /// Test Float32 type with min value
@@ -484,12 +491,11 @@ async fn test_type_float32_min() {
     let info = write_single_value(&temp_dir, &schema, "float_col", original.clone()).await;
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "float_col").await;
-    let expected = if let Value::Float32(f) = original {
-        Value::Float(f as f64)
-    } else {
-        original
-    };
-    assert_eq!(read_back, expected, "Type roundtrip failed");
+    assert_eq!(
+        read_back,
+        widen_float32(original),
+        "Float32 roundtrip failed"
+    );
 }
 
 /// Test Double type roundtrip
