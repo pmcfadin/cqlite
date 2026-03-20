@@ -760,3 +760,79 @@ async fn test_edge_range_tombstone() {
         marker_byte
     );
 }
+
+/// Test range tombstone with Bottom/Top bounds (delete all clustering keys in partition)
+#[tokio::test]
+async fn test_edge_range_tombstone_full_partition() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_edge_case_schema();
+
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema.clone(),
+    );
+
+    let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
+
+    let table_id = TableId::new("test_edge", "edge_cases");
+    let pk = PartitionKey::single("pk", Value::Integer(1));
+
+    // Write some rows
+    for (suffix, ts) in [("a", 1000000i64), ("b", 1000001), ("c", 1000002)] {
+        let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
+        let ops = vec![CellOperation::Write {
+            column: "data".to_string(),
+            value: Value::Text(format!("Data {suffix}")),
+        }];
+        let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), ops, ts, None);
+        engine
+            .write_async(mutation)
+            .await
+            .expect("Write should succeed");
+    }
+
+    // Delete entire clustering range with Bottom..Top
+    let mut range_mutation = Mutation::new(table_id, pk, None, vec![], 1000003, None);
+    range_mutation.range_tombstones.push(RangeTombstone {
+        start: ClusteringBound::Bottom,
+        end: ClusteringBound::Top,
+        deletion_time: 1000003,
+        local_deletion_time: 2_000_000_000,
+    });
+    engine
+        .write_async(range_mutation)
+        .await
+        .expect("Full range tombstone should succeed");
+
+    let info = engine
+        .flush()
+        .await
+        .expect("Flush should succeed")
+        .expect("Should return SSTableInfo");
+
+    assert!(info.data_path.exists(), "Data.db should exist");
+
+    // Verify range tombstone with Bottom/Top bounds
+    let data = std::fs::read(&info.data_path).expect("Should read Data.db");
+    let key_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+    let after_header = 2 + key_len + 4 + 8;
+    // IS_MARKER flag should be present
+    assert_eq!(
+        data[after_header] & 0x02,
+        0x02,
+        "Should have IS_MARKER flag for Bottom/Top range tombstone"
+    );
+    // Bound kind for Bottom = START_BOUNDARY (4)
+    assert_eq!(
+        data[after_header + 1],
+        4, // START_BOUNDARY
+        "Bottom bound should use START_BOUNDARY kind"
+    );
+    // Empty clustering prefix for Bottom (header = 0)
+    assert_eq!(
+        data[after_header + 2],
+        0x00,
+        "Bottom should have empty clustering prefix"
+    );
+}
