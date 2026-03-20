@@ -259,10 +259,13 @@ impl BloomFilter {
     }
 
     /// Load bloom filter from a file/reader
-    pub async fn load<R: tokio::io::AsyncRead + Unpin>(_reader: &mut R) -> Result<Self> {
-        // For now, return a default bloom filter as a placeholder
-        // In a real implementation, this would deserialize the bloom filter from the reader
-        Self::new(1000, 0.01) // Default parameters
+    pub async fn load<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> Result<Self> {
+        let mut data = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(reader, &mut data).await?;
+        if data.is_empty() {
+            return Self::new(1000, 0.01);
+        }
+        Self::deserialize(&data)
     }
 }
 

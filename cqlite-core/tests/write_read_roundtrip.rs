@@ -39,6 +39,8 @@ mod data_single;
 mod edge_cases;
 #[path = "write_read_roundtrip/filter.rs"]
 mod filter;
+#[path = "write_read_roundtrip/full_roundtrip.rs"]
+mod full_roundtrip;
 #[path = "write_read_roundtrip/index.rs"]
 mod index;
 #[path = "write_read_roundtrip/statistics.rs"]

@@ -257,6 +257,32 @@ impl CassandraVersion {
             | CassandraVersion::V5_0Release => DataFormat::LegacyOA,
         }
     }
+
+    /// Check if this version uses the NB (New Big) chunked format.
+    ///
+    /// NB format files are headerless, use the `nb-{gen}-big-` naming convention,
+    /// and read data via CompressionInfo.db chunk offsets (when compressed) or
+    /// raw sequential reads (when uncompressed).
+    ///
+    /// Excludes V5_0Uncompressed (which also uses V5CompressedLegacy row format
+    /// but has a different read path) and V5_0Bti (which uses OA format).
+    pub fn is_nb_format(&self) -> bool {
+        matches!(
+            self,
+            CassandraVersion::V5_0NewBig
+                | CassandraVersion::V5_0NewBigFormat
+                | CassandraVersion::V5_0DataFormat
+                | CassandraVersion::V5_0FormatC
+                | CassandraVersion::V5_0FormatD
+                | CassandraVersion::V5_0FormatE
+                | CassandraVersion::V5_0FormatF
+                | CassandraVersion::V5_0FormatG
+                | CassandraVersion::V5_0StaticColumns
+                | CassandraVersion::V5_0ComplexTypes
+                | CassandraVersion::V5_0TypedCollections
+                | CassandraVersion::V5_0WideRows
+        )
+    }
 }
 
 /// Data format characteristics for SSTable parsing

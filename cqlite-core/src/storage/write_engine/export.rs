@@ -383,52 +383,79 @@ impl crate::storage::write_engine::WriteEngine {
     ///
     /// Returns a tuple of (generation number, directory path) for the most recent SSTable.
     async fn find_most_recent_sstable(&self) -> Result<(u64, PathBuf)> {
-        // Find the highest generation number in data directory
-        let mut max_generation = 0u64;
-        let mut found = false;
-
         if !self.config.data_dir.exists() {
             return Err(Error::Storage(
                 "Data directory does not exist (no SSTables to export)".to_string(),
             ));
         }
 
-        let mut entries = tokio::fs::read_dir(&self.config.data_dir)
-            .await
-            .map_err(|e| Error::Storage(format!("Failed to read data directory: {}", e)))?;
+        Self::find_max_generation(
+            &self.config.data_dir,
+            crate::storage::sstable::MAX_SSTABLE_SCAN_DEPTH,
+        )
+        .await?
+        .ok_or_else(|| {
+            Error::Storage("No SSTables found in data directory (nothing to export)".to_string())
+        })
+    }
 
-        while let Some(entry) = entries
-            .next_entry()
-            .await
-            .map_err(|e| Error::Storage(format!("Failed to read directory entry: {}", e)))?
-        {
-            let filename = entry.file_name();
-            let filename_str = filename.to_string_lossy();
+    /// Recursively find the highest SSTable generation and its directory.
+    ///
+    /// Returns `Some((generation, dir))` if any SSTable files were found.
+    #[allow(clippy::type_complexity)]
+    fn find_max_generation<'a>(
+        dir: &'a Path,
+        depth: usize,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<(u64, PathBuf)>>> + Send + 'a>,
+    > {
+        let dir = dir.to_path_buf();
+        Box::pin(async move {
+            let mut best: Option<(u64, PathBuf)> = None;
 
-            // Parse generation from filename: nb-{generation}-big-{Component}.db
-            if filename_str.starts_with("nb-") && filename_str.contains("-big-") {
-                if let Some(gen_str) = filename_str
-                    .strip_prefix("nb-")
-                    .and_then(|s| s.split('-').next())
-                {
-                    if let Ok(gen) = gen_str.parse::<u64>() {
-                        if gen > max_generation {
-                            max_generation = gen;
-                            found = true;
+            let mut entries = tokio::fs::read_dir(&dir)
+                .await
+                .map_err(|e| Error::Storage(format!("Failed to read directory: {}", e)))?;
+
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|e| Error::Storage(format!("Failed to read directory entry: {}", e)))?
+            {
+                let filename = entry.file_name();
+                let filename_str = filename.to_string_lossy();
+
+                // Parse generation from filename: nb-{generation}-big-{Component}.db
+                if filename_str.starts_with("nb-") && filename_str.contains("-big-") {
+                    if let Some(gen) = filename_str
+                        .strip_prefix("nb-")
+                        .and_then(|s| s.split('-').next())
+                        .and_then(|s| s.parse::<u64>().ok())
+                    {
+                        if best.as_ref().is_none_or(|(cur, _)| gen > *cur) {
+                            best = Some((gen, dir.clone()));
+                        }
+                    }
+                } else if depth > 0 {
+                    let path = entry.path();
+                    if entry
+                        .file_type()
+                        .await
+                        .map(|ft| ft.is_dir())
+                        .unwrap_or(false)
+                    {
+                        if let Some((gen, sub_dir)) =
+                            Self::find_max_generation(&path, depth - 1).await?
+                        {
+                            if best.as_ref().is_none_or(|(cur, _)| gen > *cur) {
+                                best = Some((gen, sub_dir));
+                            }
                         }
                     }
                 }
             }
-        }
-
-        if !found {
-            return Err(Error::Storage(
-                "No SSTables found in data directory (nothing to export)".to_string(),
-            ));
-        }
-
-        // Return the generation and data directory
-        Ok((max_generation, self.config.data_dir.clone()))
+            Ok(best)
+        })
     }
 
     /// Read partition and row counts from Statistics.db and Index.db

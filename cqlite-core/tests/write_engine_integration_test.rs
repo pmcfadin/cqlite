@@ -225,23 +225,26 @@ async fn test_write_engine_close_flushes_data() -> Result<()> {
     // Close should flush
     engine.close().await?;
 
-    // Verify SSTable was created
+    // Verify SSTable was created (files may be in keyspace/table subdirectories)
     let data_dir = temp_dir.path().join("data");
-    let entries: Vec<_> = std::fs::read_dir(&data_dir)
-        .unwrap()
-        .filter_map(|e| e.ok())
-        .collect();
+    assert!(data_dir.exists(), "Data directory should exist after close");
 
-    assert!(
-        !entries.is_empty(),
-        "SSTable files should exist after close"
-    );
-
-    // Verify TOC.txt exists (publication barrier)
-    let toc_exists = entries
-        .iter()
-        .any(|e| e.file_name().to_string_lossy().contains("TOC.txt"));
-    assert!(toc_exists, "TOC.txt should exist");
+    // Recursively check for TOC.txt (publication barrier)
+    fn find_toc(dir: &std::path::Path) -> bool {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().to_string();
+                if name.contains("TOC.txt") {
+                    return true;
+                }
+                if entry.path().is_dir() && find_toc(&entry.path()) {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+    assert!(find_toc(&data_dir), "TOC.txt should exist");
 
     Ok(())
 }

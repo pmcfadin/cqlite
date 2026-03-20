@@ -556,15 +556,15 @@ impl SSTableReader {
 
         // CRITICAL FIX: V5CompressedLegacy partitions can span chunk boundaries
         // We must stitch all chunks together before parsing to avoid dropping partitions
-        // IMPORTANT: Only stitch if BOTH conditions are true:
-        // 1. Data format is V5CompressedLegacy (row payloads can span chunk boundaries)
-        // 2. Compression is enabled (chunks exist in CompressionInfo.db)
-        // V5_0Uncompressed uses V5CompressedLegacy row format but has no compression,
-        // so it should NOT be stitched (it's a single contiguous uncompressed block)
+        // Use stitching path for ALL V5CompressedLegacy formats because:
+        // 1. It uses the correct V5CompressedLegacy parser
+        // 2. It skips table_id matching (headers may have incorrect defaults)
+        // 3. For uncompressed NB format, stitch_and_parse reads raw data in one pass
+        // Exception: V5_0Uncompressed uses a different entry point and is handled
+        // by the non-stitching path's block parser.
         let data_format = self.header.cassandra_version.data_format();
-        let is_compressed = self.compression_reader.is_some() || self.compression_info.is_some();
-        let requires_stitching =
-            matches!(data_format, DataFormat::V5CompressedLegacy) && is_compressed;
+        let requires_stitching = matches!(data_format, DataFormat::V5CompressedLegacy)
+            && self.header.cassandra_version.is_nb_format();
 
         if requires_stitching {
             log::debug!(

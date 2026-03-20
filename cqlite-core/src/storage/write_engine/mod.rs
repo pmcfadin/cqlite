@@ -674,8 +674,19 @@ impl WriteEngine {
             return Ok(1);
         }
 
-        // Scan directory for SSTable files
-        for entry in std::fs::read_dir(data_dir)
+        // Recursively scan for SSTable files (writer places them in keyspace/table/ subdirs)
+        Self::scan_generations(
+            data_dir,
+            &mut max_generation,
+            crate::storage::sstable::MAX_SSTABLE_SCAN_DEPTH,
+        )?;
+
+        Ok(max_generation + 1)
+    }
+
+    /// Recursively scan directory for SSTable generation numbers
+    fn scan_generations(dir: &Path, max_generation: &mut u64, depth: usize) -> Result<()> {
+        for entry in std::fs::read_dir(dir)
             .map_err(|e| Error::Storage(format!("Failed to read data directory: {}", e)))?
         {
             let entry = entry
@@ -691,13 +702,17 @@ impl WriteEngine {
                     .and_then(|s| s.split('-').next())
                 {
                     if let Ok(gen) = gen_str.parse::<u64>() {
-                        max_generation = max_generation.max(gen);
+                        *max_generation = (*max_generation).max(gen);
                     }
+                }
+            } else if depth > 0 {
+                let path = entry.path();
+                if path.is_dir() {
+                    Self::scan_generations(&path, max_generation, depth - 1)?;
                 }
             }
         }
-
-        Ok(max_generation + 1)
+        Ok(())
     }
 
     /// Set the merge policy for background compaction (M5.2, Issue #383)
@@ -872,7 +887,17 @@ impl WriteEngine {
             return Ok(candidates);
         }
 
-        for entry in std::fs::read_dir(&self.config.data_dir)
+        Self::scan_data_files(
+            &self.config.data_dir,
+            &mut candidates,
+            crate::storage::sstable::MAX_SSTABLE_SCAN_DEPTH,
+        )?;
+        Ok(candidates)
+    }
+
+    /// Recursively scan for Data.db files
+    fn scan_data_files(dir: &Path, candidates: &mut Vec<PathBuf>, depth: usize) -> Result<()> {
+        for entry in std::fs::read_dir(dir)
             .map_err(|e| Error::Storage(format!("Failed to read data directory: {}", e)))?
         {
             let entry = entry
@@ -884,10 +909,11 @@ impl WriteEngine {
             // Only consider Data.db files
             if filename.starts_with("nb-") && filename.ends_with("-big-Data.db") {
                 candidates.push(path);
+            } else if depth > 0 && path.is_dir() {
+                Self::scan_data_files(&path, candidates, depth - 1)?;
             }
         }
-
-        Ok(candidates)
+        Ok(())
     }
 
     /// Start a new merge operation (M5.2 helper)

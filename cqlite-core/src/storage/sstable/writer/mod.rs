@@ -159,8 +159,8 @@ pub struct SSTableInfo {
 #[cfg(feature = "write-support")]
 #[derive(Debug)]
 pub struct SSTableWriter {
-    /// Output directory for SSTable files
-    output_dir: PathBuf,
+    /// SSTable output directory: output_dir/keyspace/table/
+    sstable_dir: PathBuf,
     /// SSTable generation number
     generation: u64,
     /// Table schema for column metadata
@@ -234,8 +234,12 @@ impl SSTableWriter {
         // Create Index.db writer
         let index_writer = IndexWriter::new();
 
+        // Compute the SSTable output directory: output_dir/keyspace/table/
+        // This ensures the reader's extract_table_name() can map files to table names.
+        let sstable_dir = output_dir.join(&schema.keyspace).join(&schema.table);
+
         // Create Filter.db writer (1% false positive rate by default)
-        let filter_path = Self::component_path(&output_dir, generation, "Filter.db");
+        let filter_path = Self::component_path(&sstable_dir, generation, "Filter.db");
         let filter_writer = Some(FilterWriter::new(
             filter_path,
             expected_partitions.max(1),
@@ -247,7 +251,7 @@ impl SSTableWriter {
         let summary_writer = SummaryWriter::new(summary_sample_interval as u32);
 
         Ok(Self {
-            output_dir,
+            sstable_dir,
             generation,
             schema: schema.clone(),
             stats,
@@ -446,33 +450,38 @@ impl SSTableWriter {
     /// println!("SSTable written to {}", info.data_path.display());
     /// ```
     pub async fn finish(mut self) -> Result<SSTableInfo> {
+        // Create keyspace/table subdirectory structure so the reader can
+        // extract the table name from the parent directory path.
+        let sstable_dir = &self.sstable_dir;
+        tokio::fs::create_dir_all(sstable_dir).await?;
+
         // Finalize statistics metadata (normalize sentinel values)
         self.stats.finalize();
 
         // 1. Write Statistics.db (FIRST - provides delta baseline)
-        let stats_path = Self::component_path(&self.output_dir, self.generation, "Statistics.db");
+        let stats_path = Self::component_path(sstable_dir, self.generation, "Statistics.db");
         let stats_writer = StatisticsWriter::new(stats_path.clone());
         stats_writer.write(&self.stats, Some(&self.schema))?;
 
         // 2. Write Data.db
-        let data_path = Self::component_path(&self.output_dir, self.generation, "Data.db");
+        let data_path = Self::component_path(sstable_dir, self.generation, "Data.db");
         let data_bytes = self.data_writer.finish()?;
         tokio::fs::write(&data_path, &data_bytes).await?;
         let data_size = data_bytes.len() as u64;
 
         // 3. Write Index.db
-        let index_path = Self::component_path(&self.output_dir, self.generation, "Index.db");
+        let index_path = Self::component_path(sstable_dir, self.generation, "Index.db");
         let index_bytes = self.index_writer.finish()?;
         tokio::fs::write(&index_path, index_bytes).await?;
 
-        // 4. Write Filter.db
-        let filter_path = Self::component_path(&self.output_dir, self.generation, "Filter.db");
+        // 4. Write Filter.db (path already set in constructor using sstable_dir)
+        let filter_path = Self::component_path(sstable_dir, self.generation, "Filter.db");
         if let Some(filter_writer) = self.filter_writer {
             filter_writer.finish().await?;
         }
 
         // 5. Write Summary.db
-        let summary_path = Self::component_path(&self.output_dir, self.generation, "Summary.db");
+        let summary_path = Self::component_path(sstable_dir, self.generation, "Summary.db");
         let summary_bytes = self.summary_writer.finish()?;
         tokio::fs::write(&summary_path, summary_bytes).await?;
 
@@ -482,13 +491,13 @@ impl SSTableWriter {
         // for future compressed SSTable support.
 
         // 6. Write Digest.crc32 (compute CRC32 of Data.db)
-        let digest_path = Self::component_path(&self.output_dir, self.generation, "Digest.crc32");
+        let digest_path = Self::component_path(sstable_dir, self.generation, "Digest.crc32");
         let digest_writer = DigestWriter::new(digest_path.clone());
         let crc32_value = Self::compute_crc32(&data_path).await?;
         digest_writer.write(crc32_value)?;
 
         // 7. Write TOC.txt (LAST - publication barrier)
-        let toc_path = Self::component_path(&self.output_dir, self.generation, "TOC.txt");
+        let toc_path = Self::component_path(sstable_dir, self.generation, "TOC.txt");
         let toc_writer = TocWriter::new(toc_path.clone());
         let components = vec![
             ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Data),

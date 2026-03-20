@@ -54,6 +54,12 @@ use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
 use crate::{types::TableId, Config, Result, RowKey, Value};
 
+/// Maximum directory depth when scanning for SSTable files.
+///
+/// Writer creates `data_dir/keyspace/table/nb-{gen}-big-*.db` (2 levels deep),
+/// so 3 levels provides a safety margin.
+pub(crate) const MAX_SSTABLE_SCAN_DEPTH: usize = 3;
+
 /// SSTable file identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct SSTableId(pub String);
@@ -390,69 +396,151 @@ impl SSTableManager {
     }
 
     /// Load existing SSTable files from disk
+    ///
+    /// Scans the base path recursively (up to 3 levels deep) to find Data.db files.
+    /// This supports both flat layouts (Data.db directly in base_path) and Cassandra-style
+    /// directory structures (keyspace/table_name/Data.db).
     async fn load_existing_sstables(&self) -> Result<()> {
         // Check if directory exists first
         if !self.platform.fs().exists(&self.base_path).await? {
             return Ok(()); // No directory, no SSTables to load
         }
 
-        let mut dir_entries = match self.platform.fs().read_dir(&self.base_path).await {
-            Ok(entries) => entries,
-            Err(_) => return Ok(()), // Can't read directory, skip loading
-        };
+        // Collect all Data.db paths by walking up to 3 levels deep
+        let data_files: Vec<PathBuf> =
+            Self::find_data_files(&self.platform, &self.base_path, MAX_SSTABLE_SCAN_DEPTH).await?;
+
+        if data_files.is_empty() {
+            return Ok(());
+        }
+
         let mut readers = self.readers.write().await;
         let mut table_readers = self.table_readers.write().await;
 
-        while let Some(entry) = dir_entries.next_entry().await? {
-            let path = entry.path();
-            if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                // Check for Cassandra SSTable data files using the *-Data.db pattern
-                if filename.ends_with("-Data.db") {
-                    let sstable_id = SSTableId::from_filename(filename);
-                    // Try to open the SSTable reader, but don't fail if one file is problematic
-                    match reader::SSTableReader::open(&path, &self.config, self.platform.clone())
-                        .await
+        // Pre-compute for the table name fallback heuristic
+        let base_dir_name = self
+            .base_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_string();
+
+        for path in data_files {
+            let filename = match path.file_name().and_then(|n| n.to_str()) {
+                Some(f) => f.to_string(),
+                None => continue,
+            };
+            let sstable_id = SSTableId::from_filename(&filename);
+            // Try to open the SSTable reader, but don't fail if one file is problematic
+            match reader::SSTableReader::open(&path, &self.config, self.platform.clone()).await {
+                #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
+                Ok(mut reader) => {
+                    // Set schema registry if available (before wrapping in Arc)
+                    #[cfg(feature = "state_machine")]
                     {
-                        #[cfg_attr(not(feature = "state_machine"), allow(unused_mut))]
-                        Ok(mut reader) => {
-                            // Set schema registry if available (before wrapping in Arc)
-                            #[cfg(feature = "state_machine")]
-                            {
-                                let schema_reg_guard = self.schema_registry.read().await;
-                                if let Some(ref registry_rwlock) = *schema_reg_guard {
-                                    reader.set_schema_registry(Arc::clone(registry_rwlock));
+                        let schema_reg_guard = self.schema_registry.read().await;
+                        if let Some(ref registry_rwlock) = *schema_reg_guard {
+                            reader.set_schema_registry(Arc::clone(registry_rwlock));
 
-                                    // Also set UDT registry for UDT-aware collection parsing (Issue #238)
-                                    let schema_registry = registry_rwlock.read().await;
-                                    let udt_registry_lock = schema_registry.get_udt_registry();
-                                    let udt_registry = udt_registry_lock.read().await.clone();
-                                    reader.set_udt_registry(udt_registry);
-                                }
-                            }
-
-                            let reader_arc = Arc::new(reader);
-
-                            // Store by SSTableId
-                            readers.insert(sstable_id, reader_arc.clone());
-
-                            // Extract table name and store by table name
-                            if let Some(table_name) = extract_table_name(&path) {
-                                table_readers
-                                    .entry(table_name)
-                                    .or_insert_with(Vec::new)
-                                    .push(reader_arc);
-                            }
-                        }
-                        Err(_) => {
-                            // Skip problematic SSTable files during initialization
-                            log::warn!("Could not load SSTable file: {:?}", path);
+                            // Also set UDT registry for UDT-aware collection parsing (Issue #238)
+                            let schema_registry = registry_rwlock.read().await;
+                            let udt_registry_lock = schema_registry.get_udt_registry();
+                            let udt_registry = udt_registry_lock.read().await.clone();
+                            reader.set_udt_registry(udt_registry);
                         }
                     }
+
+                    let reader_arc = Arc::new(reader);
+
+                    // Store by SSTableId
+                    readers.insert(sstable_id, reader_arc.clone());
+
+                    // Extract table name from directory path and store by table name.
+                    // Falls back to the reader's header table_name for flat directories
+                    // where extract_table_name returns the raw directory name.
+                    let table_name = extract_table_name(&path)
+                        .filter(|name| {
+                            // Heuristic: if the extracted name matches the base_path dir name,
+                            // it's not a real table name — fall back to header
+                            name.as_str() != base_dir_name
+                        })
+                        .or_else(|| {
+                            // Fallback: use table name from SSTable header (populated from
+                            // Statistics.db or path during reader::open)
+                            let header_table = reader_arc.header().table_name.clone();
+                            if header_table != "test_table" && !header_table.is_empty() {
+                                Some(header_table)
+                            } else {
+                                None
+                            }
+                        });
+
+                    if let Some(table_name) = table_name {
+                        log::debug!(
+                            "SSTableManager mapping table '{}' to SSTable '{}'",
+                            table_name,
+                            path.display()
+                        );
+                        table_readers
+                            .entry(table_name)
+                            .or_insert_with(Vec::new)
+                            .push(reader_arc);
+                    } else {
+                        log::warn!(
+                            "SSTableManager could not determine table name for: {}",
+                            path.display()
+                        );
+                    }
+                }
+                Err(_) => {
+                    // Skip problematic SSTable files during initialization
+                    log::warn!("Could not load SSTable file: {:?}", path);
                 }
             }
         }
 
         Ok(())
+    }
+
+    /// Recursively find all *-Data.db files up to `max_depth` levels deep
+    fn find_data_files<'a>(
+        platform: &'a Platform,
+        dir: &'a Path,
+        max_depth: usize,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Vec<PathBuf>>> + Send + 'a>>
+    {
+        let dir = dir.to_path_buf();
+        Box::pin(async move {
+            let mut results = Vec::new();
+
+            let mut dir_entries = match platform.fs().read_dir(&dir).await {
+                Ok(entries) => entries,
+                Err(_) => return Ok(results),
+            };
+
+            while let Some(entry) = dir_entries.next_entry().await? {
+                let path = entry.path();
+                if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
+                    if filename.ends_with("-Data.db") {
+                        results.push(path);
+                    } else if max_depth > 0 {
+                        // Check if it's a directory and recurse
+                        if entry
+                            .file_type()
+                            .await
+                            .map(|ft| ft.is_dir())
+                            .unwrap_or(false)
+                        {
+                            let sub_results =
+                                Self::find_data_files(platform, &path, max_depth - 1).await?;
+                            results.extend(sub_results);
+                        }
+                    }
+                }
+            }
+
+            Ok(results)
+        })
     }
 
     /// Create a new SSTable from MemTable data

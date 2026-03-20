@@ -106,52 +106,32 @@ async fn read_next_block_impl(
         return read_uncompressed_data_block(file).await;
     }
 
-    match cassandra_version {
-        crate::parser::header::CassandraVersion::V5_0NewBig
-        | crate::parser::header::CassandraVersion::V5_0NewBigFormat // Issue #212: BTI SSTables with byte-comparable keys
-        | crate::parser::header::CassandraVersion::V5_0DataFormat
-        | crate::parser::header::CassandraVersion::V5_0FormatC
-        | crate::parser::header::CassandraVersion::V5_0FormatD
-        | crate::parser::header::CassandraVersion::V5_0FormatE
-        | crate::parser::header::CassandraVersion::V5_0FormatF
-        | crate::parser::header::CassandraVersion::V5_0FormatG
-        | crate::parser::header::CassandraVersion::V5_0StaticColumns
-        | crate::parser::header::CassandraVersion::V5_0ComplexTypes
-        | crate::parser::header::CassandraVersion::V5_0TypedCollections
-        | crate::parser::header::CassandraVersion::V5_0WideRows => {
-            // NB format versions using chunked compression (Snappy/LZ4):
-            // - V5_0ComplexTypes (0x82365C00) - added in Issue #219
-            // - V5_0TypedCollections (0x0F3C0000) - added in Issue #221
-            // - V5_0WideRows (0xF07C5C00) - added in Issue #219 (Snappy collision handling)
-            log::debug!("block_io::read_next_block_impl: Using NB format chunk reader");
+    if cassandra_version.is_nb_format() {
+        log::debug!("block_io::read_next_block_impl: Using NB format chunk reader");
 
-            // Get file size for chunk size calculation
-            let file_size = {
-                let mut file_guard = file.lock().await;
-                let current = file_guard.stream_position().await?;
-                file_guard.seek(std::io::SeekFrom::End(0)).await?;
-                let size = file_guard.stream_position().await?;
-                file_guard.seek(std::io::SeekFrom::Start(current)).await?;
-                size
-            };
+        // Get file size for chunk size calculation
+        let file_size = {
+            let mut file_guard = file.lock().await;
+            let current = file_guard.stream_position().await?;
+            file_guard.seek(std::io::SeekFrom::End(0)).await?;
+            let size = file_guard.stream_position().await?;
+            file_guard.seek(std::io::SeekFrom::Start(current)).await?;
+            size
+        };
 
-            // Read chunk with CRC validation
-            // Note: For NB format files, CompressionInfo chunk offsets are always relative
-            // to the start of the Data.db file (offset 0). Any embedded SSTable header is
-            // part of the compressed data, not a separate uncompressed prefix.
-            // Therefore, we always use header_offset=0 for NB format chunk reading.
-            return read_nb_format_chunk_data(
-                file,
-                compression_info,
-                current_chunk_index,
-                file_size,
-                0, // NB format: chunk offsets are relative to file start
-            )
-            .await;
-        }
-        _ => {
-            // BTI and Legacy formats use traditional block headers
-        }
+        // Read chunk with CRC validation
+        // Note: For NB format files, CompressionInfo chunk offsets are always relative
+        // to the start of the Data.db file (offset 0). Any embedded SSTable header is
+        // part of the compressed data, not a separate uncompressed prefix.
+        // Therefore, we always use header_offset=0 for NB format chunk reading.
+        return read_nb_format_chunk_data(
+            file,
+            compression_info,
+            current_chunk_index,
+            file_size,
+            0, // NB format: chunk offsets are relative to file start
+        )
+        .await;
     }
 
     // Read block header with format-specific handling (BTI and Legacy only)
@@ -255,11 +235,13 @@ async fn read_nb_format_chunk_data(
 ) -> Result<Option<Vec<u8>>> {
     log::debug!("read_nb_format_chunk_data: Starting chunk read");
 
-    // Must have CompressionInfo for NB format
+    // If no CompressionInfo.db, the NB format SSTable is uncompressed.
+    // Fall back to reading raw data directly (same as V5_0Uncompressed).
     let Some(comp_info) = compression_info else {
-        return Err(Error::InvalidFormat(
-            "NB format requires CompressionInfo.db but none was loaded".to_string(),
-        ));
+        log::debug!(
+            "read_nb_format_chunk_data: No CompressionInfo.db, falling back to raw data read"
+        );
+        return read_uncompressed_data_block(file).await;
     };
 
     let chunk_idx = current_chunk_index.load(std::sync::atomic::Ordering::Relaxed);
