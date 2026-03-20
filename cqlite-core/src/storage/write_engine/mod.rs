@@ -46,7 +46,10 @@ pub use merge::KWayMerger;
 #[cfg(feature = "write-support")]
 pub use merge_policy::STCSPolicy;
 #[cfg(feature = "write-support")]
-pub use mutation::{CellOperation, ClusteringKey, DecoratedKey, Mutation, PartitionKey, TableId};
+pub use mutation::{
+    CellOperation, ClusteringBound, ClusteringKey, DecoratedKey, Mutation, PartitionKey,
+    PartitionTombstone, RangeTombstone, TableId,
+};
 #[cfg(feature = "write-support")]
 pub use wal::WriteAheadLog;
 
