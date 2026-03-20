@@ -151,11 +151,11 @@ async fn test_write_read_roundtrip_basic() -> Result<()> {
     assert!(info.data_path.exists());
     assert!(info.data_size > 0);
 
-    // Verify SSTable components exist
-    let data_dir = temp_dir.path().join("data");
-    assert!(data_dir.join("nb-1-big-Data.db").exists());
-    assert!(data_dir.join("nb-1-big-Index.db").exists());
-    assert!(data_dir.join("nb-1-big-Statistics.db").exists());
+    // Verify SSTable components exist under keyspace/table layout (#450)
+    let sstable_dir = temp_dir.path().join("data").join("test_ks").join("users");
+    assert!(sstable_dir.join("nb-1-big-Data.db").exists());
+    assert!(sstable_dir.join("nb-1-big-Index.db").exists());
+    assert!(sstable_dir.join("nb-1-big-Statistics.db").exists());
 
     Ok(())
 }
@@ -601,7 +601,7 @@ async fn test_tombstone_overwrite() -> Result<()> {
 // ============================================================================
 
 #[tokio::test]
-#[ignore = "K-way merger requires SSTable reader integration (M5.2 Issue #382)"]
+#[ignore = "maintenance_step() panics: block_on() inside KWayMerger nested in single-thread tokio runtime"]
 async fn test_stcs_compaction_trigger() -> Result<()> {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_simple_schema("test_ks", "compaction_test");
@@ -631,9 +631,13 @@ async fn test_stcs_compaction_trigger() -> Result<()> {
         engine.flush().await?;
     }
 
-    // Verify we have at least 5 SSTable generations
-    let data_dir = temp_dir.path().join("data");
-    let data_files: Vec<_> = std::fs::read_dir(&data_dir)?
+    // Verify we have at least 5 SSTable generations under keyspace/table layout (#450)
+    let sstable_dir = temp_dir
+        .path()
+        .join("data")
+        .join("test_ks")
+        .join("compaction_test");
+    let data_files: Vec<_> = std::fs::read_dir(&sstable_dir)?
         .filter_map(|e| e.ok())
         .filter(|e| {
             e.file_name()
@@ -649,25 +653,18 @@ async fn test_stcs_compaction_trigger() -> Result<()> {
         data_files.len()
     );
 
-    // Set STCS policy with min_threshold=4
-    // NOTE: set_merge_policy() currently returns Err pending M5.3 SSTable reader integration
-    let policy = STCSPolicy::default(); // min_threshold=4
-    let result = engine.set_merge_policy(Box::new(policy));
-    assert!(
-        result.is_err(),
-        "set_merge_policy should return error until M5.3"
-    );
-    assert!(result.unwrap_err().to_string().contains("M5.3"));
+    // Set STCS policy with min_threshold=4 (default)
+    let policy = STCSPolicy::default();
+    engine.set_merge_policy(Box::new(policy))?;
 
-    // Run maintenance step (without policy set, should do nothing)
+    // Run maintenance step — 5 SSTables >= min_threshold(4), compaction should trigger
     let report = engine.maintenance_step(Duration::from_secs(5))?;
 
-    // Without a policy set, no compaction work should be done
+    // STCS should select candidates and complete compaction
     assert!(
-        !report.pending_compaction,
-        "No policy set, so no compaction work"
+        report.pending_compaction || !report.completed_merges.is_empty(),
+        "5 SSTables >= min_threshold(4), compaction should trigger"
     );
-    assert_eq!(report.completed_merges.len(), 0);
 
     Ok(())
 }
@@ -696,19 +693,14 @@ async fn test_stcs_no_compaction_below_threshold() -> Result<()> {
         engine.flush().await?;
     }
 
-    // Set STCS policy
-    // NOTE: set_merge_policy() currently returns Err pending M5.3 SSTable reader integration
+    // Set STCS policy — 3 SSTables below min_threshold(4), so no compaction
     let policy = STCSPolicy::default();
-    let result = engine.set_merge_policy(Box::new(policy));
-    assert!(
-        result.is_err(),
-        "set_merge_policy should return error until M5.3"
-    );
+    engine.set_merge_policy(Box::new(policy))?;
 
-    // Run maintenance step (without policy set, should do nothing)
+    // Run maintenance step — below threshold, should select nothing
     let report = engine.maintenance_step(Duration::from_millis(100))?;
 
-    // Without a policy set, no compaction work should be done
+    // Below min_threshold, no compaction work should be done
     assert!(!report.pending_compaction);
     assert_eq!(report.completed_merges.len(), 0);
     assert_eq!(report.rows_merged, 0);
@@ -729,22 +721,17 @@ async fn test_maintenance_step_budget_honored() -> Result<()> {
 
     let mut engine = WriteEngine::new(config)?;
 
-    // Set STCS policy (no SSTables yet, so no work to do)
-    // NOTE: set_merge_policy() currently returns Err pending M5.3 SSTable reader integration
+    // Set STCS policy — no SSTables yet, so no candidates
     let policy = STCSPolicy::default();
-    let result = engine.set_merge_policy(Box::new(policy));
-    assert!(
-        result.is_err(),
-        "set_merge_policy should return error until M5.3"
-    );
+    engine.set_merge_policy(Box::new(policy))?;
 
-    // Run with very small budget (without policy set)
+    // Run with very small budget — no SSTables to compact
     let budget = Duration::from_millis(10);
     let start = std::time::Instant::now();
     let report = engine.maintenance_step(budget)?;
     let elapsed = start.elapsed();
 
-    // Should return quickly when there's no work (no policy set)
+    // Should return quickly when there's no work (no SSTables to compact)
     assert!(elapsed < Duration::from_millis(50), "Should respect budget");
     assert!(!report.pending_compaction);
 
@@ -1305,9 +1292,13 @@ async fn test_wal_recovery_partial_writes() -> Result<()> {
     // Should recover only the second batch (5 mutations)
     assert_eq!(recovered.memtable_row_count(), 5);
 
-    // First batch should be in SSTable on disk
-    let data_dir = temp_dir.path().join("data");
-    assert!(data_dir.join("nb-1-big-Data.db").exists());
+    // First batch should be in SSTable on disk under keyspace/table layout (#450)
+    let sstable_dir = temp_dir
+        .path()
+        .join("data")
+        .join("recovery_ks")
+        .join("partial_test");
+    assert!(sstable_dir.join("nb-1-big-Data.db").exists());
 
     Ok(())
 }

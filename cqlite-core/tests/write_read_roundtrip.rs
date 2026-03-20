@@ -50,13 +50,17 @@ mod summary;
 #[path = "write_read_roundtrip/type_coverage.rs"]
 mod type_coverage;
 
+use cqlite_core::platform::Platform;
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+use cqlite_core::storage::sstable::SSTableManager;
 use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
+use cqlite_core::Config;
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
 use tempfile::TempDir;
 
 /// Create a simple test schema with partition key and two columns
@@ -384,4 +388,97 @@ pub fn assert_file_exists_and_nonempty(path: &Path, component: &str) {
 /// Helper to read file contents
 pub fn read_file_bytes(path: &Path) -> Vec<u8> {
     std::fs::read(path).unwrap_or_else(|_| panic!("Should read file: {}", path.display()))
+}
+
+/// Read back a single column value from a flushed SSTable.
+///
+/// Opens SSTableManager on the data directory, scans the table,
+/// and extracts the named column from the first (and only) row.
+/// The row is returned as Value::Map(Vec<(Text(col_name), value)>).
+/// Read back the raw row value from a flushed SSTable.
+///
+/// Opens SSTableManager on the data directory, scans the table,
+/// and returns the raw Value for the first (and only) row.
+/// For most types this is Value::Map(Vec<(Text(col_name), value)>),
+/// but for some types (e.g., frozen collections) the reader may
+/// return Value::Null.
+pub async fn read_back_raw_row(temp_dir: &TempDir, schema: &TableSchema) -> Value {
+    let data_dir = temp_dir.path().join("data");
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform::new should succeed in test environment"),
+    );
+
+    let manager = SSTableManager::new(
+        &data_dir,
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("SSTableManager should load written SSTables");
+
+    let table_id =
+        cqlite_core::types::TableId::from(format!("{}.{}", schema.keyspace, schema.table).as_str());
+    let results = manager
+        .scan(&table_id, None, None, None, Some(schema))
+        .await
+        .expect("Scan should succeed");
+
+    assert_eq!(
+        results.len(),
+        1,
+        "Expected exactly 1 row in {}.{}, got {}",
+        schema.keyspace,
+        schema.table,
+        results.len()
+    );
+
+    let (_row_key, row_value) = &results[0];
+    row_value.clone()
+}
+
+/// Read back a single column value from a flushed SSTable.
+///
+/// Opens SSTableManager on the data directory, scans the table,
+/// and extracts the named column from the first (and only) row.
+/// The row is expected to be Value::Map(Vec<(Text(col_name), value)>).
+/// Panics if the row is not a Map (use `read_back_raw_row` for types
+/// where the reader may return a non-Map value).
+pub async fn read_back_column(temp_dir: &TempDir, schema: &TableSchema, col_name: &str) -> Value {
+    let row_value = read_back_raw_row(temp_dir, schema).await;
+
+    // Row is Value::Map(Vec<(Value::Text(col_name), value)>)
+    match &row_value {
+        Value::Map(entries) => {
+            for (key, value) in entries {
+                if let Value::Text(name) = key {
+                    if name == col_name {
+                        return value.clone();
+                    }
+                }
+            }
+            panic!(
+                "Column '{}' not found in row. Available columns: {:?}",
+                col_name,
+                entries
+                    .iter()
+                    .filter_map(|(k, _)| {
+                        if let Value::Text(n) = k {
+                            Some(n.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        other => panic!(
+            "Expected row to be Value::Map, got {:?}",
+            std::mem::discriminant(other)
+        ),
+    }
 }

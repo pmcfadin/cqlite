@@ -2029,17 +2029,19 @@ impl V5CompressedLegacyParser {
             }
 
             "counter" => {
-                // Counter cells contain a CounterContext structure, NOT a raw i64.
-                // Format: [VInt length prefix][CounterContext bytes]
+                // Counter cells can arrive in two formats:
                 //
-                // CounterContext format (from Cassandra's CounterContext.java):
-                //   [header_size: 2-byte BE signed short] - number of shards
-                //   [indices: 2 bytes * |header_size|] - shard type indicators
-                //   [shards: 32 bytes each] - counter_id (16) + clock (8) + count (8)
+                // 1. Real Cassandra CounterContext: [VInt length][header_size:i16][indices][shards]
+                //    The counter value is the sum of all shard counts.
                 //
-                // The counter value is the sum of all shard counts (total() function).
+                // 2. CQLite writer format (raw i64): [VInt(8)][8 bytes big-endian i64]
+                //    The writer serialises Value::Counter as a plain 8-byte integer with a
+                //    length prefix of 8, identical to how BigInt is written.
+                //
+                // We try CounterContext first and fall back to the raw-i64 interpretation
+                // when the length prefix equals exactly 8 (the size of a raw i64).
 
-                // First, read the VInt length prefix (like other variable-length types)
+                // Read the VInt length prefix.
                 let (remaining, context_len) = parse_vuint(&data[offset..]).map_err(|e| {
                     Error::corruption(format!(
                         "Cell '{}': failed to parse counter context length as VInt: {:?}",
@@ -2066,25 +2068,56 @@ impl V5CompressedLegacyParser {
                     )));
                 }
 
-                // Parse the CounterContext structure
-                let (total, consumed) = Self::parse_counter_context(data, offset, &column.name)?;
-
-                // Verify we consumed the expected number of bytes (strict validation)
-                if consumed != context_len {
-                    return Err(Error::corruption(format!(
-                        "Counter '{}': VInt length ({}) doesn't match parsed context size ({})",
-                        column.name, context_len, consumed
-                    )));
+                // Try the full CounterContext parse first.
+                match Self::parse_counter_context(data, offset, &column.name) {
+                    Ok((total, consumed)) if consumed == context_len => {
+                        // Successfully parsed a proper CounterContext.
+                        offset += consumed;
+                        log::debug!(
+                            "V5CompressedLegacy: Counter '{}' value={} (CounterContext), total consumed {} bytes",
+                            column.name,
+                            total,
+                            len_bytes_consumed + context_len
+                        );
+                        Value::Counter(total)
+                    }
+                    _ if context_len == 8 => {
+                        // A real Cassandra CounterContext is at minimum 36 bytes
+                        // (2 header + 2 indices + 32 body for 1 shard), so
+                        // context_len == 8 can only be produced by the CQLite writer
+                        // which serialises Counter as a raw big-endian i64.
+                        // This intentionally swallows any parse_counter_context error
+                        // for 8-byte payloads, which is safe since a valid
+                        // CounterContext can never be 8 bytes.
+                        //
+                        // Bounds already verified by the context_len check above.
+                        let val = i64::from_be_bytes([
+                            data[offset],
+                            data[offset + 1],
+                            data[offset + 2],
+                            data[offset + 3],
+                            data[offset + 4],
+                            data[offset + 5],
+                            data[offset + 6],
+                            data[offset + 7],
+                        ]);
+                        offset += 8;
+                        log::debug!(
+                            "V5CompressedLegacy: Counter '{}' value={} (raw i64 fallback), total consumed {} bytes",
+                            column.name,
+                            val,
+                            len_bytes_consumed + 8
+                        );
+                        Value::Counter(val)
+                    }
+                    Err(e) => return Err(e),
+                    Ok((_, consumed)) => {
+                        return Err(Error::corruption(format!(
+                            "Counter '{}': VInt length ({}) doesn't match parsed context size ({})",
+                            column.name, context_len, consumed
+                        )));
+                    }
                 }
-
-                offset += consumed;
-                log::debug!(
-                    "V5CompressedLegacy: Counter '{}' value={}, total consumed {} bytes",
-                    column.name,
-                    total,
-                    len_bytes_consumed + context_len
-                );
-                Value::Counter(total)
             }
 
             "double" => {
