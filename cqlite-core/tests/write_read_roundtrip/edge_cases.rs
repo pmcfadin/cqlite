@@ -619,7 +619,10 @@ async fn test_edge_partition_tombstone() {
         value: Value::Text("Data row 1".to_string()),
     }];
     let mutation1 = Mutation::new(table_id.clone(), pk.clone(), Some(ck1), ops1, 1000000, None);
-    engine.write_async(mutation1).await.expect("Write should succeed");
+    engine
+        .write_async(mutation1)
+        .await
+        .expect("Write should succeed");
 
     let ck2 = ClusteringKey::single("ck", Value::Text("row2".to_string()));
     let ops2 = vec![CellOperation::Write {
@@ -627,7 +630,10 @@ async fn test_edge_partition_tombstone() {
         value: Value::Text("Data row 2".to_string()),
     }];
     let mutation2 = Mutation::new(table_id.clone(), pk.clone(), Some(ck2), ops2, 1000001, None);
-    engine.write_async(mutation2).await.expect("Write should succeed");
+    engine
+        .write_async(mutation2)
+        .await
+        .expect("Write should succeed");
 
     // Delete the entire partition with a partition tombstone
     // Use a local_deletion_time far from row timestamps to expose stats tracking gaps
@@ -698,7 +704,11 @@ async fn test_edge_range_tombstone() {
     let pk = PartitionKey::single("pk", Value::Integer(1));
 
     // Write 3 rows: row_a, row_b, row_c
-    for (suffix, ts) in [("row_a", 1000000i64), ("row_b", 1000001), ("row_c", 1000002)] {
+    for (suffix, ts) in [
+        ("row_a", 1000000i64),
+        ("row_b", 1000001),
+        ("row_c", 1000002),
+    ] {
         let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
@@ -721,12 +731,14 @@ async fn test_edge_range_tombstone() {
         None,
     );
     range_mutation.range_tombstones.push(RangeTombstone {
-        start: ClusteringBound::Inclusive(
-            ClusteringKey::single("ck", Value::Text("row_a".to_string())),
-        ),
-        end: ClusteringBound::Inclusive(
-            ClusteringKey::single("ck", Value::Text("row_b".to_string())),
-        ),
+        start: ClusteringBound::Inclusive(ClusteringKey::single(
+            "ck",
+            Value::Text("row_a".to_string()),
+        )),
+        end: ClusteringBound::Inclusive(ClusteringKey::single(
+            "ck",
+            Value::Text("row_b".to_string()),
+        )),
         deletion_time: 1000003,
         local_deletion_time: 2_000_000_000,
     });
