@@ -18,8 +18,8 @@
 
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::write_engine::{
-    CellOperation, ClusteringKey, Mutation, PartitionKey, PartitionTombstone, TableId, WriteEngine,
-    WriteEngineConfig,
+    CellOperation, ClusteringBound, ClusteringKey, Mutation, PartitionKey, PartitionTombstone,
+    RangeTombstone, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
 use std::collections::HashMap;
@@ -677,5 +677,86 @@ async fn test_edge_partition_tombstone() {
     assert_eq!(
         ldt, 2_000_000_000,
         "Partition header local_deletion_time should match tombstone"
+    );
+}
+
+/// Test range tombstone (delete a range of clustering keys)
+#[tokio::test]
+async fn test_edge_range_tombstone() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_edge_case_schema();
+
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema.clone(),
+    );
+
+    let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
+
+    let table_id = TableId::new("test_edge", "edge_cases");
+    let pk = PartitionKey::single("pk", Value::Integer(1));
+
+    // Write 3 rows: row_a, row_b, row_c
+    for (suffix, ts) in [("row_a", 1000000i64), ("row_b", 1000001), ("row_c", 1000002)] {
+        let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
+        let ops = vec![CellOperation::Write {
+            column: "data".to_string(),
+            value: Value::Text(format!("Data for {suffix}")),
+        }];
+        let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), ops, ts, None);
+        engine
+            .write_async(mutation)
+            .await
+            .expect("Write should succeed");
+    }
+
+    // Delete range [row_a, row_b] (inclusive bounds)
+    let mut range_mutation = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![], // No cell operations
+        1000003,
+        None,
+    );
+    range_mutation.range_tombstones.push(RangeTombstone {
+        start: ClusteringBound::Inclusive(
+            ClusteringKey::single("ck", Value::Text("row_a".to_string())),
+        ),
+        end: ClusteringBound::Inclusive(
+            ClusteringKey::single("ck", Value::Text("row_b".to_string())),
+        ),
+        deletion_time: 1000003,
+        local_deletion_time: 2_000_000_000,
+    });
+    engine
+        .write_async(range_mutation)
+        .await
+        .expect("Range tombstone should succeed");
+
+    let info = engine
+        .flush()
+        .await
+        .expect("Flush should succeed")
+        .expect("Should return SSTableInfo");
+
+    assert!(info.data_path.exists(), "Data.db should exist");
+
+    // Verify range tombstone markers in Data.db
+    // Range tombstones are written as markers with IS_MARKER flag (0x02)
+    // They appear after the partition header, before the rows
+    let data = std::fs::read(&info.data_path).expect("Should read Data.db");
+    let key_len = u16::from_be_bytes([data[0], data[1]]) as usize;
+    // Skip partition header: 2 (key_len) + key_len + 4 (ldt) + 8 (ts) = 14 + key_len
+    let after_header = 2 + key_len + 4 + 8;
+    // The first byte after the partition header should have IS_MARKER (0x02)
+    // for the range tombstone opening bound
+    let marker_byte = data[after_header];
+    assert_eq!(
+        marker_byte & 0x02,
+        0x02,
+        "First unfiltered after partition header should have IS_MARKER flag (byte was 0x{:02x})",
+        marker_byte
     );
 }
