@@ -1483,6 +1483,28 @@ mod tests {
     }
 
     #[test]
+    fn test_write_engine_execute_insert_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        assert_eq!(engine.memtable_row_count(), 0);
+
+        // INSERT matching the test schema: test_ks.test_table(id int PK, name text)
+        let result = engine.execute("INSERT INTO test_table (id, name) VALUES (1, 'Alice')");
+        assert!(result.is_ok(), "execute() failed: {:?}", result.unwrap_err());
+
+        assert_eq!(engine.memtable_row_count(), 1);
+    }
+
+    #[test]
     fn test_determine_next_generation_empty_dir() {
         let temp_dir = TempDir::new().unwrap();
         let data_dir = temp_dir.path().join("data");
