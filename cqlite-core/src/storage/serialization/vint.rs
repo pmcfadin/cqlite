@@ -40,11 +40,11 @@ fn zigzag_encode(n: i64) -> u64 {
 /// # use cqlite_core::storage::serialization::vint::encode_signed;
 /// let mut buf = Vec::new();
 /// encode_signed(0, &mut buf);
-/// assert_eq!(buf, vec![0x80]); // Cassandra single-byte format
+/// assert_eq!(buf, vec![0x00]); // Single-byte zero
 ///
 /// buf.clear();
 /// encode_signed(-1, &mut buf);
-/// assert_eq!(buf, vec![0xFF]); // Special case
+/// assert_eq!(buf, vec![0x01]); // ZigZag encoded -1
 ///
 /// buf.clear();
 /// encode_signed(64, &mut buf);
