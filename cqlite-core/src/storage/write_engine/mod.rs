@@ -1458,7 +1458,7 @@ mod tests {
     }
 
     #[test]
-    fn test_write_engine_execute_not_implemented() {
+    fn test_write_engine_execute_table_mismatch() {
         let temp_dir = TempDir::new().unwrap();
         let schema = create_test_schema();
 
@@ -1470,9 +1470,16 @@ mod tests {
 
         let mut engine = WriteEngine::new(config).unwrap();
 
-        // CQL parsing not yet implemented
+        // Schema defines test_table, but statement targets users → table mismatch
         let result = engine.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')");
         assert!(result.is_err());
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("targets table 'users'")
+                && err_msg.contains("schema is for 'test_table'"),
+            "Expected table mismatch error, got: {}",
+            err_msg
+        );
     }
 
     #[test]
