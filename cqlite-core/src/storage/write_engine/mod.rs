@@ -1472,7 +1472,6 @@ mod tests {
 
         // Schema defines test_table, but statement targets users → table mismatch
         let result = engine.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')");
-        assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(
             err_msg.contains("targets table 'users'")
@@ -1499,7 +1498,11 @@ mod tests {
 
         // INSERT matching the test schema: test_ks.test_table(id int PK, name text)
         let result = engine.execute("INSERT INTO test_table (id, name) VALUES (1, 'Alice')");
-        assert!(result.is_ok(), "execute() failed: {:?}", result.unwrap_err());
+        assert!(
+            result.is_ok(),
+            "execute() failed: {:?}",
+            result.unwrap_err()
+        );
 
         assert_eq!(engine.memtable_row_count(), 1);
     }
