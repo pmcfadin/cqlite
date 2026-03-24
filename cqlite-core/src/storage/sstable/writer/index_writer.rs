@@ -34,7 +34,7 @@ use crate::storage::serialization::vint::encode_unsigned;
 use crate::storage::write_engine::mutation::DecoratedKey;
 
 /// BIG format marker indicating a partition key digest follows (Cassandra NB variant)
-const BIG_FORMAT_MARKER: u16 = 0x0010;
+pub const BIG_FORMAT_MARKER: u16 = 0x0010;
 
 /// Index.db component writer
 ///

@@ -191,6 +191,32 @@ fn build_cassandra_filename(generation: u64, component: &str) -> String {
     format!("nb-{}-big-{}", generation, component)
 }
 
+/// Decode an unsigned VInt from a byte slice at the given offset.
+///
+/// Returns `(value, bytes_consumed)` or an error if data is insufficient.
+/// Wraps `parser::vint::parse_vuint` with an offset-based interface.
+#[cfg(feature = "write-support")]
+fn decode_unsigned_vint(data: &[u8], offset: usize) -> Result<(u64, usize)> {
+    use crate::parser::vint::parse_vuint;
+
+    let slice = data.get(offset..).ok_or_else(|| {
+        Error::Storage(format!(
+            "VInt: offset {} beyond data length {}",
+            offset,
+            data.len()
+        ))
+    })?;
+    let (remaining, value) = parse_vuint(slice).map_err(|_| {
+        Error::Storage(format!(
+            "VInt: failed to decode at offset {} (data length {})",
+            offset,
+            data.len()
+        ))
+    })?;
+    let bytes_consumed = slice.len() - remaining.len();
+    Ok((value, bytes_consumed))
+}
+
 /// Export implementation methods (added to WriteEngine)
 #[cfg(feature = "write-support")]
 impl crate::storage::write_engine::WriteEngine {
@@ -350,8 +376,7 @@ impl crate::storage::write_engine::WriteEngine {
         }
 
         // Step 4: Collect statistics from exported SSTable
-        let (partition_count, row_count) =
-            self.read_statistics_from_export(&exported_components)?;
+        let (partition_count, row_count) = read_statistics_from_export(&exported_components)?;
 
         let report = ExportReport {
             output_path: export_path,
@@ -457,179 +482,199 @@ impl crate::storage::write_engine::WriteEngine {
             Ok(best)
         })
     }
+}
 
-    /// Read partition and row counts from Statistics.db and Index.db
-    ///
-    /// Reads the STATS component (MetadataType ordinal 2) from the exported
-    /// Statistics.db to extract totalRows. Partition count is derived from the
-    /// number of index entries in the exported Index.db.
-    ///
-    /// The STATS component layout is fixed (written by our StatisticsWriter):
-    /// - Offset 153 from component start: totalColumnsSet (u64 BE)
-    /// - Offset 161 from component start: totalRows (u64 BE)
-    ///
-    /// Index.db format (BIG format):
-    /// - Each entry: 2-byte BE key_len + key_bytes + 8-byte BE position
-    /// - Entries are sequential until EOF
-    fn read_statistics_from_export(&self, components: &[PathBuf]) -> Result<(u64, u64)> {
-        // Find Statistics.db in exported components
-        let stats_path = components
-            .iter()
-            .find(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.ends_with("Statistics.db"))
-                    .unwrap_or(false)
-            })
-            .ok_or_else(|| Error::Storage("Statistics.db not found in export".to_string()))?;
+/// Read partition and row counts from Statistics.db and Index.db
+///
+/// Reads the STATS component (MetadataType ordinal 2) from the exported
+/// Statistics.db to extract totalRows. Partition count is derived from the
+/// number of index entries in the exported Index.db.
+///
+/// The STATS component layout is fixed (written by our StatisticsWriter):
+/// - Offset 153 from component start: totalColumnsSet (u64 BE)
+/// - Offset 161 from component start: totalRows (u64 BE)
+///
+/// Index.db format (BIG format, NB variant):
+/// - Each entry: 2-byte marker (0x0010) + 16-byte MD5 digest + VInt position + VInt promoted_size
+/// - Entries are sequential until EOF
+#[cfg(feature = "write-support")]
+fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
+    // Find Statistics.db in exported components
+    let stats_path = components
+        .iter()
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.ends_with("Statistics.db"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| Error::Storage("Statistics.db not found in export".to_string()))?;
 
-        let file_data = std::fs::read(stats_path)
-            .map_err(|e| Error::Storage(format!("Failed to read Statistics.db: {}", e)))?;
+    let file_data = std::fs::read(stats_path)
+        .map_err(|e| Error::Storage(format!("Failed to read Statistics.db: {}", e)))?;
 
-        // TOC structure: 4 (count) + 4 (checksum) + N*8 (entries) + 4 (checksum)
-        // We need the STATS component offset (type ordinal 2)
-        if file_data.len() < 8 {
-            log::warn!("Statistics.db too small to parse, returning zero counts");
-            return Ok((0, 0));
-        }
-
-        let num_components =
-            u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]) as usize;
-
-        // Find STATS component (type == 2) offset from TOC entries
-        let mut stats_offset: Option<usize> = None;
-        for i in 0..num_components {
-            let entry_base = 8 + i * 8; // past count(4) + checksum(4)
-            if entry_base + 8 > file_data.len() {
-                break;
-            }
-            let comp_type = u32::from_be_bytes([
-                file_data[entry_base],
-                file_data[entry_base + 1],
-                file_data[entry_base + 2],
-                file_data[entry_base + 3],
-            ]);
-            if comp_type == 2 {
-                stats_offset = Some(u32::from_be_bytes([
-                    file_data[entry_base + 4],
-                    file_data[entry_base + 5],
-                    file_data[entry_base + 6],
-                    file_data[entry_base + 7],
-                ]) as usize);
-                break;
-            }
-        }
-
-        let stats_offset = match stats_offset {
-            Some(o) => o,
-            None => {
-                log::warn!("STATS component not found in Statistics.db TOC");
-                return Ok((0, 0));
-            }
-        };
-
-        // totalRows is at byte offset 161 within the STATS component data.
-        // Layout: 2×histogram(36ea) + CommitLog(12) + timestamps(16) +
-        //         delTimes(8) + ttls(8) + compression(8) + tombHist(8) +
-        //         level(4) + repaired(8) + minCK(4) + maxCK(4) +
-        //         legacyCounter(1) + totalColumnsSet(8) + totalRows(8)
-        const TOTAL_ROWS_OFFSET: usize = 161;
-        let abs_offset = stats_offset + TOTAL_ROWS_OFFSET;
-
-        if abs_offset + 8 > file_data.len() {
-            log::warn!(
-                "Statistics.db STATS component too short for totalRows (need {} + 8, have {})",
-                abs_offset,
-                file_data.len()
-            );
-            return Ok((0, 0));
-        }
-
-        let row_count = u64::from_be_bytes([
-            file_data[abs_offset],
-            file_data[abs_offset + 1],
-            file_data[abs_offset + 2],
-            file_data[abs_offset + 3],
-            file_data[abs_offset + 4],
-            file_data[abs_offset + 5],
-            file_data[abs_offset + 6],
-            file_data[abs_offset + 7],
-        ]);
-
-        // Count partitions from Index.db entries
-        let partition_count = self.count_index_entries(components).unwrap_or_else(|e| {
-            log::warn!("Failed to count Index.db entries: {}, defaulting to 0", e);
-            0
-        });
-
-        log::info!(
-            "Read from export: row_count={}, partition_count={}",
-            row_count,
-            partition_count
-        );
-
-        Ok((partition_count, row_count))
+    // TOC structure: 4 (count) + 4 (checksum) + N*8 (entries) + 4 (checksum)
+    // We need the STATS component offset (type ordinal 2)
+    if file_data.len() < 8 {
+        log::warn!("Statistics.db too small to parse, returning zero counts");
+        return Ok((0, 0));
     }
 
-    /// Count the number of partition entries in Index.db
-    ///
-    /// Each partition has one entry in Index.db. The format is:
-    /// - 2-byte big-endian key length
-    /// - N bytes of partition key
-    /// - 8-byte big-endian data file position
-    ///
-    /// Entries are sequential until EOF.
-    fn count_index_entries(&self, components: &[PathBuf]) -> Result<u64> {
-        // Find Index.db in exported components
-        let index_path = components
-            .iter()
-            .find(|p| {
-                p.file_name()
-                    .and_then(|n| n.to_str())
-                    .map(|s| s.ends_with("Index.db"))
-                    .unwrap_or(false)
-            })
-            .ok_or_else(|| Error::Storage("Index.db not found in export".to_string()))?;
+    let num_components =
+        u32::from_be_bytes([file_data[0], file_data[1], file_data[2], file_data[3]]) as usize;
 
-        let index_data = std::fs::read(index_path)
-            .map_err(|e| Error::Storage(format!("Failed to read Index.db: {}", e)))?;
+    // Find STATS component (type == 2) offset from TOC entries
+    let mut stats_offset: Option<usize> = None;
+    for i in 0..num_components {
+        let entry_base = 8 + i * 8; // past count(4) + checksum(4)
+        if entry_base + 8 > file_data.len() {
+            break;
+        }
+        let comp_type = u32::from_be_bytes([
+            file_data[entry_base],
+            file_data[entry_base + 1],
+            file_data[entry_base + 2],
+            file_data[entry_base + 3],
+        ]);
+        if comp_type == 2 {
+            stats_offset = Some(u32::from_be_bytes([
+                file_data[entry_base + 4],
+                file_data[entry_base + 5],
+                file_data[entry_base + 6],
+                file_data[entry_base + 7],
+            ]) as usize);
+            break;
+        }
+    }
 
-        let mut count = 0u64;
-        let mut offset = 0usize;
+    let stats_offset = match stats_offset {
+        Some(o) => o,
+        None => {
+            log::warn!("STATS component not found in Statistics.db TOC");
+            return Ok((0, 0));
+        }
+    };
 
-        while offset + 2 <= index_data.len() {
-            // Read 2-byte big-endian key length
-            let key_len = u16::from_be_bytes([index_data[offset], index_data[offset + 1]]) as usize;
-            offset += 2;
+    // totalRows is at byte offset 161 within the STATS component data.
+    // Layout: 2×histogram(36ea) + CommitLog(12) + timestamps(16) +
+    //         delTimes(8) + ttls(8) + compression(8) + tombHist(8) +
+    //         level(4) + repaired(8) + minCK(4) + maxCK(4) +
+    //         legacyCounter(1) + totalColumnsSet(8) + totalRows(8)
+    const TOTAL_ROWS_OFFSET: usize = 161;
+    let abs_offset = stats_offset + TOTAL_ROWS_OFFSET;
 
-            // Skip key bytes
-            if offset + key_len > index_data.len() {
+    if abs_offset + 8 > file_data.len() {
+        log::warn!(
+            "Statistics.db STATS component too short for totalRows (need {} + 8, have {})",
+            abs_offset,
+            file_data.len()
+        );
+        return Ok((0, 0));
+    }
+
+    let row_count = u64::from_be_bytes([
+        file_data[abs_offset],
+        file_data[abs_offset + 1],
+        file_data[abs_offset + 2],
+        file_data[abs_offset + 3],
+        file_data[abs_offset + 4],
+        file_data[abs_offset + 5],
+        file_data[abs_offset + 6],
+        file_data[abs_offset + 7],
+    ]);
+
+    // Count partitions from Index.db entries
+    let partition_count = count_index_entries(components).unwrap_or_else(|e| {
+        log::warn!("Failed to count Index.db entries: {}, defaulting to 0", e);
+        0
+    });
+
+    log::info!(
+        "Read from export: row_count={}, partition_count={}",
+        row_count,
+        partition_count
+    );
+
+    Ok((partition_count, row_count))
+}
+
+/// Count the number of partition entries in Index.db
+///
+/// Each partition has one entry in Index.db using BIG format (NB variant):
+/// ```text
+/// [marker: u16 BE = 0x0010]          ← BIG format marker
+/// [digest: 16 bytes]                 ← MD5 hash of partition key
+/// [position: unsigned VInt]          ← Data.db offset
+/// [promoted_index_size: unsigned VInt] ← Size of promoted index (0 for simple)
+/// [promoted_index: N bytes]          ← Optional promoted index data
+/// ```
+///
+/// Entries are sequential until EOF.
+#[cfg(feature = "write-support")]
+fn count_index_entries(components: &[PathBuf]) -> Result<u64> {
+    use crate::storage::sstable::writer::index_writer::BIG_FORMAT_MARKER;
+
+    // Find Index.db in exported components
+    let index_path = components
+        .iter()
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.ends_with("Index.db"))
+                .unwrap_or(false)
+        })
+        .ok_or_else(|| Error::Storage("Index.db not found in export".to_string()))?;
+
+    let index_data = std::fs::read(index_path)
+        .map_err(|e| Error::Storage(format!("Failed to read Index.db: {}", e)))?;
+
+    let mut count = 0u64;
+    let mut offset = 0usize;
+
+    // Each BIG entry is at least 18 bytes: 2 (marker) + 16 (digest)
+    while offset + 18 <= index_data.len() {
+        // Read 2-byte BIG format marker
+        let marker = u16::from_be_bytes([index_data[offset], index_data[offset + 1]]);
+        if marker != BIG_FORMAT_MARKER {
+            log::warn!(
+                "Index.db: unexpected marker 0x{:04X} at offset {}, expected 0x{:04X}",
+                marker,
+                offset,
+                BIG_FORMAT_MARKER
+            );
+            break;
+        }
+        offset += 2;
+
+        // Skip 16-byte MD5 digest
+        offset += 16;
+
+        // Read position as unsigned VInt
+        let (_, pos_bytes) = decode_unsigned_vint(&index_data, offset)?;
+        offset += pos_bytes;
+
+        // Read promoted_index_size as unsigned VInt
+        let (promoted_size, prom_bytes) = decode_unsigned_vint(&index_data, offset)?;
+        offset += prom_bytes;
+
+        // Skip promoted index bytes if present
+        if promoted_size > 0 {
+            let skip = promoted_size as usize;
+            if offset + skip > index_data.len() {
                 log::warn!(
-                    "Index.db entry at offset {} has key_len {} exceeding file bounds (file size: {})",
-                    offset - 2,
-                    key_len,
-                    index_data.len()
-                );
-                break;
-            }
-            offset += key_len;
-
-            // Skip 8-byte position
-            if offset + 8 > index_data.len() {
-                log::warn!(
-                    "Index.db entry at offset {} missing 8-byte position field",
+                    "Index.db: promoted index at offset {} exceeds file bounds",
                     offset
                 );
                 break;
             }
-            offset += 8;
-
-            count += 1;
+            offset += skip;
         }
 
-        log::debug!("Counted {} partition entries in Index.db", count);
-        Ok(count)
+        count += 1;
     }
+
+    log::debug!("Counted {} partition entries in Index.db", count);
+    Ok(count)
 }
 
 #[cfg(all(test, feature = "write-support"))]
@@ -1041,6 +1086,34 @@ mod tests {
             "Export with default options should not fail: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn test_count_index_entries_big_format() {
+        use crate::storage::sstable::writer::index_writer::BIG_FORMAT_MARKER;
+
+        let temp_dir = TempDir::new().unwrap();
+
+        // Build a synthetic BIG-format Index.db with 3 entries
+        let mut index_data = Vec::new();
+        for i in 0u64..3 {
+            // Marker
+            index_data.extend_from_slice(&BIG_FORMAT_MARKER.to_be_bytes());
+            // 16-byte MD5 digest (arbitrary)
+            index_data.extend_from_slice(&[i as u8; 16]);
+            // Position as unsigned VInt (values < 128 = 1 byte)
+            index_data.push((i * 50) as u8);
+            // Promoted index size = 0 (1-byte VInt)
+            index_data.push(0x00);
+        }
+
+        // Write to a temporary Index.db file
+        let index_path = temp_dir.path().join("nb-1-big-Index.db");
+        std::fs::write(&index_path, &index_data).unwrap();
+
+        let components = vec![index_path];
+        let count = count_index_entries(&components).unwrap();
+        assert_eq!(count, 3, "Should count 3 BIG-format index entries");
     }
 
     #[tokio::test]
