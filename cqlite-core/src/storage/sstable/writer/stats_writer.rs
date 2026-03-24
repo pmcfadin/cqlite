@@ -49,11 +49,8 @@ use std::path::PathBuf;
 
 /// Epoch constants for EncodingStats (from Cassandra's EncodingStats.java)
 /// These are used to compute deltas from a baseline for more compact encoding
-#[allow(dead_code)]
 const TIMESTAMP_EPOCH: i64 = 1442880000000000; // Sept 22, 2015 00:00:00 UTC in microseconds
-#[allow(dead_code)]
 const DELETION_TIME_EPOCH: i32 = 1442880000; // Sept 22, 2015 00:00:00 UTC in seconds
-#[allow(dead_code)]
 const TTL_EPOCH: i32 = 0; // TTL epoch is 0 (no offset)
 
 /// Number of metadata components in Statistics.db
@@ -1128,11 +1125,14 @@ mod tests {
         let writer = StatisticsWriter::new(stats_path.clone());
 
         let mut meta = StatisticsMetadata::new();
-        meta.min_timestamp = 1000000;
-        meta.max_timestamp = 2000000;
-        meta.min_local_deletion_time = 0;
-        meta.max_local_deletion_time = 0;
-        meta.min_ttl = 100;
+        // Use realistic values at or above epoch baselines to avoid wrapping
+        // in EncodingStats delta encoding (TIMESTAMP_EPOCH = 1442880000000000,
+        // DELETION_TIME_EPOCH = 1442880000, TTL_EPOCH = 0).
+        meta.min_timestamp = TIMESTAMP_EPOCH;
+        meta.max_timestamp = TIMESTAMP_EPOCH + 1000000;
+        meta.min_local_deletion_time = DELETION_TIME_EPOCH;
+        meta.max_local_deletion_time = DELETION_TIME_EPOCH + 100;
+        meta.min_ttl = 0;
         meta.max_ttl = 200;
         meta.partition_count = 50;
         meta.row_count = 150;
@@ -1209,14 +1209,25 @@ mod tests {
             file_data[ts_offset + 6],
             file_data[ts_offset + 7],
         ]);
-        assert_eq!(min_ts, 1000000, "Min timestamp should be preserved");
+        assert_eq!(min_ts, TIMESTAMP_EPOCH, "Min timestamp should be preserved");
 
         // Verify SERIALIZATION_HEADER component
-        // Should start with unsigned VInt encoding of EncodingStats
-        // First byte should be 0x00 (vuint encoding of 0)
+        // Should start with 3 unsigned VInts for EncodingStats deltas.
+        // All metadata values == their epoch baselines, so all deltas are 0.
+        // encode_vuint(0) = [0x00].
         assert_eq!(
             file_data[header_offset], 0x00,
-            "First EncodingStats delta should be 0"
+            "EncodingStats minTimestamp delta should be 0"
+        );
+        assert_eq!(
+            file_data[header_offset + 1],
+            0x00,
+            "EncodingStats minLocalDeletionTime delta should be 0"
+        );
+        assert_eq!(
+            file_data[header_offset + 2],
+            0x00,
+            "EncodingStats minTTL delta should be 0"
         );
     }
 
