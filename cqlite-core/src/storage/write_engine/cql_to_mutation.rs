@@ -11,15 +11,16 @@
 
 #[cfg(feature = "write-support")]
 use crate::cql::ast::{
-    CqlAssignmentOperator, CqlBinaryOperator, CqlCollectionLiteral, CqlDelete, CqlExpression,
-    CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUdtLiteral, CqlUnaryOperator, CqlUpdate,
-    CqlUsing,
+    CqlAssignmentOperator, CqlBatch, CqlBinaryOperator, CqlCollectionLiteral, CqlDelete,
+    CqlExpression, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUdtLiteral,
+    CqlUnaryOperator, CqlUpdate, CqlUsing,
 };
 #[cfg(feature = "write-support")]
 use crate::schema::{CqlType, TableSchema};
 #[cfg(feature = "write-support")]
 use crate::storage::write_engine::mutation::{
-    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId,
+    CellOperation, ClusteringBound, ClusteringKey, Mutation, PartitionKey, PartitionTombstone,
+    RangeTombstone, TableId,
 };
 #[cfg(feature = "write-support")]
 use crate::types::{UdtField, UdtValue, Value};
@@ -28,13 +29,16 @@ use crate::Error;
 
 /// Convert a parsed `CqlInsert` AST node into a `Mutation` using schema information.
 ///
+/// Both `VALUES` and `JSON` forms of INSERT are supported. For the JSON form the
+/// top-level object keys are matched case-insensitively to schema columns; null
+/// values are silently dropped (no write operation is emitted).
+///
 /// # Errors
 ///
 /// Returns `Error::InvalidInput` when:
 /// - The statement targets a different table than the schema
-/// - The number of columns and values do not match
+/// - The number of columns and values do not match (VALUES form)
 /// - A required partition key column is missing from the INSERT
-/// - JSON INSERT syntax is used (not yet supported)
 /// - A value cannot be coerced to its schema type
 #[cfg(feature = "write-support")]
 pub(crate) fn insert_to_mutation(
@@ -46,10 +50,8 @@ pub(crate) fn insert_to_mutation(
     // Extract (column_name, expression) pairs
     let values = match &insert.values {
         CqlInsertValues::Values(exprs) => exprs,
-        CqlInsertValues::Json(_) => {
-            return Err(Error::InvalidInput(
-                "JSON INSERT syntax is not yet supported in mutations".to_string(),
-            ));
+        CqlInsertValues::Json(json_str) => {
+            return insert_json_to_mutation(json_str, &insert.table, &insert.using, schema);
         }
     };
 
@@ -146,6 +148,325 @@ pub(crate) fn insert_to_mutation(
     ))
 }
 
+/// Convert a JSON string from `INSERT INTO ... JSON` into a `Mutation`.
+///
+/// The JSON must be a top-level object whose keys are column names (matched
+/// case-insensitively). Null values are skipped (no write operation). The
+/// partition key columns must be present; clustering key and regular columns are
+/// optional.
+///
+/// # Errors
+///
+/// Returns `Error::InvalidInput` when:
+/// - The JSON is malformed
+/// - The top-level JSON value is not an object
+/// - A required partition key column is missing from the JSON
+/// - A key in the JSON does not correspond to a schema column
+/// - A JSON value cannot be converted to the target CQL type
+#[cfg(feature = "write-support")]
+fn insert_json_to_mutation(
+    json_str: &str,
+    table_ref: &CqlTable,
+    using: &Option<CqlUsing>,
+    schema: &TableSchema,
+) -> Result<Mutation, Error> {
+    // Parse JSON
+    let json_obj: serde_json::Value = serde_json::from_str(json_str)
+        .map_err(|e| Error::InvalidInput(format!("Invalid JSON in INSERT: {}", e)))?;
+
+    let obj = json_obj.as_object().ok_or_else(|| {
+        Error::InvalidInput(
+            "INSERT JSON requires a JSON object, not array or primitive".to_string(),
+        )
+    })?;
+
+    // Validate table reference
+    validate_table(table_ref, schema)?;
+
+    // Build column-value pairs, matching JSON keys to schema columns (case-insensitive)
+    let mut col_values: Vec<(String, serde_json::Value)> = Vec::new();
+    for (key, val) in obj {
+        if val.is_null() {
+            continue; // Skip null values (no write operation)
+        }
+        let col_name_lc = key.to_lowercase();
+        let _column = schema.get_column(&col_name_lc).ok_or_else(|| {
+            Error::InvalidInput(format!("Unknown column '{}' in JSON INSERT", key))
+        })?;
+        col_values.push((col_name_lc, val.clone()));
+    }
+
+    // Extract partition key values (required)
+    let ordered_pk = schema.ordered_partition_keys();
+    let mut pk_columns: Vec<(String, Value)> = Vec::with_capacity(ordered_pk.len());
+    for pk_col in &ordered_pk {
+        let col_name_lc = pk_col.name.to_lowercase();
+        let json_val = col_values
+            .iter()
+            .find(|(n, _)| *n == col_name_lc)
+            .map(|(_, v)| v)
+            .ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "Partition key column '{}' is missing from JSON INSERT",
+                    pk_col.name
+                ))
+            })?;
+        let cql_type = CqlType::parse(&pk_col.data_type)?;
+        let value = json_value_to_cql_value(json_val, &cql_type)?;
+        pk_columns.push((pk_col.name.clone(), value));
+    }
+    let partition_key = PartitionKey::new(pk_columns);
+
+    // Extract clustering key values (optional)
+    let ordered_ck = schema.ordered_clustering_keys();
+    let mut ck_columns: Vec<(String, Value)> = Vec::with_capacity(ordered_ck.len());
+    for ck_col in &ordered_ck {
+        let col_name_lc = ck_col.name.to_lowercase();
+        if let Some((_, json_val)) = col_values.iter().find(|(n, _)| *n == col_name_lc) {
+            let cql_type = CqlType::parse(&ck_col.data_type)?;
+            let value = json_value_to_cql_value(json_val, &cql_type)?;
+            ck_columns.push((ck_col.name.clone(), value));
+        }
+    }
+    let clustering_key = if ck_columns.is_empty() {
+        None
+    } else {
+        Some(ClusteringKey::new(ck_columns))
+    };
+
+    // Build operations for regular columns
+    let pk_names: Vec<String> = ordered_pk.iter().map(|c| c.name.to_lowercase()).collect();
+    let ck_names: Vec<String> = ordered_ck.iter().map(|c| c.name.to_lowercase()).collect();
+
+    let mut operations: Vec<CellOperation> = Vec::new();
+    for (col_name_lc, json_val) in &col_values {
+        if pk_names.contains(col_name_lc) || ck_names.contains(col_name_lc) {
+            continue;
+        }
+        let column = schema
+            .get_column(col_name_lc)
+            .ok_or_else(|| Error::InvalidInput(format!("Unknown column '{}'", col_name_lc)))?;
+        let cql_type = CqlType::parse(&column.data_type)?;
+        let value = json_value_to_cql_value(json_val, &cql_type)?;
+        operations.push(CellOperation::Write {
+            column: column.name.clone(),
+            value,
+        });
+    }
+
+    let timestamp_micros = extract_timestamp(using)?;
+    let ttl_seconds = extract_ttl(using)?;
+    let table_id = TableId::new(schema.keyspace.clone(), schema.table.clone());
+
+    Ok(Mutation::new(
+        table_id,
+        partition_key,
+        clustering_key,
+        operations,
+        timestamp_micros,
+        ttl_seconds,
+    ))
+}
+
+/// Convert a `serde_json::Value` to an internal `Value`, guided by the target CQL type.
+///
+/// Supports boolean, numeric, string, array, and object JSON types. Null values
+/// should be filtered out before calling this function.
+#[cfg(feature = "write-support")]
+fn json_value_to_cql_value(
+    json_val: &serde_json::Value,
+    target_type: &CqlType,
+) -> Result<Value, Error> {
+    use serde_json::Value as JV;
+
+    // Unwrap Frozen – it does not affect value representation
+    if let CqlType::Frozen(inner) = target_type {
+        return json_value_to_cql_value(json_val, inner);
+    }
+
+    match (json_val, target_type) {
+        // Null — should be filtered before reaching here
+        (JV::Null, _) => Err(Error::InvalidInput(
+            "Unexpected null value in JSON conversion".to_string(),
+        )),
+
+        // Boolean
+        (JV::Bool(b), CqlType::Boolean) => Ok(Value::Boolean(*b)),
+
+        // Integer numbers
+        (JV::Number(n), CqlType::Int) => {
+            let v = n
+                .as_i64()
+                .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to int", n)))?;
+            let v = i32::try_from(v)
+                .map_err(|_| Error::InvalidInput(format!("Value {} out of range for int", v)))?;
+            Ok(Value::Integer(v))
+        }
+        (JV::Number(n), CqlType::BigInt) => {
+            let v = n
+                .as_i64()
+                .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to bigint", n)))?;
+            Ok(Value::BigInt(v))
+        }
+        (JV::Number(n), CqlType::SmallInt) => {
+            let v = n
+                .as_i64()
+                .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to smallint", n)))?;
+            let v = i16::try_from(v).map_err(|_| {
+                Error::InvalidInput(format!("Value {} out of range for smallint", v))
+            })?;
+            Ok(Value::SmallInt(v))
+        }
+        (JV::Number(n), CqlType::TinyInt) => {
+            let v = n
+                .as_i64()
+                .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to tinyint", n)))?;
+            let v = i8::try_from(v).map_err(|_| {
+                Error::InvalidInput(format!("Value {} out of range for tinyint", v))
+            })?;
+            Ok(Value::TinyInt(v))
+        }
+        (JV::Number(n), CqlType::Timestamp) => {
+            let v = n
+                .as_i64()
+                .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to timestamp", n)))?;
+            Ok(Value::Timestamp(v))
+        }
+        (JV::Number(n), CqlType::Float) => {
+            let v = n
+                .as_f64()
+                .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to float", n)))?;
+            Ok(Value::Float32(v as f32))
+        }
+        (JV::Number(n), CqlType::Double) => {
+            let v = n
+                .as_f64()
+                .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to double", n)))?;
+            Ok(Value::Float(v))
+        }
+        (JV::Number(n), CqlType::Varint) => {
+            let v = n
+                .as_i64()
+                .ok_or_else(|| Error::InvalidInput(format!("Cannot convert {} to varint", n)))?;
+            Ok(Value::Varint(varint_to_bytes(v)))
+        }
+
+        // String types
+        (JV::String(s), CqlType::Text | CqlType::Varchar | CqlType::Ascii) => {
+            Ok(Value::Text(s.clone()))
+        }
+        (JV::String(s), CqlType::Uuid | CqlType::TimeUuid) => parse_uuid(s),
+        (JV::String(s), CqlType::Blob) => parse_blob(s),
+        (JV::String(s), CqlType::Inet) => parse_inet(s),
+        (JV::String(s), CqlType::Int) => {
+            let v: i32 = s
+                .parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}' as int", s)))?;
+            Ok(Value::Integer(v))
+        }
+        (JV::String(s), CqlType::BigInt) => {
+            let v: i64 = s
+                .parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}' as bigint", s)))?;
+            Ok(Value::BigInt(v))
+        }
+        (JV::String(s), CqlType::Boolean) => match s.to_lowercase().as_str() {
+            "true" => Ok(Value::Boolean(true)),
+            "false" => Ok(Value::Boolean(false)),
+            _ => Err(Error::InvalidInput(format!(
+                "Cannot parse '{}' as boolean",
+                s
+            ))),
+        },
+        (JV::String(s), CqlType::Timestamp) => {
+            if let Ok(v) = s.parse::<i64>() {
+                return Ok(Value::Timestamp(v));
+            }
+            Err(Error::InvalidInput(format!(
+                "Cannot parse '{}' as timestamp",
+                s
+            )))
+        }
+        (JV::String(s), CqlType::Float) => {
+            let v: f32 = s
+                .parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}' as float", s)))?;
+            Ok(Value::Float32(v))
+        }
+        (JV::String(s), CqlType::Double) => {
+            let v: f64 = s
+                .parse()
+                .map_err(|_| Error::InvalidInput(format!("Cannot parse '{}' as double", s)))?;
+            Ok(Value::Float(v))
+        }
+
+        // Arrays → Lists, Sets, Tuples
+        (JV::Array(arr), CqlType::List(element_type)) => {
+            let elements = arr
+                .iter()
+                .map(|item| json_value_to_cql_value(item, element_type))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::List(elements))
+        }
+        (JV::Array(arr), CqlType::Set(element_type)) => {
+            let elements = arr
+                .iter()
+                .map(|item| json_value_to_cql_value(item, element_type))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Set(elements))
+        }
+        (JV::Array(arr), CqlType::Tuple(types)) => {
+            if arr.len() != types.len() {
+                return Err(Error::InvalidInput(format!(
+                    "JSON array has {} elements but tuple expects {}",
+                    arr.len(),
+                    types.len()
+                )));
+            }
+            let elements = arr
+                .iter()
+                .zip(types.iter())
+                .map(|(item, t)| json_value_to_cql_value(item, t))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Value::Tuple(elements))
+        }
+
+        // Objects → Maps
+        (JV::Object(map), CqlType::Map(key_type, val_type)) => {
+            let entries = map
+                .iter()
+                .map(|(k, v)| {
+                    let key_json = JV::String(k.clone());
+                    let key = json_value_to_cql_value(&key_json, key_type)?;
+                    let val = json_value_to_cql_value(v, val_type)?;
+                    Ok((key, val))
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            Ok(Value::Map(entries))
+        }
+
+        // Type mismatch
+        _ => Err(Error::InvalidInput(format!(
+            "Cannot convert JSON {} to CQL type {:?}",
+            json_type_name(json_val),
+            target_type
+        ))),
+    }
+}
+
+/// Return a human-readable name for a `serde_json::Value` variant.
+#[cfg(feature = "write-support")]
+fn json_type_name(val: &serde_json::Value) -> &'static str {
+    match val {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "boolean",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
 /// Convert a parsed `CqlUpdate` AST node into a `Mutation` using schema information.
 ///
 /// # Errors
@@ -190,11 +511,36 @@ pub(crate) fn update_to_mutation(
                     value,
                 });
             }
-            other => {
-                return Err(Error::InvalidInput(format!(
-                    "UPDATE assignment operator {:?} is not yet supported; only simple '=' assignment is allowed",
-                    other
-                )));
+            CqlAssignmentOperator::AddAssign
+            | CqlAssignmentOperator::ListAppend
+            | CqlAssignmentOperator::SetAdd
+            | CqlAssignmentOperator::ListPrepend => {
+                // Last-write-wins SSTable semantics: write RHS as full cell value.
+                // CQLite does not perform read-modify-write; the caller is expected
+                // to supply the complete replacement collection.
+                let col_name = assignment.column.name.to_lowercase();
+                let column = schema
+                    .get_column(&col_name)
+                    .ok_or_else(|| Error::InvalidInput(format!("Unknown column '{}'", col_name)))?;
+                let cql_type = CqlType::parse(&column.data_type)?;
+                let value = expression_to_value(&assignment.value, &cql_type)?;
+                operations.push(CellOperation::Write {
+                    column: column.name.clone(),
+                    value,
+                });
+            }
+            CqlAssignmentOperator::SubAssign | CqlAssignmentOperator::SetRemove => {
+                return Err(Error::InvalidInput(
+                    "SET col -= value is not supported; CQLite uses last-write-wins semantics. \
+                     Use SET col = <full_value> instead."
+                        .to_string(),
+                ));
+            }
+            CqlAssignmentOperator::MapUpdate(_) => {
+                return Err(Error::InvalidInput(
+                    "SET col[key] = value is not supported; use SET col = {full_map} instead."
+                        .to_string(),
+                ));
             }
         }
     }
@@ -215,7 +561,9 @@ pub(crate) fn update_to_mutation(
 
 /// Convert a parsed `CqlDelete` AST node into a `Mutation` using schema information.
 ///
-/// If `delete.columns` is empty, the result is a row tombstone (`CellOperation::DeleteRow`).
+/// If `delete.columns` is empty and there are no range predicates, the result is a row
+/// tombstone (`CellOperation::DeleteRow`). If range predicates are present (e.g.
+/// `ck > 'a' AND ck < 'z'`), the mutation will carry `range_tombstones` instead.
 /// Otherwise, each named column produces a `CellOperation::Delete`.
 ///
 /// # Errors
@@ -223,6 +571,7 @@ pub(crate) fn update_to_mutation(
 /// Returns `Error::InvalidInput` when:
 /// - The DELETE targets a different table than the schema
 /// - A required partition key column is missing from the WHERE clause
+/// - A range predicate targets a non-clustering column
 /// - A value cannot be coerced to its schema type
 #[cfg(feature = "write-support")]
 pub(crate) fn delete_to_mutation(
@@ -231,9 +580,9 @@ pub(crate) fn delete_to_mutation(
 ) -> Result<Mutation, Error> {
     validate_table(&delete.table, schema)?;
 
-    // Extract key bindings from WHERE clause
-    let bindings = extract_where_bindings(&delete.where_clause)?;
-    let keys = resolve_key_bindings(&bindings, schema)?;
+    // Extract key bindings and range predicates from WHERE clause
+    let predicates = extract_delete_predicates(&delete.where_clause)?;
+    let keys = resolve_key_bindings(&predicates.equality_bindings, schema)?;
 
     let partition_key = PartitionKey::new(keys.partition);
     let clustering_key = if keys.clustering.is_empty() {
@@ -242,9 +591,29 @@ pub(crate) fn delete_to_mutation(
         Some(ClusteringKey::new(keys.clustering))
     };
 
-    // Build operations: row delete or per-column deletes
-    let operations: Vec<CellOperation> = if delete.columns.is_empty() {
-        vec![CellOperation::DeleteRow]
+    // DELETE does not use TTL
+    let timestamp_micros = extract_timestamp(&delete.using)?;
+
+    // Determine if this is a partition-level delete:
+    // No clustering keys specified AND no specific columns AND table has clustering columns
+    // AND no range predicates → generate a partition tombstone instead of a row tombstone
+    let has_clustering_columns = !schema.clustering_keys.is_empty();
+    let is_partition_delete = clustering_key.is_none()
+        && delete.columns.is_empty()
+        && has_clustering_columns
+        && predicates.range_predicates.is_empty();
+
+    // Build operations: partition tombstone, row delete, range tombstone, or per-column deletes
+    let operations: Vec<CellOperation> = if is_partition_delete {
+        // Partition tombstone: no cell operations needed
+        vec![]
+    } else if delete.columns.is_empty() {
+        if predicates.range_predicates.is_empty() {
+            vec![CellOperation::DeleteRow]
+        } else {
+            // Range tombstone — no row-level operation required
+            vec![]
+        }
     } else {
         delete
             .columns
@@ -255,18 +624,39 @@ pub(crate) fn delete_to_mutation(
             .collect()
     };
 
-    // DELETE does not use TTL
-    let timestamp_micros = extract_timestamp(&delete.using)?;
+    // Build partition tombstone if this is a partition-level delete
+    let partition_tombstone = if is_partition_delete {
+        let local_deletion_time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i32)
+            .unwrap_or(0);
+        Some(PartitionTombstone {
+            deletion_time: timestamp_micros,
+            local_deletion_time,
+        })
+    } else {
+        None
+    };
+
+    // Build range tombstones from range predicates (if any)
+    let range_tombstones = if predicates.range_predicates.is_empty() {
+        vec![]
+    } else {
+        build_range_tombstones(&predicates.range_predicates, schema, timestamp_micros)?
+    };
 
     let table_id = TableId::new(schema.keyspace.clone(), schema.table.clone());
-    Ok(Mutation::new(
+    let mut mutation = Mutation::new(
         table_id,
         partition_key,
         clustering_key,
         operations,
         timestamp_micros,
         None, // DELETE never has TTL
-    ))
+    );
+    mutation.partition_tombstone = partition_tombstone;
+    mutation.range_tombstones = range_tombstones;
+    Ok(mutation)
 }
 
 /// Convert a CQL mutation statement string to a Mutation struct.
@@ -296,6 +686,91 @@ pub(crate) fn convert_cql_to_mutation(
             &trimmed[..trimmed.len().min(50)]
         )))
     }
+}
+
+/// Convert a CQL statement string to one or more `Mutation` structs.
+///
+/// Supports INSERT, UPDATE, DELETE, and BATCH statements. BATCH statements
+/// produce multiple mutations (one per inner statement). All other statements
+/// produce a single-element vector.
+#[cfg(feature = "write-support")]
+pub(crate) fn convert_cql_to_mutations(
+    statement: &str,
+    schema: &TableSchema,
+) -> Result<Vec<Mutation>, Error> {
+    let trimmed = statement.trim();
+
+    if trimmed.len() >= 5 && trimmed.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") {
+        let batch = crate::cql::mutation_parser::parse_batch_statement(trimmed)?;
+        batch_to_mutations(&batch, schema)
+    } else {
+        let mutation = convert_cql_to_mutation(trimmed, schema)?;
+        Ok(vec![mutation])
+    }
+}
+
+/// Convert a parsed `CqlBatch` into a list of mutations.
+///
+/// If the batch has a `USING TIMESTAMP` clause and an inner statement does not
+/// have its own, the batch timestamp is applied to the inner mutation.
+#[cfg(feature = "write-support")]
+fn batch_to_mutations(batch: &CqlBatch, schema: &TableSchema) -> Result<Vec<Mutation>, Error> {
+    use crate::cql::ast::{CqlBatchStatement, CqlBatchType};
+
+    if batch.batch_type == CqlBatchType::Counter {
+        return Err(Error::InvalidInput(
+            "COUNTER BATCH is not supported; CQLite uses last-write-wins semantics".to_string(),
+        ));
+    }
+
+    let batch_timestamp = batch
+        .using
+        .as_ref()
+        .and_then(|u| u.timestamp.as_ref())
+        .and_then(|expr| {
+            if let CqlExpression::Literal(CqlLiteral::Integer(ts)) = expr {
+                Some(*ts)
+            } else {
+                None
+            }
+        });
+
+    let mut mutations = Vec::with_capacity(batch.statements.len());
+    for stmt in &batch.statements {
+        let mut mutation = match stmt {
+            CqlBatchStatement::Insert(ins) => insert_to_mutation(ins, schema)?,
+            CqlBatchStatement::Update(upd) => update_to_mutation(upd, schema)?,
+            CqlBatchStatement::Delete(del) => delete_to_mutation(del, schema)?,
+        };
+
+        // Apply batch timestamp if inner statement didn't specify its own
+        if let Some(batch_ts) = batch_timestamp {
+            let inner_has_timestamp = match stmt {
+                CqlBatchStatement::Insert(ins) => ins
+                    .using
+                    .as_ref()
+                    .and_then(|u| u.timestamp.as_ref())
+                    .is_some(),
+                CqlBatchStatement::Update(upd) => upd
+                    .using
+                    .as_ref()
+                    .and_then(|u| u.timestamp.as_ref())
+                    .is_some(),
+                CqlBatchStatement::Delete(del) => del
+                    .using
+                    .as_ref()
+                    .and_then(|u| u.timestamp.as_ref())
+                    .is_some(),
+            };
+            if !inner_has_timestamp {
+                mutation.timestamp_micros = batch_ts;
+            }
+        }
+
+        mutations.push(mutation);
+    }
+
+    Ok(mutations)
 }
 
 /// Extract `(column_name, value_expression)` pairs from a WHERE clause expression.
@@ -348,6 +823,178 @@ fn collect_equality_bindings(
         }
     }
     Ok(())
+}
+
+/// A single range predicate extracted from a DELETE WHERE clause (e.g. `ck > 'a'`).
+#[cfg(feature = "write-support")]
+struct RangePredicate {
+    column: String,
+    operator: CqlBinaryOperator,
+    value: CqlExpression,
+}
+
+/// Equality and range predicates extracted from a DELETE WHERE clause.
+#[cfg(feature = "write-support")]
+struct DeletePredicates {
+    equality_bindings: Vec<(String, CqlExpression)>,
+    range_predicates: Vec<RangePredicate>,
+}
+
+/// Extract equality and range predicates from a DELETE WHERE clause expression.
+///
+/// Supports AND-chained equality predicates (`col = val`) and range predicates
+/// (`col > val`, `col >= val`, `col < val`, `col <= val`).
+#[cfg(feature = "write-support")]
+fn extract_delete_predicates(expr: &CqlExpression) -> Result<DeletePredicates, Error> {
+    let mut result = DeletePredicates {
+        equality_bindings: Vec::new(),
+        range_predicates: Vec::new(),
+    };
+    collect_delete_predicates(expr, &mut result)?;
+    Ok(result)
+}
+
+/// Recursively collect equality and range predicates from an AND-chained expression tree.
+#[cfg(feature = "write-support")]
+fn collect_delete_predicates(
+    expr: &CqlExpression,
+    result: &mut DeletePredicates,
+) -> Result<(), Error> {
+    match expr {
+        CqlExpression::Binary {
+            left,
+            operator: CqlBinaryOperator::And,
+            right,
+        } => {
+            collect_delete_predicates(left, result)?;
+            collect_delete_predicates(right, result)?;
+        }
+        CqlExpression::Binary {
+            left,
+            operator: CqlBinaryOperator::Eq,
+            right,
+        } => match left.as_ref() {
+            CqlExpression::Column(col_id) => {
+                result
+                    .equality_bindings
+                    .push((col_id.name.to_lowercase(), (**right).clone()));
+            }
+            _ => {
+                return Err(Error::InvalidInput(
+                    "WHERE clause predicate must have a column reference on the left-hand side"
+                        .to_string(),
+                ));
+            }
+        },
+        CqlExpression::Binary {
+            left,
+            operator,
+            right,
+        } if matches!(
+            operator,
+            CqlBinaryOperator::Lt
+                | CqlBinaryOperator::Le
+                | CqlBinaryOperator::Gt
+                | CqlBinaryOperator::Ge
+        ) =>
+        {
+            match left.as_ref() {
+                CqlExpression::Column(col_id) => {
+                    result.range_predicates.push(RangePredicate {
+                        column: col_id.name.to_lowercase(),
+                        operator: operator.clone(),
+                        value: (**right).clone(),
+                    });
+                }
+                _ => {
+                    return Err(Error::InvalidInput(
+                        "WHERE clause predicate must have a column reference on the left-hand side"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        _ => {
+            return Err(Error::InvalidInput(
+                "DELETE WHERE clause must consist of equality or range predicates joined with AND"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Build `RangeTombstone` values from a set of range predicates.
+///
+/// **Limitation**: This currently only produces correct results for tables with
+/// a single clustering key column. For multi-column clustering keys, each bound
+/// is constructed from a single column's value, which may not produce the
+/// intended composite range.
+///
+/// All range predicates must reference clustering key columns. The function
+/// produces a single `RangeTombstone` covering the intersection of all bounds.
+#[cfg(feature = "write-support")]
+fn build_range_tombstones(
+    range_predicates: &[RangePredicate],
+    schema: &TableSchema,
+    timestamp_micros: i64,
+) -> Result<Vec<RangeTombstone>, Error> {
+    let ordered_ck = schema.ordered_clustering_keys();
+    let ck_names: Vec<String> = ordered_ck.iter().map(|c| c.name.to_lowercase()).collect();
+
+    // Validate all range predicates reference clustering columns
+    for pred in range_predicates {
+        if !ck_names.contains(&pred.column) {
+            return Err(Error::InvalidInput(format!(
+                "Range predicate on non-clustering column '{}'; only clustering key columns support range deletions",
+                pred.column
+            )));
+        }
+    }
+
+    // Build bounds: find lower and upper for each clustering column
+    let mut lower_bound: Option<ClusteringBound> = None;
+    let mut upper_bound: Option<ClusteringBound> = None;
+
+    for pred in range_predicates {
+        let ck_col = ordered_ck
+            .iter()
+            .find(|c| c.name.to_lowercase() == pred.column)
+            .ok_or_else(|| {
+                Error::InvalidInput(format!(
+                    "Internal: clustering column '{}' missing after validation",
+                    pred.column
+                ))
+            })?;
+        let cql_type = CqlType::parse(&ck_col.data_type)?;
+        let value = expression_to_value(&pred.value, &cql_type)?;
+        let ck = ClusteringKey::new(vec![(ck_col.name.clone(), value)]);
+
+        match pred.operator {
+            CqlBinaryOperator::Gt => {
+                lower_bound = Some(ClusteringBound::Exclusive(ck));
+            }
+            CqlBinaryOperator::Ge => {
+                lower_bound = Some(ClusteringBound::Inclusive(ck));
+            }
+            CqlBinaryOperator::Lt => {
+                upper_bound = Some(ClusteringBound::Exclusive(ck));
+            }
+            CqlBinaryOperator::Le => {
+                upper_bound = Some(ClusteringBound::Inclusive(ck));
+            }
+            _ => unreachable!("only Lt/Le/Gt/Ge reach build_range_tombstones"),
+        }
+    }
+
+    let local_deletion_time = (timestamp_micros / 1_000_000) as i32;
+
+    Ok(vec![RangeTombstone {
+        start: lower_bound.unwrap_or(ClusteringBound::Bottom),
+        end: upper_bound.unwrap_or(ClusteringBound::Top),
+        deletion_time: timestamp_micros,
+        local_deletion_time,
+    }])
 }
 
 /// Resolved partition key and clustering key columns from a WHERE clause.
@@ -859,11 +1506,12 @@ fn overflow_error(value: i64, target: &str) -> Error {
 mod tests {
     use super::*;
     use crate::cql::ast::{
-        CqlAssignment, CqlAssignmentOperator, CqlBinaryOperator, CqlDelete, CqlExpression,
-        CqlIdentifier, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUpdate, CqlUsing,
+        CqlAssignment, CqlAssignmentOperator, CqlBinaryOperator, CqlCollectionLiteral, CqlDelete,
+        CqlExpression, CqlIdentifier, CqlInsert, CqlInsertValues, CqlLiteral, CqlTable, CqlUpdate,
+        CqlUsing,
     };
     use crate::schema::CqlType;
-    use crate::storage::write_engine::mutation::CellOperation;
+    use crate::storage::write_engine::mutation::{CellOperation, ClusteringBound};
     use crate::types::Value;
     use std::collections::HashMap;
 
@@ -1027,22 +1675,246 @@ mod tests {
         }
     }
 
+    fn simple_json_schema() -> crate::schema::TableSchema {
+        crate::schema::TableSchema {
+            keyspace: "test_ks".into(),
+            table: "test_tbl".into(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: "id".into(),
+                data_type: "int".into(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                crate::schema::Column {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "name".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "value".into(),
+                    data_type: "int".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "flag".into(),
+                    data_type: "boolean".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "tags".into(),
+                    data_type: "list<text>".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
     #[test]
-    fn test_insert_json_unsupported() {
-        let schema = test_schema();
+    fn test_json_insert_basic() {
+        let schema = simple_json_schema();
         let insert = CqlInsert {
             table: CqlTable::new("test_tbl"),
             columns: vec![],
-            values: CqlInsertValues::Json("{\"id\": \"...\"}".to_string()),
+            values: CqlInsertValues::Json(r#"{"id": 1, "name": "Alice", "value": 42}"#.to_string()),
             if_not_exists: false,
             using: None,
         };
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+        assert_eq!(mutation.partition_key.columns[0].1, Value::Integer(1));
+        let op_map: std::collections::HashMap<_, _> = mutation
+            .operations
+            .into_iter()
+            .filter_map(|op| {
+                if let CellOperation::Write { column, value } = op {
+                    Some((column, value))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(op_map.get("name"), Some(&Value::Text("Alice".to_string())));
+        assert_eq!(op_map.get("value"), Some(&Value::Integer(42)));
+    }
 
+    #[test]
+    fn test_json_insert_null_skipped() {
+        let schema = simple_json_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json(r#"{"id": 1, "name": null, "value": 7}"#.to_string()),
+            if_not_exists: false,
+            using: None,
+        };
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+        let has_name = mutation
+            .operations
+            .iter()
+            .any(|op| matches!(op, CellOperation::Write { column, .. } if column == "name"));
+        assert!(!has_name, "null field should not produce Write");
+    }
+
+    #[test]
+    fn test_json_insert_missing_pk_error() {
+        let schema = simple_json_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json(r#"{"name": "Bob"}"#.to_string()),
+            if_not_exists: false,
+            using: None,
+        };
+        let err = insert_to_mutation(&insert, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("id")),
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_json_insert_unknown_column_error() {
+        let schema = simple_json_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json(r#"{"id": 1, "nonexistent": "oops"}"#.to_string()),
+            if_not_exists: false,
+            using: None,
+        };
+        let err = insert_to_mutation(&insert, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("nonexistent")),
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_json_insert_invalid_json_error() {
+        let schema = simple_json_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json("{not valid json".to_string()),
+            if_not_exists: false,
+            using: None,
+        };
         let err = insert_to_mutation(&insert, &schema).unwrap_err();
         match err {
             Error::InvalidInput(msg) => assert!(msg.contains("JSON")),
             other => panic!("expected InvalidInput, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn test_json_insert_non_object_error() {
+        let schema = simple_json_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json("[1, 2, 3]".to_string()),
+            if_not_exists: false,
+            using: None,
+        };
+        let err = insert_to_mutation(&insert, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => assert!(msg.contains("object")),
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_json_insert_case_insensitive() {
+        let schema = simple_json_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json(r#"{"ID": 5, "NAME": "Carol"}"#.to_string()),
+            if_not_exists: false,
+            using: None,
+        };
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+        assert_eq!(mutation.partition_key.columns[0].1, Value::Integer(5));
+    }
+
+    #[test]
+    fn test_json_insert_with_timestamp() {
+        let schema = simple_json_schema();
+        let custom_ts: i64 = 1_700_000_000_000_000;
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json(r#"{"id": 1}"#.to_string()),
+            if_not_exists: false,
+            using: Some(CqlUsing {
+                timestamp: Some(CqlExpression::Literal(CqlLiteral::Integer(custom_ts))),
+                ttl: None,
+            }),
+        };
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+        assert_eq!(mutation.timestamp_micros, custom_ts);
+    }
+
+    #[test]
+    fn test_json_insert_boolean() {
+        let schema = simple_json_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json(r#"{"id": 2, "flag": true}"#.to_string()),
+            if_not_exists: false,
+            using: None,
+        };
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+        let has_flag = mutation.operations.iter().any(|op| {
+            matches!(op, CellOperation::Write { column, value }
+                if column == "flag" && *value == Value::Boolean(true))
+        });
+        assert!(has_flag);
+    }
+
+    #[test]
+    fn test_json_insert_collections() {
+        let schema = simple_json_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![],
+            values: CqlInsertValues::Json(r#"{"id": 3, "tags": ["alpha", "beta"]}"#.to_string()),
+            if_not_exists: false,
+            using: None,
+        };
+        let mutation = insert_to_mutation(&insert, &schema).unwrap();
+        let list_op = mutation.operations.iter().find_map(|op| {
+            if let CellOperation::Write { column, value } = op {
+                if column == "tags" {
+                    return Some(value.clone());
+                }
+            }
+            None
+        });
+        assert_eq!(
+            list_op,
+            Some(Value::List(vec![
+                Value::Text("alpha".to_string()),
+                Value::Text("beta".to_string()),
+            ]))
+        );
     }
 
     #[test]
@@ -1582,7 +2454,9 @@ mod tests {
     }
 
     #[test]
-    fn test_update_compound_operator_rejected() {
+    fn test_update_add_assign_on_scalar_column() {
+        // AddAssign on a scalar (int) column is treated as a plain Write under
+        // last-write-wins semantics — the RHS value is stored directly.
         let schema = test_schema();
         let update = CqlUpdate {
             table: CqlTable {
@@ -1605,7 +2479,19 @@ mod tests {
             if_condition: None,
         };
 
-        assert!(update_to_mutation(&update, &schema).is_err());
+        let result = update_to_mutation(&update, &schema);
+        assert!(
+            result.is_ok(),
+            "AddAssign on scalar should succeed: {:?}",
+            result.err()
+        );
+        match &result.unwrap().operations[0] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "age");
+                assert_eq!(*value, Value::Integer(1));
+            }
+            _ => panic!("expected Write operation"),
+        }
     }
 
     #[test]
@@ -1646,7 +2532,9 @@ mod tests {
     // ── delete_to_mutation tests ──────────────────────────────────────────────
 
     #[test]
-    fn test_delete_row_to_mutation() {
+    fn test_delete_partition_tombstone_when_no_clustering_key() {
+        // DELETE FROM t WHERE pk = X on a table with clustering columns
+        // should produce a partition tombstone, not a row tombstone
         let schema = test_schema();
         let delete = CqlDelete {
             columns: vec![],
@@ -1663,9 +2551,41 @@ mod tests {
         };
 
         let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert!(
+            mutation.operations.is_empty(),
+            "Partition tombstone should have no cell operations"
+        );
+        assert!(
+            mutation.partition_tombstone.is_some(),
+            "Should produce a partition tombstone when deleting without clustering key"
+        );
+        assert!(mutation.clustering_key.is_none());
+        assert!(mutation.ttl_seconds.is_none());
+    }
+
+    #[test]
+    fn test_delete_row_tombstone_with_clustering_key() {
+        // DELETE FROM t WHERE pk = X AND ck = Y → row tombstone (not partition tombstone)
+        let schema = test_schema();
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: None,
+            where_clause: make_where_pk_and_ck(),
+            if_condition: None,
+        };
+
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
         assert_eq!(mutation.operations.len(), 1);
         assert!(matches!(mutation.operations[0], CellOperation::DeleteRow));
-        assert!(mutation.ttl_seconds.is_none());
+        assert!(mutation.partition_tombstone.is_none());
+        assert!(mutation.clustering_key.is_some());
     }
 
     #[test]
@@ -1726,6 +2646,68 @@ mod tests {
         let ck = mutation.clustering_key.unwrap();
         assert_eq!(ck.columns.len(), 1);
         assert_eq!(ck.columns[0].0, "ts");
+        // With clustering key provided, should NOT be a partition tombstone
+        assert!(mutation.partition_tombstone.is_none());
+    }
+
+    #[test]
+    fn test_delete_partition_on_table_without_clustering_keys() {
+        // DELETE FROM t WHERE pk = X on a table WITHOUT clustering columns
+        // should produce a row tombstone (not a partition tombstone)
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        let schema = TableSchema {
+            keyspace: "test_ks".into(),
+            table: "no_ck_tbl".into(),
+            partition_keys: vec![KeyColumn {
+                name: "id".into(),
+                data_type: "int".into(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "val".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: std::collections::HashMap::new(),
+        };
+
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "no_ck_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: None,
+            where_clause: CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+                operator: CqlBinaryOperator::Eq,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(1))),
+            },
+            if_condition: None,
+        };
+
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert_eq!(mutation.operations.len(), 1);
+        assert!(matches!(mutation.operations[0], CellOperation::DeleteRow));
+        assert!(
+            mutation.partition_tombstone.is_none(),
+            "Table without clustering keys should use row tombstone, not partition tombstone"
+        );
     }
 
     // ── extract_where_bindings / resolve_key_bindings tests ──────────────────
@@ -1793,13 +2775,34 @@ mod tests {
     }
 
     #[test]
-    fn test_convert_cql_delete_string() {
+    fn test_convert_cql_delete_string_partition_tombstone() {
+        // DELETE with only PK on a table with clustering columns → partition tombstone
         let schema = test_schema();
         let sql = "DELETE FROM test_ks.test_tbl WHERE id = 550e8400-e29b-41d4-a716-446655440000";
         let result = convert_cql_to_mutation(sql, &schema);
         assert!(result.is_ok(), "Failed: {:?}", result.err());
         let mutation = result.unwrap();
+        assert!(
+            mutation.operations.is_empty(),
+            "Partition tombstone should have no cell operations"
+        );
+        assert!(
+            mutation.partition_tombstone.is_some(),
+            "Should generate partition tombstone"
+        );
+    }
+
+    #[test]
+    fn test_convert_cql_delete_string_row_tombstone() {
+        // DELETE with PK + CK → row tombstone
+        let schema = test_schema();
+        let sql = "DELETE FROM test_ks.test_tbl WHERE id = 550e8400-e29b-41d4-a716-446655440000 AND ts = 1704067200000";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutation = result.unwrap();
+        assert_eq!(mutation.operations.len(), 1);
         assert!(matches!(mutation.operations[0], CellOperation::DeleteRow));
+        assert!(mutation.partition_tombstone.is_none());
     }
 
     #[test]
@@ -1817,5 +2820,500 @@ mod tests {
         let result = convert_cql_to_mutation(sql, &schema);
         assert!(result.is_ok(), "Failed: {:?}", result.err());
         assert_eq!(result.unwrap().timestamp_micros, 1704067200000000);
+    }
+
+    // ── Collection assignment operator tests ──────────────────────────────────
+
+    fn test_collection_schema() -> crate::schema::TableSchema {
+        crate::schema::TableSchema {
+            keyspace: "test_ks".into(),
+            table: "test_table".into(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: "id".into(),
+                data_type: "int".into(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                crate::schema::Column {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "list_col".into(),
+                    data_type: "list<text>".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "set_col".into(),
+                    data_type: "set<int>".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "map_col".into(),
+                    data_type: "map<text,int>".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    fn make_where_pk_int(id: i64) -> CqlExpression {
+        CqlExpression::Binary {
+            left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+            operator: CqlBinaryOperator::Eq,
+            right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(id))),
+        }
+    }
+
+    #[test]
+    fn test_update_add_assign_list() {
+        let schema = test_collection_schema();
+        let sql = "UPDATE test_ks.test_table SET list_col += ['hello'] WHERE id = 1";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutation = result.unwrap();
+        assert_eq!(mutation.operations.len(), 1);
+        match &mutation.operations[0] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "list_col");
+                assert_eq!(*value, Value::List(vec![Value::Text("hello".into())]));
+            }
+            _ => panic!("expected Write operation"),
+        }
+    }
+
+    #[test]
+    fn test_update_add_assign_set() {
+        let schema = test_collection_schema();
+        let sql = "UPDATE test_ks.test_table SET set_col += {42} WHERE id = 1";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutation = result.unwrap();
+        match &mutation.operations[0] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "set_col");
+                assert_eq!(*value, Value::Set(vec![Value::Integer(42)]));
+            }
+            _ => panic!("expected Write operation"),
+        }
+    }
+
+    #[test]
+    fn test_update_add_assign_map() {
+        let schema = test_collection_schema();
+        let sql = "UPDATE test_ks.test_table SET map_col += {'key': 1} WHERE id = 1";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutation = result.unwrap();
+        match &mutation.operations[0] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "map_col");
+                assert_eq!(
+                    *value,
+                    Value::Map(vec![(Value::Text("key".into()), Value::Integer(1))])
+                );
+            }
+            _ => panic!("expected Write operation"),
+        }
+    }
+
+    #[test]
+    fn test_update_sub_assign_rejected() {
+        let schema = test_collection_schema();
+        let sql = "UPDATE test_ks.test_table SET set_col -= {42} WHERE id = 1";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not supported"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_update_map_update_rejected() {
+        let schema = test_collection_schema();
+        let update = CqlUpdate {
+            table: CqlTable::with_keyspace("test_ks", "test_table"),
+            using: None,
+            assignments: vec![CqlAssignment {
+                column: CqlIdentifier::new("map_col"),
+                operator: CqlAssignmentOperator::MapUpdate(CqlExpression::Literal(
+                    CqlLiteral::String("some_key".into()),
+                )),
+                value: CqlExpression::Literal(CqlLiteral::Integer(99)),
+            }],
+            where_clause: make_where_pk_int(1),
+            if_condition: None,
+        };
+        let result = update_to_mutation(&update, &schema);
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(msg.contains("not supported"), "got: {}", msg);
+    }
+
+    #[test]
+    fn test_update_list_prepend() {
+        let schema = test_collection_schema();
+        let update = CqlUpdate {
+            table: CqlTable::with_keyspace("test_ks", "test_table"),
+            using: None,
+            assignments: vec![CqlAssignment {
+                column: CqlIdentifier::new("list_col"),
+                operator: CqlAssignmentOperator::ListPrepend,
+                value: CqlExpression::Literal(CqlLiteral::Collection(CqlCollectionLiteral::List(
+                    vec![CqlLiteral::String("first".into())],
+                ))),
+            }],
+            where_clause: make_where_pk_int(1),
+            if_condition: None,
+        };
+        let result = update_to_mutation(&update, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        match &result.unwrap().operations[0] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "list_col");
+                assert_eq!(*value, Value::List(vec![Value::Text("first".into())]));
+            }
+            _ => panic!("expected Write operation"),
+        }
+    }
+
+    #[test]
+    fn test_update_assign_still_works() {
+        let schema = test_collection_schema();
+        let sql = "UPDATE test_ks.test_table SET list_col = ['a', 'b'] WHERE id = 1";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        match &result.unwrap().operations[0] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "list_col");
+                assert_eq!(
+                    *value,
+                    Value::List(vec![Value::Text("a".into()), Value::Text("b".into())])
+                );
+            }
+            _ => panic!("expected Write operation"),
+        }
+    }
+
+    // ── Range tombstone tests ─────────────────────────────────────────────────
+
+    fn test_clustering_schema() -> crate::schema::TableSchema {
+        crate::schema::TableSchema {
+            keyspace: "test_ks".into(),
+            table: "test_table".into(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: "id".into(),
+                data_type: "int".into(),
+                position: 0,
+            }],
+            clustering_keys: vec![crate::schema::ClusteringColumn {
+                name: "ck".into(),
+                data_type: "text".into(),
+                position: 0,
+                order: crate::schema::ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                crate::schema::Column {
+                    name: "id".into(),
+                    data_type: "int".into(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "ck".into(),
+                    data_type: "text".into(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "value".into(),
+                    data_type: "text".into(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_delete_range_gt() {
+        let schema = test_clustering_schema();
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable::with_keyspace("test_ks", "test_table"),
+            using: None,
+            where_clause: CqlExpression::Binary {
+                left: Box::new(CqlExpression::Binary {
+                    left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+                    operator: CqlBinaryOperator::Eq,
+                    right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(1))),
+                }),
+                operator: CqlBinaryOperator::And,
+                right: Box::new(CqlExpression::Binary {
+                    left: Box::new(CqlExpression::Column(CqlIdentifier::new("ck"))),
+                    operator: CqlBinaryOperator::Gt,
+                    right: Box::new(CqlExpression::Literal(CqlLiteral::String("a".into()))),
+                }),
+            },
+            if_condition: None,
+        };
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert_eq!(mutation.range_tombstones.len(), 1);
+        assert!(mutation.operations.is_empty());
+        let rt = &mutation.range_tombstones[0];
+        assert!(matches!(&rt.start, ClusteringBound::Exclusive(_)));
+        assert!(matches!(&rt.end, ClusteringBound::Top));
+    }
+
+    #[test]
+    fn test_delete_range_between() {
+        let schema = test_clustering_schema();
+        let where_clause = CqlExpression::Binary {
+            left: Box::new(CqlExpression::Binary {
+                left: Box::new(CqlExpression::Binary {
+                    left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+                    operator: CqlBinaryOperator::Eq,
+                    right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(1))),
+                }),
+                operator: CqlBinaryOperator::And,
+                right: Box::new(CqlExpression::Binary {
+                    left: Box::new(CqlExpression::Column(CqlIdentifier::new("ck"))),
+                    operator: CqlBinaryOperator::Ge,
+                    right: Box::new(CqlExpression::Literal(CqlLiteral::String("a".into()))),
+                }),
+            }),
+            operator: CqlBinaryOperator::And,
+            right: Box::new(CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier::new("ck"))),
+                operator: CqlBinaryOperator::Lt,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::String("z".into()))),
+            }),
+        };
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable::with_keyspace("test_ks", "test_table"),
+            using: None,
+            where_clause,
+            if_condition: None,
+        };
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert_eq!(mutation.range_tombstones.len(), 1);
+        let rt = &mutation.range_tombstones[0];
+        assert!(matches!(&rt.start, ClusteringBound::Inclusive(_)));
+        assert!(matches!(&rt.end, ClusteringBound::Exclusive(_)));
+    }
+
+    #[test]
+    fn test_delete_range_le() {
+        let schema = test_clustering_schema();
+        let where_clause = CqlExpression::Binary {
+            left: Box::new(CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+                operator: CqlBinaryOperator::Eq,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(1))),
+            }),
+            operator: CqlBinaryOperator::And,
+            right: Box::new(CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier::new("ck"))),
+                operator: CqlBinaryOperator::Le,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::String("z".into()))),
+            }),
+        };
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable::with_keyspace("test_ks", "test_table"),
+            using: None,
+            where_clause,
+            if_condition: None,
+        };
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert_eq!(mutation.range_tombstones.len(), 1);
+        let rt = &mutation.range_tombstones[0];
+        assert!(matches!(&rt.start, ClusteringBound::Bottom));
+        assert!(matches!(&rt.end, ClusteringBound::Inclusive(_)));
+    }
+
+    #[test]
+    fn test_delete_range_on_partition_key_rejected() {
+        let schema = test_clustering_schema();
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable::with_keyspace("test_ks", "test_table"),
+            using: None,
+            where_clause: CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+                operator: CqlBinaryOperator::Gt,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(1))),
+            },
+            if_condition: None,
+        };
+        let err = delete_to_mutation(&delete, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("Partition key column") || msg.contains("non-clustering"),
+                    "unexpected: {}",
+                    msg
+                );
+            }
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_delete_equality_still_works() {
+        let schema = test_clustering_schema();
+        let where_clause = CqlExpression::Binary {
+            left: Box::new(CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+                operator: CqlBinaryOperator::Eq,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(1))),
+            }),
+            operator: CqlBinaryOperator::And,
+            right: Box::new(CqlExpression::Binary {
+                left: Box::new(CqlExpression::Column(CqlIdentifier::new("ck"))),
+                operator: CqlBinaryOperator::Eq,
+                right: Box::new(CqlExpression::Literal(CqlLiteral::String("hello".into()))),
+            }),
+        };
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable::with_keyspace("test_ks", "test_table"),
+            using: None,
+            where_clause,
+            if_condition: None,
+        };
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert_eq!(mutation.range_tombstones.len(), 0);
+        assert_eq!(mutation.operations.len(), 1);
+        assert!(matches!(mutation.operations[0], CellOperation::DeleteRow));
+    }
+
+    #[test]
+    fn test_convert_cql_delete_range_string() {
+        let schema = test_clustering_schema();
+        let sql = "DELETE FROM test_ks.test_table WHERE id = 1 AND ck > 'a' AND ck < 'z'";
+        let result = convert_cql_to_mutation(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutation = result.unwrap();
+        assert_eq!(mutation.range_tombstones.len(), 1);
+        assert!(mutation.operations.is_empty());
+    }
+
+    // ── BATCH statement tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_batch_basic_two_inserts() {
+        let schema = simple_json_schema();
+        let sql = "BEGIN BATCH \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (1, 'Alice'); \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (2, 'Bob'); \
+            APPLY BATCH";
+        let result = convert_cql_to_mutations(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutations = result.unwrap();
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].partition_key.columns[0].1, Value::Integer(1));
+        assert_eq!(mutations[1].partition_key.columns[0].1, Value::Integer(2));
+    }
+
+    #[test]
+    fn test_batch_mixed_statements() {
+        let schema = simple_json_schema();
+        let sql = "BEGIN BATCH \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (1, 'Alice'); \
+            UPDATE test_ks.test_tbl SET name = 'Updated' WHERE id = 1; \
+            DELETE FROM test_ks.test_tbl WHERE id = 2; \
+            APPLY BATCH";
+        let result = convert_cql_to_mutations(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutations = result.unwrap();
+        assert_eq!(mutations.len(), 3);
+    }
+
+    #[test]
+    fn test_batch_unlogged() {
+        let schema = simple_json_schema();
+        let sql = "BEGIN UNLOGGED BATCH \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (1, 'Alice'); \
+            APPLY BATCH";
+        let result = convert_cql_to_mutations(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_batch_with_timestamp() {
+        let schema = simple_json_schema();
+        let sql = "BEGIN BATCH USING TIMESTAMP 1704067200000000 \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (1, 'Alice'); \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (2, 'Bob'); \
+            APPLY BATCH";
+        let result = convert_cql_to_mutations(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutations = result.unwrap();
+        assert_eq!(mutations.len(), 2);
+        assert_eq!(mutations[0].timestamp_micros, 1704067200000000);
+        assert_eq!(mutations[1].timestamp_micros, 1704067200000000);
+    }
+
+    #[test]
+    fn test_batch_inner_timestamp_override() {
+        let schema = simple_json_schema();
+        let sql = "BEGIN BATCH USING TIMESTAMP 1000000 \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (1, 'Alice') USING TIMESTAMP 2000000; \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (2, 'Bob'); \
+            APPLY BATCH";
+        let result = convert_cql_to_mutations(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        let mutations = result.unwrap();
+        // First INSERT has its own timestamp — should be preserved
+        assert_eq!(mutations[0].timestamp_micros, 2000000);
+        // Second INSERT should use batch timestamp
+        assert_eq!(mutations[1].timestamp_micros, 1000000);
+    }
+
+    #[test]
+    fn test_batch_empty() {
+        let schema = simple_json_schema();
+        let sql = "BEGIN BATCH APPLY BATCH";
+        let result = convert_cql_to_mutations(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_batch_single_statement() {
+        let schema = simple_json_schema();
+        let sql = "BEGIN BATCH \
+            INSERT INTO test_ks.test_tbl (id, name) VALUES (1, 'Alice'); \
+            APPLY BATCH";
+        let result = convert_cql_to_mutations(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        assert_eq!(result.unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_convert_cql_to_mutations_non_batch() {
+        // Non-batch statement should return single mutation
+        let schema = simple_json_schema();
+        let sql = "INSERT INTO test_ks.test_tbl (id, name) VALUES (1, 'Alice')";
+        let result = convert_cql_to_mutations(sql, &schema);
+        assert!(result.is_ok(), "Failed: {:?}", result.err());
+        assert_eq!(result.unwrap().len(), 1);
     }
 }

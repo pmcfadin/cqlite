@@ -809,6 +809,124 @@ fn delete_statement_impl(input: &str) -> IResult<&str, CqlDelete> {
     ))
 }
 
+/// Parse BATCH statement
+pub fn parse_batch_statement(input: &str) -> Result<CqlBatch> {
+    // Check input length (Issue #402 - DoS protection)
+    if input.len() > MAX_INPUT_LENGTH {
+        return Err(ParserError::resource_limit(
+            "input_length",
+            MAX_INPUT_LENGTH as u64,
+            input.len() as u64,
+        )
+        .into());
+    }
+
+    let result = batch_statement_impl(input);
+
+    match result {
+        Ok((_, batch)) => Ok(batch),
+        Err(e) => Err(ParserError::syntax(
+            format!("Failed to parse BATCH statement: {:?}", e),
+            SourcePosition::start(),
+        )
+        .into()),
+    }
+}
+
+fn batch_statement_impl(input: &str) -> IResult<&str, CqlBatch> {
+    let (input, _) = ws(input)?;
+    let (input, _) = keyword("begin")(input)?;
+    let (input, _) = ws1(input)?;
+
+    // Optional batch type: UNLOGGED, LOGGED, COUNTER (before BATCH keyword)
+    let (input, batch_type) = batch_type_parser(input)?;
+
+    let (input, _) = keyword("batch")(input)?;
+    let (input, _) = ws(input)?;
+
+    // Optional USING TIMESTAMP
+    let (input, using) = opt(using_clause)(input)?;
+    let (input, _) = ws(input)?;
+
+    // Parse inner statements (separated by semicolons, with optional trailing semicolon)
+    let mut statements = Vec::new();
+    let mut remaining = input;
+    loop {
+        let trimmed = remaining.trim_start();
+        // Check for APPLY BATCH
+        if trimmed.to_lowercase().starts_with("apply") {
+            remaining = trimmed;
+            break;
+        }
+        if trimmed.is_empty() {
+            break;
+        }
+
+        // Determine which statement type
+        let lowered = trimmed.to_lowercase();
+        let (rest, stmt) = if lowered.starts_with("insert") {
+            let (r, ins) = insert_statement_impl(trimmed)?;
+            (r, CqlBatchStatement::Insert(ins))
+        } else if lowered.starts_with("update") {
+            let (r, upd) = update_statement_impl(trimmed)?;
+            (r, CqlBatchStatement::Update(upd))
+        } else if lowered.starts_with("delete") {
+            let (r, del) = delete_statement_impl(trimmed)?;
+            (r, CqlBatchStatement::Delete(del))
+        } else {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                trimmed,
+                nom::error::ErrorKind::Tag,
+            )));
+        };
+
+        statements.push(stmt);
+
+        // Consume optional semicolon and whitespace
+        let rest = rest.trim_start();
+        remaining = rest.strip_prefix(';').unwrap_or(rest);
+    }
+
+    // APPLY BATCH
+    let (input, _) = keyword("apply")(remaining)?;
+    let (input, _) = ws1(input)?;
+    let (input, _) = keyword("batch")(input)?;
+    let (input, _) = ws(input)?;
+    // Optional trailing semicolon
+    let input = input.strip_prefix(';').unwrap_or(input);
+    let (input, _) = ws(input)?;
+
+    Ok((
+        input,
+        CqlBatch {
+            batch_type,
+            using,
+            statements,
+        },
+    ))
+}
+
+fn batch_type_parser(input: &str) -> IResult<&str, CqlBatchType> {
+    let trimmed = input.trim_start();
+    let lowered = trimmed.to_lowercase();
+    if lowered.starts_with("unlogged") {
+        let (input, _) = keyword("unlogged")(trimmed)?;
+        let (input, _) = ws1(input)?;
+        Ok((input, CqlBatchType::Unlogged))
+    } else if lowered.starts_with("counter") {
+        let (input, _) = keyword("counter")(trimmed)?;
+        let (input, _) = ws1(input)?;
+        Ok((input, CqlBatchType::Counter))
+    } else if lowered.starts_with("logged") {
+        let (input, _) = keyword("logged")(trimmed)?;
+        let (input, _) = ws1(input)?;
+        Ok((input, CqlBatchType::Logged))
+    } else {
+        // Default: logged
+        Ok((input, CqlBatchType::Logged))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

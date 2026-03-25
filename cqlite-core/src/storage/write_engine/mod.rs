@@ -471,11 +471,20 @@ impl WriteEngine {
             ));
         }
 
-        // Parse CQL statement
-        let mutation = self.parse_cql_to_mutation(statement)?;
+        let trimmed = statement.trim();
 
-        // Write mutation
-        self.write(mutation)
+        // BATCH statements produce multiple mutations
+        if trimmed.len() >= 5 && trimmed.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") {
+            let mutations =
+                cql_to_mutation::convert_cql_to_mutations(trimmed, &self.config.schema)?;
+            for mutation in mutations {
+                self.write(mutation)?;
+            }
+            Ok(())
+        } else {
+            let mutation = self.parse_cql_to_mutation(statement)?;
+            self.write(mutation)
+        }
     }
 
     /// Force a flush of the memtable to SSTable
