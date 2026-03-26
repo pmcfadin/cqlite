@@ -1064,12 +1064,6 @@ async fn test_type_tuple_nested() {
 }
 
 /// Test Frozen list type roundtrip
-///
-/// NOTE: The reader currently does not fully decode frozen collection types when
-/// the row is scanned. The row value comes back as `Value::Null` rather than a
-/// `Value::Map` of column values. This means the Frozen wrapper and inner List
-/// are not yet round-trippable through the read path. The test verifies the write
-/// succeeds and documents the current reader behavior for frozen types.
 #[tokio::test]
 async fn test_type_frozen_list() {
     let temp_dir = TempDir::new().unwrap();
@@ -1084,37 +1078,18 @@ async fn test_type_frozen_list() {
     let info = write_single_value(&temp_dir, &schema, "frozen_col", original.clone()).await;
 
     assert_single_partition_written(&info);
-    let row_value = super::read_back_raw_row(&temp_dir, &schema).await;
-    // The reader may strip the Frozen wrapper and return the inner List,
-    // or return Blob (raw bytes), or return Null if schema-aware decoding
-    // is not yet implemented for frozen collection types.
-    match &row_value {
-        Value::Map(entries) => {
-            // Row decoded as Map — look for the column
-            if let Some((_, col_val)) = entries
-                .iter()
-                .find(|(k, _)| matches!(k, Value::Text(n) if n == "frozen_col"))
-            {
-                assert!(
-                    *col_val == original || *col_val == inner,
-                    "Frozen list roundtrip failed: got {:?}",
-                    col_val
-                );
-            } else {
-                panic!("frozen_col not found in row Map: {:?}", entries);
-            }
-        }
-        Value::Null => {
-            // Known limitation: reader returns Null for frozen collection rows.
-            eprintln!("note: frozen list row read back as Null (frozen schema-aware decoding not yet implemented)");
-        }
-        other => panic!("Frozen list roundtrip: expected Map, Null, got {:?}", other),
-    }
+    let col_value = super::read_back_column(&temp_dir, &schema, "frozen_col").await;
+    // Accept either Value::Frozen(List) or Value::List directly
+    assert!(
+        col_value == original || col_value == inner,
+        "Frozen list roundtrip failed: expected {:?} or {:?}, got {:?}",
+        original,
+        inner,
+        col_value
+    );
 }
 
 /// Test Frozen map type roundtrip
-///
-/// NOTE: See `test_type_frozen_list` for the known reader limitation with frozen types.
 #[tokio::test]
 async fn test_type_frozen_map() {
     let temp_dir = TempDir::new().unwrap();
@@ -1125,32 +1100,17 @@ async fn test_type_frozen_map() {
     let info = write_single_value(&temp_dir, &schema, "frozen_col", original.clone()).await;
 
     assert_single_partition_written(&info);
-    let row_value = super::read_back_raw_row(&temp_dir, &schema).await;
-    match &row_value {
-        Value::Map(entries) => {
-            if let Some((_, col_val)) = entries
-                .iter()
-                .find(|(k, _)| matches!(k, Value::Text(n) if n == "frozen_col"))
-            {
-                assert!(
-                    *col_val == original || *col_val == inner,
-                    "Frozen map roundtrip failed: got {:?}",
-                    col_val
-                );
-            } else {
-                panic!("frozen_col not found in row Map: {:?}", entries);
-            }
-        }
-        Value::Null => {
-            eprintln!("note: frozen map row read back as Null (frozen schema-aware decoding not yet implemented)");
-        }
-        other => panic!("Frozen map roundtrip: expected Map, Null, got {:?}", other),
-    }
+    let col_value = super::read_back_column(&temp_dir, &schema, "frozen_col").await;
+    assert!(
+        col_value == original || col_value == inner,
+        "Frozen map roundtrip failed: expected {:?} or {:?}, got {:?}",
+        original,
+        inner,
+        col_value
+    );
 }
 
 /// Test Frozen empty list type
-///
-/// NOTE: See `test_type_frozen_list` for the known reader limitation with frozen types.
 #[tokio::test]
 async fn test_type_frozen_empty() {
     let temp_dir = TempDir::new().unwrap();
@@ -1161,30 +1121,14 @@ async fn test_type_frozen_empty() {
     let info = write_single_value(&temp_dir, &schema, "frozen_col", original.clone()).await;
 
     assert_single_partition_written(&info);
-    let row_value = super::read_back_raw_row(&temp_dir, &schema).await;
-    match &row_value {
-        Value::Map(entries) => {
-            if let Some((_, col_val)) = entries
-                .iter()
-                .find(|(k, _)| matches!(k, Value::Text(n) if n == "frozen_col"))
-            {
-                assert!(
-                    *col_val == original || *col_val == inner,
-                    "Frozen(empty) list roundtrip failed: got {:?}",
-                    col_val
-                );
-            } else {
-                panic!("frozen_col not found in row Map: {:?}", entries);
-            }
-        }
-        Value::Null => {
-            eprintln!("note: frozen(empty) list row read back as Null (frozen schema-aware decoding not yet implemented)");
-        }
-        other => panic!(
-            "Frozen(empty) list roundtrip: expected Map, Null, got {:?}",
-            other
-        ),
-    }
+    let col_value = super::read_back_column(&temp_dir, &schema, "frozen_col").await;
+    assert!(
+        col_value == original || col_value == inner,
+        "Frozen(empty) list roundtrip failed: expected {:?} or {:?}, got {:?}",
+        original,
+        inner,
+        col_value
+    );
 }
 
 /// Test all types in single partition
@@ -1270,4 +1214,52 @@ async fn test_types_multiple_rows() {
         info.partition_count, 10,
         "Should have 10 partitions with all types"
     );
+}
+
+/// Test Ascii type roundtrip (handled identically to Text)
+#[tokio::test]
+async fn test_type_ascii_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("ascii_col", "ascii");
+    let original = Value::Text("hello_ascii".to_string());
+
+    let info = write_single_value(&temp_dir, &schema, "ascii_col", original.clone()).await;
+
+    assert_single_partition_written(&info);
+    let read_back = super::read_back_column(&temp_dir, &schema, "ascii_col").await;
+    assert_eq!(read_back, original, "Ascii type roundtrip failed");
+}
+
+/// Test Varchar type roundtrip (handled identically to Text)
+#[tokio::test]
+async fn test_type_varchar_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("varchar_col", "varchar");
+    let original = Value::Text("hello_varchar".to_string());
+
+    let info = write_single_value(&temp_dir, &schema, "varchar_col", original.clone()).await;
+
+    assert_single_partition_written(&info);
+    let read_back = super::read_back_column(&temp_dir, &schema, "varchar_col").await;
+    assert_eq!(read_back, original, "Varchar type roundtrip failed");
+}
+
+/// Test Timeuuid type roundtrip (uses same Uuid([u8; 16]) path as uuid)
+#[tokio::test]
+async fn test_type_timeuuid_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("timeuuid_col", "timeuuid");
+
+    // Valid v1 UUID bytes
+    let v1_uuid_bytes: [u8; 16] = [
+        0x01, 0xb2, 0x1d, 0xd2, 0x13, 0x81, 0x11, 0xe1, 0x85, 0x5a, 0x00, 0x02, 0xa5, 0xd5, 0xc5,
+        0x1b,
+    ];
+    let original = Value::Uuid(v1_uuid_bytes);
+
+    let info = write_single_value(&temp_dir, &schema, "timeuuid_col", original.clone()).await;
+
+    assert_single_partition_written(&info);
+    let read_back = super::read_back_column(&temp_dir, &schema, "timeuuid_col").await;
+    assert_eq!(read_back, original, "Timeuuid type roundtrip failed");
 }

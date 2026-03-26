@@ -436,6 +436,40 @@ pub async fn read_back_raw_row(temp_dir: &TempDir, schema: &TableSchema) -> Valu
     row_value
 }
 
+/// Read back all raw row values from a flushed SSTable.
+///
+/// Opens SSTableManager on the data directory, scans the table,
+/// and returns the raw Value for every row found.
+/// Useful when testing multi-row partitions (e.g., clustering key tests).
+pub async fn read_back_all_rows(temp_dir: &TempDir, schema: &TableSchema) -> Vec<Value> {
+    let data_dir = temp_dir.path().join("data");
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform::new should succeed in test environment"),
+    );
+
+    let manager = SSTableManager::new(
+        &data_dir,
+        &config,
+        platform,
+        #[cfg(feature = "state_machine")]
+        None,
+    )
+    .await
+    .expect("SSTableManager should load written SSTables");
+
+    let table_id =
+        cqlite_core::types::TableId::from(format!("{}.{}", schema.keyspace, schema.table).as_str());
+    let results = manager
+        .scan(&table_id, None, None, None, Some(schema))
+        .await
+        .expect("Scan should succeed");
+
+    results.into_iter().map(|(_key, value)| value).collect()
+}
+
 /// Read back a single column value from a flushed SSTable.
 ///
 /// Opens SSTableManager on the data directory, scans the table,
