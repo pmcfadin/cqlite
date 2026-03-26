@@ -71,7 +71,11 @@ pub struct Mutation {
     pub operations: Vec<CellOperation>,
     /// Timestamp in microseconds since Unix epoch
     pub timestamp_micros: i64,
-    /// Time-to-live in seconds (None = no expiration)
+    /// Time-to-live in seconds applied to all cells in this mutation (None = no expiration).
+    ///
+    /// This is set by `USING TTL` in CQL statements and applies uniformly to all
+    /// `Write` operations. For per-column TTL, use `CellOperation::WriteWithTtl`
+    /// in the operations list instead.
     pub ttl_seconds: Option<u32>,
     /// Partition tombstone (deletes entire partition)
     pub partition_tombstone: Option<PartitionTombstone>,
@@ -151,7 +155,19 @@ pub enum ClusteringBound {
     Top,
 }
 
-/// Cell-level operation within a mutation
+/// Operations that can be applied to individual cells within a row.
+///
+/// # Per-Cell TTL
+///
+/// Per-cell TTL is supported via the `WriteWithTtl` variant when using
+/// the JSON mutation format directly. CQL syntax (`USING TTL`) applies
+/// TTL uniformly to all cells in a statement. To set different TTLs
+/// per column, submit separate mutations or use JSON mutations with
+/// `WriteWithTtl`:
+///
+/// ```json
+/// {"WriteWithTtl": {"column": "session_token", "value": {"Text": "abc"}, "ttl_seconds": 3600}}
+/// ```
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum CellOperation {
     /// Write a value to a column
@@ -161,7 +177,11 @@ pub enum CellOperation {
         /// Column value
         value: Value,
     },
-    /// Write a value to a column with TTL (expiring cell)
+    /// Write a value to a column with TTL (expiring cell).
+    ///
+    /// The cell will expire after `ttl_seconds` seconds. This is the only
+    /// way to set per-column TTL — CQL `USING TTL` applies to all cells
+    /// in a statement. Use JSON mutations to set different TTLs per column.
     WriteWithTtl {
         /// Column name
         column: String,
@@ -475,129 +495,15 @@ impl PartialOrd for DecoratedKey {
 /// Uses Cassandra's Murmur3Partitioner algorithm:
 /// 1. Compute Cassandra's `MurmurHash.hash3_x64_128`
 /// 2. Take `h1` as the signed token
-/// 3. Preserve Cassandra's wraparound semantics
+/// 3. Apply `normalize`: map `i64::MIN` → `i64::MAX` (Cassandra excludes MIN_VALUE)
 fn calculate_murmur3_token(key_bytes: &[u8]) -> Result<i64> {
-    // Special case: empty key -> Long.MIN_VALUE
     if key_bytes.is_empty() {
         return Ok(i64::MIN);
     }
 
-    Ok(cassandra_murmur3_hash(key_bytes).0 as i64)
-}
-
-fn cassandra_murmur3_hash(data: &[u8]) -> (u64, u64) {
-    const C1: u64 = 0x87c3_7b91_1142_53d5;
-    const C2: u64 = 0x4cf5_ad43_2745_937f;
-
-    let mut h1 = 0u64;
-    let mut h2 = 0u64;
-
-    let nblocks = data.len() / 16;
-    for i in 0..nblocks {
-        let offset = i * 16;
-        let mut k1 = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-        let mut k2 = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
-
-        k1 = k1.wrapping_mul(C1);
-        k1 = k1.rotate_left(31);
-        k1 = k1.wrapping_mul(C2);
-        h1 ^= k1;
-        h1 = h1.rotate_left(27);
-        h1 = h1.wrapping_add(h2);
-        h1 = h1.wrapping_mul(5).wrapping_add(0x52dc_e729);
-
-        k2 = k2.wrapping_mul(C2);
-        k2 = k2.rotate_left(33);
-        k2 = k2.wrapping_mul(C1);
-        h2 ^= k2;
-        h2 = h2.rotate_left(31);
-        h2 = h2.wrapping_add(h1);
-        h2 = h2.wrapping_mul(5).wrapping_add(0x3849_5ab5);
-    }
-
-    let tail = &data[nblocks * 16..];
-    let mut k1 = 0u64;
-    let mut k2 = 0u64;
-    let signed = |byte: u8| (byte as i8 as i64) as u64;
-
-    if tail.len() == 15 {
-        k2 ^= signed(tail[14]) << 48;
-    }
-    if tail.len() >= 14 {
-        k2 ^= signed(tail[13]) << 40;
-    }
-    if tail.len() >= 13 {
-        k2 ^= signed(tail[12]) << 32;
-    }
-    if tail.len() >= 12 {
-        k2 ^= signed(tail[11]) << 24;
-    }
-    if tail.len() >= 11 {
-        k2 ^= signed(tail[10]) << 16;
-    }
-    if tail.len() >= 10 {
-        k2 ^= signed(tail[9]) << 8;
-    }
-    if tail.len() >= 9 {
-        k2 ^= signed(tail[8]);
-        k2 = k2.wrapping_mul(C2);
-        k2 = k2.rotate_left(33);
-        k2 = k2.wrapping_mul(C1);
-        h2 ^= k2;
-    }
-
-    if tail.len() >= 8 {
-        k1 ^= signed(tail[7]) << 56;
-    }
-    if tail.len() >= 7 {
-        k1 ^= signed(tail[6]) << 48;
-    }
-    if tail.len() >= 6 {
-        k1 ^= signed(tail[5]) << 40;
-    }
-    if tail.len() >= 5 {
-        k1 ^= signed(tail[4]) << 32;
-    }
-    if tail.len() >= 4 {
-        k1 ^= signed(tail[3]) << 24;
-    }
-    if tail.len() >= 3 {
-        k1 ^= signed(tail[2]) << 16;
-    }
-    if tail.len() >= 2 {
-        k1 ^= signed(tail[1]) << 8;
-    }
-    if !tail.is_empty() {
-        k1 ^= signed(tail[0]);
-        k1 = k1.wrapping_mul(C1);
-        k1 = k1.rotate_left(31);
-        k1 = k1.wrapping_mul(C2);
-        h1 ^= k1;
-    }
-
-    let len = data.len() as u64;
-    h1 ^= len;
-    h2 ^= len;
-
-    h1 = h1.wrapping_add(h2);
-    h2 = h2.wrapping_add(h1);
-
-    h1 = fmix64(h1);
-    h2 = fmix64(h2);
-
-    h1 = h1.wrapping_add(h2);
-    h2 = h2.wrapping_add(h1);
-
-    (h1, h2)
-}
-
-fn fmix64(mut value: u64) -> u64 {
-    value ^= value >> 33;
-    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
-    value ^= value >> 33;
-    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
-    value ^= value >> 33;
-    value
+    Ok(crate::util::cassandra_murmur3::cassandra_murmur3_token(
+        key_bytes,
+    ))
 }
 
 /// Serialize a Value to bytes according to its CQL type
