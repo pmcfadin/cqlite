@@ -1140,6 +1140,13 @@ impl DataWriter {
             }
         };
 
+        // Validate: SET elements cannot be null (CQL semantics)
+        if elements.iter().any(|e| matches!(e, Value::Null)) {
+            return Err(Error::InvalidInput(
+                "SET elements cannot be null (CQL semantics)".to_string(),
+            ));
+        }
+
         // Serialize all elements first, then sort by byte representation
         let mut serialized: Vec<Vec<u8>> = elements
             .iter()
@@ -1190,6 +1197,13 @@ impl DataWriter {
             }
         };
 
+        // Validate: MAP keys cannot be null (CQL semantics)
+        if entries.iter().any(|(k, _)| matches!(k, Value::Null)) {
+            return Err(Error::InvalidInput(
+                "MAP keys cannot be null (CQL semantics)".to_string(),
+            ));
+        }
+
         // Serialize all keys and values, then sort by serialized key bytes
         let mut serialized: Vec<(Vec<u8>, Vec<u8>)> = entries
             .iter()
@@ -1236,6 +1250,13 @@ impl DataWriter {
                 )))
             }
         };
+
+        // Validate: LIST elements cannot be null (CQL semantics)
+        if elements.iter().any(|e| matches!(e, Value::Null)) {
+            return Err(Error::InvalidInput(
+                "LIST elements cannot be null (CQL semantics)".to_string(),
+            ));
+        }
 
         // Cell count
         encode_unsigned(elements.len() as u64, buf);
@@ -1847,6 +1868,12 @@ fn serialize_value(value: &Value) -> Result<Vec<u8>> {
             serializer.serialize_udt(value, &schema)
         }
         Value::List(elements) | Value::Set(elements) => {
+            // Validate: List/Set elements cannot be null (CQL semantics)
+            if elements.iter().any(|e| matches!(e, Value::Null)) {
+                return Err(Error::InvalidInput(
+                    "Collection elements cannot be null (CQL semantics)".to_string(),
+                ));
+            }
             let mut buf = Vec::new();
             buf.extend_from_slice(&len_as_i32(elements.len())?.to_be_bytes());
             for elem in elements {
@@ -1857,6 +1884,12 @@ fn serialize_value(value: &Value) -> Result<Vec<u8>> {
             Ok(buf)
         }
         Value::Map(entries) => {
+            // Validate: MAP keys cannot be null (CQL semantics)
+            if entries.iter().any(|(k, _)| matches!(k, Value::Null)) {
+                return Err(Error::InvalidInput(
+                    "MAP keys cannot be null (CQL semantics)".to_string(),
+                ));
+            }
             let mut buf = Vec::new();
             buf.extend_from_slice(&len_as_i32(entries.len())?.to_be_bytes());
             for (key, val) in entries {
