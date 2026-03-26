@@ -38,8 +38,8 @@ pub struct ExportOptions {
     pub generation: u64,
     /// Whether to perform compaction before export (default: false)
     ///
-    /// **NOT YET IMPLEMENTED**: Setting this to `true` will return an error.
-    /// Use `maintenance_step()` to compact SSTables before calling `export_sstable()`.
+    /// **Deprecated**: Setting this to `true` emits a warning but has no effect.
+    /// Use `WriteEngine::maintenance_step()` before calling `export_sstable()` instead.
     pub compact_before_export: bool,
     /// Whether to validate the exported SSTable (default: true)
     pub validate_after_export: bool,
@@ -70,10 +70,10 @@ impl ExportOptions {
         }
     }
 
-    /// Disable compaction before export
+    /// Disable compaction before export (no-op — compaction is off by default)
     ///
-    /// Use this if you know there's only one SSTable or want to export
-    /// the raw internal files without merging.
+    /// This method is a no-op since `compact_before_export` defaults to `false`.
+    /// Use `WriteEngine::maintenance_step()` before export for compaction.
     pub fn skip_compaction(mut self) -> Self {
         self.compact_before_export = false;
         self

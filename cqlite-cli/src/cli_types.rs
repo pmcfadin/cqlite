@@ -407,7 +407,7 @@ pub struct ExportSstableArgs {
     /// Table name for the exported SSTable
     #[arg(long, default_value = "data")]
     pub table: String,
-    /// Run compaction before export to merge multiple SSTables (Issue #464)
+    /// Run compaction before export to merge multiple SSTables
     #[arg(long)]
     pub compact: bool,
     /// Skip validation after export

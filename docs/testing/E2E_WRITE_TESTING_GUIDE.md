@@ -76,10 +76,9 @@ SCHEMA=test-data/schemas/basic-types.cql
   export-sstable $EXPORT_DIR \
   --keyspace test_basic \
   --table simple_table \
-  --skip-compact
 ```
 
-The `--skip-compact` flag is required (compaction is not yet implemented).
+Optionally add `--compact` to run compaction before export (merges multiple SSTables).
 
 ### 4. Verify the flushed artifact with sstabledump (optional but recommended)
 
@@ -333,7 +332,7 @@ CQLite uses a Rust `murmur3` crate that produces different hash tokens than Cass
 
 ### No compaction
 
-The `--skip-compact` flag is required for the current packaging helper. Compaction (merging multiple SSTables) is not yet implemented (M5.3 scope). Each flush produces a separate SSTable.
+Use `--compact` to merge multiple SSTables before export. Without it, the most recent SSTable is exported directly. Each flush produces a separate SSTable.
 
 ### Collection types (Phase 2)
 

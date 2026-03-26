@@ -876,7 +876,7 @@ Packaging options:
 |------|-------------|
 | `--keyspace <NAME>` | Keyspace name for export (default: `export`) |
 | `--table <NAME>` | Table name for export (default: `data`) |
-| `--skip-compact` | Skip compaction before export |
+| `--compact` | Run compaction before export to merge multiple SSTables |
 | `--skip-validate` | Skip validation after export |
 
 ### REPL Write Meta-Commands
