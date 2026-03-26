@@ -1140,17 +1140,11 @@ impl DataWriter {
             }
         };
 
-        // Validate: SET elements cannot be null (CQL semantics)
-        if elements.iter().any(|e| matches!(e, Value::Null)) {
-            return Err(Error::InvalidInput(
-                "SET elements cannot be null (CQL semantics)".to_string(),
-            ));
-        }
-
-        // Serialize all elements first, then sort by byte representation
+        // Serialize all elements first, then sort by byte representation.
+        // serialize_value rejects Value::Null, enforcing CQL semantics.
         let mut serialized: Vec<Vec<u8>> = elements
             .iter()
-            .map(serialize_value)
+            .map(|e| serialize_collection_element(e, "SET"))
             .collect::<Result<Vec<_>>>()?;
         serialized.sort();
 
@@ -1197,17 +1191,18 @@ impl DataWriter {
             }
         };
 
-        // Validate: MAP keys cannot be null (CQL semantics)
-        if entries.iter().any(|(k, _)| matches!(k, Value::Null)) {
-            return Err(Error::InvalidInput(
-                "MAP keys cannot be null (CQL semantics)".to_string(),
-            ));
-        }
-
-        // Serialize all keys and values, then sort by serialized key bytes
+        // Serialize all keys and values, then sort by serialized key bytes.
+        // Null keys are rejected inline; null values are allowed for MAP.
         let mut serialized: Vec<(Vec<u8>, Vec<u8>)> = entries
             .iter()
-            .map(|(key, val)| Ok((serialize_value(key)?, serialize_value(val)?)))
+            .map(|(key, val)| {
+                if matches!(key, Value::Null) {
+                    return Err(Error::InvalidInput(
+                        "MAP keys cannot be null (CQL semantics)".to_string(),
+                    ));
+                }
+                Ok((serialize_value(key)?, serialize_value(val)?))
+            })
             .collect::<Result<Vec<_>>>()?;
         serialized.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -1251,17 +1246,17 @@ impl DataWriter {
             }
         };
 
-        // Validate: LIST elements cannot be null (CQL semantics)
-        if elements.iter().any(|e| matches!(e, Value::Null)) {
-            return Err(Error::InvalidInput(
-                "LIST elements cannot be null (CQL semantics)".to_string(),
-            ));
-        }
-
         // Cell count
         encode_unsigned(elements.len() as u64, buf);
 
         for (i, elem) in elements.iter().enumerate() {
+            // Reject null elements inline (CQL semantics)
+            if matches!(elem, Value::Null) {
+                return Err(Error::InvalidInput(
+                    "LIST elements cannot be null (CQL semantics)".to_string(),
+                ));
+            }
+
             // Cell header: flags + optional TTL fields
             self.write_complex_cell_header(buf, 0, timestamp_micros, ttl_seconds)?;
 
@@ -1809,6 +1804,17 @@ fn len_as_i32(len: usize) -> Result<i32> {
     })
 }
 
+/// Serialize a collection element, rejecting null (CQL semantics: lists/sets cannot contain null).
+fn serialize_collection_element(value: &Value, collection_kind: &str) -> Result<Vec<u8>> {
+    if matches!(value, Value::Null) {
+        return Err(Error::InvalidInput(format!(
+            "{} elements cannot be null (CQL semantics)",
+            collection_kind
+        )));
+    }
+    serialize_value(value)
+}
+
 /// Serialize a Value to bytes for cell storage
 ///
 /// This follows Cassandra's type-specific serialization rules.
@@ -1868,31 +1874,24 @@ fn serialize_value(value: &Value) -> Result<Vec<u8>> {
             serializer.serialize_udt(value, &schema)
         }
         Value::List(elements) | Value::Set(elements) => {
-            // Validate: List/Set elements cannot be null (CQL semantics)
-            if elements.iter().any(|e| matches!(e, Value::Null)) {
-                return Err(Error::InvalidInput(
-                    "Collection elements cannot be null (CQL semantics)".to_string(),
-                ));
-            }
             let mut buf = Vec::new();
             buf.extend_from_slice(&len_as_i32(elements.len())?.to_be_bytes());
             for elem in elements {
-                let elem_bytes = serialize_value(elem)?;
+                let elem_bytes = serialize_collection_element(elem, "Collection")?;
                 buf.extend_from_slice(&len_as_i32(elem_bytes.len())?.to_be_bytes());
                 buf.extend_from_slice(&elem_bytes);
             }
             Ok(buf)
         }
         Value::Map(entries) => {
-            // Validate: MAP keys cannot be null (CQL semantics)
-            if entries.iter().any(|(k, _)| matches!(k, Value::Null)) {
-                return Err(Error::InvalidInput(
-                    "MAP keys cannot be null (CQL semantics)".to_string(),
-                ));
-            }
             let mut buf = Vec::new();
             buf.extend_from_slice(&len_as_i32(entries.len())?.to_be_bytes());
             for (key, val) in entries {
+                if matches!(key, Value::Null) {
+                    return Err(Error::InvalidInput(
+                        "MAP keys cannot be null (CQL semantics)".to_string(),
+                    ));
+                }
                 let key_bytes = serialize_value(key)?;
                 buf.extend_from_slice(&len_as_i32(key_bytes.len())?.to_be_bytes());
                 buf.extend_from_slice(&key_bytes);
