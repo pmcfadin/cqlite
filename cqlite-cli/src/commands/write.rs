@@ -269,7 +269,7 @@ pub fn handle_write_stats(write_engine: &WriteEngine) -> Result<WriteStats> {
 /// * `output_dir` - Output directory for the SSTable files
 /// * `keyspace` - Keyspace name for the exported SSTable
 /// * `table` - Table name for the exported SSTable
-/// * `skip_compact` - Skip compaction before export
+/// * `compact` - Run compaction before export to merge multiple SSTables (Issue #464)
 /// * `skip_validate` - Skip validation after export
 ///
 /// # Returns
@@ -281,18 +281,23 @@ pub async fn handle_export(
     output_dir: &Path,
     keyspace: &str,
     table: &str,
-    skip_compact: bool,
+    compact: bool,
     skip_validate: bool,
 ) -> Result<ExportResult> {
     let start = Instant::now();
+
+    // If --compact was requested, run maintenance_step() before export
+    if compact {
+        let budget = std::time::Duration::from_secs(300); // 5-minute budget
+        write_engine
+            .maintenance_step(budget)
+            .with_context(|| "Compaction before export failed")?;
+    }
 
     // Use the current generation from the write engine
     let generation = write_engine.generation();
 
     let mut options = ExportOptions::new(keyspace, table, generation);
-    if skip_compact {
-        options = options.skip_compaction();
-    }
     if skip_validate {
         options = options.skip_validation();
     }
@@ -387,7 +392,7 @@ pub async fn handle_export(
     _output_dir: &Path,
     _keyspace: &str,
     _table: &str,
-    _skip_compact: bool,
+    _compact: bool,
     _skip_validate: bool,
 ) -> Result<ExportResult> {
     Err(anyhow::anyhow!(

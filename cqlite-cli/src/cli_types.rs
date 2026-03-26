@@ -285,7 +285,7 @@ pub enum Commands {
     /// Export SSTables for Cassandra import - requires --writable mode (Issue #392)
     #[command(name = "export-sstable")]
     #[command(
-        long_about = "Export data from the write engine as Cassandra-compatible SSTables. Use the maintenance subcommand to compact before export. Pre-export compaction will be available in M5.3. Example: cqlite export-sstable /tmp/export --writable --write-dir /path/to/data"
+        long_about = "Export data from the write engine as Cassandra-compatible SSTables. Use --compact to run compaction before export to merge multiple SSTables into one. Example: cqlite export-sstable /tmp/export --compact --writable --write-dir /path/to/data"
     )]
     ExportSstable(ExportSstableArgs),
 }
@@ -407,9 +407,9 @@ pub struct ExportSstableArgs {
     /// Table name for the exported SSTable
     #[arg(long, default_value = "data")]
     pub table: String,
-    /// Skip compaction before export (no-op until M5.3, compaction is never enabled)
+    /// Run compaction before export to merge multiple SSTables (Issue #464)
     #[arg(long)]
-    pub skip_compact: bool,
+    pub compact: bool,
     /// Skip validation after export
     #[arg(long)]
     pub skip_validate: bool,

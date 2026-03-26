@@ -69,15 +69,25 @@ async fn run_main() -> Result<()> {
 
     // Issue #231: Validate required flags for one-shot query mode
     // When --execute and --schema are provided, --data-dir (or --dataset) is required
+    // Exception: DML statements (INSERT/UPDATE/DELETE) in --writable mode don't need --data-dir
     #[cfg(feature = "state_machine")]
     if cli.execute.is_some() && cli.schema.is_some() {
         if cli.data_dir.is_none() && cli.dataset.is_none() {
-            return Err(anyhow::anyhow!(
-                "Missing required flag: --data-dir\n\n\
-                 One-shot query execution requires both --schema and --data-dir.\n\n\
-                 Example:\n\
-                 cqlite --schema schema.cql --data-dir /path/to/sstables -e 'SELECT * FROM table'"
-            ));
+            let is_writable_dml = cli.writable
+                && cli.execute.as_ref().map_or(false, |q| {
+                    let upper = q.trim().to_uppercase();
+                    upper.starts_with("INSERT")
+                        || upper.starts_with("UPDATE")
+                        || upper.starts_with("DELETE")
+                });
+            if !is_writable_dml {
+                return Err(anyhow::anyhow!(
+                    "Missing required flag: --data-dir\n\n\
+                     One-shot query execution requires both --schema and --data-dir.\n\n\
+                     Example:\n\
+                     cqlite --schema schema.cql --data-dir /path/to/sstables -e 'SELECT * FROM table'"
+                ));
+            }
         }
     }
 
@@ -502,6 +512,31 @@ async fn run_main() -> Result<()> {
 
     // Handle --execute flag (single statement execution) - takes precedence over subcommands
     if let Some(query) = cli.execute {
+        // Route DML statements (INSERT/UPDATE/DELETE) to WriteEngine when --writable is set
+        #[cfg(feature = "write-support")]
+        {
+            let trimmed_upper = query.trim().to_uppercase();
+            let is_dml = trimmed_upper.starts_with("INSERT")
+                || trimmed_upper.starts_with("UPDATE")
+                || trimmed_upper.starts_with("DELETE");
+
+            if is_dml {
+                let engine = write_engine.as_mut().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "DML statements require --writable mode. \
+                         Use: cqlite --writable --write-dir <DIR> --schema <SCHEMA> --execute \"INSERT ...\""
+                    )
+                })?;
+
+                engine
+                    .execute(&query)
+                    .map_err(|e| anyhow::anyhow!("DML execution failed: {}", e))?;
+
+                println!("OK");
+                return Ok(());
+            }
+        }
+
         // Issue #142: Experimental fallback to read-sstable for SELECT when ingestion unavailable
         // This is a temporary feature (disabled by default) that will be removed in M3
         // Check this FIRST before schema validation to avoid false negatives
@@ -895,7 +930,7 @@ async fn run_main() -> Result<()> {
             output,
             keyspace,
             table,
-            skip_compact,
+            compact,
             skip_validate,
         })) => {
             #[cfg(feature = "write-support")]
@@ -908,7 +943,7 @@ async fn run_main() -> Result<()> {
                     &output,
                     &keyspace,
                     &table,
-                    skip_compact,
+                    compact,
                     skip_validate,
                 )
                 .await?;
@@ -917,7 +952,7 @@ async fn run_main() -> Result<()> {
             }
             #[cfg(not(feature = "write-support"))]
             {
-                let _ = (output, keyspace, table, skip_compact, skip_validate);
+                let _ = (output, keyspace, table, compact, skip_validate);
                 Err(anyhow::anyhow!(
                     "Write support is not enabled. Build with --features write-support to enable write operations."
                 ))

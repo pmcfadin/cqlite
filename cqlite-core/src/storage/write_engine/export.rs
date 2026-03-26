@@ -301,10 +301,11 @@ impl crate::storage::write_engine::WriteEngine {
 
         // Step 2: Full compaction (if enabled)
         let source_sstable = if options.compact_before_export {
-            return Err(Error::InvalidInput(
-                "compact_before_export is not yet implemented (requires M5.3 SSTable reader integration). \
-                 Set compact_before_export=false or use maintenance_step() to compact first.".to_string()
-            ));
+            log::warn!(
+                "compact_before_export on ExportOptions is deprecated. \
+                 Use WriteEngine::maintenance_step() before export instead."
+            );
+            self.find_most_recent_sstable().await?
         } else {
             log::info!("Skipping compaction, using most recent SSTable");
             self.find_most_recent_sstable().await?
@@ -495,7 +496,7 @@ impl crate::storage::write_engine::WriteEngine {
 /// - Offset 161 from component start: totalRows (u64 BE)
 ///
 /// Index.db format (BIG format, NB variant):
-/// - Each entry: 2-byte marker (0x0010) + 16-byte MD5 digest + VInt position + VInt promoted_size
+/// - Each entry: u16 BE key_len + key_bytes + VInt position + VInt promoted_size
 /// - Entries are sequential until EOF
 #[cfg(feature = "write-support")]
 fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
@@ -602,8 +603,8 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
 ///
 /// Each partition has one entry in Index.db using BIG format (NB variant):
 /// ```text
-/// [marker: u16 BE = 0x0010]          ← BIG format marker
-/// [digest: 16 bytes]                 ← MD5 hash of partition key
+/// [key_len: u16 BE]                  ← Length of partition key bytes
+/// [key_bytes: key_len bytes]         ← Raw partition key bytes
 /// [position: unsigned VInt]          ← Data.db offset
 /// [promoted_index_size: unsigned VInt] ← Size of promoted index (0 for simple)
 /// [promoted_index: N bytes]          ← Optional promoted index data
@@ -612,8 +613,6 @@ fn read_statistics_from_export(components: &[PathBuf]) -> Result<(u64, u64)> {
 /// Entries are sequential until EOF.
 #[cfg(feature = "write-support")]
 fn count_index_entries(components: &[PathBuf]) -> Result<u64> {
-    use crate::storage::sstable::writer::index_writer::BIG_FORMAT_MARKER;
-
     // Find Index.db in exported components
     let index_path = components
         .iter()
@@ -631,23 +630,22 @@ fn count_index_entries(components: &[PathBuf]) -> Result<u64> {
     let mut count = 0u64;
     let mut offset = 0usize;
 
-    // Each BIG entry is at least 18 bytes: 2 (marker) + 16 (digest)
-    while offset + 18 <= index_data.len() {
-        // Read 2-byte BIG format marker
-        let marker = u16::from_be_bytes([index_data[offset], index_data[offset + 1]]);
-        if marker != BIG_FORMAT_MARKER {
+    // Each BIG entry is at least 4 bytes: 2 (key_len) + 1 (pos VInt) + 1 (promoted VInt)
+    while offset + 4 <= index_data.len() {
+        // Read 2-byte key length (u16 BE)
+        let key_len = u16::from_be_bytes([index_data[offset], index_data[offset + 1]]) as usize;
+        offset += 2;
+
+        // Skip key bytes
+        if offset + key_len > index_data.len() {
             log::warn!(
-                "Index.db: unexpected marker 0x{:04X} at offset {}, expected 0x{:04X}",
-                marker,
+                "Index.db: key at offset {} exceeds file bounds (key_len={})",
                 offset,
-                BIG_FORMAT_MARKER
+                key_len
             );
             break;
         }
-        offset += 2;
-
-        // Skip 16-byte MD5 digest
-        offset += 16;
+        offset += key_len;
 
         // Read position as unsigned VInt
         let (_, pos_bytes) = decode_unsigned_vint(&index_data, offset)?;
@@ -1090,17 +1088,16 @@ mod tests {
 
     #[test]
     fn test_count_index_entries_big_format() {
-        use crate::storage::sstable::writer::index_writer::BIG_FORMAT_MARKER;
-
         let temp_dir = TempDir::new().unwrap();
 
         // Build a synthetic BIG-format Index.db with 3 entries
+        // Format: [key_len:u16 BE][key_bytes][pos VInt][promoted VInt]
         let mut index_data = Vec::new();
         for i in 0u64..3 {
-            // Marker
-            index_data.extend_from_slice(&BIG_FORMAT_MARKER.to_be_bytes());
-            // 16-byte MD5 digest (arbitrary)
-            index_data.extend_from_slice(&[i as u8; 16]);
+            // Key length (4 bytes for int keys)
+            index_data.extend_from_slice(&4u16.to_be_bytes());
+            // 4-byte key
+            index_data.extend_from_slice(&(i as u32).to_be_bytes());
             // Position as unsigned VInt (values < 128 = 1 byte)
             index_data.push((i * 50) as u8);
             // Promoted index size = 0 (1-byte VInt)
