@@ -518,12 +518,24 @@ async fn test_readonly_wal_dir_write_fails() -> cqlite_core::error::Result<()> {
     // Restore permissions so TempDir cleanup can succeed
     std::fs::set_permissions(&wal_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    // The write either fails (expected) or succeeds if the OS allows fsync
-    // on an already-open file handle regardless of directory permissions.
-    // We document the behavior rather than asserting a specific outcome,
-    // as this is OS-dependent. We verify the engine remains usable or errors
-    // cleanly either way.
-    let _ = write_result; // outcome is OS-dependent; no panic is the key invariant
+    // The write may fail (WAL sync blocked) or succeed (OS allows fsync on
+    // an already-open file handle). Either outcome is acceptable — the key
+    // invariant is no panic and no data corruption.
+    match write_result {
+        Ok(_) => {
+            // OS allowed the write despite read-only dir — engine is still usable
+            assert!(engine.memtable_row_count() > 0);
+        }
+        Err(e) => {
+            // Expected: WAL sync failed due to permissions
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("WAL") || msg.contains("sync") || msg.contains("permission") || msg.contains("Permission") || msg.contains("Storage"),
+                "Unexpected error message: {}",
+                msg
+            );
+        }
+    }
 
     Ok(())
 }
