@@ -6109,11 +6109,40 @@ impl V5CompressedLegacyParser {
 
         let mut elements = Vec::with_capacity(count);
         for i in 0..count {
-            let elem_name = format!("{}[{}]", column_name, i);
-            let (elem_value, new_offset) =
-                self.parse_raw_type_value(data, offset, element_type, &elem_name)?;
+            // Each element in a frozen collection: [i32 BE len][element bytes]
+            if offset + 4 > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen {} '{}': not enough bytes for element {} length",
+                    kind, column_name, i
+                )));
+            }
+            let elem_len_i32 = i32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            if elem_len_i32 < 0 {
+                return Err(Error::corruption(format!(
+                    "Frozen {} '{}': negative element {} length {}",
+                    kind, column_name, i, elem_len_i32
+                )));
+            }
+            let elem_len = elem_len_i32 as usize;
+            offset += 4;
+
+            if offset + elem_len > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen {} '{}': element {} needs {} bytes but only {} available",
+                    kind, column_name, i, elem_len, data.len() - offset
+                )));
+            }
+
+            let elem_data = &data[offset..offset + elem_len];
+            let elem_value =
+                self.parse_value_from_raw_bytes(elem_data, element_type, column_name)?;
             elements.push(elem_value);
-            offset = new_offset;
+            offset += elem_len;
         }
 
         if as_set {
@@ -6164,15 +6193,70 @@ impl V5CompressedLegacyParser {
 
         let mut entries = Vec::with_capacity(count);
         for i in 0..count {
-            let key_name = format!("{}[{}].key", column_name, i);
-            let (key_value, new_offset) =
-                self.parse_raw_type_value(data, offset, key_type, &key_name)?;
-            offset = new_offset;
+            // Key: [i32 BE len][key bytes]
+            if offset + 4 > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': not enough bytes for key {} length",
+                    column_name, i
+                )));
+            }
+            let key_len_i32 = i32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            if key_len_i32 < 0 {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': negative key {} length {}",
+                    column_name, i, key_len_i32
+                )));
+            }
+            let key_len = key_len_i32 as usize;
+            offset += 4;
 
-            let val_name = format!("{}[{}].value", column_name, i);
-            let (val_value, new_offset) =
-                self.parse_raw_type_value(data, offset, value_type, &val_name)?;
-            offset = new_offset;
+            if offset + key_len > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': key {} needs {} bytes but only {} available",
+                    column_name, i, key_len, data.len() - offset
+                )));
+            }
+            let key_data = &data[offset..offset + key_len];
+            let key_value = self.parse_value_from_raw_bytes(key_data, key_type, column_name)?;
+            offset += key_len;
+
+            // Value: [i32 BE len][value bytes]
+            if offset + 4 > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': not enough bytes for value {} length",
+                    column_name, i
+                )));
+            }
+            let val_len_i32 = i32::from_be_bytes([
+                data[offset],
+                data[offset + 1],
+                data[offset + 2],
+                data[offset + 3],
+            ]);
+            if val_len_i32 < 0 {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': negative value {} length {}",
+                    column_name, i, val_len_i32
+                )));
+            }
+            let val_len = val_len_i32 as usize;
+            offset += 4;
+
+            if offset + val_len > data.len() {
+                return Err(Error::corruption(format!(
+                    "Frozen map '{}': value {} needs {} bytes but only {} available",
+                    column_name, i, val_len, data.len() - offset
+                )));
+            }
+            let val_data = &data[offset..offset + val_len];
+            let val_value =
+                self.parse_value_from_raw_bytes(val_data, value_type, column_name)?;
+            offset += val_len;
 
             entries.push((key_value, val_value));
         }
