@@ -1148,6 +1148,56 @@ async fn test_export_after_close_fails() -> Result<()> {
 }
 
 #[tokio::test]
+async fn test_export_compact_before_export_deprecated_succeeds() -> Result<()> {
+    let temp_dir = TempDir::new().unwrap();
+    let export_dir = TempDir::new().unwrap();
+    let schema = create_simple_schema("test_ks", "compact_deprecated_test");
+
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema,
+    );
+
+    let mut engine = WriteEngine::new(config)?;
+
+    // Write and flush data
+    for i in 0..5 {
+        let mutation = create_simple_mutation(i, &format!("Row{}", i), 1000000 + i as i64);
+        engine.write_async(mutation).await?;
+    }
+    engine.flush().await?;
+
+    // Export with compact_before_export = true (deprecated flag)
+    // This should NOT return an error — it emits a warning and proceeds normally
+    let options = ExportOptions {
+        keyspace: "test_ks".to_string(),
+        table: "compact_deprecated_test".to_string(),
+        generation: 1,
+        compact_before_export: true,
+        validate_after_export: false,
+    };
+    let report = engine.export_sstable(export_dir.path(), options).await?;
+
+    // Verify the export succeeded and produced output
+    assert!(report.data_file_size > 0, "Data file should have content");
+    assert!(!report.components.is_empty(), "Export should have components");
+
+    // Verify the Data.db file exists at the expected path
+    let data_file = export_dir
+        .path()
+        .join("test_ks")
+        .join("compact_deprecated_test")
+        .join("nb-1-big-Data.db");
+    assert!(
+        data_file.exists(),
+        "Data.db should exist when compact_before_export=true (deprecated path)"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn test_memtable_hard_limit_enforcement() -> Result<()> {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_simple_schema("test_ks", "hard_limit_test");
