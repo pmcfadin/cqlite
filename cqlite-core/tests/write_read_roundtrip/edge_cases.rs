@@ -26,6 +26,22 @@ use std::collections::HashMap;
 use std::time::Duration;
 use tempfile::TempDir;
 
+/// Count files in `dir` whose name ends with `suffix` (e.g. "Data.db").
+fn count_files_with_suffix(dir: &std::path::Path, suffix: &str) -> usize {
+    std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|e| e.ok())
+                .filter(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|s| s.ends_with(suffix))
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 /// Create a simple schema for edge case testing
 fn create_edge_case_schema() -> TableSchema {
     TableSchema {
@@ -932,23 +948,8 @@ fn test_edge_tombstone_compaction_merge() {
         .join("data")
         .join("test_edge")
         .join("edge_cases");
-    let count_data_files = |dir: &std::path::Path| -> usize {
-        std::fs::read_dir(dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|s| s.ends_with("Data.db"))
-                            .unwrap_or(false)
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
-    };
-
     assert_eq!(
-        count_data_files(&sstable_dir),
+        count_files_with_suffix(&sstable_dir, "Data.db"),
         2,
         "Should have exactly 2 Data.db files before compaction"
     );
@@ -992,7 +993,7 @@ fn test_edge_tombstone_compaction_merge() {
             merged_path
         );
         assert_eq!(
-            count_data_files(&sstable_dir),
+            count_files_with_suffix(&sstable_dir, "Data.db"),
             1,
             "After compaction only the merged Data.db should remain"
         );
@@ -1209,23 +1210,8 @@ fn test_edge_cell_tombstone_compaction_merge() {
         .join("data")
         .join("test_edge")
         .join("edge_cases");
-    let count_data_files = |dir: &std::path::Path| -> usize {
-        std::fs::read_dir(dir)
-            .map(|rd| {
-                rd.filter_map(|e| e.ok())
-                    .filter(|e| {
-                        e.file_name()
-                            .to_str()
-                            .map(|s| s.ends_with("Data.db"))
-                            .unwrap_or(false)
-                    })
-                    .count()
-            })
-            .unwrap_or(0)
-    };
-
     assert_eq!(
-        count_data_files(&sstable_dir),
+        count_files_with_suffix(&sstable_dir, "Data.db"),
         2,
         "Should have exactly 2 Data.db files before compaction"
     );
@@ -1261,7 +1247,7 @@ fn test_edge_cell_tombstone_compaction_merge() {
             merged_path
         );
         assert_eq!(
-            count_data_files(&sstable_dir),
+            count_files_with_suffix(&sstable_dir, "Data.db"),
             1,
             "After compaction only the merged Data.db should remain"
         );

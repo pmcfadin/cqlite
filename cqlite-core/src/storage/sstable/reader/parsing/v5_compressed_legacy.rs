@@ -5843,128 +5843,309 @@ impl V5CompressedLegacyParser {
         }
     }
 
-    /// Parse frozen list value (raw version without Column parameter).
+    /// Read i32 BE element/entry count from a frozen collection blob.
+    ///
+    /// `bound` is the exclusive upper byte index for the collection data (either
+    /// `data.len()` for raw variants or `blob_end` for cell-level variants).
+    fn read_frozen_count(
+        data: &[u8],
+        offset: &mut usize,
+        bound: usize,
+        collection_kind: &str,
+        column_name: &str,
+    ) -> Result<usize> {
+        if *offset + 4 > bound {
+            return Err(Error::corruption(format!(
+                "Frozen {} '{}': not enough bytes for element count",
+                collection_kind, column_name
+            )));
+        }
+        let count = i32::from_be_bytes([
+            data[*offset],
+            data[*offset + 1],
+            data[*offset + 2],
+            data[*offset + 3],
+        ]);
+        *offset += 4;
+
+        if count < 0 {
+            return Err(Error::corruption(format!(
+                "Frozen {} '{}': negative element count {}",
+                collection_kind, column_name, count
+            )));
+        }
+        let count = count as usize;
+        if count > MAX_FROZEN_COLLECTION_SIZE as usize {
+            return Err(Error::corruption(format!(
+                "Frozen {} '{}': element count {} exceeds maximum {}",
+                collection_kind, column_name, count, MAX_FROZEN_COLLECTION_SIZE
+            )));
+        }
+        Ok(count)
+    }
+
+    /// Read the frozen collection preamble: VUInt blob_len + i32 BE element count.
+    ///
+    /// Returns `(count, blob_end)` with `offset` advanced past the preamble.
+    fn read_frozen_preamble(
+        data: &[u8],
+        offset: &mut usize,
+        collection_kind: &str,
+        column_name: &str,
+    ) -> Result<(usize, usize)> {
+        let (remaining, blob_len) = parse_vuint(&data[*offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen {} '{}': failed to parse blob length: {:?}",
+                collection_kind, column_name, e
+            ))
+        })?;
+        let blob_len = blob_len as usize;
+        let bytes_consumed = data[*offset..].len() - remaining.len();
+        *offset += bytes_consumed;
+
+        if *offset + blob_len > data.len() {
+            return Err(Error::corruption(format!(
+                "Frozen {} '{}': blob_len {} exceeds available data {}",
+                collection_kind,
+                column_name,
+                blob_len,
+                data.len() - *offset
+            )));
+        }
+
+        let blob_end = *offset + blob_len;
+        let count = Self::read_frozen_count(data, offset, blob_end, collection_kind, column_name)?;
+        Ok((count, blob_end))
+    }
+
+    /// Read a single length-prefixed element from a frozen collection blob.
+    ///
+    /// `blob_end` is the exclusive upper byte index bounding the collection.
+    /// `element_desc` appears in error messages (e.g. `"list 'col' element 3"`).
+    fn read_frozen_element(
+        &self,
+        data: &[u8],
+        offset: &mut usize,
+        blob_end: usize,
+        type_str: &str,
+        element_desc: &str,
+    ) -> Result<Value> {
+        if *offset + 4 > blob_end {
+            return Err(Error::corruption(format!(
+                "Frozen {}: not enough bytes for length",
+                element_desc
+            )));
+        }
+        let len_i32 = i32::from_be_bytes([
+            data[*offset],
+            data[*offset + 1],
+            data[*offset + 2],
+            data[*offset + 3],
+        ]);
+        if len_i32 < 0 {
+            return Err(Error::corruption(format!(
+                "Frozen {}: negative length {}",
+                element_desc, len_i32
+            )));
+        }
+        let len = len_i32 as usize;
+        *offset += 4;
+
+        if *offset + len > blob_end {
+            return Err(Error::corruption(format!(
+                "Frozen {}: needs {} bytes but only {} available",
+                element_desc,
+                len,
+                blob_end - *offset
+            )));
+        }
+
+        let elem_data = &data[*offset..*offset + len];
+        let value = self.parse_value_from_raw_bytes(elem_data, type_str, element_desc)?;
+        *offset += len;
+        Ok(value)
+    }
+
+    /// Parse a frozen list or set (cell-level, with VUInt blob_len prefix).
+    ///
+    /// The cell layout on disk is:
+    ///   [VUInt blob_len][i32 BE element_count][i32 BE elem_len][elem_bytes]...
+    ///
+    /// `as_set = true` wraps the result in `Value::Set`; otherwise `Value::List`.
+    fn parse_frozen_sequence_value(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        element_type: &str,
+        column: &crate::schema::Column,
+        as_set: bool,
+    ) -> Result<(Value, usize)> {
+        let kind = if as_set { "set" } else { "list" };
+        let (count, blob_end) = Self::read_frozen_preamble(data, &mut offset, kind, &column.name)?;
+
+        log::debug!(
+            "V5CompressedLegacy: Frozen {} '{}' with {} elements, element_type='{}'",
+            kind,
+            column.name,
+            count,
+            element_type
+        );
+
+        let mut elements = Vec::with_capacity(count);
+        for i in 0..count {
+            let desc = format!("{} '{}' element {}", kind, column.name, i);
+            let value =
+                self.read_frozen_element(data, &mut offset, blob_end, element_type, &desc)?;
+            log::debug!(
+                "V5CompressedLegacy: Frozen {} element {}: {:?}",
+                kind,
+                i,
+                value
+            );
+            elements.push(value);
+        }
+
+        if as_set {
+            Ok((Value::Set(elements), blob_end))
+        } else {
+            Ok((Value::List(elements), blob_end))
+        }
+    }
+
+    /// Parse frozen list value (thin wrapper around `parse_frozen_sequence_value`).
+    fn parse_frozen_list_value(
+        &self,
+        data: &[u8],
+        offset: usize,
+        element_type: &str,
+        column: &crate::schema::Column,
+        _reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        self.parse_frozen_sequence_value(data, offset, element_type, column, false)
+    }
+
+    /// Parse frozen set value (thin wrapper around `parse_frozen_sequence_value`).
+    ///
+    /// Frozen sets have the same binary format as frozen lists; the distinction
+    /// is semantic (sets are sorted/unique at the CQL level).
+    fn parse_frozen_set_value(
+        &self,
+        data: &[u8],
+        offset: usize,
+        element_type: &str,
+        column: &crate::schema::Column,
+        _reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        self.parse_frozen_sequence_value(data, offset, element_type, column, true)
+    }
+
+    /// Parse frozen map value.
+    ///
+    /// The cell layout on disk is:
+    ///   [VUInt blob_len][i32 BE entry_count][i32 BE key_len][key_bytes][i32 BE val_len][val_bytes]...
+    fn parse_frozen_map_value(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        key_type: &str,
+        value_type: &str,
+        column: &crate::schema::Column,
+        _reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        let (count, blob_end) = Self::read_frozen_preamble(data, &mut offset, "map", &column.name)?;
+
+        log::debug!(
+            "V5CompressedLegacy: Frozen map '{}' with {} entries, key_type='{}', value_type='{}'",
+            column.name,
+            count,
+            key_type,
+            value_type
+        );
+
+        let mut entries = Vec::with_capacity(count);
+        for i in 0..count {
+            let key_desc = format!("map '{}' key {}", column.name, i);
+            let key_value =
+                self.read_frozen_element(data, &mut offset, blob_end, key_type, &key_desc)?;
+
+            let val_desc = format!("map '{}' value {}", column.name, i);
+            let val_value =
+                self.read_frozen_element(data, &mut offset, blob_end, value_type, &val_desc)?;
+
+            log::debug!(
+                "V5CompressedLegacy: Frozen map entry {}: {:?} -> {:?}",
+                i,
+                key_value,
+                val_value
+            );
+            entries.push((key_value, val_value));
+        }
+
+        Ok((Value::Map(entries), blob_end))
+    }
+
+    /// Parse a frozen list or set (raw, nested inside an already-bounded blob).
     ///
     /// Called when parsing nested collections inside an already-bounded frozen
-    /// blob.  There is NO VUInt cell-value-length prefix here — the caller has
-    /// already bounded the data slice.  The element count is an i32 BE value
-    /// (Cassandra collection format).
+    /// blob.  There is NO VUInt cell-value-length prefix — the caller has
+    /// already bounded the data slice.  `as_set = true` produces `Value::Set`.
+    fn parse_frozen_sequence_value_raw(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        element_type: &str,
+        column_name: &str,
+        as_set: bool,
+    ) -> Result<(Value, usize)> {
+        let kind = if as_set { "set" } else { "list" };
+        let count = Self::read_frozen_count(data, &mut offset, data.len(), kind, column_name)?;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsing frozen {} '{}' with {} elements (raw)",
+            kind,
+            column_name,
+            count
+        );
+
+        let mut elements = Vec::with_capacity(count);
+        for i in 0..count {
+            let elem_name = format!("{}[{}]", column_name, i);
+            let (elem_value, new_offset) =
+                self.parse_raw_type_value(data, offset, element_type, &elem_name)?;
+            elements.push(elem_value);
+            offset = new_offset;
+        }
+
+        if as_set {
+            Ok((Value::Set(elements), offset))
+        } else {
+            Ok((Value::List(elements), offset))
+        }
+    }
+
+    /// Parse frozen list value (raw version without Column parameter).
     fn parse_frozen_list_value_raw(
         &self,
         data: &[u8],
-        mut offset: usize,
+        offset: usize,
         element_type: &str,
         column_name: &str,
     ) -> Result<(Value, usize)> {
-        // Read element count as i32 BE (Cassandra collection format).
-        if offset + 4 > data.len() {
-            return Err(Error::corruption(format!(
-                "Frozen list '{}': not enough bytes for element count",
-                column_name
-            )));
-        }
-        let count = i32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        if count < 0 {
-            return Err(Error::corruption(format!(
-                "Frozen list '{}': negative element count {}",
-                column_name, count
-            )));
-        }
-        let count = count as usize;
-
-        log::debug!(
-            "V5CompressedLegacy: Parsing frozen list '{}' with {} elements (raw)",
-            column_name,
-            count
-        );
-
-        // Bounds check to prevent DoS from corrupted data
-        if count > MAX_FROZEN_COLLECTION_SIZE as usize {
-            return Err(Error::corruption(format!(
-                "Frozen list '{}': element count {} exceeds maximum {}",
-                column_name, count, MAX_FROZEN_COLLECTION_SIZE
-            )));
-        }
-
-        let mut elements = Vec::with_capacity(count);
-
-        for i in 0..count {
-            let elem_name = format!("{}[{}]", column_name, i);
-            let (elem_value, new_offset) =
-                self.parse_raw_type_value(data, offset, element_type, &elem_name)?;
-            elements.push(elem_value);
-            offset = new_offset;
-        }
-
-        Ok((Value::List(elements), offset))
+        self.parse_frozen_sequence_value_raw(data, offset, element_type, column_name, false)
     }
 
-    /// Parse frozen set value (raw version without Column parameter)
+    /// Parse frozen set value (raw version without Column parameter).
     fn parse_frozen_set_value_raw(
         &self,
         data: &[u8],
-        mut offset: usize,
+        offset: usize,
         element_type: &str,
         column_name: &str,
     ) -> Result<(Value, usize)> {
-        // Read element count as i32 BE (Cassandra collection format).
-        if offset + 4 > data.len() {
-            return Err(Error::corruption(format!(
-                "Frozen set '{}': not enough bytes for element count",
-                column_name
-            )));
-        }
-        let count = i32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        if count < 0 {
-            return Err(Error::corruption(format!(
-                "Frozen set '{}': negative element count {}",
-                column_name, count
-            )));
-        }
-        let count = count as usize;
-
-        log::debug!(
-            "V5CompressedLegacy: Parsing frozen set '{}' with {} elements (raw)",
-            column_name,
-            count
-        );
-
-        // Bounds check to prevent DoS from corrupted data
-        if count > MAX_FROZEN_COLLECTION_SIZE as usize {
-            return Err(Error::corruption(format!(
-                "Frozen set '{}': element count {} exceeds maximum {}",
-                column_name, count, MAX_FROZEN_COLLECTION_SIZE
-            )));
-        }
-
-        let mut elements = Vec::with_capacity(count);
-
-        for i in 0..count {
-            let elem_name = format!("{}[{}]", column_name, i);
-            let (elem_value, new_offset) =
-                self.parse_raw_type_value(data, offset, element_type, &elem_name)?;
-            elements.push(elem_value);
-            offset = new_offset;
-        }
-
-        Ok((Value::Set(elements), offset))
+        self.parse_frozen_sequence_value_raw(data, offset, element_type, column_name, true)
     }
 
-    /// Parse frozen map value (raw version without Column parameter)
+    /// Parse frozen map value (raw version without Column parameter).
     fn parse_frozen_map_value_raw(
         &self,
         data: &[u8],
@@ -5973,28 +6154,7 @@ impl V5CompressedLegacyParser {
         value_type: &str,
         column_name: &str,
     ) -> Result<(Value, usize)> {
-        // Read entry count as i32 BE (Cassandra collection format).
-        if offset + 4 > data.len() {
-            return Err(Error::corruption(format!(
-                "Frozen map '{}': not enough bytes for entry count",
-                column_name
-            )));
-        }
-        let count = i32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        if count < 0 {
-            return Err(Error::corruption(format!(
-                "Frozen map '{}': negative entry count {}",
-                column_name, count
-            )));
-        }
-        let count = count as usize;
+        let count = Self::read_frozen_count(data, &mut offset, data.len(), "map", column_name)?;
 
         log::debug!(
             "V5CompressedLegacy: Parsing frozen map '{}' with {} entries (raw)",
@@ -6002,16 +6162,7 @@ impl V5CompressedLegacyParser {
             count
         );
 
-        // Bounds check to prevent DoS from corrupted data
-        if count > MAX_FROZEN_COLLECTION_SIZE as usize {
-            return Err(Error::corruption(format!(
-                "Frozen map '{}': entry count {} exceeds maximum {}",
-                column_name, count, MAX_FROZEN_COLLECTION_SIZE
-            )));
-        }
-
         let mut entries = Vec::with_capacity(count);
-
         for i in 0..count {
             let key_name = format!("{}[{}].key", column_name, i);
             let (key_value, new_offset) =
@@ -6027,460 +6178,6 @@ impl V5CompressedLegacyParser {
         }
 
         Ok((Value::Map(entries), offset))
-    }
-
-    /// Parse frozen list value.
-    ///
-    /// The cell layout on disk is:
-    ///   [VUInt blob_len][i32 BE element_count][i32 BE elem_len][elem_bytes]...
-    ///
-    /// `write_cell()` writes a VUInt cell-value-length prefix before the frozen
-    /// blob because `cell_value_uses_length_prefix()` returns `true` for Frozen.
-    /// The blob itself begins with an i32 BE element count (Cassandra collection
-    /// format), followed by length-prefixed element bytes.
-    fn parse_frozen_list_value(
-        &self,
-        data: &[u8],
-        mut offset: usize,
-        element_type: &str,
-        column: &crate::schema::Column,
-        reader: &super::super::types::SSTableReader,
-    ) -> Result<(Value, usize)> {
-        // Step 1: Read VUInt cell value length (total blob size).
-        let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
-            Error::corruption(format!(
-                "Frozen list '{}': failed to parse blob length: {:?}",
-                column.name, e
-            ))
-        })?;
-        let blob_len = blob_len as usize;
-        let bytes_consumed = data[offset..].len() - remaining.len();
-        offset += bytes_consumed;
-
-        log::debug!(
-            "V5CompressedLegacy: Frozen list '{}' blob_len={}, element_type='{}'",
-            column.name,
-            blob_len,
-            element_type
-        );
-
-        if offset + blob_len > data.len() {
-            return Err(Error::corruption(format!(
-                "Frozen list '{}': blob_len {} exceeds available data {}",
-                column.name,
-                blob_len,
-                data.len() - offset
-            )));
-        }
-
-        let blob_end = offset + blob_len;
-
-        // Step 2: Read element count as i32 BE (Cassandra collection format).
-        if offset + 4 > blob_end {
-            return Err(Error::corruption(format!(
-                "Frozen list '{}': not enough bytes for element count in blob",
-                column.name
-            )));
-        }
-        let count = i32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        if count < 0 {
-            return Err(Error::corruption(format!(
-                "Frozen list '{}': negative element count {}",
-                column.name, count
-            )));
-        }
-        let count = count as usize;
-
-        log::debug!(
-            "V5CompressedLegacy: Parsing frozen list '{}' with {} elements",
-            column.name,
-            count
-        );
-
-        if count > MAX_FROZEN_COLLECTION_SIZE as usize {
-            return Err(Error::corruption(format!(
-                "Frozen list '{}': element count {} exceeds maximum {}",
-                column.name, count, MAX_FROZEN_COLLECTION_SIZE
-            )));
-        }
-
-        let mut elements = Vec::with_capacity(count);
-
-        for i in 0..count {
-            // Each element: [i32 BE length][element bytes]
-            if offset + 4 > blob_end {
-                return Err(Error::corruption(format!(
-                    "Frozen list '{}': not enough bytes for element {} length",
-                    column.name, i
-                )));
-            }
-            let elem_len_i32 = i32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            if elem_len_i32 < 0 {
-                return Err(Error::corruption(format!(
-                    "Frozen list '{}': negative element {} length {}",
-                    column.name, i, elem_len_i32
-                )));
-            }
-            let elem_len = elem_len_i32 as usize;
-            offset += 4;
-
-            if offset + elem_len > blob_end {
-                return Err(Error::corruption(format!(
-                    "Frozen list '{}': element {} needs {} bytes but only {} available",
-                    column.name,
-                    i,
-                    elem_len,
-                    blob_end - offset
-                )));
-            }
-
-            let elem_data = &data[offset..offset + elem_len];
-            let elem_name = format!("{}[{}]", column.name, i);
-            let elem_value =
-                self.parse_value_from_raw_bytes(elem_data, element_type, &elem_name)?;
-
-            log::debug!(
-                "V5CompressedLegacy: Frozen list element {}: {:?}",
-                i,
-                elem_value
-            );
-
-            elements.push(elem_value);
-            offset += elem_len;
-        }
-
-        // Suppress unused variable warnings - reader is kept for API consistency.
-        let _ = reader;
-
-        Ok((Value::List(elements), blob_end))
-    }
-
-    /// Parse frozen set value.
-    ///
-    /// The cell layout on disk is:
-    ///   [VUInt blob_len][i32 BE element_count][i32 BE elem_len][elem_bytes]...
-    ///
-    /// Frozen sets have the same binary format as frozen lists.
-    /// The difference is semantic (sets are sorted/unique at CQL level).
-    fn parse_frozen_set_value(
-        &self,
-        data: &[u8],
-        mut offset: usize,
-        element_type: &str,
-        column: &crate::schema::Column,
-        reader: &super::super::types::SSTableReader,
-    ) -> Result<(Value, usize)> {
-        // Step 1: Read VUInt cell value length (total blob size).
-        let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
-            Error::corruption(format!(
-                "Frozen set '{}': failed to parse blob length: {:?}",
-                column.name, e
-            ))
-        })?;
-        let blob_len = blob_len as usize;
-        let bytes_consumed = data[offset..].len() - remaining.len();
-        offset += bytes_consumed;
-
-        log::debug!(
-            "V5CompressedLegacy: Frozen set '{}' blob_len={}, element_type='{}'",
-            column.name,
-            blob_len,
-            element_type
-        );
-
-        if offset + blob_len > data.len() {
-            return Err(Error::corruption(format!(
-                "Frozen set '{}': blob_len {} exceeds available data {}",
-                column.name,
-                blob_len,
-                data.len() - offset
-            )));
-        }
-
-        let blob_end = offset + blob_len;
-
-        // Step 2: Read element count as i32 BE (Cassandra collection format).
-        if offset + 4 > blob_end {
-            return Err(Error::corruption(format!(
-                "Frozen set '{}': not enough bytes for element count in blob",
-                column.name
-            )));
-        }
-        let count = i32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        if count < 0 {
-            return Err(Error::corruption(format!(
-                "Frozen set '{}': negative element count {}",
-                column.name, count
-            )));
-        }
-        let count = count as usize;
-
-        log::debug!(
-            "V5CompressedLegacy: Parsing frozen set '{}' with {} elements, element_type='{}'",
-            column.name,
-            count,
-            element_type
-        );
-
-        if count > MAX_FROZEN_COLLECTION_SIZE as usize {
-            return Err(Error::corruption(format!(
-                "Frozen set '{}': element count {} exceeds maximum {}",
-                column.name, count, MAX_FROZEN_COLLECTION_SIZE
-            )));
-        }
-
-        let mut elements = Vec::with_capacity(count);
-
-        for i in 0..count {
-            // Each element: [i32 BE length][element bytes]
-            if offset + 4 > blob_end {
-                return Err(Error::corruption(format!(
-                    "Frozen set '{}': not enough bytes for element {} length",
-                    column.name, i
-                )));
-            }
-            let elem_len_i32 = i32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            if elem_len_i32 < 0 {
-                return Err(Error::corruption(format!(
-                    "Frozen set '{}': negative element {} length {}",
-                    column.name, i, elem_len_i32
-                )));
-            }
-            let elem_len = elem_len_i32 as usize;
-            offset += 4;
-
-            if offset + elem_len > blob_end {
-                return Err(Error::corruption(format!(
-                    "Frozen set '{}': element {} needs {} bytes but only {} available",
-                    column.name,
-                    i,
-                    elem_len,
-                    blob_end - offset
-                )));
-            }
-
-            let elem_data = &data[offset..offset + elem_len];
-            let elem_name = format!("{}[{}]", column.name, i);
-            let elem_value =
-                self.parse_value_from_raw_bytes(elem_data, element_type, &elem_name)?;
-
-            log::debug!(
-                "V5CompressedLegacy: Frozen set element {}: {:?}",
-                i,
-                elem_value
-            );
-
-            elements.push(elem_value);
-            offset += elem_len;
-        }
-
-        // Suppress unused variable warnings - reader is kept for API consistency
-        let _ = reader;
-
-        Ok((Value::Set(elements), blob_end))
-    }
-
-    /// Parse frozen map value.
-    ///
-    /// The cell layout on disk is:
-    ///   [VUInt blob_len][i32 BE entry_count][i32 BE key_len][key_bytes][i32 BE val_len][val_bytes]...
-    ///
-    /// `write_cell()` writes a VUInt cell-value-length prefix before the frozen
-    /// blob because `cell_value_uses_length_prefix()` returns `true` for Frozen.
-    /// The blob itself begins with an i32 BE entry count (Cassandra collection
-    /// format), followed by length-prefixed key/value pairs.
-    fn parse_frozen_map_value(
-        &self,
-        data: &[u8],
-        mut offset: usize,
-        key_type: &str,
-        value_type: &str,
-        column: &crate::schema::Column,
-        reader: &super::super::types::SSTableReader,
-    ) -> Result<(Value, usize)> {
-        // Step 1: Read VUInt cell value length (total blob size).
-        let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
-            Error::corruption(format!(
-                "Frozen map '{}': failed to parse blob length: {:?}",
-                column.name, e
-            ))
-        })?;
-        let blob_len = blob_len as usize;
-        let bytes_consumed = data[offset..].len() - remaining.len();
-        offset += bytes_consumed;
-
-        log::debug!(
-            "V5CompressedLegacy: Frozen map '{}' blob_len={}, key_type='{}', value_type='{}'",
-            column.name,
-            blob_len,
-            key_type,
-            value_type
-        );
-
-        if offset + blob_len > data.len() {
-            return Err(Error::corruption(format!(
-                "Frozen map '{}': blob_len {} exceeds available data {}",
-                column.name,
-                blob_len,
-                data.len() - offset
-            )));
-        }
-
-        let blob_end = offset + blob_len;
-
-        // Step 2: Read entry count as i32 BE (Cassandra collection format).
-        if offset + 4 > blob_end {
-            return Err(Error::corruption(format!(
-                "Frozen map '{}': not enough bytes for entry count in blob",
-                column.name
-            )));
-        }
-        let count = i32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        if count < 0 {
-            return Err(Error::corruption(format!(
-                "Frozen map '{}': negative entry count {}",
-                column.name, count
-            )));
-        }
-        let count = count as usize;
-
-        log::debug!(
-            "V5CompressedLegacy: Parsing frozen map '{}' with {} entries, key_type='{}', value_type='{}'",
-            column.name,
-            count,
-            key_type,
-            value_type
-        );
-
-        if count > MAX_FROZEN_COLLECTION_SIZE as usize {
-            return Err(Error::corruption(format!(
-                "Frozen map '{}': entry count {} exceeds maximum {}",
-                column.name, count, MAX_FROZEN_COLLECTION_SIZE
-            )));
-        }
-
-        let mut entries = Vec::with_capacity(count);
-
-        for i in 0..count {
-            // Each key: [i32 BE length][key bytes]
-            if offset + 4 > blob_end {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': not enough bytes for key {} length",
-                    column.name, i
-                )));
-            }
-            let key_len_i32 = i32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            if key_len_i32 < 0 {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': negative key {} length {}",
-                    column.name, i, key_len_i32
-                )));
-            }
-            let key_len = key_len_i32 as usize;
-            offset += 4;
-
-            if offset + key_len > blob_end {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': key {} needs {} bytes but only {} available",
-                    column.name,
-                    i,
-                    key_len,
-                    blob_end - offset
-                )));
-            }
-
-            let key_data = &data[offset..offset + key_len];
-            let key_name = format!("{}[{}].key", column.name, i);
-            let key_value = self.parse_value_from_raw_bytes(key_data, key_type, &key_name)?;
-            offset += key_len;
-
-            // Each value: [i32 BE length][value bytes]
-            if offset + 4 > blob_end {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': not enough bytes for value {} length",
-                    column.name, i
-                )));
-            }
-            let val_len_i32 = i32::from_be_bytes([
-                data[offset],
-                data[offset + 1],
-                data[offset + 2],
-                data[offset + 3],
-            ]);
-            if val_len_i32 < 0 {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': negative value {} length {}",
-                    column.name, i, val_len_i32
-                )));
-            }
-            let val_len = val_len_i32 as usize;
-            offset += 4;
-
-            if offset + val_len > blob_end {
-                return Err(Error::corruption(format!(
-                    "Frozen map '{}': value {} needs {} bytes but only {} available",
-                    column.name,
-                    i,
-                    val_len,
-                    blob_end - offset
-                )));
-            }
-
-            let val_data = &data[offset..offset + val_len];
-            let val_name = format!("{}[{}].value", column.name, i);
-            let val_value = self.parse_value_from_raw_bytes(val_data, value_type, &val_name)?;
-            offset += val_len;
-
-            log::debug!(
-                "V5CompressedLegacy: Frozen map entry {}: {:?} -> {:?}",
-                i,
-                key_value,
-                val_value
-            );
-
-            entries.push((key_value, val_value));
-        }
-
-        // Suppress unused variable warnings - reader is kept for API consistency
-        let _ = reader;
-
-        Ok((Value::Map(entries), blob_end))
     }
 
     /// Parse tuple value from binary data

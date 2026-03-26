@@ -394,46 +394,18 @@ pub fn read_file_bytes(path: &Path) -> Vec<u8> {
 ///
 /// Opens SSTableManager on the data directory, scans the table,
 /// and returns the raw Value for the first (and only) row.
-/// For most types this is Value::Map(Vec<(Text(col_name), value)>),
-/// but for some types (e.g., frozen collections) the reader may
-/// return Value::Null.
+/// Panics if the scan returns anything other than exactly 1 row.
 pub async fn read_back_raw_row(temp_dir: &TempDir, schema: &TableSchema) -> Value {
-    let data_dir = temp_dir.path().join("data");
-    let config = Config::default();
-    let platform = Arc::new(
-        Platform::new(&config)
-            .await
-            .expect("Platform::new should succeed in test environment"),
-    );
-
-    let manager = SSTableManager::new(
-        &data_dir,
-        &config,
-        platform,
-        #[cfg(feature = "state_machine")]
-        None,
-    )
-    .await
-    .expect("SSTableManager should load written SSTables");
-
-    let table_id =
-        cqlite_core::types::TableId::from(format!("{}.{}", schema.keyspace, schema.table).as_str());
-    let results = manager
-        .scan(&table_id, None, None, None, Some(schema))
-        .await
-        .expect("Scan should succeed");
-
+    let mut rows = read_back_all_rows(temp_dir, schema).await;
     assert_eq!(
-        results.len(),
+        rows.len(),
         1,
         "Expected exactly 1 row in {}.{}, got {}",
         schema.keyspace,
         schema.table,
-        results.len()
+        rows.len()
     );
-
-    let (_row_key, row_value) = results.into_iter().next().unwrap();
-    row_value
+    rows.remove(0)
 }
 
 /// Read back all raw row values from a flushed SSTable.
