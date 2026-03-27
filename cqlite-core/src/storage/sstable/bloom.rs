@@ -1,7 +1,17 @@
 //! Bloom filter implementation for efficient key lookups
 
 use crate::{Error, Result};
-use std::io::Cursor;
+
+/// Branchless absolute value matching Cassandra's `FBUtilities.abs()`.
+///
+/// ```java
+/// long negbit = index >> 63;
+/// return (index ^ negbit) - negbit;
+/// ```
+fn abs_i64(v: i64) -> i64 {
+    let negbit = v >> 63;
+    (v ^ negbit).wrapping_sub(negbit)
+}
 
 /// Bloom filter for efficient key existence checks
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -61,27 +71,36 @@ impl BloomFilter {
 
     /// Insert a key into the bloom filter
     pub fn insert(&mut self, key: &[u8]) {
-        let hashes = self.calculate_hashes(key);
+        let (h1, h2) = self.calculate_hashes(key);
 
-        for i in 0..self.hash_count {
-            let hash = hashes.0.wrapping_add((i as u64).wrapping_mul(hashes.1));
-            let bit_index = (hash % self.bit_count) as usize;
+        // Cassandra's setIndexes: base=h2, inc=h1
+        // bit_index = abs((h2 + i * h1) % capacity), using signed arithmetic
+        let mut base = h2 as i64;
+        let inc = h1 as i64;
+        let max = self.bit_count as i64;
+
+        for _ in 0..self.hash_count {
+            let bit_index = abs_i64(base % max) as usize;
             let word_index = bit_index / 64;
             let bit_offset = bit_index % 64;
 
             if word_index < self.bits.len() {
                 self.bits[word_index] |= 1u64 << bit_offset;
             }
+            base = base.wrapping_add(inc);
         }
     }
 
     /// Check if a key might exist in the bloom filter
     pub fn contains(&self, key: &[u8]) -> bool {
-        let hashes = self.calculate_hashes(key);
+        let (h1, h2) = self.calculate_hashes(key);
 
-        for i in 0..self.hash_count {
-            let hash = hashes.0.wrapping_add((i as u64).wrapping_mul(hashes.1));
-            let bit_index = (hash % self.bit_count) as usize;
+        let mut base = h2 as i64;
+        let inc = h1 as i64;
+        let max = self.bit_count as i64;
+
+        for _ in 0..self.hash_count {
+            let bit_index = abs_i64(base % max) as usize;
             let word_index = bit_index / 64;
             let bit_offset = bit_index % 64;
 
@@ -92,6 +111,7 @@ impl BloomFilter {
             if (self.bits[word_index] & (1u64 << bit_offset)) == 0 {
                 return false;
             }
+            base = base.wrapping_add(inc);
         }
 
         true
@@ -102,20 +122,13 @@ impl BloomFilter {
         self.contains(key)
     }
 
-    /// Calculate two independent hash values for double hashing
-    /// Uses Murmur3 128-bit hash as per Cassandra's BloomFilter implementation
+    /// Calculate two independent hash values for double hashing.
+    ///
+    /// Uses Cassandra's modified Murmur3 (with sign-extension bug in tail processing)
+    /// to match the bit positions Cassandra writes into Filter.db.
     fn calculate_hashes(&self, key: &[u8]) -> (u64, u64) {
-        // Compute Murmur3 128-bit hash with seed 0 (Cassandra standard)
-        // The murmur3_x64_128 function returns a 128-bit hash as a single u128
-        let mut cursor = Cursor::new(key);
-        let hash = murmur3::murmur3_x64_128(&mut cursor, 0).unwrap_or(0); // Default to 0 on error (should never fail with valid input)
-
-        // Split 128-bit hash into two 64-bit values for double hashing
-        // hash1 = high 64 bits, hash2 = low 64 bits
-        let hash1 = (hash >> 64) as u64;
-        let hash2 = hash as u64;
-
-        (hash1, hash2)
+        let (h1, h2) = crate::util::cassandra_murmur3::cassandra_murmur3_x64_128(key);
+        (h1 as u64, h2 as u64)
     }
 
     /// Get the number of hash functions
@@ -159,14 +172,20 @@ impl BloomFilter {
         // Cassandra bloom filter format (BloomFilterSerializer + OffHeapBitSet):
         // [Hash Count: 4 bytes, big-endian i32]
         // [Num Longs: 4 bytes, big-endian i32]  (number of u64 words)
-        // [Bit Array: numLongs * 8 bytes, big-endian u64 words]
+        // [Bit Array: numLongs * 8 bytes, raw byte copy]
+        //
+        // OffHeapBitSet stores bits byte-addressable: bit N lives at byte N/8, bit N%8.
+        // The new-format serializer writes raw bytes (`out.write(bytes, 0, size)`).
+        // Our internal representation uses u64 words where bit N is at word[N/64], bit N%64.
+        // To match Cassandra's byte-level addressing, we write words in little-endian order
+        // so that byte 0 contains bits 0-7, byte 1 contains bits 8-15, etc.
 
         output.extend_from_slice(&self.hash_count.to_be_bytes());
         output.extend_from_slice(&(self.bits.len() as u32).to_be_bytes());
 
-        // Write bit array in big-endian format
+        // Write bit array as little-endian u64 words (matching Cassandra's byte-addressable layout)
         for word in &self.bits {
-            output.extend_from_slice(&word.to_be_bytes());
+            output.extend_from_slice(&word.to_le_bytes());
         }
 
         Ok(output)
@@ -197,11 +216,11 @@ impl BloomFilter {
             ));
         }
 
-        // Read bit array (big-endian u64 words)
+        // Read bit array (little-endian u64 words — matches Cassandra's byte-addressable layout)
         let mut bits = Vec::with_capacity(num_longs);
         for i in 0..num_longs {
             let offset = 8 + (i * 8);
-            let word = u64::from_be_bytes([
+            let word = u64::from_le_bytes([
                 data[offset],
                 data[offset + 1],
                 data[offset + 2],

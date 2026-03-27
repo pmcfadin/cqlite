@@ -1181,7 +1181,10 @@ async fn test_export_compact_before_export_deprecated_succeeds() -> Result<()> {
 
     // Verify the export succeeded and produced output
     assert!(report.data_file_size > 0, "Data file should have content");
-    assert!(!report.components.is_empty(), "Export should have components");
+    assert!(
+        !report.components.is_empty(),
+        "Export should have components"
+    );
 
     // Verify the Data.db file exists at the expected path
     let data_file = export_dir

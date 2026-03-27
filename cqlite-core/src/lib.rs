@@ -11,6 +11,7 @@ pub mod parser;
 // pub mod performance;
 // pub mod security; // Security framework for comprehensive protection
 pub mod types;
+pub mod util;
 pub mod version_hints;
 
 pub mod benchmarks;

@@ -6134,7 +6134,11 @@ impl V5CompressedLegacyParser {
             if offset + elem_len > data.len() {
                 return Err(Error::corruption(format!(
                     "Frozen {} '{}': element {} needs {} bytes but only {} available",
-                    kind, column_name, i, elem_len, data.len() - offset
+                    kind,
+                    column_name,
+                    i,
+                    elem_len,
+                    data.len() - offset
                 )));
             }
 
@@ -6218,7 +6222,10 @@ impl V5CompressedLegacyParser {
             if offset + key_len > data.len() {
                 return Err(Error::corruption(format!(
                     "Frozen map '{}': key {} needs {} bytes but only {} available",
-                    column_name, i, key_len, data.len() - offset
+                    column_name,
+                    i,
+                    key_len,
+                    data.len() - offset
                 )));
             }
             let key_data = &data[offset..offset + key_len];
@@ -6250,12 +6257,14 @@ impl V5CompressedLegacyParser {
             if offset + val_len > data.len() {
                 return Err(Error::corruption(format!(
                     "Frozen map '{}': value {} needs {} bytes but only {} available",
-                    column_name, i, val_len, data.len() - offset
+                    column_name,
+                    i,
+                    val_len,
+                    data.len() - offset
                 )));
             }
             let val_data = &data[offset..offset + val_len];
-            let val_value =
-                self.parse_value_from_raw_bytes(val_data, value_type, column_name)?;
+            let val_value = self.parse_value_from_raw_bytes(val_data, value_type, column_name)?;
             offset += val_len;
 
             entries.push((key_value, val_value));

@@ -530,7 +530,11 @@ async fn test_readonly_wal_dir_write_fails() -> cqlite_core::error::Result<()> {
             // Expected: WAL sync failed due to permissions
             let msg = format!("{}", e);
             assert!(
-                msg.contains("WAL") || msg.contains("sync") || msg.contains("permission") || msg.contains("Permission") || msg.contains("Storage"),
+                msg.contains("WAL")
+                    || msg.contains("sync")
+                    || msg.contains("permission")
+                    || msg.contains("Permission")
+                    || msg.contains("Storage"),
                 "Unexpected error message: {}",
                 msg
             );
