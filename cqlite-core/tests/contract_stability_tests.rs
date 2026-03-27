@@ -77,7 +77,7 @@ fn contract_query_result_with_affected_rows() {
 /// Tests a minimal QueryRow with just a key.
 #[test]
 fn contract_query_row_minimal() {
-    let row = QueryRow::new(RowKey::new(vec![0xFF, 0x00]));
+    let row = QueryRow::new(RowKey::new(vec![0x00, 0xFF]));
     insta::with_settings!({sort_maps => true}, {
         insta::assert_json_snapshot!(row);
     });
