@@ -25,6 +25,9 @@ const MAX_INPUT_LENGTH: usize = 16 * 1024 * 1024; // 16 MB
 // Identifier Limits (Issue #403)
 const MAX_IDENTIFIER_LENGTH: usize = 48; // Cassandra limit
 
+// Batch Limits
+const MAX_BATCH_STATEMENTS: usize = 65535; // Matches Cassandra's warn threshold
+
 /// Validate identifier (Issue #403)
 fn validate_identifier(name: &str) -> Result<()> {
     // Reject empty identifiers
@@ -118,7 +121,7 @@ fn parse_quoted_identifier(input: &str) -> IResult<&str, String> {
             }
             Some(c) => {
                 result.push(c);
-                consumed += 1;
+                consumed += c.len_utf8();
             }
             None => {
                 return Err(nom::Err::Error(nom::error::Error::new(
@@ -262,7 +265,7 @@ fn string_literal(input: &str) -> IResult<&str, String> {
             }
             Some(c) => {
                 result.push(c);
-                consumed += 1;
+                consumed += c.len_utf8();
             }
             None => {
                 return Err(nom::Err::Error(nom::error::Error::new(
@@ -473,17 +476,21 @@ fn where_clause(input: &str) -> IResult<&str, CqlExpression> {
         separated_list1(tuple((ws, keyword("and"), ws)), where_condition)(input)?;
 
     // Combine conditions with AND
-    let result = if conditions.len() == 1 {
-        conditions.into_iter().next().unwrap()
-    } else {
-        conditions
-            .into_iter()
-            .reduce(|acc, cond| CqlExpression::Binary {
-                left: Box::new(acc),
-                operator: CqlBinaryOperator::And,
-                right: Box::new(cond),
-            })
-            .unwrap()
+    // Safety: separated_list1 guarantees at least one element, so reduce always returns Some
+    let result = match conditions
+        .into_iter()
+        .reduce(|acc, cond| CqlExpression::Binary {
+            left: Box::new(acc),
+            operator: CqlBinaryOperator::And,
+            right: Box::new(cond),
+        }) {
+        Some(expr) => expr,
+        None => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Many1,
+            )))
+        }
     };
 
     Ok((input, result))
@@ -591,6 +598,22 @@ pub fn parse_insert_statement(input: &str) -> Result<CqlInsert> {
     }
 }
 
+/// Parse the trailing clause shared by both VALUES and JSON INSERT forms:
+/// optional IF NOT EXISTS followed by optional USING clause.
+fn insert_trailer(input: &str) -> IResult<&str, (bool, Option<CqlUsing>)> {
+    let (input, _) = ws(input)?;
+    let (input, if_not_exists) = opt(tuple((
+        keyword("if"),
+        ws1,
+        keyword("not"),
+        ws1,
+        keyword("exists"),
+    )))(input)?;
+    let (input, using) = opt(using_clause)(input)?;
+    let (input, _) = ws(input)?;
+    Ok((input, (if_not_exists.is_some(), using)))
+}
+
 fn insert_statement_impl(input: &str) -> IResult<&str, CqlInsert> {
     let (input, _) = ws(input)?;
     let (input, _) = keyword("insert")(input)?;
@@ -601,6 +624,24 @@ fn insert_statement_impl(input: &str) -> IResult<&str, CqlInsert> {
     // Table name
     let (input, table) = qualified_table_name(input)?;
     let (input, _) = ws(input)?;
+
+    // Check for JSON syntax: INSERT INTO table JSON '...'
+    if let Ok((json_input, _)) = keyword("json")(input) {
+        let (json_input, _) = ws1(json_input)?;
+        let (json_input, json_str) = string_literal(json_input)?;
+        let (json_input, (if_not_exists, using)) = insert_trailer(json_input)?;
+
+        return Ok((
+            json_input,
+            CqlInsert {
+                table,
+                columns: vec![],
+                values: CqlInsertValues::Json(json_str),
+                if_not_exists,
+                using,
+            },
+        ));
+    }
 
     // Column list
     let (input, _) = char('(')(input)?;
@@ -618,21 +659,7 @@ fn insert_statement_impl(input: &str) -> IResult<&str, CqlInsert> {
     let (input, values) = separated_list1(tuple((ws, char(','), ws)), expression)(input)?;
     let (input, _) = ws(input)?;
     let (input, _) = char(')')(input)?;
-    let (input, _) = ws(input)?;
-
-    // Optional IF NOT EXISTS
-    let (input, if_not_exists) = opt(tuple((
-        keyword("if"),
-        ws1,
-        keyword("not"),
-        ws1,
-        keyword("exists"),
-    )))(input)?;
-    let if_not_exists = if_not_exists.is_some();
-
-    // Optional USING clause
-    let (input, using) = opt(using_clause)(input)?;
-    let (input, _) = ws(input)?;
+    let (input, (if_not_exists, using)) = insert_trailer(input)?;
 
     Ok((
         input,
@@ -809,7 +836,11 @@ fn delete_statement_impl(input: &str) -> IResult<&str, CqlDelete> {
     ))
 }
 
-/// Parse BATCH statement
+/// Parse BATCH statement.
+///
+/// Accepts multi-table batches syntactically, but the write engine processes each
+/// statement independently against the provided schema. Limited to
+/// [`MAX_BATCH_STATEMENTS`] statements for DoS protection.
 pub fn parse_batch_statement(input: &str) -> Result<CqlBatch> {
     // Check input length (Issue #402 - DoS protection)
     if input.len() > MAX_INPUT_LENGTH {
@@ -879,6 +910,14 @@ fn batch_statement_impl(input: &str) -> IResult<&str, CqlBatch> {
                 nom::error::ErrorKind::Tag,
             )));
         };
+
+        // DoS protection: limit number of statements in a batch
+        if statements.len() >= MAX_BATCH_STATEMENTS {
+            return Err(nom::Err::Failure(nom::error::Error::new(
+                trimmed,
+                nom::error::ErrorKind::TooLarge,
+            )));
+        }
 
         statements.push(stmt);
 
@@ -1573,5 +1612,104 @@ mod tests {
         let result = parse_insert_statement(&cql);
         // Should fail due to depth limit
         assert!(result.is_err());
+    }
+
+    // Unicode handling in string and identifier parsing
+
+    #[test]
+    fn test_string_literal_with_multibyte_utf8() {
+        let cql = "INSERT INTO ks.t (name) VALUES ('héllo wörld')";
+        let result = parse_insert_statement(cql);
+        assert!(
+            result.is_ok(),
+            "Failed to parse string with accented chars: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_string_literal_with_emoji() {
+        let cql = "INSERT INTO ks.t (name) VALUES ('hello 🌍 world')";
+        let result = parse_insert_statement(cql);
+        assert!(
+            result.is_ok(),
+            "Failed to parse string with emoji: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_string_literal_with_cjk() {
+        let cql = "INSERT INTO ks.t (name) VALUES ('你好世界')";
+        let result = parse_insert_statement(cql);
+        assert!(
+            result.is_ok(),
+            "Failed to parse string with CJK chars: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_quoted_identifier_with_multibyte_utf8() {
+        let cql = "INSERT INTO ks.t (\"nàme\") VALUES ('test')";
+        let result = parse_insert_statement(cql);
+        assert!(
+            result.is_ok(),
+            "Failed to parse quoted identifier with accented chars: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_quoted_identifier_with_emoji() {
+        let cql = "INSERT INTO ks.t (\"col_🎉\") VALUES ('test')";
+        let result = parse_insert_statement(cql);
+        assert!(
+            result.is_ok(),
+            "Failed to parse quoted identifier with emoji: {:?}",
+            result.err()
+        );
+    }
+
+    // INSERT INTO ... JSON parsing
+
+    #[test]
+    fn test_insert_json_basic() {
+        let cql = r#"INSERT INTO ks.t JSON '{"id": 1, "name": "test"}'"#;
+        let result = parse_insert_statement(cql).unwrap();
+        assert_eq!(result.table.keyspace.unwrap().name, "ks");
+        assert_eq!(result.table.name.name, "t");
+        assert!(result.columns.is_empty());
+        match &result.values {
+            CqlInsertValues::Json(s) => {
+                assert_eq!(s, r#"{"id": 1, "name": "test"}"#);
+            }
+            CqlInsertValues::Values(_) => panic!("Expected Json variant"),
+        }
+    }
+
+    #[test]
+    fn test_insert_json_if_not_exists() {
+        let cql = r#"INSERT INTO ks.t JSON '{"id": 1}' IF NOT EXISTS"#;
+        let result = parse_insert_statement(cql).unwrap();
+        assert!(result.if_not_exists);
+        assert!(matches!(&result.values, CqlInsertValues::Json(_)));
+    }
+
+    #[test]
+    fn test_insert_json_with_using_timestamp() {
+        let cql = r#"INSERT INTO ks.t JSON '{"id": 1}' USING TIMESTAMP 12345"#;
+        let result = parse_insert_statement(cql).unwrap();
+        assert!(matches!(&result.values, CqlInsertValues::Json(_)));
+        assert!(result.using.is_some());
+    }
+
+    #[test]
+    fn test_insert_values_still_works() {
+        // Ensure the JSON branch doesn't break normal VALUES parsing
+        let cql = "INSERT INTO ks.t (id, name) VALUES (1, 'test')";
+        let result = parse_insert_statement(cql).unwrap();
+        assert!(matches!(&result.values, CqlInsertValues::Values(_)));
+        assert_eq!(result.columns.len(), 2);
     }
 }

@@ -27,6 +27,22 @@ use crate::types::{UdtField, UdtValue, Value};
 #[cfg(feature = "write-support")]
 use crate::Error;
 
+/// Return the current wall-clock time as seconds since Unix epoch, cast to i32.
+///
+/// This is the correct value for `local_deletion_time` in tombstones.  It must
+/// reflect real calendar time so that Cassandra's GC-grace expiry logic works
+/// correctly; using a logical CQL timestamp instead would break that invariant.
+///
+/// Returns 0 on the extremely unlikely event that the system clock is before
+/// the Unix epoch (e.g. test environments with a mocked clock).
+#[cfg(feature = "write-support")]
+fn wall_clock_local_deletion_time() -> i32 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i32)
+        .unwrap_or(0)
+}
+
 /// Convert a parsed `CqlInsert` AST node into a `Mutation` using schema information.
 ///
 /// Both `VALUES` and `JSON` forms of INSERT are supported. For the JSON form the
@@ -40,11 +56,17 @@ use crate::Error;
 /// - The number of columns and values do not match (VALUES form)
 /// - A required partition key column is missing from the INSERT
 /// - A value cannot be coerced to its schema type
+/// - `IF NOT EXISTS` is specified (not supported by the local write engine)
 #[cfg(feature = "write-support")]
 pub(crate) fn insert_to_mutation(
     insert: &CqlInsert,
     schema: &TableSchema,
 ) -> Result<Mutation, Error> {
+    if insert.if_not_exists {
+        return Err(Error::InvalidInput(
+            "IF NOT EXISTS is not supported by the local write engine".to_string(),
+        ));
+    }
     validate_table(&insert.table, schema)?;
 
     // Extract (column_name, expression) pairs
@@ -477,11 +499,17 @@ fn json_type_name(val: &serde_json::Value) -> &'static str {
 /// - A SET assignment uses a compound operator (only `=` is supported)
 /// - A column in SET is unknown in the schema
 /// - A value cannot be coerced to its schema type
+/// - An `IF condition` is specified (not supported by the local write engine)
 #[cfg(feature = "write-support")]
 pub(crate) fn update_to_mutation(
     update: &CqlUpdate,
     schema: &TableSchema,
 ) -> Result<Mutation, Error> {
+    if update.if_condition.is_some() {
+        return Err(Error::InvalidInput(
+            "IF conditions are not supported by the local write engine".to_string(),
+        ));
+    }
     validate_table(&update.table, schema)?;
 
     // Extract key bindings from WHERE clause
@@ -573,11 +601,17 @@ pub(crate) fn update_to_mutation(
 /// - A required partition key column is missing from the WHERE clause
 /// - A range predicate targets a non-clustering column
 /// - A value cannot be coerced to its schema type
+/// - An `IF condition` is specified (not supported by the local write engine)
 #[cfg(feature = "write-support")]
 pub(crate) fn delete_to_mutation(
     delete: &CqlDelete,
     schema: &TableSchema,
 ) -> Result<Mutation, Error> {
+    if delete.if_condition.is_some() {
+        return Err(Error::InvalidInput(
+            "IF conditions are not supported by the local write engine".to_string(),
+        ));
+    }
     validate_table(&delete.table, schema)?;
 
     // Extract key bindings and range predicates from WHERE clause
@@ -626,13 +660,9 @@ pub(crate) fn delete_to_mutation(
 
     // Build partition tombstone if this is a partition-level delete
     let partition_tombstone = if is_partition_delete {
-        let local_deletion_time = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs() as i32)
-            .unwrap_or(0);
         Some(PartitionTombstone {
             deletion_time: timestamp_micros,
-            local_deletion_time,
+            local_deletion_time: wall_clock_local_deletion_time(),
         })
     } else {
         None
@@ -987,13 +1017,11 @@ fn build_range_tombstones(
         }
     }
 
-    let local_deletion_time = (timestamp_micros / 1_000_000) as i32;
-
     Ok(vec![RangeTombstone {
         start: lower_bound.unwrap_or(ClusteringBound::Bottom),
         end: upper_bound.unwrap_or(ClusteringBound::Top),
         deletion_time: timestamp_micros,
-        local_deletion_time,
+        local_deletion_time: wall_clock_local_deletion_time(),
     }])
 }
 
@@ -3315,5 +3343,145 @@ mod tests {
         let result = convert_cql_to_mutations(sql, &schema);
         assert!(result.is_ok(), "Failed: {:?}", result.err());
         assert_eq!(result.unwrap().len(), 1);
+    }
+
+    // ── Finding 5: range tombstone local_deletion_time uses wall clock ────────
+
+    #[test]
+    fn test_range_tombstone_local_deletion_time_is_wall_clock() {
+        // The range tombstone's local_deletion_time must reflect real wall-clock
+        // time, NOT be derived from the logical CQL timestamp (timestamp_micros).
+        // A logical timestamp such as 1_704_067_200_000_000 µs would produce
+        // 1_704_067_200 seconds, which happens to be a plausible wall-clock value
+        // (2024-01-01). Instead, we use a clearly unrealistic logical timestamp
+        // (year ~33000) so that any derivation from it would be obviously wrong.
+        let schema = test_clustering_schema();
+        let far_future_timestamp_micros: i64 = 1_000_000_000_000_000_000_i64; // ~year 33658
+
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable::with_keyspace("test_ks", "test_table"),
+            using: Some(CqlUsing {
+                timestamp: Some(CqlExpression::Literal(CqlLiteral::Integer(
+                    far_future_timestamp_micros,
+                ))),
+                ttl: None,
+            }),
+            where_clause: CqlExpression::Binary {
+                left: Box::new(CqlExpression::Binary {
+                    left: Box::new(CqlExpression::Column(CqlIdentifier::new("id"))),
+                    operator: CqlBinaryOperator::Eq,
+                    right: Box::new(CqlExpression::Literal(CqlLiteral::Integer(1))),
+                }),
+                operator: CqlBinaryOperator::And,
+                right: Box::new(CqlExpression::Binary {
+                    left: Box::new(CqlExpression::Column(CqlIdentifier::new("ck"))),
+                    operator: CqlBinaryOperator::Gt,
+                    right: Box::new(CqlExpression::Literal(CqlLiteral::String("a".into()))),
+                }),
+            },
+            if_condition: None,
+        };
+
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert_eq!(mutation.range_tombstones.len(), 1);
+        let rt = &mutation.range_tombstones[0];
+
+        // local_deletion_time must be within a few seconds of now (wall clock),
+        // not a derivative of far_future_timestamp_micros.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let ldt = rt.local_deletion_time as i64;
+        assert!(
+            (ldt - now_secs).abs() < 5,
+            "local_deletion_time ({}) should be close to now ({}), not derived from logical timestamp",
+            ldt,
+            now_secs,
+        );
+    }
+
+    // ── Finding 6: IF NOT EXISTS / IF conditions return errors ────────────────
+
+    #[test]
+    fn test_insert_if_not_exists_returns_error() {
+        let schema = test_schema();
+        let insert = CqlInsert {
+            table: CqlTable::new("test_tbl"),
+            columns: vec![CqlIdentifier::new("id"), CqlIdentifier::new("ts")],
+            values: CqlInsertValues::Values(vec![
+                CqlExpression::Literal(CqlLiteral::Uuid(
+                    "550e8400-e29b-41d4-a716-446655440000".to_string(),
+                )),
+                CqlExpression::Literal(CqlLiteral::Integer(1_000_000)),
+            ]),
+            if_not_exists: true,
+            using: None,
+        };
+
+        let err = insert_to_mutation(&insert, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("IF NOT EXISTS"),
+                    "expected message about IF NOT EXISTS, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_update_if_condition_returns_error() {
+        let schema = test_schema();
+        let update = CqlUpdate {
+            table: CqlTable::with_keyspace("test_ks", "test_tbl"),
+            using: None,
+            assignments: vec![CqlAssignment {
+                column: CqlIdentifier::new("name"),
+                operator: CqlAssignmentOperator::Assign,
+                value: CqlExpression::Literal(CqlLiteral::String("New".into())),
+            }],
+            where_clause: make_where_pk_only(),
+            if_condition: Some(CqlExpression::Literal(CqlLiteral::Boolean(true))),
+        };
+
+        let err = update_to_mutation(&update, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("IF conditions"),
+                    "expected message about IF conditions, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_delete_if_condition_returns_error() {
+        let schema = test_schema();
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable::with_keyspace("test_ks", "test_tbl"),
+            using: None,
+            where_clause: make_where_pk_only(),
+            if_condition: Some(CqlExpression::Literal(CqlLiteral::Boolean(true))),
+        };
+
+        let err = delete_to_mutation(&delete, &schema).unwrap_err();
+        match err {
+            Error::InvalidInput(msg) => {
+                assert!(
+                    msg.contains("IF conditions"),
+                    "expected message about IF conditions, got: {}",
+                    msg
+                );
+            }
+            other => panic!("expected InvalidInput, got {:?}", other),
+        }
     }
 }

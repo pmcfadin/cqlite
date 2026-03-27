@@ -311,14 +311,18 @@ pub struct CqlTruncate {
     pub table: CqlTable,
 }
 
-/// BATCH statement AST
+/// BATCH statement AST.
+///
+/// The parser accepts multi-table batches (each statement may reference a different table),
+/// but the write engine processes each statement independently against the provided schema.
+/// Cross-table atomicity is not guaranteed by the local write engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CqlBatch {
     /// Batch type
     pub batch_type: CqlBatchType,
     /// USING clause (TIMESTAMP)
     pub using: Option<CqlUsing>,
-    /// Statements in the batch
+    /// Statements in the batch (max 65535 entries, enforced by parser)
     pub statements: Vec<CqlBatchStatement>,
 }
 
