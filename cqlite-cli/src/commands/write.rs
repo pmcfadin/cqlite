@@ -269,7 +269,7 @@ pub fn handle_write_stats(write_engine: &WriteEngine) -> Result<WriteStats> {
 /// * `output_dir` - Output directory for the SSTable files
 /// * `keyspace` - Keyspace name for the exported SSTable
 /// * `table` - Table name for the exported SSTable
-/// * `compact` - Run compaction before export to merge multiple SSTables (Issue #464)
+/// * `compact` - Run compaction before export to merge multiple SSTables
 /// * `skip_validate` - Skip validation after export
 ///
 /// # Returns

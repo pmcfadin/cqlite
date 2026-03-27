@@ -3,6 +3,9 @@ target/
 Cargo.lock
 *.pdb
 
+# Local cargo config
+.cargo/
+
 # IDE
 .vscode/
 .idea/

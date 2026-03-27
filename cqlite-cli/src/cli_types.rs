@@ -271,18 +271,18 @@ pub enum Commands {
         #[arg(short, long)]
         detailed: bool,
     },
-    /// Run background maintenance (compaction) - requires --writable mode (Issue #392)
+    /// Run background maintenance (compaction) - requires --writable mode
     #[command(
         long_about = "Perform incremental background compaction work within a time budget. Call repeatedly from a background task for continuous compaction. Example: cqlite maintenance --budget-ms 100 --writable --write-dir /path/to/data"
     )]
     Maintenance(MaintenanceArgs),
-    /// Display write engine statistics - requires --writable mode (Issue #392)
+    /// Display write engine statistics - requires --writable mode
     #[command(name = "write-stats")]
     #[command(
         long_about = "Show current write engine statistics including memtable size, row count, WAL size, and generation number. Example: cqlite write-stats --writable --write-dir /path/to/data"
     )]
     WriteStats,
-    /// Export SSTables for Cassandra import - requires --writable mode (Issue #392)
+    /// Export SSTables for Cassandra import - requires --writable mode
     #[command(name = "export-sstable")]
     #[command(
         long_about = "Export data from the write engine as Cassandra-compatible SSTables. Use --compact to run compaction before export to merge multiple SSTables into one. Example: cqlite export-sstable /tmp/export --compact --writable --write-dir /path/to/data"
@@ -388,7 +388,7 @@ pub enum BenchCommands {
     },
 }
 
-/// Arguments for the maintenance subcommand (Issue #392)
+// Arguments for the maintenance subcommand (Issue #392)
 #[derive(Args, Debug, Clone)]
 pub struct MaintenanceArgs {
     /// Time budget in milliseconds for this maintenance step
@@ -396,7 +396,7 @@ pub struct MaintenanceArgs {
     pub budget_ms: u64,
 }
 
-/// Arguments for the export-sstable subcommand (Issue #392)
+// Arguments for the export-sstable subcommand (Issue #392)
 #[derive(Args, Debug, Clone)]
 pub struct ExportSstableArgs {
     /// Output directory for exported SSTables

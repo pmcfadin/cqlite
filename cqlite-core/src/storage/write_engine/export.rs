@@ -299,17 +299,14 @@ impl crate::storage::write_engine::WriteEngine {
             log::info!("Memtable is empty, skipping flush");
         }
 
-        // Step 2: Full compaction (if enabled)
-        let source_sstable = if options.compact_before_export {
+        // Step 2: Compaction (deprecated on ExportOptions — use maintenance_step() instead)
+        if options.compact_before_export {
             log::warn!(
                 "compact_before_export on ExportOptions is deprecated. \
                  Use WriteEngine::maintenance_step() before export instead."
             );
-            self.find_most_recent_sstable().await?
-        } else {
-            log::info!("Skipping compaction, using most recent SSTable");
-            self.find_most_recent_sstable().await?
-        };
+        }
+        let source_sstable = self.find_most_recent_sstable().await?;
 
         // Step 3: Copy to output with Cassandra naming
         let mut exported_components = Vec::new();

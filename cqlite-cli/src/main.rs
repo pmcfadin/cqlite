@@ -73,13 +73,8 @@ async fn run_main() -> Result<()> {
     #[cfg(feature = "state_machine")]
     if cli.execute.is_some() && cli.schema.is_some() {
         if cli.data_dir.is_none() && cli.dataset.is_none() {
-            let is_writable_dml = cli.writable
-                && cli.execute.as_ref().map_or(false, |q| {
-                    let upper = q.trim().to_uppercase();
-                    upper.starts_with("INSERT")
-                        || upper.starts_with("UPDATE")
-                        || upper.starts_with("DELETE")
-                });
+            let is_writable_dml =
+                cli.writable && cli.execute.as_ref().map_or(false, |q| is_dml_statement(q));
             if !is_writable_dml {
                 return Err(anyhow::anyhow!(
                     "Missing required flag: --data-dir\n\n\
@@ -515,12 +510,7 @@ async fn run_main() -> Result<()> {
         // Route DML statements (INSERT/UPDATE/DELETE) to WriteEngine when --writable is set
         #[cfg(feature = "write-support")]
         {
-            let trimmed_upper = query.trim().to_uppercase();
-            let is_dml = trimmed_upper.starts_with("INSERT")
-                || trimmed_upper.starts_with("UPDATE")
-                || trimmed_upper.starts_with("DELETE");
-
-            if is_dml {
+            if is_dml_statement(&query) {
                 let engine = write_engine.as_mut().ok_or_else(|| {
                     anyhow::anyhow!(
                         "DML statements require --writable mode. \
@@ -987,6 +977,12 @@ async fn initialize_database(db_path: &PathBuf, config: &config::Config) -> Resu
     info!("Database initialized successfully");
 
     Ok(database)
+}
+
+/// Check if a query string is a DML statement (INSERT, UPDATE, DELETE).
+fn is_dml_statement(query: &str) -> bool {
+    let upper = query.trim().to_uppercase();
+    upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE")
 }
 
 /// Convert CLI configuration to core database configuration
