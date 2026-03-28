@@ -2696,15 +2696,6 @@ mod tests {
         let cql_type = CqlType::Frozen(Box::new(CqlType::Int));
         let result = parse_cql_value_for_type(data, &cql_type)
             .expect("parse_cql_value_for_type should succeed for Frozen<Int>");
-        match result {
-            Value::Frozen(inner) => match *inner {
-                Value::Integer(n) => assert_eq!(n, 42),
-                other => panic!("Expected Value::Integer inside Frozen, got {:?}", other),
-            },
-            other => panic!(
-                "Expected Value::Frozen, got {:?} — Frozen<Int> must not fall through to Blob",
-                other
-            ),
-        }
+        assert_eq!(result, Value::Frozen(Box::new(Value::Integer(42))));
     }
 }
