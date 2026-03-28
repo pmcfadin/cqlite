@@ -414,12 +414,12 @@ impl Ord for ClusteringKey {
         // This is used for BTreeMap ordering in memtable.
         // Schema-aware comparison should use `compare()` method.
         for ((_, a_val), (_, b_val)) in self.columns.iter().zip(other.columns.iter()) {
-            // Type mismatch indicates a schema validation bug - panic rather than
-            // silently corrupting ordering. All ClusteringKeys in a table should
-            // have been validated against the same schema before reaching this point.
-            let ordering = compare_values(a_val, b_val).expect(
-                "ClusteringKey comparison failed: type mismatch indicates schema validation bug",
-            );
+            let ordering = compare_values(a_val, b_val).unwrap_or_else(|_| {
+                // Type mismatch fallback: deterministic ordering via Debug representation.
+                // This only matters for BTreeMap key placement in memtable, not persistence.
+                // Heterogeneous SSTables (e.g. Frozen(List) vs List) must not crash the process.
+                format!("{a_val:?}").cmp(&format!("{b_val:?}"))
+            });
             if ordering != Ordering::Equal {
                 return ordering;
             }
@@ -1439,5 +1439,27 @@ mod tests {
         };
 
         assert!(PartitionKey::from_bytes(&[], &schema).is_err());
+    }
+
+    #[test]
+    fn test_clustering_key_cmp_type_mismatch_does_not_panic() {
+        // Two ClusteringKeys whose sole column has mismatched value types.
+        // This can happen with heterogeneous SSTables (e.g. Frozen(List) vs List).
+        // The Ord impl must not panic; it must produce a deterministic result.
+        let key_a = ClusteringKey {
+            columns: vec![("col".to_string(), Value::Integer(1))],
+        };
+        let key_b = ClusteringKey {
+            columns: vec![("col".to_string(), Value::Text("1".to_string()))],
+        };
+
+        // Must not panic.
+        let first = key_a.cmp(&key_b);
+        // Must be deterministic: same result on repeated calls.
+        let second = key_a.cmp(&key_b);
+        assert_eq!(first, second);
+
+        // Reflexive: a key compared against itself is Equal.
+        assert_eq!(key_a.cmp(&key_a), Ordering::Equal);
     }
 }

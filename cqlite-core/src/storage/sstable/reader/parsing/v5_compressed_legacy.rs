@@ -4135,7 +4135,7 @@ impl V5CompressedLegacyParser {
             // For complex cell values (inside collections), the value is stored as raw bytes
             // without cell flags. Use parse_raw_type_value for all types.
             let parsed_value = self
-                .parse_raw_type_value(value_data, 0, element_type, &column.name)
+                .parse_raw_type_value(value_data, 0, element_type, &column.name, 0)
                 .map(|(val, _)| val)?;
             Some(parsed_value)
         };
@@ -4460,7 +4460,14 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         type_str: &str,
         column_name: &str,
+        depth: usize,
     ) -> Result<Value> {
+        if depth > MAX_TYPE_NESTING_DEPTH {
+            return Err(Error::corruption(format!(
+                "Frozen element '{}': recursion depth {} exceeds maximum {}",
+                column_name, depth, MAX_TYPE_NESTING_DEPTH
+            )));
+        }
         let normalized_type = type_str.to_lowercase();
         match normalized_type.as_str() {
             "text"
@@ -4619,25 +4626,42 @@ impl V5CompressedLegacyParser {
             // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>)
             type_str if type_str.starts_with("list<") => {
                 let element_type = self.extract_collection_element_type(type_str, "list")?;
-                let (val, _) =
-                    self.parse_frozen_list_value_raw(data, 0, &element_type, column_name)?;
+                let (val, _) = self.parse_frozen_list_value_raw(
+                    data,
+                    0,
+                    &element_type,
+                    column_name,
+                    depth + 1,
+                )?;
                 Ok(val)
             }
             type_str if type_str.starts_with("set<") => {
                 let element_type = self.extract_collection_element_type(type_str, "set")?;
-                let (val, _) =
-                    self.parse_frozen_set_value_raw(data, 0, &element_type, column_name)?;
+                let (val, _) = self.parse_frozen_set_value_raw(
+                    data,
+                    0,
+                    &element_type,
+                    column_name,
+                    depth + 1,
+                )?;
                 Ok(val)
             }
             type_str if type_str.starts_with("map<") => {
                 let (key_type, value_type) = self.extract_map_types(type_str)?;
-                let (val, _) =
-                    self.parse_frozen_map_value_raw(data, 0, &key_type, &value_type, column_name)?;
+                let (val, _) = self.parse_frozen_map_value_raw(
+                    data,
+                    0,
+                    &key_type,
+                    &value_type,
+                    column_name,
+                    depth + 1,
+                )?;
                 Ok(val)
             }
             type_str if type_str.starts_with("frozen<") => {
                 let inner_type = self.extract_frozen_inner_type(type_str)?;
-                let inner = self.parse_value_from_raw_bytes(data, &inner_type, column_name)?;
+                let inner =
+                    self.parse_value_from_raw_bytes(data, &inner_type, column_name, depth + 1)?;
                 Ok(Value::Frozen(Box::new(inner)))
             }
             other => {
@@ -4670,7 +4694,14 @@ impl V5CompressedLegacyParser {
         mut offset: usize,
         type_str: &str,
         column_name: &str,
+        depth: usize,
     ) -> Result<(Value, usize)> {
+        if depth > MAX_TYPE_NESTING_DEPTH {
+            return Err(Error::corruption(format!(
+                "Frozen element '{}': recursion depth {} exceeds maximum {}",
+                column_name, depth, MAX_TYPE_NESTING_DEPTH
+            )));
+        }
         // Normalize type name for case-insensitive matching
         let normalized_type = type_str.to_lowercase();
 
@@ -5173,7 +5204,7 @@ impl V5CompressedLegacyParser {
             type_str if type_str.starts_with("frozen<") => {
                 let inner_type = self.extract_frozen_inner_type(type_str)?;
                 let (inner_value, new_offset) =
-                    self.parse_raw_type_value(data, offset, &inner_type, column_name)?;
+                    self.parse_raw_type_value(data, offset, &inner_type, column_name, depth + 1)?;
                 offset = new_offset;
                 Value::Frozen(Box::new(inner_value))
             }
@@ -5181,16 +5212,26 @@ impl V5CompressedLegacyParser {
             // Handle nested collections inside frozen context
             type_str if type_str.starts_with("list<") => {
                 let element_type = self.extract_collection_element_type(type_str, "list")?;
-                let (list_value, new_offset) =
-                    self.parse_frozen_list_value_raw(data, offset, &element_type, column_name)?;
+                let (list_value, new_offset) = self.parse_frozen_list_value_raw(
+                    data,
+                    offset,
+                    &element_type,
+                    column_name,
+                    depth + 1,
+                )?;
                 offset = new_offset;
                 list_value
             }
 
             type_str if type_str.starts_with("set<") => {
                 let element_type = self.extract_collection_element_type(type_str, "set")?;
-                let (set_value, new_offset) =
-                    self.parse_frozen_set_value_raw(data, offset, &element_type, column_name)?;
+                let (set_value, new_offset) = self.parse_frozen_set_value_raw(
+                    data,
+                    offset,
+                    &element_type,
+                    column_name,
+                    depth + 1,
+                )?;
                 offset = new_offset;
                 set_value
             }
@@ -5203,6 +5244,7 @@ impl V5CompressedLegacyParser {
                     &key_type,
                     &value_type,
                     column_name,
+                    depth + 1,
                 )?;
                 offset = new_offset;
                 map_value
@@ -5929,6 +5971,7 @@ impl V5CompressedLegacyParser {
         blob_end: usize,
         type_str: &str,
         element_desc: &str,
+        depth: usize,
     ) -> Result<Value> {
         if *offset + 4 > blob_end {
             return Err(Error::corruption(format!(
@@ -5961,7 +6004,7 @@ impl V5CompressedLegacyParser {
         }
 
         let elem_data = &data[*offset..*offset + len];
-        let value = self.parse_value_from_raw_bytes(elem_data, type_str, element_desc)?;
+        let value = self.parse_value_from_raw_bytes(elem_data, type_str, element_desc, depth)?;
         *offset += len;
         Ok(value)
     }
@@ -5995,7 +6038,7 @@ impl V5CompressedLegacyParser {
         for i in 0..count {
             let desc = format!("{} '{}' element {}", kind, column.name, i);
             let value =
-                self.read_frozen_element(data, &mut offset, blob_end, element_type, &desc)?;
+                self.read_frozen_element(data, &mut offset, blob_end, element_type, &desc, 0)?;
             log::debug!(
                 "V5CompressedLegacy: Frozen {} element {}: {:?}",
                 kind,
@@ -6066,11 +6109,11 @@ impl V5CompressedLegacyParser {
         for i in 0..count {
             let key_desc = format!("map '{}' key {}", column.name, i);
             let key_value =
-                self.read_frozen_element(data, &mut offset, blob_end, key_type, &key_desc)?;
+                self.read_frozen_element(data, &mut offset, blob_end, key_type, &key_desc, 0)?;
 
             let val_desc = format!("map '{}' value {}", column.name, i);
             let val_value =
-                self.read_frozen_element(data, &mut offset, blob_end, value_type, &val_desc)?;
+                self.read_frozen_element(data, &mut offset, blob_end, value_type, &val_desc, 0)?;
 
             log::debug!(
                 "V5CompressedLegacy: Frozen map entry {}: {:?} -> {:?}",
@@ -6096,6 +6139,7 @@ impl V5CompressedLegacyParser {
         element_type: &str,
         column_name: &str,
         as_set: bool,
+        depth: usize,
     ) -> Result<(Value, usize)> {
         let kind = if as_set { "set" } else { "list" };
         let count = Self::read_frozen_count(data, &mut offset, data.len(), kind, column_name)?;
@@ -6144,7 +6188,7 @@ impl V5CompressedLegacyParser {
 
             let elem_data = &data[offset..offset + elem_len];
             let elem_value =
-                self.parse_value_from_raw_bytes(elem_data, element_type, column_name)?;
+                self.parse_value_from_raw_bytes(elem_data, element_type, column_name, depth)?;
             elements.push(elem_value);
             offset += elem_len;
         }
@@ -6163,8 +6207,9 @@ impl V5CompressedLegacyParser {
         offset: usize,
         element_type: &str,
         column_name: &str,
+        depth: usize,
     ) -> Result<(Value, usize)> {
-        self.parse_frozen_sequence_value_raw(data, offset, element_type, column_name, false)
+        self.parse_frozen_sequence_value_raw(data, offset, element_type, column_name, false, depth)
     }
 
     /// Parse frozen set value (raw version without Column parameter).
@@ -6174,8 +6219,9 @@ impl V5CompressedLegacyParser {
         offset: usize,
         element_type: &str,
         column_name: &str,
+        depth: usize,
     ) -> Result<(Value, usize)> {
-        self.parse_frozen_sequence_value_raw(data, offset, element_type, column_name, true)
+        self.parse_frozen_sequence_value_raw(data, offset, element_type, column_name, true, depth)
     }
 
     /// Parse frozen map value (raw version without Column parameter).
@@ -6186,6 +6232,7 @@ impl V5CompressedLegacyParser {
         key_type: &str,
         value_type: &str,
         column_name: &str,
+        depth: usize,
     ) -> Result<(Value, usize)> {
         let count = Self::read_frozen_count(data, &mut offset, data.len(), "map", column_name)?;
 
@@ -6229,7 +6276,8 @@ impl V5CompressedLegacyParser {
                 )));
             }
             let key_data = &data[offset..offset + key_len];
-            let key_value = self.parse_value_from_raw_bytes(key_data, key_type, column_name)?;
+            let key_value =
+                self.parse_value_from_raw_bytes(key_data, key_type, column_name, depth)?;
             offset += key_len;
 
             // Value: [i32 BE len][value bytes]
@@ -6264,7 +6312,8 @@ impl V5CompressedLegacyParser {
                 )));
             }
             let val_data = &data[offset..offset + val_len];
-            let val_value = self.parse_value_from_raw_bytes(val_data, value_type, column_name)?;
+            let val_value =
+                self.parse_value_from_raw_bytes(val_data, value_type, column_name, depth)?;
             offset += val_len;
 
             entries.push((key_value, val_value));
@@ -6446,10 +6495,328 @@ mod tests {
         assert!(parser.extract_tuple_element_types("int").is_err());
     }
 
+    /// Helper: build a frozen list<int> raw binary: [i32 count][i32 len][int]...
+    fn build_frozen_list_int(values: &[i32]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(values.len() as i32).to_be_bytes());
+        for &v in values {
+            buf.extend_from_slice(&4i32.to_be_bytes());
+            buf.extend_from_slice(&v.to_be_bytes());
+        }
+        buf
+    }
+
+    /// Helper: build a frozen map<text,int> raw binary
+    fn build_frozen_map_text_int(entries: &[(&str, i32)]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(entries.len() as i32).to_be_bytes());
+        for &(k, v) in entries {
+            let k_bytes = k.as_bytes();
+            buf.extend_from_slice(&(k_bytes.len() as i32).to_be_bytes());
+            buf.extend_from_slice(k_bytes);
+            buf.extend_from_slice(&4i32.to_be_bytes());
+            buf.extend_from_slice(&v.to_be_bytes());
+        }
+        buf
+    }
+
     #[test]
-    fn test_frozen_list_parsing() {
-        // TODO(Issue #162): Add integration test with real SSTable data
-        // For now, frozen types delegate to inner type parsing which is tested elsewhere
+    fn test_parse_value_from_raw_bytes_primitives() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // int
+        let data = 42i32.to_be_bytes();
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "int", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Integer(42));
+
+        // bigint
+        let data = 123456789i64.to_be_bytes();
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "bigint", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::BigInt(123456789));
+
+        // text
+        let data = b"hello";
+        let val = parser
+            .parse_value_from_raw_bytes(data, "text", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Text("hello".to_string()));
+
+        // boolean true
+        let val = parser
+            .parse_value_from_raw_bytes(&[1], "boolean", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Boolean(true));
+
+        // boolean false
+        let val = parser
+            .parse_value_from_raw_bytes(&[0], "boolean", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Boolean(false));
+
+        // float (parse_value_from_raw_bytes promotes f32 to f64 via Float)
+        let data = 1.5f32.to_be_bytes();
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "float", "col", 0)
+            .unwrap();
+        match val {
+            Value::Float(f) => assert!((f - 1.5).abs() < 0.001),
+            other => panic!("Expected Float, got {:?}", other),
+        }
+
+        // double
+        let data = 9.876f64.to_be_bytes();
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "double", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Float(9.876));
+
+        // uuid (16 bytes)
+        let uuid_bytes: [u8; 16] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
+        let val = parser
+            .parse_value_from_raw_bytes(&uuid_bytes, "uuid", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Uuid(uuid_bytes));
+
+        // smallint
+        let data = 1234i16.to_be_bytes();
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "smallint", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::SmallInt(1234));
+
+        // tinyint
+        let val = parser
+            .parse_value_from_raw_bytes(&[42], "tinyint", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::TinyInt(42));
+
+        // blob
+        let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "blob", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Blob(data));
+
+        // varint
+        let data = vec![0x01, 0x00];
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "varint", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Varint(vec![0x01, 0x00]));
+
+        // inet (IPv4)
+        let data = vec![127, 0, 0, 1];
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "inet", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Inet(vec![127, 0, 0, 1]));
+
+        // timestamp
+        let data = 1704067200000i64.to_be_bytes();
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "timestamp", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Timestamp(1704067200000));
+
+        // decimal
+        let mut data = Vec::new();
+        data.extend_from_slice(&2i32.to_be_bytes()); // scale
+        data.extend_from_slice(&[0x01, 0xC8]); // unscaled = 456
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "decimal", "col", 0)
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::Decimal {
+                scale: 2,
+                unscaled: vec![0x01, 0xC8]
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_value_from_raw_bytes_nested_list() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_int(&[10, 20, 30]);
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "list<int>", "col", 0)
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::List(vec![
+                Value::Integer(10),
+                Value::Integer(20),
+                Value::Integer(30)
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_value_from_raw_bytes_nested_set() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_int(&[5, 15]);
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "set<int>", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Set(vec![Value::Integer(5), Value::Integer(15)]));
+    }
+
+    #[test]
+    fn test_parse_value_from_raw_bytes_nested_map() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_map_text_int(&[("alice", 1), ("bob", 2)]);
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "map<text,int>", "col", 0)
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::Map(vec![
+                (Value::Text("alice".to_string()), Value::Integer(1)),
+                (Value::Text("bob".to_string()), Value::Integer(2)),
+            ])
+        );
+    }
+
+    #[test]
+    fn test_parse_value_from_raw_bytes_frozen_wrapper() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_int(&[100, 200]);
+        let val = parser
+            .parse_value_from_raw_bytes(&data, "frozen<list<int>>", "col", 0)
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Integer(100),
+                Value::Integer(200)
+            ])))
+        );
+    }
+
+    #[test]
+    fn test_frozen_sequence_value_raw_list() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_int(&[10, 20]);
+        let (val, end_offset) = parser
+            .parse_frozen_list_value_raw(&data, 0, "int", "col", 0)
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::List(vec![Value::Integer(10), Value::Integer(20)])
+        );
+        assert_eq!(end_offset, data.len());
+    }
+
+    #[test]
+    fn test_frozen_sequence_value_raw_set() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_int(&[5, 15]);
+        let (val, _) = parser
+            .parse_frozen_set_value_raw(&data, 0, "int", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Set(vec![Value::Integer(5), Value::Integer(15)]));
+    }
+
+    #[test]
+    fn test_frozen_sequence_value_raw_empty() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = 0i32.to_be_bytes().to_vec(); // count = 0
+        let (val, _) = parser
+            .parse_frozen_list_value_raw(&data, 0, "int", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::List(vec![]));
+
+        let (val, _) = parser
+            .parse_frozen_set_value_raw(&data, 0, "int", "col", 0)
+            .unwrap();
+        assert_eq!(val, Value::Set(vec![]));
+    }
+
+    #[test]
+    fn test_frozen_map_value_raw() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_map_text_int(&[("x", 42)]);
+        let (val, end_offset) = parser
+            .parse_frozen_map_value_raw(&data, 0, "text", "int", "col", 0)
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::Map(vec![(Value::Text("x".to_string()), Value::Integer(42))])
+        );
+        assert_eq!(end_offset, data.len());
+    }
+
+    #[test]
+    fn test_frozen_parse_error_truncated_data() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Truncated: claims 2 elements but only has space for count header
+        let data = 2i32.to_be_bytes().to_vec();
+        let result = parser.parse_frozen_list_value_raw(&data, 0, "int", "col", 0);
+        assert!(result.is_err());
+
+        // Negative element length
+        let mut data = Vec::new();
+        data.extend_from_slice(&1i32.to_be_bytes()); // count = 1
+        data.extend_from_slice(&(-1i32).to_be_bytes()); // elem_len = -1
+        let result = parser.parse_frozen_list_value_raw(&data, 0, "int", "col", 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_frozen_recursion_depth_exceeded() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Build a type string with 12 levels of nesting (exceeds MAX_TYPE_NESTING_DEPTH=10)
+        let mut type_str = "int".to_string();
+        for _ in 0..12 {
+            type_str = format!("frozen<{}>", type_str);
+        }
+
+        let data = 42i32.to_be_bytes();
+        let result = parser.parse_value_from_raw_bytes(&data, &type_str, "col", 0);
+        assert!(result.is_err());
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("recursion depth"),
+            "Error should mention recursion depth: {}",
+            err_msg
+        );
+    }
+
+    #[test]
+    fn test_parse_raw_type_value_depth_guard() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Directly calling with depth at limit should fail
+        let data = 42i32.to_be_bytes();
+        let result =
+            parser.parse_raw_type_value(&data, 0, "int", "col", MAX_TYPE_NESTING_DEPTH + 1);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -6863,8 +7230,8 @@ mod tests {
         let data = vec![0u8; 4 * (MAX_UDT_FIELD_COUNT + 1)]; // Minimal data (all nulls)
 
         // Test through parse_raw_type_value which has the validation
-        // Signature: parse_raw_type_value(data, offset, type_str, column_name)
-        let result = parser.parse_raw_type_value(&data, 0, &type_str, "test_col");
+        // Signature: parse_raw_type_value(data, offset, type_str, column_name, depth)
+        let result = parser.parse_raw_type_value(&data, 0, &type_str, "test_col", 0);
         assert!(
             result.is_err(),
             "Should reject UDT with more than MAX_UDT_FIELD_COUNT fields"

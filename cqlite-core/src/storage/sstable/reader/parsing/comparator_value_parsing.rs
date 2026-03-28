@@ -6,6 +6,11 @@
 //! Unlike the `parse_cql_value_raw` function which only uses CqlTypeId,
 //! this module uses full ComparatorType information to properly parse nested
 //! structures like UDTs inside collections.
+//!
+//! **Element length encoding**: Uses VInt-encoded lengths for non-frozen
+//! collection elements. This differs from frozen collections in
+//! `v5_compressed_legacy.rs` which use i32 BE lengths per Cassandra's
+//! `AbstractType.writeValue()`.
 
 use crate::{
     parser::vint::parse_vint_length,

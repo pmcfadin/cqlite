@@ -786,10 +786,19 @@ fn create_empty_value_for_cql_type(cql_type: &CqlType) -> Result<Value> {
 
 /// Parse CQL value for a specific CQL type (used for UDT fields)
 fn parse_cql_value_for_type(input: &[u8], cql_type: &CqlType) -> Result<Value> {
-    let type_id = cql_type_to_type_id(cql_type);
-    let (_, value) = parse_cql_value(input, type_id)
-        .map_err(|_| Error::corruption("Failed to parse CQL value for UDT field".to_string()))?;
-    Ok(value)
+    match cql_type {
+        CqlType::Frozen(inner) => {
+            let inner_value = parse_cql_value_for_type(input, inner)?;
+            Ok(Value::Frozen(Box::new(inner_value)))
+        }
+        _ => {
+            let type_id = cql_type_to_type_id(cql_type);
+            let (_, value) = parse_cql_value(input, type_id).map_err(|_| {
+                Error::corruption("Failed to parse CQL value for UDT field".to_string())
+            })?;
+            Ok(value)
+        }
+    }
 }
 
 /// Parse UDT with schema and registry support for nested UDTs
@@ -1081,7 +1090,7 @@ fn cql_type_to_type_id(cql_type: &CqlType) -> CqlTypeId {
         CqlType::Map(_, _) => CqlTypeId::Map,
         CqlType::Tuple(_) => CqlTypeId::Tuple,
         CqlType::Udt(_, _) => CqlTypeId::Udt,
-        CqlType::Frozen(_) => CqlTypeId::Blob, // Frozen types use underlying type
+        CqlType::Frozen(_) => CqlTypeId::Blob, // Fallback only; callers should handle Frozen explicitly
         CqlType::Custom(_) => CqlTypeId::Blob, // Custom types as blob
     }
 }
@@ -2677,6 +2686,25 @@ mod tests {
             );
         } else {
             panic!("Expected nom::Err::Error, got something else");
+        }
+    }
+
+    #[test]
+    fn test_parse_cql_value_for_type_frozen_int() {
+        // 4 bytes of i32 BE representing the value 42
+        let data: &[u8] = &[0x00, 0x00, 0x00, 0x2A];
+        let cql_type = CqlType::Frozen(Box::new(CqlType::Int));
+        let result = parse_cql_value_for_type(data, &cql_type)
+            .expect("parse_cql_value_for_type should succeed for Frozen<Int>");
+        match result {
+            Value::Frozen(inner) => match *inner {
+                Value::Integer(n) => assert_eq!(n, 42),
+                other => panic!("Expected Value::Integer inside Frozen, got {:?}", other),
+            },
+            other => panic!(
+                "Expected Value::Frozen, got {:?} — Frozen<Int> must not fall through to Blob",
+                other
+            ),
         }
     }
 }
