@@ -37,13 +37,24 @@
 //! assert!(result.unsupported_features.is_empty());
 //! ```
 
-// CQL (Cassandra Query Language) Reference:
-// https://cassandra.apache.org/doc/latest/cassandra/developing/cql/cql_singlefile.html
-//
-// This implements CQL v3.4.3+ for Apache Cassandra 5.0+
-// CQL is NOT SQL - it's a query language specifically designed for Cassandra's distributed architecture.
-
 use crate::{Error, Result};
+
+/// Aggregate function call prefixes detected as unsupported.
+const AGGREGATE_PREFIXES: &[&str] = &["COUNT(", "SUM(", "AVG(", "MIN(", "MAX("];
+
+/// JOIN keyword variants detected as unsupported. Each is padded with spaces
+/// so we don't flag identifiers that merely contain "JOIN".
+const JOIN_KEYWORDS: &[&str] = &[
+    " JOIN ",
+    " INNER JOIN ",
+    " LEFT JOIN ",
+    " RIGHT JOIN ",
+    " FULL JOIN ",
+    " CROSS JOIN ",
+];
+
+/// Range operators detected in (or after) the WHERE clause.
+const RANGE_OPERATORS: &[&str] = &[">=", "<=", "!=", "<>", ">", "<"];
 
 /// M2 SELECT query validator
 ///
@@ -84,21 +95,23 @@ pub enum UnsupportedFeature {
     RangeQueries,
 }
 
+impl UnsupportedFeature {
+    fn label(self) -> &'static str {
+        match self {
+            UnsupportedFeature::OrderBy => "ORDER BY",
+            UnsupportedFeature::AllowFiltering => "ALLOW FILTERING",
+            UnsupportedFeature::Aggregates => "Aggregates (COUNT, SUM, AVG, MIN, MAX)",
+            UnsupportedFeature::GroupBy => "GROUP BY",
+            UnsupportedFeature::Having => "HAVING",
+            UnsupportedFeature::Joins => "JOINs",
+            UnsupportedFeature::RangeQueries => "Range queries (>, <, >=, <=, !=, <>)",
+        }
+    }
+}
+
 impl std::fmt::Display for UnsupportedFeature {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            UnsupportedFeature::OrderBy => write!(f, "ORDER BY"),
-            UnsupportedFeature::AllowFiltering => write!(f, "ALLOW FILTERING"),
-            UnsupportedFeature::Aggregates => {
-                write!(f, "Aggregates (COUNT, SUM, AVG, MIN, MAX)")
-            }
-            UnsupportedFeature::GroupBy => write!(f, "GROUP BY"),
-            UnsupportedFeature::Having => write!(f, "HAVING"),
-            UnsupportedFeature::Joins => write!(f, "JOINs"),
-            UnsupportedFeature::RangeQueries => {
-                write!(f, "Range queries (>, <, >=, <=, !=, <>)")
-            }
-        }
+        f.write_str(self.label())
     }
 }
 
@@ -120,123 +133,79 @@ impl M2SelectValidator {
     /// The error message provides helpful guidance on M2 limitations.
     pub fn validate_select(&self, cql: &str) -> Result<SelectValidationResult> {
         let cql_upper = cql.to_uppercase();
-        let mut unsupported_features = Vec::new();
+        let where_pos = cql_upper.find("WHERE");
 
-        // Detect ORDER BY
-        if cql_upper.contains("ORDER BY") {
-            unsupported_features.push(UnsupportedFeature::OrderBy);
-        }
+        // Substring-based unsupported-feature checks. Each rule is a
+        // (predicate, feature) pair so the dispatch is data-driven.
+        let rules: &[(bool, UnsupportedFeature)] = &[
+            (cql_upper.contains("ORDER BY"), UnsupportedFeature::OrderBy),
+            (
+                cql_upper.contains("ALLOW FILTERING"),
+                UnsupportedFeature::AllowFiltering,
+            ),
+            (
+                AGGREGATE_PREFIXES.iter().any(|p| cql_upper.contains(p)),
+                UnsupportedFeature::Aggregates,
+            ),
+            (cql_upper.contains("GROUP BY"), UnsupportedFeature::GroupBy),
+            (cql_upper.contains("HAVING"), UnsupportedFeature::Having),
+            (
+                JOIN_KEYWORDS.iter().any(|j| cql_upper.contains(j)),
+                UnsupportedFeature::Joins,
+            ),
+            (
+                has_range_operator_after(&cql_upper, where_pos),
+                UnsupportedFeature::RangeQueries,
+            ),
+        ];
 
-        // Detect ALLOW FILTERING
-        if cql_upper.contains("ALLOW FILTERING") {
-            unsupported_features.push(UnsupportedFeature::AllowFiltering);
-        }
+        let unsupported_features: Vec<UnsupportedFeature> = rules
+            .iter()
+            .filter_map(|(hit, feat)| hit.then_some(*feat))
+            .collect();
 
-        // Detect aggregates
-        if Self::has_aggregates(&cql_upper) {
-            unsupported_features.push(UnsupportedFeature::Aggregates);
-        }
-
-        // Detect GROUP BY
-        if cql_upper.contains("GROUP BY") {
-            unsupported_features.push(UnsupportedFeature::GroupBy);
-        }
-
-        // Detect HAVING
-        if cql_upper.contains("HAVING") {
-            unsupported_features.push(UnsupportedFeature::Having);
-        }
-
-        // Detect JOINs
-        if Self::has_joins(&cql_upper) {
-            unsupported_features.push(UnsupportedFeature::Joins);
-        }
-
-        // Detect range operators in WHERE clause
-        if Self::has_range_operators(cql) {
-            unsupported_features.push(UnsupportedFeature::RangeQueries);
-        }
-
-        // If unsupported features found, return error with helpful message
         if !unsupported_features.is_empty() {
-            return Err(Self::create_unsupported_error(&unsupported_features));
+            return Err(unsupported_query_error(&unsupported_features));
         }
 
-        // Detect supported features
-        let has_partition_key_filter = cql_upper.contains("WHERE");
-        let has_clustering_filters = cql_upper.contains("WHERE") && cql_upper.contains("AND");
-        let has_limit = cql_upper.contains("LIMIT");
-
+        let has_where = where_pos.is_some();
         Ok(SelectValidationResult {
-            has_partition_key_filter,
-            has_clustering_filters,
-            has_limit,
+            has_partition_key_filter: has_where,
+            has_clustering_filters: has_where && cql_upper.contains("AND"),
+            has_limit: cql_upper.contains("LIMIT"),
             unsupported_features,
         })
     }
+}
 
-    /// Check if the query contains aggregate functions
-    ///
-    /// Detects: COUNT, SUM, AVG, MIN, MAX
-    fn has_aggregates(cql_upper: &str) -> bool {
-        let aggregates = ["COUNT(", "SUM(", "AVG(", "MIN(", "MAX("];
-        aggregates.iter().any(|agg| cql_upper.contains(agg))
-    }
-
-    /// Check if the query contains JOIN keywords
-    ///
-    /// Detects: JOIN, INNER JOIN, LEFT JOIN, RIGHT JOIN, FULL JOIN, CROSS JOIN
-    fn has_joins(cql_upper: &str) -> bool {
-        let joins = [
-            " JOIN ",
-            " INNER JOIN ",
-            " LEFT JOIN ",
-            " RIGHT JOIN ",
-            " FULL JOIN ",
-            " CROSS JOIN ",
-        ];
-        joins.iter().any(|join| cql_upper.contains(join))
-    }
-
-    /// Check if the query contains range operators in WHERE clause
-    ///
-    /// Detects: >, <, >=, <=, !=, <>
-    ///
-    /// This is a simplified check that looks for these operators anywhere in
-    /// the query after a WHERE clause. It may have false positives (e.g., in
-    /// string literals), but this is acceptable for M2's limited scope.
-    fn has_range_operators(cql: &str) -> bool {
-        // Find WHERE clause position
-        let cql_upper = cql.to_uppercase();
-        if let Some(where_pos) = cql_upper.find("WHERE") {
-            // Check for range operators after WHERE clause
-            let after_where = &cql[where_pos..];
-            let operators = [">=", "<=", "!=", "<>", ">", "<"];
-
-            // Check each operator, being careful about order (>= before >, etc.)
-            operators.iter().any(|op| after_where.contains(op))
-        } else {
-            false
+/// Detect range operators (`>`, `<`, `>=`, `<=`, `!=`, `<>`) at or after the
+/// WHERE clause. Returns false when there is no WHERE clause.
+///
+/// This is a substring check; it may flag operators inside string literals.
+/// Acceptable for M2's limited scope.
+fn has_range_operator_after(cql_upper: &str, where_pos: Option<usize>) -> bool {
+    match where_pos {
+        Some(pos) => {
+            let after_where = &cql_upper[pos..];
+            RANGE_OPERATORS.iter().any(|op| after_where.contains(op))
         }
+        None => false,
     }
+}
 
-    /// Create a helpful error message for unsupported features
-    fn create_unsupported_error(features: &[UnsupportedFeature]) -> Error {
-        let feature_list = features
-            .iter()
-            .map(|f| f.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+fn unsupported_query_error(features: &[UnsupportedFeature]) -> Error {
+    let feature_list = features
+        .iter()
+        .map(|f| f.label())
+        .collect::<Vec<_>>()
+        .join(", ");
 
-        let message = format!(
-            "Unsupported query form in M2. Unsupported features: [{}]. \
-             M2 supports: SELECT with partition/primary key equality and optional LIMIT. \
-             Try narrowing your WHERE clause to use only equality (=) on partition/primary keys.",
-            feature_list
-        );
-
-        Error::unsupported_query(message)
-    }
+    Error::unsupported_query(format!(
+        "Unsupported query form in M2. Unsupported features: [{}]. \
+         M2 supports: SELECT with partition/primary key equality and optional LIMIT. \
+         Try narrowing your WHERE clause to use only equality (=) on partition/primary keys.",
+        feature_list
+    ))
 }
 
 #[cfg(test)]
