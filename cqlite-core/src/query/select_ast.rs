@@ -1,16 +1,8 @@
-//! Advanced CQL SELECT Abstract Syntax Tree
+//! CQL SELECT Abstract Syntax Tree.
 //!
-//! This module defines comprehensive AST types for CQL SELECT statements that enable
-//! the FIRST EVER direct querying of SSTable files without Cassandra.
-//!
-//! Features supported:
-//! - Complex WHERE clauses with all comparison operators
-//! - Aggregation functions (COUNT, SUM, AVG, MIN, MAX)
-//! - GROUP BY and HAVING clauses
-//! - ORDER BY with multiple columns
-//! - Collection operations (list[index], map['key'], set contains)
-//! - Advanced predicates (BETWEEN, IN, LIKE, regex patterns)
-//! - Subqueries and joins (for future implementation)
+//! AST types for SELECT statements executed directly against SSTable files.
+//! Covers projections, WHERE expressions, aggregates, GROUP BY/HAVING,
+//! ORDER BY, LIMIT/OFFSET, collection access, and arithmetic expressions.
 
 use crate::{TableId, Value};
 use serde::{Deserialize, Serialize};
@@ -96,7 +88,6 @@ pub enum AggregateType {
     Avg,
     Min,
     Max,
-    // Future: StdDev, Variance, etc.
 }
 
 /// Scalar function call
@@ -140,14 +131,13 @@ pub enum ArithmeticOperator {
     Modulo,
 }
 
-/// FROM clause - Cassandra CQL only supports single table queries
+/// FROM clause. Cassandra CQL only supports single-table queries (no JOINs).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum FromClause {
     /// Single table
     Table(TableId),
     /// Table with alias (Cassandra CQL supports table aliases)
     TableAlias(TableId, String),
-    // NOTE: JOIN operations are NOT supported in Cassandra CQL
 }
 
 /// Advanced WHERE expression tree
@@ -297,38 +287,31 @@ impl SelectStatement {
         }
     }
 
-    /// Get all referenced columns (for query planning)
+    /// Get all referenced columns (for query planning).
+    ///
+    /// `SELECT *` contributes nothing here; the projection is resolved later
+    /// against the schema during planning.
     pub fn get_referenced_columns(&self) -> Vec<ColumnRef> {
         let mut columns = Vec::new();
 
-        // Columns from SELECT clause
-        match &self.select_clause {
-            SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
-                for expr in exprs {
-                    columns.extend(expr.get_column_refs());
-                }
-            }
-            SelectClause::All => {
-                // Will be resolved during planning
+        if let SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) = &self.select_clause {
+            for expr in exprs {
+                columns.extend(expr.get_column_refs());
             }
         }
 
-        // Columns from WHERE clause
         if let Some(where_expr) = &self.where_clause {
             columns.extend(where_expr.get_column_refs());
         }
 
-        // Columns from GROUP BY
         if let Some(group_by) = &self.group_by {
-            columns.extend(group_by.columns.clone());
+            columns.extend(group_by.columns.iter().cloned());
         }
 
-        // Columns from HAVING
         if let Some(having) = &self.having_clause {
             columns.extend(having.get_column_refs());
         }
 
-        // Columns from ORDER BY
         if let Some(order_by) = &self.order_by {
             for item in &order_by.items {
                 columns.extend(item.expression.get_column_refs());
@@ -349,40 +332,20 @@ impl SelectExpression {
     pub fn get_column_refs(&self) -> Vec<ColumnRef> {
         match self {
             SelectExpression::Column(col_ref) => vec![col_ref.clone()],
-            SelectExpression::Aggregate(agg) => {
-                let mut refs = Vec::new();
-                for arg in &agg.args {
-                    refs.extend(arg.get_column_refs());
-                }
+            SelectExpression::Aggregate(agg) => collect_refs(&agg.args),
+            SelectExpression::Function(func) => collect_refs(&func.args),
+            SelectExpression::CollectionAccess(access) => {
+                let (col_ref, sub_expr) = match access {
+                    CollectionAccessExpression::ListIndex(c, e)
+                    | CollectionAccessExpression::MapKey(c, e)
+                    | CollectionAccessExpression::SetContains(c, e) => (c, e),
+                };
+                let mut refs = vec![col_ref.clone()];
+                refs.extend(sub_expr.get_column_refs());
                 refs
             }
-            SelectExpression::Function(func) => {
-                let mut refs = Vec::new();
-                for arg in &func.args {
-                    refs.extend(arg.get_column_refs());
-                }
-                refs
-            }
-            SelectExpression::CollectionAccess(access) => match access {
-                CollectionAccessExpression::ListIndex(col_ref, index_expr) => {
-                    let mut refs = vec![col_ref.clone()];
-                    refs.extend(index_expr.get_column_refs());
-                    refs
-                }
-                CollectionAccessExpression::MapKey(col_ref, key_expr) => {
-                    let mut refs = vec![col_ref.clone()];
-                    refs.extend(key_expr.get_column_refs());
-                    refs
-                }
-                CollectionAccessExpression::SetContains(col_ref, value_expr) => {
-                    let mut refs = vec![col_ref.clone()];
-                    refs.extend(value_expr.get_column_refs());
-                    refs
-                }
-            },
             SelectExpression::Arithmetic(arith) => {
-                let mut refs = Vec::new();
-                refs.extend(arith.left.get_column_refs());
+                let mut refs = arith.left.get_column_refs();
                 refs.extend(arith.right.get_column_refs());
                 refs
             }
@@ -390,6 +353,14 @@ impl SelectExpression {
             SelectExpression::Literal(_) => Vec::new(),
         }
     }
+}
+
+/// Collect column refs from each expression in `exprs`, in order.
+fn collect_refs(exprs: &[SelectExpression]) -> Vec<ColumnRef> {
+    exprs
+        .iter()
+        .flat_map(SelectExpression::get_column_refs)
+        .collect()
 }
 
 impl WhereExpression {
@@ -403,9 +374,7 @@ impl WhereExpression {
                         refs.extend(expr.get_column_refs());
                     }
                     ComparisonRightSide::ValueList(exprs) => {
-                        for expr in exprs {
-                            refs.extend(expr.get_column_refs());
-                        }
+                        refs.extend(collect_refs(exprs));
                     }
                     ComparisonRightSide::Range(start, end) => {
                         refs.extend(start.get_column_refs());
@@ -414,24 +383,23 @@ impl WhereExpression {
                 }
                 refs
             }
-            WhereExpression::And(exprs) | WhereExpression::Or(exprs) => {
-                let mut refs = Vec::new();
-                for expr in exprs {
-                    refs.extend(expr.get_column_refs());
-                }
-                refs
-            }
+            WhereExpression::And(exprs) | WhereExpression::Or(exprs) => exprs
+                .iter()
+                .flat_map(WhereExpression::get_column_refs)
+                .collect(),
             WhereExpression::Not(expr) | WhereExpression::Parentheses(expr) => {
                 expr.get_column_refs()
             }
         }
     }
 
-    /// Check if this WHERE expression can be pushed down to SSTable level
+    /// Check if this WHERE expression can be pushed down to SSTable level.
+    ///
+    /// OR and NOT are excluded: efficient pushdown of those would require
+    /// index intersection / negative scans we don't currently support.
     pub fn can_pushdown_to_sstable(&self) -> bool {
         match self {
             WhereExpression::Comparison(comp) => {
-                // Can pushdown simple column comparisons
                 matches!(comp.left, SelectExpression::Column(_))
                     && matches!(
                         comp.operator,
@@ -445,17 +413,9 @@ impl WhereExpression {
                     )
             }
             WhereExpression::And(exprs) => {
-                // Can pushdown if all sub-expressions can be pushed down
-                exprs.iter().all(|expr| expr.can_pushdown_to_sstable())
+                exprs.iter().all(WhereExpression::can_pushdown_to_sstable)
             }
-            WhereExpression::Or(_) => {
-                // OR expressions are harder to pushdown efficiently
-                false
-            }
-            WhereExpression::Not(_) => {
-                // NOT expressions require full scan
-                false
-            }
+            WhereExpression::Or(_) | WhereExpression::Not(_) => false,
             WhereExpression::Parentheses(expr) => expr.can_pushdown_to_sstable(),
         }
     }
