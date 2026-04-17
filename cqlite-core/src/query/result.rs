@@ -4,10 +4,22 @@
 //! It includes result set management, row iteration, and result metadata.
 
 use crate::{RowKey, Value};
+use base64::Engine;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::collections::HashMap;
 use std::fmt;
 use tokio::sync::mpsc;
+
+/// Encode bytes as standard base64 (used across JSON serializers below).
+fn b64(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// True if `RowMetadata` carries anything worth serializing.
+fn row_metadata_is_populated(meta: &RowMetadata) -> bool {
+    meta.version.is_some() || meta.ttl.is_some() || !meta.tags.is_empty()
+}
 
 /// Query result containing rows and metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -268,15 +280,11 @@ impl QueryResultIterator {
     ///
     /// Returns `None` when all rows have been received.
     pub async fn next_async(&mut self) -> Option<Result<QueryRow, crate::Error>> {
-        match self.receiver.recv().await {
-            Some(result) => {
-                if result.is_ok() {
-                    self.rows_received += 1;
-                }
-                Some(result)
-            }
-            None => None,
+        let result = self.receiver.recv().await?;
+        if result.is_ok() {
+            self.rows_received += 1;
         }
+        Some(result)
     }
 
     /// Maximum allowed chunk size to prevent OOM
@@ -297,11 +305,8 @@ impl QueryResultIterator {
     /// A vector of rows, which may be smaller than `size` if the stream ends
     /// or an error occurs.
     pub async fn collect_chunk(&mut self, size: usize) -> Result<Vec<QueryRow>, crate::Error> {
-        // Clamp size to prevent OOM from bad input
         let safe_size = size.min(Self::MAX_CHUNK_SIZE);
-
-        // Use new() instead of with_capacity() to avoid large upfront allocations
-        // Vec will grow efficiently as needed
+        // Grow the Vec lazily; a requested `safe_size` is only an upper bound.
         let mut chunk = Vec::new();
         while chunk.len() < safe_size {
             match self.receiver.recv().await {
@@ -346,16 +351,18 @@ impl QueryResult {
 
     /// Create a result with rows
     pub fn with_rows(rows: Vec<QueryRow>) -> Self {
-        let mut result = Self::new();
-        result.rows = rows;
-        result
+        Self {
+            rows,
+            ..Self::new()
+        }
     }
 
     /// Create a result for DML operations (INSERT/UPDATE/DELETE)
     pub fn with_affected_rows(rows_affected: u64) -> Self {
-        let mut result = Self::new();
-        result.rows_affected = rows_affected;
-        result
+        Self {
+            rows_affected,
+            ..Self::new()
+        }
     }
 
     /// Get the number of rows in the result
@@ -408,62 +415,37 @@ impl QueryResult {
     }
 
     /// Convert to JSON representation
+    ///
+    /// Note: `execution_time_ms` is intentionally excluded to keep snapshot
+    /// output deterministic; use `execution_time()` to read it separately.
     pub fn to_json(&self) -> serde_json::Value {
-        let mut result = serde_json::Map::new();
-
-        // Add rows with deterministic field ordering (Issue #129)
-        // Iterate metadata.columns in order, NOT HashMap iteration
-        let rows_json: Vec<serde_json::Value> = self
+        let rows: Vec<_> = self
             .rows
             .iter()
             .map(|row| self.row_to_json_deterministic(row))
             .collect();
-        result.insert("rows".to_string(), serde_json::Value::Array(rows_json));
-
-        // Add metadata
-        result.insert(
-            "rows_affected".to_string(),
-            serde_json::Value::Number(self.rows_affected.into()),
-        );
-        // Exclude execution_time_ms from JSON output (Issue #129)
-        // Timing metadata causes non-deterministic snapshot diffs
-        // Use --timing flag to display timing separately
-        result.insert(
-            "row_count".to_string(),
-            serde_json::Value::Number(self.rows.len().into()),
-        );
-
-        // Add column information
-        let columns_json: Vec<serde_json::Value> = self
+        let columns: Vec<_> = self
             .metadata
             .columns
             .iter()
-            .map(|col| col.to_json())
+            .map(ColumnInfo::to_json)
             .collect();
-        result.insert(
-            "columns".to_string(),
-            serde_json::Value::Array(columns_json),
-        );
-
-        // Add performance metrics
-        result.insert(
-            "performance".to_string(),
-            self.metadata.performance.to_json(),
-        );
-
-        // Add warnings
-        let warnings_json: Vec<serde_json::Value> = self
+        let warnings: Vec<_> = self
             .metadata
             .warnings
             .iter()
-            .map(|w| serde_json::Value::String(w.clone()))
+            .cloned()
+            .map(serde_json::Value::String)
             .collect();
-        result.insert(
-            "warnings".to_string(),
-            serde_json::Value::Array(warnings_json),
-        );
 
-        serde_json::Value::Object(result)
+        json!({
+            "rows": rows,
+            "rows_affected": self.rows_affected,
+            "row_count": self.rows.len(),
+            "columns": columns,
+            "performance": self.metadata.performance.to_json(),
+            "warnings": warnings,
+        })
     }
 
     /// Create result iterator
@@ -471,26 +453,22 @@ impl QueryResult {
         self.rows.iter()
     }
 
-    /// Convert a single row to JSON with deterministic field ordering
+    /// Convert a single row to JSON with deterministic field ordering.
     ///
-    /// Uses metadata.columns order when available to ensure consistent output
-    /// across multiple runs (Issue #129). Falls back to sorted HashMap keys
-    /// when metadata.columns is empty.
+    /// When `metadata.columns` is populated, fields appear in that order; otherwise
+    /// HashMap keys are emitted in sorted order so snapshots stay stable.
     fn row_to_json_deterministic(&self, row: &QueryRow) -> serde_json::Value {
         let mut result = serde_json::Map::new();
 
-        // Use metadata.columns for deterministic ordering if available
         if !self.metadata.columns.is_empty() {
-            // Iterate columns in metadata order, NOT HashMap order
             for col in &self.metadata.columns {
-                let value_json = match row.values.get(&col.name) {
-                    Some(value) => value.to_json(),
-                    None => serde_json::Value::Null,
-                };
+                let value_json = row
+                    .values
+                    .get(&col.name)
+                    .map_or(serde_json::Value::Null, ToJson::to_json);
                 result.insert(col.name.clone(), value_json);
             }
         } else {
-            // Fallback: Sort HashMap keys alphabetically for determinism
             let mut sorted_keys: Vec<&String> = row.values.keys().collect();
             sorted_keys.sort();
             for key in sorted_keys {
@@ -500,17 +478,12 @@ impl QueryResult {
             }
         }
 
-        // Add row key
         result.insert(
             "_key".to_string(),
             serde_json::Value::String(format!("{:?}", row.key)),
         );
 
-        // Add metadata if present
-        if row.metadata.version.is_some()
-            || row.metadata.ttl.is_some()
-            || !row.metadata.tags.is_empty()
-        {
+        if row_metadata_is_populated(&row.metadata) {
             result.insert("_metadata".to_string(), row.metadata.to_json());
         }
 
@@ -571,22 +544,16 @@ impl QueryRow {
     pub fn to_json(&self) -> serde_json::Value {
         let mut result = serde_json::Map::new();
 
-        // Add column values
         for (column, value) in &self.values {
             result.insert(column.clone(), value.to_json());
         }
 
-        // Add row key
         result.insert(
             "_key".to_string(),
             serde_json::Value::String(format!("{:?}", self.key)),
         );
 
-        // Add metadata if present
-        if self.metadata.version.is_some()
-            || self.metadata.ttl.is_some()
-            || !self.metadata.tags.is_empty()
-        {
+        if row_metadata_is_populated(&self.metadata) {
             result.insert("_metadata".to_string(), self.metadata.to_json());
         }
 
@@ -619,33 +586,18 @@ impl ColumnInfo {
 
     /// Convert to JSON representation
     pub fn to_json(&self) -> serde_json::Value {
-        let mut result = serde_json::Map::new();
-
-        result.insert(
-            "name".to_string(),
-            serde_json::Value::String(self.name.clone()),
-        );
-        result.insert(
+        let mut map = serde_json::Map::new();
+        map.insert("name".to_string(), json!(self.name));
+        map.insert(
             "data_type".to_string(),
-            serde_json::Value::String(format!("{:?}", self.data_type)),
+            json!(format!("{:?}", self.data_type)),
         );
-        result.insert(
-            "nullable".to_string(),
-            serde_json::Value::Bool(self.nullable),
-        );
-        result.insert(
-            "position".to_string(),
-            serde_json::Value::Number(self.position.into()),
-        );
-
+        map.insert("nullable".to_string(), json!(self.nullable));
+        map.insert("position".to_string(), json!(self.position));
         if let Some(table_name) = &self.table_name {
-            result.insert(
-                "table_name".to_string(),
-                serde_json::Value::String(table_name.clone()),
-            );
+            map.insert("table_name".to_string(), json!(table_name));
         }
-
-        serde_json::Value::Object(result)
+        serde_json::Value::Object(map)
     }
 }
 
@@ -675,29 +627,17 @@ impl RowMetadata {
 
     /// Convert to JSON representation
     pub fn to_json(&self) -> serde_json::Value {
-        let mut result = serde_json::Map::new();
-
+        let mut map = serde_json::Map::new();
         if let Some(version) = self.version {
-            result.insert(
-                "version".to_string(),
-                serde_json::Value::Number(version.into()),
-            );
+            map.insert("version".to_string(), json!(version));
         }
-
         if let Some(ttl) = self.ttl {
-            result.insert("ttl".to_string(), serde_json::Value::Number(ttl.into()));
+            map.insert("ttl".to_string(), json!(ttl));
         }
-
         if !self.tags.is_empty() {
-            let tags_json: serde_json::Map<String, serde_json::Value> = self
-                .tags
-                .iter()
-                .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-                .collect();
-            result.insert("tags".to_string(), serde_json::Value::Object(tags_json));
+            map.insert("tags".to_string(), json!(self.tags));
         }
-
-        serde_json::Value::Object(result)
+        serde_json::Value::Object(map)
     }
 }
 
@@ -724,50 +664,39 @@ impl PerformanceMetrics {
 
     /// Convert to JSON representation
     pub fn to_json(&self) -> serde_json::Value {
-        let mut result = serde_json::Map::new();
-
-        result.insert(
-            "parse_time_us".to_string(),
-            serde_json::Value::Number(self.parse_time_us.into()),
-        );
-        result.insert(
-            "planning_time_us".to_string(),
-            serde_json::Value::Number(self.planning_time_us.into()),
-        );
-        result.insert(
-            "execution_time_us".to_string(),
-            serde_json::Value::Number(self.execution_time_us.into()),
-        );
-        result.insert(
-            "total_time_us".to_string(),
-            serde_json::Value::Number(self.total_time_us.into()),
-        );
-        result.insert(
-            "memory_usage_bytes".to_string(),
-            serde_json::Value::Number(self.memory_usage_bytes.into()),
-        );
-        result.insert(
-            "io_operations".to_string(),
-            serde_json::Value::Number(self.io_operations.into()),
-        );
-        result.insert(
-            "cache_hits".to_string(),
-            serde_json::Value::Number(self.cache_hits.into()),
-        );
-        result.insert(
-            "cache_misses".to_string(),
-            serde_json::Value::Number(self.cache_misses.into()),
-        );
-        result.insert(
-            "cache_hit_ratio".to_string(),
-            serde_json::Value::Number(
-                serde_json::Number::from_f64(self.cache_hit_ratio())
-                    .unwrap_or(serde_json::Number::from(0)),
-            ),
-        );
-
-        serde_json::Value::Object(result)
+        let cache_hit_ratio = serde_json::Number::from_f64(self.cache_hit_ratio())
+            .map(serde_json::Value::Number)
+            .unwrap_or(json!(0));
+        json!({
+            "parse_time_us": self.parse_time_us,
+            "planning_time_us": self.planning_time_us,
+            "execution_time_us": self.execution_time_us,
+            "total_time_us": self.total_time_us,
+            "memory_usage_bytes": self.memory_usage_bytes,
+            "io_operations": self.io_operations,
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
+            "cache_hit_ratio": cache_hit_ratio,
+        })
     }
+}
+
+/// Write one horizontal border row using the supplied left/middle/right glyphs.
+fn write_border(
+    f: &mut fmt::Formatter<'_>,
+    widths: &[usize],
+    left: char,
+    sep: char,
+    right: char,
+) -> fmt::Result {
+    write!(f, "{}", left)?;
+    for (i, width) in widths.iter().enumerate() {
+        write!(f, "{}", "─".repeat(width + 2))?;
+        if i < widths.len() - 1 {
+            write!(f, "{}", sep)?;
+        }
+    }
+    writeln!(f, "{}", right)
 }
 
 impl fmt::Display for QueryResult {
@@ -776,35 +705,27 @@ impl fmt::Display for QueryResult {
             return write!(f, "Empty result set ({} rows affected)", self.rows_affected);
         }
 
-        // Create table header
         let column_names = self.column_names();
         if column_names.is_empty() {
             return write!(f, "No columns in result set");
         }
 
-        // Calculate column widths
-        let mut col_widths = Vec::new();
-        for col_name in column_names.iter() {
-            let mut max_width = col_name.len();
-            for row in &self.rows {
-                if let Some(value) = row.values.get(col_name) {
-                    max_width = max_width.max(format!("{}", value).len());
-                }
-            }
-            col_widths.push(max_width);
-        }
+        // Column widths = max(header, longest value) for each column.
+        let col_widths: Vec<usize> = column_names
+            .iter()
+            .map(|col_name| {
+                self.rows
+                    .iter()
+                    .filter_map(|row| row.values.get(col_name))
+                    .map(|v| format!("{}", v).len())
+                    .max()
+                    .unwrap_or(0)
+                    .max(col_name.len())
+            })
+            .collect();
 
-        // Print header
-        write!(f, "┌")?;
-        for (i, width) in col_widths.iter().enumerate() {
-            write!(f, "{}", "─".repeat(width + 2))?;
-            if i < col_widths.len() - 1 {
-                write!(f, "┬")?;
-            }
-        }
-        writeln!(f, "┐")?;
+        write_border(f, &col_widths, '┌', '┬', '┐')?;
 
-        // Print column names
         write!(f, "│")?;
         for (i, (col_name, width)) in column_names.iter().zip(col_widths.iter()).enumerate() {
             write!(f, " {:width$} ", col_name, width = width)?;
@@ -814,17 +735,8 @@ impl fmt::Display for QueryResult {
         }
         writeln!(f, "│")?;
 
-        // Print separator
-        write!(f, "├")?;
-        for (i, width) in col_widths.iter().enumerate() {
-            write!(f, "{}", "─".repeat(width + 2))?;
-            if i < col_widths.len() - 1 {
-                write!(f, "┼")?;
-            }
-        }
-        writeln!(f, "┤")?;
+        write_border(f, &col_widths, '├', '┼', '┤')?;
 
-        // Print rows
         for row in &self.rows {
             write!(f, "│")?;
             for (i, (col_name, width)) in column_names.iter().zip(col_widths.iter()).enumerate() {
@@ -841,17 +753,8 @@ impl fmt::Display for QueryResult {
             writeln!(f, "│")?;
         }
 
-        // Print footer
-        write!(f, "└")?;
-        for (i, width) in col_widths.iter().enumerate() {
-            write!(f, "{}", "─".repeat(width + 2))?;
-            if i < col_widths.len() - 1 {
-                write!(f, "┴")?;
-            }
-        }
-        writeln!(f, "┘")?;
+        write_border(f, &col_widths, '└', '┴', '┘')?;
 
-        // Print summary
         writeln!(
             f,
             "{} rows returned in {}ms",
@@ -859,7 +762,6 @@ impl fmt::Display for QueryResult {
             self.execution_time_ms
         )?;
 
-        // Print warnings if any
         if !self.metadata.warnings.is_empty() {
             writeln!(f, "\nWarnings:")?;
             for warning in &self.metadata.warnings {
@@ -902,132 +804,79 @@ trait ToJson {
 
 impl ToJson for Value {
     fn to_json(&self) -> serde_json::Value {
+        // Non-finite floats have no JSON representation; we emit null for those.
+        fn float_to_json(x: f64) -> serde_json::Value {
+            serde_json::Number::from_f64(x)
+                .map(serde_json::Value::Number)
+                .unwrap_or(serde_json::Value::Null)
+        }
+
         match self {
             Value::Null => serde_json::Value::Null,
-            Value::Boolean(b) => serde_json::Value::Bool(*b),
-            Value::Integer(i) => serde_json::Value::Number((*i).into()),
-            Value::Float(f) => serde_json::Number::from_f64(*f)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            Value::Text(s) => serde_json::Value::String(s.clone()),
-            Value::Blob(b) => {
-                use base64::Engine;
-                let engine = base64::engine::general_purpose::STANDARD;
-                serde_json::Value::String(engine.encode(b))
-            }
-            Value::List(list) => {
-                let json_list: Vec<serde_json::Value> = list.iter().map(|v| v.to_json()).collect();
+            Value::Boolean(b) => json!(*b),
+            Value::Integer(i) => json!(*i),
+            Value::BigInt(i) => json!(*i),
+            Value::Counter(c) => json!(*c),
+            Value::TinyInt(i) => json!(*i as i64),
+            Value::SmallInt(i) => json!(*i as i64),
+            Value::Date(d) => json!(*d),
+            Value::Time(t) => json!(*t),
+            Value::Timestamp(ts) => json!(*ts),
+            Value::Float(f) => float_to_json(*f),
+            Value::Float32(f) => float_to_json(*f as f64),
+            Value::Text(s) => json!(s),
+            Value::Json(value) => value.clone(),
+            Value::Blob(bytes) | Value::Varint(bytes) | Value::Inet(bytes) => json!(b64(bytes)),
+            Value::Uuid(uuid) => json!(b64(uuid)),
+            Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
+                let json_list: Vec<_> = items.iter().map(ToJson::to_json).collect();
                 serde_json::Value::Array(json_list)
             }
-            Value::Map(map) => {
-                let json_map: serde_json::Map<String, serde_json::Value> = map
+            Value::Map(entries) => {
+                let json_map: serde_json::Map<String, serde_json::Value> = entries
                     .iter()
                     .map(|(k, v)| (format!("{}", k), v.to_json()))
                     .collect();
                 serde_json::Value::Object(json_map)
             }
-            Value::BigInt(i) => serde_json::Value::Number((*i).into()),
-            Value::Counter(c) => serde_json::Value::Number((*c).into()),
-            Value::Timestamp(ts) => serde_json::Value::Number((*ts).into()),
-            Value::Uuid(uuid) => {
-                use base64::Engine;
-                let engine = base64::engine::general_purpose::STANDARD;
-                serde_json::Value::String(engine.encode(uuid))
-            }
-            Value::Json(json) => json.clone(),
-            Value::TinyInt(i) => serde_json::Value::Number((*i as i64).into()),
-            Value::SmallInt(i) => serde_json::Value::Number((*i as i64).into()),
-            Value::Float32(f) => serde_json::Number::from_f64(*f as f64)
-                .map(serde_json::Value::Number)
-                .unwrap_or(serde_json::Value::Null),
-            Value::Set(set) => {
-                let json_list: Vec<serde_json::Value> = set.iter().map(|v| v.to_json()).collect();
-                serde_json::Value::Array(json_list)
-            }
-            Value::Tuple(tuple) => {
-                let json_list: Vec<serde_json::Value> = tuple.iter().map(|v| v.to_json()).collect();
-                serde_json::Value::Array(json_list)
-            }
             Value::Udt(udt) => {
                 let mut json_obj = serde_json::Map::new();
-                json_obj.insert(
-                    "_type".to_string(),
-                    serde_json::Value::String(udt.type_name.clone()),
-                );
+                json_obj.insert("_type".to_string(), json!(udt.type_name));
                 for field in &udt.fields {
-                    let field_json = match &field.value {
-                        Some(value) => value.to_json(),
-                        None => serde_json::Value::Null,
-                    };
+                    let field_json = field
+                        .value
+                        .as_ref()
+                        .map_or(serde_json::Value::Null, ToJson::to_json);
                     json_obj.insert(field.name.clone(), field_json);
                 }
                 serde_json::Value::Object(json_obj)
             }
-            Value::Frozen(boxed_value) => boxed_value.to_json(),
-            Value::Varint(data) => {
-                use base64::Engine;
-                let engine = base64::engine::general_purpose::STANDARD;
-                serde_json::Value::String(engine.encode(data))
-            }
-            Value::Decimal { scale, unscaled } => {
-                let mut json_obj = serde_json::Map::new();
-                json_obj.insert(
-                    "scale".to_string(),
-                    serde_json::Value::Number((*scale).into()),
-                );
-                use base64::Engine;
-                let engine = base64::engine::general_purpose::STANDARD;
-                json_obj.insert(
-                    "unscaled".to_string(),
-                    serde_json::Value::String(engine.encode(unscaled)),
-                );
-                serde_json::Value::Object(json_obj)
-            }
+            Value::Frozen(boxed) => boxed.to_json(),
+            Value::Decimal { scale, unscaled } => json!({
+                "scale": *scale,
+                "unscaled": b64(unscaled),
+            }),
             Value::Duration {
                 months,
                 days,
                 nanos,
-            } => {
-                let mut json_obj = serde_json::Map::new();
-                json_obj.insert(
-                    "months".to_string(),
-                    serde_json::Value::Number((*months).into()),
-                );
-                json_obj.insert(
-                    "days".to_string(),
-                    serde_json::Value::Number((*days).into()),
-                );
-                json_obj.insert(
-                    "nanos".to_string(),
-                    serde_json::Value::Number((*nanos).into()),
-                );
-                serde_json::Value::Object(json_obj)
-            }
+            } => json!({
+                "months": *months,
+                "days": *days,
+                "nanos": *nanos,
+            }),
             Value::Tombstone(info) => {
                 let mut json_obj = serde_json::Map::new();
-                json_obj.insert(
-                    "type".to_string(),
-                    serde_json::Value::String("tombstone".to_string()),
-                );
-                json_obj.insert(
-                    "deletion_time".to_string(),
-                    serde_json::Value::Number(info.deletion_time.into()),
-                );
+                json_obj.insert("type".to_string(), json!("tombstone"));
+                json_obj.insert("deletion_time".to_string(), json!(info.deletion_time));
                 json_obj.insert(
                     "tombstone_type".to_string(),
-                    serde_json::Value::String(format!("{:?}", info.tombstone_type)),
+                    json!(format!("{:?}", info.tombstone_type)),
                 );
                 if let Some(ttl) = info.ttl {
-                    json_obj.insert("ttl".to_string(), serde_json::Value::Number(ttl.into()));
+                    json_obj.insert("ttl".to_string(), json!(ttl));
                 }
                 serde_json::Value::Object(json_obj)
-            }
-            Value::Date(d) => serde_json::Value::Number((*d).into()),
-            Value::Time(t) => serde_json::Value::Number((*t).into()),
-            Value::Inet(bytes) => {
-                use base64::Engine;
-                let engine = base64::engine::general_purpose::STANDARD;
-                serde_json::Value::String(engine.encode(bytes))
             }
         }
     }
