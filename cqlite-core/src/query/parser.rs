@@ -74,6 +74,22 @@ use std::collections::HashMap;
 #[derive(Debug)]
 pub struct QueryParser {}
 
+/// Build an empty `ParsedQuery` for the given type, leaving non-applicable fields
+/// at their defaults. Callers fill in the type-specific fields.
+fn empty_parsed(query_type: QueryType, table: Option<TableId>, cql: &str) -> ParsedQuery {
+    ParsedQuery {
+        query_type,
+        table,
+        columns: Vec::new(),
+        where_clause: None,
+        values: Vec::new(),
+        set_clause: HashMap::new(),
+        order_by: Vec::new(),
+        limit: None,
+        cql: cql.to_string(),
+    }
+}
+
 impl QueryParser {
     /// Create a new query parser
     pub fn new(_config: &Config) -> Self {
@@ -84,349 +100,229 @@ impl QueryParser {
     pub fn parse(&self, cql: &str) -> Result<ParsedQuery> {
         let cql = cql.trim();
 
-        // Basic keyword-based parsing
         let first_word = cql
             .split_whitespace()
             .next()
-            .ok_or_else(|| Error::query_execution("Empty query".to_string()))?
-            .to_uppercase();
+            .ok_or_else(|| Error::query_execution("Empty query".to_string()))?;
 
-        match first_word.as_str() {
-            "SELECT" => self.parse_select(cql),
-            "INSERT" => self.parse_insert(cql),
-            "UPDATE" => self.parse_update(cql),
-            "DELETE" => self.parse_delete(cql),
-            "CREATE" => self.parse_create(cql),
-            "DROP" => self.parse_drop(cql),
-            "DESCRIBE" | "DESC" => self.parse_describe(cql),
-            "USE" => self.parse_use(cql),
-            _ => Err(Error::query_execution(format!(
+        // ASCII keyword match — CQL keywords are ASCII so case-insensitive ASCII
+        // comparison is sufficient and avoids the allocation of `to_uppercase()`.
+        if first_word.eq_ignore_ascii_case("SELECT") {
+            self.parse_select(cql)
+        } else if first_word.eq_ignore_ascii_case("INSERT") {
+            self.parse_insert(cql)
+        } else if first_word.eq_ignore_ascii_case("UPDATE") {
+            self.parse_update(cql)
+        } else if first_word.eq_ignore_ascii_case("DELETE") {
+            self.parse_delete(cql)
+        } else if first_word.eq_ignore_ascii_case("CREATE") {
+            self.parse_create(cql)
+        } else if first_word.eq_ignore_ascii_case("DROP") {
+            self.parse_drop(cql)
+        } else if first_word.eq_ignore_ascii_case("DESCRIBE")
+            || first_word.eq_ignore_ascii_case("DESC")
+        {
+            self.parse_describe(cql)
+        } else if first_word.eq_ignore_ascii_case("USE") {
+            self.parse_use(cql)
+        } else {
+            Err(Error::query_execution(format!(
                 "Unsupported query type: {}",
-                first_word
-            ))),
+                first_word.to_uppercase()
+            )))
         }
     }
 
     /// Parse SELECT statement
     fn parse_select(&self, cql: &str) -> Result<ParsedQuery> {
         // M2: Validate SELECT query against supported subset
-        let validator = M2SelectValidator;
-        validator.validate_select(cql)?;
+        M2SelectValidator.validate_select(cql)?;
 
-        let mut columns = Vec::new();
-        let mut table = None;
-        let mut where_clause = None;
-        let mut order_by = Vec::new();
-        let mut limit = None;
-
-        // Simple regex-based parsing for demonstration
-        // In a real implementation, this would use a proper parser like nom or pest
+        // Build the uppercase copy once; all subsequent keyword scans reuse it.
+        let upper = cql.to_uppercase();
 
         // Extract SELECT columns
-        if let Some(select_part) = self.extract_between(cql, "SELECT", "FROM") {
-            let select_part = select_part.trim();
-            if select_part == "*" {
-                columns.push("*".to_string());
-            } else {
-                columns = select_part
-                    .split(',')
-                    .map(|col| col.trim().to_string())
-                    .collect();
+        let columns = match extract_between(cql, &upper, "SELECT", "FROM") {
+            Some(select_part) => {
+                let select_part = select_part.trim();
+                if select_part == "*" {
+                    vec!["*".to_string()]
+                } else {
+                    select_part
+                        .split(',')
+                        .map(|c| c.trim().to_string())
+                        .collect()
+                }
             }
-        }
+            None => Vec::new(),
+        };
 
         // Extract table name (handle qualified names like keyspace.table)
-        if let Some(from_part) = self.extract_after(cql, "FROM") {
-            let qualified_name = from_part.split_whitespace().next().ok_or_else(|| {
-                Error::query_execution("Missing table name after FROM".to_string())
-            })?;
+        let table = match extract_after(cql, &upper, "FROM") {
+            Some(from_part) => {
+                let qualified_name = from_part.split_whitespace().next().ok_or_else(|| {
+                    Error::query_execution("Missing table name after FROM".to_string())
+                })?;
+                // For "test_basic.simple_table" we want just "simple_table".
+                let table_name = qualified_name
+                    .split('.')
+                    .next_back()
+                    .unwrap_or(qualified_name);
+                Some(TableId::new(table_name))
+            }
+            None => None,
+        };
 
-            // Split on '.' to handle qualified table names (keyspace.table)
-            // For "test_basic.simple_table", we want just "simple_table"
-            // For "simple_table", we want "simple_table"
-            let table_name = qualified_name
-                .split('.')
-                .next_back()
-                .unwrap_or(qualified_name);
+        // Extract WHERE — terminates at ORDER BY or LIMIT, whichever comes first.
+        let where_clause = extract_clause(cql, &upper, "WHERE", &["ORDER BY", "LIMIT"])
+            .map(|s| self.parse_where_clause(s))
+            .transpose()?;
 
-            table = Some(TableId::new(table_name));
-        }
-
-        // Extract WHERE clause
-        if let Some(where_part) = self.extract_between(cql, "WHERE", "ORDER BY") {
-            where_clause = Some(self.parse_where_clause(where_part)?);
-        } else if let Some(where_part) = self.extract_between(cql, "WHERE", "LIMIT") {
-            where_clause = Some(self.parse_where_clause(where_part)?);
-        } else if let Some(where_part) = self.extract_after(cql, "WHERE") {
-            where_clause = Some(self.parse_where_clause(where_part)?);
-        }
-
-        // Extract ORDER BY clause
-        if let Some(order_part) = self.extract_between(cql, "ORDER BY", "LIMIT") {
-            order_by = self.parse_order_by(order_part)?;
-        } else if let Some(order_part) = self.extract_after(cql, "ORDER BY") {
-            order_by = self.parse_order_by(order_part)?;
-        }
+        // Extract ORDER BY — terminates at LIMIT.
+        let order_by = match extract_clause(cql, &upper, "ORDER BY", &["LIMIT"]) {
+            Some(part) => self.parse_order_by(part)?,
+            None => Vec::new(),
+        };
 
         // Extract LIMIT clause
-        if let Some(limit_part) = self.extract_after(cql, "LIMIT") {
-            let limit_str = limit_part
-                .split_whitespace()
-                .next()
-                .ok_or_else(|| Error::query_execution("Missing limit value".to_string()))?;
-            limit = Some(
-                limit_str
-                    .parse()
-                    .map_err(|_| Error::query_execution("Invalid limit value".to_string()))?,
-            );
-        }
+        let limit = match extract_after(cql, &upper, "LIMIT") {
+            Some(limit_part) => {
+                let limit_str = limit_part
+                    .split_whitespace()
+                    .next()
+                    .ok_or_else(|| Error::query_execution("Missing limit value".to_string()))?;
+                Some(
+                    limit_str
+                        .parse()
+                        .map_err(|_| Error::query_execution("Invalid limit value".to_string()))?,
+                )
+            }
+            None => None,
+        };
 
-        Ok(ParsedQuery {
-            query_type: QueryType::Select,
-            table,
-            columns,
-            where_clause,
-            values: Vec::new(),
-            set_clause: HashMap::new(),
-            order_by,
-            limit,
-            cql: cql.to_string(),
-        })
+        let mut parsed = empty_parsed(QueryType::Select, table, cql);
+        parsed.columns = columns;
+        parsed.where_clause = where_clause;
+        parsed.order_by = order_by;
+        parsed.limit = limit;
+        Ok(parsed)
     }
 
     /// Parse INSERT statement
     fn parse_insert(&self, cql: &str) -> Result<ParsedQuery> {
-        let mut table = None;
-        let mut columns = Vec::new();
-        let mut values = Vec::new();
+        let upper = cql.to_uppercase();
 
-        // Check if this is explicit column syntax: INSERT INTO table (columns) VALUES (...)
-        let paren_pos = cql.find("(");
-        let values_pos = cql.find("VALUES").unwrap_or(cql.len());
-        if let Some(pos) = paren_pos {
-            if pos < values_pos {
-                // Explicit column syntax
-                // Extract table name
-                if let Some(table_part) = self.extract_between(cql, "INTO", "(") {
-                    let table_name = table_part.trim();
-                    table = Some(TableId::new(table_name));
-                }
+        // Determine column-list style: explicit `INSERT INTO t (cols) VALUES (...)`
+        // versus implicit `INSERT INTO t VALUES (...)`. Explicit if a `(` appears
+        // before `VALUES`.
+        let paren_pos = cql.find('(');
+        let values_pos = upper.find("VALUES").unwrap_or(cql.len());
+        let explicit_columns = matches!(paren_pos, Some(p) if p < values_pos);
 
-                // Extract columns
-                if let Some(columns_part) = self.extract_between(cql, "(", ")") {
-                    columns = columns_part
-                        .split(',')
-                        .map(|col| col.trim().to_string())
-                        .collect();
-                }
-            } else {
-                // Implicit column syntax: INSERT INTO table VALUES (...)
-                // Extract table name (between INTO and VALUES)
-                if let Some(table_part) = self.extract_between(cql, "INTO", "VALUES") {
-                    let table_name = table_part.trim();
-                    table = Some(TableId::new(table_name));
-                }
-                // columns will remain empty - executor should use table schema
-            }
+        let (table, columns) = if explicit_columns {
+            let table = extract_between(cql, &upper, "INTO", "(").map(|t| TableId::new(t.trim()));
+            let columns = extract_between(cql, &upper, "(", ")")
+                .map(|c| c.split(',').map(|col| col.trim().to_string()).collect())
+                .unwrap_or_default();
+            (table, columns)
         } else {
-            // No parenthesis found - treat as implicit column syntax
-            if let Some(table_part) = self.extract_between(cql, "INTO", "VALUES") {
-                let table_name = table_part.trim();
-                table = Some(TableId::new(table_name));
-            }
-        }
+            // Implicit syntax — columns left empty so the executor falls back to schema.
+            let table =
+                extract_between(cql, &upper, "INTO", "VALUES").map(|t| TableId::new(t.trim()));
+            (table, Vec::new())
+        };
 
-        // Extract values
-        if let Some(values_part) = self.extract_between(cql, "VALUES (", ")") {
-            values = self.parse_values(values_part)?;
-        }
+        let values = match extract_between(cql, &upper, "VALUES (", ")") {
+            Some(values_part) => self.parse_values(values_part)?,
+            None => Vec::new(),
+        };
 
-        Ok(ParsedQuery {
-            query_type: QueryType::Insert,
-            table,
-            columns,
-            where_clause: None,
-            values,
-            set_clause: HashMap::new(),
-            order_by: Vec::new(),
-            limit: None,
-            cql: cql.to_string(),
-        })
+        let mut parsed = empty_parsed(QueryType::Insert, table, cql);
+        parsed.columns = columns;
+        parsed.values = values;
+        Ok(parsed)
     }
 
     /// Parse UPDATE statement
     fn parse_update(&self, cql: &str) -> Result<ParsedQuery> {
-        let mut table = None;
-        let mut set_clause = HashMap::new();
-        let mut where_clause = None;
+        let upper = cql.to_uppercase();
 
-        // Extract table name
-        let words: Vec<&str> = cql.split_whitespace().collect();
-        if words.len() >= 2 {
-            table = Some(TableId::new(words[1]));
-        }
+        // Table name is the second whitespace-separated token: `UPDATE <table> ...`
+        let table = cql.split_whitespace().nth(1).map(TableId::new);
 
-        // Extract SET clause
-        if let Some(set_part) = self.extract_between(cql, "SET", "WHERE") {
-            set_clause = self.parse_set_clause(set_part)?;
-        } else if let Some(set_part) = self.extract_after(cql, "SET") {
-            set_clause = self.parse_set_clause(set_part)?;
-        }
+        // SET runs until WHERE (or end of query).
+        let set_clause = match extract_clause(cql, &upper, "SET", &["WHERE"]) {
+            Some(part) => self.parse_set_clause(part)?,
+            None => HashMap::new(),
+        };
 
-        // Extract WHERE clause
-        if let Some(where_part) = self.extract_after(cql, "WHERE") {
-            where_clause = Some(self.parse_where_clause(where_part)?);
-        }
+        let where_clause = extract_after(cql, &upper, "WHERE")
+            .map(|s| self.parse_where_clause(s))
+            .transpose()?;
 
-        Ok(ParsedQuery {
-            query_type: QueryType::Update,
-            table,
-            columns: Vec::new(),
-            where_clause,
-            values: Vec::new(),
-            set_clause,
-            order_by: Vec::new(),
-            limit: None,
-            cql: cql.to_string(),
-        })
+        let mut parsed = empty_parsed(QueryType::Update, table, cql);
+        parsed.set_clause = set_clause;
+        parsed.where_clause = where_clause;
+        Ok(parsed)
     }
 
     /// Parse DELETE statement
     fn parse_delete(&self, cql: &str) -> Result<ParsedQuery> {
-        let mut table = None;
-        let mut where_clause = None;
+        let upper = cql.to_uppercase();
 
-        // Extract table name
-        if let Some(table_part) = self.extract_between(cql, "FROM", "WHERE") {
-            let table_name = table_part.trim();
-            table = Some(TableId::new(table_name));
-        } else if let Some(table_part) = self.extract_after(cql, "FROM") {
-            let table_name = table_part.trim();
-            table = Some(TableId::new(table_name));
-        }
+        let table = extract_clause(cql, &upper, "FROM", &["WHERE"]).map(|t| TableId::new(t.trim()));
 
-        // Extract WHERE clause
-        if let Some(where_part) = self.extract_after(cql, "WHERE") {
-            where_clause = Some(self.parse_where_clause(where_part)?);
-        }
+        let where_clause = extract_after(cql, &upper, "WHERE")
+            .map(|s| self.parse_where_clause(s))
+            .transpose()?;
 
-        Ok(ParsedQuery {
-            query_type: QueryType::Delete,
-            table,
-            columns: Vec::new(),
-            where_clause,
-            values: Vec::new(),
-            set_clause: HashMap::new(),
-            order_by: Vec::new(),
-            limit: None,
-            cql: cql.to_string(),
-        })
+        let mut parsed = empty_parsed(QueryType::Delete, table, cql);
+        parsed.where_clause = where_clause;
+        Ok(parsed)
     }
 
     /// Parse CREATE statement
     fn parse_create(&self, cql: &str) -> Result<ParsedQuery> {
-        let words: Vec<&str> = cql.split_whitespace().collect();
-        if words.len() >= 3 && words[1].to_uppercase() == "TABLE" {
-            Ok(ParsedQuery {
-                query_type: QueryType::CreateTable,
-                table: Some(TableId::new(words[2])),
-                columns: Vec::new(),
-                where_clause: None,
-                values: Vec::new(),
-                set_clause: HashMap::new(),
-                order_by: Vec::new(),
-                limit: None,
-                cql: cql.to_string(),
-            })
-        } else {
-            Err(Error::query_execution(
-                "Unsupported CREATE statement".to_string(),
-            ))
-        }
+        parse_keyword_target(
+            cql,
+            QueryType::CreateTable,
+            "TABLE",
+            "Unsupported CREATE statement",
+        )
     }
 
     /// Parse DROP statement
     fn parse_drop(&self, cql: &str) -> Result<ParsedQuery> {
-        let words: Vec<&str> = cql.split_whitespace().collect();
-        if words.len() >= 3 && words[1].to_uppercase() == "TABLE" {
-            Ok(ParsedQuery {
-                query_type: QueryType::DropTable,
-                table: Some(TableId::new(words[2])),
-                columns: Vec::new(),
-                where_clause: None,
-                values: Vec::new(),
-                set_clause: HashMap::new(),
-                order_by: Vec::new(),
-                limit: None,
-                cql: cql.to_string(),
-            })
-        } else {
-            Err(Error::query_execution(
-                "Unsupported DROP statement".to_string(),
-            ))
-        }
+        parse_keyword_target(
+            cql,
+            QueryType::DropTable,
+            "TABLE",
+            "Unsupported DROP statement",
+        )
     }
 
     /// Parse DESCRIBE statement
     fn parse_describe(&self, cql: &str) -> Result<ParsedQuery> {
-        let words: Vec<&str> = cql.split_whitespace().collect();
-        if words.len() >= 2 {
-            Ok(ParsedQuery {
-                query_type: QueryType::Describe,
-                table: Some(TableId::new(words[1])),
-                columns: Vec::new(),
-                where_clause: None,
-                values: Vec::new(),
-                set_clause: HashMap::new(),
-                order_by: Vec::new(),
-                limit: None,
-                cql: cql.to_string(),
-            })
-        } else {
-            Err(Error::query_execution(
-                "Missing table name for DESCRIBE".to_string(),
-            ))
-        }
+        parse_single_target(cql, QueryType::Describe, "Missing table name for DESCRIBE")
     }
 
     /// Parse USE statement
     fn parse_use(&self, cql: &str) -> Result<ParsedQuery> {
-        let words: Vec<&str> = cql.split_whitespace().collect();
-        if words.len() >= 2 {
-            Ok(ParsedQuery {
-                query_type: QueryType::Use,
-                table: Some(TableId::new(words[1])), // Using table for keyspace name
-                columns: Vec::new(),
-                where_clause: None,
-                values: Vec::new(),
-                set_clause: HashMap::new(),
-                order_by: Vec::new(),
-                limit: None,
-                cql: cql.to_string(),
-            })
-        } else {
-            Err(Error::query_execution(
-                "Missing keyspace name for USE".to_string(),
-            ))
-        }
+        // Note: TableId is reused to carry the keyspace name.
+        parse_single_target(cql, QueryType::Use, "Missing keyspace name for USE")
     }
 
     /// Parse WHERE clause
     fn parse_where_clause(&self, where_part: &str) -> Result<WhereClause> {
         let mut conditions = Vec::new();
 
-        // Simple parsing for a single condition
-        // In a real implementation, this would handle complex expressions
+        // Single-condition parser only — complex expressions are not supported here.
         let parts: Vec<&str> = where_part.split_whitespace().collect();
         if parts.len() >= 3 {
-            let column = parts[0].to_string();
-            let operator = self.parse_operator(parts[1])?;
-            let value = self.parse_value(parts[2])?;
-
             conditions.push(Condition {
-                column,
-                operator,
-                value,
+                column: parts[0].to_string(),
+                operator: self.parse_operator(parts[1])?,
+                value: self.parse_value(parts[2])?,
             });
         }
 
@@ -452,10 +348,9 @@ impl QueryParser {
     fn parse_value(&self, value_str: &str) -> Result<Value> {
         let value_str = value_str.trim();
 
-        // String values (quoted)
-        if value_str.starts_with('\'') && value_str.ends_with('\'') {
-            let content = &value_str[1..value_str.len() - 1];
-            return Ok(Value::Text(content.to_string()));
+        // String values (single-quoted)
+        if value_str.starts_with('\'') && value_str.ends_with('\'') && value_str.len() >= 2 {
+            return Ok(Value::Text(value_str[1..value_str.len() - 1].to_string()));
         }
 
         // Integer values
@@ -468,12 +363,15 @@ impl QueryParser {
             return Ok(Value::Float(float_val));
         }
 
-        // Boolean values
-        match value_str.to_uppercase().as_str() {
-            "TRUE" => return Ok(Value::Boolean(true)),
-            "FALSE" => return Ok(Value::Boolean(false)),
-            "NULL" => return Ok(Value::Null),
-            _ => {}
+        // Reserved literals
+        if value_str.eq_ignore_ascii_case("TRUE") {
+            return Ok(Value::Boolean(true));
+        }
+        if value_str.eq_ignore_ascii_case("FALSE") {
+            return Ok(Value::Boolean(false));
+        }
+        if value_str.eq_ignore_ascii_case("NULL") {
+            return Ok(Value::Null);
         }
 
         // Default to text
@@ -482,11 +380,10 @@ impl QueryParser {
 
     /// Parse VALUES clause
     fn parse_values(&self, values_part: &str) -> Result<Vec<Value>> {
-        let values: Result<Vec<Value>> = values_part
+        values_part
             .split(',')
             .map(|v| self.parse_value(v.trim()))
-            .collect();
-        values
+            .collect()
     }
 
     /// Parse SET clause
@@ -511,32 +408,84 @@ impl QueryParser {
 
         for order_item in order_part.split(',') {
             let parts: Vec<&str> = order_item.split_whitespace().collect();
-            if !parts.is_empty() {
-                let column = parts[0].to_string();
-                let direction = if parts.len() > 1 && parts[1].to_uppercase() == "DESC" {
+            if let Some(&col) = parts.first() {
+                let direction = if parts.get(1).is_some_and(|d| d.eq_ignore_ascii_case("DESC")) {
                     SortDirection::Desc
                 } else {
                     SortDirection::Asc
                 };
-
-                order_by.push(OrderByClause { column, direction });
+                order_by.push(OrderByClause {
+                    column: col.to_string(),
+                    direction,
+                });
             }
         }
 
         Ok(order_by)
     }
+}
 
-    /// Helper: Extract text between two patterns
-    fn extract_between<'a>(&self, text: &'a str, start: &str, end: &str) -> Option<&'a str> {
-        let start_pos = text.to_uppercase().find(&start.to_uppercase())? + start.len();
-        let end_pos = text.to_uppercase()[start_pos..].find(&end.to_uppercase())?;
-        Some(&text[start_pos..start_pos + end_pos])
+// ---- Free helpers -----------------------------------------------------------
+//
+// These helpers operate on a pre-uppercased copy of the query so each parse
+// allocates the uppercase buffer only once instead of per-keyword.
+// Byte positions in `upper` line up with `text` because `to_uppercase()`
+// preserves byte length for ASCII inputs (and CQL keywords are ASCII).
+
+/// Locate the byte slice of `text` that lies between `start` and `end` keywords
+/// (case-insensitive). `upper` must equal `text.to_uppercase()`.
+fn extract_between<'a>(text: &'a str, upper: &str, start: &str, end: &str) -> Option<&'a str> {
+    let start_pos = upper.find(&start.to_uppercase())? + start.len();
+    let end_pos = upper[start_pos..].find(&end.to_uppercase())?;
+    Some(&text[start_pos..start_pos + end_pos])
+}
+
+/// Locate the byte slice of `text` that follows `pattern` (case-insensitive).
+fn extract_after<'a>(text: &'a str, upper: &str, pattern: &str) -> Option<&'a str> {
+    let start_pos = upper.find(&pattern.to_uppercase())? + pattern.len();
+    Some(&text[start_pos..])
+}
+
+/// Extract the segment beginning at `start` and terminating at the first of
+/// `terminators` to appear, or end-of-string if none do. Falls back to
+/// `extract_after` when no terminator matches.
+fn extract_clause<'a>(
+    text: &'a str,
+    upper: &str,
+    start: &str,
+    terminators: &[&str],
+) -> Option<&'a str> {
+    for term in terminators {
+        if let Some(slice) = extract_between(text, upper, start, term) {
+            return Some(slice);
+        }
     }
+    extract_after(text, upper, start)
+}
 
-    /// Helper: Extract text after a pattern
-    fn extract_after<'a>(&self, text: &'a str, pattern: &str) -> Option<&'a str> {
-        let start_pos = text.to_uppercase().find(&pattern.to_uppercase())? + pattern.len();
-        Some(&text[start_pos..])
+/// Helper for `CREATE TABLE <name>` / `DROP TABLE <name>` style statements:
+/// requires `<verb> <expected_keyword> <target>` and emits the target as the
+/// table id.
+fn parse_keyword_target(
+    cql: &str,
+    query_type: QueryType,
+    expected_keyword: &str,
+    err_msg: &str,
+) -> Result<ParsedQuery> {
+    let words: Vec<&str> = cql.split_whitespace().collect();
+    if words.len() >= 3 && words[1].eq_ignore_ascii_case(expected_keyword) {
+        Ok(empty_parsed(query_type, Some(TableId::new(words[2])), cql))
+    } else {
+        Err(Error::query_execution(err_msg.to_string()))
+    }
+}
+
+/// Helper for `<verb> <target>` statements (DESCRIBE, USE) that need only the
+/// second token as their target.
+fn parse_single_target(cql: &str, query_type: QueryType, err_msg: &str) -> Result<ParsedQuery> {
+    match cql.split_whitespace().nth(1) {
+        Some(name) => Ok(empty_parsed(query_type, Some(TableId::new(name)), cql)),
+        None => Err(Error::query_execution(err_msg.to_string())),
     }
 }
 
