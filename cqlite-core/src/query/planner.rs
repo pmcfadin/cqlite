@@ -18,6 +18,52 @@ use super::{ComparisonOperator, Condition, ParsedQuery, QueryType, WhereClause};
 use crate::{schema::SchemaManager, Config, Error, Result, TableId};
 use std::sync::Arc;
 
+// --- Cost-model tuning constants ---------------------------------------------
+// All multipliers below are dimensionless factors applied to base costs from
+// `CostModel`. Names are kept descriptive so changes flow through to every
+// caller via a single source of truth.
+
+/// Default thread count when `Config.query.query_parallelism` is unset.
+const DEFAULT_PARALLELISM: usize = 4;
+
+/// Row count above which a scan is worth parallelizing.
+const PARALLELIZATION_ROW_THRESHOLD: u64 = 10_000;
+
+/// Filter is roughly an order of magnitude cheaper than a scan over the same rows.
+const FILTER_COST_FACTOR: f64 = 0.1;
+
+/// UPDATE write step is approximately half the cost of a full row scan.
+const UPDATE_WRITE_COST_FACTOR: f64 = 0.5;
+
+/// Projection is essentially a column-pick — three orders of magnitude cheaper.
+const PROJECT_COST_FACTOR: f64 = 0.001;
+
+/// Primary-key lookups visit a small fraction of rows compared to a scan.
+const PRIMARY_INDEX_COST_FACTOR: f64 = 0.1;
+
+/// Bloom filters short-circuit most reads.
+const BLOOM_INDEX_COST_FACTOR: f64 = 0.01;
+
+/// Composite indexes inherit selectivity but get an additional discount.
+const COMPOSITE_INDEX_COST_FACTOR: f64 = 0.5;
+
+/// Default selectivity assumed for `bloom_<col>` index entries.
+const BLOOM_INDEX_SELECTIVITY: f64 = 0.1;
+
+/// Selectivity defaults indexed by `ComparisonOperator` semantics.
+const SELECTIVITY_EQUAL: f64 = 0.1;
+const SELECTIVITY_NOT_EQUAL: f64 = 0.9;
+const SELECTIVITY_RANGE: f64 = 0.3;
+const SELECTIVITY_IN: f64 = 0.2;
+const SELECTIVITY_NOT_IN: f64 = 0.8;
+const SELECTIVITY_LIKE: f64 = 0.5;
+
+/// Trivial fixed cost for DDL plans (CREATE/DROP TABLE/INDEX).
+const DDL_FIXED_COST: f64 = 1.0;
+
+/// Trivial fixed cost for metadata-only plans (DESCRIBE/USE).
+const METADATA_FIXED_COST: f64 = 0.1;
+
 /// Query execution plan
 #[derive(Debug, Clone)]
 pub struct QueryPlan {
@@ -180,6 +226,44 @@ impl Default for CostModel {
     }
 }
 
+/// Pull the table out of a parsed query, producing a uniform error message.
+fn require_table<'a>(query: &'a ParsedQuery, op: &str) -> Result<&'a TableId> {
+    query
+        .table
+        .as_ref()
+        .ok_or_else(|| Error::query_execution(format!("Missing table in {op}")))
+}
+
+/// Clone the conditions out of an optional WHERE clause, defaulting to empty.
+fn clone_conditions(where_clause: &Option<WhereClause>) -> Vec<Condition> {
+    where_clause
+        .as_ref()
+        .map(|w| w.conditions.clone())
+        .unwrap_or_default()
+}
+
+/// Hardcoded fallback column orderings used when an INSERT omits the column list.
+///
+/// This is a temporary fixture for tests that exercise INSERT VALUES without
+/// schema lookup; a real implementation will resolve this from `SchemaManager`.
+fn default_insert_columns(table_name: &str, value_count: usize) -> Vec<String> {
+    fn s(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    match table_name {
+        "sales" => s(&["id", "region", "amount"]),
+        "orders" => s(&["id", "status", "amount"]),
+        "products" => s(&["id", "name", "price", "category"]),
+        "employees" => s(&["department", "id", "name", "salary"]),
+        "inventory" => s(&["id", "product", "quantity", "price", "active"]),
+        "customers" => s(&["id", "name", "email"]),
+        "user_data" => s(&["id", "tags", "preferences"]),
+        "performance_test" => s(&["id", "value", "category"]),
+        _ => (0..value_count).map(|i| format!("col_{}", i)).collect(),
+    }
+}
+
 impl QueryPlanner {
     /// Create a new query planner
     pub fn new(schema: Arc<SchemaManager>, config: &Config) -> Self {
@@ -197,106 +281,110 @@ impl QueryPlanner {
             QueryType::Insert => self.plan_insert(query).await,
             QueryType::Update => self.plan_update(query).await,
             QueryType::Delete => self.plan_delete(query).await,
-            QueryType::CreateTable => self.plan_create_table(query).await,
-            QueryType::DropTable => self.plan_drop_table(query).await,
-            QueryType::CreateIndex => self.plan_create_index(query).await,
-            QueryType::DropIndex => self.plan_drop_index(query).await,
-            QueryType::Describe => self.plan_describe(query).await,
-            QueryType::Use => self.plan_use(query).await,
+            QueryType::CreateTable => Ok(self.plan_ddl(query, PlanType::TableScan, DDL_FIXED_COST)),
+            QueryType::DropTable => Ok(self.plan_ddl(query, PlanType::TableScan, DDL_FIXED_COST)),
+            QueryType::CreateIndex => Ok(self.plan_ddl(query, PlanType::IndexScan, DDL_FIXED_COST)),
+            QueryType::DropIndex => Ok(self.plan_ddl(query, PlanType::IndexScan, DDL_FIXED_COST)),
+            QueryType::Describe => {
+                Ok(self.plan_metadata(query, PlanType::PointLookup, METADATA_FIXED_COST, 1))
+            }
+            QueryType::Use => {
+                Ok(self.plan_metadata(query, PlanType::PointLookup, METADATA_FIXED_COST, 0))
+            }
+        }
+    }
+
+    /// Configured query parallelism, falling back to the module default.
+    fn query_parallelism(&self) -> usize {
+        self.config
+            .query
+            .query_parallelism
+            .unwrap_or(DEFAULT_PARALLELISM)
+    }
+
+    /// Build a `ParallelizationInfo` for steps that can always be parallelized
+    /// using the configured thread count.
+    fn parallel_info(&self) -> ParallelizationInfo {
+        ParallelizationInfo {
+            can_parallelize: true,
+            suggested_threads: self.query_parallelism(),
+            partition_key: None,
+        }
+    }
+
+    /// `ParallelizationInfo` for inherently single-threaded steps.
+    fn serial_info() -> ParallelizationInfo {
+        ParallelizationInfo {
+            can_parallelize: false,
+            suggested_threads: 1,
+            partition_key: None,
         }
     }
 
     /// Plan SELECT query
     async fn plan_select(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        let table = query
-            .table
-            .as_ref()
-            .ok_or_else(|| Error::query_execution("Missing table in SELECT".to_string()))?;
+        let table = require_table(query, "SELECT")?;
 
-        // Get table statistics
         let table_stats = self.get_table_statistics(table).await?;
-
-        // Analyze WHERE clause for index selection
         let index_selection = self.select_indexes(table, &query.where_clause).await?;
-
-        // Determine plan type based on conditions
         let plan_type = self.determine_plan_type(&index_selection, &query.where_clause);
 
-        // Build execution steps
         let mut steps = Vec::new();
 
         // Step 1: Scan/Lookup
         steps.push(ExecutionStep {
             step_type: StepType::Scan,
             columns: query.columns.clone(),
-            conditions: query
-                .where_clause
-                .as_ref()
-                .map(|w| w.conditions.clone())
-                .unwrap_or_default(),
+            conditions: clone_conditions(&query.where_clause),
             cost: self.calculate_scan_cost(&index_selection, &table_stats),
             parallelization: self.determine_parallelization(&index_selection, &table_stats),
         });
 
-        // Step 2: Filter (if needed)
+        // Step 2: Filter (skipped for point lookups since the scan already pinned the row)
         if let Some(where_clause) = &query.where_clause {
             if plan_type != PlanType::PointLookup {
                 steps.push(ExecutionStep {
                     step_type: StepType::Filter,
                     columns: vec![],
                     conditions: where_clause.conditions.clone(),
-                    cost: table_stats.row_count as f64 * self.cost_model.row_scan_cost * 0.1,
-                    parallelization: ParallelizationInfo {
-                        can_parallelize: true,
-                        suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
-                        partition_key: None,
-                    },
+                    cost: table_stats.row_count as f64
+                        * self.cost_model.row_scan_cost
+                        * FILTER_COST_FACTOR,
+                    parallelization: self.parallel_info(),
                 });
             }
         }
 
-        // Step 3: Sort (if needed)
+        // Step 3: Sort
         if !query.order_by.is_empty() {
             steps.push(ExecutionStep {
                 step_type: StepType::Sort,
                 columns: query.order_by.iter().map(|o| o.column.clone()).collect(),
                 conditions: vec![],
                 cost: table_stats.row_count as f64 * self.cost_model.sort_cost_per_row,
-                parallelization: ParallelizationInfo {
-                    can_parallelize: true,
-                    suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
-                    partition_key: None,
-                },
+                parallelization: self.parallel_info(),
             });
         }
 
-        // Step 4: Limit (if needed)
+        // Step 4: Limit (virtually free)
         if query.limit.is_some() {
             steps.push(ExecutionStep {
                 step_type: StepType::Limit,
                 columns: vec![],
                 conditions: vec![],
-                cost: 0.0, // Limit is virtually free
-                parallelization: ParallelizationInfo {
-                    can_parallelize: false,
-                    suggested_threads: 1,
-                    partition_key: None,
-                },
+                cost: 0.0,
+                parallelization: Self::serial_info(),
             });
         }
 
-        // Step 5: Project (if needed)
+        // Step 5: Project (only when an explicit, non-`*` projection was requested)
         if !query.columns.is_empty() && query.columns != vec!["*"] {
             steps.push(ExecutionStep {
                 step_type: StepType::Project,
                 columns: query.columns.clone(),
                 conditions: vec![],
-                cost: table_stats.row_count as f64 * 0.001, // Very cheap
-                parallelization: ParallelizationInfo {
-                    can_parallelize: true,
-                    suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
-                    partition_key: None,
-                },
+                cost: table_stats.row_count as f64 * PROJECT_COST_FACTOR,
+                parallelization: self.parallel_info(),
             });
         }
 
@@ -316,98 +404,40 @@ impl QueryPlanner {
 
     /// Plan INSERT query
     async fn plan_insert(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        let table = query
-            .table
-            .as_ref()
-            .ok_or_else(|| Error::query_execution("Missing table in INSERT".to_string()))?;
-
+        let table = require_table(query, "INSERT")?;
         let _table_stats = self.get_table_statistics(table).await?;
 
-        // Convert INSERT VALUES into conditions for the executor to use
-        let mut conditions = Vec::new();
-
-        if query.columns.is_empty() {
-            // No explicit columns - use table schema column order
-            // For now, use common column names for INSERT VALUES syntax
-            // In a full implementation, we'd query the actual table schema
-            let default_columns: Vec<String> = match table.name() {
-                "sales" => vec!["id".to_string(), "region".to_string(), "amount".to_string()],
-                "orders" => vec!["id".to_string(), "status".to_string(), "amount".to_string()],
-                "products" => vec![
-                    "id".to_string(),
-                    "name".to_string(),
-                    "price".to_string(),
-                    "category".to_string(),
-                ],
-                "employees" => vec![
-                    "department".to_string(),
-                    "id".to_string(),
-                    "name".to_string(),
-                    "salary".to_string(),
-                ],
-                "inventory" => vec![
-                    "id".to_string(),
-                    "product".to_string(),
-                    "quantity".to_string(),
-                    "price".to_string(),
-                    "active".to_string(),
-                ],
-                "customers" => vec!["id".to_string(), "name".to_string(), "email".to_string()],
-                "user_data" => vec![
-                    "id".to_string(),
-                    "tags".to_string(),
-                    "preferences".to_string(),
-                ],
-                "performance_test" => vec![
-                    "id".to_string(),
-                    "value".to_string(),
-                    "category".to_string(),
-                ],
-                _ => {
-                    // Fallback: generate column names based on position
-                    (0..query.values.len())
-                        .map(|i| format!("col_{}", i))
-                        .collect::<Vec<_>>()
-                }
-            };
-
-            // Match default columns with their corresponding values
-            for (i, column) in default_columns.iter().enumerate() {
-                if i < query.values.len() {
-                    conditions.push(Condition {
-                        column: column.clone(),
-                        operator: ComparisonOperator::Equal,
-                        value: query.values[i].clone(),
-                    });
-                }
-            }
+        // Determine which column names to pair with the VALUES list. When the
+        // query omits columns, fall back to a per-table hardcoded ordering.
+        let owned_default;
+        let columns: &[String] = if query.columns.is_empty() {
+            owned_default = default_insert_columns(table.name(), query.values.len());
+            &owned_default
         } else {
-            // Explicit columns provided - match columns with their corresponding values
-            for (i, column) in query.columns.iter().enumerate() {
-                if i < query.values.len() {
-                    conditions.push(Condition {
-                        column: column.clone(),
-                        operator: ComparisonOperator::Equal,
-                        value: query.values[i].clone(),
-                    });
-                }
-            }
-        }
+            &query.columns
+        };
+
+        // Pair each column with its corresponding value (truncated to the shorter list).
+        let conditions: Vec<Condition> = columns
+            .iter()
+            .zip(query.values.iter())
+            .map(|(column, value)| Condition {
+                column: column.clone(),
+                operator: ComparisonOperator::Equal,
+                value: value.clone(),
+            })
+            .collect();
 
         let steps = vec![ExecutionStep {
-            step_type: StepType::Insert, // Insert operation
+            step_type: StepType::Insert,
             columns: query.columns.clone(),
-            conditions, // Pass the INSERT values as conditions
+            conditions,
             cost: self.cost_model.row_scan_cost,
-            parallelization: ParallelizationInfo {
-                can_parallelize: false,
-                suggested_threads: 1,
-                partition_key: None,
-            },
+            parallelization: Self::serial_info(),
         }];
 
         Ok(QueryPlan {
-            plan_type: PlanType::TableScan, // Insert is more like a table modification
+            plan_type: PlanType::TableScan,
             table: Some(table.clone()),
             estimated_cost: self.cost_model.row_scan_cost,
             estimated_rows: 1,
@@ -419,38 +449,30 @@ impl QueryPlanner {
 
     /// Plan UPDATE query
     async fn plan_update(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        let table = query
-            .table
-            .as_ref()
-            .ok_or_else(|| Error::query_execution("Missing table in UPDATE".to_string()))?;
+        let table = require_table(query, "UPDATE")?;
 
         let table_stats = self.get_table_statistics(table).await?;
         let index_selection = self.select_indexes(table, &query.where_clause).await?;
 
-        let mut steps = vec![ExecutionStep {
-            step_type: StepType::Scan,
-            columns: vec![],
-            conditions: query
-                .where_clause
-                .as_ref()
-                .map(|w| w.conditions.clone())
-                .unwrap_or_default(),
-            cost: self.calculate_scan_cost(&index_selection, &table_stats),
-            parallelization: self.determine_parallelization(&index_selection, &table_stats),
-        }];
-
-        // Add update step
-        steps.push(ExecutionStep {
-            step_type: StepType::Filter, // Update operation
-            columns: query.set_clause.keys().cloned().collect(),
-            conditions: vec![],
-            cost: table_stats.row_count as f64 * self.cost_model.row_scan_cost * 0.5,
-            parallelization: ParallelizationInfo {
-                can_parallelize: true,
-                suggested_threads: self.config.query.query_parallelism.unwrap_or(4),
-                partition_key: None,
+        let steps = vec![
+            ExecutionStep {
+                step_type: StepType::Scan,
+                columns: vec![],
+                conditions: clone_conditions(&query.where_clause),
+                cost: self.calculate_scan_cost(&index_selection, &table_stats),
+                parallelization: self.determine_parallelization(&index_selection, &table_stats),
             },
-        });
+            // The "update write" pass is modeled as a Filter step today.
+            ExecutionStep {
+                step_type: StepType::Filter,
+                columns: query.set_clause.keys().cloned().collect(),
+                conditions: vec![],
+                cost: table_stats.row_count as f64
+                    * self.cost_model.row_scan_cost
+                    * UPDATE_WRITE_COST_FACTOR,
+                parallelization: self.parallel_info(),
+            },
+        ];
 
         let total_cost = steps.iter().map(|s| s.cost).sum();
         let estimated_rows = self.estimate_result_rows(&table_stats, &query.where_clause);
@@ -468,10 +490,7 @@ impl QueryPlanner {
 
     /// Plan DELETE query
     async fn plan_delete(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        let table = query
-            .table
-            .as_ref()
-            .ok_or_else(|| Error::query_execution("Missing table in DELETE".to_string()))?;
+        let table = require_table(query, "DELETE")?;
 
         let table_stats = self.get_table_statistics(table).await?;
         let index_selection = self.select_indexes(table, &query.where_clause).await?;
@@ -479,11 +498,7 @@ impl QueryPlanner {
         let steps = vec![ExecutionStep {
             step_type: StepType::Scan,
             columns: vec![],
-            conditions: query
-                .where_clause
-                .as_ref()
-                .map(|w| w.conditions.clone())
-                .unwrap_or_default(),
+            conditions: clone_conditions(&query.where_clause),
             cost: self.calculate_scan_cost(&index_selection, &table_stats),
             parallelization: self.determine_parallelization(&index_selection, &table_stats),
         }];
@@ -502,77 +517,36 @@ impl QueryPlanner {
         })
     }
 
-    /// Plan DDL operations
-    async fn plan_create_table(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        Ok(QueryPlan {
-            plan_type: PlanType::TableScan,
+    /// Build a stub plan for DDL operations that don't yet generate real steps.
+    fn plan_ddl(&self, query: &ParsedQuery, plan_type: PlanType, cost: f64) -> QueryPlan {
+        QueryPlan {
+            plan_type,
             table: query.table.clone(),
-            estimated_cost: 1.0,
+            estimated_cost: cost,
             estimated_rows: 0,
             selected_indexes: vec![],
             steps: vec![],
             hints: QueryHints::default(),
-        })
+        }
     }
 
-    async fn plan_drop_table(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        Ok(QueryPlan {
-            plan_type: PlanType::TableScan,
+    /// Build a stub plan for metadata-only queries (DESCRIBE/USE).
+    fn plan_metadata(
+        &self,
+        query: &ParsedQuery,
+        plan_type: PlanType,
+        cost: f64,
+        estimated_rows: u64,
+    ) -> QueryPlan {
+        QueryPlan {
+            plan_type,
             table: query.table.clone(),
-            estimated_cost: 1.0,
-            estimated_rows: 0,
+            estimated_cost: cost,
+            estimated_rows,
             selected_indexes: vec![],
             steps: vec![],
             hints: QueryHints::default(),
-        })
-    }
-
-    async fn plan_create_index(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        Ok(QueryPlan {
-            plan_type: PlanType::IndexScan,
-            table: query.table.clone(),
-            estimated_cost: 1.0,
-            estimated_rows: 0,
-            selected_indexes: vec![],
-            steps: vec![],
-            hints: QueryHints::default(),
-        })
-    }
-
-    async fn plan_drop_index(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        Ok(QueryPlan {
-            plan_type: PlanType::IndexScan,
-            table: query.table.clone(),
-            estimated_cost: 1.0,
-            estimated_rows: 0,
-            selected_indexes: vec![],
-            steps: vec![],
-            hints: QueryHints::default(),
-        })
-    }
-
-    async fn plan_describe(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        Ok(QueryPlan {
-            plan_type: PlanType::PointLookup,
-            table: query.table.clone(),
-            estimated_cost: 0.1,
-            estimated_rows: 1,
-            selected_indexes: vec![],
-            steps: vec![],
-            hints: QueryHints::default(),
-        })
-    }
-
-    async fn plan_use(&self, query: &ParsedQuery) -> Result<QueryPlan> {
-        Ok(QueryPlan {
-            plan_type: PlanType::PointLookup,
-            table: query.table.clone(),
-            estimated_cost: 0.1,
-            estimated_rows: 0,
-            selected_indexes: vec![],
-            steps: vec![],
-            hints: QueryHints::default(),
-        })
+        }
     }
 
     /// Select optimal indexes for the query
@@ -583,7 +557,7 @@ impl QueryPlanner {
     ) -> Result<Vec<IndexSelection>> {
         let mut selections = Vec::new();
 
-        // Always consider primary key
+        // Always consider the primary key.
         selections.push(IndexSelection {
             index_name: "PRIMARY".to_string(),
             columns: vec!["id".to_string()], // Simplified
@@ -591,10 +565,11 @@ impl QueryPlanner {
             index_type: IndexType::Primary,
         });
 
-        // Check for applicable secondary indexes
         if let Some(where_clause) = where_clause {
+            // Per-condition: a synthetic secondary index, plus a bloom filter
+            // when the operator is equality. The order below preserves the
+            // original step output (all secondaries first, then all blooms).
             for condition in &where_clause.conditions {
-                // Simulate index selection logic
                 selections.push(IndexSelection {
                     index_name: format!("idx_{}", condition.column),
                     columns: vec![condition.column.clone()],
@@ -602,16 +577,12 @@ impl QueryPlanner {
                     index_type: IndexType::Secondary,
                 });
             }
-        }
-
-        // Consider bloom filter for equality checks
-        if let Some(where_clause) = where_clause {
             for condition in &where_clause.conditions {
                 if condition.operator == ComparisonOperator::Equal {
                     selections.push(IndexSelection {
                         index_name: format!("bloom_{}", condition.column),
                         columns: vec![condition.column.clone()],
-                        selectivity: 0.1, // Bloom filters are highly selective
+                        selectivity: BLOOM_INDEX_SELECTIVITY,
                         index_type: IndexType::BloomFilter,
                     });
                 }
@@ -627,39 +598,43 @@ impl QueryPlanner {
         index_selection: &[IndexSelection],
         where_clause: &Option<WhereClause>,
     ) -> PlanType {
-        if let Some(where_clause) = where_clause {
-            // Check for point lookup (primary key equality)
-            for condition in &where_clause.conditions {
-                if condition.operator == ComparisonOperator::Equal {
-                    for index in index_selection {
-                        if index.index_type == IndexType::Primary
-                            && index.columns.contains(&condition.column)
-                        {
-                            return PlanType::PointLookup;
-                        }
+        let Some(where_clause) = where_clause else {
+            return PlanType::TableScan;
+        };
+
+        let primary_columns: Vec<&str> = index_selection
+            .iter()
+            .filter(|idx| idx.index_type == IndexType::Primary)
+            .flat_map(|idx| idx.columns.iter().map(String::as_str))
+            .collect();
+
+        let mut has_range = false;
+        for condition in &where_clause.conditions {
+            match condition.operator {
+                ComparisonOperator::Equal => {
+                    if primary_columns.iter().any(|c| *c == condition.column) {
+                        return PlanType::PointLookup;
                     }
                 }
-            }
-
-            // Check for range scan
-            for condition in &where_clause.conditions {
-                if matches!(
-                    condition.operator,
-                    ComparisonOperator::LessThan
-                        | ComparisonOperator::LessThanOrEqual
-                        | ComparisonOperator::GreaterThan
-                        | ComparisonOperator::GreaterThanOrEqual
-                ) {
-                    return PlanType::RangeScan;
+                ComparisonOperator::LessThan
+                | ComparisonOperator::LessThanOrEqual
+                | ComparisonOperator::GreaterThan
+                | ComparisonOperator::GreaterThanOrEqual => {
+                    has_range = true;
                 }
+                _ => {}
             }
+        }
 
-            // Check for index scan
-            for index in index_selection {
-                if index.index_type == IndexType::Secondary {
-                    return PlanType::IndexScan;
-                }
-            }
+        if has_range {
+            return PlanType::RangeScan;
+        }
+
+        if index_selection
+            .iter()
+            .any(|idx| idx.index_type == IndexType::Secondary)
+        {
+            return PlanType::IndexScan;
         }
 
         PlanType::TableScan
@@ -671,29 +646,19 @@ impl QueryPlanner {
         index_selection: &[IndexSelection],
         table_stats: &TableStatistics,
     ) -> f64 {
-        let mut min_cost = table_stats.row_count as f64 * self.cost_model.row_scan_cost;
+        let rows = table_stats.row_count as f64;
+        let base_lookup = rows * self.cost_model.index_lookup_cost;
+        let mut min_cost = rows * self.cost_model.row_scan_cost;
 
         for index in index_selection {
             let index_cost = match index.index_type {
-                IndexType::Primary => {
-                    table_stats.row_count as f64 * self.cost_model.index_lookup_cost * 0.1
-                }
-                IndexType::Secondary => {
-                    table_stats.row_count as f64
-                        * self.cost_model.index_lookup_cost
-                        * index.selectivity
-                }
-                IndexType::BloomFilter => {
-                    table_stats.row_count as f64 * self.cost_model.index_lookup_cost * 0.01
-                }
+                IndexType::Primary => base_lookup * PRIMARY_INDEX_COST_FACTOR,
+                IndexType::Secondary => base_lookup * index.selectivity,
+                IndexType::BloomFilter => base_lookup * BLOOM_INDEX_COST_FACTOR,
                 IndexType::Composite => {
-                    table_stats.row_count as f64
-                        * self.cost_model.index_lookup_cost
-                        * index.selectivity
-                        * 0.5
+                    base_lookup * index.selectivity * COMPOSITE_INDEX_COST_FACTOR
                 }
             };
-
             min_cost = min_cost.min(index_cost);
         }
 
@@ -706,16 +671,13 @@ impl QueryPlanner {
         index_selection: &[IndexSelection],
         table_stats: &TableStatistics,
     ) -> ParallelizationInfo {
-        // Large tables benefit from parallelization
-        let can_parallelize = table_stats.row_count > 10000;
-
+        let can_parallelize = table_stats.row_count > PARALLELIZATION_ROW_THRESHOLD;
         let suggested_threads = if can_parallelize {
-            self.config.query.query_parallelism.unwrap_or(4)
+            self.query_parallelism()
         } else {
             1
         };
 
-        // Look for partition key in indexes
         let partition_key = index_selection
             .iter()
             .find(|idx| idx.index_type == IndexType::Primary)
@@ -732,16 +694,15 @@ impl QueryPlanner {
     /// Estimate selectivity of a condition
     fn estimate_selectivity(&self, condition: &Condition) -> f64 {
         match condition.operator {
-            ComparisonOperator::Equal => 0.1,
-            ComparisonOperator::NotEqual => 0.9,
+            ComparisonOperator::Equal => SELECTIVITY_EQUAL,
+            ComparisonOperator::NotEqual => SELECTIVITY_NOT_EQUAL,
             ComparisonOperator::LessThan
             | ComparisonOperator::LessThanOrEqual
             | ComparisonOperator::GreaterThan
-            | ComparisonOperator::GreaterThanOrEqual => 0.3,
-            ComparisonOperator::In => 0.2,
-            ComparisonOperator::NotIn => 0.8,
-            ComparisonOperator::Like => 0.5,
-            ComparisonOperator::NotLike => 0.5,
+            | ComparisonOperator::GreaterThanOrEqual => SELECTIVITY_RANGE,
+            ComparisonOperator::In => SELECTIVITY_IN,
+            ComparisonOperator::NotIn => SELECTIVITY_NOT_IN,
+            ComparisonOperator::Like | ComparisonOperator::NotLike => SELECTIVITY_LIKE,
         }
     }
 
@@ -751,22 +712,24 @@ impl QueryPlanner {
         table_stats: &TableStatistics,
         where_clause: &Option<WhereClause>,
     ) -> u64 {
-        let mut selectivity = 1.0;
-
-        if let Some(where_clause) = where_clause {
-            for condition in &where_clause.conditions {
-                selectivity *= self.estimate_selectivity(condition);
-            }
-        }
+        let selectivity = where_clause
+            .as_ref()
+            .map(|w| {
+                w.conditions
+                    .iter()
+                    .map(|c| self.estimate_selectivity(c))
+                    .product::<f64>()
+            })
+            .unwrap_or(1.0);
 
         (table_stats.row_count as f64 * selectivity) as u64
     }
 
     /// Get table statistics
     async fn get_table_statistics(&self, _table: &TableId) -> Result<TableStatistics> {
-        // In a real implementation, this would query actual table statistics
+        // In a real implementation, this would query actual table statistics.
         Ok(TableStatistics {
-            row_count: 100_000, // Simulated
+            row_count: 100_000,
             avg_row_size: 256,
             table_size: 25_600_000,
             index_count: 3,
@@ -794,57 +757,30 @@ mod tests {
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    #[tokio::test]
-    async fn test_query_planner_creation() {
+    /// Build a planner backed by a fresh temp dir. Tests in this module don't
+    /// need the storage engine; constructing it eats most of the test runtime.
+    async fn make_planner() -> (TempDir, QueryPlanner) {
         let temp_dir = TempDir::new().unwrap();
         let config = Config::default();
-        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
-        let _storage = Arc::new(
-            crate::storage::StorageEngine::open(
-                temp_dir.path(),
-                &config,
-                platform,
-                #[cfg(feature = "state_machine")]
-                None,
-            )
-            .await
-            .unwrap(),
-        );
         let schema = Arc::new(
             crate::schema::SchemaManager::new(temp_dir.path())
                 .await
                 .unwrap(),
         );
-
         let planner = QueryPlanner::new(schema, &config);
+        (temp_dir, planner)
+    }
+
+    #[tokio::test]
+    async fn test_query_planner_creation() {
+        let (_tmp, planner) = make_planner().await;
         assert_eq!(planner.cost_model.row_scan_cost, 1.0);
     }
 
     #[tokio::test]
     async fn test_plan_type_determination() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = Config::default();
-        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
-        let _storage = Arc::new(
-            crate::storage::StorageEngine::open(
-                temp_dir.path(),
-                &config,
-                platform,
-                #[cfg(feature = "state_machine")]
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let schema = Arc::new(
-            crate::schema::SchemaManager::new(temp_dir.path())
-                .await
-                .unwrap(),
-        );
+        let (_tmp, planner) = make_planner().await;
 
-        let planner = QueryPlanner::new(schema, &config);
-
-        // Test point lookup
         let index_selection = vec![IndexSelection {
             index_name: "PRIMARY".to_string(),
             columns: vec!["id".to_string()],
@@ -866,27 +802,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_selectivity_estimation() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = Config::default();
-        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
-        let _storage = Arc::new(
-            crate::storage::StorageEngine::open(
-                temp_dir.path(),
-                &config,
-                platform,
-                #[cfg(feature = "state_machine")]
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let schema_manager = Arc::new(
-            crate::schema::SchemaManager::new(temp_dir.path())
-                .await
-                .unwrap(),
-        );
-
-        let planner = QueryPlanner::new(schema_manager, &config);
+        let (_tmp, planner) = make_planner().await;
 
         let condition = Condition {
             column: "name".to_string(),
@@ -895,6 +811,6 @@ mod tests {
         };
 
         let selectivity = planner.estimate_selectivity(&condition);
-        assert_eq!(selectivity, 0.1);
+        assert_eq!(selectivity, SELECTIVITY_EQUAL);
     }
 }
