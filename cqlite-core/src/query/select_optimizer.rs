@@ -1,7 +1,7 @@
 //! Query optimizer for SELECT statements - basic planning and predicate pushdown.
 
 use super::select_ast::*;
-use crate::{error::Error, schema::SchemaManager, storage::StorageEngine, Result, TableId, Value};
+use crate::{schema::SchemaManager, storage::StorageEngine, Result, TableId, Value};
 use std::sync::Arc;
 
 /// Query optimizer for SELECT statements
@@ -97,61 +97,62 @@ impl SelectOptimizer {
             aggregation_plan: None,
         };
 
-        if statement.from_clause.is_none() {
+        // Constant expressions (no FROM) need no execution steps.
+        let Some(from_clause) = statement.from_clause.as_ref() else {
             return Ok(plan);
-        }
+        };
+        let table_id = match from_clause {
+            FromClause::Table(t) | FromClause::TableAlias(t, _) => t.clone(),
+        };
 
-        let table_id = self.extract_table_id(
-            statement
-                .from_clause
-                .as_ref()
-                .ok_or_else(|| Error::internal("Missing FROM clause"))?,
-        )?;
-
-        if let Some(ref where_clause) = statement.where_clause {
-            plan.sstable_predicates = self.extract_sstable_predicates(where_clause)?;
+        if let Some(where_clause) = &statement.where_clause {
+            plan.sstable_predicates = collect_sstable_predicates(where_clause);
         }
 
         plan.execution_steps.push(ExecutionStep::SSTableScan {
             table: table_id,
             predicates: plan.sstable_predicates.clone(),
-            projection: self.extract_projection_columns(&statement.select_clause),
+            projection: extract_projection_columns(&statement.select_clause),
         });
 
-        if let Some(ref where_clause) = statement.where_clause {
-            if let Some(filter) =
-                self.extract_remaining_filters(where_clause, &plan.sstable_predicates)
-            {
-                plan.execution_steps
-                    .push(ExecutionStep::Filter { expression: filter });
+        // If we couldn't push any predicates down, keep the original WHERE as
+        // a post-scan filter step.
+        if let Some(where_clause) = &statement.where_clause {
+            if plan.sstable_predicates.is_empty() {
+                plan.execution_steps.push(ExecutionStep::Filter {
+                    expression: where_clause.clone(),
+                });
             }
         }
 
-        if statement.requires_aggregation() {
-            let agg_plan = self.plan_aggregation(&statement)?;
+        let needs_aggregation = statement.requires_aggregation();
+        if needs_aggregation {
+            let agg_plan = plan_aggregation(&statement);
             plan.execution_steps.push(ExecutionStep::Aggregate {
                 plan: agg_plan.clone(),
             });
             plan.aggregation_plan = Some(agg_plan);
         }
 
-        if let Some(ref order_by) = statement.order_by {
+        if let Some(order_by) = &statement.order_by {
             plan.execution_steps.push(ExecutionStep::Sort {
                 order_by: order_by.clone(),
             });
         }
 
-        if let Some(ref limit) = statement.limit {
+        if let Some(limit) = &statement.limit {
             plan.execution_steps.push(ExecutionStep::Limit {
                 count: limit.count,
                 offset: statement.offset,
             });
         }
 
-        if let SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) =
-            &statement.select_clause
-        {
-            if !statement.requires_aggregation() {
+        // Aggregation already produces the final shape; an explicit Project
+        // step on top would be redundant.
+        if !needs_aggregation {
+            if let SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) =
+                &statement.select_clause
+            {
                 plan.execution_steps.push(ExecutionStep::Project {
                     columns: exprs.clone(),
                 });
@@ -160,164 +161,141 @@ impl SelectOptimizer {
 
         Ok(plan)
     }
+}
 
-    fn extract_table_id(&self, from_clause: &FromClause) -> Result<TableId> {
-        match from_clause {
-            FromClause::Table(table_id) | FromClause::TableAlias(table_id, _) => {
-                Ok(table_id.clone())
-            }
-        }
-    }
-
-    fn extract_sstable_predicates(
-        &self,
-        where_clause: &WhereExpression,
-    ) -> Result<Vec<SSTablePredicate>> {
-        let mut predicates = Vec::new();
-        self.extract_predicates_recursive(where_clause, &mut predicates);
-        Ok(predicates)
-    }
-
-    fn extract_predicates_recursive(
-        &self,
-        expr: &WhereExpression,
-        predicates: &mut Vec<SSTablePredicate>,
-    ) {
+/// Walk a WHERE expression tree, collecting comparisons that can be turned
+/// into SSTable-level predicates. OR/NOT branches are intentionally skipped:
+/// those require capabilities the SSTable filter pushdown doesn't have.
+fn collect_sstable_predicates(expr: &WhereExpression) -> Vec<SSTablePredicate> {
+    let mut out = Vec::new();
+    fn walk(expr: &WhereExpression, out: &mut Vec<SSTablePredicate>) {
         match expr {
             WhereExpression::Comparison(comp) => {
-                if let Some(predicate) = self.comparison_to_sstable_predicate(comp) {
-                    predicates.push(predicate);
+                if let Some(predicate) = comparison_to_sstable_predicate(comp) {
+                    out.push(predicate);
                 }
             }
             WhereExpression::And(exprs) => {
-                for expr in exprs {
-                    self.extract_predicates_recursive(expr, predicates);
+                for e in exprs {
+                    walk(e, out);
                 }
             }
-            WhereExpression::Parentheses(expr) => {
-                self.extract_predicates_recursive(expr, predicates);
-            }
-            _ => {}
+            WhereExpression::Parentheses(inner) => walk(inner, out),
+            WhereExpression::Or(_) | WhereExpression::Not(_) => {}
         }
     }
+    walk(expr, &mut out);
+    out
+}
 
-    fn comparison_to_sstable_predicate(
-        &self,
-        comp: &ComparisonExpression,
-    ) -> Option<SSTablePredicate> {
-        let SelectExpression::Column(col_ref) = &comp.left else {
-            return None;
-        };
-        let column = col_ref.column.clone();
+fn comparison_to_sstable_predicate(comp: &ComparisonExpression) -> Option<SSTablePredicate> {
+    let SelectExpression::Column(col_ref) = &comp.left else {
+        return None;
+    };
+    let column = col_ref.column.clone();
 
-        match (&comp.operator, &comp.right) {
-            (ComparisonOperator::Equal, ComparisonRightSide::Value(value_expr)) => self
-                .extract_literal_value(value_expr)
-                .map(|value| SSTablePredicate {
+    match (&comp.operator, &comp.right) {
+        (ComparisonOperator::Equal, ComparisonRightSide::Value(value_expr)) => {
+            let value = literal_value(value_expr)?;
+            Some(SSTablePredicate {
+                column,
+                operation: SSTableFilterOp::Equal,
+                values: vec![value],
+            })
+        }
+        (ComparisonOperator::In, ComparisonRightSide::ValueList(value_exprs)) => {
+            let values: Vec<Value> = value_exprs.iter().filter_map(literal_value).collect();
+            (!values.is_empty()).then_some(SSTablePredicate {
+                column,
+                operation: SSTableFilterOp::In,
+                values,
+            })
+        }
+        (ComparisonOperator::Between, ComparisonRightSide::Range(start_expr, end_expr)) => {
+            let start = literal_value(start_expr)?;
+            let end = literal_value(end_expr)?;
+            Some(SSTablePredicate {
+                column,
+                operation: SSTableFilterOp::Range,
+                values: vec![start, end],
+            })
+        }
+        _ => None,
+    }
+}
+
+fn literal_value(expr: &SelectExpression) -> Option<Value> {
+    match expr {
+        SelectExpression::Literal(value) => Some(value.clone()),
+        _ => None,
+    }
+}
+
+fn extract_projection_columns(select_clause: &SelectClause) -> Vec<String> {
+    match select_clause {
+        SelectClause::All => Vec::new(),
+        SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
+            exprs.iter().filter_map(extract_column_name).collect()
+        }
+    }
+}
+
+fn extract_column_name(expr: &SelectExpression) -> Option<String> {
+    match expr {
+        SelectExpression::Column(col_ref) => Some(col_ref.column.clone()),
+        SelectExpression::Aliased(_, alias) => Some(alias.clone()),
+        _ => None,
+    }
+}
+
+fn plan_aggregation(statement: &SelectStatement) -> AggregationPlan {
+    let group_by_columns = statement
+        .group_by
+        .as_ref()
+        .map(|g| g.columns.iter().map(|col| col.column.clone()).collect())
+        .unwrap_or_default();
+
+    let mut aggregates = Vec::new();
+    if let SelectClause::Columns(exprs) = &statement.select_clause {
+        for expr in exprs {
+            if let SelectExpression::Aggregate(agg) = expr {
+                let (column, alias) = aggregate_column_and_alias(agg);
+                aggregates.push(AggregateComputation {
+                    function: agg.function.clone(),
                     column,
-                    operation: SSTableFilterOp::Equal,
-                    values: vec![value],
-                }),
-            (ComparisonOperator::In, ComparisonRightSide::ValueList(value_exprs)) => {
-                let values: Vec<Value> = value_exprs
-                    .iter()
-                    .filter_map(|expr| self.extract_literal_value(expr))
-                    .collect();
-                (!values.is_empty()).then(|| SSTablePredicate {
-                    column,
-                    operation: SSTableFilterOp::In,
-                    values,
-                })
-            }
-            (ComparisonOperator::Between, ComparisonRightSide::Range(start_expr, end_expr)) => {
-                match (
-                    self.extract_literal_value(start_expr),
-                    self.extract_literal_value(end_expr),
-                ) {
-                    (Some(start), Some(end)) => Some(SSTablePredicate {
-                        column,
-                        operation: SSTableFilterOp::Range,
-                        values: vec![start, end],
-                    }),
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn extract_literal_value(&self, expr: &SelectExpression) -> Option<Value> {
-        match expr {
-            SelectExpression::Literal(value) => Some(value.clone()),
-            _ => None,
-        }
-    }
-
-    fn extract_projection_columns(&self, select_clause: &SelectClause) -> Vec<String> {
-        match select_clause {
-            SelectClause::All => vec![],
-            SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => exprs
-                .iter()
-                .filter_map(|expr| self.extract_column_name(expr))
-                .collect(),
-        }
-    }
-
-    fn extract_column_name(&self, expr: &SelectExpression) -> Option<String> {
-        match expr {
-            SelectExpression::Column(col_ref) => Some(col_ref.column.clone()),
-            SelectExpression::Aliased(_, alias) => Some(alias.clone()),
-            _ => None,
-        }
-    }
-
-    fn extract_remaining_filters(
-        &self,
-        where_clause: &WhereExpression,
-        sstable_predicates: &[SSTablePredicate],
-    ) -> Option<WhereExpression> {
-        sstable_predicates.is_empty().then(|| where_clause.clone())
-    }
-
-    fn plan_aggregation(&self, statement: &SelectStatement) -> Result<AggregationPlan> {
-        let group_by_columns = statement
-            .group_by
-            .as_ref()
-            .map(|g| g.columns.iter().map(|col| col.column.clone()).collect())
-            .unwrap_or_default();
-
-        let mut aggregates = Vec::new();
-        if let SelectClause::Columns(exprs) = &statement.select_clause {
-            for expr in exprs {
-                if let SelectExpression::Aggregate(agg) = expr {
-                    let (column, alias) = if agg.args.is_empty()
-                        || agg.args.iter().any(
-                            |arg| matches!(arg, SelectExpression::Column(c) if c.column == "*"),
-                        ) {
-                        ("*".to_string(), format!("{:?}(*)", agg.function))
-                    } else if let Some(col_name) = agg
-                        .args
-                        .first()
-                        .and_then(|arg| self.extract_column_name(arg))
-                    {
-                        (col_name.clone(), format!("{:?}_{}", agg.function, col_name))
-                    } else {
-                        ("*".to_string(), format!("{:?}", agg.function))
-                    };
-
-                    aggregates.push(AggregateComputation {
-                        function: agg.function.clone(),
-                        column,
-                        alias,
-                        distinct: agg.distinct,
-                    });
-                }
+                    alias,
+                    distinct: agg.distinct,
+                });
             }
         }
-        Ok(AggregationPlan {
-            group_by_columns,
-            aggregates,
-        })
+    }
+
+    AggregationPlan {
+        group_by_columns,
+        aggregates,
+    }
+}
+
+/// Resolve `(column, alias)` for an aggregate. `COUNT(*)` and any aggregate
+/// referencing `*` yields `("*", "Func(*)")`; a single named column yields
+/// `(name, "Func_name")`; anything else falls back to `("*", "Func")`.
+fn aggregate_column_and_alias(agg: &AggregateFunction) -> (String, String) {
+    let references_star = agg.args.is_empty()
+        || agg
+            .args
+            .iter()
+            .any(|arg| matches!(arg, SelectExpression::Column(c) if c.column == "*"));
+
+    if references_star {
+        return ("*".to_string(), format!("{:?}(*)", agg.function));
+    }
+
+    match agg.args.first().and_then(extract_column_name) {
+        Some(col_name) => {
+            let alias = format!("{:?}_{}", agg.function, col_name);
+            (col_name, alias)
+        }
+        None => ("*".to_string(), format!("{:?}", agg.function)),
     }
 }
 
