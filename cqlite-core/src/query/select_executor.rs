@@ -153,7 +153,7 @@ fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
 
 /// Decode a partition-key `Value` from raw `RowKey` bytes based on a
 /// schema-declared CQL type. Returns an error for malformed/short input.
-fn decode_partition_key(key: &RowKey, pk_column: &crate::schema::KeyColumn) -> Result<Value> {
+fn decode_partition_key_value(key: &RowKey, pk_column: &crate::schema::KeyColumn) -> Result<Value> {
     let key_bytes = key.0.as_slice();
     match pk_column.data_type.to_lowercase().as_str() {
         "uuid" | "timeuuid" => {
@@ -281,7 +281,7 @@ fn build_row_from_scan(
         if let Some(schema) = schema {
             for pk in &schema.partition_keys {
                 if project(&pk.name) {
-                    if let Ok(pk_value) = decode_partition_key(&key, pk) {
+                    if let Ok(pk_value) = decode_partition_key_value(&key, pk) {
                         row_values.insert(pk.name.clone(), pk_value);
                     }
                 }
