@@ -54,9 +54,13 @@ pub use result::{
     RowMetadata, StreamingConfig,
 };
 
-// Re-export advanced SELECT components
+// Re-export advanced SELECT components.
+// Only the symbols with known callers are re-exported here. `select_ast` is
+// intentionally not glob-re-exported: a `pub use select_ast::*` would shadow the
+// inline `ComparisonOperator`, `OrderByClause`, and `SortDirection` types below.
+// Other `select_ast` items remain reachable via `cqlite_core::query::select_ast::*`.
 #[cfg(feature = "state_machine")]
-pub use select_ast::*;
+pub use select_ast::SelectStatement;
 #[cfg(feature = "state_machine")]
 pub use select_executor::SelectExecutor;
 #[cfg(feature = "state_machine")]
@@ -87,24 +91,26 @@ pub struct QueryStats {
     pub rows_affected: u64,
 }
 
-/// Legacy query engine wrapper for backward compatibility
+/// Legacy query engine wrapper for backward compatibility.
+///
+/// Delegates to [`AdvancedQueryEngine`] (re-exported from [`engine`]); kept as a
+/// stable public surface used by [`crate::Database`] and the CLI's REPL.
 #[derive(Debug)]
 pub struct QueryEngine {
-    /// Advanced query engine
     advanced_engine: AdvancedQueryEngine,
 }
 
 impl QueryEngine {
-    /// Create a new query engine
+    /// Create a new query engine.
     pub fn new(
         storage: Arc<StorageEngine>,
         schema: Arc<SchemaManager>,
         memory: Arc<MemoryManager>,
         config: &Config,
     ) -> Result<Self> {
-        let advanced_engine = AdvancedQueryEngine::new(storage, schema, memory, config)?;
-
-        Ok(Self { advanced_engine })
+        Ok(Self {
+            advanced_engine: AdvancedQueryEngine::new(storage, schema, memory, config)?,
+        })
     }
 
     /// Execute a CQL query
