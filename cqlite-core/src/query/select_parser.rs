@@ -20,13 +20,7 @@ use crate::{Error, Result, TableId, Value};
 /// Advanced CQL SELECT parser
 #[derive(Debug)]
 pub struct SelectParser {
-    /// Input CQL text
-    #[allow(dead_code)]
-    input: String,
-    /// Current position in input
-    #[allow(dead_code)]
-    position: usize,
-    /// Current token being parsed
+    /// Current token being parsed (always `Some` after construction; `Token::Eof` marks end)
     current_token: Option<Token>,
     /// Tokenizer for the input
     tokenizer: Tokenizer,
@@ -107,6 +101,62 @@ pub enum Token {
     Whitespace,
 }
 
+/// Map an already-read identifier to its keyword token, or `None` for a plain identifier.
+///
+/// Uses ASCII-case-insensitive comparison so we never have to allocate an
+/// uppercase copy of the source text.
+fn keyword_for(ident: &str) -> Option<Token> {
+    // Sorted roughly by expected frequency / first-letter group for readability.
+    const KEYWORDS: &[(&str, Token)] = &[
+        ("SELECT", Token::Select),
+        ("DISTINCT", Token::Distinct),
+        ("FROM", Token::From),
+        ("WHERE", Token::Where),
+        ("HAVING", Token::Having),
+        ("LIMIT", Token::Limit),
+        ("OFFSET", Token::Offset),
+        ("AND", Token::And),
+        ("OR", Token::Or),
+        ("NOT", Token::Not),
+        ("LIKE", Token::Like),
+        ("IN", Token::In),
+        ("BETWEEN", Token::Between),
+        ("AS", Token::As),
+        ("ASC", Token::Asc),
+        ("DESC", Token::Desc),
+        ("ALLOW", Token::Allow),
+        ("FILTERING", Token::Filtering),
+        ("COUNT", Token::Count),
+        ("SUM", Token::Sum),
+        ("AVG", Token::Avg),
+        ("MIN", Token::Min),
+        ("MAX", Token::Max),
+        ("IS", Token::Is),
+        ("NULL", Token::Null),
+        ("CONTAINS", Token::Contains),
+        ("KEY", Token::Key),
+        ("TRUE", Token::Boolean(true)),
+        ("FALSE", Token::Boolean(false)),
+    ];
+
+    KEYWORDS
+        .iter()
+        .find(|(kw, _)| ident.eq_ignore_ascii_case(kw))
+        .map(|(_, tok)| tok.clone())
+}
+
+/// Map an aggregate keyword token to its AST type, if any.
+fn aggregate_for(token: &Token) -> Option<AggregateType> {
+    match token {
+        Token::Count => Some(AggregateType::Count),
+        Token::Sum => Some(AggregateType::Sum),
+        Token::Avg => Some(AggregateType::Avg),
+        Token::Min => Some(AggregateType::Min),
+        Token::Max => Some(AggregateType::Max),
+        _ => None,
+    }
+}
+
 /// Simple tokenizer for CQL
 #[derive(Debug)]
 pub struct Tokenizer {
@@ -157,14 +207,18 @@ impl Tokenizer {
             } else if ch == '\\' {
                 self.advance();
                 if let Some(escaped) = self.current_char {
-                    match escaped {
-                        'n' => value.push('\n'),
-                        't' => value.push('\t'),
-                        'r' => value.push('\r'),
-                        '\\' => value.push('\\'),
-                        '\'' => value.push('\''),
-                        '"' => value.push('"'),
-                        _ => {
+                    let mapped = match escaped {
+                        'n' => Some('\n'),
+                        't' => Some('\t'),
+                        'r' => Some('\r'),
+                        '\\' => Some('\\'),
+                        '\'' => Some('\''),
+                        '"' => Some('"'),
+                        _ => None,
+                    };
+                    match mapped {
+                        Some(c) => value.push(c),
+                        None => {
                             value.push('\\');
                             value.push(escaped);
                         }
@@ -198,15 +252,15 @@ impl Tokenizer {
         }
 
         if has_dot {
-            let float_val = value
+            value
                 .parse::<f64>()
-                .map_err(|_| Error::cql_parse(format!("Invalid float: {}", value)))?;
-            Ok(Token::Float(float_val))
+                .map(Token::Float)
+                .map_err(|_| Error::cql_parse(format!("Invalid float: {}", value)))
         } else {
-            let int_val = value
+            value
                 .parse::<i64>()
-                .map_err(|_| Error::cql_parse(format!("Invalid integer: {}", value)))?;
-            Ok(Token::Integer(int_val))
+                .map(Token::Integer)
+                .map_err(|_| Error::cql_parse(format!("Invalid integer: {}", value)))
         }
     }
 
@@ -225,78 +279,52 @@ impl Tokenizer {
         value
     }
 
+    /// Consume the literal keyword `BY` (case-insensitive) following GROUP/ORDER.
+    fn expect_by_keyword(&mut self, after: &str) -> Result<()> {
+        self.skip_whitespace();
+        let next = self.read_identifier();
+        if next.eq_ignore_ascii_case("BY") {
+            Ok(())
+        } else {
+            Err(Error::cql_parse(format!("Expected BY after {}", after)))
+        }
+    }
+
     pub fn next_token(&mut self) -> Result<Token> {
         loop {
-            match self.current_char {
+            let ch = match self.current_char {
                 None => return Ok(Token::Eof),
-                Some(ch) if ch.is_whitespace() => {
-                    self.skip_whitespace();
-                }
-                Some('(') => {
-                    self.advance();
-                    return Ok(Token::LeftParen);
-                }
-                Some(')') => {
-                    self.advance();
-                    return Ok(Token::RightParen);
-                }
-                Some('[') => {
-                    self.advance();
-                    return Ok(Token::LeftBracket);
-                }
-                Some(']') => {
-                    self.advance();
-                    return Ok(Token::RightBracket);
-                }
-                Some('{') => {
-                    self.advance();
-                    return Ok(Token::LeftBrace);
-                }
-                Some('}') => {
-                    self.advance();
-                    return Ok(Token::RightBrace);
-                }
-                Some(',') => {
-                    self.advance();
-                    return Ok(Token::Comma);
-                }
-                Some(';') => {
-                    self.advance();
-                    return Ok(Token::Semicolon);
-                }
-                Some('.') => {
-                    self.advance();
-                    return Ok(Token::Dot);
-                }
-                Some('?') => {
-                    self.advance();
-                    return Ok(Token::Question);
-                }
-                Some('+') => {
-                    self.advance();
-                    return Ok(Token::Plus);
-                }
-                Some('-') => {
-                    self.advance();
-                    return Ok(Token::Minus);
-                }
-                Some('*') => {
-                    self.advance();
-                    return Ok(Token::Multiply);
-                }
-                Some('/') => {
-                    self.advance();
-                    return Ok(Token::Divide);
-                }
-                Some('%') => {
-                    self.advance();
-                    return Ok(Token::Modulo);
-                }
-                Some('=') => {
-                    self.advance();
-                    return Ok(Token::Equal);
-                }
-                Some('!') => {
+                Some(c) => c,
+            };
+
+            // Single-character punctuation / operators that don't need lookahead.
+            let single = match ch {
+                '(' => Some(Token::LeftParen),
+                ')' => Some(Token::RightParen),
+                '[' => Some(Token::LeftBracket),
+                ']' => Some(Token::RightBracket),
+                '{' => Some(Token::LeftBrace),
+                '}' => Some(Token::RightBrace),
+                ',' => Some(Token::Comma),
+                ';' => Some(Token::Semicolon),
+                '.' => Some(Token::Dot),
+                '?' => Some(Token::Question),
+                '+' => Some(Token::Plus),
+                '-' => Some(Token::Minus),
+                '*' => Some(Token::Multiply),
+                '/' => Some(Token::Divide),
+                '%' => Some(Token::Modulo),
+                '=' => Some(Token::Equal),
+                _ => None,
+            };
+            if let Some(tok) = single {
+                self.advance();
+                return Ok(tok);
+            }
+
+            match ch {
+                c if c.is_whitespace() => self.skip_whitespace(),
+                '!' => {
                     if self.peek() == Some('=') {
                         self.advance();
                         self.advance();
@@ -304,100 +332,51 @@ impl Tokenizer {
                     }
                     return Err(Error::cql_parse("Unexpected character: !"));
                 }
-                Some('<') => {
-                    if self.peek() == Some('=') {
-                        self.advance();
-                        self.advance();
-                        return Ok(Token::LessThanEqual);
-                    }
-                    if self.peek() == Some('>') {
-                        self.advance();
-                        self.advance();
-                        return Ok(Token::NotEqual);
-                    }
-                    self.advance();
-                    return Ok(Token::LessThan);
+                '<' => {
+                    return Ok(match self.peek() {
+                        Some('=') => {
+                            self.advance();
+                            self.advance();
+                            Token::LessThanEqual
+                        }
+                        Some('>') => {
+                            self.advance();
+                            self.advance();
+                            Token::NotEqual
+                        }
+                        _ => {
+                            self.advance();
+                            Token::LessThan
+                        }
+                    });
                 }
-                Some('>') => {
-                    if self.peek() == Some('=') {
+                '>' => {
+                    return Ok(if self.peek() == Some('=') {
                         self.advance();
                         self.advance();
-                        return Ok(Token::GreaterThanEqual);
-                    }
-                    self.advance();
-                    return Ok(Token::GreaterThan);
+                        Token::GreaterThanEqual
+                    } else {
+                        self.advance();
+                        Token::GreaterThan
+                    });
                 }
-                Some('\'') => {
-                    let string_val = self.read_string('\'')?;
-                    return Ok(Token::String(string_val));
-                }
-                Some('"') => {
-                    let string_val = self.read_string('"')?;
-                    return Ok(Token::String(string_val));
-                }
-                Some(ch) if ch.is_ascii_digit() => {
-                    return self.read_number();
-                }
-                Some(ch) if ch.is_alphabetic() || ch == '_' => {
+                '\'' | '"' => return self.read_string(ch).map(Token::String),
+                c if c.is_ascii_digit() => return self.read_number(),
+                c if c.is_alphabetic() || c == '_' => {
                     let identifier = self.read_identifier();
-                    let token = match identifier.to_uppercase().as_str() {
-                        "SELECT" => Token::Select,
-                        "DISTINCT" => Token::Distinct,
-                        "FROM" => Token::From,
-                        "WHERE" => Token::Where,
-                        "GROUP" => {
-                            // Look for BY
-                            self.skip_whitespace();
-                            let next_id = self.read_identifier();
-                            if next_id.to_uppercase() == "BY" {
-                                Token::GroupBy
-                            } else {
-                                return Err(Error::cql_parse("Expected BY after GROUP"));
-                            }
-                        }
-                        "HAVING" => Token::Having,
-                        "ORDER" => {
-                            // Look for BY
-                            self.skip_whitespace();
-                            let next_id = self.read_identifier();
-                            if next_id.to_uppercase() == "BY" {
-                                Token::OrderBy
-                            } else {
-                                return Err(Error::cql_parse("Expected BY after ORDER"));
-                            }
-                        }
-                        "LIMIT" => Token::Limit,
-                        "OFFSET" => Token::Offset,
-                        "AND" => Token::And,
-                        "OR" => Token::Or,
-                        "NOT" => Token::Not,
-                        "LIKE" => Token::Like,
-                        "IN" => Token::In,
-                        "BETWEEN" => Token::Between,
-                        "AS" => Token::As,
-                        "ASC" => Token::Asc,
-                        "DESC" => Token::Desc,
-                        "ALLOW" => Token::Allow,
-                        "FILTERING" => Token::Filtering,
-                        "COUNT" => Token::Count,
-                        "SUM" => Token::Sum,
-                        "AVG" => Token::Avg,
-                        "MIN" => Token::Min,
-                        "MAX" => Token::Max,
-                        // JOIN operations are NOT supported in Cassandra CQL
-                        "IS" => Token::Is,
-                        "NULL" => Token::Null,
-                        "CONTAINS" => Token::Contains,
-                        "KEY" => Token::Key,
-                        "TRUE" => Token::Boolean(true),
-                        "FALSE" => Token::Boolean(false),
-                        _ => Token::Identifier(identifier),
-                    };
-                    return Ok(token);
+                    // GROUP BY / ORDER BY are two-word keywords; resolve here so
+                    // the parser only ever sees a single GroupBy / OrderBy token.
+                    if identifier.eq_ignore_ascii_case("GROUP") {
+                        self.expect_by_keyword("GROUP")?;
+                        return Ok(Token::GroupBy);
+                    }
+                    if identifier.eq_ignore_ascii_case("ORDER") {
+                        self.expect_by_keyword("ORDER")?;
+                        return Ok(Token::OrderBy);
+                    }
+                    return Ok(keyword_for(&identifier).unwrap_or(Token::Identifier(identifier)));
                 }
-                Some(ch) => {
-                    return Err(Error::cql_parse(format!("Unexpected character: {}", ch)));
-                }
+                other => return Err(Error::cql_parse(format!("Unexpected character: {}", other))),
             }
         }
     }
@@ -407,12 +386,9 @@ impl SelectParser {
     /// Create a new SELECT parser
     pub fn new(cql: &str) -> Result<Self> {
         let mut tokenizer = Tokenizer::new(cql);
-        let current_token = tokenizer.next_token()?;
-
+        let current_token = Some(tokenizer.next_token()?);
         Ok(Self {
-            input: cql.to_string(),
-            position: 0,
-            current_token: Some(current_token),
+            current_token,
             tokenizer,
         })
     }
@@ -421,6 +397,29 @@ impl SelectParser {
     fn advance(&mut self) -> Result<()> {
         self.current_token = Some(self.tokenizer.next_token()?);
         Ok(())
+    }
+
+    /// Borrow the current token. Returns `&Token::Eof` if for some reason the
+    /// stream is exhausted (in practice `current_token` is always `Some`).
+    fn peek(&self) -> &Token {
+        self.current_token.as_ref().unwrap_or(&Token::Eof)
+    }
+
+    /// True if the current token equals `tok` (by discriminant, not payload).
+    fn at(&self, tok: &Token) -> bool {
+        self.current_token
+            .as_ref()
+            .is_some_and(|cur| std::mem::discriminant(cur) == std::mem::discriminant(tok))
+    }
+
+    /// Consume the current token if it matches `tok` (by discriminant); return whether it did.
+    fn eat(&mut self, tok: &Token) -> Result<bool> {
+        if self.at(tok) {
+            self.advance()?;
+            Ok(true)
+        } else {
+            Ok(false)
+        }
     }
 
     /// Check if current token matches expected token
@@ -440,76 +439,84 @@ impl SelectParser {
         }
     }
 
+    /// Consume an integer literal token (used by LIMIT and OFFSET parsers).
+    fn expect_integer(&mut self, context: &str) -> Result<i64> {
+        if let Some(Token::Integer(n)) = self.current_token {
+            self.advance()?;
+            Ok(n)
+        } else {
+            Err(Error::cql_parse(format!(
+                "Expected integer after {}",
+                context
+            )))
+        }
+    }
+
+    /// Parse `name` or `name . column` into a [`ColumnRef`], assuming the
+    /// current token is the leading identifier.
+    fn parse_column_ref(&mut self, table_or_column: String) -> Result<ColumnRef> {
+        // Caller has already consumed the leading identifier.
+        if !self.eat(&Token::Dot)? {
+            return Ok(ColumnRef::new(table_or_column));
+        }
+        if let Some(Token::Identifier(column)) = self.current_token.clone() {
+            self.advance()?;
+            Ok(ColumnRef::qualified(table_or_column, column))
+        } else {
+            Err(Error::cql_parse(
+                "Expected column name after table qualifier",
+            ))
+        }
+    }
+
     /// Parse a complete SELECT statement
     pub fn parse_select_statement(&mut self) -> Result<SelectStatement> {
-        // Parse SELECT clause
         self.expect(Token::Select)?;
         let select_clause = self.parse_select_clause()?;
 
-        // Parse optional FROM clause
-        let from_clause = if self.current_token == Some(Token::From) {
-            self.advance()?;
+        let from_clause = if self.eat(&Token::From)? {
             Some(self.parse_from_clause()?)
         } else {
             None
         };
 
-        // Parse optional WHERE clause
-        let where_clause = if self.current_token == Some(Token::Where) {
-            self.advance()?;
+        let where_clause = if self.eat(&Token::Where)? {
             Some(self.parse_where_expression()?)
         } else {
             None
         };
 
-        // Parse optional GROUP BY clause
-        let group_by = if self.current_token == Some(Token::GroupBy) {
-            self.advance()?;
+        let group_by = if self.eat(&Token::GroupBy)? {
             Some(self.parse_group_by_clause()?)
         } else {
             None
         };
 
-        // Parse optional HAVING clause
-        let having_clause = if self.current_token == Some(Token::Having) {
-            self.advance()?;
+        let having_clause = if self.eat(&Token::Having)? {
             Some(self.parse_where_expression()?)
         } else {
             None
         };
 
-        // Parse optional ORDER BY clause
-        let order_by = if self.current_token == Some(Token::OrderBy) {
-            self.advance()?;
+        let order_by = if self.eat(&Token::OrderBy)? {
             Some(self.parse_order_by_clause()?)
         } else {
             None
         };
 
-        // Parse optional LIMIT clause
-        let limit = if self.current_token == Some(Token::Limit) {
-            self.advance()?;
+        let limit = if self.eat(&Token::Limit)? {
             Some(self.parse_limit_clause()?)
         } else {
             None
         };
 
-        // Parse optional OFFSET clause
-        let offset = if self.current_token == Some(Token::Offset) {
-            self.advance()?;
-            if let Some(Token::Integer(n)) = self.current_token {
-                self.advance()?;
-                Some(n as u64)
-            } else {
-                return Err(Error::cql_parse("Expected integer after OFFSET"));
-            }
+        let offset = if self.eat(&Token::Offset)? {
+            Some(self.expect_integer("OFFSET")? as u64)
         } else {
             None
         };
 
-        // Parse optional ALLOW FILTERING
-        let allow_filtering = if self.current_token == Some(Token::Allow) {
-            self.advance()?;
+        let allow_filtering = if self.eat(&Token::Allow)? {
             self.expect(Token::Filtering)?;
             true
         } else {
@@ -531,26 +538,16 @@ impl SelectParser {
 
     /// Parse SELECT clause
     fn parse_select_clause(&mut self) -> Result<SelectClause> {
-        let distinct = if self.current_token == Some(Token::Distinct) {
-            self.advance()?;
-            true
-        } else {
-            false
-        };
+        let distinct = self.eat(&Token::Distinct)?;
 
-        if let Some(Token::Multiply) = self.current_token {
-            self.advance()?;
+        if self.eat(&Token::Multiply)? {
             return Ok(SelectClause::All);
         }
 
         let mut expressions = Vec::new();
-
         loop {
             expressions.push(self.parse_select_expression()?);
-
-            if self.current_token == Some(Token::Comma) {
-                self.advance()?;
-            } else {
+            if !self.eat(&Token::Comma)? {
                 break;
             }
         }
@@ -567,8 +564,7 @@ impl SelectParser {
         let expr = self.parse_primary_expression()?;
 
         // Check for AS alias
-        if self.current_token == Some(Token::As) {
-            self.advance()?;
+        if self.eat(&Token::As)? {
             if let Some(Token::Identifier(alias)) = self.current_token.clone() {
                 self.advance()?;
                 return Ok(SelectExpression::Aliased(Box::new(expr), alias));
@@ -581,85 +577,50 @@ impl SelectParser {
 
     /// Parse primary expression (column, function, literal, etc.)
     fn parse_primary_expression(&mut self) -> Result<SelectExpression> {
-        match &self.current_token {
-            Some(Token::Count) => {
-                self.advance()?;
-                self.parse_aggregate_function(AggregateType::Count)
-            }
-            Some(Token::Sum) => {
-                self.advance()?;
-                self.parse_aggregate_function(AggregateType::Sum)
-            }
-            Some(Token::Avg) => {
-                self.advance()?;
-                self.parse_aggregate_function(AggregateType::Avg)
-            }
-            Some(Token::Min) => {
-                self.advance()?;
-                self.parse_aggregate_function(AggregateType::Min)
-            }
-            Some(Token::Max) => {
-                self.advance()?;
-                self.parse_aggregate_function(AggregateType::Max)
-            }
+        if let Some(agg) = aggregate_for(self.peek()) {
+            self.advance()?;
+            return self.parse_aggregate_function(agg);
+        }
+
+        // Take ownership/copy of literal payloads up front so we can call &mut self.
+        match self.current_token.clone() {
             Some(Token::Identifier(name)) => {
-                let name = name.clone();
                 self.advance()?;
 
-                // Check for function call
-                if self.current_token == Some(Token::LeftParen) {
-                    self.advance()?;
+                // Function call: identifier ( args )
+                if self.eat(&Token::LeftParen)? {
                     let mut args = Vec::new();
-
-                    if self.current_token != Some(Token::RightParen) {
+                    if !self.at(&Token::RightParen) {
                         loop {
                             args.push(self.parse_select_expression()?);
-                            if self.current_token == Some(Token::Comma) {
-                                self.advance()?;
-                            } else {
+                            if !self.eat(&Token::Comma)? {
                                 break;
                             }
                         }
                     }
-
                     self.expect(Token::RightParen)?;
-                    Ok(SelectExpression::Function(FunctionCall { name, args }))
-                } else {
-                    // Check for table qualification
-                    if self.current_token == Some(Token::Dot) {
-                        self.advance()?;
-                        if let Some(Token::Identifier(column)) = self.current_token.clone() {
-                            self.advance()?;
-                            Ok(SelectExpression::Column(ColumnRef::qualified(name, column)))
-                        } else {
-                            Err(Error::cql_parse(
-                                "Expected column name after table qualifier",
-                            ))
-                        }
-                    } else {
-                        Ok(SelectExpression::Column(ColumnRef::new(name)))
-                    }
+                    return Ok(SelectExpression::Function(FunctionCall { name, args }));
                 }
+
+                // Either bare column or qualified table.column.
+                let col = self.parse_column_ref(name)?;
+                Ok(SelectExpression::Column(col))
             }
             Some(Token::Integer(n)) => {
-                let value = *n;
                 self.advance()?;
-                Ok(SelectExpression::Literal(Value::BigInt(value)))
+                Ok(SelectExpression::Literal(Value::BigInt(n)))
             }
             Some(Token::Float(f)) => {
-                let value = *f;
                 self.advance()?;
-                Ok(SelectExpression::Literal(Value::Float(value)))
+                Ok(SelectExpression::Literal(Value::Float(f)))
             }
             Some(Token::String(s)) => {
-                let value = s.clone();
                 self.advance()?;
-                Ok(SelectExpression::Literal(Value::Text(value)))
+                Ok(SelectExpression::Literal(Value::Text(s)))
             }
             Some(Token::Boolean(b)) => {
-                let value = *b;
                 self.advance()?;
-                Ok(SelectExpression::Literal(Value::Boolean(value)))
+                Ok(SelectExpression::Literal(Value::Boolean(b)))
             }
             Some(Token::Null) => {
                 self.advance()?;
@@ -671,9 +632,9 @@ impl SelectParser {
                 self.expect(Token::RightParen)?;
                 Ok(expr)
             }
-            _ => Err(Error::cql_parse(format!(
+            other => Err(Error::cql_parse(format!(
                 "Unexpected token in expression: {:?}",
-                self.current_token
+                other
             ))),
         }
     }
@@ -682,27 +643,17 @@ impl SelectParser {
     fn parse_aggregate_function(&mut self, agg_type: AggregateType) -> Result<SelectExpression> {
         self.expect(Token::LeftParen)?;
 
-        let distinct = if self.current_token == Some(Token::Distinct) {
-            self.advance()?;
-            true
-        } else {
-            false
-        };
-
+        let distinct = self.eat(&Token::Distinct)?;
         let mut args = Vec::new();
 
-        if self.current_token != Some(Token::RightParen) {
-            // Special handling for COUNT(*) - the * should be treated as a wildcard
-            if self.current_token == Some(Token::Multiply) {
-                self.advance()?;
-                // For COUNT(*), we represent this as a wildcard column
+        if !self.at(&Token::RightParen) {
+            // COUNT(*) is the only place `*` is valid as an aggregate arg; treat it as a wildcard column.
+            if self.eat(&Token::Multiply)? {
                 args.push(SelectExpression::Column(ColumnRef::new("*".to_string())));
             } else {
                 loop {
                     args.push(self.parse_select_expression()?);
-                    if self.current_token == Some(Token::Comma) {
-                        self.advance()?;
-                    } else {
+                    if !self.eat(&Token::Comma)? {
                         break;
                     }
                 }
@@ -721,44 +672,41 @@ impl SelectParser {
     /// Parse FROM clause
     fn parse_from_clause(&mut self) -> Result<FromClause> {
         // Cassandra CQL only supports single table queries - NO JOINS
-        if let Some(Token::Identifier(first_identifier)) = self.current_token.clone() {
-            self.advance()?;
+        let Some(Token::Identifier(first_identifier)) = self.current_token.clone() else {
+            return Err(Error::cql_parse("Expected table name in FROM clause"));
+        };
+        self.advance()?;
 
-            // Check if this is a qualified table name (keyspace.table)
-            let table_name = if let Some(Token::Dot) = self.current_token {
-                self.advance()?; // Skip the dot
-                if let Some(Token::Identifier(actual_table)) = self.current_token.clone() {
-                    self.advance()?;
-                    // Preserve the qualified name (keyspace.table)
-                    format!("{}.{}", first_identifier, actual_table)
-                } else {
-                    return Err(Error::cql_parse("Expected table name after keyspace"));
-                }
+        // Qualified name: keyspace.table
+        let table_name = if self.eat(&Token::Dot)? {
+            if let Some(Token::Identifier(actual_table)) = self.current_token.clone() {
+                self.advance()?;
+                format!("{}.{}", first_identifier, actual_table)
             } else {
-                first_identifier // No dot, so use the first identifier as the table name
-            };
-
-            // Check for optional table alias (Cassandra CQL does support aliases)
-            if let Some(Token::Identifier(alias)) = self.current_token.clone() {
-                // Ensure it's not a reserved keyword that would indicate invalid syntax
-                let alias_upper = alias.to_uppercase();
-                if alias_upper != "WHERE"
-                    && alias_upper != "GROUP"
-                    && alias_upper != "ORDER"
-                    && alias_upper != "HAVING"
-                    && alias_upper != "LIMIT"
-                {
-                    self.advance()?;
-                    Ok(FromClause::TableAlias(TableId::new(table_name), alias))
-                } else {
-                    Ok(FromClause::Table(TableId::new(table_name)))
-                }
-            } else {
-                Ok(FromClause::Table(TableId::new(table_name)))
+                return Err(Error::cql_parse("Expected table name after keyspace"));
             }
         } else {
-            Err(Error::cql_parse("Expected table name in FROM clause"))
+            first_identifier
+        };
+
+        let table = TableId::new(table_name);
+
+        // Optional alias - but only if the next identifier isn't a clause keyword
+        // that the lookahead-free tokenizer would otherwise hand us as a plain identifier.
+        // (In practice clause keywords already tokenize as their own variants, but we
+        // keep this defensive check to preserve historical behavior.)
+        const CLAUSE_KEYWORDS: &[&str] = &["WHERE", "GROUP", "ORDER", "HAVING", "LIMIT"];
+        if let Some(Token::Identifier(alias)) = self.current_token.clone() {
+            let is_clause_kw = CLAUSE_KEYWORDS
+                .iter()
+                .any(|kw| alias.eq_ignore_ascii_case(kw));
+            if !is_clause_kw {
+                self.advance()?;
+                return Ok(FromClause::TableAlias(table, alias));
+            }
         }
+
+        Ok(FromClause::Table(table))
     }
 
     /// Parse WHERE expression
@@ -768,48 +716,27 @@ impl SelectParser {
 
     /// Parse OR expression
     fn parse_or_expression(&mut self) -> Result<WhereExpression> {
-        let expr = self.parse_and_expression()?;
-
-        let mut or_exprs = vec![expr];
-        while self.current_token == Some(Token::Or) {
-            self.advance()?;
+        let first = self.parse_and_expression()?;
+        let mut or_exprs = vec![first];
+        while self.eat(&Token::Or)? {
             or_exprs.push(self.parse_and_expression()?);
         }
-
-        if or_exprs.len() == 1 {
-            or_exprs
-                .into_iter()
-                .next()
-                .ok_or_else(|| Error::internal("Empty OR expression vector"))
-        } else {
-            Ok(WhereExpression::Or(or_exprs))
-        }
+        Ok(unwrap_singleton(or_exprs, WhereExpression::Or))
     }
 
     /// Parse AND expression
     fn parse_and_expression(&mut self) -> Result<WhereExpression> {
-        let expr = self.parse_not_expression()?;
-
-        let mut and_exprs = vec![expr];
-        while self.current_token == Some(Token::And) {
-            self.advance()?;
+        let first = self.parse_not_expression()?;
+        let mut and_exprs = vec![first];
+        while self.eat(&Token::And)? {
             and_exprs.push(self.parse_not_expression()?);
         }
-
-        if and_exprs.len() == 1 {
-            and_exprs
-                .into_iter()
-                .next()
-                .ok_or_else(|| Error::internal("Empty AND expression vector"))
-        } else {
-            Ok(WhereExpression::And(and_exprs))
-        }
+        Ok(unwrap_singleton(and_exprs, WhereExpression::And))
     }
 
     /// Parse NOT expression
     fn parse_not_expression(&mut self) -> Result<WhereExpression> {
-        if self.current_token == Some(Token::Not) {
-            self.advance()?;
+        if self.eat(&Token::Not)? {
             let expr = self.parse_comparison_expression()?;
             Ok(WhereExpression::Not(Box::new(expr)))
         } else {
@@ -819,8 +746,7 @@ impl SelectParser {
 
     /// Parse comparison expression
     fn parse_comparison_expression(&mut self) -> Result<WhereExpression> {
-        if self.current_token == Some(Token::LeftParen) {
-            self.advance()?;
+        if self.eat(&Token::LeftParen)? {
             let expr = self.parse_where_expression()?;
             self.expect(Token::RightParen)?;
             return Ok(WhereExpression::Parentheses(Box::new(expr)));
@@ -828,32 +754,32 @@ impl SelectParser {
 
         let left = self.parse_select_expression()?;
 
-        let operator = match &self.current_token {
-            Some(Token::Equal) => {
-                self.advance()?;
-                ComparisonOperator::Equal
-            }
-            Some(Token::NotEqual) => {
-                self.advance()?;
-                ComparisonOperator::NotEqual
-            }
-            Some(Token::LessThan) => {
-                self.advance()?;
-                ComparisonOperator::LessThan
-            }
-            Some(Token::LessThanEqual) => {
-                self.advance()?;
-                ComparisonOperator::LessThanOrEqual
-            }
-            Some(Token::GreaterThan) => {
-                self.advance()?;
-                ComparisonOperator::GreaterThan
-            }
-            Some(Token::GreaterThanEqual) => {
-                self.advance()?;
-                ComparisonOperator::GreaterThanOrEqual
-            }
-            Some(Token::In) => {
+        // Map a "simple" binary comparison token to its operator. For operators
+        // with bespoke right-hand-side parsing (IN, BETWEEN, IS, CONTAINS) we
+        // handle them in the match below and return early.
+        let simple_op = match self.peek() {
+            Token::Equal => Some(ComparisonOperator::Equal),
+            Token::NotEqual => Some(ComparisonOperator::NotEqual),
+            Token::LessThan => Some(ComparisonOperator::LessThan),
+            Token::LessThanEqual => Some(ComparisonOperator::LessThanOrEqual),
+            Token::GreaterThan => Some(ComparisonOperator::GreaterThan),
+            Token::GreaterThanEqual => Some(ComparisonOperator::GreaterThanOrEqual),
+            Token::Like => Some(ComparisonOperator::Like),
+            _ => None,
+        };
+
+        if let Some(op) = simple_op {
+            self.advance()?;
+            let right = ComparisonRightSide::Value(self.parse_select_expression()?);
+            return Ok(WhereExpression::Comparison(ComparisonExpression {
+                left,
+                operator: op,
+                right,
+            }));
+        }
+
+        let operator = match self.peek() {
+            Token::In => {
                 self.advance()?;
                 let right = self.parse_in_expression()?;
                 return Ok(WhereExpression::Comparison(ComparisonExpression {
@@ -862,11 +788,7 @@ impl SelectParser {
                     right,
                 }));
             }
-            Some(Token::Like) => {
-                self.advance()?;
-                ComparisonOperator::Like
-            }
-            Some(Token::Between) => {
+            Token::Between => {
                 self.advance()?;
                 let start = self.parse_select_expression()?;
                 self.expect(Token::And)?;
@@ -877,41 +799,38 @@ impl SelectParser {
                     right: ComparisonRightSide::Range(start, end),
                 }));
             }
-            Some(Token::Is) => {
+            Token::Is => {
                 self.advance()?;
-                if self.current_token == Some(Token::Not) {
-                    self.advance()?;
-                    self.expect(Token::Null)?;
+                let op = if self.eat(&Token::Not)? {
                     ComparisonOperator::IsNotNull
                 } else {
-                    self.expect(Token::Null)?;
                     ComparisonOperator::IsNull
-                }
+                };
+                self.expect(Token::Null)?;
+                op
             }
-            Some(Token::Contains) => {
+            Token::Contains => {
                 self.advance()?;
-                if self.current_token == Some(Token::Key) {
-                    self.advance()?;
+                if self.eat(&Token::Key)? {
                     ComparisonOperator::ContainsKey
                 } else {
                     ComparisonOperator::Contains
                 }
             }
-            _ => {
+            other => {
                 return Err(Error::cql_parse(format!(
                     "Expected comparison operator, found {:?}",
-                    self.current_token
+                    other
                 )));
             }
         };
 
-        let right = if matches!(
-            operator,
-            ComparisonOperator::IsNull | ComparisonOperator::IsNotNull
-        ) {
-            ComparisonRightSide::Value(SelectExpression::Literal(Value::Null))
-        } else {
-            ComparisonRightSide::Value(self.parse_select_expression()?)
+        // Only IS NULL / IS NOT NULL / CONTAINS / CONTAINS KEY reach here.
+        let right = match operator {
+            ComparisonOperator::IsNull | ComparisonOperator::IsNotNull => {
+                ComparisonRightSide::Value(SelectExpression::Literal(Value::Null))
+            }
+            _ => ComparisonRightSide::Value(self.parse_select_expression()?),
         };
 
         Ok(WhereExpression::Comparison(ComparisonExpression {
@@ -926,12 +845,10 @@ impl SelectParser {
         self.expect(Token::LeftParen)?;
         let mut values = Vec::new();
 
-        if self.current_token != Some(Token::RightParen) {
+        if !self.at(&Token::RightParen) {
             loop {
                 values.push(self.parse_select_expression()?);
-                if self.current_token == Some(Token::Comma) {
-                    self.advance()?;
-                } else {
+                if !self.eat(&Token::Comma)? {
                     break;
                 }
             }
@@ -946,34 +863,13 @@ impl SelectParser {
         let mut columns = Vec::new();
 
         loop {
-            if let Some(Token::Identifier(name)) = self.current_token.clone() {
-                self.advance()?;
-
-                // Check for qualified column name (table.column)
-                if self.current_token == Some(Token::Dot) {
-                    self.advance()?; // consume dot
-                    if let Some(Token::Identifier(column_name)) = self.current_token.clone() {
-                        self.advance()?;
-                        columns.push(ColumnRef {
-                            table: Some(name),
-                            column: column_name,
-                        });
-                    } else {
-                        return Err(Error::cql_parse(
-                            "Expected column name after dot in GROUP BY",
-                        ));
-                    }
-                } else {
-                    // Simple column name
-                    columns.push(ColumnRef::new(name));
-                }
-            } else {
+            let Some(Token::Identifier(name)) = self.current_token.clone() else {
                 return Err(Error::cql_parse("Expected column name in GROUP BY"));
-            }
+            };
+            self.advance()?;
+            columns.push(self.parse_column_ref(name)?);
 
-            if self.current_token == Some(Token::Comma) {
-                self.advance()?;
-            } else {
+            if !self.eat(&Token::Comma)? {
                 break;
             }
         }
@@ -988,11 +884,9 @@ impl SelectParser {
         loop {
             let expression = self.parse_select_expression()?;
 
-            let direction = if self.current_token == Some(Token::Desc) {
-                self.advance()?;
+            let direction = if self.eat(&Token::Desc)? {
                 SortDirection::Descending
-            } else if self.current_token == Some(Token::Asc) {
-                self.advance()?;
+            } else if self.eat(&Token::Asc)? {
                 SortDirection::Ascending
             } else {
                 SortDirection::Ascending
@@ -1003,9 +897,7 @@ impl SelectParser {
                 direction,
             });
 
-            if self.current_token == Some(Token::Comma) {
-                self.advance()?;
-            } else {
+            if !self.eat(&Token::Comma)? {
                 break;
             }
         }
@@ -1015,15 +907,25 @@ impl SelectParser {
 
     /// Parse LIMIT clause
     fn parse_limit_clause(&mut self) -> Result<LimitClause> {
-        if let Some(Token::Integer(count)) = self.current_token {
-            self.advance()?;
-            Ok(LimitClause {
-                count: count as u64,
-                per_partition: false, // TODO: Add PER PARTITION support
-            })
-        } else {
-            Err(Error::cql_parse("Expected integer after LIMIT"))
-        }
+        let count = self.expect_integer("LIMIT")? as u64;
+        Ok(LimitClause {
+            count,
+            per_partition: false, // TODO: Add PER PARTITION support
+        })
+    }
+}
+
+/// If `exprs` has a single element, return it; otherwise wrap with `wrap`
+/// (typically `WhereExpression::And` / `WhereExpression::Or`). The vector is
+/// guaranteed non-empty by callers that always push at least one element.
+fn unwrap_singleton<F>(mut exprs: Vec<WhereExpression>, wrap: F) -> WhereExpression
+where
+    F: FnOnce(Vec<WhereExpression>) -> WhereExpression,
+{
+    if exprs.len() == 1 {
+        exprs.pop().expect("checked len == 1")
+    } else {
+        wrap(exprs)
     }
 }
 
@@ -1064,7 +966,6 @@ mod tests {
         assert!(stmt.from_clause.is_none());
         if let SelectClause::Columns(exprs) = stmt.select_clause {
             assert_eq!(exprs.len(), 1);
-            // Expression parsed successfully
             if let SelectExpression::Literal(Value::BigInt(1)) = &exprs[0] {
                 // Success
             } else {
@@ -1082,7 +983,6 @@ mod tests {
     }
 
     #[test]
-    #[cfg(feature = "state_machine")]
     fn test_select_with_aggregates() {
         let stmt = parse_select("SELECT COUNT(*), AVG(age) FROM users GROUP BY city").unwrap();
         assert!(stmt.requires_aggregation());
