@@ -37,24 +37,17 @@ pub struct SelectExecutor {
 }
 
 /// Query execution context
+///
+/// Pure bookkeeping for an in-flight query. Only used internally; the public
+/// API surface is `SelectExecutor` itself.
 #[derive(Debug)]
-pub struct ExecutionContext {
+struct ExecutionContext {
     /// Current table being queried
     pub table_id: TableId,
     /// Column metadata
     pub columns: Vec<ColumnInfo>,
     /// Row count processed so far
     pub rows_processed: u64,
-    /// Bytes read from storage
-    pub bytes_read: u64,
-}
-
-/// Streaming query result iterator
-pub struct QueryResultStream {
-    /// Receiver for query results
-    _receiver: mpsc::Receiver<Result<QueryRow>>,
-    /// Execution context
-    _context: ExecutionContext,
 }
 
 /// Aggregation state for GROUP BY operations
@@ -76,6 +69,488 @@ enum AggregateValue {
     Avg { sum: f64, count: u64 },
     Min(Value),
     Max(Value),
+}
+
+// ---------------------------------------------------------------------------
+// Free helpers: pure functions that don't depend on `&self`. These were
+// previously duplicated as `_static` methods on `SelectExecutor`; centralising
+// them lets both the streaming background task and the synchronous executor
+// share one implementation.
+// ---------------------------------------------------------------------------
+
+/// Split a `TableId` of the form `"keyspace.table"` into its parts.
+///
+/// If no dot is present, the whole name becomes the table component and the
+/// keyspace is `None`.
+fn parse_table_id(table_id: &TableId) -> (Option<String>, String) {
+    let table_str = table_id.name();
+    match table_str.rfind('.') {
+        Some(dot) => (
+            Some(table_str[..dot].to_string()),
+            table_str[dot + 1..].to_string(),
+        ),
+        None => (None, table_str.to_string()),
+    }
+}
+
+/// Compare two `Value`s for equality, including limited cross-type numeric
+/// coercion (int↔bigint, int↔float, bigint↔float).
+///
+/// `Value` implements `PartialEq` natively but only matches identical variants;
+/// we additionally treat the small set of cross-numeric cases that show up in
+/// CQL predicates.
+fn values_equal(a: &Value, b: &Value) -> bool {
+    if a == b {
+        return true;
+    }
+    // Only coerce when both operands are numeric — otherwise non-numeric
+    // pairs (e.g. Text vs Integer) would spuriously compare equal via `as_f64`.
+    if same_numeric_family(a, b) {
+        if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
+            return x == y;
+        }
+    }
+    false
+}
+
+/// True when both `Value`s are numeric variants eligible for cross-type coercion.
+fn same_numeric_family(a: &Value, b: &Value) -> bool {
+    a.as_f64().is_some() && b.as_f64().is_some()
+}
+
+/// Compare two `Value`s for ordering, returning `Ordering::Equal` for
+/// incomparable variants. Used by sorting/aggregation paths that historically
+/// swallowed comparison errors via `unwrap_or(0)`.
+fn compare_values_ordering(a: &Value, b: &Value) -> std::cmp::Ordering {
+    try_compare_values(a, b).unwrap_or(std::cmp::Ordering::Equal)
+}
+
+/// Compare two `Value`s for ordering, returning an error when the operand
+/// types are not comparable. Preferred in WHERE-clause evaluation so users see
+/// a real diagnostic rather than a silent equality.
+///
+/// Cross-type numerics are coerced via `f64` first; same-variant comparisons
+/// fall back to `Value::partial_cmp`. We deliberately avoid `partial_cmp` for
+/// non-matching variants because it stringifies and would produce surprising
+/// orderings (e.g. `Text("9")` < `Text("10")` lexicographically).
+fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
+    use std::cmp::Ordering;
+    if same_numeric_family(a, b) {
+        if let (Some(x), Some(y)) = (a.as_f64(), b.as_f64()) {
+            return Ok(x.partial_cmp(&y).unwrap_or(Ordering::Equal));
+        }
+    }
+    if std::mem::discriminant(a) == std::mem::discriminant(b) {
+        return a.partial_cmp(b).ok_or_else(|| {
+            Error::query_execution("Cannot compare incompatible types".to_string())
+        });
+    }
+    log::debug!("Cannot compare {:?} with {:?}", a, b);
+    Err(Error::query_execution(
+        "Cannot compare incompatible types".to_string(),
+    ))
+}
+
+/// Decode a partition-key `Value` from raw `RowKey` bytes based on a
+/// schema-declared CQL type. Returns an error for malformed/short input.
+fn decode_partition_key(key: &RowKey, pk_column: &crate::schema::KeyColumn) -> Result<Value> {
+    let key_bytes = key.0.as_slice();
+    match pk_column.data_type.to_lowercase().as_str() {
+        "uuid" | "timeuuid" => {
+            let bytes: [u8; 16] = key_bytes
+                .get(..16)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| {
+                    Error::query_execution(format!(
+                        "Partition key too short for UUID: {} bytes",
+                        key_bytes.len()
+                    ))
+                })?;
+            Ok(Value::Uuid(bytes))
+        }
+        "text" | "varchar" | "ascii" => {
+            if key_bytes.len() < 2 {
+                return Err(Error::query_execution(
+                    "Partition key too short for text".to_string(),
+                ));
+            }
+            let len = u16::from_be_bytes([key_bytes[0], key_bytes[1]]) as usize;
+            let body = key_bytes.get(2..2 + len).ok_or_else(|| {
+                Error::query_execution("Partition key text length mismatch".to_string())
+            })?;
+            let text = String::from_utf8(body.to_vec()).map_err(|e| {
+                Error::query_execution(format!("Invalid UTF-8 in partition key: {}", e))
+            })?;
+            Ok(Value::Text(text))
+        }
+        "int" => {
+            let bytes: [u8; 4] = key_bytes
+                .get(..4)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| {
+                    Error::query_execution("Partition key too short for int".to_string())
+                })?;
+            Ok(Value::Integer(i32::from_be_bytes(bytes)))
+        }
+        "bigint" | "counter" => {
+            let bytes: [u8; 8] = key_bytes
+                .get(..8)
+                .and_then(|s| s.try_into().ok())
+                .ok_or_else(|| {
+                    Error::query_execution("Partition key too short for bigint".to_string())
+                })?;
+            Ok(Value::BigInt(i64::from_be_bytes(bytes)))
+        }
+        _ => {
+            log::warn!(
+                "Unsupported partition key type: {}, returning as debug string",
+                pk_column.data_type
+            );
+            Ok(Value::Text(format!("{:?}", key_bytes)))
+        }
+    }
+}
+
+/// Evaluate the SSTable predicate set against a single `QueryRow`.
+///
+/// Returns `Ok(true)` only if every predicate is satisfied. A missing column
+/// causes the row to be rejected.
+fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Result<bool> {
+    use super::select_optimizer::SSTableFilterOp;
+    for predicate in predicates {
+        let Some(column_value) = row.values.get(&predicate.column) else {
+            return Ok(false);
+        };
+        let matches = match &predicate.operation {
+            SSTableFilterOp::Equal => predicate
+                .values
+                .first()
+                .is_some_and(|v| values_equal(column_value, v)),
+            SSTableFilterOp::In => predicate.values.contains(column_value),
+            SSTableFilterOp::Range => {
+                if predicate.values.len() < 2 {
+                    false
+                } else {
+                    let lo = &predicate.values[0];
+                    let hi = &predicate.values[1];
+                    compare_values_ordering(column_value, lo).is_ge()
+                        && compare_values_ordering(column_value, hi).is_le()
+                }
+            }
+            SSTableFilterOp::Prefix => matches!(
+                (column_value, predicate.values.first()),
+                (Value::Text(s), Some(Value::Text(p))) if s.starts_with(p)
+            ),
+            SSTableFilterOp::BloomFilter => true, // already checked upstream
+        };
+        if !matches {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Build a `QueryRow` from a single `(RowKey, Value)` produced by storage scan,
+/// applying optional projection and synthesising partition-key columns from the
+/// raw key bytes when a schema is available.
+///
+/// Returns `None` for tombstoned rows (so the caller can `continue`).
+fn build_row_from_scan(
+    key: RowKey,
+    value: Value,
+    projection: &[String],
+    schema: Option<&crate::schema::TableSchema>,
+) -> Option<QueryRow> {
+    if matches!(value, Value::Null) {
+        return None;
+    }
+
+    let mut row_values = HashMap::new();
+    let project = |name: &str| projection.is_empty() || projection.iter().any(|p| p == name);
+
+    if let Value::Map(map) = value {
+        for (col_name, col_value) in map {
+            if let Value::Text(name) = col_name {
+                if project(&name) {
+                    row_values.insert(name, col_value);
+                }
+            }
+        }
+        // Cassandra never serialises partition-key columns in the cell payload;
+        // reconstruct them from the row key when the schema is known.
+        if let Some(schema) = schema {
+            for pk in &schema.partition_keys {
+                if project(&pk.name) {
+                    if let Ok(pk_value) = decode_partition_key(&key, pk) {
+                        row_values.insert(pk.name.clone(), pk_value);
+                    }
+                }
+            }
+        }
+    } else {
+        // Non-map fallback: expose the raw value plus a debug-formatted id.
+        row_values.insert("data".to_string(), value);
+        if project("id") {
+            row_values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
+        }
+    }
+
+    Some(QueryRow {
+        values: row_values,
+        key,
+        metadata: Default::default(),
+    })
+}
+
+/// Apply an `ArithmeticOperator` to two same-typed numeric `Value`s.
+///
+/// Behaviour matches the previous inline implementations: same-type only
+/// (no implicit coercion), and division/modulo by zero are reported as
+/// query-execution errors. Float division-by-zero (matching the original
+/// runtime path) yields IEEE inf/NaN rather than an error.
+fn eval_arithmetic(op: &ArithmeticOperator, left: Value, right: Value) -> Result<Value> {
+    use ArithmeticOperator::*;
+    macro_rules! int_op {
+        ($a:expr, $b:expr, $ctor:expr) => {
+            match op {
+                Add => Ok($ctor($a + $b)),
+                Subtract => Ok($ctor($a - $b)),
+                Multiply => Ok($ctor($a * $b)),
+                Divide => {
+                    if $b == 0 {
+                        Err(Error::query_execution("Division by zero".to_string()))
+                    } else {
+                        Ok($ctor($a / $b))
+                    }
+                }
+                Modulo => {
+                    if $b == 0 {
+                        Err(Error::query_execution("Modulo by zero".to_string()))
+                    } else {
+                        Ok($ctor($a % $b))
+                    }
+                }
+            }
+        };
+    }
+    match (left, right) {
+        (Value::Integer(a), Value::Integer(b)) => int_op!(a, b, Value::Integer),
+        (Value::BigInt(a), Value::BigInt(b)) => int_op!(a, b, Value::BigInt),
+        (Value::Float(a), Value::Float(b)) => match op {
+            Add => Ok(Value::Float(a + b)),
+            Subtract => Ok(Value::Float(a - b)),
+            Multiply => Ok(Value::Float(a * b)),
+            Divide => Ok(Value::Float(a / b)),
+            Modulo => Ok(Value::Float(a % b)),
+        },
+        _ => Err(Error::query_execution(
+            "Incompatible types for arithmetic".to_string(),
+        )),
+    }
+}
+
+/// Build the GROUP BY key for `row`. With no GROUP BY, all rows hash into a
+/// single `[Null]` bucket (global aggregation).
+fn build_group_key(row: &QueryRow, group_by_columns: &[String]) -> Vec<Value> {
+    if group_by_columns.is_empty() {
+        return vec![Value::Null];
+    }
+    group_by_columns
+        .iter()
+        .map(|col| row.values.get(col).cloned().unwrap_or(Value::Null))
+        .collect()
+}
+
+/// Locate the group matching `key` in `groups`, or push a fresh entry with
+/// initial aggregator state. Returns the index into `groups`.
+///
+/// `Value` doesn't implement `Hash`, so groups live in a `Vec` and lookup is
+/// linear. This is unchanged from the legacy implementation; switching to a
+/// hash map would change result-row ordering for callers that rely on
+/// insertion order.
+fn find_or_init_group(
+    groups: &mut Vec<(Vec<Value>, Vec<AggregateValue>)>,
+    key: Vec<Value>,
+    aggregates: &[super::select_optimizer::AggregateComputation],
+) -> usize {
+    if let Some(idx) = groups.iter().position(|(k, _)| k == &key) {
+        return idx;
+    }
+    let initial: Vec<_> = aggregates
+        .iter()
+        .map(|c| match c.function {
+            AggregateType::Count => AggregateValue::Count(0),
+            AggregateType::Sum => AggregateValue::Sum(0.0),
+            AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
+            AggregateType::Min => AggregateValue::Min(Value::Null),
+            AggregateType::Max => AggregateValue::Max(Value::Null),
+        })
+        .collect();
+    groups.push((key, initial));
+    groups.len() - 1
+}
+
+/// Apply one row's contribution to a single aggregate accumulator.
+///
+/// COUNT(*) always increments; COUNT(col) only increments on non-null. SUM and
+/// AVG ignore non-numeric values. MIN/MAX clone the value only when it
+/// becomes the new extremum, sparing per-row clones in the common case.
+fn update_aggregate(
+    state: &mut AggregateValue,
+    agg_comp: &super::select_optimizer::AggregateComputation,
+    row: &QueryRow,
+) {
+    let is_star = agg_comp.column == "*";
+    // Look up the column once; for COUNT(*) we don't need it.
+    let value: Option<&Value> = if is_star {
+        None
+    } else {
+        row.values.get(&agg_comp.column)
+    };
+    let is_null = !is_star && value.is_none_or(Value::is_null);
+
+    match state {
+        AggregateValue::Count(count) => {
+            if is_star || !is_null {
+                *count += 1;
+            }
+        }
+        AggregateValue::Sum(sum) => {
+            if let Some(v) = value.and_then(Value::as_f64) {
+                *sum += v;
+            }
+        }
+        AggregateValue::Avg { sum, count } => {
+            if let Some(v) = value.and_then(Value::as_f64) {
+                *sum += v;
+                *count += 1;
+            }
+        }
+        AggregateValue::Min(min_val) => {
+            if let Some(v) = value {
+                if !v.is_null()
+                    && (min_val.is_null() || compare_values_ordering(v, min_val).is_lt())
+                {
+                    *min_val = v.clone();
+                }
+            }
+        }
+        AggregateValue::Max(max_val) => {
+            if let Some(v) = value {
+                if !v.is_null()
+                    && (max_val.is_null() || compare_values_ordering(v, max_val).is_gt())
+                {
+                    *max_val = v.clone();
+                }
+            }
+        }
+    }
+}
+
+/// Materialize a single aggregation group into a `QueryRow`.
+fn finalize_group(
+    group_key: Vec<Value>,
+    group_aggregates: Vec<AggregateValue>,
+    agg_plan: &AggregationPlan,
+) -> QueryRow {
+    let mut row_values = HashMap::new();
+
+    for (i, col) in agg_plan.group_by_columns.iter().enumerate() {
+        if let Some(v) = group_key.get(i) {
+            row_values.insert(col.clone(), v.clone());
+        }
+    }
+
+    for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
+        let result_value = match &group_aggregates[i] {
+            AggregateValue::Count(count) => Value::BigInt(*count as i64),
+            AggregateValue::Sum(sum) => Value::Float(*sum),
+            AggregateValue::Avg { sum, count } => {
+                if *count > 0 {
+                    Value::Float(sum / (*count as f64))
+                } else {
+                    Value::Null
+                }
+            }
+            AggregateValue::Min(val) | AggregateValue::Max(val) => val.clone(),
+        };
+        row_values.insert(agg_comp.alias.clone(), result_value);
+    }
+
+    QueryRow {
+        values: row_values,
+        key: RowKey::new(vec![]),
+        metadata: Default::default(),
+    }
+}
+
+/// Constant-folding arithmetic. Same operand-type rules as `eval_arithmetic`,
+/// plus BigInt support and per-operator error wording matching the legacy
+/// implementation (e.g. `"Cannot add incompatible types"` and
+/// `"Modulo only supported for integers"`).
+fn const_arithmetic(op: &ArithmeticOperator, left: Value, right: Value) -> Result<Value> {
+    use ArithmeticOperator::*;
+
+    // Modulo's error wording is special: any non-integer combination must
+    // report `"Modulo only supported for integers"` regardless of which side
+    // is offending.
+    if matches!(op, Modulo) {
+        return match (left, right) {
+            (Value::Integer(a), Value::Integer(b)) => {
+                eval_arithmetic(op, Value::Integer(a), Value::Integer(b))
+            }
+            (Value::BigInt(a), Value::BigInt(b)) => {
+                eval_arithmetic(op, Value::BigInt(a), Value::BigInt(b))
+            }
+            _ => Err(Error::query_execution(
+                "Modulo only supported for integers".to_string(),
+            )),
+        };
+    }
+
+    let verb = match op {
+        Add => "add",
+        Subtract => "subtract",
+        Multiply => "multiply",
+        Divide => "divide",
+        Modulo => unreachable!("handled above"),
+    };
+
+    match (left, right) {
+        (Value::Integer(a), Value::Integer(b)) => {
+            eval_arithmetic(op, Value::Integer(a), Value::Integer(b))
+        }
+        (Value::BigInt(a), Value::BigInt(b)) => {
+            eval_arithmetic(op, Value::BigInt(a), Value::BigInt(b))
+        }
+        (Value::Float(a), Value::Float(b)) => {
+            // Constant Float Divide rejects 0.0 (legacy behaviour); runtime
+            // Float divide does not. Modulo on Float is rejected above.
+            if matches!(op, Divide) && b == 0.0 {
+                return Err(Error::query_execution("Division by zero".to_string()));
+            }
+            eval_arithmetic(op, Value::Float(a), Value::Float(b))
+        }
+        _ => Err(Error::query_execution(format!(
+            "Cannot {} incompatible types",
+            verb
+        ))),
+    }
+}
+
+/// Translate a CQL LIKE pattern (`%`, `_`) into an anchored regex.
+fn like_pattern_to_regex(pattern: &str) -> String {
+    let mut out = String::with_capacity(pattern.len() + 4);
+    out.push('^');
+    for ch in pattern.chars() {
+        match ch {
+            '%' => out.push_str(".*"),
+            '_' => out.push('.'),
+            _ => out.push(ch),
+        }
+    }
+    out.push('$');
+    out
 }
 
 impl SelectExecutor {
@@ -100,7 +575,6 @@ impl SelectExecutor {
             table_id,
             columns: self.get_result_columns(&plan.statement).await?,
             rows_processed: 0,
-            bytes_read: 0,
         };
 
         // Handle queries without FROM clause (like SELECT 1)
@@ -342,90 +816,40 @@ impl SelectExecutor {
                     projection,
                     ..
                 } => {
-                    // Parse table ID
-                    let (keyspace, table_name) = Self::parse_table_id_static(table);
-
-                    // Look up schema
+                    let (keyspace, table_name) = parse_table_id(table);
                     let schema_opt = schema_manager
                         .find_schema_by_table(&keyspace, &table_name)
                         .await;
 
-                    // Scan SSTables
                     let scan_results = storage
                         .scan(table, None, None, None, schema_opt.as_ref())
                         .await?;
 
-                    // Stream rows through channel
                     for (key, value) in scan_results {
-                        // Skip tombstoned/null rows
-                        if matches!(value, Value::Null) {
+                        let Some(row) =
+                            build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                        else {
                             continue;
-                        }
-
-                        // Create QueryRow from scanned data
-                        let mut row_values = HashMap::new();
-
-                        if let Value::Map(map) = value {
-                            for (col_name, col_value) in map {
-                                if let Value::Text(name) = col_name {
-                                    if projection.is_empty() || projection.contains(&name) {
-                                        row_values.insert(name, col_value);
-                                    }
-                                }
-                            }
-
-                            // Synthesize partition key columns
-                            if let Some(schema) = &schema_opt {
-                                for pk in &schema.partition_keys {
-                                    if projection.is_empty() || projection.contains(&pk.name) {
-                                        if let Ok(pk_value) =
-                                            Self::decode_partition_key_static(&key, pk)
-                                        {
-                                            row_values.insert(pk.name.clone(), pk_value);
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            row_values.insert("data".to_string(), value);
-                            if projection.is_empty() || projection.contains(&"id".to_string()) {
-                                row_values
-                                    .insert("id".to_string(), Value::Text(format!("{:?}", key)));
-                            }
-                        }
-
-                        let row = QueryRow {
-                            values: row_values,
-                            key: key.clone(),
-                            metadata: Default::default(),
                         };
 
-                        // Apply predicates
-                        if !Self::evaluate_predicates_static(&row, predicates)? {
+                        if !evaluate_predicates(&row, predicates)? {
                             continue;
                         }
 
-                        // Send row through channel (with backpressure)
+                        // Send row through channel (with backpressure). Consumer drop ends the scan.
                         if tx.send(Ok(row)).await.is_err() {
-                            // Consumer dropped, stop scanning
                             return Ok(());
                         }
                     }
                 }
                 ExecutionStep::Limit { count, .. } => {
-                    // Limit is handled by consumer closing the channel early
-                    // Log for debugging
                     log::debug!(
                         "Streaming execution: LIMIT {} will be applied by consumer",
                         count
                     );
                 }
-                ExecutionStep::Project { .. } => {
-                    // Projection handled during scan via projection parameter
-                }
-                ExecutionStep::Filter { .. } => {
-                    // Filter predicates pushed down to SSTableScan
-                }
+                // Projection and predicate filtering are pushed into SSTableScan above.
+                ExecutionStep::Project { .. } | ExecutionStep::Filter { .. } => {}
                 _ => {
                     log::warn!("Streaming execution: skipping unsupported step {:?}", step);
                 }
@@ -435,178 +859,12 @@ impl SelectExecutor {
         Ok(())
     }
 
-    /// Static version of parse_table_id for background task
-    fn parse_table_id_static(table_id: &TableId) -> (Option<String>, String) {
-        let table_str = table_id.name();
-        if let Some(dot_pos) = table_str.rfind('.') {
-            let keyspace = table_str[..dot_pos].to_string();
-            let table_name = table_str[dot_pos + 1..].to_string();
-            (Some(keyspace), table_name)
-        } else {
-            (None, table_str.to_string())
-        }
-    }
-
-    /// Static version of decode_partition_key_value for background task
-    fn decode_partition_key_static(
-        key: &RowKey,
-        pk_column: &crate::schema::KeyColumn,
-    ) -> Result<Value> {
-        let key_bytes = key.0.as_slice();
-        let normalized_type = pk_column.data_type.to_lowercase();
-
-        match normalized_type.as_str() {
-            "uuid" | "timeuuid" => {
-                if key_bytes.len() >= 16 {
-                    let uuid_bytes: [u8; 16] = key_bytes[..16].try_into().map_err(|_| {
-                        Error::query_execution("Invalid UUID key length".to_string())
-                    })?;
-                    Ok(Value::Uuid(uuid_bytes))
-                } else {
-                    Err(Error::query_execution(format!(
-                        "Partition key too short for UUID: {} bytes",
-                        key_bytes.len()
-                    )))
-                }
-            }
-            "text" | "varchar" | "ascii" => {
-                if key_bytes.len() >= 2 {
-                    let len = u16::from_be_bytes([key_bytes[0], key_bytes[1]]) as usize;
-                    if key_bytes.len() >= 2 + len {
-                        let text =
-                            String::from_utf8(key_bytes[2..2 + len].to_vec()).map_err(|e| {
-                                Error::query_execution(format!("Invalid UTF-8 in key: {}", e))
-                            })?;
-                        Ok(Value::Text(text))
-                    } else {
-                        Err(Error::query_execution(
-                            "Partition key text length mismatch".to_string(),
-                        ))
-                    }
-                } else {
-                    Err(Error::query_execution(
-                        "Partition key too short for text".to_string(),
-                    ))
-                }
-            }
-            "int" => {
-                if key_bytes.len() >= 4 {
-                    let int_val = i32::from_be_bytes([
-                        key_bytes[0],
-                        key_bytes[1],
-                        key_bytes[2],
-                        key_bytes[3],
-                    ]);
-                    Ok(Value::Integer(int_val))
-                } else {
-                    Err(Error::query_execution(
-                        "Partition key too short for int".to_string(),
-                    ))
-                }
-            }
-            "bigint" | "counter" => {
-                if key_bytes.len() >= 8 {
-                    let long_val = i64::from_be_bytes([
-                        key_bytes[0],
-                        key_bytes[1],
-                        key_bytes[2],
-                        key_bytes[3],
-                        key_bytes[4],
-                        key_bytes[5],
-                        key_bytes[6],
-                        key_bytes[7],
-                    ]);
-                    Ok(Value::BigInt(long_val))
-                } else {
-                    Err(Error::query_execution(
-                        "Partition key too short for bigint".to_string(),
-                    ))
-                }
-            }
-            _ => {
-                log::warn!(
-                    "Unsupported partition key type: {}, returning as debug string",
-                    pk_column.data_type
-                );
-                Ok(Value::Text(format!("{:?}", key_bytes)))
-            }
-        }
-    }
-
-    /// Static version of evaluate_sstable_predicates for background task
-    fn evaluate_predicates_static(row: &QueryRow, predicates: &[SSTablePredicate]) -> Result<bool> {
-        for predicate in predicates {
-            if let Some(column_value) = row.values.get(&predicate.column) {
-                let matches = match &predicate.operation {
-                    super::select_optimizer::SSTableFilterOp::Equal => predicate
-                        .values
-                        .first()
-                        .is_some_and(|v| Self::values_equal_static(column_value, v)),
-                    super::select_optimizer::SSTableFilterOp::In => {
-                        predicate.values.contains(column_value)
-                    }
-                    super::select_optimizer::SSTableFilterOp::Range => {
-                        if predicate.values.len() >= 2 {
-                            let min_val = &predicate.values[0];
-                            let max_val = &predicate.values[1];
-                            Self::compare_values_static(column_value, min_val) >= 0
-                                && Self::compare_values_static(column_value, max_val) <= 0
-                        } else {
-                            false
-                        }
-                    }
-                    super::select_optimizer::SSTableFilterOp::Prefix => {
-                        if let (Value::Text(col_str), Some(Value::Text(prefix))) =
-                            (column_value, predicate.values.first())
-                        {
-                            col_str.starts_with(prefix)
-                        } else {
-                            false
-                        }
-                    }
-                    super::select_optimizer::SSTableFilterOp::BloomFilter => true,
-                };
-
-                if !matches {
-                    return Ok(false);
-                }
-            } else {
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    /// Static helper: Compare two values for equality
-    fn values_equal_static(a: &Value, b: &Value) -> bool {
-        match (a, b) {
-            (Value::Integer(a), Value::Integer(b)) => a == b,
-            (Value::BigInt(a), Value::BigInt(b)) => a == b,
-            (Value::Float(a), Value::Float(b)) => a == b,
-            (Value::Text(a), Value::Text(b)) => a == b,
-            (Value::Boolean(a), Value::Boolean(b)) => a == b,
-            (Value::Timestamp(a), Value::Timestamp(b)) => a == b,
-            (Value::Integer(a), Value::BigInt(b)) => (*a as i64) == *b,
-            (Value::BigInt(a), Value::Integer(b)) => *a == (*b as i64),
-            _ => false,
-        }
-    }
-
-    /// Static helper: Compare two values for ordering
-    fn compare_values_static(a: &Value, b: &Value) -> i32 {
-        match (a, b) {
-            (Value::Integer(a), Value::Integer(b)) => a.cmp(b) as i32,
-            (Value::BigInt(a), Value::BigInt(b)) => a.cmp(b) as i32,
-            (Value::Float(a), Value::Float(b)) => {
-                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal) as i32
-            }
-            (Value::Text(a), Value::Text(b)) => a.cmp(b) as i32,
-            (Value::Timestamp(a), Value::Timestamp(b)) => a.cmp(b) as i32,
-            _ => 0,
-        }
-    }
-
-    /// Execute SSTable scan with predicate pushdown
+    /// Execute SSTable scan with predicate pushdown.
+    ///
+    /// Per-row work (build row, decode partition key, evaluate predicates) is
+    /// handled by the free helpers `build_row_from_scan` and
+    /// `evaluate_predicates`, which are shared with the streaming background
+    /// task to keep the two execution paths in lockstep.
     async fn execute_sstable_scan(
         &self,
         table: &TableId,
@@ -614,7 +872,7 @@ impl SelectExecutor {
         projection: &[String],
         context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
-        let mut results = Vec::new();
+        const MAX_RESULTS: usize = 1_000_000;
 
         log::info!(
             "Executing SSTableScan: table=\"{}\", predicates={:?}",
@@ -622,32 +880,26 @@ impl SelectExecutor {
             predicates
         );
 
-        // Parse table ID to extract keyspace and table name
-        let (keyspace, table_name) = self.parse_table_id(table);
-
-        // Look up schema from SchemaManager
+        let (keyspace, table_name) = parse_table_id(table);
         let schema_opt = self
             ._schema
             .find_schema_by_table(&keyspace, &table_name)
             .await;
 
-        if let Some(ref schema) = schema_opt {
-            log::info!(
+        match schema_opt.as_ref() {
+            Some(schema) => log::info!(
                 "Found schema for {}.{} with {} columns",
                 schema.keyspace,
                 schema.table,
                 schema.columns.len()
-            );
-        } else {
-            log::info!(
+            ),
+            None => log::info!(
                 "No schema found for {}.{}, proceeding without schema-aware parsing",
                 keyspace.as_deref().unwrap_or("unknown"),
                 table_name
-            );
+            ),
         }
 
-        // Use StorageEngine's scan method to get all rows for the table
-        // Pass schema if available, None otherwise
         let scan_results = self
             .storage
             .scan(table, None, None, None, schema_opt.as_ref())
@@ -655,71 +907,20 @@ impl SelectExecutor {
 
         log::info!("Scan returned {} rows", scan_results.len());
 
+        let mut results = Vec::new();
         for (key, value) in scan_results {
             context.rows_processed += 1;
 
-            // CRITICAL FIX (Issue #191): Skip tombstoned/null rows
-            // When the parser returns Value::Null (tombstoned row or unparseable partition),
-            // we should skip it entirely instead of creating a pseudo-row that will fail
-            // column projection. This mirrors SSTableDataManager behavior.
-            if matches!(value, Value::Null) {
-                log::debug!("Skipping tombstoned/null row with key: {:?}", key);
+            // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
+            let Some(row) = build_row_from_scan(key, value, projection, schema_opt.as_ref()) else {
                 continue;
-            }
-
-            // Create QueryRow from the scanned data
-            let mut row_values = HashMap::new();
-
-            // Add value columns based on projection
-            // Deserialize Value::Map stored by INSERT operations
-            if let Value::Map(map) = value {
-                for (col_name, col_value) in map {
-                    if let Value::Text(name) = col_name {
-                        // For empty projection (SELECT *), include ALL columns
-                        // For specific projection, only include requested columns
-                        if projection.is_empty() || projection.contains(&name) {
-                            row_values.insert(name, col_value);
-                        }
-                    }
-                }
-
-                // CRITICAL FIX (Issue #191): Synthesize partition key columns from RowKey
-                // Cassandra never serializes key columns in cell data - they're part of the row key.
-                // If the query selects partition key columns (e.g., id), we must decode them from
-                // the RowKey and add them to row_values.
-                if let Some(schema) = &schema_opt {
-                    for pk in &schema.partition_keys {
-                        // Only synthesize if projected
-                        if projection.is_empty() || projection.contains(&pk.name) {
-                            // Decode partition key from RowKey bytes
-                            if let Ok(pk_value) = self.decode_partition_key_value(&key, pk) {
-                                row_values.insert(pk.name.clone(), pk_value);
-                            }
-                        }
-                    }
-                }
-            } else {
-                // Fallback for non-map values - treat as generic data
-                row_values.insert("data".to_string(), value);
-                // Also add a key-based id for compatibility
-                if projection.is_empty() || projection.contains(&"id".to_string()) {
-                    row_values.insert("id".to_string(), Value::Text(format!("{:?}", key)));
-                }
-            }
-
-            let row = QueryRow {
-                values: row_values,
-                key: key.clone(),
-                metadata: Default::default(),
             };
 
-            // Apply predicates
-            if self.evaluate_sstable_predicates(&row, predicates)? {
+            if evaluate_predicates(&row, predicates)? {
                 results.push(row);
             }
 
-            // Check for memory limits
-            if results.len() > 1_000_000 {
+            if results.len() > MAX_RESULTS {
                 return Err(Error::query_execution(
                     "Result set too large, consider adding LIMIT".to_string(),
                 ));
@@ -727,127 +928,6 @@ impl SelectExecutor {
         }
 
         Ok(results)
-    }
-
-    /// Evaluate SSTable predicates against a row
-    fn evaluate_sstable_predicates(
-        &self,
-        row: &QueryRow,
-        predicates: &[SSTablePredicate],
-    ) -> Result<bool> {
-        for predicate in predicates {
-            if let Some(column_value) = row.values.get(&predicate.column) {
-                let matches = match &predicate.operation {
-                    super::select_optimizer::SSTableFilterOp::Equal => predicate
-                        .values
-                        .first()
-                        .is_some_and(|v| self.values_equal(column_value, v).unwrap_or(false)),
-                    super::select_optimizer::SSTableFilterOp::In => {
-                        predicate.values.contains(column_value)
-                    }
-                    super::select_optimizer::SSTableFilterOp::Range => {
-                        if predicate.values.len() >= 2 {
-                            let min_val = &predicate.values[0];
-                            let max_val = &predicate.values[1];
-                            self.compare_values(column_value, min_val)? >= 0
-                                && self.compare_values(column_value, max_val)? <= 0
-                        } else {
-                            false
-                        }
-                    }
-                    super::select_optimizer::SSTableFilterOp::Prefix => {
-                        if let (Value::Text(col_str), Some(Value::Text(prefix))) =
-                            (column_value, predicate.values.first())
-                        {
-                            col_str.starts_with(prefix)
-                        } else {
-                            false
-                        }
-                    }
-                    super::select_optimizer::SSTableFilterOp::BloomFilter => {
-                        // Bloom filter was already checked
-                        true
-                    }
-                };
-
-                if !matches {
-                    return Ok(false);
-                }
-            } else {
-                // Column not found - this shouldn't happen with proper schema
-                return Ok(false);
-            }
-        }
-        Ok(true)
-    }
-
-    /// Compare two values for equality, handling cross-type comparisons
-    fn values_equal(&self, a: &Value, b: &Value) -> Result<bool> {
-        match (a, b) {
-            // Same type comparisons
-            (Value::Integer(a), Value::Integer(b)) => Ok(a == b),
-            (Value::BigInt(a), Value::BigInt(b)) => Ok(a == b),
-            (Value::Float(a), Value::Float(b)) => Ok(a == b),
-            (Value::Text(a), Value::Text(b)) => Ok(a == b),
-            (Value::Boolean(a), Value::Boolean(b)) => Ok(a == b),
-            (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a == b),
-
-            // Cross-type numeric comparisons
-            (Value::Integer(a), Value::BigInt(b)) => Ok(*a as i64 == *b),
-            (Value::BigInt(a), Value::Integer(b)) => Ok(*a == *b as i64),
-            (Value::Float(a), Value::Integer(b)) => Ok(*a == *b as f64),
-            (Value::Integer(a), Value::Float(b)) => Ok(*a as f64 == *b),
-            (Value::Float(a), Value::BigInt(b)) => Ok(*a == *b as f64),
-            (Value::BigInt(a), Value::Float(b)) => Ok(*a as f64 == *b),
-
-            // Null comparisons
-            (Value::Null, Value::Null) => Ok(true),
-            (Value::Null, _) | (_, Value::Null) => Ok(false),
-
-            // Different types
-            _ => Ok(false),
-        }
-    }
-
-    /// Compare two values for ordering
-    fn compare_values(&self, a: &Value, b: &Value) -> Result<i32> {
-        match (a, b) {
-            (Value::Integer(a), Value::Integer(b)) => Ok(a.cmp(b) as i32),
-            (Value::BigInt(a), Value::BigInt(b)) => Ok(a.cmp(b) as i32),
-            (Value::Float(a), Value::Float(b)) => {
-                Ok(a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal) as i32)
-            }
-            (Value::Text(a), Value::Text(b)) => Ok(a.cmp(b) as i32),
-            (Value::Boolean(a), Value::Boolean(b)) => Ok(a.cmp(b) as i32),
-            (Value::Timestamp(a), Value::Timestamp(b)) => Ok(a.cmp(b) as i32),
-            // Handle Float vs BigInt comparisons
-            (Value::Float(a), Value::BigInt(b)) => {
-                Ok(a.partial_cmp(&(*b as f64))
-                    .unwrap_or(std::cmp::Ordering::Equal) as i32)
-            }
-            (Value::BigInt(a), Value::Float(b)) => Ok((*a as f64)
-                .partial_cmp(b)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                as i32),
-            // Handle Float vs Integer comparisons
-            (Value::Float(a), Value::Integer(b)) => {
-                Ok(a.partial_cmp(&(*b as f64))
-                    .unwrap_or(std::cmp::Ordering::Equal) as i32)
-            }
-            (Value::Integer(a), Value::Float(b)) => Ok((*a as f64)
-                .partial_cmp(b)
-                .unwrap_or(std::cmp::Ordering::Equal)
-                as i32),
-            // Handle Integer vs BigInt comparisons
-            (Value::Integer(a), Value::BigInt(b)) => Ok((*a as i64).cmp(b) as i32),
-            (Value::BigInt(a), Value::Integer(b)) => Ok(a.cmp(&(*b as i64)) as i32),
-            _ => {
-                log::debug!("Cannot compare {:?} with {:?}", a, b);
-                Err(Error::query_execution(
-                    "Cannot compare incompatible types".to_string(),
-                ))
-            }
-        }
     }
 
     /// Execute filtering step
@@ -894,36 +974,40 @@ impl SelectExecutor {
         }
     }
 
-    /// Evaluate comparison expression
+    /// Evaluate comparison expression. Operators that need a single right
+    /// operand share one `evaluate` call; IN/LIKE/IS NULL fall through to
+    /// their custom branches.
     fn evaluate_comparison(&self, comp: &ComparisonExpression, row: &QueryRow) -> Result<bool> {
+        use ComparisonOperator::*;
+
         let left_value = self.evaluate_select_expression(&comp.left, row)?;
 
+        // Fast path for null tests, which ignore the right side.
+        match comp.operator {
+            IsNull => return Ok(left_value.is_null()),
+            IsNotNull => return Ok(!left_value.is_null()),
+            _ => {}
+        }
+
         match (&comp.operator, &comp.right) {
-            (ComparisonOperator::Equal, ComparisonRightSide::Value(right_expr)) => {
+            (
+                op @ (Equal | NotEqual | LessThan | LessThanOrEqual | GreaterThan
+                | GreaterThanOrEqual),
+                ComparisonRightSide::Value(right_expr),
+            ) => {
                 let right_value = self.evaluate_select_expression(right_expr, row)?;
-                Ok(self.values_equal(&left_value, &right_value)?)
+                let result = match op {
+                    Equal => values_equal(&left_value, &right_value),
+                    NotEqual => !values_equal(&left_value, &right_value),
+                    LessThan => try_compare_values(&left_value, &right_value)?.is_lt(),
+                    LessThanOrEqual => try_compare_values(&left_value, &right_value)?.is_le(),
+                    GreaterThan => try_compare_values(&left_value, &right_value)?.is_gt(),
+                    GreaterThanOrEqual => try_compare_values(&left_value, &right_value)?.is_ge(),
+                    _ => unreachable!("guarded by outer match"),
+                };
+                Ok(result)
             }
-            (ComparisonOperator::NotEqual, ComparisonRightSide::Value(right_expr)) => {
-                let right_value = self.evaluate_select_expression(right_expr, row)?;
-                Ok(!self.values_equal(&left_value, &right_value)?)
-            }
-            (ComparisonOperator::LessThan, ComparisonRightSide::Value(right_expr)) => {
-                let right_value = self.evaluate_select_expression(right_expr, row)?;
-                Ok(self.compare_values(&left_value, &right_value)? < 0)
-            }
-            (ComparisonOperator::LessThanOrEqual, ComparisonRightSide::Value(right_expr)) => {
-                let right_value = self.evaluate_select_expression(right_expr, row)?;
-                Ok(self.compare_values(&left_value, &right_value)? <= 0)
-            }
-            (ComparisonOperator::GreaterThan, ComparisonRightSide::Value(right_expr)) => {
-                let right_value = self.evaluate_select_expression(right_expr, row)?;
-                Ok(self.compare_values(&left_value, &right_value)? > 0)
-            }
-            (ComparisonOperator::GreaterThanOrEqual, ComparisonRightSide::Value(right_expr)) => {
-                let right_value = self.evaluate_select_expression(right_expr, row)?;
-                Ok(self.compare_values(&left_value, &right_value)? >= 0)
-            }
-            (ComparisonOperator::In, ComparisonRightSide::ValueList(value_exprs)) => {
+            (In, ComparisonRightSide::ValueList(value_exprs)) => {
                 for value_expr in value_exprs {
                     let value = self.evaluate_select_expression(value_expr, row)?;
                     if left_value == value {
@@ -932,7 +1016,7 @@ impl SelectExecutor {
                 }
                 Ok(false)
             }
-            (ComparisonOperator::Like, ComparisonRightSide::Value(pattern_expr)) => {
+            (Like, ComparisonRightSide::Value(pattern_expr)) => {
                 let pattern = self.evaluate_select_expression(pattern_expr, row)?;
                 if let (Value::Text(text), Value::Text(pattern_str)) = (&left_value, &pattern) {
                     Ok(self.match_like_pattern(text, pattern_str))
@@ -940,8 +1024,6 @@ impl SelectExecutor {
                     Ok(false)
                 }
             }
-            (ComparisonOperator::IsNull, _) => Ok(left_value.is_null()),
-            (ComparisonOperator::IsNotNull, _) => Ok(!left_value.is_null()),
             _ => Err(Error::query_execution(
                 "Unsupported comparison operator".to_string(),
             )),
@@ -982,113 +1064,88 @@ impl SelectExecutor {
         }
     }
 
-    /// Evaluate collection access operations
+    /// Evaluate collection access operations (`list[idx]`, `map['key']`,
+    /// `value IN set_column`).
     fn evaluate_collection_access(
         &self,
         access: &CollectionAccessExpression,
         row: &QueryRow,
     ) -> Result<Value> {
+        let lookup_column = |col: &ColumnRef| -> Result<&Value> {
+            row.values
+                .get(&col.column)
+                .ok_or_else(|| Error::query_execution(format!("Column not found: {}", col.column)))
+        };
+
         match access {
             CollectionAccessExpression::ListIndex(col_ref, index_expr) => {
-                let list_value = row.values.get(&col_ref.column).ok_or_else(|| {
-                    Error::query_execution(format!("Column not found: {}", col_ref.column))
-                })?;
+                let list_value = lookup_column(col_ref)?;
                 let index_value = self.evaluate_select_expression(index_expr, row)?;
 
-                if let (Value::List(list), Value::Integer(index)) = (list_value, &index_value) {
-                    if *index >= 0 && (*index as usize) < list.len() {
-                        Ok(list[*index as usize].clone())
-                    } else {
-                        Ok(Value::Null)
-                    }
+                let (Value::List(list), Value::Integer(index)) = (list_value, &index_value) else {
+                    return Err(Error::query_execution("Invalid list access".to_string()));
+                };
+                if *index >= 0 && (*index as usize) < list.len() {
+                    Ok(list[*index as usize].clone())
                 } else {
-                    Err(Error::query_execution("Invalid list access".to_string()))
+                    Ok(Value::Null)
                 }
             }
             CollectionAccessExpression::MapKey(col_ref, key_expr) => {
-                let map_value = row.values.get(&col_ref.column).ok_or_else(|| {
-                    Error::query_execution(format!("Column not found: {}", col_ref.column))
-                })?;
+                let map_value = lookup_column(col_ref)?;
                 let key_value = self.evaluate_select_expression(key_expr, row)?;
 
-                if let Value::Map(map) = map_value {
-                    for (k, v) in map {
-                        if *k == key_value {
-                            return Ok(v.clone());
-                        }
-                    }
-                    Ok(Value::Null)
-                } else {
-                    Err(Error::query_execution("Invalid map access".to_string()))
-                }
+                let Value::Map(map) = map_value else {
+                    return Err(Error::query_execution("Invalid map access".to_string()));
+                };
+                Ok(map
+                    .iter()
+                    .find(|(k, _)| *k == key_value)
+                    .map(|(_, v)| v.clone())
+                    .unwrap_or(Value::Null))
             }
             CollectionAccessExpression::SetContains(col_ref, value_expr) => {
-                let set_value = row.values.get(&col_ref.column).ok_or_else(|| {
-                    Error::query_execution(format!("Column not found: {}", col_ref.column))
-                })?;
+                let set_value = lookup_column(col_ref)?;
                 let test_value = self.evaluate_select_expression(value_expr, row)?;
 
-                if let Value::Set(set) = set_value {
-                    Ok(Value::Boolean(set.contains(&test_value)))
-                } else {
-                    Err(Error::query_execution(
+                let Value::Set(set) = set_value else {
+                    return Err(Error::query_execution(
                         "Invalid set contains operation".to_string(),
-                    ))
-                }
+                    ));
+                };
+                Ok(Value::Boolean(set.contains(&test_value)))
             }
         }
     }
 
-    /// Evaluate arithmetic expressions
+    /// Evaluate arithmetic expressions on a (left, op, right) triple.
+    ///
+    /// Runtime arithmetic supports same-type Integer or Float operands. Mixed
+    /// types or non-numeric operands return an error. (Constant-folding
+    /// arithmetic additionally accepts BigInt — see
+    /// `evaluate_constant_expression`.)
     fn evaluate_arithmetic(
         &self,
         op: &ArithmeticOperator,
         left: Value,
         right: Value,
     ) -> Result<Value> {
-        match (left, right) {
-            (Value::Integer(a), Value::Integer(b)) => match op {
-                ArithmeticOperator::Add => Ok(Value::Integer(a + b)),
-                ArithmeticOperator::Subtract => Ok(Value::Integer(a - b)),
-                ArithmeticOperator::Multiply => Ok(Value::Integer(a * b)),
-                ArithmeticOperator::Divide => {
-                    if b != 0 {
-                        Ok(Value::Integer(a / b))
-                    } else {
-                        Err(Error::query_execution("Division by zero".to_string()))
-                    }
-                }
-                ArithmeticOperator::Modulo => {
-                    if b != 0 {
-                        Ok(Value::Integer(a % b))
-                    } else {
-                        Err(Error::query_execution("Modulo by zero".to_string()))
-                    }
-                }
-            },
-            (Value::Float(a), Value::Float(b)) => match op {
-                ArithmeticOperator::Add => Ok(Value::Float(a + b)),
-                ArithmeticOperator::Subtract => Ok(Value::Float(a - b)),
-                ArithmeticOperator::Multiply => Ok(Value::Float(a * b)),
-                ArithmeticOperator::Divide => Ok(Value::Float(a / b)),
-                ArithmeticOperator::Modulo => Ok(Value::Float(a % b)),
-            },
+        match (&left, &right) {
+            (Value::Integer(_), Value::Integer(_)) | (Value::Float(_), Value::Float(_)) => {
+                eval_arithmetic(op, left, right)
+            }
             _ => Err(Error::query_execution(
                 "Incompatible types for arithmetic".to_string(),
             )),
         }
     }
 
-    /// Simple LIKE pattern matching
+    /// Simple LIKE pattern matching. The CQL pattern syntax (`%`, `_`) is
+    /// translated by `like_pattern_to_regex` before compilation.
     fn match_like_pattern(&self, text: &str, pattern: &str) -> bool {
-        // Simple implementation - convert CQL LIKE to regex-like matching
-        let regex_pattern = pattern.replace('%', ".*").replace('_', ".");
-
-        if let Ok(regex) = regex::Regex::new(&format!("^{}$", regex_pattern)) {
-            regex.is_match(text)
-        } else {
-            false
-        }
+        regex::Regex::new(&like_pattern_to_regex(pattern))
+            .map(|re| re.is_match(text))
+            .unwrap_or(false)
     }
 
     /// Execute sorting step
@@ -1107,15 +1164,12 @@ impl SelectExecutor {
                     .evaluate_select_expression(&item.expression, b)
                     .unwrap_or(Value::Null);
 
-                let cmp = self.compare_values(&a_val, &b_val).unwrap_or(0);
-
                 let ordering = match item.direction {
-                    SortDirection::Ascending => cmp,
-                    SortDirection::Descending => -cmp,
+                    SortDirection::Ascending => compare_values_ordering(&a_val, &b_val),
+                    SortDirection::Descending => compare_values_ordering(&b_val, &a_val),
                 };
-
-                if ordering != 0 {
-                    return ordering.cmp(&0);
+                if !ordering.is_eq() {
+                    return ordering;
                 }
             }
             std::cmp::Ordering::Equal
@@ -1124,105 +1178,35 @@ impl SelectExecutor {
         Ok(rows)
     }
 
-    /// Execute aggregation step
+    /// Execute the aggregation step. Splits naturally into three phases:
+    /// build group key, accumulate per-aggregate state, then finalize each
+    /// group into a result row.
     async fn execute_aggregation(
         &self,
         rows: Vec<QueryRow>,
         agg_plan: &AggregationPlan,
         _context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
+        const PER_ROW_MEMORY_ESTIMATE_BYTES: usize = 100;
+        const DEFAULT_AGGREGATION_MEMORY_LIMIT: usize = 512 * 1024 * 1024;
+
         let mut agg_state = AggregationState {
             groups: Vec::new(),
             memory_usage_bytes: 0,
-            memory_limit_bytes: 512 * 1024 * 1024, // Default 512MB limit
+            memory_limit_bytes: DEFAULT_AGGREGATION_MEMORY_LIMIT,
         };
 
-        // Process each row
         for row in rows {
-            // Extract group key
-            let group_key = if agg_plan.group_by_columns.is_empty() {
-                vec![Value::Null] // Single group for global aggregation
-            } else {
-                let mut key = Vec::new();
-                for col in &agg_plan.group_by_columns {
-                    key.push(row.values.get(col).cloned().unwrap_or(Value::Null));
-                }
-                key
-            };
-
-            // Find or create group
+            let group_key = build_group_key(&row, &agg_plan.group_by_columns);
             let group_index =
-                if let Some(index) = agg_state.groups.iter().position(|(k, _)| k == &group_key) {
-                    index
-                } else {
-                    let initial_aggregates = agg_plan
-                        .aggregates
-                        .iter()
-                        .map(|agg_comp| match agg_comp.function {
-                            AggregateType::Count => AggregateValue::Count(0),
-                            AggregateType::Sum => AggregateValue::Sum(0.0),
-                            AggregateType::Avg => AggregateValue::Avg { sum: 0.0, count: 0 },
-                            AggregateType::Min => AggregateValue::Min(Value::Null),
-                            AggregateType::Max => AggregateValue::Max(Value::Null),
-                        })
-                        .collect();
-                    agg_state.groups.push((group_key, initial_aggregates));
-                    agg_state.groups.len() - 1
-                };
-
+                find_or_init_group(&mut agg_state.groups, group_key, &agg_plan.aggregates);
             let group_aggregates = &mut agg_state.groups[group_index].1;
 
-            // Update each aggregate
             for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
-                let column_value = if agg_comp.column == "*" {
-                    // COUNT(*) - always count the row regardless of column values
-                    Value::Integer(1)
-                } else {
-                    row.values
-                        .get(&agg_comp.column)
-                        .cloned()
-                        .unwrap_or(Value::Null)
-                };
-
-                match &mut group_aggregates[i] {
-                    AggregateValue::Count(count) => {
-                        // For COUNT(*), always increment. For COUNT(column), only increment if not null
-                        if agg_comp.column == "*" || !column_value.is_null() {
-                            *count += 1;
-                        }
-                    }
-                    AggregateValue::Sum(sum) => {
-                        if let Some(num_val) = column_value.as_f64() {
-                            *sum += num_val;
-                        }
-                    }
-                    AggregateValue::Avg { sum, count } => {
-                        if let Some(num_val) = column_value.as_f64() {
-                            *sum += num_val;
-                            *count += 1;
-                        }
-                    }
-                    AggregateValue::Min(min_val) => {
-                        if min_val.is_null()
-                            || (!column_value.is_null()
-                                && self.compare_values(&column_value, &*min_val).unwrap_or(0) < 0)
-                        {
-                            *min_val = column_value;
-                        }
-                    }
-                    AggregateValue::Max(max_val) => {
-                        if max_val.is_null()
-                            || (!column_value.is_null()
-                                && self.compare_values(&column_value, &*max_val).unwrap_or(0) > 0)
-                        {
-                            *max_val = column_value;
-                        }
-                    }
-                }
+                update_aggregate(&mut group_aggregates[i], agg_comp, &row);
             }
 
-            // Check memory limits
-            agg_state.memory_usage_bytes += 100; // Rough estimate per row
+            agg_state.memory_usage_bytes += PER_ROW_MEMORY_ESTIMATE_BYTES;
             if agg_state.memory_usage_bytes > agg_state.memory_limit_bytes {
                 return Err(Error::query_execution(
                     "Aggregation memory limit exceeded".to_string(),
@@ -1230,48 +1214,18 @@ impl SelectExecutor {
             }
         }
 
-        // Convert aggregation state to result rows
-        let mut result_rows = Vec::new();
-
-        for (group_key, group_aggregates) in agg_state.groups {
-            let mut row_values = HashMap::new();
-
-            // Add group by columns
-            for (i, col) in agg_plan.group_by_columns.iter().enumerate() {
-                if i < group_key.len() {
-                    row_values.insert(col.clone(), group_key[i].clone());
-                }
-            }
-
-            // Add aggregate results
-            for (i, agg_comp) in agg_plan.aggregates.iter().enumerate() {
-                let result_value = match &group_aggregates[i] {
-                    AggregateValue::Count(count) => Value::BigInt(*count as i64),
-                    AggregateValue::Sum(sum) => Value::Float(*sum),
-                    AggregateValue::Avg { sum, count } => {
-                        if *count > 0 {
-                            Value::Float(sum / (*count as f64))
-                        } else {
-                            Value::Null
-                        }
-                    }
-                    AggregateValue::Min(val) | AggregateValue::Max(val) => val.clone(),
-                };
-
-                row_values.insert(agg_comp.alias.clone(), result_value);
-            }
-
-            result_rows.push(QueryRow {
-                values: row_values,
-                key: RowKey::new(vec![]),
-                metadata: Default::default(),
-            });
-        }
+        let result_rows = agg_state
+            .groups
+            .into_iter()
+            .map(|(group_key, group_aggregates)| {
+                finalize_group(group_key, group_aggregates, agg_plan)
+            })
+            .collect();
 
         Ok(result_rows)
     }
 
-    /// Execute limit step
+    /// Execute limit step (apply OFFSET then truncate to LIMIT).
     async fn execute_limit(
         &self,
         mut rows: Vec<QueryRow>,
@@ -1280,15 +1234,12 @@ impl SelectExecutor {
         _context: &mut ExecutionContext,
     ) -> Result<Vec<QueryRow>> {
         let start_index = offset.unwrap_or(0) as usize;
-        let _end_index = start_index + count as usize;
-
         if start_index >= rows.len() {
-            Ok(Vec::new())
-        } else {
-            rows.drain(..start_index);
-            rows.truncate(count as usize);
-            Ok(rows)
+            return Ok(Vec::new());
         }
+        rows.drain(..start_index);
+        rows.truncate(count as usize);
+        Ok(rows)
     }
 
     /// Execute projection step
@@ -1370,7 +1321,12 @@ impl SelectExecutor {
         })
     }
 
-    /// Evaluate a constant expression (no table access needed)
+    /// Evaluate a constant expression (no table access needed).
+    ///
+    /// Accepts literals, aliases, and arithmetic over same-typed Integer,
+    /// BigInt, or Float operands. Modulo is restricted to integers (matching
+    /// the original behaviour). Error messages are kept verbatim from the
+    /// legacy implementation so any callers asserting on them still pass.
     #[allow(clippy::only_used_in_recursion)]
     fn evaluate_constant_expression(
         &self,
@@ -1383,86 +1339,9 @@ impl SelectExecutor {
                 Ok((value, Some(alias.clone())))
             }
             SelectExpression::Arithmetic(arith) => {
-                // Simplified arithmetic evaluation
                 let (left_val, _) = self.evaluate_constant_expression(&arith.left)?;
                 let (right_val, _) = self.evaluate_constant_expression(&arith.right)?;
-
-                let result = match arith.operator {
-                    ArithmeticOperator::Add => match (left_val, right_val) {
-                        (Value::Integer(a), Value::Integer(b)) => Value::Integer(a + b),
-                        (Value::BigInt(a), Value::BigInt(b)) => Value::BigInt(a + b),
-                        (Value::Float(a), Value::Float(b)) => Value::Float(a + b),
-                        _ => {
-                            return Err(Error::query_execution(
-                                "Cannot add incompatible types".to_string(),
-                            ));
-                        }
-                    },
-                    ArithmeticOperator::Subtract => match (left_val, right_val) {
-                        (Value::Integer(a), Value::Integer(b)) => Value::Integer(a - b),
-                        (Value::BigInt(a), Value::BigInt(b)) => Value::BigInt(a - b),
-                        (Value::Float(a), Value::Float(b)) => Value::Float(a - b),
-                        _ => {
-                            return Err(Error::query_execution(
-                                "Cannot subtract incompatible types".to_string(),
-                            ));
-                        }
-                    },
-                    ArithmeticOperator::Multiply => match (left_val, right_val) {
-                        (Value::Integer(a), Value::Integer(b)) => Value::Integer(a * b),
-                        (Value::BigInt(a), Value::BigInt(b)) => Value::BigInt(a * b),
-                        (Value::Float(a), Value::Float(b)) => Value::Float(a * b),
-                        _ => {
-                            return Err(Error::query_execution(
-                                "Cannot multiply incompatible types".to_string(),
-                            ));
-                        }
-                    },
-                    ArithmeticOperator::Divide => match (left_val, right_val) {
-                        (Value::Integer(a), Value::Integer(b)) => {
-                            if b == 0 {
-                                return Err(Error::query_execution("Division by zero".to_string()));
-                            }
-                            Value::Integer(a / b)
-                        }
-                        (Value::BigInt(a), Value::BigInt(b)) => {
-                            if b == 0 {
-                                return Err(Error::query_execution("Division by zero".to_string()));
-                            }
-                            Value::BigInt(a / b)
-                        }
-                        (Value::Float(a), Value::Float(b)) => {
-                            if b == 0.0 {
-                                return Err(Error::query_execution("Division by zero".to_string()));
-                            }
-                            Value::Float(a / b)
-                        }
-                        _ => {
-                            return Err(Error::query_execution(
-                                "Cannot divide incompatible types".to_string(),
-                            ));
-                        }
-                    },
-                    ArithmeticOperator::Modulo => match (left_val, right_val) {
-                        (Value::Integer(a), Value::Integer(b)) => {
-                            if b == 0 {
-                                return Err(Error::query_execution("Modulo by zero".to_string()));
-                            }
-                            Value::Integer(a % b)
-                        }
-                        (Value::BigInt(a), Value::BigInt(b)) => {
-                            if b == 0 {
-                                return Err(Error::query_execution("Modulo by zero".to_string()));
-                            }
-                            Value::BigInt(a % b)
-                        }
-                        _ => {
-                            return Err(Error::query_execution(
-                                "Modulo only supported for integers".to_string(),
-                            ));
-                        }
-                    },
-                };
+                let result = const_arithmetic(&arith.operator, left_val, right_val)?;
                 Ok((result, None))
             }
             _ => Err(Error::query_execution(
@@ -1471,126 +1350,12 @@ impl SelectExecutor {
         }
     }
 
-    /// Helper methods
+    /// Extract a `TableId` from a FROM clause. Cassandra CQL has no JOINs, so
+    /// either form (bare table or aliased table) yields the same result.
     fn extract_table_id(&self, from_clause: &FromClause) -> Result<TableId> {
         match from_clause {
             FromClause::Table(table_id) | FromClause::TableAlias(table_id, _) => {
                 Ok(table_id.clone())
-            } // JOIN operations are not supported in Cassandra CQL
-        }
-    }
-
-    /// Parse table ID to extract keyspace and table name
-    /// TableId is typically formatted as "keyspace.table" or just "table"
-    fn parse_table_id(&self, table_id: &TableId) -> (Option<String>, String) {
-        let table_str = table_id.name();
-        if let Some(dot_pos) = table_str.rfind('.') {
-            let keyspace = table_str[..dot_pos].to_string();
-            let table_name = table_str[dot_pos + 1..].to_string();
-            (Some(keyspace), table_name)
-        } else {
-            (None, table_str.to_string())
-        }
-    }
-
-    /// Decode partition key value from RowKey bytes (Issue #191)
-    ///
-    /// Cassandra doesn't serialize partition keys in cell data - they're part of the row key.
-    /// This method extracts the partition key value from the RowKey bytes based on the CQL type.
-    ///
-    /// For simple_table: partition key is UUID (16 bytes)
-    fn decode_partition_key_value(
-        &self,
-        key: &RowKey,
-        pk_column: &crate::schema::KeyColumn,
-    ) -> Result<Value> {
-        let key_bytes = key.0.as_slice();
-
-        // For simple partition keys (not composite), the entire key is the partition key value
-        // Decode based on CQL type
-        let normalized_type = pk_column.data_type.to_lowercase();
-        match normalized_type.as_str() {
-            "uuid" | "timeuuid" => {
-                // UUID is 16 bytes
-                if key_bytes.len() >= 16 {
-                    let uuid_bytes: [u8; 16] = key_bytes[..16].try_into().map_err(|_| {
-                        Error::query_execution("Invalid UUID key length".to_string())
-                    })?;
-                    Ok(Value::Uuid(uuid_bytes))
-                } else {
-                    Err(Error::query_execution(format!(
-                        "Partition key too short for UUID: {} bytes",
-                        key_bytes.len()
-                    )))
-                }
-            }
-            "text" | "varchar" | "ascii" => {
-                // Text keys are length-prefixed (2 bytes big-endian length + bytes)
-                if key_bytes.len() >= 2 {
-                    let len = u16::from_be_bytes([key_bytes[0], key_bytes[1]]) as usize;
-                    if key_bytes.len() >= 2 + len {
-                        let text =
-                            String::from_utf8(key_bytes[2..2 + len].to_vec()).map_err(|e| {
-                                Error::query_execution(format!(
-                                    "Invalid UTF-8 in partition key: {}",
-                                    e
-                                ))
-                            })?;
-                        Ok(Value::Text(text))
-                    } else {
-                        Err(Error::query_execution(
-                            "Partition key text length mismatch".to_string(),
-                        ))
-                    }
-                } else {
-                    Err(Error::query_execution(
-                        "Partition key too short for text".to_string(),
-                    ))
-                }
-            }
-            "int" => {
-                // INT is 4 bytes big-endian
-                if key_bytes.len() >= 4 {
-                    let int_val = i32::from_be_bytes([
-                        key_bytes[0],
-                        key_bytes[1],
-                        key_bytes[2],
-                        key_bytes[3],
-                    ]);
-                    Ok(Value::Integer(int_val))
-                } else {
-                    Err(Error::query_execution(
-                        "Partition key too short for int".to_string(),
-                    ))
-                }
-            }
-            "bigint" | "counter" => {
-                // BIGINT is 8 bytes big-endian
-                if key_bytes.len() >= 8 {
-                    let long_val = i64::from_be_bytes([
-                        key_bytes[0],
-                        key_bytes[1],
-                        key_bytes[2],
-                        key_bytes[3],
-                        key_bytes[4],
-                        key_bytes[5],
-                        key_bytes[6],
-                        key_bytes[7],
-                    ]);
-                    Ok(Value::BigInt(long_val))
-                } else {
-                    Err(Error::query_execution(
-                        "Partition key too short for bigint".to_string(),
-                    ))
-                }
-            }
-            _ => {
-                // For unsupported types, return the raw bytes as a blob or debug string
-                log::warn!(
-                    "Unsupported partition key type: {}, returning as debug string",
-                    pk_column.data_type
-                );
-                Ok(Value::Text(format!("{:?}", key_bytes)))
             }
         }
     }
@@ -1604,7 +1369,7 @@ impl SelectExecutor {
                 // This is needed for streaming mode where we can't wait for first row
                 if let Some(ref from_clause) = statement.from_clause {
                     let table_id = self.extract_table_id(from_clause)?;
-                    let (keyspace_opt, table_name) = Self::parse_table_id_static(&table_id);
+                    let (keyspace_opt, table_name) = parse_table_id(&table_id);
 
                     // Look up schema from SchemaManager
                     if let Some(schema) = self
@@ -1687,27 +1452,20 @@ mod tests {
         SelectExecutor { _schema, storage }
     }
 
-    #[tokio::test]
-    async fn test_value_comparison() {
-        let executor = create_test_executor().await;
-
+    #[test]
+    fn test_value_comparison() {
+        use std::cmp::Ordering;
         assert_eq!(
-            executor
-                .compare_values(&Value::Integer(5), &Value::Integer(3))
-                .unwrap(),
-            1
+            try_compare_values(&Value::Integer(5), &Value::Integer(3)).unwrap(),
+            Ordering::Greater
         );
         assert_eq!(
-            executor
-                .compare_values(&Value::Integer(3), &Value::Integer(5))
-                .unwrap(),
-            -1
+            try_compare_values(&Value::Integer(3), &Value::Integer(5)).unwrap(),
+            Ordering::Less
         );
         assert_eq!(
-            executor
-                .compare_values(&Value::Integer(5), &Value::Integer(5))
-                .unwrap(),
-            0
+            try_compare_values(&Value::Integer(5), &Value::Integer(5)).unwrap(),
+            Ordering::Equal
         );
     }
 
