@@ -15,9 +15,10 @@
 
 use super::{
     executor::{QueryExecutor, QueryResult},
-    planner::QueryPlan,
+    planner::{PlanType, QueryPlan},
     ParsedQuery,
 };
+use crate::types::DataType;
 use crate::{Error, Result, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -45,7 +46,7 @@ pub struct ParameterMetadata {
     /// Parameter position (0-based)
     pub position: usize,
     /// Expected parameter type
-    pub expected_type: Option<crate::types::DataType>,
+    pub expected_type: Option<DataType>,
     /// Whether parameter is optional
     pub optional: bool,
 }
@@ -91,65 +92,28 @@ impl PreparedQuery {
 
     /// Execute the prepared query with parameters
     pub async fn execute(&self, params: &[Value]) -> Result<QueryResult> {
-        // Validate parameter count
-        if params.len() != self.parameters.len() {
-            return Err(Error::query_execution(format!(
-                "Parameter count mismatch: expected {}, got {}",
-                self.parameters.len(),
-                params.len()
-            )));
-        }
-
-        // Validate parameter types
-        for (i, param) in params.iter().enumerate() {
-            if let Some(metadata) = self.parameters.get(i) {
-                if let Some(expected_type) = &metadata.expected_type {
-                    if !self.type_matches(param, expected_type) {
-                        return Err(Error::query_execution(format!(
-                            "Parameter {} type mismatch: expected {:?}, got {:?}",
-                            i, expected_type, param
-                        )));
-                    }
-                }
-            }
-        }
-
-        // Create execution context
-        let mut context = PreparedContext {
-            parameters: HashMap::new(),
-            positional_params: params.to_vec(),
-            hints: ExecutionHints::default(),
-        };
-
-        // Bind named parameters
-        for (i, param) in params.iter().enumerate() {
-            if let Some(metadata) = self.parameters.get(i) {
-                if let Some(name) = &metadata.name {
-                    context.parameters.insert(name.clone(), param.clone());
-                }
-            }
-        }
-
-        // Execute the query with bound parameters
-        self.execute_with_context(&context).await
+        self.validate_params(params)?;
+        // Default execution path: no hints, so skip the plan clone in
+        // execute_with_context and call the executor directly.
+        self.executor.execute(&self.plan).await
     }
 
     /// Execute with named parameters
     pub async fn execute_named(&self, params: &HashMap<String, Value>) -> Result<QueryResult> {
-        // Convert named parameters to positional
-        let mut positional_params = Vec::new();
-
+        // Convert named parameters to positional, in declaration order.
+        let mut positional_params = Vec::with_capacity(self.parameters.len());
         for metadata in &self.parameters {
-            if let Some(name) = &metadata.name {
-                if let Some(value) = params.get(name) {
-                    positional_params.push(value.clone());
-                } else if !metadata.optional {
+            let Some(name) = &metadata.name else {
+                continue;
+            };
+            match params.get(name) {
+                Some(value) => positional_params.push(value.clone()),
+                None if metadata.optional => positional_params.push(Value::Null),
+                None => {
                     return Err(Error::query_execution(format!(
                         "Missing required parameter: {}",
                         name
                     )));
-                } else {
-                    positional_params.push(Value::Null);
                 }
             }
         }
@@ -159,25 +123,23 @@ impl PreparedQuery {
 
     /// Execute with execution context
     pub async fn execute_with_context(&self, context: &PreparedContext) -> Result<QueryResult> {
-        // Apply execution hints to the plan
-        let mut modified_plan = self.plan.clone();
+        let hints = &context.hints;
+        // Avoid cloning the plan if no hints would override it.
+        if hints.force_index.is_none() && hints.timeout_ms.is_none() && hints.parallelism.is_none()
+        {
+            return self.executor.execute(&self.plan).await;
+        }
 
-        // Apply force index hint
-        if let Some(force_index) = &context.hints.force_index {
+        let mut modified_plan = self.plan.clone();
+        if let Some(force_index) = &hints.force_index {
             modified_plan.hints.force_index = Some(force_index.clone());
         }
-
-        // Apply timeout hint
-        if let Some(timeout) = context.hints.timeout_ms {
+        if let Some(timeout) = hints.timeout_ms {
             modified_plan.hints.timeout_ms = Some(timeout);
         }
-
-        // Apply parallelism hint
-        if let Some(parallelism) = context.hints.parallelism {
+        if let Some(parallelism) = hints.parallelism {
             modified_plan.hints.preferred_parallelization = Some(parallelism);
         }
-
-        // Execute the query
         self.executor.execute(&modified_plan).await
     }
 
@@ -209,51 +171,67 @@ impl PreparedQuery {
 
     /// Check if query is cache-friendly
     pub fn is_cache_friendly(&self) -> bool {
-        // Cache-friendly queries are those that:
-        // 1. Use point lookups or index scans
-        // 2. Have predictable execution patterns
-        // 3. Don't involve complex aggregations
-
-        // For our simplified implementation, we consider TableScan cache-friendly too
+        // Cache-friendly plans have predictable execution patterns and no complex
+        // aggregations. The simplified implementation also treats TableScan as
+        // cache-friendly.
         matches!(
             self.plan.plan_type,
-            super::planner::PlanType::PointLookup
-                | super::planner::PlanType::IndexScan
-                | super::planner::PlanType::TableScan
+            PlanType::PointLookup | PlanType::IndexScan | PlanType::TableScan
         )
     }
 
-    /// Extract parameter placeholders from parsed query
+    /// Validate parameter count and types against this query's metadata.
+    fn validate_params(&self, params: &[Value]) -> Result<()> {
+        if params.len() != self.parameters.len() {
+            return Err(Error::query_execution(format!(
+                "Parameter count mismatch: expected {}, got {}",
+                self.parameters.len(),
+                params.len()
+            )));
+        }
+
+        for (i, (param, metadata)) in params.iter().zip(&self.parameters).enumerate() {
+            if let Some(expected_type) = &metadata.expected_type {
+                if !type_matches(param, expected_type) {
+                    return Err(Error::query_execution(format!(
+                        "Parameter {} type mismatch: expected {:?}, got {:?}",
+                        i, expected_type, param
+                    )));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Extract parameter placeholders from parsed query.
+    ///
+    /// Simplified implementation: a single positional Integer parameter is
+    /// emitted whenever the query has a WHERE clause. A real implementation
+    /// would scan the CQL text for `?` and `:name` placeholders.
     fn extract_parameters(parsed_query: &ParsedQuery) -> Vec<ParameterMetadata> {
-        let mut parameters = Vec::new();
-
-        // Simple parameter extraction - in a real implementation, this would
-        // analyze the CQL text for parameter placeholders like ? or :name
-
-        // For demonstration, we'll assume queries with WHERE clauses have parameters
-        if parsed_query.where_clause.is_some() {
-            parameters.push(ParameterMetadata {
-                name: None,
-                position: 0,
-                expected_type: Some(crate::types::DataType::Integer), // Simplified
-                optional: false,
-            });
+        if parsed_query.where_clause.is_none() {
+            return Vec::new();
         }
-
-        parameters
+        vec![ParameterMetadata {
+            name: None,
+            position: 0,
+            expected_type: Some(DataType::Integer),
+            optional: false,
+        }]
     }
+}
 
-    /// Check if value matches expected type
-    fn type_matches(&self, value: &Value, expected_type: &crate::types::DataType) -> bool {
-        match (value, expected_type) {
-            (Value::Integer(_), crate::types::DataType::Integer) => true,
-            (Value::Float(_), crate::types::DataType::Float) => true,
-            (Value::Text(_), crate::types::DataType::Text) => true,
-            (Value::Boolean(_), crate::types::DataType::Boolean) => true,
-            (Value::Null, _) => true, // Null is compatible with any type
-            _ => false,
-        }
-    }
+/// Check if `value` matches `expected_type`. `Null` is compatible with any type.
+fn type_matches(value: &Value, expected_type: &DataType) -> bool {
+    matches!(
+        (value, expected_type),
+        (Value::Integer(_), DataType::Integer)
+            | (Value::Float(_), DataType::Float)
+            | (Value::Text(_), DataType::Text)
+            | (Value::Boolean(_), DataType::Boolean)
+            | (Value::Null, _)
+    )
 }
 
 /// Statistics for prepared queries
@@ -272,6 +250,7 @@ pub struct PreparedQueryStats {
 }
 
 /// Prepared statement builder
+#[derive(Default)]
 pub struct PreparedQueryBuilder {
     /// CQL text
     cql: String,
@@ -286,51 +265,25 @@ impl PreparedQueryBuilder {
     pub fn new(cql: &str) -> Self {
         Self {
             cql: cql.to_string(),
-            parameters: Vec::new(),
-            hints: ExecutionHints::default(),
+            ..Self::default()
         }
     }
 
     /// Add a parameter
-    pub fn parameter(
-        mut self,
-        name: Option<String>,
-        data_type: crate::types::DataType,
-        optional: bool,
-    ) -> Self {
-        self.parameters.push(ParameterMetadata {
-            name,
-            position: self.parameters.len(),
-            expected_type: Some(data_type),
-            optional,
-        });
+    pub fn parameter(mut self, name: Option<String>, data_type: DataType, optional: bool) -> Self {
+        self.push_parameter(name, data_type, optional);
         self
     }
 
     /// Add a positional parameter
-    pub fn positional_parameter(mut self, data_type: crate::types::DataType) -> Self {
-        self.parameters.push(ParameterMetadata {
-            name: None,
-            position: self.parameters.len(),
-            expected_type: Some(data_type),
-            optional: false,
-        });
+    pub fn positional_parameter(mut self, data_type: DataType) -> Self {
+        self.push_parameter(None, data_type, false);
         self
     }
 
     /// Add a named parameter
-    pub fn named_parameter(
-        mut self,
-        name: &str,
-        data_type: crate::types::DataType,
-        optional: bool,
-    ) -> Self {
-        self.parameters.push(ParameterMetadata {
-            name: Some(name.to_string()),
-            position: self.parameters.len(),
-            expected_type: Some(data_type),
-            optional,
-        });
+    pub fn named_parameter(mut self, name: &str, data_type: DataType, optional: bool) -> Self {
+        self.push_parameter(Some(name.to_string()), data_type, optional);
         self
     }
 
@@ -378,6 +331,15 @@ impl PreparedQueryBuilder {
             parameters: self.parameters,
             executor,
         }
+    }
+
+    fn push_parameter(&mut self, name: Option<String>, data_type: DataType, optional: bool) {
+        self.parameters.push(ParameterMetadata {
+            name,
+            position: self.parameters.len(),
+            expected_type: Some(data_type),
+            optional,
+        });
     }
 }
 
@@ -440,14 +402,15 @@ mod tests {
 
         assert_eq!(prepared.cql(), "SELECT * FROM users");
         assert_eq!(prepared.parameters().len(), 0);
-        assert!(prepared.is_cache_friendly()); // TableScan is not cache-friendly, but our implementation is simplified
+        // TableScan is treated as cache-friendly by the simplified implementation.
+        assert!(prepared.is_cache_friendly());
     }
 
     #[test]
     fn test_prepared_query_builder() {
         let builder = PreparedQueryBuilder::new("SELECT * FROM users WHERE id = ? AND name = ?")
-            .positional_parameter(crate::types::DataType::Integer)
-            .positional_parameter(crate::types::DataType::Text)
+            .positional_parameter(DataType::Integer)
+            .positional_parameter(DataType::Text)
             .timeout(5000)
             .parallelism(4);
 
@@ -462,7 +425,7 @@ mod tests {
         let metadata = ParameterMetadata {
             name: Some("user_id".to_string()),
             position: 0,
-            expected_type: Some(crate::types::DataType::Integer),
+            expected_type: Some(DataType::Integer),
             optional: false,
         };
 
@@ -486,62 +449,15 @@ mod tests {
         assert!(hints.cache_results);
     }
 
-    #[tokio::test]
-    async fn test_type_matching() {
-        let temp_dir = TempDir::new().unwrap();
-        let config = Config::default();
-        let platform = Arc::new(crate::platform::Platform::new(&config).await.unwrap());
-        let storage = Arc::new(
-            crate::storage::StorageEngine::open(
-                temp_dir.path(),
-                &config,
-                platform,
-                #[cfg(feature = "state_machine")]
-                None,
-            )
-            .await
-            .unwrap(),
-        );
-        let schema = Arc::new(
-            crate::schema::SchemaManager::new(temp_dir.path())
-                .await
-                .unwrap(),
-        );
-        let executor = Arc::new(crate::query::executor::QueryExecutor::new(
-            storage, schema, &config,
-        ));
-
-        let parsed_query = ParsedQuery {
-            query_type: crate::query::QueryType::Select,
-            table: Some(crate::TableId::new("users")),
-            columns: vec!["*".to_string()],
-            where_clause: None,
-            values: vec![],
-            set_clause: std::collections::HashMap::new(),
-            order_by: vec![],
-            limit: None,
-            cql: "SELECT * FROM users".to_string(),
-        };
-
-        let plan = crate::query::planner::QueryPlan {
-            plan_type: crate::query::planner::PlanType::TableScan,
-            table: Some(crate::TableId::new("users")),
-            estimated_cost: 100.0,
-            estimated_rows: 1000,
-            selected_indexes: vec![],
-            steps: vec![],
-            hints: crate::query::planner::QueryHints::default(),
-        };
-
-        let prepared = PreparedQuery::new(parsed_query, plan, executor);
-
-        // Test type matching
-        assert!(prepared.type_matches(&Value::Integer(42), &crate::types::DataType::Integer));
-        assert!(prepared.type_matches(
+    #[test]
+    fn test_type_matching() {
+        assert!(type_matches(&Value::Integer(42), &DataType::Integer));
+        assert!(type_matches(
             &Value::Text("test".to_string()),
-            &crate::types::DataType::Text
+            &DataType::Text
         ));
-        assert!(prepared.type_matches(&Value::Null, &crate::types::DataType::Integer)); // Null matches any type
-        assert!(!prepared.type_matches(&Value::Integer(42), &crate::types::DataType::Text));
+        // Null matches any expected type.
+        assert!(type_matches(&Value::Null, &DataType::Integer));
+        assert!(!type_matches(&Value::Integer(42), &DataType::Text));
     }
 }
