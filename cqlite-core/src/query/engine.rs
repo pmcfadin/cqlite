@@ -99,13 +99,13 @@ impl QueryEngine {
         #[cfg(feature = "state_machine")]
         let select_optimizer = SelectOptimizer::new(schema.clone(), storage.clone());
         #[cfg(feature = "state_machine")]
-        let select_executor = SelectExecutor::new(schema.clone(), storage.clone());
+        let select_executor = SelectExecutor::new(schema.clone(), storage);
 
         Ok(Self {
             parser,
             planner,
             executor,
-            schema_manager: schema.clone(),
+            schema_manager: schema,
             #[cfg(feature = "state_machine")]
             select_optimizer,
             #[cfg(feature = "state_machine")]
@@ -117,72 +117,66 @@ impl QueryEngine {
         })
     }
 
+    /// Increment the total queries counter
+    fn inc_total_queries(&self) {
+        self.stats.write().total_queries += 1;
+    }
+
+    /// Increment the error queries counter
+    fn inc_error_queries(&self) {
+        self.stats.write().error_queries += 1;
+    }
+
+    /// Update cache hit ratio after a cache hit
+    fn record_cache_hit(&self) {
+        let mut stats = self.stats.write();
+        let total = stats.total_queries as f64;
+        // Running mean: previous ratio weighted by (total - 1) hits + 1 hit / total
+        stats.cache_hit_ratio = (stats.cache_hit_ratio * (total - 1.0) + 1.0) / total;
+    }
+
     /// Execute a CQL query
     pub async fn execute(&self, cql: &str) -> Result<QueryResult> {
         let start_time = Instant::now();
+        self.inc_total_queries();
 
-        // Update total queries counter
-        {
-            let mut stats = self.stats.write();
-            stats.total_queries += 1;
-        }
-
-        // Check if this is a SELECT statement - use advanced parser
+        // Route SELECT statements through the advanced parser, except simple
+        // `WHERE id = <value>` point lookups which must share the normal
+        // executor's key-handling path so INSERT and SELECT agree on keys.
         let trimmed_cql = cql.trim().to_uppercase();
-        if trimmed_cql.starts_with("SELECT") {
-            // For simple WHERE id = <value> queries, use normal executor for consistent key handling
-            // This ensures INSERT and SELECT use the same key generation logic
-            if cql.contains("WHERE id =") && cql.split_whitespace().count() <= 8 {
-                #[cfg(debug_assertions)]
-                log::debug!(
-                    "Routing simple SELECT through normal executor for consistent key handling"
-                );
-                // Fall through to normal execution path for simple point lookups
-            } else {
-                return self.execute_select_query(cql, start_time).await;
-            }
+        let is_simple_id_lookup = cql.contains("WHERE id =") && cql.split_whitespace().count() <= 8;
+        if trimmed_cql.starts_with("SELECT") && !is_simple_id_lookup {
+            return self.execute_select_query(cql, start_time).await;
+        }
+        #[cfg(debug_assertions)]
+        if trimmed_cql.starts_with("SELECT") && is_simple_id_lookup {
+            log::debug!(
+                "Routing simple SELECT through normal executor for consistent key handling"
+            );
         }
 
         // Check plan cache first for non-SELECT queries
         if let Some(mut cached_entry) = self.plan_cache.get_mut(cql) {
-            // Update cache hit statistics
-            {
-                let mut stats = self.stats.write();
-                stats.cache_hit_ratio = (stats.cache_hit_ratio * (stats.total_queries - 1) as f64
-                    + 1.0)
-                    / stats.total_queries as f64;
-            }
-
-            // Update cache entry hit count in place to avoid locking twice
+            self.record_cache_hit();
             cached_entry.hit_count += 1;
 
-            // Execute the cached plan
             let mut result = self.executor.execute(&cached_entry.plan).await?;
             self.update_execution_stats(&mut result, start_time);
             return Ok(result);
         }
 
-        // Parse the query (non-SELECT)
-        let parsed_query = self.parser.parse(cql).inspect_err(|_e| {
-            // Update error statistics
-            let mut stats = self.stats.write();
-            stats.error_queries += 1;
-        })?;
-
-        // Plan the query
+        let parsed_query = self
+            .parser
+            .parse(cql)
+            .inspect_err(|_| self.inc_error_queries())?;
         let plan = self.planner.plan(&parsed_query).await?;
 
-        // Cache the plan if enabled
         if self.config.query.query_cache_size.unwrap_or(0) > 0 {
             self.cache_query_plan(cql, parsed_query, plan.clone());
         }
 
-        // Execute the query
         let mut result = self.executor.execute(&plan).await?;
-
-        // Update statistics
         self.update_execution_stats(&mut result, start_time);
-
         Ok(result)
     }
 
@@ -213,30 +207,18 @@ impl QueryEngine {
         cql: &str,
         config: StreamingConfig,
     ) -> Result<QueryResultIterator> {
-        // Update total queries counter
-        {
-            let mut stats = self.stats.write();
-            stats.total_queries += 1;
-        }
+        self.inc_total_queries();
 
-        // Only SELECT statements can be streamed
-        let trimmed_cql = cql.trim().to_uppercase();
-        if !trimmed_cql.starts_with("SELECT") {
+        if !cql.trim().to_uppercase().starts_with("SELECT") {
             return Err(Error::query_execution(
-                "Streaming execution only supports SELECT queries".to_string(),
+                "Streaming execution only supports SELECT queries",
             ));
         }
 
-        // Parse SELECT statement
-        let select_statement = select_parser::parse_select(cql).inspect_err(|_e| {
-            let mut stats = self.stats.write();
-            stats.error_queries += 1;
-        })?;
-
-        // Optimize the query plan
+        let select_statement =
+            select_parser::parse_select(cql).inspect_err(|_| self.inc_error_queries())?;
         let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
 
-        // Execute with streaming
         self.select_executor
             .execute_streaming(optimized_plan, config)
             .await
@@ -247,18 +229,9 @@ impl QueryEngine {
         // Check plan cache first for SELECT queries too
         if let Some(mut cached_entry) = self.plan_cache.get_mut(cql) {
             if cached_entry.plan.table.is_some() {
-                // Update cache hit statistics
-                {
-                    let mut stats = self.stats.write();
-                    stats.cache_hit_ratio =
-                        (stats.cache_hit_ratio * (stats.total_queries - 1) as f64 + 1.0)
-                            / stats.total_queries as f64;
-                }
-
-                // Update cache entry hit count
+                self.record_cache_hit();
                 cached_entry.hit_count += 1;
 
-                // Execute the cached plan
                 let mut result = self.executor.execute(&cached_entry.plan).await?;
                 self.update_execution_stats(&mut result, start_time);
                 return Ok(result);
@@ -269,28 +242,17 @@ impl QueryEngine {
             self.plan_cache.remove(cql);
         }
 
-        // Parse SELECT statement using advanced parser
-        #[cfg(feature = "state_machine")]
-        let select_statement = select_parser::parse_select(cql).inspect_err(|_e| {
-            // Update error statistics
-            let mut stats = self.stats.write();
-            stats.error_queries += 1;
-        })?;
-
         #[cfg(not(feature = "state_machine"))]
-        return Err(crate::error::Error::QueryExecution(
-            "Advanced SELECT parsing requires state_machine feature".to_string(),
+        return Err(Error::query_execution(
+            "Advanced SELECT parsing requires state_machine feature",
         ));
 
-        // Optimize the query plan
-        #[cfg(feature = "state_machine")]
-        let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
-
-        // Execute the optimized plan
         #[cfg(feature = "state_machine")]
         {
+            let select_statement =
+                select_parser::parse_select(cql).inspect_err(|_| self.inc_error_queries())?;
+            let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
             let mut result = self.select_executor.execute(optimized_plan).await?;
-            // Update statistics
             self.update_execution_stats(&mut result, start_time);
             Ok(result)
         }
@@ -305,12 +267,10 @@ impl QueryEngine {
 
     /// Prepare a query for repeated execution
     pub async fn prepare(&self, cql: &str) -> Result<Arc<PreparedQuery>> {
-        // Check cache first
         if let Some(cached) = self.prepared_cache.get(cql) {
             return Ok(cached.clone());
         }
 
-        // Parse and prepare the query
         let parsed_query = self.parser.parse(cql)?;
         let plan = self.planner.plan(&parsed_query).await?;
 
@@ -320,7 +280,6 @@ impl QueryEngine {
             Arc::new(self.executor.clone()),
         ));
 
-        // Cache the prepared statement
         self.prepared_cache
             .insert(cql.to_string(), prepared.clone());
 
@@ -334,19 +293,10 @@ impl QueryEngine {
         params: &[Value],
     ) -> Result<QueryResult> {
         let start_time = Instant::now();
+        self.inc_total_queries();
 
-        // Update total queries counter
-        {
-            let mut stats = self.stats.write();
-            stats.total_queries += 1;
-        }
-
-        // Execute the prepared query
         let mut result = prepared.execute(params).await?;
-
-        // Update statistics
         self.update_execution_stats(&mut result, start_time);
-
         Ok(result)
     }
 
@@ -443,12 +393,9 @@ impl QueryEngine {
         let total_time = start_time.elapsed();
         let avg_time =
             execution_times.iter().sum::<std::time::Duration>() / execution_times.len() as u32;
-        let min_time = execution_times.iter().min().ok_or_else(|| {
-            Error::query_execution("No execution times recorded for analysis".to_string())
-        })?;
-        let max_time = execution_times.iter().max().ok_or_else(|| {
-            Error::query_execution("No execution times recorded for analysis".to_string())
-        })?;
+        let no_times = || Error::query_execution("No execution times recorded for analysis");
+        let min_time = execution_times.iter().min().ok_or_else(no_times)?;
+        let max_time = execution_times.iter().max().ok_or_else(no_times)?;
 
         // Calculate standard deviation
         let variance = execution_times
@@ -473,7 +420,7 @@ impl QueryEngine {
         })
     }
 
-    /// Cache a query plan
+    /// Cache a query plan, evicting the oldest entry first if at capacity (simple LRU).
     fn cache_query_plan(
         &self,
         cql: &str,
@@ -481,33 +428,30 @@ impl QueryEngine {
         plan: super::planner::QueryPlan,
     ) {
         let cache_size = self.config.query.query_cache_size.unwrap_or(0);
-
-        if cache_size > 0 {
-            // Check if we need to evict entries
-            if self.plan_cache.len() >= cache_size {
-                // Simple LRU eviction - remove oldest entry
-                let oldest_key = self
-                    .plan_cache
-                    .iter()
-                    .min_by_key(|entry| entry.cached_at)
-                    .map(|entry| entry.key().clone());
-
-                if let Some(key) = oldest_key {
-                    self.plan_cache.remove(&key);
-                }
-            }
-
-            // Add new entry
-            self.plan_cache.insert(
-                cql.to_string(),
-                QueryCacheEntry {
-                    parsed_query,
-                    plan,
-                    cached_at: Instant::now(),
-                    hit_count: 0,
-                },
-            );
+        if cache_size == 0 {
+            return;
         }
+
+        if self.plan_cache.len() >= cache_size {
+            let oldest_key = self
+                .plan_cache
+                .iter()
+                .min_by_key(|entry| entry.cached_at)
+                .map(|entry| entry.key().clone());
+            if let Some(key) = oldest_key {
+                self.plan_cache.remove(&key);
+            }
+        }
+
+        self.plan_cache.insert(
+            cql.to_string(),
+            QueryCacheEntry {
+                parsed_query,
+                plan,
+                cached_at: Instant::now(),
+                hit_count: 0,
+            },
+        );
     }
 
     /// Check if schema is available for a table
@@ -546,19 +490,14 @@ impl QueryEngine {
             std::cmp::max(1, execution_time.as_millis() as u64)
         };
 
-        // Update global statistics
-        let mut stats = self.stats.write();
-        let old_avg = stats.avg_execution_time_us;
         let new_time_us = execution_time.as_micros() as u64;
-
-        // Update running average
+        let mut stats = self.stats.write();
         stats.avg_execution_time_us = if stats.total_queries <= 1 {
             new_time_us
         } else {
-            ((old_avg * (stats.total_queries - 1)) + new_time_us) / stats.total_queries
+            ((stats.avg_execution_time_us * (stats.total_queries - 1)) + new_time_us)
+                / stats.total_queries
         };
-
-        // Update rows affected
         stats.rows_affected += result.rows_affected;
     }
 }
