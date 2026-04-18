@@ -12,6 +12,14 @@
 const C1: u64 = 0x87c3_7b91_1142_53d5;
 const C2: u64 = 0x4cf5_ad43_2745_937f;
 
+// Body mix constants (per-block additive constants for h1 and h2).
+const H1_ADD: u64 = 0x52dc_e729;
+const H2_ADD: u64 = 0x3849_5ab5;
+
+// Finalization mix multipliers used by `fmix64`.
+const FMIX_C1: u64 = 0xff51_afd7_ed55_8ccd;
+const FMIX_C2: u64 = 0xc4ce_b9fe_1a85_ec53;
+
 /// Compute Cassandra's `MurmurHash.hash3_x64_128` with seed 0.
 ///
 /// Returns `(h1, h2)` matching `result[0]` and `result[1]` from the Java implementation.
@@ -22,15 +30,13 @@ pub fn cassandra_murmur3_x64_128(data: &[u8]) -> (i64, i64) {
     let mut h1: u64 = 0;
     let mut h2: u64 = 0;
 
-    let nblocks = data.len() / 16;
-
-    // Body: process 16-byte blocks
+    // Body: process 16-byte blocks.
     // Cassandra's getBlock reads bytes as unsigned (& 0xff) in little-endian order,
     // which is equivalent to u64::from_le_bytes.
-    for i in 0..nblocks {
-        let offset = i * 16;
-        let mut k1 = u64::from_le_bytes(data[offset..offset + 8].try_into().unwrap());
-        let mut k2 = u64::from_le_bytes(data[offset + 8..offset + 16].try_into().unwrap());
+    let mut chunks = data.chunks_exact(16);
+    for block in &mut chunks {
+        let mut k1 = u64::from_le_bytes(block[0..8].try_into().unwrap());
+        let mut k2 = u64::from_le_bytes(block[8..16].try_into().unwrap());
 
         k1 = k1.wrapping_mul(C1);
         k1 = k1.rotate_left(31);
@@ -38,7 +44,7 @@ pub fn cassandra_murmur3_x64_128(data: &[u8]) -> (i64, i64) {
         h1 ^= k1;
         h1 = h1.rotate_left(27);
         h1 = h1.wrapping_add(h2);
-        h1 = h1.wrapping_mul(5).wrapping_add(0x52dc_e729);
+        h1 = h1.wrapping_mul(5).wrapping_add(H1_ADD);
 
         k2 = k2.wrapping_mul(C2);
         k2 = k2.rotate_left(33);
@@ -46,69 +52,38 @@ pub fn cassandra_murmur3_x64_128(data: &[u8]) -> (i64, i64) {
         h2 ^= k2;
         h2 = h2.rotate_left(31);
         h2 = h2.wrapping_add(h1);
-        h2 = h2.wrapping_mul(5).wrapping_add(0x3849_5ab5);
+        h2 = h2.wrapping_mul(5).wrapping_add(H2_ADD);
     }
 
-    // Tail: process remaining bytes
+    // Tail: process remaining bytes.
     // Cassandra's bug: `(long) key.get(offset+N)` sign-extends because Java's byte is signed.
-    // We replicate this with: byte as i8 as i64 as u64
-    let tail = &data[nblocks * 16..];
+    // We replicate this with: byte as i8 as i64 as u64.
+    let tail = chunks.remainder();
     let mut k1: u64 = 0;
     let mut k2: u64 = 0;
 
-    // Sign-extend a byte the way Java does: byte → signed byte → long
+    // Sign-extend a byte the way Java does: byte → signed byte → long.
     let signed = |byte: u8| -> u64 { byte as i8 as i64 as u64 };
 
-    // Fall-through switch (Java switch without break)
-    // Process k2 bytes (tail positions 8-14), then k1 bytes (tail positions 0-7)
-    if tail.len() >= 15 {
-        k2 ^= signed(tail[14]) << 48;
+    // Shift schedule matches the Java fall-through switch:
+    // positions 0..8 feed k1 (shifts 0, 8, 16, 24, 32, 40, 48, 56);
+    // positions 8..15 feed k2 (shifts 0, 8, 16, 24, 32, 40, 48).
+    for (pos, &byte) in tail.iter().enumerate() {
+        let shift = ((pos % 8) * 8) as u32;
+        if pos < 8 {
+            k1 ^= signed(byte) << shift;
+        } else {
+            k2 ^= signed(byte) << shift;
+        }
     }
-    if tail.len() >= 14 {
-        k2 ^= signed(tail[13]) << 40;
-    }
-    if tail.len() >= 13 {
-        k2 ^= signed(tail[12]) << 32;
-    }
-    if tail.len() >= 12 {
-        k2 ^= signed(tail[11]) << 24;
-    }
-    if tail.len() >= 11 {
-        k2 ^= signed(tail[10]) << 16;
-    }
-    if tail.len() >= 10 {
-        k2 ^= signed(tail[9]) << 8;
-    }
+
     if tail.len() >= 9 {
-        k2 ^= signed(tail[8]);
         k2 = k2.wrapping_mul(C2);
         k2 = k2.rotate_left(33);
         k2 = k2.wrapping_mul(C1);
         h2 ^= k2;
     }
-    if tail.len() >= 8 {
-        k1 ^= signed(tail[7]) << 56;
-    }
-    if tail.len() >= 7 {
-        k1 ^= signed(tail[6]) << 48;
-    }
-    if tail.len() >= 6 {
-        k1 ^= signed(tail[5]) << 40;
-    }
-    if tail.len() >= 5 {
-        k1 ^= signed(tail[4]) << 32;
-    }
-    if tail.len() >= 4 {
-        k1 ^= signed(tail[3]) << 24;
-    }
-    if tail.len() >= 3 {
-        k1 ^= signed(tail[2]) << 16;
-    }
-    if tail.len() >= 2 {
-        k1 ^= signed(tail[1]) << 8;
-    }
     if !tail.is_empty() {
-        k1 ^= signed(tail[0]);
         k1 = k1.wrapping_mul(C1);
         k1 = k1.rotate_left(31);
         k1 = k1.wrapping_mul(C2);
@@ -152,9 +127,9 @@ fn normalize(v: i64) -> i64 {
 
 fn fmix64(mut value: u64) -> u64 {
     value ^= value >> 33;
-    value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+    value = value.wrapping_mul(FMIX_C1);
     value ^= value >> 33;
-    value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+    value = value.wrapping_mul(FMIX_C2);
     value ^= value >> 33;
     value
 }
@@ -169,6 +144,18 @@ mod tests {
     //   SELECT token(id), id FROM ... ;
     // where key_bytes is the CQL-serialized form of the partition key.
     // ---------------------------------------------------------------
+
+    /// Shared assertion loop for token test vectors.
+    fn assert_tokens(label: &str, vectors: &[(&[u8], i64)]) {
+        for (key_bytes, expected_token) in vectors {
+            let token = cassandra_murmur3_token(key_bytes);
+            assert_eq!(
+                token, *expected_token,
+                "Token mismatch for {} key {:02X?}: got {}, expected {}",
+                label, key_bytes, token, expected_token
+            );
+        }
+    }
 
     /// Text key test vectors (key bytes = UTF-8 bytes of the string)
     #[test]
@@ -196,18 +183,7 @@ mod tests {
                 -7889617755374116647,
             ),
         ];
-
-        for (key_bytes, expected_token) in vectors {
-            let token = cassandra_murmur3_token(key_bytes);
-            assert_eq!(
-                token,
-                *expected_token,
-                "Token mismatch for text key {:?}: got {}, expected {}",
-                std::str::from_utf8(key_bytes).unwrap_or("<non-utf8>"),
-                token,
-                expected_token
-            );
-        }
+        assert_tokens("text", vectors);
     }
 
     /// Int key test vectors (key bytes = 4-byte big-endian)
@@ -227,15 +203,7 @@ mod tests {
             (&[0x7F, 0xFF, 0xFF, 0xFF], -765994672030311617),  // i32::MAX
             (&[0x80, 0x00, 0x00, 0x00], -420533958509279465),  // i32::MIN
         ];
-
-        for (key_bytes, expected_token) in vectors {
-            let token = cassandra_murmur3_token(key_bytes);
-            assert_eq!(
-                token, *expected_token,
-                "Token mismatch for int key {:02X?}: got {}, expected {}",
-                key_bytes, token, expected_token
-            );
-        }
+        assert_tokens("int", vectors);
     }
 
     /// UUID key test vectors (key bytes = 16-byte UUID in big-endian)
@@ -272,15 +240,7 @@ mod tests {
                 -8497799532739775204,
             ),
         ];
-
-        for (key_bytes, expected_token) in vectors {
-            let token = cassandra_murmur3_token(key_bytes);
-            assert_eq!(
-                token, *expected_token,
-                "Token mismatch for UUID key {:02X?}: got {}, expected {}",
-                key_bytes, token, expected_token
-            );
-        }
+        assert_tokens("UUID", vectors);
     }
 
     /// Blob key test vectors (key bytes = raw bytes, exercises sign-extension bug)
@@ -313,15 +273,7 @@ mod tests {
                 -5563837382979743776,
             ),
         ];
-
-        for (key_bytes, expected_token) in vectors {
-            let token = cassandra_murmur3_token(key_bytes);
-            assert_eq!(
-                token, *expected_token,
-                "Token mismatch for blob key {:02X?}: got {}, expected {}",
-                key_bytes, token, expected_token
-            );
-        }
+        assert_tokens("blob", vectors);
     }
 
     /// Bigint key test vectors (key bytes = 8-byte big-endian)
@@ -343,15 +295,7 @@ mod tests {
                 9204767954415360687,
             ), // i64::MIN
         ];
-
-        for (key_bytes, expected_token) in vectors {
-            let token = cassandra_murmur3_token(key_bytes);
-            assert_eq!(
-                token, *expected_token,
-                "Token mismatch for bigint key {:02X?}: got {}, expected {}",
-                key_bytes, token, expected_token
-            );
-        }
+        assert_tokens("bigint", vectors);
     }
 
     /// Composite partition key test vectors
