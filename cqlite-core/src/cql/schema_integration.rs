@@ -76,18 +76,10 @@ impl SchemaParserConfig {
     }
 }
 
-/// Parse CQL CREATE TABLE statement using the new parser abstraction layer
+/// Parse a CQL CREATE TABLE statement using the parser abstraction layer.
 ///
-/// This is the main entry point that maintains backward compatibility while
-/// using the new parser abstraction internally.
-///
-/// # Arguments
-/// * `cql` - The CQL CREATE TABLE statement to parse
-/// * `config` - Optional configuration for parsing behavior
-///
-/// # Returns
-/// * `Ok(TableSchema)` - Successfully parsed table schema
-/// * `Err(Error)` - Parsing error with detailed information
+/// This is the main entry point for schema parsing. Passing `None` for `config`
+/// uses [`SchemaParserConfig::default`].
 ///
 /// # Example
 /// ```rust,no_run
@@ -105,135 +97,61 @@ pub async fn parse_cql_schema_enhanced(
 ) -> Result<TableSchema> {
     let config = config.unwrap_or_default();
 
-    // Create parser configuration
     let parser_config = ParserConfig::default()
         .with_backend(config.backend)
         .with_strict_validation(config.strict_validation)
         .with_timeout(std::time::Duration::from_secs(config.timeout_secs));
 
-    // Create parser using the factory
     let parser = ParserFactory::create(parser_config)?;
-
-    // Parse the CQL statement
     let statement = parser.parse(cql).await?;
 
-    // Use visitor pattern to convert AST to TableSchema
     let mut visitor = SchemaBuilderVisitor;
-    let schema = visitor.visit_statement(&statement)?;
-
-    Ok(schema)
+    visitor.visit_statement(&statement)
 }
 
-/// Parse CQL CREATE TABLE statement with default configuration
-///
-/// This is a convenience function that uses default settings for most use cases.
-///
-/// # Arguments
-/// * `cql` - The CQL CREATE TABLE statement to parse
-///
-/// # Returns
-/// * `Ok(TableSchema)` - Successfully parsed table schema
-/// * `Err(Error)` - Parsing error with detailed information
+/// Parse a CQL CREATE TABLE statement with default configuration.
 pub async fn parse_cql_schema_simple(cql: &str) -> Result<TableSchema> {
     parse_cql_schema_enhanced(cql, None).await
 }
 
-/// Parse CQL CREATE TABLE statement for high-performance scenarios
-///
-/// Uses nom parser with minimal validation for maximum speed.
-///
-/// # Arguments
-/// * `cql` - The CQL CREATE TABLE statement to parse
-///
-/// # Returns
-/// * `Ok(TableSchema)` - Successfully parsed table schema
-/// * `Err(Error)` - Parsing error with detailed information
+/// Parse a CQL CREATE TABLE statement using the fast (nom, minimal validation) preset.
 pub async fn parse_cql_schema_fast(cql: &str) -> Result<TableSchema> {
     parse_cql_schema_enhanced(cql, Some(SchemaParserConfig::fast())).await
 }
 
-/// Parse CQL CREATE TABLE statement with strict validation
-///
-/// Uses ANTLR parser with comprehensive validation and error reporting.
-///
-/// # Arguments
-/// * `cql` - The CQL CREATE TABLE statement to parse
-///
-/// # Returns
-/// * `Ok(TableSchema)` - Successfully parsed table schema
-/// * `Err(Error)` - Parsing error with detailed information
+/// Parse a CQL CREATE TABLE statement using the strict (ANTLR, full validation) preset.
 pub async fn parse_cql_schema_strict(cql: &str) -> Result<TableSchema> {
     parse_cql_schema_enhanced(cql, Some(SchemaParserConfig::strict())).await
 }
 
-/// Parse multiple CQL CREATE TABLE statements in batch
-///
-/// This function parses multiple statements efficiently using parallel processing
-/// when possible.
-///
-/// # Arguments
-/// * `statements` - Vector of CQL CREATE TABLE statements to parse
-/// * `config` - Optional configuration for parsing behavior
-///
-/// # Returns
-/// * `Ok(Vec<TableSchema>)` - Successfully parsed table schemas
-/// * `Err(Error)` - Parsing error with detailed information
+/// Parse multiple CQL CREATE TABLE statements sequentially using a shared configuration.
 pub async fn parse_cql_schemas_batch(
     statements: Vec<&str>,
     config: Option<SchemaParserConfig>,
 ) -> Result<Vec<TableSchema>> {
     let config = config.unwrap_or_default();
-
-    // For now, parse sequentially
-    // TODO: Implement parallel parsing when supported by backend
     let mut schemas = Vec::with_capacity(statements.len());
 
     for statement in statements {
-        let schema = parse_cql_schema_enhanced(statement, Some(config.clone())).await?;
-        schemas.push(schema);
+        schemas.push(parse_cql_schema_enhanced(statement, Some(config.clone())).await?);
     }
 
     Ok(schemas)
 }
 
-/// Validate CQL CREATE TABLE statement syntax without full parsing
+/// Validate CQL CREATE TABLE syntax without building the full schema.
 ///
-/// This is a lightweight function that checks if the statement has valid syntax
-/// without building the full AST or schema.
-///
-/// # Arguments
-/// * `cql` - The CQL CREATE TABLE statement to validate
-/// * `backend` - Optional parser backend to use (default: Auto)
-///
-/// # Returns
-/// * `Ok(true)` - Statement has valid syntax
-/// * `Ok(false)` - Statement has invalid syntax
-/// * `Err(Error)` - Validation error
+/// Uses `ParserBackend::Auto` when `backend` is `None`.
 #[allow(dead_code)]
 pub async fn validate_cql_schema_syntax(cql: &str, backend: Option<ParserBackend>) -> Result<bool> {
     let backend = backend.unwrap_or(ParserBackend::Auto);
-
-    let parser_config = ParserConfig::minimal().with_backend(backend);
-    let parser = ParserFactory::create(parser_config)?;
-
+    let parser = ParserFactory::create(ParserConfig::minimal().with_backend(backend))?;
     Ok(parser.validate_syntax(cql))
 }
 
-/// Extract table name from CQL CREATE TABLE statement
-///
-/// This is a utility function that quickly extracts just the table name
-/// without parsing the full statement.
-///
-/// # Arguments
-/// * `cql` - The CQL CREATE TABLE statement
-///
-/// # Returns
-/// * `Ok(String)` - Extracted table name
-/// * `Err(Error)` - Extraction error
+/// Extract just the table name from a CQL CREATE TABLE statement.
 pub async fn extract_table_name_enhanced(cql: &str) -> Result<String> {
-    let parser_config = ParserConfig::minimal().with_backend(ParserBackend::Nom);
-    let parser = ParserFactory::create(parser_config)?;
-
+    let parser = ParserFactory::create(ParserConfig::minimal().with_backend(ParserBackend::Nom))?;
     let statement = parser.parse(cql).await?;
 
     match statement {
@@ -244,54 +162,31 @@ pub async fn extract_table_name_enhanced(cql: &str) -> Result<String> {
     }
 }
 
-/// Compatibility wrapper for the existing parse_cql_schema function
+/// Backward-compatibility wrapper matching the original `nom::IResult` signature.
 ///
-/// **DEPRECATED**: This function exists only for backward compatibility.
-/// For new code, prefer using `cqlite_core::schema::parse_cql_schema()` which is
-/// synchronous and doesn't require tokio runtime creation.
-///
-/// This function maintains backward compatibility with the existing API
-/// by delegating to the synchronous nom-based parser directly, avoiding
-/// the overhead of creating a tokio runtime on every call.
-///
-/// # Arguments
-/// * `cql` - The CQL CREATE TABLE statement to parse
-///
-/// # Returns
-/// * `nom::IResult<&str, TableSchema>` - Result in original format for compatibility
+/// **DEPRECATED**: Prefer `cqlite_core::schema::parse_cql_schema()` — it is synchronous
+/// and does not require a tokio runtime. Delegates to the nom backend directly to
+/// avoid runtime-creation overhead on every call.
 #[deprecated(
     since = "0.2.0",
     note = "Use cqlite_core::schema::parse_cql_schema() instead - it's synchronous and more efficient"
 )]
 pub fn parse_cql_schema_compat(cql: &str) -> nom::IResult<&str, TableSchema> {
-    use super::config::ParserConfig;
     use super::nom_backend::NomParser;
 
-    // Create nom parser directly (synchronous, no runtime overhead)
-    let parser_config = ParserConfig::minimal();
-    let parser = NomParser::new(parser_config)
-        .map_err(|_e| nom::Err::Error(nom::error::Error::new(cql, nom::error::ErrorKind::Fail)))?;
-
-    // Use synchronous parsing (nom parser doesn't actually need async)
-    match parser.parse_create_table_to_schema(cql) {
-        Ok(schema) => Ok(("", schema)),
-        Err(_) => Err(nom::Err::Error(nom::error::Error::new(
-            cql,
-            nom::error::ErrorKind::Fail,
-        ))),
+    fn nom_err(cql: &str) -> nom::Err<nom::error::Error<&str>> {
+        nom::Err::Error(nom::error::Error::new(cql, nom::error::ErrorKind::Fail))
     }
+
+    let parser = NomParser::new(ParserConfig::minimal()).map_err(|_| nom_err(cql))?;
+    parser
+        .parse_create_table_to_schema(cql)
+        .map(|schema| ("", schema))
+        .map_err(|_| nom_err(cql))
 }
 
-/// Test if table name matches the given pattern
-///
-/// This is a utility function for backward compatibility.
-///
-/// # Arguments
-/// * `schema` - The table schema to check
-/// * `pattern` - The pattern to match against
-///
-/// # Returns
-/// * `bool` - Whether the table name matches the pattern
+/// Returns `true` if `pattern` matches either the unqualified table name or the
+/// fully qualified `keyspace.table` form.
 pub fn table_name_matches_enhanced(schema: &TableSchema, pattern: &str) -> bool {
     schema.table == pattern || format!("{}.{}", schema.keyspace, schema.table) == pattern
 }
