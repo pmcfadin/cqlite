@@ -9,9 +9,9 @@ use super::traits::SourcePosition;
 use crate::error::Result;
 use nom::{
     branch::alt,
-    bytes::complete::{tag_no_case, take_while1},
+    bytes::complete::{tag_no_case, take_while1, take_while_m_n},
     character::complete::{char, digit1, multispace0, multispace1},
-    combinator::{map, opt},
+    combinator::{map, opt, recognize},
     multi::{separated_list0, separated_list1},
     sequence::{preceded, separated_pair, tuple},
     IResult,
@@ -27,6 +27,45 @@ const MAX_IDENTIFIER_LENGTH: usize = 48; // Cassandra limit
 
 // Batch Limits
 const MAX_BATCH_STATEMENTS: usize = 65535; // Matches Cassandra's warn threshold
+
+/// ASCII-case-insensitive prefix test. Avoids allocating via `to_lowercase()`
+/// on (potentially multi-megabyte) parser input. `keyword` is expected to be
+/// lowercase ASCII.
+fn starts_with_ascii_ci(input: &str, keyword: &str) -> bool {
+    let bytes = input.as_bytes();
+    let kw = keyword.as_bytes();
+    bytes.len() >= kw.len()
+        && bytes[..kw.len()]
+            .iter()
+            .zip(kw)
+            .all(|(a, b)| a.eq_ignore_ascii_case(b))
+}
+
+/// Enforce the shared [`MAX_INPUT_LENGTH`] DoS guard (Issue #402).
+fn check_input_length(input: &str) -> Result<()> {
+    if input.len() > MAX_INPUT_LENGTH {
+        return Err(ParserError::resource_limit(
+            "input_length",
+            MAX_INPUT_LENGTH as u64,
+            input.len() as u64,
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Convert a nom parse result into the crate `Result`, attaching a `kind` label
+/// (e.g. "INSERT", "UPDATE") for the error message.
+fn finish_parse<T>(kind: &str, result: IResult<&str, T>) -> Result<T> {
+    match result {
+        Ok((_, value)) => Ok(value),
+        Err(e) => Err(ParserError::syntax(
+            format!("Failed to parse {} statement: {:?}", kind, e),
+            SourcePosition::start(),
+        )
+        .into()),
+    }
+}
 
 /// Validate identifier (Issue #403)
 fn validate_identifier(name: &str) -> Result<()> {
@@ -191,38 +230,25 @@ fn qualified_table_name(input: &str) -> IResult<&str, CqlTable> {
 
 /// Parse integer literal
 fn integer_literal(input: &str) -> IResult<&str, i64> {
-    let (input, sign) = opt(char('-'))(input)?;
-    let (input, digits) = digit1(input)?;
-
-    let num_str = match sign {
-        Some(_) => format!("-{}", digits),
-        None => digits.to_string(),
-    };
-
+    let (rest, num_str) = recognize(tuple((opt(char('-')), digit1)))(input)?;
     let value = num_str.parse::<i64>().map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
     })?;
-
-    Ok((input, value))
+    Ok((rest, value))
 }
 
 /// Parse float literal
 fn float_literal(input: &str) -> IResult<&str, f64> {
-    let (input, sign) = opt(char('-'))(input)?;
-    let (input, int_part) = digit1(input)?;
-    let (input, _) = char('.')(input)?;
-    let (input, frac_part) = digit1(input)?;
-
-    let num_str = match sign {
-        Some(_) => format!("-{}.{}", int_part, frac_part),
-        None => format!("{}.{}", int_part, frac_part),
-    };
-
+    let (rest, num_str) = recognize(tuple((
+        opt(char('-')),
+        digit1,
+        char('.'),
+        digit1,
+    )))(input)?;
     let value = num_str.parse::<f64>().map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
     })?;
-
-    Ok((input, value))
+    Ok((rest, value))
 }
 
 /// Parse string literal (single-quoted)
@@ -279,37 +305,23 @@ fn string_literal(input: &str) -> IResult<&str, String> {
     Ok((&input[consumed..], result))
 }
 
-/// Parse UUID literal with strict 8-4-4-4-12 format validation (Issue #402)
+/// Parse UUID literal with strict 8-4-4-4-12 hex format validation (Issue #402).
 fn uuid_literal(input: &str) -> IResult<&str, String> {
-    // UUID format: 8-4-4-4-12 hex digits
-    // xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx
-
-    // Parse 8 hex digits
-    let (input, part1) =
-        nom::bytes::complete::take_while_m_n(8, 8, |c: char| c.is_ascii_hexdigit())(input)?;
-    let (input, _) = char('-')(input)?;
-
-    // Parse 4 hex digits
-    let (input, part2) =
-        nom::bytes::complete::take_while_m_n(4, 4, |c: char| c.is_ascii_hexdigit())(input)?;
-    let (input, _) = char('-')(input)?;
-
-    // Parse 4 hex digits
-    let (input, part3) =
-        nom::bytes::complete::take_while_m_n(4, 4, |c: char| c.is_ascii_hexdigit())(input)?;
-    let (input, _) = char('-')(input)?;
-
-    // Parse 4 hex digits
-    let (input, part4) =
-        nom::bytes::complete::take_while_m_n(4, 4, |c: char| c.is_ascii_hexdigit())(input)?;
-    let (input, _) = char('-')(input)?;
-
-    // Parse 12 hex digits
-    let (input, part5) =
-        nom::bytes::complete::take_while_m_n(12, 12, |c: char| c.is_ascii_hexdigit())(input)?;
-
-    let uuid = format!("{}-{}-{}-{}-{}", part1, part2, part3, part4, part5);
-    Ok((input, uuid))
+    fn hex_run(n: usize) -> impl Fn(&str) -> IResult<&str, &str> {
+        move |i| take_while_m_n(n, n, |c: char| c.is_ascii_hexdigit())(i)
+    }
+    let (rest, matched) = recognize(tuple((
+        hex_run(8),
+        char('-'),
+        hex_run(4),
+        char('-'),
+        hex_run(4),
+        char('-'),
+        hex_run(4),
+        char('-'),
+        hex_run(12),
+    )))(input)?;
+    Ok((rest, matched.to_string()))
 }
 
 /// Parse blob literal (hex string with 0x prefix) with even length validation (Issue #402)
@@ -328,93 +340,71 @@ fn blob_literal(input: &str) -> IResult<&str, String> {
     Ok((input, hex.to_string()))
 }
 
+/// Emit a `Failure` with [`TooLarge`] — shared by depth and size checks (Issue #402).
+fn too_large<T>(input: &str) -> IResult<&str, T> {
+    Err(nom::Err::Failure(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::TooLarge,
+    )))
+}
+
+/// Parse the `open..close` body of a collection literal with depth tracking
+/// and a post-parse size check against [`MAX_COLLECTION_SIZE`] (Issue #402).
+fn collection_body<'a, T, P>(
+    input: &'a str,
+    depth: usize,
+    open: char,
+    close: char,
+    mut parse_items: P,
+) -> IResult<&'a str, Vec<T>>
+where
+    P: FnMut(&'a str, usize) -> IResult<&'a str, Vec<T>>,
+{
+    if depth >= MAX_NESTING_DEPTH {
+        return too_large(input);
+    }
+
+    let (input, _) = char(open)(input)?;
+    let (input, _) = ws(input)?;
+    let (input, items) = parse_items(input, depth)?;
+    let (input, _) = ws(input)?;
+    let (input, _) = char(close)(input)?;
+
+    if items.len() > MAX_COLLECTION_SIZE {
+        return too_large(input);
+    }
+
+    Ok((input, items))
+}
+
 /// Parse list literal with depth tracking (Issue #402)
 fn list_literal_depth(input: &str, depth: usize) -> IResult<&str, CqlCollectionLiteral> {
-    // Check nesting depth
-    if depth >= MAX_NESTING_DEPTH {
-        return Err(nom::Err::Failure(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
-    }
-
-    let (input, _) = char('[')(input)?;
-    let (input, _) = ws(input)?;
-    let (input, items) =
-        separated_list0(tuple((ws, char(','), ws)), |i| literal_depth(i, depth + 1))(input)?;
-    let (input, _) = ws(input)?;
-    let (input, _) = char(']')(input)?;
-
-    // Check collection size limit
-    if items.len() > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Failure(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
-    }
-
+    let (input, items) = collection_body(input, depth, '[', ']', |i, d| {
+        separated_list0(tuple((ws, char(','), ws)), |i2| literal_depth(i2, d + 1))(i)
+    })?;
     Ok((input, CqlCollectionLiteral::List(items)))
 }
 
 /// Parse set literal with depth tracking (Issue #402)
 fn set_literal_depth(input: &str, depth: usize) -> IResult<&str, CqlCollectionLiteral> {
-    // Check nesting depth
-    if depth >= MAX_NESTING_DEPTH {
-        return Err(nom::Err::Failure(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
-    }
-
-    let (input, _) = char('{')(input)?;
-    let (input, _) = ws(input)?;
-    let (input, items) =
-        separated_list0(tuple((ws, char(','), ws)), |i| literal_depth(i, depth + 1))(input)?;
-    let (input, _) = ws(input)?;
-    let (input, _) = char('}')(input)?;
-
-    // Check collection size limit
-    if items.len() > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Failure(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
-    }
-
+    let (input, items) = collection_body(input, depth, '{', '}', |i, d| {
+        separated_list0(tuple((ws, char(','), ws)), |i2| literal_depth(i2, d + 1))(i)
+    })?;
     Ok((input, CqlCollectionLiteral::Set(items)))
 }
 
 /// Parse map literal with depth tracking (Issue #402)
 fn map_literal_depth(input: &str, depth: usize) -> IResult<&str, CqlCollectionLiteral> {
-    // Check nesting depth
-    if depth >= MAX_NESTING_DEPTH {
-        return Err(nom::Err::Failure(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
-    }
-
-    let (input, _) = char('{')(input)?;
-    let (input, _) = ws(input)?;
-    let (input, pairs) = separated_list0(
-        tuple((ws, char(','), ws)),
-        separated_pair(
-            |i| literal_depth(i, depth + 1),
-            tuple((ws, char(':'), ws)),
-            |i| literal_depth(i, depth + 1),
-        ),
-    )(input)?;
-    let (input, _) = ws(input)?;
-    let (input, _) = char('}')(input)?;
-
-    // Check collection size limit
-    if pairs.len() > MAX_COLLECTION_SIZE {
-        return Err(nom::Err::Failure(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::TooLarge,
-        )));
-    }
-
+    let (input, pairs) = collection_body(input, depth, '{', '}', |i, d| {
+        separated_list0(
+            tuple((ws, char(','), ws)),
+            separated_pair(
+                |i2| literal_depth(i2, d + 1),
+                tuple((ws, char(':'), ws)),
+                |i2| literal_depth(i2, d + 1),
+            ),
+        )(i)
+    })?;
     Ok((input, CqlCollectionLiteral::Map(pairs)))
 }
 
@@ -475,23 +465,17 @@ fn where_clause(input: &str) -> IResult<&str, CqlExpression> {
     let (input, conditions) =
         separated_list1(tuple((ws, keyword("and"), ws)), where_condition)(input)?;
 
-    // Combine conditions with AND
-    // Safety: separated_list1 guarantees at least one element, so reduce always returns Some
-    let result = match conditions
+    // `separated_list1` guarantees >= 1 element, so `reduce` always returns `Some`.
+    let result = conditions
         .into_iter()
         .reduce(|acc, cond| CqlExpression::Binary {
             left: Box::new(acc),
             operator: CqlBinaryOperator::And,
             right: Box::new(cond),
-        }) {
-        Some(expr) => expr,
-        None => {
-            return Err(nom::Err::Error(nom::error::Error::new(
-                input,
-                nom::error::ErrorKind::Many1,
-            )))
-        }
-    };
+        })
+        .ok_or_else(|| {
+            nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Many1))
+        })?;
 
     Ok((input, result))
 }
@@ -538,14 +522,8 @@ fn using_clause(input: &str) -> IResult<&str, CqlUsing> {
 
     let mut ttl = None;
     let mut timestamp = None;
-
-    match first_option {
-        UsingOption::Ttl(t) => ttl = Some(t),
-        UsingOption::Timestamp(ts) => timestamp = Some(ts),
-    }
-
-    if let Some(second) = second_option {
-        match second {
+    for opt_val in [Some(first_option), second_option].into_iter().flatten() {
+        match opt_val {
             UsingOption::Ttl(t) => ttl = Some(t),
             UsingOption::Timestamp(ts) => timestamp = Some(ts),
         }
@@ -576,26 +554,8 @@ fn using_option(input: &str) -> IResult<&str, UsingOption> {
 
 /// Parse INSERT statement
 pub fn parse_insert_statement(input: &str) -> Result<CqlInsert> {
-    // Check input length (Issue #402 - DoS protection)
-    if input.len() > MAX_INPUT_LENGTH {
-        return Err(ParserError::resource_limit(
-            "input_length",
-            MAX_INPUT_LENGTH as u64,
-            input.len() as u64,
-        )
-        .into());
-    }
-
-    let result = insert_statement_impl(input);
-
-    match result {
-        Ok((_, insert)) => Ok(insert),
-        Err(e) => Err(ParserError::syntax(
-            format!("Failed to parse INSERT statement: {:?}", e),
-            SourcePosition::start(),
-        )
-        .into()),
-    }
+    check_input_length(input)?;
+    finish_parse("INSERT", insert_statement_impl(input))
 }
 
 /// Parse the trailing clause shared by both VALUES and JSON INSERT forms:
@@ -675,26 +635,8 @@ fn insert_statement_impl(input: &str) -> IResult<&str, CqlInsert> {
 
 /// Parse UPDATE statement
 pub fn parse_update_statement(input: &str) -> Result<CqlUpdate> {
-    // Check input length (Issue #402 - DoS protection)
-    if input.len() > MAX_INPUT_LENGTH {
-        return Err(ParserError::resource_limit(
-            "input_length",
-            MAX_INPUT_LENGTH as u64,
-            input.len() as u64,
-        )
-        .into());
-    }
-
-    let result = update_statement_impl(input);
-
-    match result {
-        Ok((_, update)) => Ok(update),
-        Err(e) => Err(ParserError::syntax(
-            format!("Failed to parse UPDATE statement: {:?}", e),
-            SourcePosition::start(),
-        )
-        .into()),
-    }
+    check_input_length(input)?;
+    finish_parse("UPDATE", update_statement_impl(input))
 }
 
 fn update_statement_impl(input: &str) -> IResult<&str, CqlUpdate> {
@@ -765,26 +707,8 @@ fn assignment_operator(input: &str) -> IResult<&str, CqlAssignmentOperator> {
 
 /// Parse DELETE statement
 pub fn parse_delete_statement(input: &str) -> Result<CqlDelete> {
-    // Check input length (Issue #402 - DoS protection)
-    if input.len() > MAX_INPUT_LENGTH {
-        return Err(ParserError::resource_limit(
-            "input_length",
-            MAX_INPUT_LENGTH as u64,
-            input.len() as u64,
-        )
-        .into());
-    }
-
-    let result = delete_statement_impl(input);
-
-    match result {
-        Ok((_, delete)) => Ok(delete),
-        Err(e) => Err(ParserError::syntax(
-            format!("Failed to parse DELETE statement: {:?}", e),
-            SourcePosition::start(),
-        )
-        .into()),
-    }
+    check_input_length(input)?;
+    finish_parse("DELETE", delete_statement_impl(input))
 }
 
 fn delete_statement_impl(input: &str) -> IResult<&str, CqlDelete> {
@@ -792,10 +716,9 @@ fn delete_statement_impl(input: &str) -> IResult<&str, CqlDelete> {
     let (input, _) = keyword("delete")(input)?;
     let (input, _) = ws(input)?;
 
-    // Check if we have column list or FROM directly
-    // Peek ahead to see if next keyword is FROM
+    // Check if we have column list or FROM directly by peeking at the next keyword.
     let trimmed = input.trim_start();
-    let has_from = trimmed.to_lowercase().starts_with("from");
+    let has_from = starts_with_ascii_ci(trimmed, "from");
 
     let (input, columns) = if has_from {
         (input, vec![])
@@ -842,26 +765,8 @@ fn delete_statement_impl(input: &str) -> IResult<&str, CqlDelete> {
 /// statement independently against the provided schema. Limited to
 /// [`MAX_BATCH_STATEMENTS`] statements for DoS protection.
 pub fn parse_batch_statement(input: &str) -> Result<CqlBatch> {
-    // Check input length (Issue #402 - DoS protection)
-    if input.len() > MAX_INPUT_LENGTH {
-        return Err(ParserError::resource_limit(
-            "input_length",
-            MAX_INPUT_LENGTH as u64,
-            input.len() as u64,
-        )
-        .into());
-    }
-
-    let result = batch_statement_impl(input);
-
-    match result {
-        Ok((_, batch)) => Ok(batch),
-        Err(e) => Err(ParserError::syntax(
-            format!("Failed to parse BATCH statement: {:?}", e),
-            SourcePosition::start(),
-        )
-        .into()),
-    }
+    check_input_length(input)?;
+    finish_parse("BATCH", batch_statement_impl(input))
 }
 
 fn batch_statement_impl(input: &str) -> IResult<&str, CqlBatch> {
@@ -884,8 +789,7 @@ fn batch_statement_impl(input: &str) -> IResult<&str, CqlBatch> {
     let mut remaining = input;
     loop {
         let trimmed = remaining.trim_start();
-        // Check for APPLY BATCH
-        if trimmed.to_lowercase().starts_with("apply") {
+        if starts_with_ascii_ci(trimmed, "apply") {
             remaining = trimmed;
             break;
         }
@@ -893,15 +797,13 @@ fn batch_statement_impl(input: &str) -> IResult<&str, CqlBatch> {
             break;
         }
 
-        // Determine which statement type
-        let lowered = trimmed.to_lowercase();
-        let (rest, stmt) = if lowered.starts_with("insert") {
+        let (rest, stmt) = if starts_with_ascii_ci(trimmed, "insert") {
             let (r, ins) = insert_statement_impl(trimmed)?;
             (r, CqlBatchStatement::Insert(ins))
-        } else if lowered.starts_with("update") {
+        } else if starts_with_ascii_ci(trimmed, "update") {
             let (r, upd) = update_statement_impl(trimmed)?;
             (r, CqlBatchStatement::Update(upd))
-        } else if lowered.starts_with("delete") {
+        } else if starts_with_ascii_ci(trimmed, "delete") {
             let (r, del) = delete_statement_impl(trimmed)?;
             (r, CqlBatchStatement::Delete(del))
         } else {
@@ -947,23 +849,19 @@ fn batch_statement_impl(input: &str) -> IResult<&str, CqlBatch> {
 
 fn batch_type_parser(input: &str) -> IResult<&str, CqlBatchType> {
     let trimmed = input.trim_start();
-    let lowered = trimmed.to_lowercase();
-    if lowered.starts_with("unlogged") {
-        let (input, _) = keyword("unlogged")(trimmed)?;
-        let (input, _) = ws1(input)?;
-        Ok((input, CqlBatchType::Unlogged))
-    } else if lowered.starts_with("counter") {
-        let (input, _) = keyword("counter")(trimmed)?;
-        let (input, _) = ws1(input)?;
-        Ok((input, CqlBatchType::Counter))
-    } else if lowered.starts_with("logged") {
-        let (input, _) = keyword("logged")(trimmed)?;
-        let (input, _) = ws1(input)?;
-        Ok((input, CqlBatchType::Logged))
-    } else {
-        // Default: logged
-        Ok((input, CqlBatchType::Logged))
+    for (kw, ty) in [
+        ("unlogged", CqlBatchType::Unlogged),
+        ("counter", CqlBatchType::Counter),
+        ("logged", CqlBatchType::Logged),
+    ] {
+        if starts_with_ascii_ci(trimmed, kw) {
+            let (rest, _) = keyword(kw)(trimmed)?;
+            let (rest, _) = ws1(rest)?;
+            return Ok((rest, ty));
+        }
     }
+    // Default: logged (no batch-type keyword present; preserve original `input`)
+    Ok((input, CqlBatchType::Logged))
 }
 
 #[cfg(test)]
