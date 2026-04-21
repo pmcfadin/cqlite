@@ -301,9 +301,8 @@ impl ParserConfig {
 
     /// Create a fast configuration optimized for performance
     ///
-    /// This configuration enables parallel processing which requires a minimum of 2 worker threads.
-    /// The thread count is automatically set to max(available_cpus, 2) to ensure compatibility
-    /// with the parallel feature even in single-core CI environments.
+    /// Parallel parsing requires >=2 worker threads, so the thread count is
+    /// set to `max(num_cpus, 2)` to stay valid even on single-core CI runners.
     pub fn fast() -> Self {
         Self {
             backend: ParserBackend::Nom,
@@ -317,8 +316,6 @@ impl ParserConfig {
             performance: PerformanceSettings {
                 optimization_level: 3,
                 enable_jit: true,
-                // Ensure at least 2 threads for parallel feature compatibility
-                // This prevents validation failures in single-core CI environments
                 worker_threads: (num_cpus::get() as u32).max(2),
                 ..Default::default()
             },
@@ -382,8 +379,6 @@ impl ParserConfig {
             max_string_length: 10_000,
             max_parameters: 100,
             strict_validation: false,
-            allow_experimental: false,
-            backend_options: HashMap::new(),
             features: vec![],
             memory_limits: MemoryLimits {
                 max_ast_size: 10 * 1024 * 1024,   // 10 MB
@@ -404,8 +399,7 @@ impl ParserConfig {
                 collect_error_stats: false,
                 ..Default::default()
             },
-            memory_settings: MemorySettings::default(),
-            security_settings: SecuritySettings::default(),
+            ..Default::default()
         }
     }
 
@@ -427,43 +421,11 @@ impl ParserConfig {
         self
     }
 
-    /// Add a feature
+    /// Add a feature (no-op if already present)
     pub fn with_feature(mut self, feature: ParserFeature) -> Self {
         if !self.features.contains(&feature) {
             self.features.push(feature);
         }
-        self
-    }
-
-    /// Add multiple features
-    pub fn with_features(mut self, features: Vec<ParserFeature>) -> Self {
-        for feature in features {
-            self = self.with_feature(feature);
-        }
-        self
-    }
-
-    /// Set a backend-specific option
-    pub fn with_backend_option(mut self, key: String, value: serde_json::Value) -> Self {
-        self.backend_options.insert(key, value);
-        self
-    }
-
-    /// Set memory limits
-    pub fn with_memory_limits(mut self, limits: MemoryLimits) -> Self {
-        self.memory_limits = limits;
-        self
-    }
-
-    /// Set performance settings
-    pub fn with_performance(mut self, performance: PerformanceSettings) -> Self {
-        self.performance = performance;
-        self
-    }
-
-    /// Set error handling settings
-    pub fn with_error_handling(mut self, error_handling: ErrorHandlingSettings) -> Self {
-        self.error_handling = error_handling;
         self
     }
 
@@ -472,61 +434,39 @@ impl ParserConfig {
         self.features.contains(feature)
     }
 
-    /// Get a backend-specific option
-    pub fn get_backend_option(&self, key: &str) -> Option<&serde_json::Value> {
-        self.backend_options.get(key)
-    }
-
     /// Validate the configuration
     pub fn validate(&self) -> Result<(), String> {
-        // Validate timeout
         if self.timeout.as_secs() == 0 {
             return Err("Timeout must be greater than 0".to_string());
         }
-
-        // Validate expression depth
         if self.max_expression_depth == 0 {
             return Err("Max expression depth must be greater than 0".to_string());
         }
-
-        // Validate collection size
         if self.max_collection_size == 0 {
             return Err("Max collection size must be greater than 0".to_string());
         }
-
-        // Validate memory limits
         if self.memory_limits.max_ast_size == 0 {
             return Err("Max AST size must be greater than 0".to_string());
         }
-
         if self.memory_limits.max_stack_depth == 0 {
             return Err("Max stack depth must be greater than 0".to_string());
         }
-
-        // Validate performance settings
         if self.performance.worker_threads == 0 {
             return Err("Worker threads must be greater than 0".to_string());
         }
-
-        // Validate buffer sizes are reasonable
         if self.performance.stream_buffer_size < 1024 {
             return Err("Stream buffer size should be at least 1KB for efficiency".to_string());
         }
-
         if self.performance.optimization_level > 3 {
             return Err("Optimization level must be 0-3".to_string());
         }
-
-        // Validate error handling settings
         if self.error_handling.max_errors == 0 {
             return Err("Max errors must be greater than 0".to_string());
         }
 
-        // Check feature compatibility
         if self.has_feature(&ParserFeature::Parallel) && self.performance.worker_threads == 1 {
             return Err("Parallel parsing requires at least 2 worker threads. Use ParserConfig::fast() for automatic thread count adjustment.".to_string());
         }
-
         if self.has_feature(&ParserFeature::Streaming)
             && matches!(self.backend, ParserBackend::Antlr)
         {
@@ -534,77 +474,6 @@ impl ParserConfig {
         }
 
         Ok(())
-    }
-
-    /// Create a configuration suitable for the given input characteristics
-    pub fn for_input(input_size: usize, complexity: InputComplexity) -> Self {
-        match complexity {
-            InputComplexity::Simple => {
-                if input_size < 1000 {
-                    Self::minimal()
-                } else {
-                    Self::fast()
-                }
-            }
-            InputComplexity::Medium => Self::default(),
-            InputComplexity::Complex => Self::strict().with_timeout(Duration::from_secs(60)),
-        }
-    }
-}
-
-/// Input complexity classification
-#[derive(Debug, Clone, PartialEq)]
-pub enum InputComplexity {
-    /// Simple queries with basic operations
-    Simple,
-    /// Medium complexity with joins, subqueries
-    Medium,
-    /// Complex queries with deep nesting, many conditions
-    Complex,
-}
-
-/// Configuration builder for fluent API
-#[derive(Debug, Default)]
-pub struct ParserConfigBuilder {
-    config: ParserConfig,
-}
-
-impl ParserConfigBuilder {
-    /// Create a new builder
-    pub fn new() -> Self {
-        Self {
-            config: ParserConfig::default(),
-        }
-    }
-
-    /// Set backend
-    pub fn backend(mut self, backend: ParserBackend) -> Self {
-        self.config.backend = backend;
-        self
-    }
-
-    /// Set timeout
-    pub fn timeout(mut self, timeout: Duration) -> Self {
-        self.config.timeout = timeout;
-        self
-    }
-
-    /// Enable feature
-    pub fn feature(mut self, feature: ParserFeature) -> Self {
-        self.config = self.config.with_feature(feature);
-        self
-    }
-
-    /// Set strict validation
-    pub fn strict(mut self, strict: bool) -> Self {
-        self.config.strict_validation = strict;
-        self
-    }
-
-    /// Build the configuration
-    pub fn build(self) -> Result<ParserConfig, String> {
-        self.config.validate()?;
-        Ok(self.config)
     }
 }
 
@@ -643,29 +512,12 @@ mod tests {
         let mut config = ParserConfig::default();
         assert!(config.validate().is_ok());
 
-        // Invalid timeout
         config.timeout = Duration::from_secs(0);
         assert!(config.validate().is_err());
 
-        // Reset and test invalid optimization level
         config = ParserConfig::default();
         config.performance.optimization_level = 5;
         assert!(config.validate().is_err());
-    }
-
-    #[test]
-    fn test_config_builder() {
-        let config = ParserConfigBuilder::new()
-            .backend(ParserBackend::Nom)
-            .timeout(Duration::from_secs(10))
-            .feature(ParserFeature::Caching)
-            .strict(false)
-            .build()
-            .unwrap();
-
-        assert!(matches!(config.backend, ParserBackend::Nom));
-        assert!(!config.strict_validation);
-        assert!(config.has_feature(&ParserFeature::Caching));
     }
 
     #[test]
@@ -675,16 +527,6 @@ mod tests {
 
         config = config.with_feature(ParserFeature::Streaming);
         assert!(config.has_feature(&ParserFeature::Streaming));
-    }
-
-    #[test]
-    fn test_input_based_config() {
-        let simple_config = ParserConfig::for_input(100, InputComplexity::Simple);
-        assert!(matches!(simple_config.backend, ParserBackend::Nom));
-
-        let complex_config = ParserConfig::for_input(10000, InputComplexity::Complex);
-        assert!(matches!(complex_config.backend, ParserBackend::Antlr));
-        assert_eq!(complex_config.timeout, Duration::from_secs(60));
     }
 
     #[test]
@@ -704,17 +546,5 @@ mod tests {
             .validate()
             .expect_err("streaming should be incompatible with ANTLR backend");
         assert!(err.contains("Streaming is not supported with ANTLR backend"));
-    }
-
-    #[test]
-    fn test_builder_validation_failure() {
-        let result = ParserConfigBuilder::new()
-            .backend(ParserBackend::Auto)
-            .timeout(Duration::from_secs(0))
-            .build();
-        assert!(
-            result.is_err(),
-            "zero timeout should fail builder validation"
-        );
     }
 }
