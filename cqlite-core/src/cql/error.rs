@@ -190,15 +190,16 @@ impl ParserError {
 
     /// Create an unsupported feature error
     pub fn unsupported_feature(backend: impl Into<String>, feature: impl Into<String>) -> Self {
-        let backend_str = backend.into();
-        let feature_str = feature.into();
+        let backend = backend.into();
+        let feature = feature.into();
+        let message = format!(
+            "Feature '{}' is not supported by backend '{}'",
+            feature, backend
+        );
         Self::UnsupportedFeature {
-            backend: backend_str.clone(),
-            feature: feature_str.clone(),
-            message: format!(
-                "Feature '{}' is not supported by backend '{}'",
-                feature_str, backend_str
-            ),
+            backend,
+            feature,
+            message,
         }
     }
 
@@ -228,10 +229,11 @@ impl ParserError {
 
     /// Create a resource limit exceeded error
     pub fn resource_limit(resource: impl Into<String>, limit: u64, actual: u64) -> Self {
-        let resource_str = resource.into();
+        let limit_type = resource.into();
+        let message = format!("Resource '{}' limit exceeded", limit_type);
         Self::ResourceLimit {
-            message: format!("Resource '{}' limit exceeded", resource_str),
-            limit_type: resource_str,
+            message,
+            limit_type,
             current_value: actual,
             max_value: limit,
         }
@@ -265,20 +267,19 @@ impl ParserError {
         }
     }
 
-    /// Check if this error is recoverable
+    /// Check if this error is recoverable.
+    ///
+    /// Recoverable errors include those where switching backends, retrying with
+    /// a longer timeout, or raising a resource limit may allow progress.
     pub fn is_recoverable(&self) -> bool {
-        match self {
-            Self::SyntaxError { .. } => false,
-            Self::SemanticError { .. } => false,
-            Self::LexicalError { .. } => false,
-            Self::BackendError { .. } => true, // Might be able to switch backends
-            Self::TypeError { .. } => false,
-            Self::ConfigurationError { .. } => true,
-            Self::UnsupportedFeature { .. } => true, // Can switch backends
-            Self::InternalError { .. } => false,
-            Self::Timeout { .. } => true, // Can retry with longer timeout
-            Self::ResourceLimit { .. } => true, // Can increase limits
-        }
+        matches!(
+            self,
+            Self::BackendError { .. }
+                | Self::ConfigurationError { .. }
+                | Self::UnsupportedFeature { .. }
+                | Self::Timeout { .. }
+                | Self::ResourceLimit { .. }
+        )
     }
 
     /// Get the error category
@@ -523,7 +524,6 @@ impl ErrorContext {
             };
             snippet.push_str(&format!("{}{:4}: {}\n", marker, line_num, line));
 
-            // Add error indicator for the specific column
             if line_num == error_line {
                 let col = position.column as usize;
                 if col > 0 && col <= line.len() {
@@ -594,22 +594,15 @@ pub mod utils {
     }
 
     /// Chain multiple parser errors into a single error
-    pub fn chain_errors(errors: Vec<ParserError>) -> ParserError {
-        if errors.is_empty() {
-            return ParserError::internal("No errors to chain");
+    pub fn chain_errors(mut errors: Vec<ParserError>) -> ParserError {
+        match errors.len() {
+            0 => ParserError::internal("No errors to chain"),
+            1 => errors.remove(0),
+            _ => {
+                let messages: Vec<String> = errors.iter().map(|e| e.message()).collect();
+                ParserError::internal(format!("Multiple errors: {}", messages.join("; ")))
+            }
         }
-
-        if errors.len() == 1 {
-            return errors
-                .into_iter()
-                .next()
-                .unwrap_or_else(|| ParserError::internal("No error"));
-        }
-
-        let messages: Vec<String> = errors.iter().map(|e| e.message()).collect();
-        let combined_message = format!("Multiple errors: {}", messages.join("; "));
-
-        ParserError::internal(combined_message)
     }
 }
 
@@ -631,7 +624,7 @@ mod tests {
 
         let backend_err = ParserError::backend("nom", "Parse failed");
         assert!(matches!(backend_err, ParserError::BackendError { .. }));
-        assert!(backend_err.is_recoverable()); // Backend errors are recoverable
+        assert!(backend_err.is_recoverable());
     }
 
     #[test]
@@ -665,7 +658,6 @@ mod tests {
         let parser_err = ParserError::syntax("Expected token", SourcePosition::start());
         let core_err: Error = parser_err.into();
 
-        // Should convert to CQL parse error
         assert!(matches!(core_err, Error::CqlParse(_)));
     }
 }
