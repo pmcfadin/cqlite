@@ -658,23 +658,12 @@ impl CqlIdentifier {
 
     /// Check if the name is valid as an unquoted identifier
     fn is_valid_unquoted(&self) -> bool {
-        if self.name.is_empty() {
-            return false;
-        }
-
-        // First character must be letter or underscore
-        let Some(first) = self.name.chars().next() else {
+        let mut chars = self.name.chars();
+        let Some(first) = chars.next() else {
             return false;
         };
-        if !first.is_ascii_alphabetic() && first != '_' {
-            return false;
-        }
-
-        // Remaining characters must be alphanumeric or underscore
-        self.name
-            .chars()
-            .skip(1)
-            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+        (first.is_ascii_alphabetic() || first == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
     }
 }
 
