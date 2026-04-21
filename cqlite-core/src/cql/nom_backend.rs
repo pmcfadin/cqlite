@@ -5,7 +5,6 @@
 
 use crate::error::Result;
 use async_trait::async_trait;
-use std::time::Instant;
 
 use super::{
     ast::*,
@@ -22,41 +21,36 @@ pub struct NomParser {}
 impl NomParser {
     /// Create a new nom parser with the given configuration
     pub fn new(config: ParserConfig) -> Result<Self> {
-        // Validate nom-specific configuration
         Self::validate_config(&config)?;
-
         Ok(Self {})
     }
 
-    /// Validate configuration for nom backend
+    /// Reject configurations that request features the nom backend does not implement.
     fn validate_config(config: &ParserConfig) -> Result<()> {
         use super::config::ParserFeature;
 
-        // Check for unsupported features
         if config.has_feature(&ParserFeature::CodeCompletion) {
             return Err(ParserError::unsupported_feature("nom", "code completion").into());
         }
-
         if config.has_feature(&ParserFeature::SyntaxHighlighting) {
             return Err(ParserError::unsupported_feature("nom", "syntax highlighting").into());
         }
-
         Ok(())
     }
 
-    /// Get backend information
     /// Parse CQL CREATE TABLE statement and return TableSchema for backward compatibility
     pub fn parse_create_table_to_schema(&self, input: &str) -> Result<TableSchema> {
         match self.parse_create_table_statement(input)? {
             CqlStatement::CreateTable(ast) => Ok(self.convert_ast_to_table_schema(&ast)),
             _ => Err(ParserError::syntax(
-                "Expected CREATE TABLE statement".to_string(),
+                "Expected CREATE TABLE statement",
                 super::traits::SourcePosition::start(),
             )
             .into()),
         }
     }
 
+    /// Get backend information
     pub fn backend_info() -> ParserBackendInfo {
         ParserBackendInfo {
             name: "nom".to_string(),
@@ -79,13 +73,6 @@ impl NomParser {
 #[async_trait]
 impl CqlParser for NomParser {
     async fn parse(&self, input: &str) -> Result<CqlStatement> {
-        let _start = Instant::now();
-
-        // Use real nom parsing implementation
-
-        // Note: We can't update stats here because we have &self, not &mut self
-        // In a real implementation, we'd use interior mutability or a different approach
-
         self.parse_statement_impl(input)
     }
 
@@ -129,38 +116,31 @@ impl NomParser {
         &self,
         schema: crate::schema::TableSchema,
     ) -> Result<CqlCreateTable> {
-        // Convert table name
-        let table = CqlTable::new(&schema.table);
-
-        // Convert columns
-        let mut columns = Vec::new();
-        for column in &schema.columns {
-            let data_type = self.convert_cql_type_string_to_ast(&column.data_type)?;
-            columns.push(CqlColumnDef {
-                name: CqlIdentifier::new(&column.name),
-                data_type,
-                is_static: column.is_static,
-            });
-        }
-
-        // Convert primary key
-        let partition_key = schema
-            .partition_keys
+        let columns = schema
+            .columns
             .iter()
-            .map(|k| CqlIdentifier::new(&k.name))
-            .collect();
-        let clustering_key = schema
-            .clustering_keys
-            .iter()
-            .map(|k| CqlIdentifier::new(&k.name))
-            .collect();
+            .map(|column| {
+                Ok(CqlColumnDef {
+                    name: CqlIdentifier::new(&column.name),
+                    data_type: self.convert_cql_type_string_to_ast(&column.data_type)?,
+                    is_static: column.is_static,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let primary_key = CqlPrimaryKey {
-            partition_key,
-            clustering_key,
+            partition_key: schema
+                .partition_keys
+                .iter()
+                .map(|k| CqlIdentifier::new(&k.name))
+                .collect(),
+            clustering_key: schema
+                .clustering_keys
+                .iter()
+                .map(|k| CqlIdentifier::new(&k.name))
+                .collect(),
         };
 
-        // Convert table options
         let options = CqlTableOptions {
             options: schema
                 .comments
@@ -170,8 +150,9 @@ impl NomParser {
         };
 
         Ok(CqlCreateTable {
-            if_not_exists: false, // TODO: detect IF NOT EXISTS from original CQL
-            table,
+            // TODO: detect IF NOT EXISTS from original CQL
+            if_not_exists: false,
+            table: CqlTable::new(&schema.table),
             columns,
             primary_key,
             options,
@@ -181,64 +162,55 @@ impl NomParser {
     /// Convert CQL type string to AST data type
     #[allow(clippy::only_used_in_recursion)]
     fn convert_cql_type_string_to_ast(&self, type_str: &str) -> Result<CqlDataType> {
-        let type_lower = type_str.trim().to_lowercase();
+        let trimmed = type_str.trim();
+        let type_lower = trimmed.to_lowercase();
 
-        // Handle collection types
+        // Extract inner string for a parameterized type like `list<...>`.
+        // Returns the slice between the first `<` and the last `>` of `trimmed`.
+        let inner_of = |prefix_len: usize| -> Option<&str> {
+            trimmed[prefix_len..]
+                .rfind('>')
+                .map(|end| trimmed[prefix_len..prefix_len + end].trim())
+        };
+
         if type_lower.starts_with("list<") {
-            if let Some(inner_start) = type_lower.find('<') {
-                if let Some(inner_end) = type_lower.rfind('>') {
-                    let inner_type = &type_str[inner_start + 1..inner_end];
-                    let inner_ast = self.convert_cql_type_string_to_ast(inner_type)?;
-                    return Ok(CqlDataType::List(Box::new(inner_ast)));
-                }
+            if let Some(inner) = inner_of("list<".len()) {
+                return Ok(CqlDataType::List(Box::new(
+                    self.convert_cql_type_string_to_ast(inner)?,
+                )));
             }
         }
-
         if type_lower.starts_with("set<") {
-            if let Some(inner_start) = type_lower.find('<') {
-                if let Some(inner_end) = type_lower.rfind('>') {
-                    let inner_type = &type_str[inner_start + 1..inner_end];
-                    let inner_ast = self.convert_cql_type_string_to_ast(inner_type)?;
-                    return Ok(CqlDataType::Set(Box::new(inner_ast)));
-                }
+            if let Some(inner) = inner_of("set<".len()) {
+                return Ok(CqlDataType::Set(Box::new(
+                    self.convert_cql_type_string_to_ast(inner)?,
+                )));
             }
         }
-
         if type_lower.starts_with("map<") {
-            if let Some(inner_start) = type_lower.find('<') {
-                if let Some(inner_end) = type_lower.rfind('>') {
-                    let inner = &type_str[inner_start + 1..inner_end];
-                    let parts: Vec<&str> = inner.splitn(2, ',').collect();
-                    if parts.len() == 2 {
-                        let key_type = self.convert_cql_type_string_to_ast(parts[0].trim())?;
-                        let value_type = self.convert_cql_type_string_to_ast(parts[1].trim())?;
-                        return Ok(CqlDataType::Map(Box::new(key_type), Box::new(value_type)));
-                    }
+            if let Some(inner) = inner_of("map<".len()) {
+                let parts: Vec<&str> = inner.splitn(2, ',').collect();
+                if parts.len() == 2 {
+                    let key_type = self.convert_cql_type_string_to_ast(parts[0].trim())?;
+                    let value_type = self.convert_cql_type_string_to_ast(parts[1].trim())?;
+                    return Ok(CqlDataType::Map(Box::new(key_type), Box::new(value_type)));
                 }
             }
         }
-
         if type_lower.starts_with("tuple<") {
-            if let Some(inner_start) = type_lower.find('<') {
-                if let Some(inner_end) = type_lower.rfind('>') {
-                    let inner = &type_str[inner_start + 1..inner_end];
-                    let parts: Vec<&str> = inner.split(',').collect();
-                    let mut types = Vec::new();
-                    for part in parts {
-                        types.push(self.convert_cql_type_string_to_ast(part.trim())?);
-                    }
-                    return Ok(CqlDataType::Tuple(types));
-                }
+            if let Some(inner) = inner_of("tuple<".len()) {
+                let types = inner
+                    .split(',')
+                    .map(|part| self.convert_cql_type_string_to_ast(part.trim()))
+                    .collect::<Result<Vec<_>>>()?;
+                return Ok(CqlDataType::Tuple(types));
             }
         }
-
         if type_lower.starts_with("frozen<") {
-            if let Some(inner_start) = type_lower.find('<') {
-                if let Some(inner_end) = type_lower.rfind('>') {
-                    let inner_type = &type_str[inner_start + 1..inner_end];
-                    let inner_ast = self.convert_cql_type_string_to_ast(inner_type)?;
-                    return Ok(CqlDataType::Frozen(Box::new(inner_ast)));
-                }
+            if let Some(inner) = inner_of("frozen<".len()) {
+                return Ok(CqlDataType::Frozen(Box::new(
+                    self.convert_cql_type_string_to_ast(inner)?,
+                )));
             }
         }
 
@@ -264,10 +236,8 @@ impl NomParser {
             "duration" => Ok(CqlDataType::Duration),
             "varint" => Ok(CqlDataType::Varint),
             "counter" => Ok(CqlDataType::Counter),
-            _ => {
-                // Assume it's a UDT or custom type
-                Ok(CqlDataType::Custom(type_str.to_string()))
-            }
+            // Assume unknown types are UDTs or custom types
+            _ => Ok(CqlDataType::Custom(type_str.to_string())),
         }
     }
 
@@ -275,52 +245,41 @@ impl NomParser {
     pub fn convert_ast_to_table_schema(&self, ast: &CqlCreateTable) -> TableSchema {
         use crate::schema::{ClusteringColumn, Column, KeyColumn};
 
-        // Convert partition keys
+        // Look up a column's declared type in the AST; fall back to "text" if
+        // the primary key references a column we somehow didn't see.
+        let type_of = |name: &str| -> String {
+            ast.columns
+                .iter()
+                .find(|col| col.name.name == name)
+                .map(|col| self.convert_ast_type_to_string(&col.data_type))
+                .unwrap_or_else(|| "text".to_string())
+        };
+
         let partition_keys = ast
             .primary_key
             .partition_key
             .iter()
             .enumerate()
-            .map(|(pos, key)| {
-                let data_type = ast
-                    .columns
-                    .iter()
-                    .find(|col| col.name.name == key.name)
-                    .map(|col| self.convert_ast_type_to_string(&col.data_type))
-                    .unwrap_or_else(|| "text".to_string());
-
-                KeyColumn {
-                    name: key.name.clone(),
-                    data_type,
-                    position: pos,
-                }
+            .map(|(pos, key)| KeyColumn {
+                name: key.name.clone(),
+                data_type: type_of(&key.name),
+                position: pos,
             })
             .collect();
 
-        // Convert clustering keys
         let clustering_keys = ast
             .primary_key
             .clustering_key
             .iter()
             .enumerate()
-            .map(|(pos, key)| {
-                let data_type = ast
-                    .columns
-                    .iter()
-                    .find(|col| col.name.name == key.name)
-                    .map(|col| self.convert_ast_type_to_string(&col.data_type))
-                    .unwrap_or_else(|| "text".to_string());
-
-                ClusteringColumn {
-                    name: key.name.clone(),
-                    data_type,
-                    position: pos,
-                    order: crate::schema::ClusteringOrder::Asc,
-                }
+            .map(|(pos, key)| ClusteringColumn {
+                name: key.name.clone(),
+                data_type: type_of(&key.name),
+                position: pos,
+                order: crate::schema::ClusteringOrder::Asc,
             })
             .collect();
 
-        // Convert columns
         let columns = ast
             .columns
             .iter()
@@ -334,7 +293,8 @@ impl NomParser {
             .collect();
 
         TableSchema {
-            keyspace: "default".to_string(), // TODO: extract from table name if qualified
+            // TODO: extract from table name if qualified
+            keyspace: "default".to_string(),
             table: ast.table.name.name.clone(),
             partition_keys,
             clustering_keys,
@@ -397,21 +357,28 @@ impl NomParser {
 
     /// Parse a complete CQL statement using nom parsers
     fn parse_statement_impl(&self, input: &str) -> Result<CqlStatement> {
-        let trimmed = input.trim().to_lowercase();
+        let trimmed = input.trim();
 
-        // Route to appropriate nom parser
-        if trimmed.starts_with("select") {
-            self.parse_select_statement(input)
-        } else if trimmed.starts_with("insert") {
-            self.parse_insert_statement(input)
-        } else if trimmed.starts_with("update") {
-            self.parse_update_statement(input)
-        } else if trimmed.starts_with("delete") {
-            self.parse_delete_statement(input)
-        } else if trimmed.starts_with("create table") {
+        // Case-insensitive keyword-prefix dispatch. We check the longest
+        // prefixes first so two-word keywords (e.g. `CREATE TABLE`) win over
+        // their single-word counterparts.
+        fn starts_with_ci(haystack: &str, needle: &str) -> bool {
+            haystack.len() >= needle.len()
+                && haystack[..needle.len()].eq_ignore_ascii_case(needle)
+        }
+
+        if starts_with_ci(trimmed, "create table") {
             self.parse_create_table_statement(input)
-        } else if trimmed.starts_with("drop table") {
+        } else if starts_with_ci(trimmed, "drop table") {
             self.parse_drop_table_statement(input)
+        } else if starts_with_ci(trimmed, "select") {
+            self.parse_select_statement(input)
+        } else if starts_with_ci(trimmed, "insert") {
+            self.parse_insert_statement(input)
+        } else if starts_with_ci(trimmed, "update") {
+            self.parse_update_statement(input)
+        } else if starts_with_ci(trimmed, "delete") {
+            self.parse_delete_statement(input)
         } else {
             Err(ParserError::syntax(
                 format!("Unsupported statement type: {}", input),
@@ -423,17 +390,15 @@ impl NomParser {
 
     /// Parse SELECT statement (placeholder)
     fn parse_select_statement(&self, input: &str) -> Result<CqlStatement> {
-        // This is a very basic placeholder implementation
-        // A real implementation would use proper nom parsers
-
+        let lower = input.to_lowercase();
         let select = CqlSelect {
-            distinct: input.to_lowercase().contains("distinct"),
-            select_list: vec![CqlSelectItem::Wildcard], // Simplified
+            distinct: lower.contains("distinct"),
+            select_list: vec![CqlSelectItem::Wildcard],
             from: CqlTable::new("placeholder_table"),
             where_clause: None,
             order_by: None,
             limit: None,
-            allow_filtering: input.to_lowercase().contains("allow filtering"),
+            allow_filtering: lower.contains("allow filtering"),
         };
 
         Ok(CqlStatement::Select(select))
@@ -493,9 +458,8 @@ impl NomParser {
         .into())
     }
 
-    /// Parse CREATE TABLE statement using existing nom parser
+    /// Parse CREATE TABLE statement using the existing nom parser in `schema::cql_parser`.
     fn parse_create_table_statement(&self, input: &str) -> Result<CqlStatement> {
-        // Use existing nom parser from cql_parser.rs
         let (_, table_schema) =
             crate::schema::cql_parser::parse_create_table(input).map_err(|e| {
                 ParserError::syntax(
@@ -504,7 +468,6 @@ impl NomParser {
                 )
             })?;
 
-        // Convert TableSchema to AST
         let ast = self.convert_table_schema_to_ast(table_schema)?;
         Ok(CqlStatement::CreateTable(ast))
     }
@@ -525,27 +488,24 @@ impl NomParser {
         let trimmed = input.trim().to_lowercase();
 
         match trimmed.as_str() {
-            "text" | "varchar" => Ok(CqlDataType::Text),
-            "int" | "integer" => Ok(CqlDataType::Int),
-            "bigint" => Ok(CqlDataType::BigInt),
-            "uuid" => Ok(CqlDataType::Uuid),
-            "boolean" | "bool" => Ok(CqlDataType::Boolean),
-            "timestamp" => Ok(CqlDataType::Timestamp),
-            "blob" => Ok(CqlDataType::Blob),
-            _ => {
-                // Try to parse collection types
-                if trimmed.starts_with("list<") && trimmed.ends_with('>') {
-                    let inner = &trimmed[5..trimmed.len() - 1];
-                    let inner_type = self.parse_type_impl(inner)?;
-                    Ok(CqlDataType::List(Box::new(inner_type)))
-                } else if trimmed.starts_with("set<") && trimmed.ends_with('>') {
-                    let inner = &trimmed[4..trimmed.len() - 1];
-                    let inner_type = self.parse_type_impl(inner)?;
-                    Ok(CqlDataType::Set(Box::new(inner_type)))
-                } else {
-                    Ok(CqlDataType::Custom(input.to_string()))
-                }
-            }
+            "text" | "varchar" => return Ok(CqlDataType::Text),
+            "int" | "integer" => return Ok(CqlDataType::Int),
+            "bigint" => return Ok(CqlDataType::BigInt),
+            "uuid" => return Ok(CqlDataType::Uuid),
+            "boolean" | "bool" => return Ok(CqlDataType::Boolean),
+            "timestamp" => return Ok(CqlDataType::Timestamp),
+            "blob" => return Ok(CqlDataType::Blob),
+            _ => {}
+        }
+
+        if trimmed.starts_with("list<") && trimmed.ends_with('>') {
+            let inner_type = self.parse_type_impl(&trimmed[5..trimmed.len() - 1])?;
+            Ok(CqlDataType::List(Box::new(inner_type)))
+        } else if trimmed.starts_with("set<") && trimmed.ends_with('>') {
+            let inner_type = self.parse_type_impl(&trimmed[4..trimmed.len() - 1])?;
+            Ok(CqlDataType::Set(Box::new(inner_type)))
+        } else {
+            Ok(CqlDataType::Custom(input.to_string()))
         }
     }
 
@@ -611,7 +571,6 @@ impl NomParser {
 
     /// Parse column definitions (placeholder)
     fn parse_column_definitions_impl(&self, _input: &str) -> Result<Vec<CqlColumnDef>> {
-        // Placeholder implementation
         Ok(vec![
             CqlColumnDef {
                 name: CqlIdentifier::new("id"),
@@ -633,17 +592,15 @@ impl NomParser {
         })
     }
 
-    /// Quick syntax validation
+    /// Quick syntax validation: non-empty input with balanced parentheses and
+    /// closed single-quoted string literals (with backslash escapes).
     fn quick_syntax_check(&self, input: &str) -> bool {
         let trimmed = input.trim();
-
-        // Basic checks
         if trimmed.is_empty() {
             return false;
         }
 
-        // Check for balanced parentheses
-        let mut paren_count = 0;
+        let mut paren_count: i32 = 0;
         let mut in_string = false;
         let mut escape_next = false;
 
