@@ -4,10 +4,62 @@
 //! allowing easy traversal and transformation of CQL AST nodes.
 
 use super::ast::*;
-use super::traits::{CqlVisitor, ValidationContext};
-use crate::error::Result;
+use super::traits::{CqlVisitor, ValidationContext, ValidationStrictness};
+use crate::error::{Error, Result};
 use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use std::collections::HashMap;
+
+/// Render a `CqlDataType` as a CQL source string (e.g. `list<text>`, `map<uuid, int>`).
+pub(crate) fn cql_data_type_to_string(data_type: &CqlDataType) -> String {
+    match data_type {
+        CqlDataType::Boolean => "boolean".to_string(),
+        CqlDataType::TinyInt => "tinyint".to_string(),
+        CqlDataType::SmallInt => "smallint".to_string(),
+        CqlDataType::Int => "int".to_string(),
+        CqlDataType::BigInt => "bigint".to_string(),
+        CqlDataType::Varint => "varint".to_string(),
+        CqlDataType::Decimal => "decimal".to_string(),
+        CqlDataType::Float => "float".to_string(),
+        CqlDataType::Double => "double".to_string(),
+        CqlDataType::Text => "text".to_string(),
+        CqlDataType::Ascii => "ascii".to_string(),
+        CqlDataType::Varchar => "varchar".to_string(),
+        CqlDataType::Blob => "blob".to_string(),
+        CqlDataType::Timestamp => "timestamp".to_string(),
+        CqlDataType::Date => "date".to_string(),
+        CqlDataType::Time => "time".to_string(),
+        CqlDataType::Uuid => "uuid".to_string(),
+        CqlDataType::TimeUuid => "timeuuid".to_string(),
+        CqlDataType::Inet => "inet".to_string(),
+        CqlDataType::Duration => "duration".to_string(),
+        CqlDataType::Counter => "counter".to_string(),
+        CqlDataType::List(inner) => format!("list<{}>", cql_data_type_to_string(inner)),
+        CqlDataType::Set(inner) => format!("set<{}>", cql_data_type_to_string(inner)),
+        CqlDataType::Map(key, value) => format!(
+            "map<{}, {}>",
+            cql_data_type_to_string(key),
+            cql_data_type_to_string(value)
+        ),
+        CqlDataType::Tuple(types) => {
+            let type_strs: Vec<String> = types.iter().map(cql_data_type_to_string).collect();
+            format!("tuple<{}>", type_strs.join(", "))
+        }
+        CqlDataType::Udt(name) => name.as_str().to_string(),
+        CqlDataType::Frozen(inner) => format!("frozen<{}>", cql_data_type_to_string(inner)),
+        CqlDataType::Custom(name) => name.clone(),
+    }
+}
+
+/// Extract the inner `CqlIdentifier` from any `CqlIndexColumn` variant.
+fn index_column_identifier(column: &CqlIndexColumn) -> &CqlIdentifier {
+    match column {
+        CqlIndexColumn::Column(id)
+        | CqlIndexColumn::Keys(id)
+        | CqlIndexColumn::Values(id)
+        | CqlIndexColumn::Entries(id)
+        | CqlIndexColumn::Full(id) => id,
+    }
+}
 
 /// Default visitor implementation that traverses the entire AST
 ///
@@ -37,7 +89,6 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     }
 
     fn visit_select(&mut self, select: &CqlSelect) -> Result<T> {
-        // Visit select items
         for item in &select.select_list {
             match item {
                 CqlSelectItem::Expression { expression, .. } => {
@@ -52,7 +103,6 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
             }
         }
 
-        // Visit WHERE clause
         if let Some(where_clause) = &select.where_clause {
             let _: T = self.visit_expression(where_clause)?;
         }
@@ -61,24 +111,16 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     }
 
     fn visit_insert(&mut self, insert: &CqlInsert) -> Result<T> {
-        // Visit column names
         for column in &insert.columns {
             let _: T = self.visit_identifier(column)?;
         }
 
-        // Visit values
-        match &insert.values {
-            CqlInsertValues::Values(expressions) => {
-                for expr in expressions {
-                    let _: T = self.visit_expression(expr)?;
-                }
-            }
-            CqlInsertValues::Json(_) => {
-                // JSON values are literal strings, no sub-expressions to visit
+        if let CqlInsertValues::Values(expressions) = &insert.values {
+            for expr in expressions {
+                let _: T = self.visit_expression(expr)?;
             }
         }
 
-        // Visit USING clause
         if let Some(using) = &insert.using {
             if let Some(ttl) = &using.ttl {
                 let _: T = self.visit_expression(ttl)?;
@@ -92,26 +134,21 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     }
 
     fn visit_update(&mut self, update: &CqlUpdate) -> Result<T> {
-        // Visit assignments
         for assignment in &update.assignments {
             let _: T = self.visit_identifier(&assignment.column)?;
             let _: T = self.visit_expression(&assignment.value)?;
 
-            // Visit map update key if present
             if let CqlAssignmentOperator::MapUpdate(key_expr) = &assignment.operator {
                 let _: T = self.visit_expression(key_expr)?;
             }
         }
 
-        // Visit WHERE clause
         let _: T = self.visit_expression(&update.where_clause)?;
 
-        // Visit IF condition
         if let Some(if_condition) = &update.if_condition {
             let _: T = self.visit_expression(if_condition)?;
         }
 
-        // Visit USING clause
         if let Some(using) = &update.using {
             if let Some(ttl) = &using.ttl {
                 let _: T = self.visit_expression(ttl)?;
@@ -125,20 +162,16 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     }
 
     fn visit_delete(&mut self, delete: &CqlDelete) -> Result<T> {
-        // Visit column names
         for column in &delete.columns {
             let _: T = self.visit_identifier(column)?;
         }
 
-        // Visit WHERE clause
         let _: T = self.visit_expression(&delete.where_clause)?;
 
-        // Visit IF condition
         if let Some(if_condition) = &delete.if_condition {
             let _: T = self.visit_expression(if_condition)?;
         }
 
-        // Visit USING clause
         if let Some(using) = &delete.using {
             if let Some(timestamp) = &using.timestamp {
                 let _: T = self.visit_expression(timestamp)?;
@@ -149,19 +182,16 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     }
 
     fn visit_create_table(&mut self, create: &CqlCreateTable) -> Result<T> {
-        // Visit table name
         let _: T = self.visit_identifier(&create.table.name)?;
         if let Some(keyspace) = &create.table.keyspace {
             let _: T = self.visit_identifier(keyspace)?;
         }
 
-        // Visit column definitions
         for column in &create.columns {
             let _: T = self.visit_identifier(&column.name)?;
             let _: T = self.visit_data_type(&column.data_type)?;
         }
 
-        // Visit primary key
         for pk_column in &create.primary_key.partition_key {
             let _: T = self.visit_identifier(pk_column)?;
         }
@@ -173,7 +203,6 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     }
 
     fn visit_drop_table(&mut self, drop: &CqlDropTable) -> Result<T> {
-        // Visit table name
         let _: T = self.visit_identifier(&drop.table.name)?;
         if let Some(keyspace) = &drop.table.keyspace {
             let _: T = self.visit_identifier(keyspace)?;
@@ -183,49 +212,28 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
     }
 
     fn visit_create_index(&mut self, create: &CqlCreateIndex) -> Result<T> {
-        // Visit index name
         if let Some(name) = &create.name {
             let _: T = self.visit_identifier(name)?;
         }
 
-        // Visit table name
         let _: T = self.visit_identifier(&create.table.name)?;
         if let Some(keyspace) = &create.table.keyspace {
             let _: T = self.visit_identifier(keyspace)?;
         }
 
-        // Visit indexed columns
         for column in &create.columns {
-            match column {
-                CqlIndexColumn::Column(id) => {
-                    let _: T = self.visit_identifier(id)?;
-                }
-                CqlIndexColumn::Keys(id) => {
-                    let _: T = self.visit_identifier(id)?;
-                }
-                CqlIndexColumn::Values(id) => {
-                    let _: T = self.visit_identifier(id)?;
-                }
-                CqlIndexColumn::Entries(id) => {
-                    let _: T = self.visit_identifier(id)?;
-                }
-                CqlIndexColumn::Full(id) => {
-                    let _: T = self.visit_identifier(id)?;
-                }
-            }
+            let _: T = self.visit_identifier(index_column_identifier(column))?;
         }
 
         Ok(T::default())
     }
 
     fn visit_alter_table(&mut self, alter: &CqlAlterTable) -> Result<T> {
-        // Visit table name
         let _: T = self.visit_identifier(&alter.table.name)?;
         if let Some(keyspace) = &alter.table.keyspace {
             let _: T = self.visit_identifier(keyspace)?;
         }
 
-        // Visit operation
         match &alter.operation {
             CqlAlterTableOp::AddColumn(column_def) => {
                 let _: T = self.visit_identifier(&column_def.name)?;
@@ -242,9 +250,7 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
                 let _: T = self.visit_identifier(old_name)?;
                 let _: T = self.visit_identifier(new_name)?;
             }
-            CqlAlterTableOp::WithOptions(_) => {
-                // Table options are literals, no sub-expressions to visit
-            }
+            CqlAlterTableOp::WithOptions(_) => {}
         }
 
         Ok(T::default())
@@ -267,9 +273,7 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
             CqlDataType::Udt(name) => {
                 let _: T = self.visit_identifier(name)?;
             }
-            _ => {
-                // Primitive types have no sub-components to visit
-            }
+            _ => {}
         }
 
         Ok(T::default())
@@ -377,9 +381,7 @@ impl<T: Default> CqlVisitor<T> for DefaultVisitor {
                     let _: T = self.visit_literal(item)?;
                 }
             }
-            _ => {
-                // Primitive literals have no sub-components to visit
-            }
+            _ => {}
         }
 
         Ok(T::default())
@@ -420,7 +422,6 @@ impl CqlVisitor<()> for IdentifierCollector {
     }
 
     fn visit_select(&mut self, select: &CqlSelect) -> Result<()> {
-        // Visit select items
         for item in &select.select_list {
             match item {
                 CqlSelectItem::Expression { expression, .. } => {
@@ -435,13 +436,11 @@ impl CqlVisitor<()> for IdentifierCollector {
             }
         }
 
-        // Visit table reference - collect table name as identifier
         self.visit_identifier(&select.from.name)?;
         if let Some(keyspace) = &select.from.keyspace {
             self.visit_identifier(keyspace)?;
         }
 
-        // Visit WHERE clause
         if let Some(where_clause) = &select.where_clause {
             self.visit_expression(where_clause)?;
         }
@@ -450,76 +449,62 @@ impl CqlVisitor<()> for IdentifierCollector {
     }
 
     fn visit_insert(&mut self, insert: &CqlInsert) -> Result<()> {
-        // Visit table name
         self.visit_identifier(&insert.table.name)?;
         if let Some(keyspace) = &insert.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
 
-        // Visit column names
         for column in &insert.columns {
             self.visit_identifier(column)?;
         }
 
-        // Visit values
-        match &insert.values {
-            CqlInsertValues::Values(values) => {
-                for value in values {
-                    self.visit_expression(value)?;
-                }
+        if let CqlInsertValues::Values(values) = &insert.values {
+            for value in values {
+                self.visit_expression(value)?;
             }
-            CqlInsertValues::Json(_) => {} // JSON doesn't contain identifiers
         }
 
         Ok(())
     }
 
     fn visit_update(&mut self, update: &CqlUpdate) -> Result<()> {
-        // Visit table name
         self.visit_identifier(&update.table.name)?;
         if let Some(keyspace) = &update.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
 
-        // Visit assignments
         for assignment in &update.assignments {
             self.visit_identifier(&assignment.column)?;
             self.visit_expression(&assignment.value)?;
         }
 
-        // Visit WHERE clause
         self.visit_expression(&update.where_clause)?;
 
         Ok(())
     }
 
     fn visit_delete(&mut self, delete: &CqlDelete) -> Result<()> {
-        // Visit table name
         self.visit_identifier(&delete.table.name)?;
         if let Some(keyspace) = &delete.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
 
-        // Visit WHERE clause
         self.visit_expression(&delete.where_clause)?;
 
         Ok(())
     }
 
     fn visit_create_table(&mut self, create: &CqlCreateTable) -> Result<()> {
-        // Visit table name
         self.visit_identifier(&create.table.name)?;
         if let Some(keyspace) = &create.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
 
-        // Visit column definitions
         for column in &create.columns {
             self.visit_identifier(&column.name)?;
             self.visit_data_type(&column.data_type)?;
         }
 
-        // Visit primary key
         for pk_col in &create.primary_key.partition_key {
             self.visit_identifier(pk_col)?;
         }
@@ -546,25 +531,8 @@ impl CqlVisitor<()> for IdentifierCollector {
         if let Some(keyspace) = &create.table.keyspace {
             self.visit_identifier(keyspace)?;
         }
-        // Visit indexed columns
         for column in &create.columns {
-            match column {
-                CqlIndexColumn::Column(identifier) => {
-                    self.visit_identifier(identifier)?;
-                }
-                CqlIndexColumn::Keys(identifier) => {
-                    self.visit_identifier(identifier)?;
-                }
-                CqlIndexColumn::Values(identifier) => {
-                    self.visit_identifier(identifier)?;
-                }
-                CqlIndexColumn::Entries(identifier) => {
-                    self.visit_identifier(identifier)?;
-                }
-                CqlIndexColumn::Full(identifier) => {
-                    self.visit_identifier(identifier)?;
-                }
-            }
+            self.visit_identifier(index_column_identifier(column))?;
         }
         Ok(())
     }
@@ -591,7 +559,7 @@ impl CqlVisitor<()> for IdentifierCollector {
                 self.visit_identifier(old_name)?;
                 self.visit_identifier(new_name)?;
             }
-            _ => {} // Other operations don't contain identifiers we care about
+            _ => {}
         }
 
         Ok(())
@@ -609,7 +577,7 @@ impl CqlVisitor<()> for IdentifierCollector {
             CqlDataType::Udt(name) => {
                 self.visit_identifier(name)?;
             }
-            _ => {} // Primitive types don't contain identifiers
+            _ => {}
         }
         Ok(())
     }
@@ -676,8 +644,7 @@ impl CqlVisitor<()> for IdentifierCollector {
                 self.visit_expression(expression)?;
                 self.visit_data_type(target_type)?;
             }
-            CqlExpression::Parameter(_) => {} // Parameters don't contain identifiers
-            CqlExpression::NamedParameter(_) => {} // Named parameters don't contain identifiers we collect
+            CqlExpression::Parameter(_) | CqlExpression::NamedParameter(_) => {}
         }
         Ok(())
     }
@@ -688,7 +655,6 @@ impl CqlVisitor<()> for IdentifierCollector {
     }
 
     fn visit_literal(&mut self, _literal: &CqlLiteral) -> Result<()> {
-        // Literals don't contain identifiers
         Ok(())
     }
 }
@@ -709,7 +675,6 @@ impl SemanticValidator {
         }
     }
 
-    /// Add a validation error
     fn add_error(&mut self, message: String) {
         self.errors.push(message);
     }
@@ -722,6 +687,18 @@ impl SemanticValidator {
     /// Get all validation errors
     pub fn get_errors(&self) -> &[String] {
         &self.errors
+    }
+
+    fn is_strict(&self) -> bool {
+        matches!(self.context.strictness, ValidationStrictness::Strict)
+    }
+
+    /// Record an error if `table` is unknown and strict validation is enabled.
+    fn check_table_exists(&mut self, table: &CqlTable) {
+        let name = table.full_name();
+        if !self.context.schemas.contains_key(&name) && self.is_strict() {
+            self.add_error(format!("Table '{}' does not exist", name));
+        }
     }
 }
 
@@ -745,87 +722,40 @@ impl CqlVisitor<()> for SemanticValidator {
     }
 
     fn visit_select(&mut self, select: &CqlSelect) -> Result<()> {
-        // Check if table exists
-        let table_name = select.from.full_name();
-        if !self.context.schemas.contains_key(&table_name)
-            && matches!(
-                self.context.strictness,
-                super::traits::ValidationStrictness::Strict
-            )
-        {
-            self.add_error(format!("Table '{}' does not exist", table_name));
-        }
-
-        // Continue with default traversal
+        self.check_table_exists(&select.from);
         DefaultVisitor.visit_select(select)
     }
 
     fn visit_insert(&mut self, insert: &CqlInsert) -> Result<()> {
-        // Check if table exists
         let table_name = insert.table.full_name();
-        if !self.context.schemas.contains_key(&table_name) {
-            if matches!(
-                self.context.strictness,
-                super::traits::ValidationStrictness::Strict
-            ) {
-                self.add_error(format!("Table '{}' does not exist", table_name));
-            }
-        } else {
-            // Validate column count matches values count
-            match &insert.values {
-                CqlInsertValues::Values(values) => {
-                    if insert.columns.len() != values.len() {
-                        self.add_error(format!(
-                            "Column count ({}) does not match value count ({})",
-                            insert.columns.len(),
-                            values.len()
-                        ));
-                    }
-                }
-                CqlInsertValues::Json(_) => {
-                    // JSON values are validated at runtime
+        if self.context.schemas.contains_key(&table_name) {
+            if let CqlInsertValues::Values(values) = &insert.values {
+                if insert.columns.len() != values.len() {
+                    self.add_error(format!(
+                        "Column count ({}) does not match value count ({})",
+                        insert.columns.len(),
+                        values.len()
+                    ));
                 }
             }
+        } else if self.is_strict() {
+            self.add_error(format!("Table '{}' does not exist", table_name));
         }
 
-        // Continue with default traversal
         DefaultVisitor.visit_insert(insert)
     }
 
     fn visit_update(&mut self, update: &CqlUpdate) -> Result<()> {
-        // Check if table exists
-        let table_name = update.table.full_name();
-        if !self.context.schemas.contains_key(&table_name)
-            && matches!(
-                self.context.strictness,
-                super::traits::ValidationStrictness::Strict
-            )
-        {
-            self.add_error(format!("Table '{}' does not exist", table_name));
-        }
-
-        // Continue with default traversal
+        self.check_table_exists(&update.table);
         DefaultVisitor.visit_update(update)
     }
 
     fn visit_delete(&mut self, delete: &CqlDelete) -> Result<()> {
-        // Check if table exists
-        let table_name = delete.table.full_name();
-        if !self.context.schemas.contains_key(&table_name)
-            && matches!(
-                self.context.strictness,
-                super::traits::ValidationStrictness::Strict
-            )
-        {
-            self.add_error(format!("Table '{}' does not exist", table_name));
-        }
-
-        // Continue with default traversal
+        self.check_table_exists(&delete.table);
         DefaultVisitor.visit_delete(delete)
     }
 
     fn visit_create_table(&mut self, create: &CqlCreateTable) -> Result<()> {
-        // Check for duplicate column names
         let mut column_names = std::collections::HashSet::new();
         for column in &create.columns {
             let name = column.name.as_str();
@@ -834,7 +764,6 @@ impl CqlVisitor<()> for SemanticValidator {
             }
         }
 
-        // Validate that primary key columns exist
         for pk_column in &create.primary_key.partition_key {
             let name = pk_column.as_str();
             if !create.columns.iter().any(|c| c.name.as_str() == name) {
@@ -855,91 +784,46 @@ impl CqlVisitor<()> for SemanticValidator {
             }
         }
 
-        // Continue with default traversal
         DefaultVisitor.visit_create_table(create)
     }
 
     fn visit_drop_table(&mut self, drop: &CqlDropTable) -> Result<()> {
-        // Check if table exists (for non-IF EXISTS statements)
         if !drop.if_exists {
-            let table_name = drop.table.full_name();
-            if !self.context.schemas.contains_key(&table_name)
-                && matches!(
-                    self.context.strictness,
-                    super::traits::ValidationStrictness::Strict
-                )
-            {
-                self.add_error(format!("Table '{}' does not exist", table_name));
-            }
+            self.check_table_exists(&drop.table);
         }
-
-        // Continue with default traversal
         DefaultVisitor.visit_drop_table(drop)
     }
 
     fn visit_create_index(&mut self, create: &CqlCreateIndex) -> Result<()> {
-        // Check if table exists
-        let table_name = create.table.full_name();
-        if !self.context.schemas.contains_key(&table_name)
-            && matches!(
-                self.context.strictness,
-                super::traits::ValidationStrictness::Strict
-            )
-        {
-            self.add_error(format!("Table '{}' does not exist", table_name));
-        }
-
-        // Continue with default traversal
+        self.check_table_exists(&create.table);
         DefaultVisitor.visit_create_index(create)
     }
 
     fn visit_alter_table(&mut self, alter: &CqlAlterTable) -> Result<()> {
-        // Check if table exists
-        let table_name = alter.table.full_name();
-        if !self.context.schemas.contains_key(&table_name)
-            && matches!(
-                self.context.strictness,
-                super::traits::ValidationStrictness::Strict
-            )
-        {
-            self.add_error(format!("Table '{}' does not exist", table_name));
-        }
-
-        // Continue with default traversal
+        self.check_table_exists(&alter.table);
         DefaultVisitor.visit_alter_table(alter)
     }
 
     fn visit_data_type(&mut self, data_type: &CqlDataType) -> Result<()> {
-        // Validate UDT references
         if let CqlDataType::Udt(udt_name) = data_type {
             let udt_key = udt_name.as_str();
-            if !self.context.udts.contains_key(udt_key)
-                && matches!(
-                    self.context.strictness,
-                    super::traits::ValidationStrictness::Strict
-                )
-            {
+            if !self.context.udts.contains_key(udt_key) && self.is_strict() {
                 self.add_error(format!("UDT '{}' does not exist", udt_key));
             }
         }
 
-        // Continue with default traversal
         DefaultVisitor.visit_data_type(data_type)
     }
 
     fn visit_expression(&mut self, expression: &CqlExpression) -> Result<()> {
-        // Add expression-specific validation here
-        // For now, just traverse
         DefaultVisitor.visit_expression(expression)
     }
 
     fn visit_identifier(&mut self, _identifier: &CqlIdentifier) -> Result<()> {
-        // Identifier validation can be added here
         Ok(())
     }
 
     fn visit_literal(&mut self, literal: &CqlLiteral) -> Result<()> {
-        // Literal validation can be added here
         DefaultVisitor.visit_literal(literal)
     }
 }
@@ -1006,51 +890,22 @@ pub mod utils {
 
     /// Collect all table references in a statement
     pub fn collect_table_references(statement: &CqlStatement) -> Vec<String> {
-        let mut tables = Vec::new();
-
-        match statement {
-            CqlStatement::Select(select) => {
-                tables.push(select.from.full_name());
-            }
-            CqlStatement::Insert(insert) => {
-                tables.push(insert.table.full_name());
-            }
-            CqlStatement::Update(update) => {
-                tables.push(update.table.full_name());
-            }
-            CqlStatement::Delete(delete) => {
-                tables.push(delete.table.full_name());
-            }
-            CqlStatement::CreateTable(create) => {
-                tables.push(create.table.full_name());
-            }
-            CqlStatement::DropTable(drop) => {
-                tables.push(drop.table.full_name());
-            }
-            CqlStatement::CreateIndex(create) => {
-                tables.push(create.table.full_name());
-            }
-            CqlStatement::AlterTable(alter) => {
-                tables.push(alter.table.full_name());
-            }
-            CqlStatement::CreateType(_) => {
-                // UDTs don't reference tables
-            }
-            CqlStatement::DropType(_) => {
-                // UDTs don't reference tables
-            }
-            CqlStatement::Use(_) => {
-                // USE statements don't reference tables
-            }
-            CqlStatement::Truncate(truncate) => {
-                tables.push(truncate.table.full_name());
-            }
-            CqlStatement::Batch(_) => {
-                // Batch statements contain other statements, would need recursive handling
-            }
-        }
-
-        tables
+        let table = match statement {
+            CqlStatement::Select(select) => &select.from,
+            CqlStatement::Insert(insert) => &insert.table,
+            CqlStatement::Update(update) => &update.table,
+            CqlStatement::Delete(delete) => &delete.table,
+            CqlStatement::CreateTable(create) => &create.table,
+            CqlStatement::DropTable(drop) => &drop.table,
+            CqlStatement::CreateIndex(create) => &create.table,
+            CqlStatement::AlterTable(alter) => &alter.table,
+            CqlStatement::Truncate(truncate) => &truncate.table,
+            CqlStatement::CreateType(_)
+            | CqlStatement::DropType(_)
+            | CqlStatement::Use(_)
+            | CqlStatement::Batch(_) => return Vec::new(),
+        };
+        vec![table.full_name()]
     }
 
     /// Check if a statement modifies data
@@ -1091,18 +946,41 @@ pub mod utils {
 #[derive(Debug, Default)]
 pub struct SchemaBuilderVisitor;
 
+/// Error returned for every non-CREATE-TABLE visitor method on `SchemaBuilderVisitor`.
+fn schema_builder_unsupported(kind: &str) -> Error {
+    Error::invalid_input(format!("SchemaBuilderVisitor {}", kind))
+}
+
+/// Find the column definition matching `key` or return an invalid-input error.
+fn column_def_for<'a>(
+    create: &'a CqlCreateTable,
+    key: &CqlIdentifier,
+    role: &str,
+) -> Result<&'a CqlColumnDef> {
+    create
+        .columns
+        .iter()
+        .find(|col| col.name.as_str() == key.as_str())
+        .ok_or_else(|| {
+            Error::invalid_input(format!(
+                "{} key column '{}' not found in column definitions",
+                role,
+                key.as_str()
+            ))
+        })
+}
+
 impl CqlVisitor<TableSchema> for SchemaBuilderVisitor {
     fn visit_statement(&mut self, statement: &CqlStatement) -> Result<TableSchema> {
         match statement {
             CqlStatement::CreateTable(create) => self.visit_create_table(create),
-            _ => Err(crate::error::Error::invalid_input(
-                "SchemaBuilderVisitor only supports CREATE TABLE statements".to_string(),
+            _ => Err(schema_builder_unsupported(
+                "only supports CREATE TABLE statements",
             )),
         }
     }
 
     fn visit_create_table(&mut self, create: &CqlCreateTable) -> Result<TableSchema> {
-        // Extract table name and keyspace
         let table_name = create.table.name.as_str().to_string();
         let keyspace = create
             .table
@@ -1111,81 +989,49 @@ impl CqlVisitor<TableSchema> for SchemaBuilderVisitor {
             .map(|ks| ks.as_str().to_string())
             .unwrap_or_else(|| "default".to_string());
 
-        // Convert partition key columns
-        let partition_keys: Result<Vec<KeyColumn>> = create
+        let partition_keys = create
             .primary_key
             .partition_key
             .iter()
             .enumerate()
             .map(|(pos, pk_col)| {
-                // Find the column definition for this partition key
-                let column_def = create
-                    .columns
-                    .iter()
-                    .find(|col| col.name.as_str() == pk_col.as_str())
-                    .ok_or_else(|| {
-                        crate::error::Error::invalid_input(format!(
-                            "Partition key column '{}' not found in column definitions",
-                            pk_col.as_str()
-                        ))
-                    })?;
-
+                let column_def = column_def_for(create, pk_col, "Partition")?;
                 Ok(KeyColumn {
                     name: pk_col.as_str().to_string(),
-                    data_type: self.convert_cql_data_type_to_string(&column_def.data_type),
+                    data_type: cql_data_type_to_string(&column_def.data_type),
                     position: pos,
                 })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
-        let partition_keys = partition_keys?;
-
-        // Convert clustering key columns
-        let clustering_keys: Result<Vec<ClusteringColumn>> = create
+        let clustering_keys = create
             .primary_key
             .clustering_key
             .iter()
             .enumerate()
             .map(|(pos, ck_col)| {
-                // Find the column definition for this clustering key
-                let column_def = create
-                    .columns
-                    .iter()
-                    .find(|col| col.name.as_str() == ck_col.as_str())
-                    .ok_or_else(|| {
-                        crate::error::Error::invalid_input(format!(
-                            "Clustering key column '{}' not found in column definitions",
-                            ck_col.as_str()
-                        ))
-                    })?;
-
+                let column_def = column_def_for(create, ck_col, "Clustering")?;
                 Ok(ClusteringColumn {
                     name: ck_col.as_str().to_string(),
-                    data_type: self.convert_cql_data_type_to_string(&column_def.data_type),
+                    data_type: cql_data_type_to_string(&column_def.data_type),
                     position: pos,
-                    order: crate::schema::ClusteringOrder::Asc, // Default ordering
+                    order: crate::schema::ClusteringOrder::Asc,
                 })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
-        let clustering_keys = clustering_keys?;
-
-        // Convert all columns
         let columns: Vec<Column> = create
             .columns
             .iter()
-            .map(|col_def| {
-                Column {
-                    name: col_def.name.as_str().to_string(),
-                    data_type: self.convert_cql_data_type_to_string(&col_def.data_type),
-                    nullable: true, // Default to nullable
-                    default: None,
-                    is_static: col_def.is_static,
-                }
+            .map(|col_def| Column {
+                name: col_def.name.as_str().to_string(),
+                data_type: cql_data_type_to_string(&col_def.data_type),
+                nullable: true,
+                default: None,
+                is_static: col_def.is_static,
             })
             .collect();
 
-        // Build the schema
         Ok(TableSchema {
             keyspace,
             table: table_name,
@@ -1196,71 +1042,56 @@ impl CqlVisitor<TableSchema> for SchemaBuilderVisitor {
         })
     }
 
-    // Default implementations for other visit methods
     fn visit_select(&mut self, _select: &CqlSelect) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support SELECT statements".to_string(),
-        ))
+        Err(schema_builder_unsupported("does not support SELECT statements"))
     }
 
     fn visit_insert(&mut self, _insert: &CqlInsert) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support INSERT statements".to_string(),
-        ))
+        Err(schema_builder_unsupported("does not support INSERT statements"))
     }
 
     fn visit_update(&mut self, _update: &CqlUpdate) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support UPDATE statements".to_string(),
-        ))
+        Err(schema_builder_unsupported("does not support UPDATE statements"))
     }
 
     fn visit_delete(&mut self, _delete: &CqlDelete) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support DELETE statements".to_string(),
-        ))
+        Err(schema_builder_unsupported("does not support DELETE statements"))
     }
 
     fn visit_drop_table(&mut self, _drop: &CqlDropTable) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support DROP TABLE statements".to_string(),
+        Err(schema_builder_unsupported(
+            "does not support DROP TABLE statements",
         ))
     }
 
     fn visit_create_index(&mut self, _create: &CqlCreateIndex) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support CREATE INDEX statements".to_string(),
+        Err(schema_builder_unsupported(
+            "does not support CREATE INDEX statements",
         ))
     }
 
     fn visit_alter_table(&mut self, _alter: &CqlAlterTable) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support ALTER TABLE statements".to_string(),
+        Err(schema_builder_unsupported(
+            "does not support ALTER TABLE statements",
         ))
     }
 
     fn visit_data_type(&mut self, _data_type: &CqlDataType) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support standalone data types".to_string(),
+        Err(schema_builder_unsupported(
+            "does not support standalone data types",
         ))
     }
 
     fn visit_expression(&mut self, _expression: &CqlExpression) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support expressions".to_string(),
-        ))
+        Err(schema_builder_unsupported("does not support expressions"))
     }
 
     fn visit_identifier(&mut self, _identifier: &CqlIdentifier) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support identifiers".to_string(),
-        ))
+        Err(schema_builder_unsupported("does not support identifiers"))
     }
 
     fn visit_literal(&mut self, _literal: &CqlLiteral) -> Result<TableSchema> {
-        Err(crate::error::Error::invalid_input(
-            "SchemaBuilderVisitor does not support literals".to_string(),
-        ))
+        Err(schema_builder_unsupported("does not support literals"))
     }
 }
 
@@ -1268,65 +1099,6 @@ impl SchemaBuilderVisitor {
     /// Create a new SchemaBuilderVisitor
     pub fn new() -> Self {
         Self
-    }
-    /// Convert CqlDataType to string representation compatible with existing schema format
-    #[allow(clippy::only_used_in_recursion)]
-    fn convert_cql_data_type_to_string(&self, data_type: &CqlDataType) -> String {
-        match data_type {
-            // Primitive types
-            CqlDataType::Boolean => "boolean".to_string(),
-            CqlDataType::TinyInt => "tinyint".to_string(),
-            CqlDataType::SmallInt => "smallint".to_string(),
-            CqlDataType::Int => "int".to_string(),
-            CqlDataType::BigInt => "bigint".to_string(),
-            CqlDataType::Varint => "varint".to_string(),
-            CqlDataType::Decimal => "decimal".to_string(),
-            CqlDataType::Float => "float".to_string(),
-            CqlDataType::Double => "double".to_string(),
-            CqlDataType::Text => "text".to_string(),
-            CqlDataType::Ascii => "ascii".to_string(),
-            CqlDataType::Varchar => "varchar".to_string(),
-            CqlDataType::Blob => "blob".to_string(),
-            CqlDataType::Timestamp => "timestamp".to_string(),
-            CqlDataType::Date => "date".to_string(),
-            CqlDataType::Time => "time".to_string(),
-            CqlDataType::Uuid => "uuid".to_string(),
-            CqlDataType::TimeUuid => "timeuuid".to_string(),
-            CqlDataType::Inet => "inet".to_string(),
-            CqlDataType::Duration => "duration".to_string(),
-            CqlDataType::Counter => "counter".to_string(),
-
-            // Collection types
-            CqlDataType::List(inner) => {
-                format!("list<{}>", self.convert_cql_data_type_to_string(inner))
-            }
-            CqlDataType::Set(inner) => {
-                format!("set<{}>", self.convert_cql_data_type_to_string(inner))
-            }
-            CqlDataType::Map(key, value) => {
-                format!(
-                    "map<{}, {}>",
-                    self.convert_cql_data_type_to_string(key),
-                    self.convert_cql_data_type_to_string(value)
-                )
-            }
-
-            // Complex types
-            CqlDataType::Tuple(types) => {
-                let type_strs: Vec<String> = types
-                    .iter()
-                    .map(|t| self.convert_cql_data_type_to_string(t))
-                    .collect();
-                format!("tuple<{}>", type_strs.join(", "))
-            }
-            CqlDataType::Udt(name) => name.as_str().to_string(),
-            CqlDataType::Frozen(inner) => {
-                format!("frozen<{}>", self.convert_cql_data_type_to_string(inner))
-            }
-
-            // Custom type
-            CqlDataType::Custom(name) => name.clone(),
-        }
     }
 }
 
@@ -1372,12 +1144,10 @@ impl CqlVisitor<()> for ValidationVisitor {
     }
 
     fn visit_create_table(&mut self, create: &CqlCreateTable) -> Result<()> {
-        // Validate table name
         if create.table.name.as_str().is_empty() {
             self.add_error("Table name cannot be empty".to_string());
         }
 
-        // Validate partition keys exist in columns
         for pk_col in &create.primary_key.partition_key {
             if !create
                 .columns
@@ -1391,7 +1161,6 @@ impl CqlVisitor<()> for ValidationVisitor {
             }
         }
 
-        // Validate clustering keys exist in columns
         for ck_col in &create.primary_key.clustering_key {
             if !create
                 .columns
@@ -1405,7 +1174,6 @@ impl CqlVisitor<()> for ValidationVisitor {
             }
         }
 
-        // Validate no duplicate column names
         let mut column_names = std::collections::HashSet::new();
         for column in &create.columns {
             let name = column.name.as_str();
@@ -1414,7 +1182,6 @@ impl CqlVisitor<()> for ValidationVisitor {
             }
         }
 
-        // Validate primary key is not empty
         if create.primary_key.partition_key.is_empty() {
             self.add_error("Table must have at least one partition key column".to_string());
         }
@@ -1422,42 +1189,34 @@ impl CqlVisitor<()> for ValidationVisitor {
         Ok(())
     }
 
-    // Default implementations that perform basic validation
     fn visit_select(&mut self, _select: &CqlSelect) -> Result<()> {
-        // Basic SELECT validation could be added here
         Ok(())
     }
 
     fn visit_insert(&mut self, _insert: &CqlInsert) -> Result<()> {
-        // Basic INSERT validation could be added here
         Ok(())
     }
 
     fn visit_update(&mut self, _update: &CqlUpdate) -> Result<()> {
-        // Basic UPDATE validation could be added here
         Ok(())
     }
 
     fn visit_delete(&mut self, _delete: &CqlDelete) -> Result<()> {
-        // Basic DELETE validation could be added here
         Ok(())
     }
 
-    fn visit_drop_table(&mut self, _drop: &CqlDropTable) -> Result<()> {
-        // Validate table name
-        if _drop.table.name.as_str().is_empty() {
+    fn visit_drop_table(&mut self, drop: &CqlDropTable) -> Result<()> {
+        if drop.table.name.as_str().is_empty() {
             self.add_error("Table name cannot be empty".to_string());
         }
         Ok(())
     }
 
     fn visit_create_index(&mut self, _create: &CqlCreateIndex) -> Result<()> {
-        // Basic CREATE INDEX validation could be added here
         Ok(())
     }
 
     fn visit_alter_table(&mut self, _alter: &CqlAlterTable) -> Result<()> {
-        // Basic ALTER TABLE validation could be added here
         Ok(())
     }
 
@@ -1498,7 +1257,6 @@ impl TypeCollectorVisitor {
     fn collect_type(&mut self, data_type: &CqlDataType) {
         self.types.push(data_type.clone());
 
-        // Recursively collect nested types
         match data_type {
             CqlDataType::List(inner) | CqlDataType::Set(inner) | CqlDataType::Frozen(inner) => {
                 self.collect_type(inner);
@@ -1512,7 +1270,7 @@ impl TypeCollectorVisitor {
                     self.collect_type(t);
                 }
             }
-            _ => {} // Primitive and UDT types have no nested types
+            _ => {}
         }
     }
 }
@@ -1521,12 +1279,11 @@ impl CqlVisitor<()> for TypeCollectorVisitor {
     fn visit_statement(&mut self, statement: &CqlStatement) -> Result<()> {
         match statement {
             CqlStatement::CreateTable(create) => self.visit_create_table(create),
-            _ => Ok(()), // Other statements may not have explicit type definitions
+            _ => Ok(()),
         }
     }
 
     fn visit_create_table(&mut self, create: &CqlCreateTable) -> Result<()> {
-        // Collect types from all column definitions
         for column in &create.columns {
             self.collect_type(&column.data_type);
         }
@@ -1558,7 +1315,6 @@ impl CqlVisitor<()> for TypeCollectorVisitor {
     }
 
     fn visit_alter_table(&mut self, alter: &CqlAlterTable) -> Result<()> {
-        // Collect types from ALTER TABLE operations
         match &alter.operation {
             CqlAlterTableOp::AddColumn(column_def) => {
                 self.collect_type(&column_def.data_type);
@@ -1566,7 +1322,7 @@ impl CqlVisitor<()> for TypeCollectorVisitor {
             CqlAlterTableOp::AlterColumn { new_type, .. } => {
                 self.collect_type(new_type);
             }
-            _ => {} // Other operations don't involve type definitions
+            _ => {}
         }
         Ok(())
     }
