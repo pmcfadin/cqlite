@@ -13,24 +13,26 @@ use super::{
     traits::{CqlParser, ParserBackendInfo, ParserFeature, PerformanceCharacteristics},
 };
 
+const NOT_IMPLEMENTED: &str = "ANTLR parser not yet implemented";
+
+fn not_implemented<T>() -> Result<T> {
+    Err(ParserError::backend("antlr", NOT_IMPLEMENTED).into())
+}
+
 /// ANTLR-based parser implementation
-#[derive(Debug)]
-pub struct AntlrParser {}
+#[derive(Debug, Default)]
+pub struct AntlrParser;
 
 impl AntlrParser {
     /// Create a new ANTLR parser with the given configuration
     pub fn new(config: ParserConfig) -> Result<Self> {
-        // Validate ANTLR-specific configuration
         Self::validate_config(&config)?;
-
-        Ok(Self {})
+        Ok(Self)
     }
 
-    /// Validate configuration for ANTLR backend
     fn validate_config(config: &ParserConfig) -> Result<()> {
         use super::config::ParserFeature;
 
-        // Check for unsupported features
         if config.has_feature(&ParserFeature::Streaming) {
             return Err(ParserError::unsupported_feature("antlr", "streaming").into());
         }
@@ -62,41 +64,34 @@ impl AntlrParser {
 #[async_trait]
 impl CqlParser for AntlrParser {
     async fn parse(&self, _input: &str) -> Result<CqlStatement> {
-        // For now, return an error indicating this is not yet implemented
-        // In a real implementation, this would use ANTLR-generated parsers
-        Err(ParserError::backend(
-            "antlr",
-            "ANTLR parser not yet implemented - this is a placeholder for future implementation",
-        )
-        .into())
+        not_implemented()
     }
 
     async fn parse_type(&self, _input: &str) -> Result<CqlDataType> {
-        Err(ParserError::backend("antlr", "ANTLR parser not yet implemented").into())
+        not_implemented()
     }
 
     async fn parse_expression(&self, _input: &str) -> Result<CqlExpression> {
-        Err(ParserError::backend("antlr", "ANTLR parser not yet implemented").into())
+        not_implemented()
     }
 
     async fn parse_identifier(&self, _input: &str) -> Result<CqlIdentifier> {
-        Err(ParserError::backend("antlr", "ANTLR parser not yet implemented").into())
+        not_implemented()
     }
 
     async fn parse_literal(&self, _input: &str) -> Result<CqlLiteral> {
-        Err(ParserError::backend("antlr", "ANTLR parser not yet implemented").into())
+        not_implemented()
     }
 
     async fn parse_column_definitions(&self, _input: &str) -> Result<Vec<CqlColumnDef>> {
-        Err(ParserError::backend("antlr", "ANTLR parser not yet implemented").into())
+        not_implemented()
     }
 
     async fn parse_table_options(&self, _input: &str) -> Result<CqlTableOptions> {
-        Err(ParserError::backend("antlr", "ANTLR parser not yet implemented").into())
+        not_implemented()
     }
 
     fn validate_syntax(&self, _input: &str) -> bool {
-        // For now, always return false since we haven't implemented the parser
         false
     }
 
@@ -125,13 +120,8 @@ mod tests {
         let config = ParserConfig::default();
         let parser = AntlrParser::new(config).unwrap();
 
-        let result = parser.parse("SELECT * FROM users").await;
-        assert!(result.is_err());
-
-        // Should be a backend error indicating not implemented
-        if let Err(e) = result {
-            assert!(e.to_string().contains("not yet implemented"));
-        }
+        let err = parser.parse("SELECT * FROM users").await.unwrap_err();
+        assert!(err.to_string().contains("not yet implemented"));
     }
 
     #[test]
