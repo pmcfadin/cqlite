@@ -1043,19 +1043,27 @@ impl CqlVisitor<TableSchema> for SchemaBuilderVisitor {
     }
 
     fn visit_select(&mut self, _select: &CqlSelect) -> Result<TableSchema> {
-        Err(schema_builder_unsupported("does not support SELECT statements"))
+        Err(schema_builder_unsupported(
+            "does not support SELECT statements",
+        ))
     }
 
     fn visit_insert(&mut self, _insert: &CqlInsert) -> Result<TableSchema> {
-        Err(schema_builder_unsupported("does not support INSERT statements"))
+        Err(schema_builder_unsupported(
+            "does not support INSERT statements",
+        ))
     }
 
     fn visit_update(&mut self, _update: &CqlUpdate) -> Result<TableSchema> {
-        Err(schema_builder_unsupported("does not support UPDATE statements"))
+        Err(schema_builder_unsupported(
+            "does not support UPDATE statements",
+        ))
     }
 
     fn visit_delete(&mut self, _delete: &CqlDelete) -> Result<TableSchema> {
-        Err(schema_builder_unsupported("does not support DELETE statements"))
+        Err(schema_builder_unsupported(
+            "does not support DELETE statements",
+        ))
     }
 
     fn visit_drop_table(&mut self, _drop: &CqlDropTable) -> Result<TableSchema> {

@@ -312,7 +312,9 @@ pub mod benchmarks {
         let parser_config = ParserConfig::default().with_backend(backend.clone());
         let parser = match ParserFactory::create(parser_config) {
             Ok(p) => p,
-            Err(e) => return BenchmarkResult::failed(&backend, format!("Failed to create parser: {}", e)),
+            Err(e) => {
+                return BenchmarkResult::failed(&backend, format!("Failed to create parser: {}", e))
+            }
         };
 
         let mut times = Vec::new();

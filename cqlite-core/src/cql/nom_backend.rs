@@ -363,8 +363,7 @@ impl NomParser {
         // prefixes first so two-word keywords (e.g. `CREATE TABLE`) win over
         // their single-word counterparts.
         fn starts_with_ci(haystack: &str, needle: &str) -> bool {
-            haystack.len() >= needle.len()
-                && haystack[..needle.len()].eq_ignore_ascii_case(needle)
+            haystack.len() >= needle.len() && haystack[..needle.len()].eq_ignore_ascii_case(needle)
         }
 
         if starts_with_ci(trimmed, "create table") {

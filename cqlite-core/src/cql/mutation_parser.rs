@@ -239,12 +239,7 @@ fn integer_literal(input: &str) -> IResult<&str, i64> {
 
 /// Parse float literal
 fn float_literal(input: &str) -> IResult<&str, f64> {
-    let (rest, num_str) = recognize(tuple((
-        opt(char('-')),
-        digit1,
-        char('.'),
-        digit1,
-    )))(input)?;
+    let (rest, num_str) = recognize(tuple((opt(char('-')), digit1, char('.'), digit1)))(input)?;
     let value = num_str.parse::<f64>().map_err(|_| {
         nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Digit))
     })?;
