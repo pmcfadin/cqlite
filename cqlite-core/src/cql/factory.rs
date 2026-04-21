@@ -18,121 +18,77 @@ use super::{
 pub struct ParserFactory;
 
 impl ParserFactory {
-    /// Create a parser with the default configuration
+    /// Create a parser with the default configuration.
     pub fn create_default() -> Result<Arc<dyn CqlParser + Send + Sync>> {
-        let config = ParserConfig::default();
-        Self::create(config)
+        Self::create(ParserConfig::default())
     }
 
-    /// Create a parser with the specified configuration
-    pub fn create(config: ParserConfig) -> Result<Arc<dyn CqlParser + Send + Sync>> {
-        // Validate configuration
+    /// Create a parser with the specified configuration.
+    pub fn create(mut config: ParserConfig) -> Result<Arc<dyn CqlParser + Send + Sync>> {
         config.validate().map_err(Error::configuration)?;
 
-        let backend = match config.backend.clone() {
-            ParserBackend::Nom => Self::create_nom_parser(config)?,
-            ParserBackend::Antlr => Self::create_antlr_parser(config)?,
-            ParserBackend::Auto => Self::create_auto_parser(config)?,
-            ParserBackend::Custom(name) => Self::create_custom_parser(&name, config)?,
-        };
+        if matches!(config.backend, ParserBackend::Auto) {
+            config.backend = Self::select_optimal_backend(&config);
+        }
 
-        Ok(backend)
+        match config.backend.clone() {
+            ParserBackend::Nom => Ok(Arc::new(NomParser::new(config)?)),
+            ParserBackend::Antlr => Ok(Arc::new(AntlrParser::new(config)?)),
+            ParserBackend::Auto => unreachable!("Auto resolved above"),
+            ParserBackend::Custom(name) => Err(Error::configuration(format!(
+                "Custom parser '{}' not available",
+                name
+            ))),
+        }
     }
 
-    /// Create a nom-based parser
-    fn create_nom_parser(config: ParserConfig) -> Result<Arc<dyn CqlParser + Send + Sync>> {
-        let parser = NomParser::new(config)?;
-        Ok(Arc::new(parser))
-    }
-
-    /// Create an ANTLR-based parser
-    fn create_antlr_parser(config: ParserConfig) -> Result<Arc<dyn CqlParser + Send + Sync>> {
-        let parser = AntlrParser::new(config)?;
-        Ok(Arc::new(parser))
-    }
-
-    /// Auto-select the best parser based on configuration and input characteristics
-    fn create_auto_parser(config: ParserConfig) -> Result<Arc<dyn CqlParser + Send + Sync>> {
-        // Decision logic for auto-selection
-        let backend = Self::select_optimal_backend(&config);
-
-        let mut config_with_backend = config;
-        config_with_backend.backend = backend;
-
-        Self::create(config_with_backend)
-    }
-
-    /// Create a custom parser (for extensions)
-    fn create_custom_parser(
-        name: &str,
-        _config: ParserConfig,
-    ) -> Result<Arc<dyn CqlParser + Send + Sync>> {
-        Err(Error::configuration(format!(
-            "Custom parser '{}' not available",
-            name
-        )))
-    }
-
-    /// Select optimal backend based on configuration
+    /// Select the best backend given the feature set in `config`.
+    ///
+    /// ANTLR is preferred when features require rich diagnostics or
+    /// tooling support; otherwise nom is used.
     fn select_optimal_backend(config: &ParserConfig) -> ParserBackend {
         use super::config::ParserFeature;
 
-        // Prefer ANTLR for features that require advanced parsing
-        if config.has_feature(&ParserFeature::ErrorRecovery)
+        let needs_antlr = config.has_feature(&ParserFeature::ErrorRecovery)
             || config.has_feature(&ParserFeature::SyntaxHighlighting)
             || config.has_feature(&ParserFeature::CodeCompletion)
-            || config.strict_validation
-        {
-            return ParserBackend::Antlr;
-        }
+            || config.strict_validation;
 
-        // Prefer nom for performance-oriented features
-        if config.has_feature(&ParserFeature::Streaming)
-            || config.has_feature(&ParserFeature::Parallel)
-            || config.performance.optimization_level >= 2
-        {
-            return ParserBackend::Nom;
+        if needs_antlr {
+            ParserBackend::Antlr
+        } else {
+            ParserBackend::Nom
         }
-
-        // Default to nom for general use
-        ParserBackend::Nom
     }
 
-    /// Get information about available backends
+    /// Get information about available backends.
     pub fn get_available_backends() -> Vec<ParserBackendInfo> {
         vec![NomParser::backend_info(), AntlrParser::backend_info()]
     }
 
-    /// Check if a specific backend is available
+    /// Check whether the given backend can be instantiated.
     pub fn is_backend_available(backend: &ParserBackend) -> bool {
         match backend {
-            ParserBackend::Nom => true,
-            ParserBackend::Antlr => true, // Will be true once implemented
-            ParserBackend::Auto => true,
-            ParserBackend::Custom(_) => false, // Would need registration system
+            ParserBackend::Nom | ParserBackend::Antlr | ParserBackend::Auto => true,
+            ParserBackend::Custom(_) => false,
         }
     }
 
-    /// Get the recommended backend for specific use cases
+    /// Recommend a backend for a high-level use case.
     pub fn recommend_backend(use_case: UseCase) -> ParserBackend {
         match use_case {
-            UseCase::HighPerformance => ParserBackend::Nom,
-            UseCase::Development => ParserBackend::Antlr,
+            UseCase::HighPerformance | UseCase::Embedded | UseCase::Batch => ParserBackend::Nom,
+            UseCase::Development | UseCase::Interactive => ParserBackend::Antlr,
             UseCase::Production => ParserBackend::Auto,
-            UseCase::Embedded => ParserBackend::Nom,
-            UseCase::Interactive => ParserBackend::Antlr,
-            UseCase::Batch => ParserBackend::Nom,
         }
     }
 
-    /// Create a parser optimized for a specific use case
+    /// Create a parser optimized for a specific use case.
     pub fn create_for_use_case(use_case: UseCase) -> Result<Arc<dyn CqlParser + Send + Sync>> {
         let backend = Self::recommend_backend(use_case.clone());
-        let config = Self::create_config_for_use_case(use_case, backend);
-        Self::create(config)
+        Self::create(Self::create_config_for_use_case(use_case, backend))
     }
 
-    /// Create configuration for a specific use case
     fn create_config_for_use_case(use_case: UseCase, backend: ParserBackend) -> ParserConfig {
         use super::config::ParserFeature;
         use std::time::Duration;
@@ -157,17 +113,13 @@ impl ParserFactory {
 
 impl CqlParserFactory for ParserFactory {
     fn create_parser(&self) -> Result<Box<dyn CqlParser>> {
-        let config = ParserConfig::default();
-        let parser = Self::create(config)?;
-
-        // We need to convert from Arc<dyn CqlParser + Send + Sync> to Box<dyn CqlParser>
-        // This is a bit tricky, but we can work around it by creating a wrapper
-        Ok(Box::new(ParserWrapper { inner: parser }))
+        self.create_parser_with_config(ParserConfig::default())
     }
 
     fn create_parser_with_config(&self, config: ParserConfig) -> Result<Box<dyn CqlParser>> {
-        let parser = Self::create(config)?;
-        Ok(Box::new(ParserWrapper { inner: parser }))
+        Ok(Box::new(ParserWrapper {
+            inner: Self::create(config)?,
+        }))
     }
 
     fn factory_info(&self) -> FactoryInfo {
@@ -179,7 +131,9 @@ impl CqlParserFactory for ParserFactory {
     }
 }
 
-/// Wrapper to convert Arc<dyn CqlParser + Send + Sync> to Box<dyn CqlParser>
+/// Adapter turning the shared `Arc<dyn CqlParser + Send + Sync>` returned by
+/// [`ParserFactory::create`] into the `Box<dyn CqlParser>` required by
+/// [`CqlParserFactory`].
 #[derive(Debug)]
 struct ParserWrapper {
     inner: Arc<dyn CqlParser + Send + Sync>,
@@ -224,41 +178,34 @@ impl CqlParser for ParserWrapper {
     }
 }
 
-/// Use case categories for parser optimization
+/// Use case categories for parser optimization.
 #[derive(Debug, Clone, PartialEq)]
 pub enum UseCase {
-    /// High-performance parsing with minimal overhead
+    /// High-performance parsing with minimal overhead.
     HighPerformance,
-
-    /// Development environment with rich error messages and debugging
+    /// Development environment with rich error messages and debugging.
     Development,
-
-    /// Production environment with balanced performance and reliability
+    /// Production environment with balanced performance and reliability.
     Production,
-
-    /// Embedded systems with strict resource constraints
+    /// Embedded systems with strict resource constraints.
     Embedded,
-
-    /// Interactive environments requiring fast response times
+    /// Interactive environments requiring fast response times.
     Interactive,
-
-    /// Batch processing with large volumes of queries
+    /// Batch processing with large volumes of queries.
     Batch,
 }
 
-/// Registry for custom parser backends
+/// Registry for custom parser backends.
 #[derive(Debug, Default)]
 pub struct ParserRegistry {
     custom_factories: std::collections::HashMap<String, Box<dyn CqlParserFactory + Send + Sync>>,
 }
 
 impl ParserRegistry {
-    /// Create a new parser registry
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Register a custom parser factory
     pub fn register_factory(
         &mut self,
         name: String,
@@ -267,53 +214,40 @@ impl ParserRegistry {
         self.custom_factories.insert(name, factory);
     }
 
-    /// Get a registered factory
     pub fn get_factory(&self, name: &str) -> Option<&(dyn CqlParserFactory + Send + Sync)> {
         self.custom_factories.get(name).map(|f| f.as_ref())
     }
 
-    /// List all registered factories
     pub fn list_factories(&self) -> Vec<&str> {
         self.custom_factories.keys().map(|s| s.as_str()).collect()
     }
 
-    /// Create a parser using a registered factory
+    /// Create a parser using a registered factory.
     pub fn create_with_factory(
         &self,
         factory_name: &str,
         config: ParserConfig,
     ) -> Result<Box<dyn CqlParser>> {
-        let factory = self
-            .get_factory(factory_name)
-            .ok_or_else(|| Error::configuration(format!("Factory '{}' not found", factory_name)))?;
-
-        factory.create_parser_with_config(config)
+        self.get_factory(factory_name)
+            .ok_or_else(|| Error::configuration(format!("Factory '{}' not found", factory_name)))?
+            .create_parser_with_config(config)
     }
 }
 
-/// Global parser registry instance
 static GLOBAL_REGISTRY: OnceLock<Mutex<ParserRegistry>> = OnceLock::new();
 
-/// Get the global parser registry
-fn with_global_registry<T>(f: impl FnOnce(&mut ParserRegistry) -> T) -> T {
+/// Register a factory in the process-wide registry.
+pub fn register_global_factory(name: String, factory: Box<dyn CqlParserFactory + Send + Sync>) {
     let registry = GLOBAL_REGISTRY.get_or_init(|| Mutex::new(ParserRegistry::new()));
     let mut guard = registry.lock().unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
+    guard.register_factory(name, factory);
 }
 
-/// Register a global parser factory
-pub fn register_global_factory(name: String, factory: Box<dyn CqlParserFactory + Send + Sync>) {
-    with_global_registry(|registry| {
-        registry.register_factory(name, factory);
-    });
-}
-
-/// Benchmark different parser backends
+/// Benchmark helpers for comparing parser backends.
 pub mod benchmarks {
     use super::*;
     use std::time::{Duration, Instant};
 
-    /// Benchmark result for a parser backend
     #[derive(Debug, Clone)]
     pub struct BenchmarkResult {
         pub backend: String,
@@ -324,7 +258,19 @@ pub mod benchmarks {
         pub errors: Vec<String>,
     }
 
-    /// Benchmark configuration
+    impl BenchmarkResult {
+        fn failed(backend: &ParserBackend, error: String) -> Self {
+            Self {
+                backend: format!("{:?}", backend),
+                avg_parse_time: Duration::ZERO,
+                min_parse_time: Duration::ZERO,
+                max_parse_time: Duration::ZERO,
+                success_rate: 0.0,
+                errors: vec![error],
+            }
+        }
+    }
+
     #[derive(Debug, Clone)]
     pub struct BenchmarkConfig {
         pub iterations: u32,
@@ -348,22 +294,17 @@ pub mod benchmarks {
         }
     }
 
-    /// Run benchmarks on available parser backends
+    /// Run benchmarks on all available parser backends.
     pub async fn benchmark_parsers(config: BenchmarkConfig) -> Vec<BenchmarkResult> {
-        let backends = vec![ParserBackend::Nom, ParserBackend::Antlr];
         let mut results = Vec::new();
-
-        for backend in backends {
+        for backend in [ParserBackend::Nom, ParserBackend::Antlr] {
             if ParserFactory::is_backend_available(&backend) {
-                let result = benchmark_backend(backend, &config).await;
-                results.push(result);
+                results.push(benchmark_backend(backend, &config).await);
             }
         }
-
         results
     }
 
-    /// Benchmark a specific parser backend
     async fn benchmark_backend(
         backend: ParserBackend,
         config: &BenchmarkConfig,
@@ -371,58 +312,40 @@ pub mod benchmarks {
         let parser_config = ParserConfig::default().with_backend(backend.clone());
         let parser = match ParserFactory::create(parser_config) {
             Ok(p) => p,
-            Err(e) => {
-                return BenchmarkResult {
-                    backend: format!("{:?}", backend),
-                    avg_parse_time: Duration::from_secs(0),
-                    min_parse_time: Duration::from_secs(0),
-                    max_parse_time: Duration::from_secs(0),
-                    success_rate: 0.0,
-                    errors: vec![format!("Failed to create parser: {}", e)],
-                };
-            }
+            Err(e) => return BenchmarkResult::failed(&backend, format!("Failed to create parser: {}", e)),
         };
 
         let mut times = Vec::new();
         let mut errors = Vec::new();
-        let mut successes = 0;
+        let mut successes: u32 = 0;
 
         for _ in 0..config.iterations {
             for test_case in &config.test_cases {
                 let start = Instant::now();
-
                 match tokio::time::timeout(config.timeout, parser.parse(test_case)).await {
                     Ok(Ok(_)) => {
                         successes += 1;
                         times.push(start.elapsed());
                     }
-                    Ok(Err(e)) => {
-                        errors.push(format!("Parse error: {}", e));
-                    }
-                    Err(_) => {
-                        errors.push("Timeout".to_string());
-                    }
+                    Ok(Err(e)) => errors.push(format!("Parse error: {}", e)),
+                    Err(_) => errors.push("Timeout".to_string()),
                 }
             }
         }
 
         let total_attempts = config.iterations * config.test_cases.len() as u32;
-        let success_rate = successes as f64 / total_attempts as f64;
-
-        let avg_time = if !times.is_empty() {
-            times.iter().sum::<Duration>() / times.len() as u32
+        let success_rate = f64::from(successes) / f64::from(total_attempts);
+        let avg_parse_time = if times.is_empty() {
+            Duration::ZERO
         } else {
-            Duration::from_secs(0)
+            times.iter().sum::<Duration>() / times.len() as u32
         };
-
-        let min_time = times.iter().min().copied().unwrap_or_default();
-        let max_time = times.iter().max().copied().unwrap_or_default();
 
         BenchmarkResult {
             backend: format!("{:?}", backend),
-            avg_parse_time: avg_time,
-            min_parse_time: min_time,
-            max_parse_time: max_time,
+            avg_parse_time,
+            min_parse_time: times.iter().min().copied().unwrap_or_default(),
+            max_parse_time: times.iter().max().copied().unwrap_or_default(),
             success_rate,
             errors,
         }
@@ -477,8 +400,5 @@ mod tests {
     fn test_parser_registry() {
         let registry = ParserRegistry::new();
         assert!(registry.list_factories().is_empty());
-
-        // Can't easily test factory registration without implementing a mock factory
-        // but the structure is in place
     }
 }
