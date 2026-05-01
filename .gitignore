@@ -170,3 +170,11 @@ config/
 # Test data archives (fetched via scripts)
 cassandra5-small.tar.gz
 cassandra5-small.tar.gz.sha256
+
+# E2E test outputs (regenerable)
+/e2e_phase1/
+/e2e_collections/
+/mutations.jsonl
+
+# Runtime locks
+.claude/scheduled_tasks.lock
