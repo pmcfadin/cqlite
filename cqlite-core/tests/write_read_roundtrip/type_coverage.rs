@@ -1380,7 +1380,10 @@ async fn test_type_tuple_int_text_uuid() {
                  schema-aware decoding not yet implemented)"
             );
         }
-        other => eprintln!("note: tuple<int,text,uuid> row read back as {:?}", other),
+        other => panic!(
+            "tuple<int,text,uuid> row read back as unexpected type {:?}",
+            other
+        ),
     }
 }
 
