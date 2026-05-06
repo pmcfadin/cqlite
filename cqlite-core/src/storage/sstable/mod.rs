@@ -130,6 +130,20 @@ pub(crate) fn extract_table_name(sstable_path: &Path) -> Option<String> {
     Some(dir_name.to_string())
 }
 
+/// Return `true` if the filename is a macOS AppleDouble resource-fork sidecar.
+///
+/// macOS creates `._<name>` companion files when copying to non-Apple filesystems
+/// (HFS+→FAT32, SMB shares, CI artifact tarballs, etc.).  These are NOT valid
+/// Cassandra SSTable files even though they share the `-Data.db` suffix.
+///
+/// This predicate is the single point of truth for the `._*` filter; both
+/// `load_from_table_directories` and `find_data_files` call it so the guard can
+/// never silently diverge.  See Issue #481.
+#[inline]
+fn is_apple_double_sidecar(filename: &str) -> bool {
+    filename.starts_with("._")
+}
+
 /// SSTable manager that handles multiple SSTable files
 #[derive(Debug)]
 pub struct SSTableManager {
@@ -307,10 +321,9 @@ impl SSTableManager {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
                     // Check for Cassandra SSTable data files using the *-Data.db pattern.
-                    // Skip macOS resource fork metadata files (._* prefix) which are
-                    // created by macOS when copying files to non-Apple filesystems
-                    // and are NOT valid Cassandra SSTable data files. See Issue #481.
-                    if filename.ends_with("-Data.db") && !filename.starts_with("._") {
+                    // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
+                    // See Issue #481.
+                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
                         files_found += 1;
                         log::debug!("SSTableManager found SSTable file: {:?}", path);
 
@@ -524,8 +537,9 @@ impl SSTableManager {
             while let Some(entry) = dir_entries.next_entry().await? {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    // Skip macOS resource fork metadata files (._* prefix). See Issue #481.
-                    if filename.ends_with("-Data.db") && !filename.starts_with("._") {
+                    // Skip macOS AppleDouble sidecars via is_apple_double_sidecar().
+                    // See Issue #481.
+                    if filename.ends_with("-Data.db") && !is_apple_double_sidecar(filename) {
                         results.push(path);
                     } else if max_depth > 0 {
                         // Check if it's a directory and recurse
@@ -1017,6 +1031,61 @@ mod tests {
         assert_ne!(id1.filename(), id2.filename());
         assert!(id1.filename().starts_with("sstable_"));
         assert!(id1.filename().ends_with(".sst"));
+    }
+
+    /// Regression test for Issue #481: `._*` AppleDouble sidecars must not be
+    /// returned by `find_data_files`.
+    ///
+    /// Before the fix, `find_data_files` only checked `ends_with("-Data.db")`,
+    /// so `._nb-1-big-Data.db` passed the filter and would later fail to open
+    /// as a valid SSTable.  The test would fail on the pre-fix code because
+    /// `results` would contain two paths instead of one.
+    #[tokio::test]
+    async fn test_find_data_files_excludes_apple_double_sidecar() {
+        use std::fs;
+
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+
+        // Write a minimal (invalid but correctly named) SSTable file and its
+        // macOS AppleDouble sidecar companion alongside it.
+        let real_file = temp_dir.path().join("nb-1-big-Data.db");
+        let sidecar = temp_dir.path().join("._nb-1-big-Data.db");
+        fs::write(&real_file, b"\x00").unwrap();
+        fs::write(&sidecar, b"\x00\x00").unwrap();
+
+        // find_data_files scans `temp_dir` with max_depth=0 (single level).
+        let results = SSTableManager::find_data_files(&platform, temp_dir.path(), 0)
+            .await
+            .unwrap();
+
+        // Only the real Data.db file should be returned; the ._ sidecar must be excluded.
+        assert_eq!(
+            results.len(),
+            1,
+            "expected exactly 1 result but got {}: {:?}",
+            results.len(),
+            results
+        );
+        assert_eq!(results[0], real_file);
+        assert!(
+            !results.contains(&sidecar),
+            "AppleDouble sidecar must not appear in results"
+        );
+    }
+
+    /// Unit test for the is_apple_double_sidecar helper.
+    #[test]
+    fn test_is_apple_double_sidecar() {
+        // Must match
+        assert!(is_apple_double_sidecar("._nb-1-big-Data.db"));
+        assert!(is_apple_double_sidecar("._anything"));
+        assert!(is_apple_double_sidecar("._"));
+        // Must not match
+        assert!(!is_apple_double_sidecar("nb-1-big-Data.db"));
+        assert!(!is_apple_double_sidecar("na-2-big-Data.db"));
+        assert!(!is_apple_double_sidecar(""));
     }
 
     #[test]

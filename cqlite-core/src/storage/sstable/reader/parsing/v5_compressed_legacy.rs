@@ -3761,13 +3761,27 @@ impl V5CompressedLegacyParser {
     ///
     /// Issue #221: This enables parsing of typed_collections_table and other
     /// tables with non-frozen collections.
+    /// Outer entry point — the `reader` parameter is forwarded to the inner
+    /// cells but is currently unused there (`_reader`).  The outer/inner split
+    /// lets unit tests call `parse_complex_column_inner` without constructing a
+    /// full `SSTableReader`.
     fn parse_complex_column(
+        &self,
+        data: &[u8],
+        offset: usize,
+        column: &crate::schema::Column,
+        has_complex_deletion: bool,
+        _reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        self.parse_complex_column_inner(data, offset, column, has_complex_deletion)
+    }
+
+    fn parse_complex_column_inner(
         &self,
         data: &[u8],
         mut offset: usize,
         column: &crate::schema::Column,
         has_complex_deletion: bool,
-        reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         log::debug!(
             "V5CompressedLegacy: Parsing complex column '{}' type='{}' has_complex_deletion={} at offset {}",
@@ -3845,14 +3859,8 @@ impl V5CompressedLegacyParser {
             let mut elements = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, _path, new_offset) = self.parse_complex_cell_value(
-                    data,
-                    offset,
-                    &element_type,
-                    column,
-                    i as u64,
-                    reader,
-                )?;
+                let (cell_value, _path, new_offset) =
+                    self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
                 offset = new_offset;
 
                 // Add non-null values to the list
@@ -3874,19 +3882,21 @@ impl V5CompressedLegacyParser {
             let mut elements = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, path_bytes, new_offset) = self.parse_complex_cell_value(
-                    data,
-                    offset,
-                    &element_type,
-                    column,
-                    i as u64,
-                    reader,
-                )?;
+                let (cell_value, path_bytes, new_offset) =
+                    self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
                 offset = new_offset;
 
                 // For sets: the path bytes ARE the element value (cell value is always empty).
                 // If cell_value is Some (unusual case where set cell has a non-empty value),
                 // use it. Otherwise parse the path bytes as the element type.
+                //
+                // Known limitation (Issue #493): tombstone ambiguity.
+                // When `cell_value.is_none() && !path_bytes.is_empty()`, both live elements
+                // (HAS_EMPTY_VALUE flag = 0x04) and element-level tombstones (is_deleted = 0x01
+                // with an identifying path) enter this branch.  Currently both are surfaced as
+                // live values.  Once tombstone tracking lands, this branch should consult the
+                // `is_deleted` flag on the cell and skip tombstoned elements.
+                // TODO(#493): skip element tombstones once tombstone tracking lands.
                 if let Some(val) = cell_value {
                     elements.push(val);
                 } else if !path_bytes.is_empty() {
@@ -3919,14 +3929,8 @@ impl V5CompressedLegacyParser {
             let mut entries = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, path_bytes, new_offset) = self.parse_complex_cell_value(
-                    data,
-                    offset,
-                    &value_type,
-                    column,
-                    i as u64,
-                    reader,
-                )?;
+                let (cell_value, path_bytes, new_offset) =
+                    self.parse_complex_cell_value(data, offset, &value_type, column, i as u64)?;
                 offset = new_offset;
 
                 // For maps, the cell path IS the key
@@ -3984,7 +3988,6 @@ impl V5CompressedLegacyParser {
         element_type: &str,
         column: &crate::schema::Column,
         cell_index: u64,
-        _reader: &super::super::types::SSTableReader,
     ) -> Result<(Option<Value>, Vec<u8>, usize)> {
         log::debug!(
             "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} element_type='{}' starting at offset {}",
@@ -7464,6 +7467,133 @@ mod tests {
         assert!(
             !V5CompressedLegacyParser::is_range_tombstone_marker(0x03),
             "0x03 has END_OF_PARTITION bit set, should NOT be range tombstone"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for Issue #481
+    // -----------------------------------------------------------------------
+
+    /// Build the binary for a single complex cell with HAS_EMPTY_VALUE set and
+    /// the given `path_bytes` as the cell path.  The timestamp field is encoded
+    /// as VInt(0) (ZigZag ⇒ 0x00, one byte).
+    ///
+    /// Wire format (Cassandra 5.0 complex-cell layout):
+    ///   [flags:u8] [timestamp:VInt] [path_len:VUInt] [path:bytes]
+    fn build_set_cell_bytes(path: &[u8]) -> Vec<u8> {
+        // flags = 0x04 (HAS_EMPTY_VALUE); use_row_timestamp bit (0x08) NOT set,
+        // so an explicit timestamp follows.
+        let flags: u8 = 0x04;
+        // VInt(0) in ZigZag = 0x00 (single byte).
+        let ts_byte: u8 = 0x00;
+        // path_len as VUInt (single-byte form for small lengths).
+        let path_len = path.len() as u8;
+        assert!(path_len < 0x80, "helper only supports path lengths < 128");
+
+        let mut buf = vec![flags, ts_byte, path_len];
+        buf.extend_from_slice(path);
+        buf
+    }
+
+    /// Regression test for Issue #481 bug 2: `parse_complex_cell_value` was
+    /// calling `parse_raw_type_value(value_data, 0, ...)` which re-consumed the
+    /// already-extracted length prefix, causing the first content byte (e.g.
+    /// `0x2A = 42`) to be misread as the start of another VInt length.
+    ///
+    /// **Without the fix** `parse_raw_type_value` would try to read 42 more
+    /// bytes from a 2-byte slice and return an error, so the test would panic.
+    /// **With the fix** `parse_value_from_raw_bytes` treats the whole slice as
+    /// raw value bytes and returns `Blob([0x2A, 0xBB, 0xCC])`.
+    #[test]
+    fn test_regression_481_complex_cell_value_no_double_length_prefix() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "my_blob".to_string(),
+            data_type: "blob".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build one list-cell with value bytes [0x2A, 0xBB, 0xCC].
+        //
+        // flags = 0x08 (use_row_timestamp — skip reading a timestamp),
+        // path_len VUInt = 0x00 (empty path, normal for list elements),
+        // value_len VUInt = 0x03,
+        // value = [0x2A, 0xBB, 0xCC].
+        //
+        // The first content byte (0x2A = 42) is deliberately chosen so that
+        // the pre-fix code — which passed the already-extracted slice back into
+        // parse_raw_type_value with offset 0 — would read it as a length prefix
+        // ("read 42 more bytes") and fail.
+        let cell_bytes: Vec<u8> = vec![
+            0x08, // flags: use_row_timestamp (skip ts field), no deletion, no empty-value
+            0x00, // path_len VUInt = 0 (empty path)
+            0x03, // value_len VUInt = 3
+            0x2A, // ← first content byte; pre-fix code misread this as a length
+            0xBB, 0xCC,
+        ];
+
+        let (cell_value, path_bytes, consumed) = parser
+            .parse_complex_cell_value(&cell_bytes, 0, "blob", &column, 0)
+            .expect("parse_complex_cell_value should succeed");
+
+        assert!(path_bytes.is_empty());
+        assert_eq!(consumed, cell_bytes.len());
+        assert_eq!(
+            cell_value,
+            Some(Value::Blob(vec![0x2A, 0xBB, 0xCC])),
+            "blob value must be the three raw bytes, not a misread length-prefixed parse"
+        );
+    }
+
+    /// Regression test for Issue #481 bug 3: for `set<T>` complex columns, each
+    /// set element is stored in the cell PATH (with `HAS_EMPTY_VALUE` = 0x04
+    /// set in cell flags), not the cell value.
+    ///
+    /// **Without the fix** `parse_complex_column` (the set branch) only checked
+    /// `if let Some(val) = cell_value { elements.push(val) }` and silently
+    /// discarded the path bytes, so the set appeared empty.
+    /// **With the fix** the `else if !path_bytes.is_empty()` branch decodes the
+    /// path bytes and adds them to the set.
+    #[test]
+    fn test_regression_481_set_elements_from_cell_path() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "my_set".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build a synthetic `set<text>` with two elements: "hello" and "world".
+        //
+        // Outer format: [cell_count:VUInt] [cell1] [cell2]
+        //   cell_count = 2 → VUInt(2) = 0x02
+        //
+        // Each cell has HAS_EMPTY_VALUE (0x04) set, so the element lives in the
+        // path field.  Timestamp is VInt(0) = 0x00 (ZigZag single byte).
+        let hello = b"hello";
+        let world = b"world";
+        let mut blob = vec![0x02u8]; // cell_count = 2
+        blob.extend(build_set_cell_bytes(hello));
+        blob.extend(build_set_cell_bytes(world));
+
+        let (value, consumed) = parser
+            .parse_complex_column_inner(&blob, 0, &column, false)
+            .expect("parse_complex_column_inner should succeed");
+
+        assert_eq!(consumed, blob.len());
+        assert_eq!(
+            value,
+            Value::Set(vec![
+                Value::Text("hello".to_string()),
+                Value::Text("world".to_string()),
+            ]),
+            "set elements stored in cell path must be decoded and returned"
         );
     }
 }
