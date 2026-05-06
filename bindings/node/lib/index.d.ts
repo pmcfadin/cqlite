@@ -316,18 +316,27 @@ export interface DatabaseStats {
  *
  * @example
  * ```typescript
+ * // Read-only
  * const options: DatabaseOptions = {
  *   schema: '/path/to/schema.cql',
  *   memoryLimit: 256 * 1024 * 1024, // 256MB
  *   cacheEnabled: true
  * };
  * const db = await Database.open('/path/to/data', options);
+ *
+ * // Read-write
+ * const db = await Database.open('/path/to/data', {
+ *   schema: '/path/to/schema.cql',
+ *   writable: true,
+ *   writeDir: '/tmp/cqlite-writes',
+ * });
  * ```
  */
 export interface DatabaseOptions {
   /**
    * Path to a CQL schema file (.cql).
    * If provided, the schema will be loaded and used for query execution.
+   * Required when `writable` is true.
    */
   schema?: string;
 
@@ -350,6 +359,114 @@ export interface DatabaseOptions {
    * Set to false to minimize memory usage at the cost of performance.
    */
   cacheEnabled?: boolean;
+
+  /**
+   * Enable write support (INSERT, UPDATE, DELETE).
+   * When true, `writeDir` must also be provided and a `schema` is required.
+   * Default: false (read-only mode).
+   */
+  writable?: boolean;
+
+  /**
+   * Directory for write-engine data (memtable flush targets and WAL files).
+   * Required when `writable` is true.
+   * Sub-directories `data/` and `wal/` are created automatically.
+   *
+   * @example
+   * ```typescript
+   * { writable: true, writeDir: '/tmp/cqlite-writes' }
+   * ```
+   */
+  writeDir?: string;
+}
+
+// ============================================================================
+// Write Support
+// ============================================================================
+
+/**
+ * Write engine statistics.
+ *
+ * Returned synchronously by `Database.writeStats`.
+ * Reflects the current state of the in-memory write buffer and WAL.
+ *
+ * @example
+ * ```typescript
+ * const stats = db.writeStats;
+ * console.log(`Memtable: ${stats.memtableSize} bytes, ${stats.memtableRows} rows`);
+ * console.log(`L0 files: ${stats.l0Count}`);
+ * ```
+ */
+export interface WriteStats {
+  /** Current memtable size in bytes. */
+  memtableSize: number;
+
+  /** Current number of rows in the memtable. */
+  memtableRows: number;
+
+  /** Current write-ahead log (WAL) size in bytes. */
+  walSize: number;
+
+  /**
+   * Number of L0 SSTable files flushed during this session.
+   * Increases by 1 for each `flushRun()` call that produced data.
+   */
+  l0Count: number;
+
+  /** Total bytes written to SSTables across all flushes in this session. */
+  totalWritten: number;
+}
+
+/**
+ * Options for `Database.maintenanceStep()`.
+ *
+ * Controls time-bounded background compaction.
+ *
+ * @example
+ * ```typescript
+ * const report = await db.maintenanceStep({ budgetMs: 200 });
+ * ```
+ */
+export interface MaintenanceOptions {
+  /**
+   * Maximum time to spend in this maintenance step, in milliseconds.
+   * Default: 100.
+   */
+  budgetMs?: number;
+}
+
+/**
+ * Report returned by `Database.maintenanceStep()`.
+ *
+ * Describes progress made during one time-bounded compaction step.
+ *
+ * @example
+ * ```typescript
+ * const report = await db.maintenanceStep({ budgetMs: 100 });
+ * console.log(`Merged ${report.rowsMerged} rows in ${report.timeSpentMs}ms`);
+ * if (report.pendingCompaction) {
+ *   console.log('More compaction work pending');
+ * }
+ * ```
+ */
+export interface MaintenanceReport {
+  /** Time actually spent in the maintenance step, in milliseconds. */
+  timeSpentMs: number;
+
+  /** Number of rows merged during this step. */
+  rowsMerged: number;
+
+  /** Number of bytes written during this step. */
+  bytesWritten: number;
+
+  /**
+   * Paths of SSTables produced by merges completed in this step.
+   * Empty array when no merge was completed (step was partial progress).
+   */
+  completedMerges: string[];
+
+  /** Whether there is more compaction work pending after this step. */
+  pendingCompaction: boolean;
 }
 
 /**
@@ -854,6 +971,75 @@ export declare class Database {
    * @throws {CqliteError} If the query cannot be prepared
    */
   prepare(query: string): Promise<PreparedStatement>;
+
+  /**
+   * Flush the in-memory write buffer (memtable) to an SSTable on disk.
+   *
+   * Returns the path to the created Data.db file.
+   * If the memtable is empty, an empty string is returned (no-op flush).
+   *
+   * Requires the database to have been opened with `{ writable: true }`.
+   *
+   * @returns Promise resolving to the Data.db path, or "" if nothing was flushed
+   * @throws {CqliteError} If write support is not enabled or the flush fails
+   *
+   * @example
+   * ```typescript
+   * const db = await Database.open('/data', {
+   *   schema: 'schema.cql',
+   *   writable: true,
+   *   writeDir: '/tmp/writes',
+   * });
+   * await db.execute("INSERT INTO t (id, name) VALUES (uuid(), 'Alice')");
+   * const sstablePath = await db.flushRun();
+   * console.log(`Flushed to: ${sstablePath}`);
+   * ```
+   */
+  flushRun(): Promise<string>;
+
+  /**
+   * Perform time-bounded background maintenance (compaction).
+   *
+   * Runs incremental compaction work within the provided time budget.
+   * Can be called repeatedly to drain pending compaction work.
+   *
+   * Requires the database to have been opened with `{ writable: true }`.
+   *
+   * @param options - Optional maintenance options (default budgetMs: 100)
+   * @returns Promise resolving to a MaintenanceReport
+   * @throws {CqliteError} If write support is not enabled or maintenance fails
+   *
+   * @example
+   * ```typescript
+   * let report: MaintenanceReport;
+   * do {
+   *   report = await db.maintenanceStep({ budgetMs: 100 });
+   *   console.log(`Merged ${report.rowsMerged} rows`);
+   * } while (report.pendingCompaction);
+   * ```
+   */
+  maintenanceStep(options?: MaintenanceOptions): Promise<MaintenanceReport>;
+
+  /**
+   * Get current write engine statistics (synchronous getter).
+   *
+   * Returns a snapshot of the in-memory write buffer (memtable) and WAL state.
+   *
+   * Requires the database to have been opened with `{ writable: true }`.
+   *
+   * @returns WriteStats snapshot
+   * @throws {CqliteError} If write support is not enabled
+   *
+   * @example
+   * ```typescript
+   * const stats = db.writeStats;
+   * console.log(`Memtable: ${stats.memtableSize} bytes, ${stats.memtableRows} rows`);
+   * console.log(`WAL: ${stats.walSize} bytes`);
+   * console.log(`L0 files: ${stats.l0Count}`);
+   * console.log(`Total written: ${stats.totalWritten} bytes`);
+   * ```
+   */
+  get writeStats(): WriteStats;
 }
 
 // ============================================================================

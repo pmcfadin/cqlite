@@ -189,7 +189,12 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
     async execute(query) {
       try {
         const result = await this._native.execute(query);
-        result.rowsAffected = result.rowCount; // M4 spec alias (Issue #348)
+        // For SELECT: rowsAffected = rowCount (alias, Issue #348).
+        // For DML (INSERT/UPDATE/DELETE): rowsAffected is already set by Rust layer to 1;
+        // do NOT overwrite it with rowCount (which would be 0 for writes).
+        if (result.rowsAffected === undefined || result.rowsAffected === null) {
+          result.rowsAffected = result.rowCount;
+        }
         return result;
       } catch (error) {
         throw enhanceError(error);
@@ -199,7 +204,10 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
     async executeNative(query) {
       try {
         const result = await this._native.executeNative(query);
-        result.rowsAffected = result.rowCount; // M4 spec alias (Issue #348)
+        // Same pattern as execute(): preserve rowsAffected from Rust layer.
+        if (result.rowsAffected === undefined || result.rowsAffected === null) {
+          result.rowsAffected = result.rowCount;
+        }
         return result;
       } catch (error) {
         throw enhanceError(error);
@@ -358,6 +366,55 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
         const nativeStmt = await this._native.prepare(query);
         // Wrap to ensure type consistency (Issue #351)
         return this._wrapPreparedStatement(nativeStmt);
+      } catch (error) {
+        throw enhanceError(error);
+      }
+    }
+
+    /**
+     * Flush the in-memory write buffer (memtable) to an SSTable on disk.
+     *
+     * Returns the path to the created Data.db file.
+     * Returns an empty string if the memtable was empty (no-op flush).
+     *
+     * Requires the database to have been opened with `{ writable: true }`.
+     *
+     * @returns {Promise<string>} Absolute path to the Data.db file, or "" if nothing flushed
+     * @throws {CqliteError} If write support is not enabled or the flush fails
+     */
+    async flushRun() {
+      try {
+        return await this._native.flushRun();
+      } catch (error) {
+        throw enhanceError(error);
+      }
+    }
+
+    /**
+     * Perform time-bounded background maintenance (compaction).
+     *
+     * @param {Object} [options] - Maintenance options
+     * @param {number} [options.budgetMs=100] - Time budget in milliseconds
+     * @returns {Promise<Object>} MaintenanceReport with timeSpentMs, rowsMerged, etc.
+     * @throws {CqliteError} If write support is not enabled or maintenance fails
+     */
+    async maintenanceStep(options) {
+      try {
+        return await this._native.maintenanceStep(options);
+      } catch (error) {
+        throw enhanceError(error);
+      }
+    }
+
+    /**
+     * Get current write engine statistics (synchronous getter).
+     *
+     * @returns {Object} WriteStats with memtableSize, memtableRows, walSize, l0Count, totalWritten
+     * @throws {CqliteError} If write support is not enabled
+     */
+    get writeStats() {
+      try {
+        return this._native.writeStats;
       } catch (error) {
         throw enhanceError(error);
       }

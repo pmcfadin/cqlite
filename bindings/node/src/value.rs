@@ -263,19 +263,22 @@ fn decimal_to_string(scale: i32, unscaled: &[u8]) -> String {
         let scale_usize = scale as usize;
         if digits.len() <= scale_usize {
             // Need leading zeros: 123 with scale 5 -> 0.00123
-            format!("0.{:0>width$}", digits, width = scale_usize)
+            format!("0.{digits:0>scale_usize$}")
         } else {
             // Insert decimal point
             let split_point = digits.len() - scale_usize;
-            format!("{}.{}", &digits[..split_point], &digits[split_point..])
+            let int_part = &digits[..split_point];
+            let frac_part = &digits[split_point..];
+            format!("{int_part}.{frac_part}")
         }
     } else {
         // Negative scale means multiply by power of 10
-        format!("{}e{}", digits, -scale)
+        let neg_scale = -scale;
+        format!("{digits}e{neg_scale}")
     };
 
     if is_negative {
-        format!("-{}", result)
+        format!("-{result}")
     } else {
         result
     }

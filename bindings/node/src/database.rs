@@ -1,7 +1,7 @@
 //! Database wrapper for Node.js bindings.
 //!
 //! This module provides the `Database` class for Node.js access to
-//! CQLite's SSTable reading capabilities.
+//! CQLite's SSTable reading and writing capabilities.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,6 +10,9 @@ use std::sync::Arc;
 use napi_derive::napi;
 
 use crate::error::{simple_error, to_napi_error};
+
+#[cfg(feature = "write-support")]
+use std::sync::Mutex;
 
 /// Column metadata information.
 ///
@@ -62,12 +65,67 @@ pub struct QueryResult {
     /// Number of rows returned.
     pub row_count: u32,
 
+    /// Number of rows affected by a write statement (INSERT/UPDATE/DELETE).
+    /// For SELECT queries this equals row_count.
+    pub rows_affected: u32,
+
     /// Query execution time in milliseconds.
     pub execution_time_ms: u32,
 
     /// Column metadata for the result set.
     /// Contains information about each column's name, type, and nullability.
     pub columns: Vec<ColumnInfo>,
+}
+
+/// Write engine statistics.
+///
+/// Returned by `Database.writeStats` (synchronous getter).
+/// Reflects the current state of the in-memory write buffer and WAL.
+#[napi(object)]
+pub struct WriteStats {
+    /// Current memtable size in bytes.
+    pub memtable_size: f64,
+
+    /// Current number of rows in the memtable.
+    pub memtable_rows: u32,
+
+    /// Current WAL (write-ahead log) size in bytes.
+    pub wal_size: f64,
+
+    /// Number of L0 SSTable files (generation count proxy).
+    pub l0_count: u32,
+
+    /// Total bytes written to SSTables since engine was opened.
+    pub total_written: f64,
+}
+
+/// Maintenance step options.
+///
+/// Controls time-bounded background compaction behaviour.
+#[napi(object)]
+pub struct MaintenanceOptions {
+    /// Maximum time to spend in this maintenance step, in milliseconds.
+    /// Default: 100.
+    pub budget_ms: Option<u32>,
+}
+
+/// Report returned by `Database.maintenanceStep()`.
+#[napi(object)]
+pub struct MaintenanceReport {
+    /// Time actually spent in the step, in milliseconds.
+    pub time_spent_ms: f64,
+
+    /// Number of rows merged during this step.
+    pub rows_merged: f64,
+
+    /// Number of bytes written during this step.
+    pub bytes_written: f64,
+
+    /// Paths of SSTables produced by completed merges (as strings).
+    pub completed_merges: Vec<String>,
+
+    /// Whether there is pending compaction work remaining.
+    pub pending_compaction: bool,
 }
 
 /// Database statistics.
@@ -109,6 +167,17 @@ pub struct DatabaseOptions {
     /// Set to false to minimize memory usage at the cost of performance.
     #[napi(js_name = "cacheEnabled")]
     pub cache_enabled: Option<bool>,
+
+    /// Enable write support.
+    /// When true, INSERT/UPDATE/DELETE statements will be accepted and `writeDir`
+    /// must also be provided.  Default: false.
+    pub writable: Option<bool>,
+
+    /// Directory for write-engine data (memtable flush targets and WAL files).
+    /// Required when `writable` is true.
+    /// Sub-directories `data/` and `wal/` are created automatically.
+    #[napi(js_name = "writeDir")]
+    pub write_dir: Option<String>,
 }
 
 /// Configuration for streaming query execution.
@@ -197,14 +266,39 @@ impl StreamingConfig {
 /// }
 /// ```
 ///
+/// ## Write Support
+///
+/// Pass `{ writable: true, writeDir: '/path/to/write-dir' }` to enable writes:
+///
+/// ```javascript
+/// const db = await Database.open('/path/to/data', {
+///   schema: '/path/to/schema.cql',
+///   writable: true,
+///   writeDir: '/tmp/cqlite-writes',
+/// });
+/// await db.execute("INSERT INTO users (id, name) VALUES (uuid(), 'Alice')");
+/// const path = await db.flushRun();
+/// ```
+///
 /// ## Thread Safety
 ///
 /// Database handles are thread-safe and can be shared across worker threads.
 /// The `close()` method is idempotent - calling it multiple times is safe.
+/// The write engine is protected by an Arc<Mutex> and only one write can proceed at a time.
 #[napi]
 pub struct Database {
     inner: Arc<cqlite_core::Database>,
     closed: AtomicBool,
+    /// Write engine, present only when `writable: true` was supplied to `open()`.
+    /// Wrapped in Arc so it can be shared with async tasks.
+    #[cfg(feature = "write-support")]
+    write_engine: Option<Arc<Mutex<cqlite_core::storage::write_engine::WriteEngine>>>,
+    /// Track total bytes written across all flushes (for writeStats.totalWritten).
+    #[cfg(feature = "write-support")]
+    total_written_bytes: Arc<Mutex<u64>>,
+    /// Track how many L0 SSTable files have been flushed.
+    #[cfg(feature = "write-support")]
+    l0_count: Arc<Mutex<u32>>,
 }
 
 impl Database {
@@ -216,6 +310,29 @@ impl Database {
             Ok(())
         }
     }
+
+    /// Check that write support is enabled, returning a clear error if not.
+    #[cfg(feature = "write-support")]
+    fn ensure_writable(&self) -> napi::Result<()> {
+        if self.write_engine.is_none() {
+            Err(simple_error(
+                "Write support not enabled. \
+                 Open the database with { writable: true, writeDir: '<path>' } to enable write operations.",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Determine whether a CQL statement is a write operation.
+    #[cfg(feature = "write-support")]
+    fn is_dml_statement(query: &str) -> bool {
+        let upper = query.trim_start().to_uppercase();
+        upper.starts_with("INSERT")
+            || upper.starts_with("UPDATE")
+            || upper.starts_with("DELETE")
+            || upper.starts_with("BEGIN")
+    }
 }
 
 #[napi]
@@ -223,17 +340,24 @@ impl Database {
     /// Opens a database at the specified data directory.
     ///
     /// @param dataDir - Path to the SSTable data directory
-    /// @param options - Optional configuration (schema path, etc.)
+    /// @param options - Optional configuration (schema path, writable, writeDir, etc.)
     /// @returns Promise resolving to a Database instance
     ///
     /// @example
     /// ```javascript
-    /// // Basic open
+    /// // Basic open (read-only)
     /// const db = await Database.open('/path/to/sstables');
     ///
     /// // With schema file
     /// const db = await Database.open('/path/to/sstables', {
     ///   schema: '/path/to/schema.cql'
+    /// });
+    ///
+    /// // With write support enabled
+    /// const db = await Database.open('/path/to/sstables', {
+    ///   schema: '/path/to/schema.cql',
+    ///   writable: true,
+    ///   writeDir: '/tmp/cqlite-writes',
     /// });
     /// ```
     #[napi(factory)]
@@ -244,7 +368,7 @@ impl Database {
         let path = PathBuf::from(&data_dir);
 
         // Extract all options and build config
-        let (schema_path, core_config) = if let Some(opts) = options {
+        let (schema_path, core_config, writable, write_dir) = if let Some(opts) = options {
             let mut config = cqlite_core::Config::default();
 
             if let Some(limit) = opts.memory_limit {
@@ -267,10 +391,26 @@ impl Database {
                 config.memory.query_cache.enabled = enabled;
             }
 
-            (opts.schema.map(PathBuf::from), config)
+            let writable = opts.writable.unwrap_or(false);
+            let write_dir = opts.write_dir.map(PathBuf::from);
+
+            (opts.schema.map(PathBuf::from), config, writable, write_dir)
         } else {
-            (None, cqlite_core::Config::default())
+            (None, cqlite_core::Config::default(), false, None)
         };
+
+        // Clone schema path before it is potentially consumed by db open, so the
+        // write engine initializer can also read the same CQL file.
+        #[cfg(feature = "write-support")]
+        let schema_path_for_write: Option<PathBuf> = schema_path.clone();
+
+        // Validate write options
+        #[cfg(feature = "write-support")]
+        if writable && write_dir.is_none() {
+            return Err(napi::Error::from_reason(
+                "writeDir is required when writable is true",
+            ));
+        }
 
         let db = if let Some(schema) = schema_path {
             // Use ingestion module for schema + SSTable discovery
@@ -294,31 +434,186 @@ impl Database {
                 .map_err(to_napi_error)?
         };
 
+        // Build write engine if requested
+        #[cfg(feature = "write-support")]
+        let write_engine_opt: Option<
+            Arc<Mutex<cqlite_core::storage::write_engine::WriteEngine>>,
+        > = if writable {
+            let wd = write_dir
+                .as_ref()
+                .expect("write_dir validated above to be Some when writable");
+
+            // We need a TableSchema for the write engine.
+            // Use the ingestion result schema registry if available, otherwise require
+            // schema_path to be provided and parse it directly (mirrors CLI write-only mode).
+            let schema = if let Some(ref sp) = schema_path_for_write {
+                // Parse schema directly from CQL file (same as CLI write-only mode).
+                // Mirrors the logic in cqlite-cli/src/main.rs that extracts keyspace
+                // from USE/CREATE KEYSPACE statements before applying to table schemas.
+                use cqlite_core::schema::cql_parser::{
+                    classify_statement, parse_create_table, split_cql_statements, StatementType,
+                };
+                let content = std::fs::read_to_string(sp).map_err(|e| {
+                    napi::Error::from_reason(format!(
+                        "Failed to read schema file '{}': {}",
+                        sp.display(),
+                        e
+                    ))
+                })?;
+                let statements = split_cql_statements(&content);
+
+                // Pass 1: collect keyspace from USE / CREATE KEYSPACE statements
+                // and all table schemas (with keyspace applied).
+                let mut file_keyspace: Option<String> = None;
+                let mut table_schemas: Vec<cqlite_core::schema::TableSchema> = Vec::new();
+
+                for stmt in &statements {
+                    match classify_statement(stmt) {
+                        StatementType::Other(ref kind) if kind == "use" => {
+                            // Extract keyspace from USE <keyspace>;
+                            let name = stmt
+                                .trim()
+                                .strip_prefix("USE")
+                                .or_else(|| stmt.trim().strip_prefix("use"))
+                                .unwrap_or("")
+                                .trim()
+                                .trim_end_matches(';')
+                                .trim()
+                                .to_string();
+                            if !name.is_empty() {
+                                file_keyspace = Some(name);
+                            }
+                        }
+                        StatementType::Other(ref kind) if kind == "create" => {
+                            // Extract keyspace from CREATE KEYSPACE IF NOT EXISTS <name>
+                            let lower = stmt.to_lowercase();
+                            if lower.contains("create keyspace") {
+                                let after = if let Some(pos) = lower.find("exists") {
+                                    &stmt[pos + 6..]
+                                } else if let Some(pos) = lower.find("keyspace") {
+                                    &stmt[pos + 8..]
+                                } else {
+                                    ""
+                                };
+                                let name = after
+                                    .trim()
+                                    .split(|c: char| c.is_whitespace() || c == '{' || c == ';')
+                                    .next()
+                                    .unwrap_or("")
+                                    .trim()
+                                    .to_string();
+                                if !name.is_empty() {
+                                    file_keyspace = Some(name);
+                                }
+                            }
+                        }
+                        StatementType::CreateTable => {
+                            if let Ok((_remaining, mut ts)) = parse_create_table(stmt) {
+                                // Apply file-level keyspace if table doesn't have one yet
+                                if ts.keyspace.is_empty()
+                                    || ts.keyspace == "unknown"
+                                    || ts.keyspace == "default"
+                                {
+                                    if let Some(ref ks) = file_keyspace {
+                                        ts.keyspace = ks.clone();
+                                    }
+                                }
+                                table_schemas.push(ts);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Return the first table schema (simplest heuristic; callers that
+                // need a specific table should use a dedicated schema file).
+                table_schemas.into_iter().next().ok_or_else(|| {
+                    napi::Error::from_reason(format!(
+                        "No CREATE TABLE statement found in schema file '{}'",
+                        sp.display()
+                    ))
+                })?
+            } else {
+                return Err(napi::Error::from_reason(
+                    "A schema file (option `schema`) is required when `writable` is true.",
+                ));
+            };
+
+            let config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
+                wd.join("data"),
+                wd.join("wal"),
+                schema,
+            );
+
+            let engine = cqlite_core::storage::write_engine::WriteEngine::new(config)
+                .map_err(to_napi_error)?;
+            Some(Arc::new(Mutex::new(engine)))
+        } else {
+            None
+        };
+
+        #[cfg(not(feature = "write-support"))]
+        let _ = (writable, write_dir); // suppress unused warning when feature off
+
         Ok(Database {
             inner: Arc::new(db),
             closed: AtomicBool::new(false),
+            #[cfg(feature = "write-support")]
+            write_engine: write_engine_opt,
+            #[cfg(feature = "write-support")]
+            total_written_bytes: Arc::new(Mutex::new(0)),
+            #[cfg(feature = "write-support")]
+            l0_count: Arc::new(Mutex::new(0)),
         })
     }
 
-    /// Execute a CQL query and return results.
+    /// Execute a CQL query or write statement and return results.
     ///
-    /// Executes a query against the database and returns all matching rows.
-    /// For large result sets, consider using streaming (future feature).
+    /// For SELECT queries, returns matching rows.
+    /// For INSERT/UPDATE/DELETE, executes the write and returns `rowsAffected`.
+    /// For large result sets, consider using streaming via `executeStreaming()`.
     ///
-    /// @param query - CQL SELECT statement to execute
+    /// @param query - CQL statement to execute
     /// @returns Promise resolving to QueryResult with rows and metadata
     ///
     /// @example
     /// ```javascript
+    /// // Read
     /// const result = await db.execute('SELECT * FROM users LIMIT 10');
     /// console.log(`Got ${result.rowCount} rows in ${result.executionTimeMs}ms`);
-    /// for (const row of result.rows) {
-    ///   console.log(row.name);
-    /// }
+    ///
+    /// // Write (requires writable: true in open options)
+    /// const wr = await db.execute("INSERT INTO users (id, name) VALUES (uuid(), 'Alice')");
+    /// console.log(`Rows affected: ${wr.rowsAffected}`);
     /// ```
     #[napi]
     pub async fn execute(&self, query: String) -> napi::Result<QueryResult> {
         self.ensure_open()?;
+
+        // Route DML statements to write engine when write support is compiled in.
+        #[cfg(feature = "write-support")]
+        if Self::is_dml_statement(&query) {
+            self.ensure_writable()?;
+            let start = std::time::Instant::now();
+            {
+                let we = self
+                    .write_engine
+                    .as_ref()
+                    .expect("ensure_writable verified write_engine is Some");
+                let mut engine = we
+                    .lock()
+                    .map_err(|_| simple_error("Write engine lock poisoned"))?;
+                engine.execute(&query).map_err(to_napi_error)?;
+            }
+            let elapsed_ms = start.elapsed().as_millis() as u32;
+            return Ok(QueryResult {
+                rows: vec![],
+                row_count: 0,
+                rows_affected: 1,
+                execution_time_ms: elapsed_ms,
+                columns: vec![],
+            });
+        }
 
         let core_result = self.inner.execute(&query).await.map_err(to_napi_error)?;
 
@@ -345,8 +640,10 @@ impl Database {
             .map(ColumnInfo::from_core)
             .collect();
 
+        let row_count = rows.len() as u32;
         Ok(QueryResult {
-            row_count: rows.len() as u32,
+            rows_affected: row_count,
+            row_count,
             rows,
             execution_time_ms: core_result.execution_time_ms as u32,
             columns,
@@ -476,7 +773,7 @@ impl Database {
         crate::streaming::StreamingResult::new(iter)
     }
 
-    /// Execute a CQL query and return results with native JavaScript types.
+    /// Execute a CQL query or write statement and return results with native JavaScript types.
     ///
     /// This method returns native JavaScript types instead of JSON:
     /// - BigInt for bigint/counter columns (preserves 64-bit precision)
@@ -485,7 +782,9 @@ impl Database {
     /// - Set for set columns
     /// - Map for map columns
     ///
-    /// @param query - CQL SELECT statement to execute
+    /// For INSERT/UPDATE/DELETE, `rowsAffected` is set to 1 and `rows` is empty.
+    ///
+    /// @param query - CQL statement to execute
     /// @returns Promise resolving to NativeQueryResult with native typed rows
     ///
     /// @example
@@ -498,19 +797,32 @@ impl Database {
     ///   // row.data is a Buffer if the column is blob
     ///   console.log(row.name, typeof row.id);
     /// }
+    ///
+    /// // Write (requires writable: true in open options)
+    /// const wr = await db.executeNative("INSERT INTO users (id, name) VALUES (uuid(), 'Alice')");
+    /// console.log(`Rows affected: ${wr.rowsAffected}`);
     /// ```
     #[napi(
         js_name = "executeNative",
-        ts_return_type = "Promise<{rows: object[], rowCount: number, executionTimeMs: number, columns: ColumnInfo[]}>"
+        ts_return_type = "Promise<{rows: object[], rowCount: number, rowsAffected: number, executionTimeMs: number, columns: ColumnInfo[]}>"
     )]
     pub fn execute_native(
         &self,
         query: String,
     ) -> napi::Result<napi::bindgen_prelude::AsyncTask<ExecuteNativeTask>> {
         self.ensure_open()?;
+
+        // For DML, check write engine availability before creating the task
+        #[cfg(feature = "write-support")]
+        if Self::is_dml_statement(&query) {
+            self.ensure_writable()?;
+        }
+
         Ok(napi::bindgen_prelude::AsyncTask::new(ExecuteNativeTask {
             inner: self.inner.clone(),
             query,
+            #[cfg(feature = "write-support")]
+            write_engine: self.write_engine.clone(),
         }))
     }
 
@@ -524,12 +836,202 @@ impl Database {
         let prepared = self.inner.prepare(&query).await.map_err(to_napi_error)?;
         Ok(crate::prepared::PreparedStatement::new(prepared))
     }
+
+    /// Flush the in-memory write buffer (memtable) to an SSTable on disk.
+    ///
+    /// Returns the path to the created Data.db file.  If the memtable is empty
+    /// an empty string is returned (no-op flush).
+    ///
+    /// Requires the database to have been opened with `{ writable: true }`.
+    ///
+    /// @returns Promise resolving to the Data.db path, or "" if nothing was flushed
+    /// @throws {CqliteError} If write support is not enabled or the flush fails
+    ///
+    /// @example
+    /// ```javascript
+    /// const db = await Database.open('/data', { schema: 'schema.cql', writable: true, writeDir: '/tmp/w' });
+    /// await db.execute("INSERT INTO t (id) VALUES (1)");
+    /// const sstablePath = await db.flushRun();
+    /// console.log(`Flushed to: ${sstablePath}`);
+    /// ```
+    #[napi(js_name = "flushRun")]
+    pub async fn flush_run(&self) -> napi::Result<String> {
+        self.ensure_open()?;
+
+        #[cfg(feature = "write-support")]
+        {
+            self.ensure_writable()?;
+
+            let we = self
+                .write_engine
+                .as_ref()
+                .expect("ensure_writable verified write_engine is Some");
+
+            // `flush()` is async and takes &mut self on the engine.
+            // We hold the Mutex lock and block_on inside a spawn_blocking to avoid
+            // blocking the napi async executor thread.
+            let we_clone = Arc::clone(we);
+            let total_written_clone = Arc::clone(&self.total_written_bytes);
+            let l0_clone = Arc::clone(&self.l0_count);
+
+            let result = tokio::task::spawn_blocking(move || {
+                let mut engine = we_clone
+                    .lock()
+                    .map_err(|_| simple_error("Write engine lock poisoned"))?;
+                crate::runtime::block_on(engine.flush()).map_err(to_napi_error)
+            })
+            .await
+            .map_err(|e| simple_error(format!("flush_run task panicked: {e}")))??;
+
+            match result {
+                Some(info) => {
+                    // Track flush statistics
+                    if let Ok(mut tw) = total_written_clone.lock() {
+                        *tw += info.data_size;
+                    }
+                    if let Ok(mut l0) = l0_clone.lock() {
+                        *l0 += 1;
+                    }
+                    Ok(info.data_path.to_string_lossy().into_owned())
+                }
+                None => Ok(String::new()),
+            }
+        }
+
+        #[cfg(not(feature = "write-support"))]
+        Err(simple_error(
+            "Write support not enabled. Build with --features write-support to enable write operations.",
+        ))
+    }
+
+    /// Perform time-bounded background maintenance (compaction).
+    ///
+    /// Runs incremental compaction work within the provided time budget.
+    /// Can be called repeatedly to drain pending compaction work.
+    ///
+    /// Requires the database to have been opened with `{ writable: true }`.
+    ///
+    /// @param options - Optional maintenance options (default budgetMs: 100)
+    /// @returns Promise resolving to a MaintenanceReport
+    /// @throws {CqliteError} If write support is not enabled or maintenance fails
+    ///
+    /// @example
+    /// ```javascript
+    /// const report = await db.maintenanceStep({ budgetMs: 100 });
+    /// console.log(`Merged ${report.rowsMerged} rows in ${report.timeSpentMs}ms`);
+    /// if (report.pendingCompaction) {
+    ///   console.log('More compaction work pending');
+    /// }
+    /// ```
+    #[napi(js_name = "maintenanceStep")]
+    pub async fn maintenance_step(
+        &self,
+        options: Option<MaintenanceOptions>,
+    ) -> napi::Result<MaintenanceReport> {
+        self.ensure_open()?;
+
+        #[cfg(feature = "write-support")]
+        {
+            self.ensure_writable()?;
+
+            let budget_ms = options.as_ref().and_then(|o| o.budget_ms).unwrap_or(100) as u64;
+
+            let we = self
+                .write_engine
+                .as_ref()
+                .expect("ensure_writable verified write_engine is Some");
+            let we_clone = Arc::clone(we);
+
+            let report = tokio::task::spawn_blocking(move || {
+                let mut engine = we_clone
+                    .lock()
+                    .map_err(|_| simple_error("Write engine lock poisoned"))?;
+                let budget = std::time::Duration::from_millis(budget_ms);
+                engine.maintenance_step(budget).map_err(to_napi_error)
+            })
+            .await
+            .map_err(|e| simple_error(format!("maintenanceStep task panicked: {e}")))??;
+
+            Ok(MaintenanceReport {
+                time_spent_ms: report.time_spent.as_secs_f64() * 1000.0,
+                rows_merged: report.rows_merged as f64,
+                bytes_written: report.bytes_written as f64,
+                completed_merges: report
+                    .completed_merges
+                    .iter()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .collect(),
+                pending_compaction: report.pending_compaction,
+            })
+        }
+
+        #[cfg(not(feature = "write-support"))]
+        {
+            let _ = options;
+            Err(simple_error(
+                "Write support not enabled. Build with --features write-support to enable write operations.",
+            ))
+        }
+    }
+
+    /// Get current write engine statistics (synchronous).
+    ///
+    /// Returns statistics about the in-memory write buffer (memtable) and WAL.
+    /// All sizes are in bytes.
+    ///
+    /// Requires the database to have been opened with `{ writable: true }`.
+    ///
+    /// @returns WriteStats snapshot
+    /// @throws {CqliteError} If write support is not enabled
+    ///
+    /// @example
+    /// ```javascript
+    /// const stats = db.writeStats;
+    /// console.log(`Memtable: ${stats.memtableSize} bytes, ${stats.memtableRows} rows`);
+    /// console.log(`L0 files: ${stats.l0Count}`);
+    /// ```
+    #[napi(getter, js_name = "writeStats")]
+    pub fn write_stats(&self) -> napi::Result<WriteStats> {
+        self.ensure_open()?;
+
+        #[cfg(feature = "write-support")]
+        {
+            self.ensure_writable()?;
+
+            let we = self
+                .write_engine
+                .as_ref()
+                .expect("ensure_writable verified write_engine is Some");
+            let engine = we
+                .lock()
+                .map_err(|_| simple_error("Write engine lock poisoned"))?;
+
+            let total_written = self.total_written_bytes.lock().map(|g| *g).unwrap_or(0);
+            let l0_count = self.l0_count.lock().map(|g| *g).unwrap_or(0);
+
+            Ok(WriteStats {
+                memtable_size: engine.memtable_size() as f64,
+                memtable_rows: engine.memtable_row_count() as u32,
+                wal_size: engine.wal_size() as f64,
+                l0_count,
+                total_written: total_written as f64,
+            })
+        }
+
+        #[cfg(not(feature = "write-support"))]
+        Err(simple_error(
+            "Write support not enabled. Build with --features write-support to enable write operations.",
+        ))
+    }
 }
 
 /// Async task for executing queries with native type conversion.
 pub struct ExecuteNativeTask {
     inner: Arc<cqlite_core::Database>,
     query: String,
+    /// Write engine handle, present only when write support is compiled and writable=true.
+    #[cfg(feature = "write-support")]
+    write_engine: Option<Arc<Mutex<cqlite_core::storage::write_engine::WriteEngine>>>,
 }
 
 /// Intermediate result from async query execution.
@@ -537,6 +1039,8 @@ pub struct QueryResultData {
     rows: Vec<std::collections::HashMap<String, cqlite_core::types::Value>>,
     execution_time_ms: u32,
     columns: Vec<cqlite_core::query::result::ColumnInfo>,
+    /// Non-zero when the statement was a DML write.
+    rows_affected: u32,
 }
 
 impl napi::Task for ExecuteNativeTask {
@@ -544,14 +1048,35 @@ impl napi::Task for ExecuteNativeTask {
     type JsValue = napi::JsObject;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        // Route DML to write engine when write support is present.
+        #[cfg(feature = "write-support")]
+        if Database::is_dml_statement(&self.query) {
+            if let Some(ref we) = self.write_engine {
+                let start = std::time::Instant::now();
+                let mut engine = we
+                    .lock()
+                    .map_err(|_| simple_error("Write engine lock poisoned"))?;
+                engine.execute(&self.query).map_err(to_napi_error)?;
+                let elapsed_ms = start.elapsed().as_millis() as u32;
+                return Ok(QueryResultData {
+                    rows: vec![],
+                    execution_time_ms: elapsed_ms,
+                    columns: vec![],
+                    rows_affected: 1,
+                });
+            }
+        }
+
         // Use global runtime for async execution
         let result =
             crate::runtime::block_on(self.inner.execute(&self.query)).map_err(to_napi_error)?;
 
+        let row_count = result.rows.len() as u32;
         Ok(QueryResultData {
             rows: result.rows.iter().map(|r| r.values.clone()).collect(),
             execution_time_ms: result.execution_time_ms as u32,
             columns: result.metadata.columns.clone(),
+            rows_affected: row_count,
         })
     }
 
@@ -567,6 +1092,7 @@ impl napi::Task for ExecuteNativeTask {
 
         result_obj.set_named_property("rows", rows_arr)?;
         result_obj.set_named_property("rowCount", env.create_uint32(output.rows.len() as u32)?)?;
+        result_obj.set_named_property("rowsAffected", env.create_uint32(output.rows_affected)?)?;
         result_obj.set_named_property(
             "executionTimeMs",
             env.create_uint32(output.execution_time_ms)?,
@@ -652,12 +1178,12 @@ fn value_to_json(value: &cqlite_core::types::Value) -> serde_json::Value {
         Value::Varint(bytes) => {
             // Convert to hex string for large integers
             let hex_str = hex::encode(bytes);
-            serde_json::Value::String(format!("0x{}", hex_str))
+            serde_json::Value::String(format!("0x{hex_str}"))
         }
         Value::Decimal { scale, unscaled } => {
             // Represent as string to preserve precision
             let hex_str = hex::encode(unscaled);
-            serde_json::Value::String(format!("decimal:{}:0x{}", scale, hex_str))
+            serde_json::Value::String(format!("decimal:{scale}:0x{hex_str}"))
         }
         Value::Duration {
             months,

@@ -112,7 +112,7 @@ pub fn extract_metadata(err: &Error) -> ErrorMetadata {
 
     // Format message with prefix if applicable
     let message = match category_to_prefix(category) {
-        Some(prefix) => format!("{}: {}", prefix, original_message),
+        Some(prefix) => format!("{prefix}: {original_message}"),
         None => original_message,
     };
 
@@ -150,10 +150,12 @@ pub fn to_napi_error(err: Error) -> napi::Error {
     //
     // For now, we embed metadata in a machine-parseable format at the end
     // of the message, which the index.js wrapper can extract.
-    let formatted_message = format!(
-        "{}\0code={}\0category={}\0isRecoverable={}",
-        metadata.message, metadata.code, metadata.category, metadata.is_recoverable
-    );
+    let message = &metadata.message;
+    let code = metadata.code;
+    let category = &metadata.category;
+    let is_recoverable = metadata.is_recoverable;
+    let formatted_message =
+        format!("{message}\0code={code}\0category={category}\0isRecoverable={is_recoverable}");
 
     napi::Error::new(napi::Status::GenericFailure, formatted_message)
 }
@@ -165,10 +167,8 @@ pub fn to_napi_error(err: Error) -> napi::Error {
 pub fn simple_error(message: impl Into<String>) -> napi::Error {
     let msg = message.into();
     // For consistency, add minimal metadata
-    let formatted_message = format!(
-        "{}\0code=INVALID_INPUT\0category=Logic\0isRecoverable=false",
-        msg
-    );
+    let formatted_message =
+        format!("{msg}\0code=INVALID_INPUT\0category=Logic\0isRecoverable=false");
     napi::Error::new(napi::Status::GenericFailure, formatted_message)
 }
 
@@ -471,11 +471,7 @@ mod tests {
 
         for category in categories {
             let code = category_to_code(category);
-            assert!(
-                !code.is_empty(),
-                "Category {:?} should have a code",
-                category
-            );
+            assert!(!code.is_empty(), "Category {category:?} should have a code");
         }
     }
 }
