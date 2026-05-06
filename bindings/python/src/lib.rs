@@ -13,6 +13,7 @@ mod result;
 mod runtime;
 mod stats;
 mod value;
+mod write;
 
 pub use config::{config_from_py, StreamingConfig};
 pub use database::{open, Database};
@@ -21,6 +22,7 @@ pub use prepared::PreparedStatement;
 pub use result::{ColumnInfo, QueryResult, QueryResultIter, Row, StreamingIterator};
 pub use runtime::{block_on, get_runtime};
 pub use stats::DatabaseStats;
+pub use write::{MaintenanceReport, WriteStats};
 
 /// CQLite version string.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -55,6 +57,9 @@ fn _cqlite(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register database stats types
     stats::register_stats(m)?;
+
+    // Register write-support types (WriteStats, MaintenanceReport)
+    write::register_write(m)?;
 
     Ok(())
 }

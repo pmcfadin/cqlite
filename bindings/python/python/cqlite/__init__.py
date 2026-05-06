@@ -25,6 +25,9 @@ from cqlite._cqlite import (
     PreparedStatement,
     # Statistics
     DatabaseStats,
+    # Write API (Issue #390)
+    WriteStats,
+    MaintenanceReport,
 )
 
 __all__ = [
@@ -52,4 +55,7 @@ __all__ = [
     "PreparedStatement",
     # Statistics
     "DatabaseStats",
+    # Write API (Issue #390)
+    "WriteStats",
+    "MaintenanceReport",
 ]

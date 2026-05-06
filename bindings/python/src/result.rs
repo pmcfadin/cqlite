@@ -129,6 +129,22 @@ impl QueryResult {
 }
 
 impl QueryResult {
+    /// Create a minimal QueryResult for a DML operation (INSERT/UPDATE/DELETE).
+    ///
+    /// The result has no rows but reflects the number of mutations applied.
+    pub(crate) fn from_write(
+        _py: Python<'_>,
+        rows_affected: u64,
+        execution_time_ms: u64,
+    ) -> PyResult<Self> {
+        Ok(Self {
+            rows: Vec::new(),
+            rows_affected,
+            execution_time_ms,
+            columns: Vec::new(),
+        })
+    }
+
     /// Convert from cqlite_core QueryResult.
     ///
     /// Eagerly converts all rows and values to Python objects.
