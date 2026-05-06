@@ -4703,7 +4703,28 @@ impl V5CompressedLegacyParser {
                 Ok(val)
             }
             other => {
-                // Fall back: treat as blob
+                // Check if it's a short UDT name in the registry (e.g., "address_type").
+                // This handles the case where parse_value_from_raw_bytes is called recursively
+                // from the frozen<> arm with the stripped inner type (e.g., frozen<address_type>
+                // → "address_type"). Since parse_raw_type_value already has a registry-lookup
+                // fallback that correctly handles bare UDT names, we delegate there.
+                // The byte-level encoding is identical: UDT fields use 4-byte i32 length prefixes
+                // with no overall cell-level length prefix, so parse_raw_type_value offset=0 is
+                // correct for already-extracted cell value bytes.
+                // See Issue #481 regression fix.
+                if let Some(ref registry) = self.udt_registry {
+                    if registry.get_udt(&self.keyspace, other).is_some() {
+                        log::debug!(
+                            "parse_value_from_raw_bytes: type '{}' for '{}' resolved as UDT via registry, delegating to parse_raw_type_value",
+                            other,
+                            column_name,
+                        );
+                        let (val, _offset) =
+                            self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
+                        return Ok(val);
+                    }
+                }
+                // Truly unknown type: fall back to blob.
                 log::debug!(
                     "parse_value_from_raw_bytes: unknown type '{}' for '{}', treating as blob ({} bytes)",
                     other,
@@ -7545,6 +7566,145 @@ mod tests {
             cell_value,
             Some(Value::Blob(vec![0x2A, 0xBB, 0xCC])),
             "blob value must be the three raw bytes, not a misread length-prefixed parse"
+        );
+    }
+
+    /// Regression test for Issue #481 regression: `list<frozen<udt>>` elements
+    /// were being returned as `Value::Blob` instead of `Value::Udt`.
+    ///
+    /// **Root cause**: `parse_complex_cell_value` called `parse_value_from_raw_bytes`
+    /// with element_type `"frozen<address_type>"`.  The `frozen<>` arm stripped it
+    /// to `"address_type"`, then recursed.  `"address_type"` did not match
+    /// `is_udt_type()` (marshal form only) and fell through to the blob fallback.
+    ///
+    /// **Fix**: the `other =>` fallback in `parse_value_from_raw_bytes` now checks
+    /// `self.udt_registry` for the bare name and delegates to `parse_raw_type_value`
+    /// when found, which correctly reads the per-field i32 length-prefixed UDT data.
+    ///
+    /// This test fails on the pre-fix code path (produces `Value::Blob`) and
+    /// passes after the fix (produces `Value::Udt` with `street` and `city` fields).
+    #[test]
+    fn test_regression_481_list_frozen_udt_parses_as_udt_not_blob() {
+        use crate::schema::{CqlType, UdtRegistry};
+        use crate::types::{UdtFieldDef, UdtTypeDef};
+
+        // Build a UdtRegistry with a minimal "address_type" UDT: street TEXT, city TEXT
+        let mut registry = UdtRegistry::new();
+        registry.register_udt(UdtTypeDef {
+            keyspace: "test_collections".to_string(),
+            name: "address_type".to_string(),
+            fields: vec![
+                UdtFieldDef {
+                    name: "street".to_string(),
+                    field_type: CqlType::Text,
+                    nullable: true,
+                },
+                UdtFieldDef {
+                    name: "city".to_string(),
+                    field_type: CqlType::Text,
+                    nullable: true,
+                },
+            ],
+        });
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_collections".to_string(),
+            "collections_with_udts".to_string(),
+            0,
+            0,
+            None,
+        )
+        .with_udt_registry(registry);
+
+        let column = crate::schema::Column {
+            name: "addresses".to_string(),
+            data_type: "list<frozen<address_type>>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build UDT bytes for {street="Main St", city="Springfield"}:
+        //   Each field: [i32 BE length (4 bytes)][field bytes]
+        //   street: length=7, bytes="Main St"
+        //   city:   length=11, bytes="Springfield"
+        let mut udt_bytes: Vec<u8> = Vec::new();
+        let street = b"Main St";
+        udt_bytes.extend_from_slice(&(street.len() as i32).to_be_bytes());
+        udt_bytes.extend_from_slice(street);
+        let city = b"Springfield";
+        udt_bytes.extend_from_slice(&(city.len() as i32).to_be_bytes());
+        udt_bytes.extend_from_slice(city);
+
+        // Build a complex-cell encoded list with one element.
+        //   [cell_count:VUInt = 1]
+        //   [flags:u8 = 0x08 (use_row_timestamp — skip explicit ts)]
+        //   [path_len:VUInt = 0x00 (empty path — list elements have empty path)]
+        //   [value_len:VUInt = udt_bytes.len()]
+        //   [value: udt_bytes]
+        assert!(
+            udt_bytes.len() < 0x80,
+            "test helper assumes single-byte VUInt"
+        );
+        let mut blob: Vec<u8> = vec![
+            0x01,                  // cell_count = 1
+            0x08,                  // flags: use_row_timestamp, not deleted, value present
+            0x00,                  // path_len VUInt = 0 (list cells have empty path)
+            udt_bytes.len() as u8, // value_len VUInt
+        ];
+        blob.extend_from_slice(&udt_bytes);
+
+        let (value, consumed) = parser
+            .parse_complex_column_inner(&blob, 0, &column, false)
+            .expect("parse_complex_column_inner must succeed for list<frozen<address_type>>");
+        assert_eq!(consumed, blob.len(), "all bytes must be consumed");
+
+        // The list must contain exactly one element that is a UDT (not a Blob).
+        let elements = match value {
+            Value::List(elems) => elems,
+            other => panic!("Expected Value::List, got {:?}", other),
+        };
+        assert_eq!(elements.len(), 1, "list must have one element");
+
+        // The element must be a Frozen<Udt> or Udt (not Blob).
+        let udt_val = match &elements[0] {
+            Value::Frozen(inner) => match inner.as_ref() {
+                Value::Udt(u) => u.clone(),
+                other => panic!("Expected Frozen<Udt>, got Frozen<{:?}>", other),
+            },
+            Value::Udt(u) => u.clone(),
+            other => panic!(
+                "Expected Value::Udt or Value::Frozen(Udt), got {:?} \
+                 (regression: list<frozen<udt>> must not return Blob)",
+                other
+            ),
+        };
+
+        // Verify field names match the schema definition.
+        let field_names: Vec<&str> = udt_val.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            field_names.contains(&"street"),
+            "UDT must have 'street' field, got: {:?}",
+            field_names
+        );
+        assert!(
+            field_names.contains(&"city"),
+            "UDT must have 'city' field, got: {:?}",
+            field_names
+        );
+
+        // Verify field values decode correctly.
+        let street_field = udt_val.fields.iter().find(|f| f.name == "street").unwrap();
+        assert_eq!(
+            street_field.value,
+            Some(Value::Text("Main St".to_string())),
+            "street field must decode to Text(\"Main St\")"
+        );
+        let city_field = udt_val.fields.iter().find(|f| f.name == "city").unwrap();
+        assert_eq!(
+            city_field.value,
+            Some(Value::Text("Springfield".to_string())),
+            "city field must decode to Text(\"Springfield\")"
         );
     }
 
