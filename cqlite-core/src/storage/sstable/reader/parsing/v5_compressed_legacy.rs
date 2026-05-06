@@ -65,6 +65,10 @@ const MAX_UDT_FIELD_COUNT: usize = 1000;
 /// This covers recursive UDTs and deeply nested collections (e.g., list<list<list<...>>>).
 const MAX_TYPE_NESTING_DEPTH: usize = 10;
 
+/// Return type for `parse_row_data_with_offset`:
+/// (cells, row_header, next_offset, is_static)
+type ParsedRow = (HashMap<String, Value>, Option<RowHeader>, usize, bool);
+
 /// Row header data extracted from V5CompressedLegacy row
 #[derive(Debug, Clone)]
 struct RowHeader {
@@ -358,6 +362,15 @@ impl V5CompressedLegacyParser {
                     // - END_OF_PARTITION marker (flags == 0x01, Issue #229 fix)
                     // - Next partition header (detected via peek_is_partition_header)
                     // - Parse error (invalid row data)
+
+                    // Issue #480 FIX: Static cell handling
+                    //
+                    // Cassandra static rows are stored once per partition (before clustering rows).
+                    // They should NOT be emitted as separate result entries — instead their column
+                    // values must be merged into each clustering row that follows in the partition.
+                    //
+                    // We accumulate static cells here and inject them into every clustering row.
+                    let mut static_cells: HashMap<String, Value> = HashMap::new();
                     let mut row_count = 0;
                     loop {
                         // Issue #229 FIX: Check for END_OF_PARTITION marker BEFORE attempting row parse
@@ -402,17 +415,18 @@ impl V5CompressedLegacyParser {
                         }
 
                         match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
-                            Ok((cells, row_header_opt, next_offset)) => {
+                            Ok((mut cells, row_header_opt, next_offset, is_static)) => {
                                 // Update offset to point to the next row or partition
                                 offset = next_offset;
                                 row_count += 1;
 
                                 log::debug!(
-                                    "V5CompressedLegacy: Partition {} Row {} - Parsed {} cells, now at offset {}",
+                                    "V5CompressedLegacy: Partition {} Row {} - Parsed {} cells, now at offset {} (is_static={})",
                                     partition_index,
                                     row_count,
                                     cells.len(),
-                                    offset
+                                    offset,
+                                    is_static
                                 );
 
                                 if let Some(ref header) = row_header_opt {
@@ -424,32 +438,59 @@ impl V5CompressedLegacyParser {
                                 }
 
                                 debug!(
-                                    "V5CompressedLegacy: Parsed {} cells from row {}",
+                                    "V5CompressedLegacy: Parsed {} cells from row {} (is_static={})",
                                     cells.len(),
-                                    row_count
+                                    row_count,
+                                    is_static
                                 );
 
-                                // Convert cells HashMap to Value::Map (required by SelectExecutor)
-                                let row_value = if cells.is_empty() {
-                                    warn!(
-                                        "V5CompressedLegacy: No cells extracted for {}.{} partition {} row {} (partition key: {} bytes)",
-                                        self.keyspace,
-                                        self.table_name,
+                                // Issue #480 FIX: Static row handling
+                                //
+                                // Static rows are stored once per partition and contain values for
+                                // STATIC columns (e.g. `static_data TEXT STATIC`). They must NOT
+                                // be emitted as standalone result rows. Instead, store the static
+                                // column values and merge them into each subsequent clustering row.
+                                if is_static {
+                                    log::debug!(
+                                        "V5CompressedLegacy: Partition {} - Storing {} static cells for merging into clustering rows",
                                         partition_index,
-                                        row_count,
-                                        partition_key.0.len()
+                                        cells.len()
                                     );
-                                    Value::Null
+                                    static_cells = cells;
+                                    // Do NOT push to results — static rows are not result rows
+                                    // Continue to next row/marker in partition
                                 } else {
-                                    // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map
-                                    let map_entries: Vec<(Value, Value)> = cells
-                                        .into_iter()
-                                        .map(|(name, value)| (Value::Text(name), value))
-                                        .collect();
-                                    Value::Map(map_entries)
-                                };
+                                    // Merge static cells into this clustering row (Issue #480)
+                                    for (k, v) in &static_cells {
+                                        cells.entry(k.clone()).or_insert_with(|| v.clone());
+                                    }
 
-                                results.push((table_id.clone(), partition_key.clone(), row_value));
+                                    // Convert cells HashMap to Value::Map (required by SelectExecutor)
+                                    let row_value = if cells.is_empty() {
+                                        warn!(
+                                            "V5CompressedLegacy: No cells extracted for {}.{} partition {} row {} (partition key: {} bytes)",
+                                            self.keyspace,
+                                            self.table_name,
+                                            partition_index,
+                                            row_count,
+                                            partition_key.0.len()
+                                        );
+                                        Value::Null
+                                    } else {
+                                        // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map
+                                        let map_entries: Vec<(Value, Value)> = cells
+                                            .into_iter()
+                                            .map(|(name, value)| (Value::Text(name), value))
+                                            .collect();
+                                        Value::Map(map_entries)
+                                    };
+
+                                    results.push((
+                                        table_id.clone(),
+                                        partition_key.clone(),
+                                        row_value,
+                                    ));
+                                }
 
                                 // Check if we're at the end of the partition
                                 if offset >= data.len() {
@@ -1302,14 +1343,16 @@ impl V5CompressedLegacyParser {
     /// V5CompressedLegacy format stores cells WITHOUT column names in schema column order.
     /// Schema is REQUIRED to determine which column each value belongs to.
     ///
-    /// Returns: (cells, row_header, new_offset)
+    /// Returns: `ParsedRow` = `(cells, row_header, new_offset, is_static)` where
+    /// `is_static` is `true` when the row's `EXTENDED_IS_STATIC` flag was set.
+    /// Static rows must be merged into clustering rows by the caller, not emitted directly.
     fn parse_row_data_with_offset(
         &self,
         data: &[u8],
         mut offset: usize,
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
-    ) -> Result<(HashMap<String, Value>, Option<RowHeader>, usize)> {
+    ) -> Result<ParsedRow> {
         let mut cells = HashMap::new();
 
         let schema = schema.ok_or_else(|| {
@@ -1469,7 +1512,7 @@ impl V5CompressedLegacyParser {
             );
 
             // Return empty cells for tombstoned row
-            return Ok((cells, Some(row_header), next_offset));
+            return Ok((cells, Some(row_header), next_offset, is_static));
         }
 
         // Advance offset past row metadata to start of cell data
@@ -1698,11 +1741,11 @@ impl V5CompressedLegacyParser {
         let next_offset = after_cells_offset;
 
         debug!(
-            "V5CompressedLegacy: Row complete - row_size={} bytes, next offset = {} (counted from {})",
-            row_size, next_offset, row_size_counted_from
+            "V5CompressedLegacy: Row complete - row_size={} bytes, next offset = {} (counted from {}, is_static={})",
+            row_size, next_offset, row_size_counted_from, is_static
         );
 
-        Ok((cells, Some(row_header), next_offset))
+        Ok((cells, Some(row_header), next_offset, is_static))
     }
 
     /// Parse a single cell value WITHOUT column name (schema-order format)

@@ -1165,4 +1165,111 @@ mod tests {
         let entries = result.unwrap();
         eprintln!("get_all_entries() returned {} entries", entries.len());
     }
+
+    /// Regression test for Issue #480: static cell duplication on read.
+    ///
+    /// static_columns_table has 100 partitions, each containing one static_block
+    /// and one clustering row. CQLite should return exactly 100 result rows — one
+    /// per partition — not 200 (which would occur if static rows were emitted as
+    /// separate result entries).
+    ///
+    /// Two bugs were fixed:
+    /// 1. Snappy varint collision: bytes `0xC0 0x51` at the start of the Snappy
+    ///    stream were misidentified as the V5_0StaticColumns magic number, causing
+    ///    the file pointer to advance past part of the compressed data before
+    ///    decompression, resulting in "corrupt input" errors.
+    /// 2. Static row duplication: static rows were pushed into `results` just like
+    ///    clustering rows. They should be accumulated per-partition and merged into
+    ///    each subsequent clustering row instead.
+    #[tokio::test]
+    async fn test_static_columns_table_row_count_issue480() {
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => PathBuf::from(root),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping Issue #480 regression test");
+                return;
+            }
+        };
+
+        let table_base = datasets_root.join("sstables/test_basic");
+        if !table_base.exists() {
+            eprintln!("test_basic dir not found, skipping Issue #480 regression test");
+            return;
+        }
+
+        // Locate the static_columns_table directory
+        let table_dir = std::fs::read_dir(&table_base).ok().and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.starts_with("static_columns_table"))
+                        .unwrap_or(false)
+                })
+                .map(|e| e.path())
+        });
+
+        let Some(table_path) = table_dir else {
+            eprintln!("static_columns_table not found, skipping Issue #480 regression test");
+            return;
+        };
+
+        // Find the Data.db file (must be real binary, not macOS ._resource_fork)
+        let data_file = std::fs::read_dir(&table_path).ok().and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .find(|e| {
+                    let name = e.file_name();
+                    let s = name.to_str().unwrap_or("");
+                    s.ends_with("-Data.db") && !s.starts_with("._")
+                })
+                .map(|e| e.path())
+        });
+
+        let Some(data_path) = data_file else {
+            eprintln!("Data.db not found in static_columns_table dir, skipping");
+            return;
+        };
+
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::Platform::new(&config)
+                .await
+                .expect("Failed to create platform"),
+        );
+
+        let reader = SSTableReader::open(&data_path, &config, platform)
+            .await
+            .expect("Failed to open static_columns_table SSTable");
+
+        let table_id = crate::types::TableId::new("test_basic.static_columns_table".to_string());
+        let result = reader.scan(&table_id, None, None, None, None).await;
+        assert!(
+            result.is_ok(),
+            "Scan of static_columns_table should succeed: {:?}",
+            result.err()
+        );
+
+        let entries = result.unwrap();
+        eprintln!(
+            "Issue #480 regression: static_columns_table scan returned {} rows",
+            entries.len()
+        );
+
+        // Expected: 100 rows (one per partition, static data merged into clustering row)
+        // Before fix: 0 rows (Snappy decompression failure)
+        // After fixing only decompression: 200 rows (static rows emitted separately)
+        // After full fix: 100 rows
+        assert_eq!(
+            entries.len(),
+            100,
+            "static_columns_table should return 100 rows (one per partition), \
+             got {}. Regression for Issue #480: static cell duplication on read.",
+            entries.len()
+        );
+    }
 }

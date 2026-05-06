@@ -155,23 +155,26 @@ pub(crate) async fn parse_header_with_version_detection(
             // first byte of compressed chunk data has this bit set, it can coincidentally
             // match certain magic number patterns.
             //
-            // Known collision: V5_0WideRows (0xF07C5C00)
-            // - First byte 0xF0 has high bit set (Snappy continuation marker)
-            // - 0xF0 0x7C decodes as Snappy varint for ~15984 bytes (compressed chunk length)
-            // - This occurs when NB format Data.db starts with a ~16KB compressed chunk
+            // Known collisions (Issue #480):
+            //   V5_0WideRows (0xF07C5C00):
+            //   - First byte 0xF0 has high bit set (Snappy continuation marker)
+            //   - 0xF0 0x7C decodes as Snappy varint for ~15984 bytes (compressed chunk length)
+            //   - This occurs when NB format Data.db starts with a ~16KB compressed chunk
             //
-            // We only check V5_0WideRows specifically because:
-            // 1. It's the only collision observed in practice (chat_messages table)
-            // 2. Checking ALL magic numbers with high bit would risk breaking real
-            //    embedded headers (V5_0ComplexTypes, V5_0FormatF, etc. have high bit too)
-            // 3. NB format files are typically headerless, so false positives are rare
+            //   V5_0StaticColumns (0xC0515C00):
+            //   - First byte 0xC0 has high bit set (Snappy continuation marker)
+            //   - 0xC0 0x51 decodes as Snappy varint for 10432 bytes (uncompressed size)
+            //   - This occurs when the static_columns_table Data.db is Snappy-compressed
+            //     and the uncompressed size encodes to bytes matching this magic number
             //
-            // Detection strategy: If bytes match V5_0WideRows AND first byte has high bit,
-            // treat as Snappy collision and parse as headerless.
+            // Detection strategy: if detected version is one of the known headerless
+            // collisions AND the first byte has the Snappy high-bit set, treat as
+            // headerless Snappy-compressed NB format.
             let detected_version = CassandraVersion::from_magic_number(first_4_bytes);
-            let is_snappy_varint_collision = detected_version
-                == Some(CassandraVersion::V5_0WideRows)
-                && (header_buffer[0] & 0x80) != 0;
+            let is_snappy_varint_collision = matches!(
+                detected_version,
+                Some(CassandraVersion::V5_0WideRows) | Some(CassandraVersion::V5_0StaticColumns)
+            ) && (header_buffer[0] & 0x80) != 0;
 
             if detected_version.is_some() && !is_snappy_varint_collision {
                 log::debug!(
@@ -183,7 +186,7 @@ pub(crate) async fn parse_header_with_version_detection(
             } else if is_snappy_varint_collision {
                 // Snappy varint collision detected - treat as headerless
                 log::debug!(
-                    "NB format file '{}' has Snappy varint collision with V5_0WideRows magic (0x{:08x}) - treating as headerless",
+                    "NB format file '{}' has Snappy varint collision with magic 0x{:08x} - treating as headerless",
                     path.display(),
                     first_4_bytes
                 );
@@ -785,13 +788,60 @@ mod tests {
         );
     }
 
-    /// Test other magic numbers with high bit are NOT flagged (only V5_0WideRows check).
+    /// Test Snappy varint collision detection for V5_0StaticColumns magic number.
     ///
-    /// We specifically only check V5_0WideRows to avoid breaking real embedded headers.
+    /// Issue #480: Snappy-compressed Data.db starting with 0xC0 0x51 0x5C 0x00 collides
+    /// with V5_0StaticColumns magic (0xC0515C00) because 0xC0 has the high bit set
+    /// (Snappy continuation marker) and 0xC0 0x51 decodes as the Snappy varint for
+    /// uncompressed size 10432.
+    #[test]
+    fn test_snappy_varint_collision_v5_0_static_columns() {
+        // Bytes that look like V5_0StaticColumns magic but are actually Snappy varint
+        let header_buffer = [0xC0, 0x51, 0x5C, 0x00, 0x10, 0x30, 0xB5, 0x68];
+
+        // First byte 0xC0 has high bit set (Snappy continuation marker)
+        assert_eq!(
+            header_buffer[0] & 0x80,
+            0x80,
+            "First byte should have high bit set"
+        );
+
+        let first_4_bytes = u32::from_be_bytes([
+            header_buffer[0],
+            header_buffer[1],
+            header_buffer[2],
+            header_buffer[3],
+        ]);
+        assert_eq!(
+            first_4_bytes, 0xC051_5C00,
+            "Should match V5_0StaticColumns magic"
+        );
+
+        let detected = CassandraVersion::from_magic_number(first_4_bytes);
+        assert_eq!(
+            detected,
+            Some(CassandraVersion::V5_0StaticColumns),
+            "Should detect V5_0StaticColumns"
+        );
+
+        // Mirrors production: V5_0WideRows OR V5_0StaticColumns is collision when
+        // first byte has the Snappy high bit set.
+        let is_collision = matches!(
+            detected,
+            Some(CassandraVersion::V5_0WideRows) | Some(CassandraVersion::V5_0StaticColumns)
+        ) && (header_buffer[0] & 0x80) != 0;
+        assert!(
+            is_collision,
+            "Should detect Snappy collision for V5_0StaticColumns"
+        );
+    }
+
+    /// Test other magic numbers with high bit are NOT flagged (only V5_0WideRows /
+    /// V5_0StaticColumns are known Snappy-collision allowlist entries).
     #[test]
     fn test_other_high_bit_magic_not_collision() {
         // V5_0ComplexTypes magic: 0x82365C00 - first byte 0x82 HAS high bit
-        // But we don't flag it because we only check V5_0WideRows specifically
+        // But we don't flag it because it's not in the collision allowlist.
         let header_buffer = [0x82, 0x36, 0x5C, 0x00, 0x00, 0x00, 0x00, 0x00];
 
         // First byte DOES have high bit set
@@ -815,9 +865,13 @@ mod tests {
             "Should detect V5_0ComplexTypes"
         );
 
-        // Should NOT be flagged as collision (only V5_0WideRows is checked)
-        let is_collision =
-            detected == Some(CassandraVersion::V5_0WideRows) && (header_buffer[0] & 0x80) != 0;
+        // Mirrors production: only V5_0WideRows / V5_0StaticColumns are in the
+        // Snappy-collision allowlist; V5_0ComplexTypes is a real format and must
+        // not be flagged even though its first byte has the high bit set.
+        let is_collision = matches!(
+            detected,
+            Some(CassandraVersion::V5_0WideRows) | Some(CassandraVersion::V5_0StaticColumns)
+        ) && (header_buffer[0] & 0x80) != 0;
         assert!(
             !is_collision,
             "V5_0ComplexTypes should not be flagged as collision"
