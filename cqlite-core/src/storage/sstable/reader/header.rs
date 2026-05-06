@@ -155,23 +155,26 @@ pub(crate) async fn parse_header_with_version_detection(
             // first byte of compressed chunk data has this bit set, it can coincidentally
             // match certain magic number patterns.
             //
-            // Known collision: V5_0WideRows (0xF07C5C00)
-            // - First byte 0xF0 has high bit set (Snappy continuation marker)
-            // - 0xF0 0x7C decodes as Snappy varint for ~15984 bytes (compressed chunk length)
-            // - This occurs when NB format Data.db starts with a ~16KB compressed chunk
+            // Known collisions (Issue #480):
+            //   V5_0WideRows (0xF07C5C00):
+            //   - First byte 0xF0 has high bit set (Snappy continuation marker)
+            //   - 0xF0 0x7C decodes as Snappy varint for ~15984 bytes (compressed chunk length)
+            //   - This occurs when NB format Data.db starts with a ~16KB compressed chunk
             //
-            // We only check V5_0WideRows specifically because:
-            // 1. It's the only collision observed in practice (chat_messages table)
-            // 2. Checking ALL magic numbers with high bit would risk breaking real
-            //    embedded headers (V5_0ComplexTypes, V5_0FormatF, etc. have high bit too)
-            // 3. NB format files are typically headerless, so false positives are rare
+            //   V5_0StaticColumns (0xC0515C00):
+            //   - First byte 0xC0 has high bit set (Snappy continuation marker)
+            //   - 0xC0 0x51 decodes as Snappy varint for 10432 bytes (uncompressed size)
+            //   - This occurs when the static_columns_table Data.db is Snappy-compressed
+            //     and the uncompressed size encodes to bytes matching this magic number
             //
-            // Detection strategy: If bytes match V5_0WideRows AND first byte has high bit,
-            // treat as Snappy collision and parse as headerless.
+            // Detection strategy: if detected version is one of the known headerless
+            // collisions AND the first byte has the Snappy high-bit set, treat as
+            // headerless Snappy-compressed NB format.
             let detected_version = CassandraVersion::from_magic_number(first_4_bytes);
-            let is_snappy_varint_collision = detected_version
-                == Some(CassandraVersion::V5_0WideRows)
-                && (header_buffer[0] & 0x80) != 0;
+            let is_snappy_varint_collision = matches!(
+                detected_version,
+                Some(CassandraVersion::V5_0WideRows) | Some(CassandraVersion::V5_0StaticColumns)
+            ) && (header_buffer[0] & 0x80) != 0;
 
             if detected_version.is_some() && !is_snappy_varint_collision {
                 log::debug!(
@@ -183,7 +186,7 @@ pub(crate) async fn parse_header_with_version_detection(
             } else if is_snappy_varint_collision {
                 // Snappy varint collision detected - treat as headerless
                 log::debug!(
-                    "NB format file '{}' has Snappy varint collision with V5_0WideRows magic (0x{:08x}) - treating as headerless",
+                    "NB format file '{}' has Snappy varint collision with magic 0x{:08x} - treating as headerless",
                     path.display(),
                     first_4_bytes
                 );
