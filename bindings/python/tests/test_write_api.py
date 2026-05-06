@@ -402,7 +402,11 @@ def test_close_flushes_memtable(tmp_path, write_schema):
     )
     db.close()
 
-    # After close, WAL and data directories should contain flushed artifacts
+    # After close the engine flushed the memtable; at least one Data.db file
+    # must exist under write_dir/data/.
     wd_data = write_dir / "data"
-    # Allow that flush may or may not have created files (empty table is ok)
     assert db.is_closed
+    assert any(wd_data.rglob("*-Data.db")), (
+        f"Expected at least one flushed SSTable (*-Data.db) under {wd_data}, "
+        f"but found: {list(wd_data.rglob('*'))}"
+    )

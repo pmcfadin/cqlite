@@ -314,6 +314,12 @@ def open(
         write_dir: Directory for WAL files and flushed SSTables.
                    Required when ``writable=True``; created automatically.
 
+                   **Caveat**: Only one ``Database`` instance should hold a given
+                   ``write_dir`` at a time.  Concurrent instances sharing the same
+                   directory are **not** protected by file locks and will corrupt
+                   each other's WAL and SSTable files.  File locking is planned for
+                   a future release (see issue #485).
+
     Returns:
         A Database instance
 
@@ -593,6 +599,12 @@ class WriteStats:
         wal_size: Write-ahead log file size in bytes.
         l0_count: Number of Level-0 (unflushed) SSTables on disk.
         total_written: Cumulative rows written since the engine was opened.
+
+    Note:
+        ``l0_count`` and ``total_written`` are placeholder fields that will be
+        populated when ``WriteEngine`` exposes runtime stats (planned, see
+        issue #486).  For now they default to ``0`` and may not reflect actual
+        storage state.
 
     Example:
         >>> stats = db.write_stats

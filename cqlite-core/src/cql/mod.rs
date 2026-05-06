@@ -83,3 +83,31 @@ use std::sync::Arc;
 pub fn create_default_parser() -> Result<Arc<dyn CqlParser + Send + Sync>> {
     ParserFactory::create_default()
 }
+
+/// Detect whether a CQL statement is a Data Manipulation Language (DML) statement.
+///
+/// Returns `true` for statements that write data — `INSERT`, `UPDATE`, `DELETE`, or
+/// `BEGIN` (which begins a `BATCH` block). Detection is done by case-insensitive
+/// prefix matching on the trimmed input, so it is suitable for routing read vs.
+/// write paths *before* full parsing.
+///
+/// # Examples
+///
+/// ```
+/// use cqlite_core::cql::is_dml_statement;
+///
+/// assert!(is_dml_statement("INSERT INTO t (id) VALUES (1)"));
+/// assert!(is_dml_statement("insert into t (id) values (1)"));
+/// assert!(is_dml_statement("UPDATE t SET x = 1 WHERE id = 1"));
+/// assert!(is_dml_statement("DELETE FROM t WHERE id = 1"));
+/// assert!(is_dml_statement("BEGIN BATCH INSERT INTO t (id) VALUES (1) APPLY BATCH"));
+/// assert!(!is_dml_statement("SELECT * FROM t"));
+/// assert!(!is_dml_statement("  CREATE TABLE t (id int PRIMARY KEY)"));
+/// ```
+pub fn is_dml_statement(s: &str) -> bool {
+    let upper = s.trim().to_uppercase();
+    upper.starts_with("INSERT")
+        || upper.starts_with("UPDATE")
+        || upper.starts_with("DELETE")
+        || upper.starts_with("BEGIN")
+}

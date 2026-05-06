@@ -103,12 +103,11 @@ impl Database {
     }
 
     /// Detect DML statements (INSERT / UPDATE / DELETE / BEGIN BATCH).
+    ///
+    /// Delegates to `cqlite_core::cql::is_dml_statement` — the single canonical
+    /// implementation shared with the CLI for consistent routing semantics.
     fn is_dml_statement(query: &str) -> bool {
-        let upper = query.trim().to_uppercase();
-        upper.starts_with("INSERT")
-            || upper.starts_with("UPDATE")
-            || upper.starts_with("DELETE")
-            || upper.starts_with("BEGIN")
+        cqlite_core::cql::is_dml_statement(query)
     }
 }
 
@@ -406,7 +405,7 @@ impl Database {
     /// path = db.flush_run()
     /// assert Path(path).exists()
     /// ```
-    pub fn flush_run(&self, _py: Python<'_>) -> PyResult<String> {
+    pub fn flush_run(&self) -> PyResult<String> {
         self.ensure_open()?;
         self.require_writable()?;
 
@@ -454,7 +453,7 @@ impl Database {
     /// report = db.maintenance_step(budget_ms=100)
     /// print(f"Merged {report.rows_merged} rows in {report.time_spent_ms:.1f} ms")
     /// ```
-    pub fn maintenance_step(&self, _py: Python<'_>, budget_ms: u64) -> PyResult<MaintenanceReport> {
+    pub fn maintenance_step(&self, budget_ms: u64) -> PyResult<MaintenanceReport> {
         self.ensure_open()?;
         self.require_writable()?;
 
@@ -564,6 +563,13 @@ impl Database {
 /// * `writable`   – Enable write support (INSERT / UPDATE / DELETE).  Default `False`.
 /// * `write_dir`  – Directory for WAL and flushed SSTables.  Required when
 ///                  `writable=True`.  Created automatically if it doesn't exist.
+///
+/// # Caveat: write_dir is not file-locked
+///
+/// Only one `Database` instance should hold a given `write_dir` at a time.
+/// Concurrent instances sharing the same directory are **not** protected by
+/// file locks and will corrupt each other's WAL and SSTable files.  File
+/// locking is planned for a future release (see issue #485).
 ///
 /// # Returns
 ///
