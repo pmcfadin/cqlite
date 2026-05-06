@@ -8,7 +8,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
-- (Next milestone features will go here)
+- Write→flush→read roundtrip tests for `Inet`, `Varint`, and `Duration` types
+  (Issue #477)
+- Write→flush→read roundtrip tests for `Tuple<int, text, uuid>` and
+  `Frozen<udt>` types (Issue #478)
+- `WriteEngine::write()` and `WriteEngine::write_async()` now return
+  `Error::InvalidOperation` immediately when a mutation contains a
+  `Value::Counter` cell, preventing silent data corruption — counter columns
+  require server-side distributed increment semantics (Issue #479)
 
 ## [0.4.0] - 2026-01-27 (M4 Complete)
 
