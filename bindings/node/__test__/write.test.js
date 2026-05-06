@@ -37,8 +37,10 @@ function tmpWriteDir() {
 }
 
 /**
- * Schema path for the test_basic keyspace.
- * This CQL file must contain CREATE TABLE test_basic.simple_table.
+ * Schema path for the write tests.
+ * Uses a single-table CQL file (write-test.cql) so the no-heuristics mandate
+ * (Issue #28) is satisfied: the write engine has an unambiguous write target.
+ * The multi-table basic-types.cql is intentionally NOT used here.
  */
 const SCHEMA_PATH = path.join(
   __dirname,
@@ -47,7 +49,7 @@ const SCHEMA_PATH = path.join(
   '..',
   'test-data',
   'schemas',
-  'basic-types.cql'
+  'write-test.cql'
 );
 
 /**
@@ -196,7 +198,7 @@ describe('Read-only guard (Issue #391)', () => {
         throw new Error('Should have thrown');
       } catch (e) {
         expect(e).toBeDefined();
-        expect(e.message.toLowerCase()).toMatch(/writedir|write.dir/);
+        expect(e.message.toLowerCase()).toMatch(/writedir|write[_-]dir/);
       }
     } finally {
       cleanup();
@@ -674,6 +676,29 @@ describe('Write error paths (Issue #391)', () => {
     } catch (e) {
       expect(e).toBeDefined();
       expect(typeof e.message).toBe('string');
+    }
+  });
+
+  test('Schema file with multiple CREATE TABLE statements is rejected (Issue #28)', async () => {
+    // basic-types.cql has 8 CREATE TABLE statements — the no-heuristics mandate
+    // (Issue #28) requires an explicit error rather than silently picking one.
+    expect.assertions(2);
+    const multiTableSchema = path.join(
+      __dirname, '..', '..', '..', 'test-data', 'schemas', 'basic-types.cql'
+    );
+    const { dir, cleanup: c } = tmpWriteDir();
+    try {
+      await Database.open(dir, {
+        schema: multiTableSchema,
+        writable: true,
+        writeDir: dir,
+      });
+      throw new Error('Should have thrown');
+    } catch (e) {
+      expect(e).toBeDefined();
+      expect(e.message.toLowerCase()).toMatch(/multiple|8|single/);
+    } finally {
+      c();
     }
   });
 });

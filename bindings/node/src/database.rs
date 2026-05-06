@@ -525,14 +525,27 @@ impl Database {
                     }
                 }
 
-                // Return the first table schema (simplest heuristic; callers that
-                // need a specific table should use a dedicated schema file).
-                table_schemas.into_iter().next().ok_or_else(|| {
-                    napi::Error::from_reason(format!(
-                        "No CREATE TABLE statement found in schema file '{}'",
-                        sp.display()
-                    ))
-                })?
+                // Enforce single-table write target (Issue #28 no-heuristics mandate).
+                // Silently picking one table would hide ambiguity; require callers to
+                // provide a schema file with exactly one CREATE TABLE statement.
+                match table_schemas.len() {
+                    0 => {
+                        return Err(napi::Error::from_reason(format!(
+                            "No CREATE TABLE statement found in schema file '{}'",
+                            sp.display()
+                        )));
+                    }
+                    1 => table_schemas.into_iter().next().expect("length is 1"),
+                    count => {
+                        return Err(napi::Error::from_reason(format!(
+                            "Schema file '{}' contains {} CREATE TABLE statements. \
+                             The Node bindings currently support a single-table write \
+                             target. Specify a schema with exactly one CREATE TABLE.",
+                            sp.display(),
+                            count
+                        )));
+                    }
+                }
             } else {
                 return Err(napi::Error::from_reason(
                     "A schema file (option `schema`) is required when `writable` is true.",
@@ -591,21 +604,26 @@ impl Database {
         self.ensure_open()?;
 
         // Route DML statements to write engine when write support is compiled in.
+        // Use spawn_blocking so the Mutex lock + synchronous engine.execute() call
+        // does not stall the napi async executor thread (same pattern as flush_run).
         #[cfg(feature = "write-support")]
         if Self::is_dml_statement(&query) {
             self.ensure_writable()?;
-            let start = std::time::Instant::now();
-            {
-                let we = self
-                    .write_engine
+            let we_clone = Arc::clone(
+                self.write_engine
                     .as_ref()
-                    .expect("ensure_writable verified write_engine is Some");
-                let mut engine = we
+                    .expect("ensure_writable verified write_engine is Some"),
+            );
+            let elapsed_ms = tokio::task::spawn_blocking(move || {
+                let start = std::time::Instant::now();
+                let mut engine = we_clone
                     .lock()
                     .map_err(|_| simple_error("Write engine lock poisoned"))?;
                 engine.execute(&query).map_err(to_napi_error)?;
-            }
-            let elapsed_ms = start.elapsed().as_millis() as u32;
+                Ok::<u32, napi::Error>(start.elapsed().as_millis() as u32)
+            })
+            .await
+            .map_err(|e| simple_error(format!("execute DML task panicked: {e}")))??;
             return Ok(QueryResult {
                 rows: vec![],
                 row_count: 0,

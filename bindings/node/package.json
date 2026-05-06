@@ -28,6 +28,7 @@
   },
   "scripts": {
     "build": "napi build --platform --release --features write-support",
+    "postbuild": "node scripts/generate-loader.mjs",
     "build:debug": "napi build --platform --features write-support",
     "test": "jest",
     "test:watch": "jest --watch",
