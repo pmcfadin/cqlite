@@ -1343,7 +1343,9 @@ impl V5CompressedLegacyParser {
     /// V5CompressedLegacy format stores cells WITHOUT column names in schema column order.
     /// Schema is REQUIRED to determine which column each value belongs to.
     ///
-    /// Returns: (cells, row_header, new_offset)
+    /// Returns: `ParsedRow` = `(cells, row_header, new_offset, is_static)` where
+    /// `is_static` is `true` when the row's `EXTENDED_IS_STATIC` flag was set.
+    /// Static rows must be merged into clustering rows by the caller, not emitted directly.
     fn parse_row_data_with_offset(
         &self,
         data: &[u8],
