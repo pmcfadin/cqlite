@@ -3866,11 +3866,15 @@ impl V5CompressedLegacyParser {
             || dt.starts_with("org.apache.cassandra.db.marshal.settype(")
         {
             // Parse set elements
+            // In Cassandra's complex cell format for sets, each element is a separate cell
+            // where the cell PATH contains the raw bytes of the set element, and the cell
+            // VALUE is always empty (HAS_EMPTY_VALUE flag = 0x04 set).
+            // We must parse the path bytes as the element value, not the (empty) cell value.
             let element_type = self.extract_collection_element_type(&column.data_type, "set")?;
             let mut elements = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, _path, new_offset) = self.parse_complex_cell_value(
+                let (cell_value, path_bytes, new_offset) = self.parse_complex_cell_value(
                     data,
                     offset,
                     &element_type,
@@ -3880,9 +3884,29 @@ impl V5CompressedLegacyParser {
                 )?;
                 offset = new_offset;
 
-                // Add non-null values to the set
+                // For sets: the path bytes ARE the element value (cell value is always empty).
+                // If cell_value is Some (unusual case where set cell has a non-empty value),
+                // use it. Otherwise parse the path bytes as the element type.
                 if let Some(val) = cell_value {
                     elements.push(val);
+                } else if !path_bytes.is_empty() {
+                    // Path bytes are the set element — parse them as the element type
+                    match self.parse_value_from_raw_bytes(
+                        &path_bytes,
+                        &element_type,
+                        &column.name,
+                        0,
+                    ) {
+                        Ok(val) => elements.push(val),
+                        Err(e) => {
+                            log::debug!(
+                                "V5CompressedLegacy: set element {} parse failed (type={}): {}",
+                                i,
+                                element_type,
+                                e
+                            );
+                        }
+                    }
                 }
             }
 
@@ -4131,12 +4155,15 @@ impl V5CompressedLegacyParser {
             let value_data = &data[offset..offset + value_len_usize];
             offset += value_len_usize;
 
-            // Parse the value based on element type
-            // For complex cell values (inside collections), the value is stored as raw bytes
-            // without cell flags. Use parse_raw_type_value for all types.
-            let parsed_value = self
-                .parse_raw_type_value(value_data, 0, element_type, &column.name, 0)
-                .map(|(val, _)| val)?;
+            // Parse the value based on element type.
+            // The value bytes have already been extracted (length was consumed above).
+            // Use parse_value_from_raw_bytes which treats the entire slice as the value
+            // WITHOUT an additional length prefix (unlike parse_raw_type_value which
+            // expects a VInt length prefix — wrong for already-extracted complex cell values).
+            // See Issue #481: using parse_raw_type_value here caused the first byte of
+            // blob/text values to be misread as a length, producing corrupt parses.
+            let parsed_value =
+                self.parse_value_from_raw_bytes(value_data, element_type, &column.name, 0)?;
             Some(parsed_value)
         };
 
@@ -4663,6 +4690,14 @@ impl V5CompressedLegacyParser {
                 let inner =
                     self.parse_value_from_raw_bytes(data, &inner_type, column_name, depth + 1)?;
                 Ok(Value::Frozen(Box::new(inner)))
+            }
+            // UDT (User-Defined Type): delegate to parse_raw_type_value which has the full
+            // UDT parsing logic including field count validation and nested type resolution.
+            // The raw bytes representation is identical between the two function conventions.
+            other if Self::is_udt_type(other) => {
+                let (val, _offset) =
+                    self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
+                Ok(val)
             }
             other => {
                 // Fall back: treat as blob

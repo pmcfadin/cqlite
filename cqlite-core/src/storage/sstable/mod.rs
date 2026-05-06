@@ -306,8 +306,11 @@ impl SSTableManager {
             while let Some(entry) = dir_entries.next_entry().await? {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    // Check for Cassandra SSTable data files using the *-Data.db pattern
-                    if filename.ends_with("-Data.db") {
+                    // Check for Cassandra SSTable data files using the *-Data.db pattern.
+                    // Skip macOS resource fork metadata files (._* prefix) which are
+                    // created by macOS when copying files to non-Apple filesystems
+                    // and are NOT valid Cassandra SSTable data files. See Issue #481.
+                    if filename.ends_with("-Data.db") && !filename.starts_with("._") {
                         files_found += 1;
                         log::debug!("SSTableManager found SSTable file: {:?}", path);
 
@@ -521,7 +524,8 @@ impl SSTableManager {
             while let Some(entry) = dir_entries.next_entry().await? {
                 let path = entry.path();
                 if let Some(filename) = path.file_name().and_then(|n| n.to_str()) {
-                    if filename.ends_with("-Data.db") {
+                    // Skip macOS resource fork metadata files (._* prefix). See Issue #481.
+                    if filename.ends_with("-Data.db") && !filename.starts_with("._") {
                         results.push(path);
                     } else if max_depth > 0 {
                         // Check if it's a directory and recurse
