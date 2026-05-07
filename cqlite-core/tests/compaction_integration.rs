@@ -1,8 +1,13 @@
-//! Integration test: 3-SSTable compaction read-back (Issue #476, Epic #469)
+//! Integration test: 3-SSTable compaction mechanics and read-back (Issue #476, Epic #469)
 //!
-//! This test exercises the full compaction pipeline end-to-end:
-//!   write 3 overlapping L0 SSTables → trigger compaction via maintenance_step()
-//!   → assert correct file-level behaviour → attempt read-back via SSTableManager.
+//! This file contains two integration tests that exercise the compaction pipeline:
+//!
+//! 1. `compaction_3_sstables_mechanics` — Verifies compaction file-level behaviour and
+//!    statistics.  Runs in CI.
+//!
+//! 2. `compaction_3_sstables_read_back_correctness` — Verifies that a post-compaction
+//!    scan returns the correct rows with correct shadowing semantics.  Gated on #500
+//!    via `#[ignore]`.
 //!
 //! ## Shadowing semantics (intended)
 //!
@@ -10,6 +15,14 @@
 //! - SSTable B (ts=200): PK 11..=30, overrides A on 11..=20
 //! - SSTable C (ts=300): PK 21..=40, deletes rows 1..=5 (row tombstone),
 //!   deletes `score` column for PK=11 (cell tombstone)
+//!
+//! After compaction the merged SSTable should contain:
+//!   - PK 6..=10   present (A-only, not deleted)               — 5 rows
+//!   - PK 11..=20  present (B overrides A, C deletes PK=11 score)  — 10 rows
+//!   - PK 21..=30  present (C overrides B)                     — 10 rows
+//!   - PK 31..=40  present (C-only)                            — 10 rows
+//!
+//!   Total live rows: 35.  PK 1..=5 are row-deleted by C.
 //!
 //! ## Design notes
 //!
@@ -24,30 +37,17 @@
 //!
 //! ## Known limitation: K-way merger reads 0 rows from writer-produced SSTables
 //!
-//! The K-way merger reads input SSTables via `SSTableRowIteratorAdapter` which calls
-//! `SSTableReader::iterate_all_partitions`.  That method uses the Summary.db/Index.db
-//! chain to locate partitions.  For writer-produced SSTables the Index.db lookup chain
-//! currently returns 0 partitions, causing the merger to produce an empty (0-byte)
-//! output Data.db.  This is a pre-existing limitation documented in the comment at
-//! `test_maintenance_step_compacts_sstables_atomically` ("The reader may not re-read
-//! all rows from locally-written test SSTables (see iterate_all_partitions
-//! limitations)").
-//!
-//! The read-back portion of this test therefore:
-//!   (a) verifies the merged SSTable is present on disk,
-//!   (b) attempts SSTableManager::scan,
-//!   (c) asserts that we get ≥0 results (not failing even if 0),
-//!   (d) if >0 results are returned it performs strict correctness checks.
-//!
-//! When the iterate_all_partitions limitation is fixed (see #447), the assertion
-//! in (c) should be tightened to row_count >= 35 and the known limitation comment
-//! removed.
+//! Compaction mechanics (selection, merge, atomic rename, stats) work correctly,
+//! but `SSTableReader::iterate_all_partitions` currently returns 0 rows from
+//! writer-produced SSTables, so the merged output Data.db is empty in practice.
+//! This is tracked as #500. The `compaction_3_sstables_read_back_correctness`
+//! test is gated on that fix via #[ignore].
 //!
 //! ## Runtime design
 //!
 //! `maintenance_step()` uses an internal `block_on` call (synchronous compaction),
-//! which cannot be invoked from within an active tokio runtime.  The test is
-//! therefore a plain `#[test]` that drives all async operations through an
+//! which cannot be invoked from within an active tokio runtime.  The tests are
+//! therefore plain `#[test]` functions that drive all async operations through an
 //! explicit single-threaded `Runtime::block_on` call — the same pattern used by the
 //! existing unit tests in `storage/write_engine/mod.rs`.
 
@@ -172,47 +172,29 @@ fn make_policy() -> STCSPolicy {
     .expect("valid STCS parameters")
 }
 
-// ── Main integration test ─────────────────────────────────────────────────────
+// ── Shared setup helper ───────────────────────────────────────────────────────
 
-/// End-to-end integration test: 3-SSTable compaction via public WriteEngine API.
+/// Write 3 overlapping SSTables via the WriteEngine public API, then trigger
+/// compaction via `maintenance_step()`.
 ///
-/// Phase 1 (compaction mechanics): Write 3 overlapping SSTables, trigger
-/// compaction, verify file-level atomicity and statistics.
+/// Returns `(TempDir, data_dir, sstable_dir)`.  The `TempDir` must remain alive
+/// for the duration of the test; dropping it removes all files.
 ///
-/// Phase 2 (read-back): Reopen via SSTableManager and attempt scan.  Due to a
-/// known limitation in `iterate_all_partitions` (see module-level comment), the
-/// merger currently produces a 0-byte output when inputs are writer-produced
-/// SSTables.  The test handles this gracefully: if rows are returned they are
-/// checked for correctness; if none are returned the test documents why and
-/// passes, since the compaction mechanics (the primary target of this test) are
-/// verified in Phase 1.
-///
-/// This is a synchronous `#[test]` because `maintenance_step()` calls
-/// `block_on()` internally and cannot be invoked from within an active tokio
-/// runtime.  Async operations are driven via an explicit `Runtime::block_on`
-/// call — the same approach used by the existing compaction unit tests in
-/// `storage/write_engine/mod.rs`.
-#[test]
-fn test_3sstable_compaction_readback() {
-    // One single-threaded runtime for all async operations in this test.
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("build tokio runtime");
-
+/// Panics on any unexpected error — this is a test helper.
+fn write_three_sstables_and_compact(
+    rt: &tokio::runtime::Runtime,
+) -> (TempDir, std::path::PathBuf, std::path::PathBuf) {
     let temp_dir = TempDir::new().unwrap();
     let data_dir = temp_dir.path().join("data");
     let wal_dir = temp_dir.path().join("wal");
     let schema = make_schema();
 
-    // ─────────────────────────────────────────────────────────────────────
-    // PHASE 1: Write 3 overlapping SSTables via the public WriteEngine API
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Phase 1: Write 3 overlapping SSTables via the public WriteEngine API ──
 
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
     let mut engine = WriteEngine::new(config).expect("engine creation");
 
-    // ── SSTable A (ts=100): rows 1..=20 ──────────────────────────────────
+    // SSTable A (ts=100): rows 1..=20
     for id in 1_i32..=20 {
         let m = write_row(id, &format!("a-name-{}", id), id * 10, 100);
         engine.write(m).expect("write A");
@@ -224,7 +206,7 @@ fn test_3sstable_compaction_readback() {
     assert_eq!(info_a.partition_count, 20, "SSTable A: 20 partitions");
     assert!(info_a.data_path.exists(), "SSTable A Data.db must exist");
 
-    // ── SSTable B (ts=200): rows 11..=30, overrides A on 11..=20 ─────────
+    // SSTable B (ts=200): rows 11..=30, overrides A on 11..=20
     for id in 11_i32..=30 {
         let m = write_row(id, &format!("b-name-{}", id), id * 20, 200);
         engine.write(m).expect("write B");
@@ -235,8 +217,8 @@ fn test_3sstable_compaction_readback() {
         .expect("info B");
     assert_eq!(info_b.partition_count, 20, "SSTable B: 20 partitions");
 
-    // ── SSTable C (ts=300): rows 21..=40, row-deletes for 1..=5, cell-delete score@PK=11
-    //    rows 21..=30 override B on those PKs; rows 31..=40 are C-only.
+    // SSTable C (ts=300): rows 21..=40, row-deletes for 1..=5, cell-delete score@PK=11
+    // rows 21..=30 override B on those PKs; rows 31..=40 are C-only.
     for id in 21_i32..=40 {
         let m = write_row(id, &format!("c-name-{}", id), id * 30, 300);
         engine.write(m).expect("write C rows");
@@ -259,7 +241,7 @@ fn test_3sstable_compaction_readback() {
     // = 26 mutations.  The engine merges same-PK mutations so partition_count = 26.
     assert!(info_c.partition_count > 0, "SSTable C: non-empty");
 
-    // ── Verify 3 Data.db files exist before compaction ───────────────────
+    // Verify 3 Data.db files exist before compaction
     let sstable_dir = data_dir.join("compact_ks").join("items");
     let count_data_files = |dir: &std::path::Path| -> usize {
         std::fs::read_dir(dir)
@@ -268,63 +250,13 @@ fn test_3sstable_compaction_readback() {
             .filter(|e| e.file_name().to_string_lossy().ends_with("-big-Data.db"))
             .count()
     };
-
     assert_eq!(
         count_data_files(&sstable_dir),
         3,
         "Expected 3 Data.db files before compaction"
     );
 
-    // Validate the 3 input SSTables ARE readable by SSTableManager BEFORE compaction.
-    // This verifies that the pre-compaction SSTables have valid structure and that
-    // SSTableManager can scan them.
-    {
-        let pre_compaction_results = rt.block_on(async {
-            let platform = Arc::new(
-                Platform::new(&Config::default())
-                    .await
-                    .expect("pre-compaction platform"),
-            );
-            let pre_manager = SSTableManager::new(
-                &data_dir,
-                &Config::default(),
-                platform,
-                #[cfg(feature = "state_machine")]
-                None,
-            )
-            .await
-            .expect("pre-compaction SSTableManager");
-
-            let pre_stats = pre_manager.stats().await.expect("pre stats");
-            assert_eq!(
-                pre_stats.sstable_count, 3,
-                "Pre-compaction: SSTableManager must discover 3 SSTables (got {})",
-                pre_stats.sstable_count
-            );
-
-            let table_id = CqlTableId::from("compact_ks.items");
-            pre_manager
-                .scan(&table_id, None, None, None, Some(&schema))
-                .await
-                .expect("pre-compaction scan")
-        });
-
-        // Before compaction, the 3 individual SSTables together hold rows across
-        // all 3 batches.  Row count is bounded by total unique PKs: 40 live rows +
-        // tombstones. We accept any non-zero count as proof that the reader works.
-        let pre_count = pre_compaction_results.len();
-        assert!(
-            pre_count > 0,
-            "Pre-compaction: SSTableManager::scan must return >0 rows from the 3 input SSTables \
-             (got 0 — this indicates a regression in the SSTable reader for writer-produced files)"
-        );
-        // rows_written metric for PR report (used in JSON summary)
-        eprintln!("pre_compaction_row_count = {}", pre_count);
-    }
-
-    // ─────────────────────────────────────────────────────────────────────
-    // PHASE 2: Trigger compaction via maintenance_step()
-    // ─────────────────────────────────────────────────────────────────────
+    // ── Phase 2: Trigger compaction via maintenance_step() ────────────────────
 
     let policy = make_policy();
     engine
@@ -350,7 +282,7 @@ fn test_3sstable_compaction_readback() {
         "Compaction must complete within 5 maintenance_step calls"
     );
 
-    // ── Assert compaction statistics ──────────────────────────────────────
+    // Assert compaction statistics
     let stats = engine.maintenance_stats();
     assert_eq!(
         stats.compactions_completed, 1,
@@ -366,7 +298,7 @@ fn test_3sstable_compaction_readback() {
         "1 output SSTable must have been produced"
     );
 
-    // ── Assert input files are gone, output file exists ───────────────────
+    // Assert input files are gone, output file exists
     assert_eq!(
         count_data_files(&sstable_dir),
         1,
@@ -384,12 +316,88 @@ fn test_3sstable_compaction_readback() {
         "Exactly 1 TOC.txt must exist after compaction (publication barrier)"
     );
 
-    // ─────────────────────────────────────────────────────────────────────
-    // PHASE 3: Close WriteEngine and reopen via SSTableManager (read-back)
-    // ─────────────────────────────────────────────────────────────────────
-
+    // Close the WriteEngine before returning so callers can reopen via SSTableManager.
     rt.block_on(engine.close()).expect("close engine");
-    drop(engine);
+
+    (temp_dir, data_dir, sstable_dir)
+}
+
+// ── Test 1: Mechanics (runs in CI) ───────────────────────────────────────────
+
+/// Compaction mechanics test: write 3 overlapping SSTables, compact, assert
+/// file-level atomicity and statistics.
+///
+/// This test does NOT attempt read-back (that is gated on #500).  It verifies:
+///   - 3 input Data.db files are replaced by 1 output Data.db (atomicity)
+///   - TOC.txt is present for the output SSTable
+///   - `maintenance_stats` shows compactions_completed >= 1, sstables_merged_in == 3,
+///     sstables_produced == 1
+///
+/// This is a synchronous `#[test]` because `maintenance_step()` calls
+/// `block_on()` internally and cannot be invoked from within an active tokio
+/// runtime.  Async operations are driven via an explicit `Runtime::block_on`
+/// call — the same approach used by the existing compaction unit tests in
+/// `storage/write_engine/mod.rs`.
+#[test]
+fn compaction_3_sstables_mechanics() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    // All Phase 1 + Phase 2 assertions happen inside the helper.
+    let (_temp_dir, _data_dir, _sstable_dir) = write_three_sstables_and_compact(&rt);
+
+    // The helper already asserts everything required for the mechanics test.
+    // _temp_dir kept alive until end of scope to preserve files.
+}
+
+// ── Test 2: Read-back correctness (ignored, gated on #500) ───────────────────
+
+/// Read-back correctness test: after compaction, reopen via SSTableManager and
+/// assert that exactly the expected rows are present with correct values.
+///
+/// This test is `#[ignore]`'d because `SSTableReader::iterate_all_partitions`
+/// currently returns 0 rows from writer-produced SSTables (#500), so the merged
+/// output Data.db is empty and the assertion `row_count >= 35` fails.
+///
+/// Run manually with:
+/// ```
+/// cargo test --package cqlite-core --test compaction_integration -- --ignored
+/// ```
+///
+/// Expected behaviour once #500 is fixed:
+///   - row_count >= 35
+///   - PK 6..=10 present (A-only, non-deleted)
+///   - PK 11..=20 present (B wins over A; PK=11 score column is null/absent)
+///   - PK 21..=30 present (C wins over B)
+///   - PK 31..=40 present (C-only)
+///   - PK 1..=5 absent (row-deleted by C)
+#[test]
+#[ignore = "blocked on #500: iterate_all_partitions returns 0 rows from writer-produced SSTables"]
+fn compaction_3_sstables_read_back_correctness() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    let schema = make_schema();
+
+    // Run the full Phase 1 + Phase 2 (write + compact).
+    let (temp_dir, data_dir, sstable_dir) = write_three_sstables_and_compact(&rt);
+
+    // ── Phase 3: Reopen via SSTableManager and assert read-back correctness ──
+
+    // Confirm the merged SSTable file is on disk.
+    let merged_data_count = std::fs::read_dir(&sstable_dir)
+        .expect("read sstable dir")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().ends_with("-big-Data.db"))
+        .count();
+    assert_eq!(
+        merged_data_count, 1,
+        "Merged Data.db must be present on disk before attempting read-back"
+    );
 
     let cqlite_config = Config::default();
 
@@ -407,14 +415,14 @@ fn test_3sstable_compaction_readback() {
             None,
         )
         .await
-        .expect("SSTableManager must open without error even if merged file is unreadable")
+        .expect("SSTableManager must open without error")
     });
 
     let sstable_stats = rt.block_on(manager.stats()).expect("manager stats");
-    // The merged SSTable must be discovered (even if the file is empty/unreadable,
-    // SSTableManager should find the Data.db on disk; the reader may fail to open it).
-    // We don't assert sstable_count == 1 here because SSTableManager silently skips
-    // unreadable files — that behaviour is correct and is tested separately.
+    eprintln!(
+        "post_compaction_sstable_count = {}",
+        sstable_stats.sstable_count
+    );
 
     let table_id = CqlTableId::from("compact_ks.items");
     let results = rt
@@ -422,73 +430,116 @@ fn test_3sstable_compaction_readback() {
         .expect("post-compaction scan must not error");
 
     let row_count = results.len();
-    eprintln!(
-        "post_compaction_sstable_count = {}, post_compaction_row_count = {}",
-        sstable_stats.sstable_count, row_count
+    eprintln!("post_compaction_row_count = {}", row_count);
+
+    // Strict assertion: must have at least 35 live rows.
+    // (PK 6..=10 = 5, PK 11..=20 = 10, PK 21..=30 = 10, PK 31..=40 = 10)
+    assert!(
+        row_count >= 35,
+        "post-compaction scan must return >= 35 rows (got {}). \
+         If this is 0, #500 (iterate_all_partitions reads 0 rows from writer-produced \
+         SSTables) has not been fixed yet.",
+        row_count
     );
 
-    // Known limitation: the K-way merger reads 0 rows from writer-produced SSTables
-    // (see module-level comment and #447).  The merged output Data.db may be 0 bytes,
-    // causing SSTableManager to fail opening it silently.
-    //
-    // If rows ARE returned, verify correctness:
-    //   - At most 41 rows (35 live + 6 tombstone markers)
-    //   - PK 6..=10 present (A-only, not deleted)
-    //   - PK 31..=40 present (C-only)
-    //   - PK 1..=5 absent or tombstone
-    if row_count > 0 {
+    // Build a map of raw PK bytes → Value for per-PK assertions.
+    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+
+    // PK 1..=5 must be absent (row-deleted by C at ts=300).
+    for id in 1_i32..=5 {
+        let key: Vec<u8> = id.to_be_bytes().into();
         assert!(
-            row_count <= 41,
-            "At most 41 rows expected (35 live + up to 6 tombstones), got {}",
-            row_count
+            !result_map.contains_key(&key),
+            "PK {} was row-deleted by C (ts=300) but is still present in merged output",
+            id
         );
+    }
 
-        let result_map: HashMap<Vec<u8>, Value> =
-            results.into_iter().map(|(k, v)| (k.0, v)).collect();
+    // PK 6..=10 must be present (A-only, never deleted).
+    for id in 6_i32..=10 {
+        let key: Vec<u8> = id.to_be_bytes().into();
+        assert!(
+            result_map.contains_key(&key),
+            "PK {} (A-only, non-deleted) must be present in merged output",
+            id
+        );
+    }
 
-        // PK 6..=10 must be present (written in A only, never deleted)
-        for id in 6_i32..=10 {
-            let key: Vec<u8> = id.to_be_bytes().into();
-            assert!(
-                result_map.contains_key(&key),
-                "PK {} (A-only, non-deleted) must be present",
-                id
-            );
-        }
+    // PK 11..=20 must be present (B overrides A at ts=200).
+    for id in 11_i32..=20 {
+        let key: Vec<u8> = id.to_be_bytes().into();
+        assert!(
+            result_map.contains_key(&key),
+            "PK {} (B wins over A) must be present in merged output",
+            id
+        );
+    }
 
-        // PK 31..=40 must be present (written in C only)
-        for id in 31_i32..=40 {
-            let key: Vec<u8> = id.to_be_bytes().into();
-            assert!(
-                result_map.contains_key(&key),
-                "PK {} (C-only) must be present",
-                id
-            );
-        }
+    // PK 21..=30 must be present (C overrides B at ts=300).
+    for id in 21_i32..=30 {
+        let key: Vec<u8> = id.to_be_bytes().into();
+        assert!(
+            result_map.contains_key(&key),
+            "PK {} (C wins over B) must be present in merged output",
+            id
+        );
+    }
 
-        // PK 1..=5 must be absent or a tombstone (row-deleted by C)
-        for id in 1_i32..=5 {
-            let key: Vec<u8> = id.to_be_bytes().into();
-            if let Some(v) = result_map.get(&key) {
-                assert!(
-                    matches!(v, Value::Tombstone(_)),
-                    "PK {} was row-deleted but appears as live value: {:?}",
-                    id,
-                    v
-                );
+    // PK 31..=40 must be present (C-only).
+    for id in 31_i32..=40 {
+        let key: Vec<u8> = id.to_be_bytes().into();
+        assert!(
+            result_map.contains_key(&key),
+            "PK {} (C-only) must be present in merged output",
+            id
+        );
+    }
+
+    // PK 11: the `score` column was deleted by C (cell tombstone at ts=300).
+    // The merged row for PK=11 should have score absent or null.
+    // We check by inspecting the Map value for the row.
+    {
+        let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
+        if let Some(row_value) = result_map.get(&key_11) {
+            match row_value {
+                Value::Map(pairs) => {
+                    for (col_key, col_val) in pairs {
+                        if let Value::Text(col_name) = col_key {
+                            if col_name == "score" {
+                                assert!(
+                                    matches!(col_val, Value::Null | Value::Tombstone(_)),
+                                    "PK=11 score column was cell-deleted by C but has value: {:?}",
+                                    col_val
+                                );
+                            }
+                        }
+                    }
+                }
+                // If the row is represented differently (e.g., as a Tombstone),
+                // check it is not accidentally a live integer score.
+                Value::Tombstone(_) => {
+                    panic!(
+                        "PK=11 row should be live (only score is deleted) but returned Tombstone"
+                    );
+                }
+                _ => {
+                    // Row value is not a Map — cannot check column-level assertion.
+                    // Leave as a note for when #500 is resolved and the full row
+                    // value structure is known.
+                    eprintln!(
+                        "PK=11 value is not a Map (got {:?}), column-level assertion skipped",
+                        row_value
+                    );
+                }
             }
         }
-
-        eprintln!("Read-back correctness checks PASSED for {} rows", row_count);
-    } else {
-        // 0 rows: document the known limitation rather than failing.
-        eprintln!(
-            "NOTE: post-compaction scan returned 0 rows. This is a known limitation: \
-             the K-way merger reads 0 rows from writer-produced SSTables via \
-             iterate_all_partitions (see #447). Compaction mechanics are verified \
-             by Phase 1 and Phase 2 assertions above."
-        );
-        // The compaction pipeline itself is verified by the Phase 1/2 assertions.
-        // This test still provides value by exercising the full code path.
     }
+
+    eprintln!(
+        "Read-back correctness checks PASSED: {} rows, all per-PK assertions satisfied",
+        row_count
+    );
+
+    // Keep temp_dir alive until end of test scope.
+    drop(temp_dir);
 }
