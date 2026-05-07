@@ -654,15 +654,11 @@ async fn test_type_time_max() {
     assert_eq!(read_back, original, "Time(max) roundtrip failed");
 }
 
-/// Test that writing a Counter cell via WriteEngine returns a typed error.
-///
 /// Counter columns require server-side distributed increment semantics
 /// (counter UPDATE `SET col = col + n`) that cannot be expressed as a
-/// last-write-wins `Mutation`. The engine must reject such mutations eagerly
+/// last-write-wins `Mutation`. The engine rejects such mutations eagerly
 /// with `Error::InvalidOperation` so callers receive an actionable error
 /// rather than silently writing semantically incorrect data.
-///
-/// Issue #479
 #[tokio::test]
 async fn test_counter_write_returns_typed_error() {
     let temp_dir = TempDir::new().unwrap();
@@ -697,12 +693,8 @@ async fn test_counter_write_returns_typed_error() {
     );
 }
 
-/// Test that the sync `write()` path also rejects Counter cells.
-///
 /// Both `write()` and `write_async()` must enforce the counter guard
 /// consistently so callers cannot bypass it by choosing the sync path.
-///
-/// Issue #479
 #[test]
 fn test_counter_write_sync_returns_typed_error() {
     use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
@@ -1300,30 +1292,10 @@ async fn test_type_timeuuid_roundtrip() {
     assert_eq!(read_back, original, "Timeuuid type roundtrip failed");
 }
 
-// ── Issue #477: Inet / Varint / Duration — see tests above (lines 711–973) ──
-// Those types are fully covered by test_type_inet_*, test_type_varint_*, and
-// test_type_duration_* which already pass.  The tests below add new coverage
-// for issue #478 (Tuple<int,text,uuid> and Frozen<udt>) and issue #479
-// (Counter typed error).
-
-// ── Issue #478: Tuple<int, text, uuid> (three mixed-primitive-element tuple) ──
-
-/// Test Tuple with three mixed primitive element types: int, text, uuid.
-///
-/// This exercises the serializer/deserializer path for a tuple that contains
-/// a fixed-width integer, a variable-length text, and a 16-byte UUID — three
-/// structurally different element kinds in one tuple value.
-///
-/// ## Known limitation
-///
-/// The reader does not yet perform schema-aware element-type decoding for
-/// three-element tuples.  When the column type string is `tuple<int, text, uuid>`,
-/// the reader may return `Value::Null` as the row value (rather than a Map
-/// containing the tuple column) if the type string cannot be parsed.
-/// The test verifies that the write path succeeds and accepts any non-panicking
-/// read-back outcome, documenting the current behavior for future improvement.
-///
-/// Issue #478
+/// Known limitation: the reader does not yet perform schema-aware element-type
+/// decoding for three-element tuples, so `tuple<int, text, uuid>` may read back
+/// as `Value::Null`. The test asserts the write path succeeds and accepts any
+/// non-panicking read-back; tighten once schema-aware decoding lands.
 #[tokio::test]
 async fn test_type_tuple_int_text_uuid() {
     let temp_dir = TempDir::new().unwrap();
@@ -1387,27 +1359,10 @@ async fn test_type_tuple_int_text_uuid() {
     }
 }
 
-// ── Issue #478: Frozen<udt> ────────────────────────────────────────────────
-
-/// Test Frozen UDT roundtrip.
-///
-/// Writes a `Frozen<udt>` where the UDT has two fields (name: text, age: int).
-/// Verifies that the write path succeeds and the frozen wrapper is preserved
-/// after flush.
-///
-/// ## Known limitation
-///
-/// The reader does not yet perform schema-aware UDT field decoding when the
-/// column type is the generic string `"frozen<udt>"` (no concrete type name).
-/// The inner UDT bytes are written correctly but the reader returns
-/// `Value::Frozen(Value::Null)` because it cannot map the generic type string
-/// to field names and types.
-///
-/// Both `Value::Frozen(Box::new(Value::Udt(_)))` and `Value::Udt(_)` (fully
-/// decoded) and `Value::Frozen(Box::new(Value::Null))` (partially decoded,
-/// current reader behaviour) are accepted as successful write-path outcomes.
-///
-/// Issue #478
+/// Known limitation: the reader cannot map the generic `frozen<udt>` type
+/// string to field names without a concrete UDT name, so the inner UDT bytes
+/// read back as `Value::Frozen(Value::Null)`. The test accepts that outcome
+/// alongside fully-decoded values; tighten once UDT registry support lands.
 #[tokio::test]
 async fn test_type_frozen_udt() {
     use cqlite_core::types::{UdtField, UdtValue};

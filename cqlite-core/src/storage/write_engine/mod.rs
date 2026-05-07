@@ -358,10 +358,6 @@ impl WriteEngine {
             ));
         }
 
-        // Reject counter cell writes — counter columns require server-side
-        // distributed increment semantics that cannot be expressed as a
-        // last-write-wins mutation. Use a dedicated Cassandra counter table
-        // with `UPDATE … SET col = col + n WHERE pk = ?` via the wire protocol.
         reject_counter_cells(&mutation)?;
 
         // Check hard limit before accepting write
@@ -431,7 +427,6 @@ impl WriteEngine {
             ));
         }
 
-        // Reject counter cell writes — same guard as the sync `write()` path.
         reject_counter_cells(&mutation)?;
 
         // Check hard limit before accepting write
