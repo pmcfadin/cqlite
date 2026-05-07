@@ -2710,10 +2710,16 @@ impl V5CompressedLegacyParser {
     /// Check if a type string represents a UDT (User-Defined Type).
     /// Detects Cassandra's internal format: org.apache.cassandra.db.marshal.UserType(...)
     fn is_udt_type(type_str: &str) -> bool {
-        // Case-insensitive check for UDT type marker
-        type_str
-            .to_lowercase()
-            .contains("org.apache.cassandra.db.marshal.usertype")
+        // ASCII case-insensitive substring match without allocating a lowercased
+        // copy. The marshal name is pure ASCII so byte-window comparison is safe.
+        const TARGET: &[u8] = b"org.apache.cassandra.db.marshal.usertype";
+        let bytes = type_str.as_bytes();
+        if bytes.len() < TARGET.len() {
+            return false;
+        }
+        bytes
+            .windows(TARGET.len())
+            .any(|w| w.iter().zip(TARGET).all(|(a, b)| a.eq_ignore_ascii_case(b)))
     }
 
     /// Parse a UDT type string to extract the UDT definition.
@@ -5370,18 +5376,20 @@ impl V5CompressedLegacyParser {
                 // The data slice passed to parse_raw_type_value is already the raw UDT bytes.
                 let udt_data = &data[offset..];
 
-                // Debug: Log the UDT data hex dump
-                log::debug!(
-                    "Frozen UDT '{}': data_len={}, hex dump: {}",
-                    column_name,
-                    udt_data.len(),
-                    udt_data
+                if log::log_enabled!(log::Level::Debug) {
+                    let hex: String = udt_data
                         .iter()
                         .take(64)
                         .map(|b| format!("{:02x}", b))
                         .collect::<Vec<_>>()
-                        .join(" ")
-                );
+                        .join(" ");
+                    log::debug!(
+                        "Frozen UDT '{}': data_len={}, hex dump: {}",
+                        column_name,
+                        udt_data.len(),
+                        hex
+                    );
+                }
 
                 // TODO(Issue #220): Full UDT parsing requires SSTableReader for nested types.
                 // parse_raw_type_value is called in frozen collection contexts where we don't
