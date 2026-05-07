@@ -3804,13 +3804,27 @@ impl V5CompressedLegacyParser {
     ///
     /// Issue #221: This enables parsing of typed_collections_table and other
     /// tables with non-frozen collections.
+    /// Outer entry point — the `reader` parameter is forwarded to the inner
+    /// cells but is currently unused there (`_reader`).  The outer/inner split
+    /// lets unit tests call `parse_complex_column_inner` without constructing a
+    /// full `SSTableReader`.
     fn parse_complex_column(
+        &self,
+        data: &[u8],
+        offset: usize,
+        column: &crate::schema::Column,
+        has_complex_deletion: bool,
+        _reader: &super::super::types::SSTableReader,
+    ) -> Result<(Value, usize)> {
+        self.parse_complex_column_inner(data, offset, column, has_complex_deletion)
+    }
+
+    fn parse_complex_column_inner(
         &self,
         data: &[u8],
         mut offset: usize,
         column: &crate::schema::Column,
         has_complex_deletion: bool,
-        reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         log::debug!(
             "V5CompressedLegacy: Parsing complex column '{}' type='{}' has_complex_deletion={} at offset {}",
@@ -3888,14 +3902,8 @@ impl V5CompressedLegacyParser {
             let mut elements = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, _path, new_offset) = self.parse_complex_cell_value(
-                    data,
-                    offset,
-                    &element_type,
-                    column,
-                    i as u64,
-                    reader,
-                )?;
+                let (cell_value, _path, new_offset) =
+                    self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
                 offset = new_offset;
 
                 // Add non-null values to the list
@@ -3909,23 +3917,49 @@ impl V5CompressedLegacyParser {
             || dt.starts_with("org.apache.cassandra.db.marshal.settype(")
         {
             // Parse set elements
+            // In Cassandra's complex cell format for sets, each element is a separate cell
+            // where the cell PATH contains the raw bytes of the set element, and the cell
+            // VALUE is always empty (HAS_EMPTY_VALUE flag = 0x04 set).
+            // We must parse the path bytes as the element value, not the (empty) cell value.
             let element_type = self.extract_collection_element_type(&column.data_type, "set")?;
             let mut elements = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, _path, new_offset) = self.parse_complex_cell_value(
-                    data,
-                    offset,
-                    &element_type,
-                    column,
-                    i as u64,
-                    reader,
-                )?;
+                let (cell_value, path_bytes, new_offset) =
+                    self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
                 offset = new_offset;
 
-                // Add non-null values to the set
+                // For sets: the path bytes ARE the element value (cell value is always empty).
+                // If cell_value is Some (unusual case where set cell has a non-empty value),
+                // use it. Otherwise parse the path bytes as the element type.
+                //
+                // Known limitation (Issue #493): tombstone ambiguity.
+                // When `cell_value.is_none() && !path_bytes.is_empty()`, both live elements
+                // (HAS_EMPTY_VALUE flag = 0x04) and element-level tombstones (is_deleted = 0x01
+                // with an identifying path) enter this branch.  Currently both are surfaced as
+                // live values.  Once tombstone tracking lands, this branch should consult the
+                // `is_deleted` flag on the cell and skip tombstoned elements.
+                // TODO(#493): skip element tombstones once tombstone tracking lands.
                 if let Some(val) = cell_value {
                     elements.push(val);
+                } else if !path_bytes.is_empty() {
+                    // Path bytes are the set element — parse them as the element type
+                    match self.parse_value_from_raw_bytes(
+                        &path_bytes,
+                        &element_type,
+                        &column.name,
+                        0,
+                    ) {
+                        Ok(val) => elements.push(val),
+                        Err(e) => {
+                            log::debug!(
+                                "V5CompressedLegacy: set element {} parse failed (type={}): {}",
+                                i,
+                                element_type,
+                                e
+                            );
+                        }
+                    }
                 }
             }
 
@@ -3938,14 +3972,8 @@ impl V5CompressedLegacyParser {
             let mut entries = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, path_bytes, new_offset) = self.parse_complex_cell_value(
-                    data,
-                    offset,
-                    &value_type,
-                    column,
-                    i as u64,
-                    reader,
-                )?;
+                let (cell_value, path_bytes, new_offset) =
+                    self.parse_complex_cell_value(data, offset, &value_type, column, i as u64)?;
                 offset = new_offset;
 
                 // For maps, the cell path IS the key
@@ -4003,7 +4031,6 @@ impl V5CompressedLegacyParser {
         element_type: &str,
         column: &crate::schema::Column,
         cell_index: u64,
-        _reader: &super::super::types::SSTableReader,
     ) -> Result<(Option<Value>, Vec<u8>, usize)> {
         log::debug!(
             "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} element_type='{}' starting at offset {}",
@@ -4174,12 +4201,15 @@ impl V5CompressedLegacyParser {
             let value_data = &data[offset..offset + value_len_usize];
             offset += value_len_usize;
 
-            // Parse the value based on element type
-            // For complex cell values (inside collections), the value is stored as raw bytes
-            // without cell flags. Use parse_raw_type_value for all types.
-            let parsed_value = self
-                .parse_raw_type_value(value_data, 0, element_type, &column.name, 0)
-                .map(|(val, _)| val)?;
+            // Parse the value based on element type.
+            // The value bytes have already been extracted (length was consumed above).
+            // Use parse_value_from_raw_bytes which treats the entire slice as the value
+            // WITHOUT an additional length prefix (unlike parse_raw_type_value which
+            // expects a VInt length prefix — wrong for already-extracted complex cell values).
+            // See Issue #481: using parse_raw_type_value here caused the first byte of
+            // blob/text values to be misread as a length, producing corrupt parses.
+            let parsed_value =
+                self.parse_value_from_raw_bytes(value_data, element_type, &column.name, 0)?;
             Some(parsed_value)
         };
 
@@ -4707,8 +4737,37 @@ impl V5CompressedLegacyParser {
                     self.parse_value_from_raw_bytes(data, &inner_type, column_name, depth + 1)?;
                 Ok(Value::Frozen(Box::new(inner)))
             }
+            // UDT (User-Defined Type): delegate to parse_raw_type_value which has the full
+            // UDT parsing logic including field count validation and nested type resolution.
+            // The raw bytes representation is identical between the two function conventions.
+            other if Self::is_udt_type(other) => {
+                let (val, _offset) =
+                    self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
+                Ok(val)
+            }
             other => {
-                // Fall back: treat as blob
+                // Check if it's a short UDT name in the registry (e.g., "address_type").
+                // This handles the case where parse_value_from_raw_bytes is called recursively
+                // from the frozen<> arm with the stripped inner type (e.g., frozen<address_type>
+                // → "address_type"). Since parse_raw_type_value already has a registry-lookup
+                // fallback that correctly handles bare UDT names, we delegate there.
+                // The byte-level encoding is identical: UDT fields use 4-byte i32 length prefixes
+                // with no overall cell-level length prefix, so parse_raw_type_value offset=0 is
+                // correct for already-extracted cell value bytes.
+                // See Issue #481 regression fix.
+                if let Some(ref registry) = self.udt_registry {
+                    if registry.get_udt(&self.keyspace, other).is_some() {
+                        log::debug!(
+                            "parse_value_from_raw_bytes: type '{}' for '{}' resolved as UDT via registry, delegating to parse_raw_type_value",
+                            other,
+                            column_name,
+                        );
+                        let (val, _offset) =
+                            self.parse_raw_type_value(data, 0, type_str, column_name, depth)?;
+                        return Ok(val);
+                    }
+                }
+                // Truly unknown type: fall back to blob.
                 log::debug!(
                     "parse_value_from_raw_bytes: unknown type '{}' for '{}', treating as blob ({} bytes)",
                     other,
@@ -7472,6 +7531,272 @@ mod tests {
         assert!(
             !V5CompressedLegacyParser::is_range_tombstone_marker(0x03),
             "0x03 has END_OF_PARTITION bit set, should NOT be range tombstone"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Regression tests for Issue #481
+    // -----------------------------------------------------------------------
+
+    /// Build the binary for a single complex cell with HAS_EMPTY_VALUE set and
+    /// the given `path_bytes` as the cell path.  The timestamp field is encoded
+    /// as VInt(0) (ZigZag ⇒ 0x00, one byte).
+    ///
+    /// Wire format (Cassandra 5.0 complex-cell layout):
+    ///   [flags:u8] [timestamp:VInt] [path_len:VUInt] [path:bytes]
+    fn build_set_cell_bytes(path: &[u8]) -> Vec<u8> {
+        // flags = 0x04 (HAS_EMPTY_VALUE); use_row_timestamp bit (0x08) NOT set,
+        // so an explicit timestamp follows.
+        let flags: u8 = 0x04;
+        // VInt(0) in ZigZag = 0x00 (single byte).
+        let ts_byte: u8 = 0x00;
+        // path_len as VUInt (single-byte form for small lengths).
+        let path_len = path.len() as u8;
+        assert!(path_len < 0x80, "helper only supports path lengths < 128");
+
+        let mut buf = vec![flags, ts_byte, path_len];
+        buf.extend_from_slice(path);
+        buf
+    }
+
+    /// Regression test for Issue #481 bug 2: `parse_complex_cell_value` was
+    /// calling `parse_raw_type_value(value_data, 0, ...)` which re-consumed the
+    /// already-extracted length prefix, causing the first content byte (e.g.
+    /// `0x2A = 42`) to be misread as the start of another VInt length.
+    ///
+    /// **Without the fix** `parse_raw_type_value` would try to read 42 more
+    /// bytes from a 2-byte slice and return an error, so the test would panic.
+    /// **With the fix** `parse_value_from_raw_bytes` treats the whole slice as
+    /// raw value bytes and returns `Blob([0x2A, 0xBB, 0xCC])`.
+    #[test]
+    fn test_regression_481_complex_cell_value_no_double_length_prefix() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "my_blob".to_string(),
+            data_type: "blob".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build one list-cell with value bytes [0x2A, 0xBB, 0xCC].
+        //
+        // flags = 0x08 (use_row_timestamp — skip reading a timestamp),
+        // path_len VUInt = 0x00 (empty path, normal for list elements),
+        // value_len VUInt = 0x03,
+        // value = [0x2A, 0xBB, 0xCC].
+        //
+        // The first content byte (0x2A = 42) is deliberately chosen so that
+        // the pre-fix code — which passed the already-extracted slice back into
+        // parse_raw_type_value with offset 0 — would read it as a length prefix
+        // ("read 42 more bytes") and fail.
+        let cell_bytes: Vec<u8> = vec![
+            0x08, // flags: use_row_timestamp (skip ts field), no deletion, no empty-value
+            0x00, // path_len VUInt = 0 (empty path)
+            0x03, // value_len VUInt = 3
+            0x2A, // ← first content byte; pre-fix code misread this as a length
+            0xBB, 0xCC,
+        ];
+
+        let (cell_value, path_bytes, consumed) = parser
+            .parse_complex_cell_value(&cell_bytes, 0, "blob", &column, 0)
+            .expect("parse_complex_cell_value should succeed");
+
+        assert!(path_bytes.is_empty());
+        assert_eq!(consumed, cell_bytes.len());
+        assert_eq!(
+            cell_value,
+            Some(Value::Blob(vec![0x2A, 0xBB, 0xCC])),
+            "blob value must be the three raw bytes, not a misread length-prefixed parse"
+        );
+    }
+
+    /// Regression test for Issue #481 regression: `list<frozen<udt>>` elements
+    /// were being returned as `Value::Blob` instead of `Value::Udt`.
+    ///
+    /// **Root cause**: `parse_complex_cell_value` called `parse_value_from_raw_bytes`
+    /// with element_type `"frozen<address_type>"`.  The `frozen<>` arm stripped it
+    /// to `"address_type"`, then recursed.  `"address_type"` did not match
+    /// `is_udt_type()` (marshal form only) and fell through to the blob fallback.
+    ///
+    /// **Fix**: the `other =>` fallback in `parse_value_from_raw_bytes` now checks
+    /// `self.udt_registry` for the bare name and delegates to `parse_raw_type_value`
+    /// when found, which correctly reads the per-field i32 length-prefixed UDT data.
+    ///
+    /// This test fails on the pre-fix code path (produces `Value::Blob`) and
+    /// passes after the fix (produces `Value::Udt` with `street` and `city` fields).
+    #[test]
+    fn test_regression_481_list_frozen_udt_parses_as_udt_not_blob() {
+        use crate::schema::{CqlType, UdtRegistry};
+        use crate::types::{UdtFieldDef, UdtTypeDef};
+
+        // Build a UdtRegistry with a minimal "address_type" UDT: street TEXT, city TEXT
+        let mut registry = UdtRegistry::new();
+        registry.register_udt(UdtTypeDef {
+            keyspace: "test_collections".to_string(),
+            name: "address_type".to_string(),
+            fields: vec![
+                UdtFieldDef {
+                    name: "street".to_string(),
+                    field_type: CqlType::Text,
+                    nullable: true,
+                },
+                UdtFieldDef {
+                    name: "city".to_string(),
+                    field_type: CqlType::Text,
+                    nullable: true,
+                },
+            ],
+        });
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_collections".to_string(),
+            "collections_with_udts".to_string(),
+            0,
+            0,
+            None,
+        )
+        .with_udt_registry(registry);
+
+        let column = crate::schema::Column {
+            name: "addresses".to_string(),
+            data_type: "list<frozen<address_type>>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build UDT bytes for {street="Main St", city="Springfield"}:
+        //   Each field: [i32 BE length (4 bytes)][field bytes]
+        //   street: length=7, bytes="Main St"
+        //   city:   length=11, bytes="Springfield"
+        let mut udt_bytes: Vec<u8> = Vec::new();
+        let street = b"Main St";
+        udt_bytes.extend_from_slice(&(street.len() as i32).to_be_bytes());
+        udt_bytes.extend_from_slice(street);
+        let city = b"Springfield";
+        udt_bytes.extend_from_slice(&(city.len() as i32).to_be_bytes());
+        udt_bytes.extend_from_slice(city);
+
+        // Build a complex-cell encoded list with one element.
+        //   [cell_count:VUInt = 1]
+        //   [flags:u8 = 0x08 (use_row_timestamp — skip explicit ts)]
+        //   [path_len:VUInt = 0x00 (empty path — list elements have empty path)]
+        //   [value_len:VUInt = udt_bytes.len()]
+        //   [value: udt_bytes]
+        assert!(
+            udt_bytes.len() < 0x80,
+            "test helper assumes single-byte VUInt"
+        );
+        let mut blob: Vec<u8> = vec![
+            0x01,                  // cell_count = 1
+            0x08,                  // flags: use_row_timestamp, not deleted, value present
+            0x00,                  // path_len VUInt = 0 (list cells have empty path)
+            udt_bytes.len() as u8, // value_len VUInt
+        ];
+        blob.extend_from_slice(&udt_bytes);
+
+        let (value, consumed) = parser
+            .parse_complex_column_inner(&blob, 0, &column, false)
+            .expect("parse_complex_column_inner must succeed for list<frozen<address_type>>");
+        assert_eq!(consumed, blob.len(), "all bytes must be consumed");
+
+        // The list must contain exactly one element that is a UDT (not a Blob).
+        let elements = match value {
+            Value::List(elems) => elems,
+            other => panic!("Expected Value::List, got {:?}", other),
+        };
+        assert_eq!(elements.len(), 1, "list must have one element");
+
+        // The element must be a Frozen<Udt> or Udt (not Blob).
+        let udt_val = match &elements[0] {
+            Value::Frozen(inner) => match inner.as_ref() {
+                Value::Udt(u) => u.clone(),
+                other => panic!("Expected Frozen<Udt>, got Frozen<{:?}>", other),
+            },
+            Value::Udt(u) => u.clone(),
+            other => panic!(
+                "Expected Value::Udt or Value::Frozen(Udt), got {:?} \
+                 (regression: list<frozen<udt>> must not return Blob)",
+                other
+            ),
+        };
+
+        // Verify field names match the schema definition.
+        let field_names: Vec<&str> = udt_val.fields.iter().map(|f| f.name.as_str()).collect();
+        assert!(
+            field_names.contains(&"street"),
+            "UDT must have 'street' field, got: {:?}",
+            field_names
+        );
+        assert!(
+            field_names.contains(&"city"),
+            "UDT must have 'city' field, got: {:?}",
+            field_names
+        );
+
+        // Verify field values decode correctly.
+        let street_field = udt_val.fields.iter().find(|f| f.name == "street").unwrap();
+        assert_eq!(
+            street_field.value,
+            Some(Value::Text("Main St".to_string())),
+            "street field must decode to Text(\"Main St\")"
+        );
+        let city_field = udt_val.fields.iter().find(|f| f.name == "city").unwrap();
+        assert_eq!(
+            city_field.value,
+            Some(Value::Text("Springfield".to_string())),
+            "city field must decode to Text(\"Springfield\")"
+        );
+    }
+
+    /// Regression test for Issue #481 bug 3: for `set<T>` complex columns, each
+    /// set element is stored in the cell PATH (with `HAS_EMPTY_VALUE` = 0x04
+    /// set in cell flags), not the cell value.
+    ///
+    /// **Without the fix** `parse_complex_column` (the set branch) only checked
+    /// `if let Some(val) = cell_value { elements.push(val) }` and silently
+    /// discarded the path bytes, so the set appeared empty.
+    /// **With the fix** the `else if !path_bytes.is_empty()` branch decodes the
+    /// path bytes and adds them to the set.
+    #[test]
+    fn test_regression_481_set_elements_from_cell_path() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "my_set".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build a synthetic `set<text>` with two elements: "hello" and "world".
+        //
+        // Outer format: [cell_count:VUInt] [cell1] [cell2]
+        //   cell_count = 2 → VUInt(2) = 0x02
+        //
+        // Each cell has HAS_EMPTY_VALUE (0x04) set, so the element lives in the
+        // path field.  Timestamp is VInt(0) = 0x00 (ZigZag single byte).
+        let hello = b"hello";
+        let world = b"world";
+        let mut blob = vec![0x02u8]; // cell_count = 2
+        blob.extend(build_set_cell_bytes(hello));
+        blob.extend(build_set_cell_bytes(world));
+
+        let (value, consumed) = parser
+            .parse_complex_column_inner(&blob, 0, &column, false)
+            .expect("parse_complex_column_inner should succeed");
+
+        assert_eq!(consumed, blob.len());
+        assert_eq!(
+            value,
+            Value::Set(vec![
+                Value::Text("hello".to_string()),
+                Value::Text("world".to_string()),
+            ]),
+            "set elements stored in cell path must be decoded and returned"
         );
     }
 }

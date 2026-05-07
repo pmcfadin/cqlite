@@ -689,9 +689,16 @@ async fn test_collection_table_map_parsing() {
                 "typed_collections_table: {} partitions, {}/{} cells validated",
                 r.partition_count, r.validated_cells, r.total_cells
             );
+            // Issue #481 fix: typed_collections_table has 50 partitions.
+            // Before the fix, the V5CompressedLegacy reader returned only 1 partition
+            // due to the double length-prefix bug and the set path-elements bug.
+            // This assertion pins the fix: if either regression is reintroduced, the
+            // test will catch it.
             assert!(
-                r.partition_count > 0,
-                "Should have parsed at least some partitions"
+                r.partition_count >= 50,
+                "typed_collections_table should have at least 50 partitions (got {}). \
+                 If this fails, the Issue #481 regression has been reintroduced.",
+                r.partition_count
             );
         }
         Err(e) => {
