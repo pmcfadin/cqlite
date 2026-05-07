@@ -654,57 +654,85 @@ async fn test_type_time_max() {
     assert_eq!(read_back, original, "Time(max) roundtrip failed");
 }
 
-/// Test Counter type roundtrip
+/// Counter columns require server-side distributed increment semantics
+/// (counter UPDATE `SET col = col + n`) that cannot be expressed as a
+/// last-write-wins `Mutation`. The engine rejects such mutations eagerly
+/// with `Error::InvalidOperation` so callers receive an actionable error
+/// rather than silently writing semantically incorrect data.
 #[tokio::test]
-async fn test_type_counter_roundtrip() {
+async fn test_counter_write_returns_typed_error() {
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("counter_col", "counter");
+    let mut engine = super::create_test_engine(&temp_dir, schema.clone())
+        .expect("Engine creation should succeed");
 
-    let original = Value::Counter(100);
-    let info = write_single_value(&temp_dir, &schema, "counter_col", original.clone()).await;
+    let table_id = TableId::new(&schema.keyspace, &schema.table);
+    let pk = PartitionKey::single("pk", Value::Integer(1));
+    let ops = vec![CellOperation::Write {
+        column: "counter_col".to_string(),
+        value: Value::Counter(100),
+    }];
+    let mutation = Mutation::new(table_id, pk, None, ops, 1_000_000, None);
 
-    assert_single_partition_written(&info);
-    let read_back = super::read_back_column(&temp_dir, &schema, "counter_col").await;
+    let result = engine.write_async(mutation).await;
+
     assert!(
-        read_back == Value::Counter(100) || read_back == Value::BigInt(100),
-        "Counter roundtrip failed: got {:?}",
-        read_back
+        result.is_err(),
+        "Counter write via WriteEngine must return an error, but it succeeded"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, cqlite_core::error::Error::InvalidOperation(_)),
+        "Counter write must return Error::InvalidOperation, got: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("counter"),
+        "Error message should mention 'counter', got: {}",
+        err
     );
 }
 
-/// Test Counter type with zero value
-#[tokio::test]
-async fn test_type_counter_zero() {
+/// Both `write()` and `write_async()` must enforce the counter guard
+/// consistently so callers cannot bypass it by choosing the sync path.
+#[test]
+fn test_counter_write_sync_returns_typed_error() {
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
     let temp_dir = TempDir::new().unwrap();
     let schema = create_type_test_schema("counter_col", "counter");
 
-    let original = Value::Counter(0);
-    let info = write_single_value(&temp_dir, &schema, "counter_col", original.clone()).await;
-
-    assert_single_partition_written(&info);
-    let read_back = super::read_back_column(&temp_dir, &schema, "counter_col").await;
-    assert!(
-        read_back == Value::Counter(0) || read_back == Value::BigInt(0),
-        "Counter(zero) roundtrip failed: got {:?}",
-        read_back
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema.clone(),
     );
-}
+    let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
 
-/// Test Counter type with negative value
-#[tokio::test]
-async fn test_type_counter_negative() {
-    let temp_dir = TempDir::new().unwrap();
-    let schema = create_type_test_schema("counter_col", "counter");
+    let table_id = TableId::new(&schema.keyspace, &schema.table);
+    let pk = PartitionKey::single("pk", Value::Integer(1));
+    let ops = vec![CellOperation::Write {
+        column: "counter_col".to_string(),
+        value: Value::Counter(42),
+    }];
+    let mutation = Mutation::new(table_id, pk, None, ops, 1_000_000, None);
 
-    let original = Value::Counter(-50);
-    let info = write_single_value(&temp_dir, &schema, "counter_col", original.clone()).await;
+    let result = engine.write(mutation);
 
-    assert_single_partition_written(&info);
-    let read_back = super::read_back_column(&temp_dir, &schema, "counter_col").await;
     assert!(
-        read_back == Value::Counter(-50) || read_back == Value::BigInt(-50),
-        "Counter(negative) roundtrip failed: got {:?}",
-        read_back
+        result.is_err(),
+        "Counter write via sync WriteEngine::write() must return an error, but it succeeded"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, cqlite_core::error::Error::InvalidOperation(_)),
+        "Counter write must return Error::InvalidOperation, got: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("counter"),
+        "Error message should mention 'counter', got: {}",
+        err
     );
 }
 
@@ -1262,4 +1290,133 @@ async fn test_type_timeuuid_roundtrip() {
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "timeuuid_col").await;
     assert_eq!(read_back, original, "Timeuuid type roundtrip failed");
+}
+
+/// Known limitation: the reader does not yet perform schema-aware element-type
+/// decoding for three-element tuples, so `tuple<int, text, uuid>` may read back
+/// as `Value::Null`. The test asserts the write path succeeds and accepts any
+/// non-panicking read-back; tighten once schema-aware decoding lands.
+#[tokio::test]
+async fn test_type_tuple_int_text_uuid() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("tuple_col", "tuple<int, text, uuid>");
+
+    let known_uuid = uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap();
+    let original = Value::Tuple(vec![
+        Value::Integer(99),
+        Value::Text("hello".to_string()),
+        Value::Uuid(*known_uuid.as_bytes()),
+    ]);
+
+    let info = write_single_value(&temp_dir, &schema, "tuple_col", original.clone()).await;
+
+    assert_single_partition_written(&info);
+
+    // Read back all rows (bypasses column extraction to avoid panicking on Null row)
+    let rows = super::read_back_all_rows(&temp_dir, &schema).await;
+    assert_eq!(rows.len(), 1, "Should have exactly 1 row");
+    let row = &rows[0];
+    // Document current behavior:
+    // - If the type string is recognised: row is a Map with the tuple column.
+    // - If the type string is not recognised: row may be Value::Null.
+    // Both outcomes are acceptable until schema-aware decoding is implemented.
+    match row {
+        Value::Map(entries) => {
+            // Column found in the row map — extract and accept Tuple or Blob
+            if let Some((_, col_val)) = entries
+                .iter()
+                .find(|(k, _)| matches!(k, Value::Text(n) if n == "tuple_col"))
+            {
+                match col_val {
+                    Value::Tuple(_) => eprintln!(
+                        "note: tuple<int,text,uuid> read back as Tuple \
+                         (element types may differ — schema-aware decoding not yet implemented)"
+                    ),
+                    Value::Blob(_) => eprintln!(
+                        "note: tuple<int,text,uuid> read back as Blob \
+                         (schema-aware decoding not yet implemented)"
+                    ),
+                    other => {
+                        eprintln!("note: tuple<int,text,uuid> column read back as {:?}", other)
+                    }
+                }
+            } else {
+                eprintln!("note: tuple<int,text,uuid> column not found in row Map");
+            }
+        }
+        Value::Null => {
+            // Known limitation: reader returns Null when type string is unrecognised
+            eprintln!(
+                "note: tuple<int,text,uuid> row read back as Null \
+                 (reader does not yet support 3-element tuple type string — \
+                 schema-aware decoding not yet implemented)"
+            );
+        }
+        other => panic!(
+            "tuple<int,text,uuid> row read back as unexpected type {:?}",
+            other
+        ),
+    }
+}
+
+/// Known limitation: the reader cannot map the generic `frozen<udt>` type
+/// string to field names without a concrete UDT name, so the inner UDT bytes
+/// read back as `Value::Frozen(Value::Null)`. The test accepts that outcome
+/// alongside fully-decoded values; tighten once UDT registry support lands.
+#[tokio::test]
+async fn test_type_frozen_udt() {
+    use cqlite_core::types::{UdtField, UdtValue};
+
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("frozen_col", "frozen<udt>");
+
+    // Build a simple two-field UDT value
+    let inner_udt = Value::Udt(UdtValue {
+        type_name: "person".to_string(),
+        keyspace: "test_types".to_string(),
+        fields: vec![
+            UdtField {
+                name: "name".to_string(),
+                value: Some(Value::Text("Alice".to_string())),
+            },
+            UdtField {
+                name: "age".to_string(),
+                value: Some(Value::Integer(30)),
+            },
+        ],
+    });
+    let original = Value::Frozen(Box::new(inner_udt.clone()));
+
+    let info = write_single_value(&temp_dir, &schema, "frozen_col", original.clone()).await;
+
+    assert_single_partition_written(&info);
+    let col_value = super::read_back_column(&temp_dir, &schema, "frozen_col").await;
+
+    // Accept:
+    //   • Frozen(Udt(…))  – fully decoded (future ideal)
+    //   • Udt(…)          – unwrapped by reader
+    //   • Frozen(Null)    – current reader behaviour: frozen wrapper present,
+    //                       inner UDT not decoded due to generic type string
+    //   • Blob(…)         – raw bytes fallback
+    match &col_value {
+        v if *v == original || *v == inner_udt => {
+            // Fully decoded — ideal outcome
+        }
+        Value::Frozen(inner) if matches!(inner.as_ref(), Value::Null) => {
+            // Known limitation: reader preserves Frozen wrapper but cannot
+            // decode UDT fields from generic "frozen<udt>" type string
+            eprintln!(
+                "note: frozen<udt> read back as Frozen(Null) — \
+                 reader cannot decode UDT fields without a concrete type name \
+                 (schema-aware UDT decoding not yet implemented for generic type strings)"
+            );
+        }
+        Value::Blob(_) => {
+            eprintln!("note: frozen<udt> read back as Blob (raw bytes fallback)");
+        }
+        other => panic!(
+            "Frozen<udt> roundtrip: unexpected read-back value {:?}",
+            other
+        ),
+    }
 }

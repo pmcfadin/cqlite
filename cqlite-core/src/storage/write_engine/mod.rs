@@ -260,6 +260,30 @@ pub struct WriteEngine {
     cumulative_stats: CompactionStats,
 }
 
+/// Reject any mutation that contains a counter cell write.
+///
+/// Counter columns require server-side distributed increment semantics and
+/// cannot be expressed as a last-write-wins mutation.  Both the sync
+/// `write()` and the async `write_async()` paths call this guard immediately
+/// after the closed-check.
+#[cfg(feature = "write-support")]
+fn reject_counter_cells(mutation: &Mutation) -> Result<()> {
+    for op in &mutation.operations {
+        match op {
+            CellOperation::Write { value, .. } | CellOperation::WriteWithTtl { value, .. } => {
+                if matches!(value, crate::types::Value::Counter(_)) {
+                    return Err(Error::invalid_operation(
+                        "counter writes are not supported via the standard mutation path; \
+                         counter columns require server-side distributed increment semantics",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 #[cfg(feature = "write-support")]
 impl WriteEngine {
     /// Create a new write engine
@@ -399,6 +423,8 @@ impl WriteEngine {
             ));
         }
 
+        reject_counter_cells(&mutation)?;
+
         // Check hard limit before accepting write
         if self.memtable.size_bytes() >= self.config.memtable_hard_limit {
             return Err(Error::Storage(format!(
@@ -465,6 +491,8 @@ impl WriteEngine {
                 "WriteEngine has been closed".to_string(),
             ));
         }
+
+        reject_counter_cells(&mutation)?;
 
         // Check hard limit before accepting write
         if self.memtable.size_bytes() >= self.config.memtable_hard_limit {
