@@ -198,16 +198,16 @@ The following critical blockers have been **resolved**:
 | counters | 2 | ✅ PASS | test_basic (Fixed by Issue #206) |
 | large_collections_table | 2 | ✅ PASS | test_collections (Fixed by Issue #213) |
 | empty_collections_table | 1 | ✅ PASS | test_collections (Fixed by Issue #213) |
-| frozen_collections_table | 1 | ❌ FAIL | test_collections (Feature gap: frozen types) |
-| typed_collections_table | 1 | ❌ FAIL | test_collections (Feature gap: complex types) |
+| frozen_collections_table | 1 | ✅ PASS | test_collections (Fixed by Issue #481) |
+| typed_collections_table | 1 | ✅ PASS | test_collections (Fixed by Issue #481) |
 
-**Status**: 7/9 passing (77.8%)
+**Status**: 9/9 passing (100%)
 
 #### Tier 3: Minimal/No Coverage (0-1 test file references)
 **16 tables with minimal testing**
 
 **test_collections**:
-- collections_with_udts (1 test) - ❌ FAIL (Feature gap: UDT support)
+- collections_with_udts (1 test) - ✅ PASS (Fixed by Issue #481 — UDT registry dispatch)
 
 **test_timeseries** (ALL PASSING ✅):
 - app_metrics (1 test) - ✅ PASS
@@ -371,18 +371,18 @@ The following priorities have all been completed:
 
 | Keyspace | Tables | Passed | XFail | Status |
 |----------|--------|--------|-------|--------|
-| test_basic | 8 | 7 | 1 | 87.5% |
-| test_collections | 8 | 7 | 1 | 87.5% |
+| test_basic | 8 | 8 | 0 | 100% ✅ |
+| test_collections | 8 | 8 | 0 | 100% ✅ |
 | test_timeseries | 9 | 9 | 0 | 100% ✅ |
 | test_wide_rows | 8 | 8 | 0 | 100% ✅ |
-| **TOTAL** | **33** | **31** | **2** | **94%** |
+| **TOTAL** | **33** | **33** | **0** | **100%** ✅ |
 
 ### Known Issues (XFail)
 
-| Table | Issue | Root Cause |
-|-------|-------|------------|
-| test_basic.static_columns_table | Row count 200 vs expected 100 | Static column duplication in query results |
-| test_collections.typed_collections_table | Row count 1 vs expected 50 | V5CompressedLegacy cell extraction failure |
+None. Phase 4 (epic #471) closed the previous two xfail entries:
+`static_columns_table` via #480 and `typed_collections_table` via #481.
+A separate v0.9.1 follow-up (#493) tracks set-element tombstone handling
+in V5CompressedLegacy — that bug does not affect the 33-table corpus.
 
 ### Value Parity Tests
 
@@ -393,7 +393,7 @@ The following priorities have all been completed:
 | sensor_data values | ✅ PASS | Timeseries patterns validated |
 
 ### Coverage Summary
-- **Row Count Parity**: 31/33 tables (94%)
+- **Row Count Parity**: 33/33 tables (100%)
 - **Value Parity**: 2/3 representative tables (67%)
 - **All CQL types validated**: UUID, timestamp, date, time, inet, blob, decimal, duration, collections
 
@@ -452,18 +452,17 @@ The following priorities have all been completed:
 
 | File | Tables Covered | Purpose |
 |------|----------------|---------|
-| `test_parity.py` | 33 (31 pass, 2 xfail) | JSONL golden file validation |
-| `test_cli_parity.py` | 33 (30 pass, 3 xfail) | Python vs CLI output parity |
+| `test_parity.py` | 33 (33 pass) | JSONL golden file validation |
+| `test_cli_parity.py` | 33 (33 pass) | Python vs CLI output parity |
 
 ### Known Issues (XFail)
 
-These are **core library issues** not Python binding issues:
-
-| Table | Issue | Root Cause |
-|-------|-------|------------|
-| `static_columns_table` | Row count 200 vs 100 | Static column duplication |
-| `typed_collections_table` | Row count 1 vs 50 | V5CompressedLegacy cell extraction |
-| `frozen_collections_table` | Parsing differs | Frozen collection handling |
+None as of Phase 4 (epic #471, May 2026). Previous xfail entries
+`static_columns_table` and `typed_collections_table` were resolved by #480
+and #481 respectively. `frozen_collections_table` parity issues were also
+addressed in #481's typed-collections fix path. Issue #493 tracks an
+out-of-scope set-element tombstone follow-up for v0.9.1 (does not affect
+the 33-table parity corpus).
 
 ### Test Commands
 
