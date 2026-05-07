@@ -15,7 +15,7 @@
 
 use super::{create_simple_mutation, create_simple_schema};
 use cqlite_core::platform::Platform;
-use cqlite_core::storage::sstable::SSTableManager;
+use cqlite_core::storage::sstable::{SSTableManager, SSTableReader};
 use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
 use cqlite_core::types::TableId;
 use cqlite_core::Config;
@@ -190,5 +190,77 @@ async fn test_multiple_flushes_all_readable() {
         2,
         "Should read back both partitions from both SSTables, got {}",
         results.len()
+    );
+}
+
+/// Issue #500: `iterate_all_partitions` must return every partition from a
+/// writer-produced SSTable.
+///
+/// Before the fix, the Summary→Index lookup loop returned 0 entries because
+/// the writer emits Index.db in a raw-key format the reader's digest-based
+/// parser cannot resolve, even though Summary.db was populated. The k-way
+/// merger relied on this method, so compaction silently produced empty output.
+///
+/// Now the method falls back to `sequential_scan` when the digest lookup
+/// resolves nothing, so a fresh `SSTableReader` opened on writer output yields
+/// the same partition count that was written.
+#[tokio::test]
+async fn test_iterate_all_partitions_writer_roundtrip() {
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_simple_schema();
+    let data_dir = temp_dir.path().join("data");
+
+    let config = WriteEngineConfig::new(
+        data_dir.clone(),
+        temp_dir.path().join("wal"),
+        schema.clone(),
+    );
+    let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
+
+    const N_ROWS: i32 = 10;
+    for i in 1..=N_ROWS {
+        let mutation =
+            create_simple_mutation(i, &format!("user-{}", i), i * 100, 1_000_000 + i as i64);
+        engine
+            .write_async(mutation)
+            .await
+            .expect("Write should succeed");
+    }
+
+    let info = engine
+        .flush()
+        .await
+        .expect("Flush should succeed")
+        .expect("Should return SSTableInfo");
+    assert_eq!(info.partition_count, N_ROWS as usize);
+    assert!(
+        info.data_path.exists(),
+        "Data.db must exist at {}",
+        info.data_path.display()
+    );
+
+    // Reopen with a fresh SSTableReader and call iterate_all_partitions directly.
+    let cqlite_config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&cqlite_config)
+            .await
+            .expect("Platform creation"),
+    );
+    let reader = SSTableReader::open(&info.data_path, &cqlite_config, platform)
+        .await
+        .expect("Reader should open writer-produced Data.db");
+
+    let entries = reader
+        .iterate_all_partitions()
+        .await
+        .expect("iterate_all_partitions must not error");
+
+    assert_eq!(
+        entries.len(),
+        N_ROWS as usize,
+        "iterate_all_partitions must return every written partition (Issue #500). \
+         Wrote {} partitions, got {}",
+        N_ROWS,
+        entries.len()
     );
 }

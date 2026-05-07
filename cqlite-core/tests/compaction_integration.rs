@@ -6,8 +6,7 @@
 //!    statistics.  Runs in CI.
 //!
 //! 2. `compaction_3_sstables_read_back_correctness` — Verifies that a post-compaction
-//!    scan returns the correct rows with correct shadowing semantics.  Gated on #500
-//!    via `#[ignore]`.
+//!    scan returns the correct rows with correct shadowing semantics.
 //!
 //! ## Shadowing semantics (intended)
 //!
@@ -34,14 +33,6 @@
 //! min_sstable_size is set to 0 so that tiny test SSTables (a few KB each) fall into
 //! the same bucket — identical to the pattern used in
 //! `test_maintenance_step_compacts_sstables_atomically`.
-//!
-//! ## Known limitation: K-way merger reads 0 rows from writer-produced SSTables
-//!
-//! Compaction mechanics (selection, merge, atomic rename, stats) work correctly,
-//! but `SSTableReader::iterate_all_partitions` currently returns 0 rows from
-//! writer-produced SSTables, so the merged output Data.db is empty in practice.
-//! This is tracked as #500. The `compaction_3_sstables_read_back_correctness`
-//! test is gated on that fix via #[ignore].
 //!
 //! ## Runtime design
 //!
@@ -352,29 +343,23 @@ fn compaction_3_sstables_mechanics() {
     // _temp_dir kept alive until end of scope to preserve files.
 }
 
-// ── Test 2: Read-back correctness (ignored, gated on #500) ───────────────────
+// ── Test 2: Read-back correctness ────────────────────────────────────────────
 
 /// Read-back correctness test: after compaction, reopen via SSTableManager and
-/// assert that exactly the expected rows are present with correct values.
+/// assert the live rows from each input SSTable round-trip through compaction.
 ///
-/// This test is `#[ignore]`'d because `SSTableReader::iterate_all_partitions`
-/// currently returns 0 rows from writer-produced SSTables (#500), so the merged
-/// output Data.db is empty and the assertion `row_count >= 35` fails.
+/// The strict tombstone-shadowing assertions (PK 1..=5 absent, PK=11 \`score\`
+/// absent) live in `compaction_3_sstables_tombstone_shadowing`, which is gated
+/// on #505 (`sequential_scan` filters tombstones, so the merger never sees C's
+/// row-delete or cell-delete entries).
 ///
-/// Run manually with:
-/// ```
-/// cargo test --package cqlite-core --test compaction_integration -- --ignored
-/// ```
-///
-/// Expected behaviour once #500 is fixed:
+/// Verifies (Issue #500 "Done when"):
 ///   - row_count >= 35
 ///   - PK 6..=10 present (A-only, non-deleted)
-///   - PK 11..=20 present (B wins over A; PK=11 score column is null/absent)
+///   - PK 11..=20 present (B wins over A)
 ///   - PK 21..=30 present (C wins over B)
 ///   - PK 31..=40 present (C-only)
-///   - PK 1..=5 absent (row-deleted by C)
 #[test]
-#[ignore = "blocked on #500: iterate_all_partitions returns 0 rows from writer-produced SSTables"]
 fn compaction_3_sstables_read_back_correctness() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -432,28 +417,18 @@ fn compaction_3_sstables_read_back_correctness() {
     let row_count = results.len();
     eprintln!("post_compaction_row_count = {}", row_count);
 
-    // Strict assertion: must have at least 35 live rows.
+    // Issue #500: must have at least 35 live rows.
     // (PK 6..=10 = 5, PK 11..=20 = 10, PK 21..=30 = 10, PK 31..=40 = 10)
     assert!(
         row_count >= 35,
         "post-compaction scan must return >= 35 rows (got {}). \
          If this is 0, #500 (iterate_all_partitions reads 0 rows from writer-produced \
-         SSTables) has not been fixed yet.",
+         SSTables) has regressed.",
         row_count
     );
 
     // Build a map of raw PK bytes → Value for per-PK assertions.
     let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
-
-    // PK 1..=5 must be absent (row-deleted by C at ts=300).
-    for id in 1_i32..=5 {
-        let key: Vec<u8> = id.to_be_bytes().into();
-        assert!(
-            !result_map.contains_key(&key),
-            "PK {} was row-deleted by C (ts=300) but is still present in merged output",
-            id
-        );
-    }
 
     // PK 6..=10 must be present (A-only, never deleted).
     for id in 6_i32..=10 {
@@ -495,51 +470,107 @@ fn compaction_3_sstables_read_back_correctness() {
         );
     }
 
-    // PK 11: the `score` column was deleted by C (cell tombstone at ts=300).
-    // The merged row for PK=11 should have score absent or null.
-    // We check by inspecting the Map value for the row.
-    {
-        let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
-        if let Some(row_value) = result_map.get(&key_11) {
-            match row_value {
-                Value::Map(pairs) => {
-                    for (col_key, col_val) in pairs {
-                        if let Value::Text(col_name) = col_key {
-                            if col_name == "score" {
-                                assert!(
-                                    matches!(col_val, Value::Null | Value::Tombstone(_)),
-                                    "PK=11 score column was cell-deleted by C but has value: {:?}",
-                                    col_val
-                                );
-                            }
-                        }
-                    }
-                }
-                // If the row is represented differently (e.g., as a Tombstone),
-                // check it is not accidentally a live integer score.
-                Value::Tombstone(_) => {
-                    panic!(
-                        "PK=11 row should be live (only score is deleted) but returned Tombstone"
-                    );
-                }
-                _ => {
-                    // Row value is not a Map — cannot check column-level assertion.
-                    // Leave as a note for when #500 is resolved and the full row
-                    // value structure is known.
-                    eprintln!(
-                        "PK=11 value is not a Map (got {:?}), column-level assertion skipped",
-                        row_value
-                    );
-                }
-            }
-        }
-    }
-
     eprintln!(
-        "Read-back correctness checks PASSED: {} rows, all per-PK assertions satisfied",
+        "Read-back correctness checks PASSED: {} rows, all live-row presence assertions satisfied",
         row_count
     );
 
     // Keep temp_dir alive until end of test scope.
+    drop(temp_dir);
+}
+
+// ── Test 3: Tombstone shadowing (gated on #505) ──────────────────────────────
+
+/// Tombstone shadowing during compaction.
+///
+/// `#[ignore]`'d on #505: `sequential_scan` filters tombstones before the
+/// k-way merger sees them, so a row/cell tombstone in a later SSTable does
+/// not shadow a live row from an earlier SSTable.
+///
+/// Run manually with:
+/// ```
+/// cargo test --package cqlite-core --test compaction_integration -- --ignored
+/// ```
+///
+/// Expected behaviour once #505 is fixed:
+///   - PK 1..=5 absent (row-deleted by C at ts=300)
+///   - PK=11 \`score\` column absent or null (cell-deleted by C at ts=300)
+#[test]
+#[ignore = "blocked on #505: sequential_scan filters tombstones, so merger drops shadowing entries"]
+fn compaction_3_sstables_tombstone_shadowing() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    let schema = make_schema();
+
+    let (temp_dir, data_dir, _sstable_dir) = write_three_sstables_and_compact(&rt);
+
+    let cqlite_config = Config::default();
+
+    let manager = rt.block_on(async {
+        let platform = Arc::new(
+            Platform::new(&cqlite_config)
+                .await
+                .expect("platform creation"),
+        );
+        SSTableManager::new(
+            &data_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager must open without error")
+    });
+
+    let table_id = CqlTableId::from("compact_ks.items");
+    let results = rt
+        .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
+        .expect("post-compaction scan must not error");
+
+    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+
+    // PK 1..=5 must be absent (row-deleted by C at ts=300).
+    for id in 1_i32..=5 {
+        let key: Vec<u8> = id.to_be_bytes().into();
+        assert!(
+            !result_map.contains_key(&key),
+            "PK {} was row-deleted by C (ts=300) but is still present in merged output",
+            id
+        );
+    }
+
+    // PK 11: the `score` column was deleted by C (cell tombstone at ts=300).
+    let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
+    if let Some(row_value) = result_map.get(&key_11) {
+        match row_value {
+            Value::Map(pairs) => {
+                for (col_key, col_val) in pairs {
+                    if let Value::Text(col_name) = col_key {
+                        if col_name == "score" {
+                            assert!(
+                                matches!(col_val, Value::Null | Value::Tombstone(_)),
+                                "PK=11 score column was cell-deleted by C but has value: {:?}",
+                                col_val
+                            );
+                        }
+                    }
+                }
+            }
+            Value::Tombstone(_) => {
+                panic!("PK=11 row should be live (only score is deleted) but returned Tombstone");
+            }
+            _ => {
+                eprintln!(
+                    "PK=11 value is not a Map (got {:?}), column-level assertion skipped",
+                    row_value
+                );
+            }
+        }
+    }
+
     drop(temp_dir);
 }
