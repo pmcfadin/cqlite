@@ -217,8 +217,10 @@ test_table() {
     local qualified_name="${keyspace}.${table_name}"
 
     # Find Data.db file
+    # Exclude macOS AppleDouble resource fork sidecar files (._*-Data.db) which are
+    # 4 KB metadata files that look like SSTables to a naive *-Data.db glob (Issue #481).
     local data_db_file
-    data_db_file=$(find "${full_table_path}" -name "*-Data.db" -type f | head -1)
+    data_db_file=$(find "${full_table_path}" -name "*-Data.db" -type f -not -name "._*" | head -1)
 
     if [[ -z "${data_db_file}" ]]; then
         log_error "${qualified_name} ... FAIL (no Data.db file found)"
