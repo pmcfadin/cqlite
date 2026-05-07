@@ -128,18 +128,36 @@ class Database:
         ...
 
     def execute(self, query: str) -> "QueryResult":
-        """Execute a CQL query and return all results.
+        """Execute a CQL query or DML statement.
+
+        For SELECT queries, reads from the SSTable data on disk and returns
+        matching rows.
+
+        For INSERT, UPDATE, and DELETE statements, the operation is routed to
+        the write engine (requires the database to have been opened with
+        ``writable=True``).  The returned ``QueryResult`` will have an empty
+        ``rows`` list and ``rows_affected`` reflecting the number of mutations
+        applied (typically 1).
 
         Args:
-            query: CQL SELECT query string
+            query: CQL SELECT, INSERT, UPDATE, or DELETE statement.
 
         Returns:
-            QueryResult containing all matching rows
+            QueryResult containing rows (for SELECT) or rows_affected (for DML).
 
         Raises:
-            QueryError: If query execution fails
-            ParseError: If query syntax is invalid
-            RuntimeError: If database is closed
+            QueryError: If query execution fails.
+            ParseError: If query syntax is invalid.
+            RuntimeError: If database is closed, or if a DML statement is
+                          attempted on a read-only database.
+
+        Example:
+            >>> result = db.execute("SELECT * FROM users LIMIT 10")
+            >>> print(f"Got {len(result)} rows")
+
+            >>> # Requires writable=True
+            >>> result = db.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+            >>> print(f"Affected {result.rows_affected} row(s)")
         """
         ...
 
@@ -197,10 +215,64 @@ class Database:
         """
         ...
 
+    def flush_run(self) -> str:
+        """Flush the memtable to a new SSTable.
+
+        Forces all in-memory writes to disk and returns the absolute path to
+        the new ``Data.db`` file, or an empty string if the memtable was empty.
+
+        Requires the database to have been opened with ``writable=True``.
+
+        Returns:
+            Absolute path to the flushed SSTable ``Data.db``, or ``""`` if
+            nothing was flushed.
+
+        Raises:
+            RuntimeError: If database is closed or opened in read-only mode.
+            CqliteError: If the flush fails (e.g. I/O error).
+        """
+        ...
+
+    def maintenance_step(self, budget_ms: int) -> "MaintenanceReport":
+        """Perform one incremental maintenance step (compaction).
+
+        Runs background compaction work within the given time budget.
+        Can be called repeatedly to make incremental progress.
+
+        Requires the database to have been opened with ``writable=True``.
+
+        Args:
+            budget_ms: Maximum milliseconds to spend in this call.
+
+        Returns:
+            A ``MaintenanceReport`` with timing and merge statistics.
+
+        Raises:
+            RuntimeError: If database is closed or opened in read-only mode.
+            CqliteError: If maintenance fails.
+        """
+        ...
+
+    @property
+    def write_stats(self) -> "WriteStats":
+        """Current write engine statistics (memtable, WAL, L0 count).
+
+        Requires the database to have been opened with ``writable=True``.
+
+        Returns:
+            A ``WriteStats`` snapshot.
+
+        Raises:
+            RuntimeError: If database is closed or opened in read-only mode.
+        """
+        ...
+
     def close(self) -> None:
         """Close the database connection.
 
         This method is idempotent and thread-safe.
+        When opened in writable mode, any unflushed memtable data is flushed
+        to disk before the connection is released.
         """
         ...
 
@@ -226,6 +298,8 @@ def open(
     *,
     schema: str | Path | None = None,
     config: Config | None = None,
+    writable: bool = False,
+    write_dir: str | Path | None = None,
 ) -> Database:
     """Open a database connection to SSTable data.
 
@@ -233,8 +307,18 @@ def open(
 
     Args:
         path: Path to the SSTable directory
-        schema: Optional path to CQL schema file
+        schema: Optional path to CQL schema file.  Required when ``writable=True``.
         config: Optional configuration (dict, JSON string, or preset name)
+        writable: Enable write support (INSERT / UPDATE / DELETE).
+                  When ``True``, both ``schema`` and ``write_dir`` must be provided.
+        write_dir: Directory for WAL files and flushed SSTables.
+                   Required when ``writable=True``; created automatically.
+
+                   **Caveat**: Only one ``Database`` instance should hold a given
+                   ``write_dir`` at a time.  Concurrent instances sharing the same
+                   directory are **not** protected by file locks and will corrupt
+                   each other's WAL and SSTable files.  File locking is planned for
+                   a future release (see issue #485).
 
     Returns:
         A Database instance
@@ -242,12 +326,25 @@ def open(
     Raises:
         IOError: If the path does not exist
         SchemaError: If schema parsing fails
-        ValueError: If configuration is invalid
+        ValueError: If configuration is invalid, or ``writable=True`` but
+                    ``write_dir`` or ``schema`` was not provided
 
     Example:
         >>> import cqlite
+        >>> # Read-only
         >>> db = cqlite.open("data/sstables", schema="schema.cql")
         >>> result = db.execute("SELECT * FROM test.users")
+        >>> db.close()
+
+        >>> # Writable
+        >>> db = cqlite.open(
+        ...     "data/sstables",
+        ...     schema="schema.cql",
+        ...     writable=True,
+        ...     write_dir="/tmp/cqlite-writes",
+        ... )
+        >>> db.execute("INSERT INTO test.users (id) VALUES (1)")
+        >>> db.flush_run()
         >>> db.close()
 
     Thread Safety:
@@ -491,6 +588,115 @@ class PreparedStatement:
         ...
 
     def __repr__(self) -> str: ...
+
+# Write API (Issue #390)
+class WriteStats:
+    """Snapshot of write engine metrics.
+
+    Attributes:
+        memtable_size: Current memtable size in bytes.
+        memtable_rows: Number of rows currently buffered in the memtable.
+        wal_size: Write-ahead log file size in bytes.
+        l0_count: Number of Level-0 (unflushed) SSTables on disk.
+        total_written: Cumulative rows written since the engine was opened.
+
+    Note:
+        ``l0_count`` and ``total_written`` are placeholder fields that will be
+        populated when ``WriteEngine`` exposes runtime stats (planned, see
+        issue #486).  For now they default to ``0`` and may not reflect actual
+        storage state.
+
+    Example:
+        >>> stats = db.write_stats
+        >>> print(f"Memtable: {stats.memtable_size} bytes, {stats.memtable_rows} rows")
+    """
+
+    @property
+    def memtable_size(self) -> int:
+        """Memtable size in bytes."""
+        ...
+
+    @property
+    def memtable_rows(self) -> int:
+        """Number of rows in the memtable."""
+        ...
+
+    @property
+    def wal_size(self) -> int:
+        """Write-ahead log size in bytes."""
+        ...
+
+    @property
+    def l0_count(self) -> int:
+        """Number of Level-0 SSTables on disk."""
+        ...
+
+    @property
+    def total_written(self) -> int:
+        """Total rows written since engine opened."""
+        ...
+
+    def to_dict(self) -> dict[str, int]:
+        """Convert to a plain dictionary.
+
+        Keys: ``memtable_size``, ``memtable_rows``, ``wal_size``,
+              ``l0_count``, ``total_written``.
+        """
+        ...
+
+    def __repr__(self) -> str: ...
+
+
+class MaintenanceReport:
+    """Result of a single ``Database.maintenance_step()`` call.
+
+    Attributes:
+        time_spent_ms: Actual time spent in this step (milliseconds, float).
+        rows_merged: Number of rows merged in this step.
+        bytes_written: Bytes written to output SSTable(s).
+        completed_merges: Absolute paths of SSTable ``Data.db`` files completed.
+        pending_compaction: ``True`` if more compaction work remains.
+
+    Example:
+        >>> report = db.maintenance_step(budget_ms=200)
+        >>> print(f"Merged {report.rows_merged} rows in {report.time_spent_ms:.1f} ms")
+    """
+
+    @property
+    def time_spent_ms(self) -> float:
+        """Time spent in this step (milliseconds)."""
+        ...
+
+    @property
+    def rows_merged(self) -> int:
+        """Number of rows merged."""
+        ...
+
+    @property
+    def bytes_written(self) -> int:
+        """Bytes written to output SSTables."""
+        ...
+
+    @property
+    def completed_merges(self) -> list[str]:
+        """Paths of completed SSTable Data.db files."""
+        ...
+
+    @property
+    def pending_compaction(self) -> bool:
+        """True if more compaction work remains."""
+        ...
+
+    def to_dict(self) -> dict[str, Any]:
+        """Convert to a plain dictionary.
+
+        Keys: ``time_spent_ms``, ``rows_merged``, ``bytes_written``,
+              ``completed_merges``, ``pending_compaction``.
+        """
+        ...
+
+    def __repr__(self) -> str: ...
+
 
 # Statistics
 class DatabaseStats:

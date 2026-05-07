@@ -979,10 +979,12 @@ async fn initialize_database(db_path: &PathBuf, config: &config::Config) -> Resu
     Ok(database)
 }
 
-/// Check if a query string is a DML statement (INSERT, UPDATE, DELETE).
+/// Check if a query string is a DML statement (INSERT, UPDATE, DELETE, or BEGIN BATCH).
+///
+/// Delegates to `cqlite_core::cql::is_dml_statement` — see that function for
+/// the canonical definition and semantics.
 fn is_dml_statement(query: &str) -> bool {
-    let upper = query.trim().to_uppercase();
-    upper.starts_with("INSERT") || upper.starts_with("UPDATE") || upper.starts_with("DELETE")
+    cqlite_core::cql::is_dml_statement(query)
 }
 
 /// Convert CLI configuration to core database configuration

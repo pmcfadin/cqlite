@@ -40,8 +40,14 @@ use std::path::{Path, PathBuf};
 
 /// Sync directory metadata to ensure file entries are persisted
 ///
-/// This is critical for crash safety - without syncing the directory,
-/// newly created or renamed files may not appear after a crash.
+/// On POSIX systems this is critical for crash safety - without syncing the
+/// directory, newly created or renamed files may not appear after a crash.
+///
+/// Windows does not allow opening a directory as a file (ERROR_ACCESS_DENIED).
+/// NTFS commits directory metadata together with the contained file's data
+/// when `sync_all` is called on the file itself, so an explicit directory
+/// sync is unnecessary on Windows and we skip it.
+#[cfg(unix)]
 fn sync_directory(dir: &Path) -> Result<()> {
     let dir_file = File::open(dir)
         .map_err(|e| Error::Storage(format!("Failed to open directory for sync: {}", e)))?;
@@ -50,6 +56,11 @@ fn sync_directory(dir: &Path) -> Result<()> {
         .sync_all()
         .map_err(|e| Error::Storage(format!("Failed to sync directory: {}", e)))?;
 
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_dir: &Path) -> Result<()> {
     Ok(())
 }
 

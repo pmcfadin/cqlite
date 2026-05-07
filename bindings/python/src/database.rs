@@ -1,13 +1,36 @@
 //! Database wrapper for Python bindings.
 //!
 //! This module provides the `Database` class and `open()` function
-//! for Python access to CQLite's SSTable reading capabilities.
+//! for Python access to CQLite's SSTable reading and writing capabilities.
+//!
+//! ## Write Support
+//!
+//! When `Database.open()` is called with `writable=True` **and** a `write_dir`
+//! path, the database initialises a [`WriteEngine`] that backs INSERT/UPDATE/DELETE
+//! statements executed through the unified `db.execute()` API.  The caller must
+//! also supply `schema=` so that the write engine can resolve column types.
+//!
+//! ```python
+//! import cqlite
+//!
+//! with cqlite.open(
+//!     "test-data/datasets/sstables",
+//!     schema="test-data/schemas/basic-types.cql",
+//!     writable=True,
+//!     write_dir="/tmp/cqlite-writes",
+//! ) as db:
+//!     db.execute("INSERT INTO test_basic.simple_table ...")
+//!     path = db.flush_run()
+//! ```
+//!
+//! Read-only mode (the default) is unchanged; all existing call-sites continue
+//! to work without modification.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::prelude::*;
 
 use crate::config::{config_from_py, StreamingConfig};
@@ -16,6 +39,7 @@ use crate::prepared::PreparedStatement;
 use crate::result::{QueryResult, StreamingIterator};
 use crate::runtime::block_on;
 use crate::stats::DatabaseStats;
+use crate::write::{MaintenanceReport, PyWriteEngine, WriteStats};
 
 /// A CQLite database handle.
 ///
@@ -44,6 +68,8 @@ use crate::stats::DatabaseStats;
 pub struct Database {
     inner: Arc<cqlite_core::Database>,
     closed: AtomicBool,
+    /// Optional write engine — present only when opened with `writable=True`.
+    write_engine: Option<Mutex<PyWriteEngine>>,
 }
 
 impl Database {
@@ -63,6 +89,26 @@ impl Database {
     pub(crate) fn inner(&self) -> Arc<cqlite_core::Database> {
         Arc::clone(&self.inner)
     }
+
+    /// Return a clear error when a write method is called on a read-only database.
+    fn require_writable(&self) -> PyResult<()> {
+        if self.write_engine.is_none() {
+            return Err(PyRuntimeError::new_err(
+                "Database is read-only. \
+                 Open with writable=True and write_dir=<path> to enable write operations. \
+                 Example: cqlite.open(path, schema=schema, writable=True, write_dir='/tmp/writes')",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Detect DML statements (INSERT / UPDATE / DELETE / BEGIN BATCH).
+    ///
+    /// Delegates to `cqlite_core::cql::is_dml_statement` — the single canonical
+    /// implementation shared with the CLI for consistent routing semantics.
+    fn is_dml_statement(query: &str) -> bool {
+        cqlite_core::cql::is_dml_statement(query)
+    }
 }
 
 #[pymethods]
@@ -71,6 +117,9 @@ impl Database {
     ///
     /// This method is idempotent - calling it multiple times is safe.
     /// After closing, any operations on the database will raise RuntimeError.
+    ///
+    /// When the database was opened in writable mode the write engine is closed
+    /// first, which flushes any remaining memtable data to disk.
     ///
     /// # Example
     ///
@@ -85,8 +134,17 @@ impl Database {
             return Ok(());
         }
 
-        // Shutdown the storage engine to release resources
-        // Release GIL during async shutdown to allow other Python threads to run
+        // Close the write engine first (flushes remaining memtable)
+        if let Some(ref engine_mutex) = self.write_engine {
+            let mut engine = engine_mutex
+                .lock()
+                .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned during close"))?;
+            // close() flushes remaining data. MutexGuard is not Send, so we
+            // cannot release the GIL here. The flush on close is typically fast.
+            block_on(engine.inner.close()).map_err(to_py_err)?;
+        }
+
+        // Shutdown the read-side storage engine
         py.allow_threads(|| block_on(self.inner.shutdown()))
             .map_err(to_py_err)?;
         Ok(())
@@ -113,16 +171,6 @@ impl Database {
     ///
     /// Ensures the database is closed when exiting the context,
     /// even if an exception occurred.
-    ///
-    /// # Arguments
-    ///
-    /// * `exc_type` - Exception type if an exception was raised
-    /// * `exc_val` - Exception value if an exception was raised
-    /// * `exc_tb` - Traceback if an exception was raised
-    ///
-    /// # Returns
-    ///
-    /// False to indicate exceptions should not be suppressed.
     #[pyo3(signature = (_exc_type=None, _exc_val=None, _exc_tb=None))]
     fn __exit__(
         &self,
@@ -139,40 +187,56 @@ impl Database {
     fn __repr__(&self) -> String {
         if self.closed.load(Ordering::SeqCst) {
             "Database(closed)".to_string()
+        } else if self.write_engine.is_some() {
+            "Database(open, writable)".to_string()
         } else {
             "Database(open)".to_string()
         }
     }
 
-    /// Execute a CQL query and return results.
+    /// Execute a CQL query or DML statement.
     ///
-    /// Executes a synchronous query against the database and returns all
-    /// matching rows. For large result sets, consider using `execute_streaming()`.
+    /// For SELECT queries this reads from the SSTable data on disk.
+    ///
+    /// For INSERT, UPDATE, and DELETE statements the operation is routed to the
+    /// write engine (requires the database to have been opened with
+    /// `writable=True`). The returned `QueryResult` will have an empty `rows`
+    /// list and `rows_affected` reflecting the number of mutations applied
+    /// (typically 1).
     ///
     /// # Arguments
     ///
-    /// * `query` - CQL SELECT statement to execute
+    /// * `query` - CQL statement to execute
     ///
     /// # Returns
     ///
-    /// QueryResult containing rows, metadata, and timing information.
+    /// QueryResult containing rows/metadata for SELECT, or rows_affected for DML.
     ///
     /// # Raises
     ///
-    /// * `QueryError` - If query execution fails
-    /// * `ParseError` - If CQL syntax is invalid
-    /// * `RuntimeError` - If database is closed
+    /// * `QueryError`   – If query execution fails
+    /// * `ParseError`   – If CQL syntax is invalid
+    /// * `RuntimeError` – If database is closed, or if DML is attempted on a
+    ///                    read-only database
     ///
     /// # Example
     ///
     /// ```python
+    /// # Read
     /// result = db.execute("SELECT * FROM users LIMIT 10")
     /// print(f"Got {len(result)} rows in {result.execution_time_ms}ms")
-    /// for row in result:
-    ///     print(row["name"])
+    ///
+    /// # Write (requires writable=True)
+    /// result = db.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')")
+    /// print(f"Affected {result.rows_affected} row(s)")
     /// ```
     pub fn execute(&self, py: Python<'_>, query: &str) -> PyResult<QueryResult> {
         self.ensure_open()?;
+
+        // Route DML statements to the write engine when present
+        if Self::is_dml_statement(query) {
+            return self.execute_dml(py, query);
+        }
 
         let db = self.inner();
         let query_owned = query.to_string();
@@ -217,12 +281,11 @@ impl Database {
     /// config = cqlite.StreamingConfig(buffer_size=512, chunk_size=5000)
     /// for row in db.execute_streaming("SELECT * FROM huge_table", config=config):
     ///     process(row)
-    ///     # Memory stays bounded
     ///
     /// # Early termination is safe
     /// for row in db.execute_streaming("SELECT * FROM large_table"):
     ///     if row["id"] == target_id:
-    ///         break  # Resources cleaned up automatically
+    ///         break
     /// ```
     #[pyo3(signature = (query, *, config=None))]
     pub fn execute_streaming(
@@ -268,7 +331,6 @@ impl Database {
     /// ```python
     /// stmt = db.prepare("SELECT * FROM users WHERE id = ?")
     /// print(f"Parameters: {stmt.parameter_count}")
-    /// print(f"Stats: {stmt.stats()}")
     /// ```
     pub fn prepare(&self, py: Python<'_>, query: &str) -> PyResult<PreparedStatement> {
         self.ensure_open()?;
@@ -276,7 +338,6 @@ impl Database {
         let db = self.inner();
         let query_owned = query.to_string();
 
-        // Release GIL during async execution
         let prepared = py
             .allow_threads(|| block_on(db.prepare(&query_owned)))
             .map_err(to_py_err)?;
@@ -302,22 +363,192 @@ impl Database {
     /// ```python
     /// stats = db.stats()
     /// print(f"SSTables: {stats.storage_stats['sstable_count']}")
-    /// print(f"Memory used: {stats.memory_stats['total_memory_used']}")
-    /// print(f"Full stats: {stats.to_dict()}")
     /// ```
     pub fn stats(&self, py: Python<'_>) -> PyResult<DatabaseStats> {
         self.ensure_open()?;
 
         let db = self.inner();
 
-        // Release GIL during async execution
         let core_stats = py
             .allow_threads(|| block_on(db.stats()))
             .map_err(to_py_err)?;
 
         DatabaseStats::from_core(py, core_stats)
     }
+
+    // -----------------------------------------------------------------------
+    // Write API – available only when `writable=True` at open time
+    // -----------------------------------------------------------------------
+
+    /// Flush the memtable to a new SSTable.
+    ///
+    /// Forces a flush of all in-memory writes to disk.  Returns the absolute
+    /// path to the newly written `Data.db` file, or an empty string if the
+    /// memtable was empty (nothing to flush).
+    ///
+    /// Requires the database to have been opened with `writable=True`.
+    ///
+    /// # Returns
+    ///
+    /// Absolute path string of the flushed SSTable Data.db file, or `""` if
+    /// the memtable was empty.
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` – If database is closed or opened in read-only mode
+    /// * `CqliteError`  – If the flush fails (e.g. I/O error)
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// db.execute("INSERT INTO t (id) VALUES (1)")
+    /// path = db.flush_run()
+    /// assert Path(path).exists()
+    /// ```
+    pub fn flush_run(&self) -> PyResult<String> {
+        self.ensure_open()?;
+        self.require_writable()?;
+
+        let engine_mutex = self
+            .write_engine
+            .as_ref()
+            .expect("require_writable() guarantees write_engine is Some");
+
+        let mut engine = engine_mutex
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned"))?;
+
+        // Flush involves substantial I/O. We cannot release the GIL here because
+        // MutexGuard is not Send. Flush is typically fast (writes a single SSTable
+        // file). This is acceptable for the current implementation.
+        engine.flush().map_err(to_py_err)
+    }
+
+    /// Perform one incremental maintenance step (compaction).
+    ///
+    /// Runs background compaction work within the given time budget.  Can be
+    /// called repeatedly to make incremental progress.  The actual time spent
+    /// may exceed `budget_ms` by up to ~10% (one partition is always processed
+    /// to guarantee forward progress).
+    ///
+    /// Requires the database to have been opened with `writable=True`.
+    ///
+    /// # Arguments
+    ///
+    /// * `budget_ms` – Maximum milliseconds to spend in this call
+    ///
+    /// # Returns
+    ///
+    /// A `MaintenanceReport` with timing, merge statistics, and a
+    /// `pending_compaction` flag.
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` – If database is closed or opened in read-only mode
+    /// * `CqliteError`  – If maintenance fails
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// report = db.maintenance_step(budget_ms=100)
+    /// print(f"Merged {report.rows_merged} rows in {report.time_spent_ms:.1f} ms")
+    /// ```
+    pub fn maintenance_step(&self, budget_ms: u64) -> PyResult<MaintenanceReport> {
+        self.ensure_open()?;
+        self.require_writable()?;
+
+        let engine_mutex = self
+            .write_engine
+            .as_ref()
+            .expect("require_writable() guarantees write_engine is Some");
+
+        let mut engine = engine_mutex
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned"))?;
+
+        let budget = std::time::Duration::from_millis(budget_ms);
+
+        // MutexGuard is not Send so we cannot release the GIL here.
+        // maintenance_step() is time-bounded and typically completes quickly.
+        let report = engine.maintenance_step(budget).map_err(to_py_err)?;
+
+        Ok(MaintenanceReport::from_core(report))
+    }
+
+    /// Current write engine statistics.
+    ///
+    /// Returns a snapshot of memtable occupancy, WAL size, and L0 SSTable count.
+    ///
+    /// Requires the database to have been opened with `writable=True`.
+    ///
+    /// # Returns
+    ///
+    /// A `WriteStats` object.
+    ///
+    /// # Raises
+    ///
+    /// * `RuntimeError` – If database is closed or opened in read-only mode
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// stats = db.write_stats
+    /// print(f"Memtable: {stats.memtable_size} bytes, {stats.memtable_rows} rows")
+    /// ```
+    #[getter]
+    pub fn write_stats(&self) -> PyResult<WriteStats> {
+        self.ensure_open()?;
+        self.require_writable()?;
+
+        let engine_mutex = self
+            .write_engine
+            .as_ref()
+            .expect("require_writable() guarantees write_engine is Some");
+
+        let engine = engine_mutex
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned"))?;
+
+        Ok(engine.write_stats())
+    }
 }
+
+// -----------------------------------------------------------------------
+// Internal helpers (not exposed to Python)
+// -----------------------------------------------------------------------
+
+impl Database {
+    /// Route a DML statement to the write engine.
+    fn execute_dml(&self, py: Python<'_>, query: &str) -> PyResult<QueryResult> {
+        use std::time::Instant;
+
+        self.require_writable()?;
+
+        let engine_mutex = self
+            .write_engine
+            .as_ref()
+            .expect("require_writable() guarantees write_engine is Some");
+
+        let mut engine = engine_mutex
+            .lock()
+            .map_err(|_| PyRuntimeError::new_err("Write engine lock poisoned"))?;
+
+        let query_owned = query.to_string();
+        let t0 = Instant::now();
+
+        // MutexGuard is not Send so we cannot release the GIL here.
+        // execute() is a fast synchronous in-memory operation (WAL write + memtable insert).
+        let rows_affected = engine.execute(&query_owned).map_err(to_py_err)?;
+
+        let elapsed_ms = t0.elapsed().as_millis() as u64;
+
+        QueryResult::from_write(py, rows_affected, elapsed_ms)
+    }
+}
+
+// -----------------------------------------------------------------------
+// open() function
+// -----------------------------------------------------------------------
 
 /// Open a CQLite database.
 ///
@@ -326,9 +557,19 @@ impl Database {
 ///
 /// # Arguments
 ///
-/// * `path` - Path to the data directory containing SSTables
-/// * `schema` - Optional path to a CQL schema file (.cql)
-/// * `config` - Optional configuration (dict, JSON string, or preset name)
+/// * `path`       – Path to the data directory containing SSTables
+/// * `schema`     – Optional path to a CQL schema file (.cql)
+/// * `config`     – Optional configuration (dict, JSON string, or preset name)
+/// * `writable`   – Enable write support (INSERT / UPDATE / DELETE).  Default `False`.
+/// * `write_dir`  – Directory for WAL and flushed SSTables.  Required when
+///                  `writable=True`.  Created automatically if it doesn't exist.
+///
+/// # Caveat: write_dir is not file-locked
+///
+/// Only one `Database` instance should hold a given `write_dir` at a time.
+/// Concurrent instances sharing the same directory are **not** protected by
+/// file locks and will corrupt each other's WAL and SSTable files.  File
+/// locking is planned for a future release (see issue #485).
 ///
 /// # Returns
 ///
@@ -336,68 +577,144 @@ impl Database {
 ///
 /// # Raises
 ///
-/// * `IOError` - If the path doesn't exist or is inaccessible
-/// * `SchemaError` - If schema parsing fails
-/// * `ValueError` - If configuration is invalid
+/// * `IOError`     – If the path doesn't exist or is inaccessible
+/// * `SchemaError` – If schema parsing fails
+/// * `ValueError`  – If configuration is invalid, or `writable=True` but
+///                   `write_dir` or `schema` was not provided
 ///
 /// # Examples
 ///
 /// ```python
-/// # Basic open
+/// # Basic read-only open
 /// db = cqlite.open("/path/to/sstables")
 ///
 /// # With schema file
 /// db = cqlite.open("/path/to/sstables", schema="/path/to/schema.cql")
 ///
-/// # With config preset
-/// db = cqlite.open("/path/to/sstables", config="memory_optimized")
-///
-/// # With custom config dict
-/// db = cqlite.open("/path/to/sstables", config={"memory": {"max_memory": 134217728}})
+/// # With write support
+/// db = cqlite.open(
+///     "/path/to/sstables",
+///     schema="/path/to/schema.cql",
+///     writable=True,
+///     write_dir="/tmp/cqlite-write",
+/// )
 ///
 /// # Using context manager
 /// with cqlite.open("/path/to/sstables") as db:
-///     # database is automatically closed on exit
 ///     pass
 /// ```
 #[pyfunction]
-#[pyo3(signature = (path, *, schema=None, config=None))]
+#[pyo3(signature = (path, *, schema=None, config=None, writable=false, write_dir=None))]
 pub fn open(
     py: Python<'_>,
     path: PathBuf,
     schema: Option<PathBuf>,
     config: Option<&Bound<'_, PyAny>>,
+    writable: bool,
+    write_dir: Option<PathBuf>,
 ) -> PyResult<Database> {
+    // Validate writable-mode requirements upfront before any I/O.
+    if writable {
+        if write_dir.is_none() {
+            return Err(PyValueError::new_err(
+                "write_dir is required when writable=True. \
+                 Example: cqlite.open(path, writable=True, write_dir='/tmp/cqlite-writes')",
+            ));
+        }
+        if schema.is_none() {
+            return Err(PyValueError::new_err(
+                "schema is required when writable=True so that the write engine \
+                 can resolve column types.",
+            ));
+        }
+    }
+
     let core_config = config_from_py(py, config)?;
 
-    let db = if let Some(schema_path) = schema {
-        // Use ingestion module for schema + SSTable discovery
+    // Open the read-side database and capture the schema registry when present.
+    // We always use ingestion when a schema file is provided because that path
+    // performs the SSTable discovery and populates the schema registry.
+    let (db, schema_registry_opt) = if let Some(schema_path) = schema.clone() {
         let ingestion_config = cqlite_core::ingestion::IngestionConfig {
             schema_paths: vec![schema_path],
-            data_dir: path,
+            data_dir: path.clone(),
             version_hint: None,
             core_config,
             table_directory_filter: None,
         };
 
-        // Release GIL during async ingestion to allow other Python threads to run
         py.allow_threads(|| {
             block_on(async {
                 let result = cqlite_core::ingestion::ingest(ingestion_config).await?;
-                Ok::<_, cqlite_core::Error>(result.database)
+                let registry = result.schema_registry;
+                Ok::<_, cqlite_core::Error>((result.database, Some(registry)))
             })
         })
         .map_err(to_py_err)?
     } else {
-        // Simple open without schema
-        // Release GIL during async open to allow other Python threads to run
-        py.allow_threads(|| block_on(cqlite_core::Database::open(&path, core_config)))
-            .map_err(to_py_err)?
+        let db = py
+            .allow_threads(|| block_on(cqlite_core::Database::open(&path, core_config)))
+            .map_err(to_py_err)?;
+        (db, None)
+    };
+
+    // Build WriteEngine when writable=True.
+    let write_engine: Option<Mutex<PyWriteEngine>> = if writable {
+        let wd = write_dir.expect("validated above");
+        let schema_path_display = schema.clone().expect("validated above");
+
+        // Retrieve the first TableSchema from the registry loaded during ingestion.
+        let table_schema = py
+            .allow_threads(|| {
+                block_on(async {
+                    let registry = schema_registry_opt.ok_or_else(|| {
+                        cqlite_core::Error::Schema(
+                            "Internal error: schema registry unavailable. \
+                             This should not happen when schema= is provided."
+                                .to_string(),
+                        )
+                    })?;
+
+                    let schemas = registry
+                        .read()
+                        .await
+                        .list_schemas(None)
+                        .await
+                        .map_err(|e| {
+                            cqlite_core::Error::Schema(format!("Failed to list schemas: {}", e))
+                        })?;
+
+                    schemas.into_iter().next().ok_or_else(|| {
+                        cqlite_core::Error::Schema(format!(
+                            "No table schema found in {:?}. \
+                             Verify the schema file contains at least one CREATE TABLE statement.",
+                            schema_path_display
+                        ))
+                    })
+                })
+            })
+            .map_err(to_py_err)?;
+
+        let engine_config = cqlite_core::storage::write_engine::WriteEngineConfig::new(
+            wd.join("data"),
+            wd.join("wal"),
+            table_schema,
+        );
+
+        let engine = cqlite_core::storage::write_engine::WriteEngine::new(engine_config)
+            .map_err(to_py_err)?;
+
+        Some(Mutex::new(PyWriteEngine::new(engine)))
+    } else {
+        // Silence unused-variable warning
+        let _ = (write_dir, schema_registry_opt);
+        None
     };
 
     Ok(Database {
         inner: Arc::new(db),
         closed: AtomicBool::new(false),
+        write_engine,
     })
 }
 
@@ -418,13 +735,26 @@ mod tests {
         let closed = AtomicBool::new(false);
         assert!(!closed.load(Ordering::SeqCst));
 
-        // First swap should return false (was not closed)
         let was_closed = closed.swap(true, Ordering::SeqCst);
         assert!(!was_closed);
         assert!(closed.load(Ordering::SeqCst));
 
-        // Second swap should return true (was already closed)
         let was_closed = closed.swap(true, Ordering::SeqCst);
         assert!(was_closed);
+    }
+
+    #[test]
+    fn test_is_dml_statement() {
+        assert!(Database::is_dml_statement("INSERT INTO t (id) VALUES (1)"));
+        assert!(Database::is_dml_statement("insert into t (id) values (1)"));
+        assert!(Database::is_dml_statement(
+            "UPDATE t SET x = 1 WHERE id = 1"
+        ));
+        assert!(Database::is_dml_statement("DELETE FROM t WHERE id = 1"));
+        assert!(Database::is_dml_statement(
+            "BEGIN BATCH INSERT INTO t (id) VALUES (1) APPLY BATCH"
+        ));
+        assert!(!Database::is_dml_statement("SELECT * FROM t"));
+        assert!(!Database::is_dml_statement("  select * from t"));
     }
 }
