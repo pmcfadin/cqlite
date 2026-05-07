@@ -27,8 +27,10 @@
     "access": "public"
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
+    "build": "napi build --platform --release --features write-support",
+    "postbuild": "node scripts/generate-loader.mjs",
+    "build:debug": "napi build --platform --features write-support",
+    "pretest": "node scripts/generate-loader.mjs",
     "test": "jest",
     "test:watch": "jest --watch",
     "test:coverage": "jest --coverage",
