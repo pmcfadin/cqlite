@@ -2697,9 +2697,6 @@ mod tests {
             "Expected exactly 1 completed merge, got: {:?}",
             report.completed_merges
         );
-        // Note: rows_merged reflects data read back through the SSTable reader.
-        // The reader may not re-read all rows from locally-written test SSTables
-        // (see iterate_all_partitions limitations), so we only assert the merge itself ran.
         // bytes_written is u64 and always non-negative, so no assertion needed here.
 
         // The merged output file must exist in the final SSTable directory

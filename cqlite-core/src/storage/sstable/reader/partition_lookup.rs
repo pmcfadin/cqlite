@@ -74,6 +74,18 @@ impl SSTableReader {
     /// entries and returns all partition data.
     ///
     /// For token-based filtering, compute tokens from partition keys after retrieval.
+    ///
+    /// ## Issue #500: Sequential-scan fallback for writer-produced SSTables
+    ///
+    /// The Summary.db → Index.db → Data.db lookup path depends on Index.db format
+    /// compatibility between writer and reader (digest format vs. raw-key format).
+    /// Locally written SSTables emit raw-key Index.db entries that the reader's
+    /// digest-based parser cannot resolve, so the lookup loop returns 0 entries
+    /// even though Summary.db enumerates the partitions correctly.
+    ///
+    /// When that happens we fall back to `sequential_scan`, which walks Data.db
+    /// directly. For V5CompressedLegacy NB SSTables (the format the writer emits),
+    /// `sequential_scan` uses the chunk-stitching path and returns every partition.
     pub async fn iterate_all_partitions(&self) -> Result<Vec<(RowKey, Value)>> {
         if let Some(summary_reader) = &self.summary_reader {
             let entries = summary_reader.get_entries();
@@ -120,13 +132,51 @@ impl SSTableReader {
                 }
             }
 
-            debug!("Partition iteration found {} entries", results.len());
-            return Ok(results);
+            // Only trust the index-based path when EVERY summary entry was resolved.
+            // Partial resolution silently drops the unresolved entries; defaulting to
+            // `sequential_scan` in that case is strictly safer and still correct on
+            // real Cassandra SSTables (sequential_scan returns the same partitions
+            // when the index resolves them all).
+            if results.len() == entries.len() && !entries.is_empty() {
+                debug!("Partition iteration found {} entries", results.len());
+                return Ok(results);
+            }
+
+            debug!(
+                "Index.db lookup resolved {}/{} summary entries; \
+                 falling back to sequential_scan (Issue #500)",
+                results.len(),
+                entries.len()
+            );
         }
 
-        // Fallback to existing scan method
-        self.sequential_scan(&TableId::from("default"), None, None, None, None)
+        // Fallback path: sequential walk of Data.db.
+        // Used when Summary.db is absent OR when the Index.db lookup loop returned
+        // no entries (Issue #500: writer-produced SSTables emit a raw-key Index.db
+        // format the reader's digest-based parser does not resolve).
+        let table_id = self.scan_table_id();
+        let schema = self.schema.as_deref();
+        self.sequential_scan(&table_id, None, None, None, schema)
             .await
+    }
+
+    /// Build the TableId used for fallback `sequential_scan` from header metadata.
+    ///
+    /// The reader populates `header.keyspace` / `header.table_name` from either the
+    /// SSTable header or the parent directory path. When the V5CompressedLegacy
+    /// stitching path is used, table_id matching is skipped, so any non-empty value
+    /// is accepted; for other formats this returns the qualified `keyspace.table`
+    /// form so the scan filter matches.
+    fn scan_table_id(&self) -> TableId {
+        let keyspace = &self.header.keyspace;
+        let table_name = &self.header.table_name;
+        if !keyspace.is_empty() && !table_name.is_empty() {
+            TableId::from(format!("{}.{}", keyspace, table_name))
+        } else if !table_name.is_empty() {
+            TableId::from(table_name.as_str())
+        } else {
+            TableId::from("default")
+        }
     }
 
     /// Token range iteration (deprecated - tokens not stored in Summary.db)
