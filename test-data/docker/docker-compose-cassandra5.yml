@@ -3,8 +3,9 @@
 
 services:
   # Cassandra 5.0 - Latest version with new features (Enhanced for Issue #30)
+  # Pinned to 5.0.2 (Issue #482) so e2e readback tests use a stable build.
   cassandra-5-0:
-    image: cassandra:5.0
+    image: cassandra:5.0.2
     container_name: cqlite-cassandra-5-0
     hostname: cassandra-5-0
     environment:
@@ -14,7 +15,9 @@ services:
       - CASSANDRA_ENDPOINT_SNITCH=GossipingPropertyFileSnitch
       - CASSANDRA_START_RPC=true
       - CASSANDRA_RPC_ADDRESS=0.0.0.0
-      - CASSANDRA_LISTEN_ADDRESS=0.0.0.0
+      # Cassandra 5.0.2+ rejects a wildcard listen_address; use the entrypoint's
+      # auto-detection so it picks up the container IP at startup.
+      - CASSANDRA_LISTEN_ADDRESS=auto
       - CASSANDRA_BROADCAST_ADDRESS=cassandra-5-0
       - CASSANDRA_AUTHENTICATOR=AllowAllAuthenticator
       - CASSANDRA_AUTHORIZER=AllowAllAuthorizer
