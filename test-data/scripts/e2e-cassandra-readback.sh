@@ -78,7 +78,6 @@ phase()  { printf '\n[e2e-readback] === %s ===\n' "$*" >&2; }
 # sharing covers /tmp but not the per-user $TMPDIR=/var/folders/... path).
 WORKDIR="$(mktemp -d "/tmp/cqlite-e2e-readback.XXXXXX")"
 log "Workdir: $WORKDIR"
-declare -i FAILED_TABLES=0
 declare -a PASSED_LIST=()
 declare -a FAILED_LIST=()
 
@@ -94,7 +93,7 @@ cleanup() {
   fi
   exit "$rc"
 }
-trap cleanup EXIT INT TERM
+trap cleanup EXIT
 
 # ----- cqlite binary -----------------------------------------------------
 build_cqlite() {
@@ -545,6 +544,9 @@ verify_table() {
   # entries. Spec lines:
   #   row[<pk>].<col>=<expected-value>     -> exact column-and-value check
   #   contains[<pk>]=<substring>           -> substring check anywhere in JSON
+  local spec_body
+  spec_body="$(<"$spec")"
+
   local pk
   while IFS= read -r pk; do
     [[ -n "$pk" ]] || continue
@@ -582,8 +584,8 @@ verify_table() {
           return 1
         fi
       fi
-    done <"$spec"
-  done < <(grep "^row\.${pk_col}=" "$spec" | cut -d= -f2)
+    done <<<"$spec_body"
+  done < <(grep "^row\.${pk_col}=" <<<"$spec_body" | cut -d= -f2)
 
   return 0
 }
@@ -624,7 +626,6 @@ process_table() {
   else
     warn "[$label] FAIL"
     FAILED_LIST+=("$label")
-    FAILED_TABLES=$((FAILED_TABLES + 1))
   fi
 }
 
@@ -664,7 +665,7 @@ done
 
 phase "Summary"
 log "Passed: ${#PASSED_LIST[@]} (${PASSED_LIST[*]:-})"
-if (( FAILED_TABLES > 0 )); then
+if (( ${#FAILED_LIST[@]} > 0 )); then
   warn "Failed: ${#FAILED_LIST[@]} (${FAILED_LIST[*]})"
   exit 1
 fi
