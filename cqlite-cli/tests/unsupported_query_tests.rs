@@ -126,7 +126,7 @@ fn test_exit_code_consistency() {
     for case in test_cases {
         let err = anyhow!(case);
         let exit_code = classify_error(&err);
-        assert_eq!(exit_code.as_i32(), 5, "Expected exit code 5 for: {}", case);
+        assert_eq!(exit_code.as_i32(), 5, "Expected exit code 5 for: {case}");
     }
 }
 
@@ -161,14 +161,12 @@ fn test_unsupported_not_supported_pattern() {
         if should_get_unsupported_hint {
             assert!(
                 hint.contains("Supported SELECT features"),
-                "Expected unsupported hint for: {}",
-                error_msg
+                "Expected unsupported hint for: {error_msg}"
             );
         } else {
             assert!(
                 !hint.contains("Supported SELECT features"),
-                "Should not get unsupported hint for: {}",
-                error_msg
+                "Should not get unsupported hint for: {error_msg}"
             );
         }
     }
@@ -192,9 +190,7 @@ fn test_hint_shows_all_m2_features() {
     for feature in required_features {
         assert!(
             hint.contains(feature),
-            "Hint should mention '{}' but doesn't:\n{}",
-            feature,
-            hint
+            "Hint should mention '{feature}' but doesn't:\n{hint}"
         );
     }
 }
@@ -211,9 +207,7 @@ fn test_hint_shows_unsupported_features() {
     for feature in unsupported_features {
         assert!(
             hint.contains(feature),
-            "Hint should mention unsupported '{}' but doesn't:\n{}",
-            feature,
-            hint
+            "Hint should mention unsupported '{feature}' but doesn't:\n{hint}"
         );
     }
 }
@@ -236,7 +230,7 @@ fn test_exit_code_5_for_all_query_errors() {
             CliExitCode::QueryExecutionError,
             "All query errors should be QueryExecutionError"
         );
-        assert_eq!(exit_code.as_i32(), 5, "Exit code should be 5 for: {}", case);
+        assert_eq!(exit_code.as_i32(), 5, "Exit code should be 5 for: {case}");
     }
 }
 
@@ -258,8 +252,7 @@ fn test_case_insensitive_detection() {
 
         assert!(
             hint.contains("Supported SELECT features"),
-            "Case-insensitive detection failed for: {}",
-            case
+            "Case-insensitive detection failed for: {case}"
         );
     }
 }

@@ -1088,7 +1088,7 @@ async fn test_frozen_list_clustering_key_uniqueness() {
         let clustering_key = Some(ClusteringKey::single("ck", ck));
         let ops = vec![CellOperation::Write {
             column: "data".to_string(),
-            value: Value::Text(format!("row_{}", i)),
+            value: Value::Text(format!("row_{i}")),
         }];
         let mutation = Mutation::new(
             table_id.clone(),

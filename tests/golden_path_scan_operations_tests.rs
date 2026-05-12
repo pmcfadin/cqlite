@@ -85,8 +85,7 @@ impl GoldenPathScanTestFixture {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
-                    "Test SSTable not found: {:?}. Please ensure test-data is available.",
-                    fallback_path
+                    "Test SSTable not found: {fallback_path:?}. Please ensure test-data is available."
                 ),
             )));
         }
@@ -103,7 +102,7 @@ impl GoldenPathScanTestFixture {
         if fs::metadata(&fallback_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Test SSTable not found: {:?}", fallback_path),
+                format!("Test SSTable not found: {fallback_path:?}"),
             )));
         }
 
@@ -114,7 +113,7 @@ impl GoldenPathScanTestFixture {
     #[allow(dead_code)]
     fn create_test_key_range(&self) -> Vec<RowKey> {
         (1..=50)
-            .map(|i| RowKey::from(format!("scan_key_{:03}", i).as_bytes()))
+            .map(|i| RowKey::from(format!("scan_key_{i:03}").as_bytes()))
             .collect()
     }
 }
@@ -132,7 +131,7 @@ async fn test_golden_path_full_table_scan() -> Result<()> {
     let scan_duration = start_time.elapsed();
 
     // Assertions: Basic functionality
-    println!("✅ Full table scan completed in {:?}", scan_duration);
+    println!("✅ Full table scan completed in {scan_duration:?}");
     println!("✅ Found {} entries in full scan", results.len());
 
     // Performance assertion: Should complete in reasonable time
@@ -171,7 +170,7 @@ async fn test_golden_path_range_scan_with_boundaries() -> Result<()> {
         .await?;
     let scan_duration = start_time.elapsed();
 
-    println!("✅ Range scan completed in {:?}", scan_duration);
+    println!("✅ Range scan completed in {scan_duration:?}");
     println!("✅ Range scan found {} entries", results.len());
 
     // Performance assertion: Range scans should be fast
@@ -270,8 +269,7 @@ async fn test_golden_path_prefix_scan_operations() -> Result<()> {
     let scan_duration = start_time.elapsed();
 
     println!(
-        "✅ Prefix scan for '{}' completed in {:?}",
-        prefix, scan_duration
+        "✅ Prefix scan for '{prefix}' completed in {scan_duration:?}"
     );
     println!("✅ Prefix scan found {} matching entries", results.len());
 
@@ -279,7 +277,7 @@ async fn test_golden_path_prefix_scan_operations() -> Result<()> {
     for (key, _value) in &results {
         let key_str = String::from_utf8_lossy(key.as_bytes());
         // Note: actual prefix matching depends on data content
-        println!("  Found key: {}", key_str);
+        println!("  Found key: {key_str}");
     }
 
     // Performance assertion
@@ -338,7 +336,7 @@ async fn test_golden_path_scan_performance_benchmarks() -> Result<()> {
 
     // Print benchmark results
     for (name, (duration, count)) in benchmark_results {
-        println!("✅ Benchmark {}: {} entries in {:?}", name, count, duration);
+        println!("✅ Benchmark {name}: {count} entries in {duration:?}");
     }
 
     Ok(())
@@ -375,8 +373,7 @@ async fn test_golden_path_scan_ordering_validation() -> Result<()> {
         for (key, _value) in &results {
             assert!(
                 seen_keys.insert(key.clone()),
-                "Duplicate key found in scan results: {:?}",
-                key
+                "Duplicate key found in scan results: {key:?}"
             );
         }
 
@@ -484,7 +481,7 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
     // Verify all concurrent scans completed successfully
     for handle_result in results {
         let (id, scan_result, duration) =
-            handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
+            handle_result.map_err(|e| Error::internal(format!("Task failed: {e}")))?;
 
         let scan_results = scan_result?;
 
@@ -512,8 +509,7 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
     );
 
     println!(
-        "✅ All concurrent scan operations completed in {:?}",
-        total_duration
+        "✅ All concurrent scan operations completed in {total_duration:?}"
     );
     Ok(())
 }

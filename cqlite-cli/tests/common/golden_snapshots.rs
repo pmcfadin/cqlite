@@ -55,19 +55,19 @@ pub fn assert_golden_snapshot(name: &str, actual: &str) -> Result<()> {
 
     if update || !golden_path.exists() {
         fs::write(&golden_path, actual)
-            .with_context(|| format!("Failed to write golden snapshot: {}", name))?;
+            .with_context(|| format!("Failed to write golden snapshot: {name}"))?;
 
         if update {
-            eprintln!("✓ Updated golden snapshot: {}", name);
+            eprintln!("✓ Updated golden snapshot: {name}");
         } else {
-            eprintln!("✓ Created golden snapshot: {}", name);
+            eprintln!("✓ Created golden snapshot: {name}");
         }
         return Ok(());
     }
 
     // Read existing golden snapshot
     let expected = fs::read_to_string(&golden_path)
-        .with_context(|| format!("Failed to read golden snapshot: {}", name))?;
+        .with_context(|| format!("Failed to read golden snapshot: {name}"))?;
 
     // Compare trimmed output (ignore trailing whitespace)
     let expected_trimmed = expected.trim();

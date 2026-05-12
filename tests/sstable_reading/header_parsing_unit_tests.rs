@@ -577,7 +577,7 @@ mod full_header_unit_tests {
         let mut columns = Vec::new();
         for i in 0..20 {
             columns.push(ColumnInfo {
-                name: format!("col_{}", i),
+                name: format!("col_{i}"),
                 column_type: format!("type_{}", i),
                 is_primary_key: i < 3,
                 key_position: if i < 3 { Some(i as u16) } else { None },

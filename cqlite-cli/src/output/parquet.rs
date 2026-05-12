@@ -1143,7 +1143,7 @@ mod tests {
         for i in 1..=5 {
             let mut values = HashMap::new();
             values.insert("id".to_string(), Value::Integer(i));
-            values.insert("name".to_string(), Value::Text(format!("row_{}", i)));
+            values.insert("name".to_string(), Value::Text(format!("row_{i}")));
             let row = QueryRow::with_values(RowKey::new(vec![i as u8]), values);
             result.rows.push(row);
         }

@@ -3829,7 +3829,7 @@ mod tests {
 
         let columns: Vec<Column> = (0..4)
             .map(|i| Column {
-                name: format!("col_{}", i),
+                name: format!("col_{i}"),
                 data_type: "text".to_string(),
                 nullable: true,
                 default: None,

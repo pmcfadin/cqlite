@@ -788,7 +788,7 @@ fn create_header_with_columns(column_count: usize) -> SSTableHeader {
     header.columns.clear();
     for i in 0..column_count {
         header.columns.push(ColumnInfo {
-            name: format!("col_{}", i),
+            name: format!("col_{i}"),
             column_type: format!("type_{}", i % 10),
             is_primary_key: i < 5,
             key_position: if i < 5 { Some(i as u16) } else { None },

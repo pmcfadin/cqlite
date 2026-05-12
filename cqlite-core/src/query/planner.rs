@@ -260,7 +260,7 @@ fn default_insert_columns(table_name: &str, value_count: usize) -> Vec<String> {
         "customers" => s(&["id", "name", "email"]),
         "user_data" => s(&["id", "tags", "preferences"]),
         "performance_test" => s(&["id", "value", "category"]),
-        _ => (0..value_count).map(|i| format!("col_{}", i)).collect(),
+        _ => (0..value_count).map(|i| format!("col_{i}")).collect(),
     }
 }
 

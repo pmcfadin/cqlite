@@ -35,8 +35,7 @@ fn test_dataset_name_rejects_directory_traversal_parent() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Invalid dataset name") || stderr.contains("must not contain"),
-        "Expected security validation error, got: {}",
-        stderr
+        "Expected security validation error, got: {stderr}"
     );
 }
 
@@ -67,8 +66,7 @@ fn test_dataset_name_rejects_forward_slash() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Invalid dataset name") || stderr.contains("'/'"),
-        "Expected security validation error, got: {}",
-        stderr
+        "Expected security validation error, got: {stderr}"
     );
 }
 
@@ -99,8 +97,7 @@ fn test_dataset_name_rejects_backslash() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Invalid dataset name") || stderr.contains("'\\'"),
-        "Expected security validation error, got: {}",
-        stderr
+        "Expected security validation error, got: {stderr}"
     );
 }
 
@@ -131,8 +128,7 @@ fn test_dataset_name_rejects_leading_dot() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Invalid dataset name") || stderr.contains("start with '.'"),
-        "Expected security validation error, got: {}",
-        stderr
+        "Expected security validation error, got: {stderr}"
     );
 }
 
@@ -170,8 +166,7 @@ fn test_dataset_name_accepts_valid_names() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !stderr.contains("Invalid dataset name"),
-        "Valid dataset name should not trigger validation error, got: {}",
-        stderr
+        "Valid dataset name should not trigger validation error, got: {stderr}"
     );
 }
 
@@ -217,8 +212,7 @@ fn test_dataset_canonicalization_prevents_symlink_escape() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("Security violation") || stderr.contains("escaped"),
-        "Expected security violation for symlink escape, got: {}",
-        stderr
+        "Expected security violation for symlink escape, got: {stderr}"
     );
 }
 

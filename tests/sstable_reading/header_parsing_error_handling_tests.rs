@@ -690,7 +690,7 @@ fn create_complex_header() -> SSTableHeader {
     // Add complex elements
     for i in 0..10 {
         header.columns.push(ColumnInfo {
-            name: format!("col_{}", i),
+            name: format!("col_{i}"),
             column_type: format!("type_{}", i),
             is_primary_key: false,
             key_position: None,

@@ -163,8 +163,7 @@ fn test_csv_escapes_commas_in_values() {
     // Value containing comma must be quoted per RFC 4180
     assert!(
         csv.contains("\"hello, world\""),
-        "CSV must quote values containing commas. Got: {}",
-        csv
+        "CSV must quote values containing commas. Got: {csv}"
     );
 }
 
@@ -181,8 +180,7 @@ fn test_csv_escapes_quotes_in_values() {
     // Quotes must be escaped as "" per RFC 4180
     assert!(
         csv.contains("\"say \"\"hello\"\"\""),
-        "CSV must escape quotes by doubling them. Got: {}",
-        csv
+        "CSV must escape quotes by doubling them. Got: {csv}"
     );
 }
 
@@ -199,8 +197,7 @@ fn test_csv_escapes_newlines_in_values() {
     // Value containing newline must be quoted
     assert!(
         csv.contains("\"line1\nline2\""),
-        "CSV must quote values containing newlines. Got: {}",
-        csv
+        "CSV must quote values containing newlines. Got: {csv}"
     );
 }
 
@@ -358,9 +355,7 @@ fn test_json_serializes_all_value_variants() {
         let parsed: Result<Vec<serde_json::Value>, _> = serde_json::from_str(&json_str);
         assert!(
             parsed.is_ok(),
-            "JSON output for '{}' is not valid JSON: {}",
-            name,
-            json_str
+            "JSON output for '{name}' is not valid JSON: {json_str}"
         );
     }
 }
@@ -506,9 +501,7 @@ fn test_csv_serializes_all_value_variants() {
         let lines: Vec<&str> = csv_str.lines().collect();
         assert!(
             lines.len() >= 2,
-            "CSV for '{}' should have header and data row. Got: {}",
-            name,
-            csv_str
+            "CSV for '{name}' should have header and data row. Got: {csv_str}"
         );
     }
 }
@@ -526,14 +519,12 @@ fn test_null_representation_consistent() {
     let json = JSONWriter::write(&result, &default_config()).unwrap();
     assert!(
         json.contains("null"),
-        "JSON must represent NULL as 'null' keyword. Got: {}",
-        json
+        "JSON must represent NULL as 'null' keyword. Got: {json}"
     );
     // Verify it's not the string "null"
     assert!(
         !json.contains("\"null\""),
-        "JSON NULL should not be quoted string. Got: {}",
-        json
+        "JSON NULL should not be quoted string. Got: {json}"
     );
 
     // CSV: empty field (may be quoted "" or unquoted empty per RFC 4180)
@@ -544,8 +535,7 @@ fn test_null_representation_consistent() {
     // Empty field can be "" (quoted empty) or truly empty - both are valid NULL representations
     assert!(
         data_line.is_empty() || data_line == "\"\"" || data_line.trim().is_empty(),
-        "CSV NULL should be empty field or quoted empty. Got data line: '{}'",
-        data_line
+        "CSV NULL should be empty field or quoted empty. Got data line: '{data_line}'"
     );
 }
 
@@ -583,8 +573,7 @@ fn test_missing_column_treated_as_null() {
     let json = JSONWriter::write(&result, &default_config()).unwrap();
     assert!(
         json.contains("null"),
-        "JSON must include null for missing column. Got: {}",
-        json
+        "JSON must include null for missing column. Got: {json}"
     );
 
     // CSV: should have empty field
@@ -683,18 +672,15 @@ fn test_udt_renders_field_names_not_indices() {
     // UDT must contain field names, not numeric indices
     assert!(
         json.contains("street"),
-        "UDT JSON must contain field name 'street'. Got: {}",
-        json
+        "UDT JSON must contain field name 'street'. Got: {json}"
     );
     assert!(
         json.contains("city"),
-        "UDT JSON must contain field name 'city'. Got: {}",
-        json
+        "UDT JSON must contain field name 'city'. Got: {json}"
     );
     assert!(
         json.contains("zip_code"),
-        "UDT JSON must contain field name 'zip_code'. Got: {}",
-        json
+        "UDT JSON must contain field name 'zip_code'. Got: {json}"
     );
 
     // Should NOT contain numeric indices like "0", "1", "2" as field names
@@ -742,8 +728,7 @@ fn test_udt_with_null_field() {
     // Field name should appear even if value is null
     assert!(
         json.contains("nickname"),
-        "UDT should include null field name. Got: {}",
-        json
+        "UDT should include null field name. Got: {json}"
     );
 }
 

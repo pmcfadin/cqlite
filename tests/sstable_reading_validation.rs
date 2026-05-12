@@ -19,8 +19,7 @@ impl SSTableTestHarness {
     pub async fn new() -> Result<Self> {
         let temp_dir = TempDir::new().map_err(|e| {
             Error::Io(std::io::Error::other(format!(
-                "Failed to create temp dir: {}",
-                e
+                "Failed to create temp dir: {e}"
             )))
         })?;
         let config = Config::default();
@@ -38,7 +37,7 @@ impl SSTableTestHarness {
     }
 
     pub async fn create_test_sstable(&self, name: &str, data: TestSSTableData) -> Result<PathBuf> {
-        let sstable_path = self.temp_path().join(format!("{}.db", name));
+        let sstable_path = self.temp_path().join(format!("{name}.db"));
         create_test_sstable_file(&sstable_path, data).await?;
         Ok(sstable_path)
     }
@@ -91,8 +90,7 @@ async fn create_test_sstable_file(path: &Path, data: TestSSTableData) -> Result<
 
     let mut file = File::create(path).await.map_err(|e| {
         Error::Io(std::io::Error::other(format!(
-            "Failed to create test file: {}",
-            e
+            "Failed to create test file: {e}"
         )))
     })?;
 
@@ -101,8 +99,7 @@ async fn create_test_sstable_file(path: &Path, data: TestSSTableData) -> Result<
         .await
         .map_err(|e| {
             Error::Io(std::io::Error::other(format!(
-                "Failed to write header: {}",
-                e
+                "Failed to write header: {e}"
             )))
         })?;
 
@@ -110,8 +107,7 @@ async fn create_test_sstable_file(path: &Path, data: TestSSTableData) -> Result<
         .await
         .map_err(|e| {
             Error::Io(std::io::Error::other(format!(
-                "Failed to write version: {}",
-                e
+                "Failed to write version: {e}"
             )))
         })?;
 
@@ -119,8 +115,7 @@ async fn create_test_sstable_file(path: &Path, data: TestSSTableData) -> Result<
         .await
         .map_err(|e| {
             Error::Io(std::io::Error::other(format!(
-                "Failed to write keyspace: {}",
-                e
+                "Failed to write keyspace: {e}"
             )))
         })?;
 
@@ -128,8 +123,7 @@ async fn create_test_sstable_file(path: &Path, data: TestSSTableData) -> Result<
         .await
         .map_err(|e| {
             Error::Io(std::io::Error::other(format!(
-                "Failed to write table: {}",
-                e
+                "Failed to write table: {e}"
             )))
         })?;
 
@@ -137,22 +131,19 @@ async fn create_test_sstable_file(path: &Path, data: TestSSTableData) -> Result<
     for row in &data.rows {
         file.write_all(&row.key).await.map_err(|e| {
             Error::Io(std::io::Error::other(format!(
-                "Failed to write row key: {}",
-                e
+                "Failed to write row key: {e}"
             )))
         })?;
         file.write_all(b"\n").await.map_err(|e| {
             Error::Io(std::io::Error::other(format!(
-                "Failed to write separator: {}",
-                e
+                "Failed to write separator: {e}"
             )))
         })?;
     }
 
     file.flush().await.map_err(|e| {
         Error::Io(std::io::Error::other(format!(
-            "Failed to flush file: {}",
-            e
+            "Failed to flush file: {e}"
         )))
     })?;
 
@@ -179,8 +170,7 @@ async fn test_create_test_file() -> Result<()> {
     // Verify file has content
     let metadata = tokio::fs::metadata(&sstable_path).await.map_err(|e| {
         Error::Io(std::io::Error::other(format!(
-            "Failed to get file metadata: {}",
-            e
+            "Failed to get file metadata: {e}"
         )))
     })?;
     assert!(metadata.len() > 0, "Test SSTable file should not be empty");
@@ -228,8 +218,7 @@ async fn test_file_creation_performance() -> Result<()> {
     // File creation should be fast (under 1 second)
     assert!(
         duration.as_secs() < 1,
-        "File creation took too long: {:?}",
-        duration
+        "File creation took too long: {duration:?}"
     );
 
     Ok(())
@@ -260,7 +249,7 @@ async fn test_multiple_file_creation() -> Result<()> {
 
     for (name, data) in files {
         let path = harness.create_test_sstable(name, data).await?;
-        assert!(path.exists(), "File {} should exist", name);
+        assert!(path.exists(), "File {name} should exist");
     }
 
     Ok(())

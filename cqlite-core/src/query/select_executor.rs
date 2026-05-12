@@ -1259,7 +1259,7 @@ impl SelectExecutor {
                 let column_name = match expr {
                     SelectExpression::Column(col_ref) => col_ref.column.clone(),
                     SelectExpression::Aliased(_, alias) => alias.clone(),
-                    _ => format!("col_{}", i),
+                    _ => format!("col_{i}"),
                 };
                 projected_values.insert(column_name, value);
             }
@@ -1408,7 +1408,7 @@ impl SelectExecutor {
                     let column_name = match expr {
                         SelectExpression::Column(col_ref) => col_ref.column.clone(),
                         SelectExpression::Aliased(_, alias) => alias.clone(),
-                        _ => format!("col_{}", i),
+                        _ => format!("col_{i}"),
                     };
 
                     columns.push(ColumnInfo {

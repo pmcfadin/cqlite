@@ -542,7 +542,7 @@ impl ReplDataApi {
                 values: row_values
                     .into_iter()
                     .enumerate()
-                    .map(|(i, value)| (format!("col_{}", i), value))
+                    .map(|(i, value)| (format!("col_{i}"), value))
                     .collect(),
                 key: data_row.key.clone(),
                 metadata: crate::query::result::RowMetadata {

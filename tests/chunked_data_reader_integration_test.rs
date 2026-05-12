@@ -38,7 +38,7 @@ fn find_data_file(compression_info_path: &Path) -> Option<std::path::PathBuf> {
         .to_str()?
         .strip_suffix("-CompressionInfo.db")?;
 
-    let data_path = compression_info_path.with_file_name(format!("{}-Data.db", stem));
+    let data_path = compression_info_path.with_file_name(format!("{stem}-Data.db"));
 
     if data_path.exists() {
         Some(data_path)
@@ -81,7 +81,7 @@ fn test_chunked_reader_with_real_lz4() {
                 None => continue,
             };
 
-            println!("Testing LZ4 ChunkedDataReader with: {:?}", ci_path);
+            println!("Testing LZ4 ChunkedDataReader with: {ci_path:?}");
             println!("  Algorithm: {}", compression_info.algorithm);
             println!("  Chunk length: {} bytes", compression_info.chunk_length);
             println!("  Total chunks: {}", compression_info.chunk_offsets.len());
@@ -105,7 +105,7 @@ fn test_chunked_reader_with_real_lz4() {
             assert!(bytes_read > 0, "Should read at least some data");
             assert!(bytes_read <= 1024, "Should not read more than buffer size");
 
-            println!("  ✅ Read {} bytes successfully", bytes_read);
+            println!("  ✅ Read {bytes_read} bytes successfully");
 
             // Test position tracking
             assert_eq!(reader.position(), bytes_read as u64);
@@ -123,7 +123,7 @@ fn test_chunked_reader_with_real_lz4() {
                 .expect("Failed to read large buffer");
             assert!(bytes_read > 0);
 
-            println!("  ✅ Multi-chunk read: {} bytes", bytes_read);
+            println!("  ✅ Multi-chunk read: {bytes_read} bytes");
 
             found_lz4 = true;
             break;
@@ -169,7 +169,7 @@ fn test_chunked_reader_with_real_snappy() {
                 None => continue,
             };
 
-            println!("Testing Snappy ChunkedDataReader with: {:?}", ci_path);
+            println!("Testing Snappy ChunkedDataReader with: {ci_path:?}");
 
             let data_file = fs::File::open(&data_path).expect("Failed to open Data.db");
             let file_size = data_file.metadata().expect("Failed to get metadata").len();
@@ -182,7 +182,7 @@ fn test_chunked_reader_with_real_snappy() {
             let bytes_read = reader.read(&mut buffer).expect("Failed to read");
 
             assert!(bytes_read > 0);
-            println!("  ✅ Snappy read {} bytes successfully", bytes_read);
+            println!("  ✅ Snappy read {bytes_read} bytes successfully");
 
             found_snappy = true;
             break;
@@ -232,7 +232,7 @@ fn test_chunked_reader_with_real_deflate() {
                 None => continue,
             };
 
-            println!("Testing Deflate ChunkedDataReader with: {:?}", ci_path);
+            println!("Testing Deflate ChunkedDataReader with: {ci_path:?}");
 
             let data_file = fs::File::open(&data_path).expect("Failed to open Data.db");
             let file_size = data_file.metadata().expect("Failed to get metadata").len();
@@ -245,7 +245,7 @@ fn test_chunked_reader_with_real_deflate() {
             let bytes_read = reader.read(&mut buffer).expect("Failed to read");
 
             assert!(bytes_read > 0);
-            println!("  ✅ Deflate read {} bytes successfully", bytes_read);
+            println!("  ✅ Deflate read {bytes_read} bytes successfully");
 
             found_deflate = true;
             break;
@@ -288,7 +288,7 @@ fn test_chunked_reader_seeks_and_reads() {
                 None => continue,
             };
 
-            println!("Testing seek operations with: {:?}", ci_path);
+            println!("Testing seek operations with: {ci_path:?}");
 
             let data_file = fs::File::open(&data_path).expect("Failed to open Data.db");
             let file_size = data_file.metadata().expect("Failed to get metadata").len();
@@ -376,7 +376,7 @@ fn test_chunked_reader_chunk_boundary_spanning() {
                 None => continue,
             };
 
-            println!("Testing chunk boundary spanning with: {:?}", ci_path);
+            println!("Testing chunk boundary spanning with: {ci_path:?}");
             println!("  Chunks: {}", compression_info.chunk_offsets.len());
 
             let data_file = fs::File::open(&data_path).expect("Failed to open Data.db");
@@ -406,7 +406,7 @@ fn test_chunked_reader_chunk_boundary_spanning() {
             // Verify position advanced correctly
             assert_eq!(reader.position(), near_boundary + bytes_read as u64);
 
-            println!("  ✅ Read {} bytes spanning chunk boundary", bytes_read);
+            println!("  ✅ Read {bytes_read} bytes spanning chunk boundary");
 
             tested = true;
             break;
@@ -462,7 +462,7 @@ fn test_chunked_reader_all_algorithms() {
     );
 
     for (algo, ci_path) in by_algo {
-        println!("\nTesting algorithm: {}", algo);
+        println!("\nTesting algorithm: {algo}");
 
         let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
         let compression_info =
@@ -480,7 +480,7 @@ fn test_chunked_reader_all_algorithms() {
         let mut buffer = vec![0u8; 512];
         let bytes_read = reader.read(&mut buffer).expect("Failed to read");
 
-        assert!(bytes_read > 0, "Should read data for algorithm: {}", algo);
-        println!("  ✅ {} read {} bytes successfully", algo, bytes_read);
+        assert!(bytes_read > 0, "Should read data for algorithm: {algo}");
+        println!("  ✅ {algo} read {bytes_read} bytes successfully");
     }
 }

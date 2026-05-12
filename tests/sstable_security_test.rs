@@ -29,8 +29,7 @@ mod security_tests {
             let result = parse_magic_and_version(&data);
             assert!(
                 result.is_err(),
-                "Invalid magic 0x{:08X} should be rejected",
-                magic
+                "Invalid magic 0x{magic:08X} should be rejected"
             );
         }
     }
@@ -54,8 +53,7 @@ mod security_tests {
             let result = parse_magic_and_version(&data);
             assert!(
                 result.is_err(),
-                "Invalid version 0x{:04X} should be rejected",
-                version
+                "Invalid version 0x{version:04X} should be rejected"
             );
         }
     }
@@ -84,8 +82,7 @@ mod security_tests {
             if size < 6 {
                 assert!(
                     result.is_err(),
-                    "Truncated data of size {} should be rejected",
-                    size
+                    "Truncated data of size {size} should be rejected"
                 );
             }
         }
@@ -130,8 +127,7 @@ mod security_tests {
             let result = parse_vint_length(&test_data);
             assert!(
                 result.is_err(),
-                "Negative length {:?} should be rejected",
-                test_data
+                "Negative length {test_data:?} should be rejected"
             );
         }
     }
@@ -175,9 +171,7 @@ mod security_tests {
             if let Ok((_, value)) = result {
                 assert!(
                     value < 1_000_000_000,
-                    "{}: VInt value {} too large",
-                    description,
-                    value
+                    "{description}: VInt value {value} too large"
                 );
             }
         }
@@ -238,7 +232,7 @@ mod security_tests {
 
         for (data, description) in test_cases {
             if let Err(error) = parse_magic_and_version(&data) {
-                let error_msg = format!("{:?}", error);
+                let error_msg = format!("{error:?}");
 
                 // Error messages should not contain:
                 // - Raw binary data
@@ -246,14 +240,12 @@ mod security_tests {
                 // - Internal paths
                 // - Detailed parsing state
                 assert!(
-                    !error_msg.contains(&format!("{:?}", data)),
-                    "{}: Error message should not contain raw data",
-                    description
+                    !error_msg.contains(&format!("{data:?}")),
+                    "{description}: Error message should not contain raw data"
                 );
                 assert!(
                     !error_msg.contains("0x"),
-                    "{}: Error message should not contain hex addresses",
-                    description
+                    "{description}: Error message should not contain hex addresses"
                 );
             }
         }
@@ -290,14 +282,12 @@ mod security_tests {
             if size < 6 {
                 assert!(
                     result.is_err(),
-                    "{}: Should fail with insufficient data",
-                    description
+                    "{description}: Should fail with insufficient data"
                 );
             } else {
                 assert!(
                     result.is_ok(),
-                    "{}: Should succeed with sufficient data",
-                    description
+                    "{description}: Should succeed with sufficient data"
                 );
             }
         }

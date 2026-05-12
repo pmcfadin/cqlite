@@ -69,8 +69,7 @@ impl GoldenPathGetTestFixture {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
-                    "Test SSTable not found: {:?}. Please ensure test-data is available.",
-                    sstable_path
+                    "Test SSTable not found: {sstable_path:?}. Please ensure test-data is available."
                 ),
             )));
         }
@@ -88,7 +87,7 @@ impl GoldenPathGetTestFixture {
         if fs::metadata(&actual_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Schema-aware test SSTable not found: {:?}", actual_path),
+                format!("Schema-aware test SSTable not found: {actual_path:?}"),
             )));
         }
 
@@ -128,7 +127,7 @@ async fn test_golden_path_simple_get_operation() -> Result<()> {
     let get_duration = start_time.elapsed();
 
     // Assertions: Basic functionality
-    println!("✅ Get operation completed in {:?}", get_duration);
+    println!("✅ Get operation completed in {get_duration:?}");
 
     // Performance assertion: Should complete within reasonable time
     assert!(
@@ -149,8 +148,7 @@ async fn test_golden_path_simple_get_operation() -> Result<()> {
         }
         None => {
             println!(
-                "ℹ️  No value found for key {:?} (expected for test dataset)",
-                test_key
+                "ℹ️  No value found for key {test_key:?} (expected for test dataset)"
             );
         }
     }
@@ -187,8 +185,7 @@ async fn test_golden_path_get_with_bloom_filter_validation() -> Result<()> {
 
         assert!(
             result.is_none(),
-            "Should not find value for definitely non-existent key: {:?}",
-            test_key
+            "Should not find value for definitely non-existent key: {test_key:?}"
         );
     }
 
@@ -205,7 +202,7 @@ async fn test_golden_path_get_performance_benchmarks() -> Result<()> {
 
     // Performance test: Multiple get operations
     let test_keys = (1..=100)
-        .map(|i| RowKey::from(format!("test_key_{}", i).as_bytes()))
+        .map(|i| RowKey::from(format!("test_key_{i}").as_bytes()))
         .collect::<Vec<_>>();
 
     let start_time = Instant::now();
@@ -365,7 +362,7 @@ async fn test_golden_path_schema_aware_get_operations() -> Result<()> {
             println!("✅ Schema-aware get operations validated");
         }
         Err(e) => {
-            println!("ℹ️  Schema-aware reader not available (expected): {}", e);
+            println!("ℹ️  Schema-aware reader not available (expected): {e}");
             // This is acceptable as schema-aware functionality may not be fully implemented
         }
     }
@@ -386,7 +383,7 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
             let reader = reader.clone();
             let table_id = table_id.clone();
             tokio::spawn(async move {
-                let key = RowKey::from(format!("concurrent_key_{}", i).as_bytes());
+                let key = RowKey::from(format!("concurrent_key_{i}").as_bytes());
                 let start_time = Instant::now();
                 let result = reader.get(&table_id, &key).await;
                 let duration = start_time.elapsed();
@@ -402,7 +399,7 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
     // Verify all concurrent operations completed successfully
     for handle_result in results {
         let (id, get_result, duration) =
-            handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
+            handle_result.map_err(|e| Error::internal(format!("Task failed: {e}")))?;
 
         // Each operation should complete reasonably fast
         assert!(
@@ -424,8 +421,7 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
     );
 
     println!(
-        "✅ Concurrent get operations completed in {:?}",
-        total_duration
+        "✅ Concurrent get operations completed in {total_duration:?}"
     );
     Ok(())
 }
