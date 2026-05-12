@@ -62,7 +62,8 @@ use crate::storage::serialization::types::TypeSerializer;
 use crate::storage::serialization::vint::{encode_signed, encode_unsigned, unsigned_len};
 use crate::storage::sstable::writer::stats_writer::StatisticsMetadata;
 use crate::storage::write_engine::mutation::{
-    ClusteringBound, DecoratedKey, Mutation, PartitionTombstone, RangeTombstone,
+    ClusteringBound, DecoratedKey, Mutation, PartitionKey, PartitionTombstone, RangeTombstone,
+    TableId,
 };
 use crate::types::{ComparatorType, UdtTypeDef, Value};
 use std::io::Write;
@@ -171,38 +172,164 @@ impl DataWriter {
             prev_unfiltered_size = self.write_range_tombstone_with_size(rt, schema)? as u64;
         }
 
-        let static_mutations: Vec<&Mutation> = mutations
-            .iter()
-            .filter(|mutation| is_static_row_mutation(mutation, schema))
-            .collect();
-        if static_mutations.len() > 1 {
-            return Err(Error::InvalidInput(format!(
-                "Partition contains {} static row mutations; expected at most one",
-                static_mutations.len()
-            )));
+        // Cassandra's SerializationHeader.hasStatic() returns true whenever the schema
+        // declares any static column — and both the writer and reader unconditionally
+        // emit/consume a static-row prelude in that case.  We must do the same.
+        let schema_has_static = schema.columns.iter().any(|c| c.is_static);
+
+        if schema_has_static {
+            // Collect static-column operations from ALL mutations in this partition,
+            // regardless of whether the mutation also carries a clustering key.
+            // Last-write-wins by timestamp_micros when the same column appears twice.
+            let merged = collect_static_operations(mutations, schema);
+
+            if merged.is_empty() {
+                // Schema declares statics but this partition writes none.
+                // Cassandra still expects the prelude; emit the minimal empty form.
+                prev_unfiltered_size =
+                    self.write_empty_static_row(prev_unfiltered_size, schema)? as u64;
+            } else {
+                // Build a synthetic Mutation carrying the merged static ops.
+                // Use the latest timestamp seen across contributing mutations.
+                // `!merged.is_empty()` implies at least one mutation contributed
+                // a static op, so the inner `.max()` is guaranteed `Some`.
+                let latest_ts = mutations
+                    .iter()
+                    .filter(|m| has_static_operation(m, schema))
+                    .map(|m| m.timestamp_micros)
+                    .max()
+                    .unwrap_or(mutations.first().map(|m| m.timestamp_micros).unwrap_or(0));
+
+                // Pick the TTL from the mutation with the latest timestamp that
+                // contributed a static op (mirrors Cassandra's last-write-wins).
+                let ttl = mutations
+                    .iter()
+                    .filter(|m| has_static_operation(m, schema))
+                    .max_by_key(|m| m.timestamp_micros)
+                    .and_then(|m| m.ttl_seconds);
+
+                let synthetic = Mutation {
+                    table: mutations
+                        .first()
+                        .map(|m| m.table.clone())
+                        .unwrap_or_else(|| TableId {
+                            keyspace: schema.keyspace.clone(),
+                            table: schema.table.clone(),
+                        }),
+                    partition_key: mutations
+                        .first()
+                        .map(|m| m.partition_key.clone())
+                        .unwrap_or_else(|| PartitionKey {
+                            columns: Vec::new(),
+                        }),
+                    clustering_key: None,
+                    operations: merged,
+                    timestamp_micros: latest_ts,
+                    ttl_seconds: ttl,
+                    partition_tombstone: None,
+                    range_tombstones: Vec::new(),
+                };
+
+                prev_unfiltered_size =
+                    self.write_static_row_with_prev_size(&synthetic, schema, prev_unfiltered_size)?
+                        as u64;
+            }
         }
 
-        if let Some(static_mutation) = static_mutations.first() {
-            prev_unfiltered_size = self.write_static_row_with_prev_size(
-                static_mutation,
-                schema,
-                prev_unfiltered_size,
-            )? as u64;
-        }
+        // Write all clustering rows for this partition.
+        // Strip any static-column operations so they don't appear inside
+        // clustering row bodies (static cells belong in the static-row prelude).
+        for mutation in mutations.iter() {
+            // Skip pure-static mutations (no clustering key AND only static ops):
+            // they contributed to the prelude above and have no clustering row.
+            if is_static_row_mutation(mutation, schema) {
+                continue;
+            }
 
-        // Write all non-static rows for this partition
-        for mutation in mutations
-            .iter()
-            .filter(|mutation| !is_static_row_mutation(mutation, schema))
-        {
-            prev_unfiltered_size =
-                self.write_row_with_prev_size(mutation, schema, prev_unfiltered_size)? as u64;
+            if schema_has_static {
+                // Strip static ops from mutations that also write regular columns.
+                let regular_ops: Vec<_> = mutation
+                    .operations
+                    .iter()
+                    .filter(|op| !is_static_operation(op, schema))
+                    .cloned()
+                    .collect();
+
+                if regular_ops.is_empty() {
+                    // Either the mutation had only static ops (already in the
+                    // prelude) or it carried no ops at all — either way there
+                    // is no clustering row to emit.
+                    continue;
+                }
+
+                let stripped = Mutation {
+                    table: mutation.table.clone(),
+                    partition_key: mutation.partition_key.clone(),
+                    clustering_key: mutation.clustering_key.clone(),
+                    operations: regular_ops,
+                    timestamp_micros: mutation.timestamp_micros,
+                    ttl_seconds: mutation.ttl_seconds,
+                    partition_tombstone: None,
+                    range_tombstones: Vec::new(),
+                };
+
+                prev_unfiltered_size =
+                    self.write_row_with_prev_size(&stripped, schema, prev_unfiltered_size)? as u64;
+            } else {
+                prev_unfiltered_size =
+                    self.write_row_with_prev_size(mutation, schema, prev_unfiltered_size)? as u64;
+            }
         }
 
         // Write end-of-partition marker
         self.buffer.push(END_OF_PARTITION);
 
         Ok(partition_offset)
+    }
+
+    /// Write an empty static-row prelude.
+    ///
+    /// Required by Cassandra whenever the schema has any static column, even
+    /// when this particular partition writes no static cells.
+    ///
+    /// Binary form:
+    /// ```text
+    /// [0x80]              ← row_flags = ROW_HAS_EXTENDED_FLAGS only
+    /// [0x01]              ← extended_flags = EXTENDED_IS_STATIC
+    /// [row_size: VUInt]   ← size of (prev_size VInt + bitmap)
+    /// [prev_size: VUInt]
+    /// [bitmap: VUInt]     ← all-missing bitmap: (1 << N) - 1 for N static cols
+    ///                       (encoded via write_column_subset with empty present set)
+    /// ```
+    fn write_empty_static_row(&mut self, prev_size: u64, schema: &TableSchema) -> Result<usize> {
+        let start_len = self.buffer.len();
+
+        // flags = only HAS_EXTENDED_FLAGS; no timestamp, no TTL, no deletion,
+        // no HAS_ALL_COLUMNS, no HAS_COMPLEX_DELETION.
+        let flags: u8 = ROW_HAS_EXTENDED_FLAGS;
+        self.buffer.push(flags);
+        self.buffer.push(EXTENDED_IS_STATIC);
+
+        // Build the row body: just prev_size VInt + column bitmap (all missing).
+        let mut body = Vec::new();
+
+        // Column bitmap: "all columns missing" for every static column.
+        // write_column_subset with an empty present_set.
+        let static_columns = self.static_columns(schema);
+        let empty_present: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        self.write_column_subset(&mut body, &static_columns, &empty_present)?;
+
+        let prev_size_vint_len = unsigned_len(prev_size);
+        let row_body_size = prev_size_vint_len as u64 + body.len() as u64;
+
+        let mut row_size_buf = Vec::new();
+        encode_unsigned(row_body_size, &mut row_size_buf);
+        self.buffer.extend_from_slice(&row_size_buf);
+
+        encode_unsigned(prev_size, &mut self.buffer);
+        self.buffer.extend_from_slice(&body);
+
+        Ok(self.buffer.len() - start_len)
     }
 
     /// Finish writing and return the Data.db bytes
@@ -2028,6 +2155,76 @@ fn is_static_row_mutation(mutation: &Mutation, schema: &TableSchema) -> bool {
             .unwrap_or(false),
         crate::storage::write_engine::mutation::CellOperation::DeleteRow => true,
     })
+}
+
+/// Returns true if this single operation targets a static column.
+fn is_static_operation(
+    op: &crate::storage::write_engine::mutation::CellOperation,
+    schema: &TableSchema,
+) -> bool {
+    match op {
+        crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
+        | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { column, .. }
+        | crate::storage::write_engine::mutation::CellOperation::Delete { column } => schema
+            .columns
+            .iter()
+            .find(|c| c.name == *column)
+            .map(|c| c.is_static)
+            .unwrap_or(false),
+        crate::storage::write_engine::mutation::CellOperation::DeleteRow => false,
+    }
+}
+
+/// Returns true if this mutation contributes at least one static-column operation.
+fn has_static_operation(mutation: &Mutation, schema: &TableSchema) -> bool {
+    mutation
+        .operations
+        .iter()
+        .any(|op| is_static_operation(op, schema))
+}
+
+/// Collect and merge static-column operations from all mutations in a partition.
+///
+/// Scans every mutation (regardless of whether it has a clustering key) and
+/// collects operations that target static columns.  Last-write-wins by
+/// `timestamp_micros` when the same column is written more than once.
+///
+/// Returns the merged operations in an unspecified order (the writer will
+/// sort them by schema column order when building the row body).
+fn collect_static_operations(
+    mutations: &[Mutation],
+    schema: &TableSchema,
+) -> Vec<crate::storage::write_engine::mutation::CellOperation> {
+    use std::collections::HashMap;
+
+    // Map: column_name → (timestamp, operation)
+    let mut best: HashMap<String, (i64, crate::storage::write_engine::mutation::CellOperation)> =
+        HashMap::new();
+
+    for mutation in mutations {
+        for op in &mutation.operations {
+            if !is_static_operation(op, schema) {
+                continue;
+            }
+            let col_name = match op {
+                crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
+                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                    column,
+                    ..
+                }
+                | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                    column.clone()
+                }
+                crate::storage::write_engine::mutation::CellOperation::DeleteRow => continue,
+            };
+            let entry = best.entry(col_name).or_insert((i64::MIN, op.clone()));
+            if mutation.timestamp_micros >= entry.0 {
+                *entry = (mutation.timestamp_micros, op.clone());
+            }
+        }
+    }
+
+    best.into_values().map(|(_, op)| op).collect()
 }
 
 /// Serialize value for clustering key (type-specific encoding)

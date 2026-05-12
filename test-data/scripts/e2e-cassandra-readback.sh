@@ -27,12 +27,6 @@
 #
 # Exit code: 0 only when every selected table passes refresh+readback.
 #
-# Known failures (as of this commit):
-#   * static-columns: CQLite's static-row write encoding trips Cassandra's
-#     `UnfilteredSerializer.deserializeStaticRow` assertion. Tracked in #507.
-#     Run `--tables basic-primitives,collections,udt,ttl` to exclude it
-#     while #507 is being addressed.
-#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
