@@ -1205,6 +1205,140 @@ async fn test_issue_432_static_columns_table_portable_sstable_round_trip() -> Cq
     .await
 }
 
+/// Issue #507 — gen_static mutation shape: clustering rows whose operations include
+/// both a static column and regular columns must produce a valid SSTable that
+/// Cassandra accepts via sstabledump and sstableloader.
+///
+/// Previously CQLite emitted no static-row prelude when every mutation had a
+/// clustering key, causing Cassandra to fire `UnfilteredSerializer` assertion 4.
+#[tokio::test]
+async fn test_issue_507_gen_static_shape_cassandra_readback() -> CqliteResult<()> {
+    let partition_hex = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+    let partition_uuid = format!(
+        "{}-{}-{}-{}-{}",
+        &partition_hex[0..8],
+        &partition_hex[8..12],
+        &partition_hex[12..16],
+        &partition_hex[16..20],
+        &partition_hex[20..32]
+    );
+
+    // Build mutations identical to what gen_static() produces:
+    //   Two clustering rows in the same partition, each with clustering_key set,
+    //   and operations carrying static_data (STATIC) + row_data + row_value.
+    let ts = 1_704_067_200_000_000i64;
+    let cluster_ts_base_ms: i64 = 1_704_067_200_000;
+
+    let pk_uuid = uuid_value(&partition_uuid);
+
+    run_issue_432_scenario(
+        schema_static_columns_table(),
+        &create_static_columns_table_issue_432_cql(),
+        vec![
+            // Mutation 1: clustering_key = cluster_ts_base_ms + 1000, row_data = "alpha"
+            Mutation::new(
+                TableId::new("test_basic", "static_columns_table"),
+                PartitionKey::single("partition_key", pk_uuid.clone()),
+                Some(ClusteringKey::single(
+                    "clustering_key",
+                    Value::Timestamp(cluster_ts_base_ms + 1000),
+                )),
+                vec![
+                    CellOperation::Write {
+                        column: "static_data".to_string(),
+                        value: Value::Text("shared-static-text".to_string()),
+                    },
+                    CellOperation::Write {
+                        column: "row_data".to_string(),
+                        value: Value::Text("alpha".to_string()),
+                    },
+                    CellOperation::Write {
+                        column: "row_value".to_string(),
+                        value: Value::Integer(11),
+                    },
+                ],
+                ts,
+                None,
+            ),
+            // Mutation 2: clustering_key = cluster_ts_base_ms + 2000, row_data = "beta"
+            Mutation::new(
+                TableId::new("test_basic", "static_columns_table"),
+                PartitionKey::single("partition_key", pk_uuid.clone()),
+                Some(ClusteringKey::single(
+                    "clustering_key",
+                    Value::Timestamp(cluster_ts_base_ms + 2000),
+                )),
+                vec![
+                    CellOperation::Write {
+                        column: "static_data".to_string(),
+                        value: Value::Text("shared-static-text".to_string()),
+                    },
+                    CellOperation::Write {
+                        column: "row_data".to_string(),
+                        value: Value::Text("beta".to_string()),
+                    },
+                    CellOperation::Write {
+                        column: "row_value".to_string(),
+                        value: Value::Integer(22),
+                    },
+                ],
+                ts,
+                None,
+            ),
+        ],
+        |dump| {
+            // sstabledump must succeed (exit 0) — that alone proves the prelude is valid.
+            // The dump should show one partition with a staticRow and two clustering rows.
+            assert_sstabledump_counts(dump, 1, 2)?;
+            let dump_str = serde_json::to_string(dump)
+                .map_err(|e| Error::Storage(format!("JSON serialize: {e}")))?;
+            assert!(
+                dump_str.contains("staticRow") || dump_str.contains("static_data"),
+                "sstabledump output should contain a staticRow or static_data column; \
+                 got: {dump_str}"
+            );
+            assert_sstabledump_contains(
+                dump,
+                &[
+                    "\"name\":\"static_data\",\"value\":\"shared-static-text\"",
+                    "\"name\":\"row_data\",\"value\":\"alpha\"",
+                    "\"name\":\"row_data\",\"value\":\"beta\"",
+                    "\"name\":\"row_value\",\"value\":11",
+                    "\"name\":\"row_value\",\"value\":22",
+                ],
+            )
+        },
+        move |harness| {
+            assert_query_count(
+                harness,
+                &format!("SELECT COUNT(*) FROM {}", harness.fully_qualified_table()),
+                2,
+            )?;
+
+            let query = format!(
+                "SELECT static_data, row_data, row_value \
+                 FROM {} WHERE partition_key = {}",
+                harness.fully_qualified_table(),
+                cql_uuid(&partition_uuid)
+            );
+            let output =
+                harness.query_until(&query, Duration::from_secs(20), |out| out.rows.len() == 2)?;
+            // Both rows should see the same static_data value.
+            assert_eq!(output.rows[0][0], "shared-static-text");
+            assert_eq!(output.rows[1][0], "shared-static-text");
+            // row_data / row_value differ per clustering row.
+            let row_data_values: Vec<&str> = output.rows.iter().map(|r| r[1].as_str()).collect();
+            assert!(
+                row_data_values.contains(&"alpha") && row_data_values.contains(&"beta"),
+                "Expected rows with row_data 'alpha' and 'beta'; got {:?}",
+                row_data_values
+            );
+            Ok(())
+        },
+    )
+    .await
+}
+
 #[tokio::test]
 async fn test_issue_432_ttl_test_table_portable_sstable_round_trip() -> CqliteResult<()> {
     let ttl_id = "44444444-4444-4444-8444-444444444444";
