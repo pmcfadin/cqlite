@@ -49,11 +49,13 @@ tests/              # shared fixtures (Cassandra 5 SSTables)
 | **M2** | **CLI (REPL + one‑shot)**  | Human can query & verify data from disk; basic `SELECT … WHERE …`                         |
 | **M3** | **Output Writers**         | JSON, CSV, Parquet export work end‑to‑end via CLI                                         |
 | **M4** | **Python & Node.js Bindings** | `pip install cqlite-py`, `npm i @cqlite/node`; CI wheels & native modules                 |
-| **M5** | **Write Support**          | Generate valid Cassandra 5 SSTables; write API in core and bindings                       |
-| **M6** | **WASM Bindings**          | `npm i @cqlite/wasm`; IndexedDB support; browser compatibility                            |
-| **M7** | **Perf & Size Validation** | Benchmarks > native bulk tools; WASM < 2 MB; publish v1.0 release                         |
+| **M5** | **Write Support** ✅ **(v0.9.0)** | Generate valid Cassandra 5 SSTables; write API in core and bindings                       |
+| **M6** | **WASM Bindings** *(deferred)*   | `npm i @cqlite/wasm`; IndexedDB support; browser compatibility                            |
+| **M7** | **Perf & Size Validation** *(deferred)* | Benchmarks > native bulk tools; WASM < 2 MB; publish v1.0 release                |
 
 > **Revision Note (Jan 2026)**: M1 coverage revised to tiered targets per Issue #204. M4 now Python & Node.js only (sync Python first). Write Support restored as M5. WASM moved to M6. v1.0 release moved to M7.
+
+> **Revision Note (May 2026)**: M5 complete, v0.9.0 cut. WAL + memtable + STCS compaction + write APIs in Python, Node.js, and CLI ship in this release. M6 (WASM) and M7 (perf + v1.0) are the remaining milestones. See CHANGELOG.md for the full M5 change list.
 
 ### 4.1 · M5 Write Support Architecture
 
@@ -152,6 +154,21 @@ cqlsh -e "SELECT * FROM keyspace.table"
 - `sstableloader` compatibility is a useful secondary workflow, but passing `sstableloader` alone does not satisfy M5.
 
 > **Revision Note (March 2026)**: M5 write support treats flushed SSTables as the primary portable artifact. The milestone acceptance path is now explicitly direct Cassandra readability after copy plus native refresh/import; loader workflows remain secondary convenience tooling. See Issues #392, #393, #396, #397.
+
+---
+
+## 4.2 · Known Issues (post-v0.9.0)
+
+The following are tracked follow-ups, not release blockers. All are open GitHub issues.
+
+| Issue | Description | Workaround |
+|-------|-------------|------------|
+| #311 | Python concurrent-query race in schema metadata access | Run one warm-up query before spawning parallel threads on the same handle |
+| #493 | Set-element tombstone decoding | Read-only; tombstones are silently ignored in query results |
+| #501 | Schema-aware tuple decoding | Tuples return as raw byte arrays in some edge cases |
+| #502 | frozen<udt> field decoding | Frozen UDT values may be returned as raw bytes in some edge cases |
+
+See [docs/write-support-limitations.md](../write-support-limitations.md) for the full limitations reference.
 
 ---
 

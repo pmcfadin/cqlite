@@ -225,6 +225,68 @@ CQL types are automatically converted to JavaScript types:
 \* **Note:** With `execute()`, `varint` returns `"0x{hex}"` and `decimal` returns `"decimal:{scale}:0x{hex}"`.
 Use `executeNative()` for human-readable formats.
 
+## Write Operations
+
+CQLite v0.9.0 adds write support to the Node.js bindings. Open the database with
+`writable: true` and a `writeDir` to enable write operations.
+
+```javascript
+const { Database } = require('@cqlite/node');
+
+const db = await Database.open('path/to/sstables', {
+  schema: 'schema.cql',
+  writable: true,
+  writeDir: '/tmp/my-writes',
+});
+
+// Write rows via CQL INSERT, UPDATE, or DELETE
+await db.execute(
+  "INSERT INTO test_basic.simple_table (id, name, age) " +
+  "VALUES (22222222-2222-2222-2222-222222222222, 'Bob', 25)"
+);
+await db.execute(
+  "UPDATE test_basic.simple_table SET age = 26 " +
+  "WHERE id = 22222222-2222-2222-2222-222222222222"
+);
+
+// Flush the in-memory write buffer (memtable) to an SSTable on disk.
+// Returns the path to the flushed Data.db file, or "" if memtable was empty.
+const path = await db.flushRun();
+console.log('Flushed to:', path);
+
+// Run background compaction within a time budget
+const report = await db.maintenanceStep({ budgetMs: 100 });
+console.log(`Merged ${report.rowsMerged} rows in ${report.timeSpentMs}ms`);
+if (report.pendingCompaction) {
+  console.log('More compaction work available');
+}
+
+// Inspect write statistics (synchronous getter)
+const stats = db.writeStats;
+console.log('Memtable size:', stats.memtableSizeBytes, 'bytes');
+console.log('Total flushed:', stats.totalWrittenBytes, 'bytes');
+
+await db.close();
+```
+
+### Write API
+
+| Method / Property | Description |
+|-------------------|-------------|
+| `db.execute(cql)` | Execute a CQL INSERT, UPDATE, or DELETE statement |
+| `db.flushRun()` | Flush memtable to SSTable; returns the Data.db path or `""` if memtable was empty |
+| `db.maintenanceStep(options?)` | Run STCS compaction for up to `options.budgetMs` ms (default: 100); returns `MaintenanceReport` |
+| `db.writeStats` | Synchronous getter: `memtableSizeBytes`, `memtableRowCount`, `totalWrittenBytes`, `l0SstableCount` |
+
+### Known Limitations
+
+- Counter columns cannot be written — `execute()` throws `CqliteError` for
+  counter mutations.
+- BTI-format index files are not produced; the writer emits BIG format.
+
+See [docs/write-support-limitations.md](../../docs/write-support-limitations.md)
+for the full limitations reference.
+
 ## Examples
 
 See the [examples/](examples/) directory for complete working examples:
@@ -239,6 +301,7 @@ See the [examples/](examples/) directory for complete working examples:
 
 - [TypeScript Definitions](lib/index.d.ts) - Complete API type hints
 - [Main Project README](../../README.md) - CQLite project overview
+- [Write Support Guide](../../docs/write-support.md) - Detailed write documentation
 - [Issue Tracker](https://github.com/pmcfadin/cqlite/issues) - Report bugs or request features
 
 ## License

@@ -6,7 +6,7 @@
 [![Rust](https://img.shields.io/badge/rust-1.85+-red.svg)](https://www.rust-lang.org)
 [![Cassandra](https://img.shields.io/badge/cassandra-5.0+-green.svg)](https://cassandra.apache.org)
 
-> **Status**: M4 Complete - Core reading, CLI, Output Writers, Python and Node.js Bindings are production-ready
+> **Status**: M5 Complete (v0.9.0) - Core reading, CLI, Output Writers, Python and Node.js Bindings, and Write Support are production-ready
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
@@ -67,6 +67,77 @@ for (const row of result.rows) {
 await db.close();
 ```
 
+## Write Support
+
+CQLite v0.9.0 (M5) ships write support across all interfaces: Rust core, Python,
+Node.js, and CLI. Written data flushes to portable Cassandra 5.0 SSTables that
+Cassandra can read directly via `nodetool refresh`.
+
+The schema file below is included in the repository at
+`test-data/schemas/write-test.cql`.
+
+### Python
+
+```python
+import cqlite
+
+# Open in writable mode — write_dir stores the WAL and flushed SSTables
+with cqlite.open(
+    'test-data/datasets/sstables',
+    schema='test-data/schemas/write-test.cql',
+    writable=True,
+    write_dir='/tmp/my-writes',
+) as db:
+    db.execute(
+        "INSERT INTO test_basic.simple_table (id, name, age) "
+        "VALUES (11111111-1111-1111-1111-111111111111, 'Alice', 30)"
+    )
+    path = db.flush_run()
+    print(f'Flushed SSTable: {path}')
+```
+
+### Node.js
+
+```javascript
+const { Database } = require('@cqlite/node');
+
+const db = await Database.open('test-data/datasets/sstables', {
+  schema: 'test-data/schemas/write-test.cql',
+  writable: true,
+  writeDir: '/tmp/my-writes',
+});
+await db.execute(
+  "INSERT INTO test_basic.simple_table (id, name, age) " +
+  "VALUES (22222222-2222-2222-2222-222222222222, 'Bob', 25)"
+);
+const path = await db.flushRun();
+console.log('Flushed SSTable:', path);
+await db.close();
+```
+
+### CLI
+
+```bash
+# Build with write support
+cargo build --package cqlite-cli --features write-support
+
+# Write via CQL INSERT
+cargo run --package cqlite-cli --features write-support -- \
+  --writable --write-dir /tmp/my-writes \
+  --schema test-data/schemas/write-test.cql \
+  --execute "INSERT INTO test_basic.simple_table (id, name, age) \
+             VALUES (33333333-3333-3333-3333-333333333333, 'Carol', 28)"
+
+# Flush memtable to SSTable
+cargo run --package cqlite-cli --features write-support -- \
+  --writable --write-dir /tmp/my-writes \
+  --schema test-data/schemas/write-test.cql \
+  --flush
+```
+
+See [docs/write-support.md](docs/write-support.md) for the full write guide,
+including the Cassandra export workflow and known limitations.
+
 ## Feature Flags
 
 CQLite uses Cargo feature flags to control optional functionality:
@@ -116,10 +187,16 @@ cargo build --no-default-features
 - [x] pip/npm installable packages (5 platform builds each)
 - [x] Type stubs for IDE support (Python mypy, TypeScript)
 
-### 📋 Roadmap (M5+)
-- [ ] Write support (SSTable creation)
-- [ ] WASM support for browser deployment
-- [ ] Advanced query capabilities
+### ✅ M5 Complete — v0.9.0 (May 2026)
+- [x] Write support: WAL + memtable + flush to Cassandra SSTables
+- [x] STCS compaction via `maintenance_step()`
+- [x] Write API in Python, Node.js, and CLI
+- [x] Full type coverage: Inet, Varint, Duration, Tuple, Frozen
+- [x] E2E readback gate: write → flush → Cassandra `nodetool refresh` → verify
+
+### 📋 Roadmap
+- [ ] M6: WASM bindings for browser deployment
+- [ ] M7: Performance validation + v1.0 release
 
 ## Architecture Highlights
 
@@ -187,6 +264,15 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test --package cqlite-cor
 - Thread-safe database handles
 - 500+ tests with 98%+ pass rate across both bindings
 
+### ✅ M5 Complete — v0.9.0 (May 2026)
+- Write support: WAL-backed memtable + flush to portable Cassandra 5.0 SSTables
+- STCS compaction (`maintenance_step()`)
+- Write API exposed in Python (`flush_run`, `maintenance_step`, `write_stats`),
+  Node.js (`flushRun`, `maintenanceStep`, `writeStats`), and CLI (`--writable`,
+  `--write-dir`, `--flush`, `maintenance`, `write-stats`, `export-sstable`)
+- Type roundtrips verified for all major types including Inet, Varint, Duration, Tuple, Frozen
+- E2E validation against live Cassandra 5.0 (write → flush → `nodetool refresh` → `cqlsh`)
+
 See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
 ## Technical Details
@@ -229,4 +315,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: M1 through M4 milestones are complete. Core SSTable reading, CLI, output writers, Python bindings, and Node.js bindings are production-ready. Next: M5 (Write Support).
+**Note**: M1 through M5 milestones are complete (v0.9.0). Core SSTable reading, CLI, output writers, Python bindings, Node.js bindings, and write support are production-ready. Next: M6 (WASM bindings) and M7 (performance validation + v1.0).
