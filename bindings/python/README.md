@@ -177,11 +177,72 @@ CQL types are automatically converted to Python native types:
 | `frozen<T>` | Unwrapped inner type |
 | UDT | `dict` with `_type` and `_keyspace` keys |
 
+## Write Operations
+
+CQLite v0.9.0 adds write support to the Python bindings. Open the database with
+`writable=True` and a `write_dir` to enable write operations.
+
+```python
+import cqlite
+
+with cqlite.open(
+    'path/to/sstables',
+    schema='schema.cql',
+    writable=True,
+    write_dir='/tmp/my-writes',
+) as db:
+    # Write rows via CQL INSERT, UPDATE, or DELETE
+    db.execute(
+        "INSERT INTO test_basic.simple_table (id, name, age) "
+        "VALUES (11111111-1111-1111-1111-111111111111, 'Alice', 30)"
+    )
+    db.execute(
+        "UPDATE test_basic.simple_table SET age = 31 "
+        "WHERE id = 11111111-1111-1111-1111-111111111111"
+    )
+
+    # Flush the in-memory write buffer (memtable) to an SSTable on disk.
+    # Returns the path to the flushed Data.db file.
+    path = db.flush_run()
+    print(f'Flushed to: {path}')
+
+    # Run background compaction within a time budget
+    report = db.maintenance_step(budget_ms=100)
+    print(f'Merged {report.rows_merged} rows in {report.time_spent_ms:.1f} ms')
+    if report.pending_compaction:
+        print('More compaction work available')
+
+    # Inspect write statistics
+    stats = db.write_stats
+    print(f'Memtable size: {stats.memtable_size_bytes} bytes')
+    print(f'Total flushed: {stats.total_written_bytes} bytes')
+```
+
+### Write API
+
+| Method / Property | Description |
+|-------------------|-------------|
+| `db.execute(cql)` | Execute a CQL INSERT, UPDATE, or DELETE statement |
+| `db.flush_run()` | Flush memtable to SSTable; returns the Data.db path or `""` if memtable was empty |
+| `db.maintenance_step(budget_ms)` | Run STCS compaction for up to `budget_ms` milliseconds; returns `MaintenanceReport` |
+| `db.write_stats` | `WriteStats` property: `memtable_size_bytes`, `memtable_row_count`, `total_written_bytes`, `l0_sstable_count` |
+
+### Known Limitations
+
+- Counter columns cannot be written — `execute()` raises `CqliteError` for
+  counter mutations.
+- Concurrent queries on the same handle may need a warm-up query first (Issue
+  #311).
+
+See [docs/write-support-limitations.md](../../docs/write-support-limitations.md)
+for the full limitations reference.
+
 ## Resources
 
 - [Acceptance Testing Notebook](notebooks/acceptance-testing.ipynb) - Interactive examples and validation
 - [Type Stubs](python/cqlite/__init__.pyi) - Complete API type hints for IDE support
 - [Main Project README](../../README.md) - CQLite project overview and documentation
+- [Write Support Guide](../../docs/write-support.md) - Detailed write documentation
 - [Issue Tracker](https://github.com/pmcfadin/cqlite/issues) - Report bugs or request features
 
 ## License

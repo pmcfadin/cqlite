@@ -5,17 +5,65 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [v0.9.0] — M5 Write Support
 
 ### Added
+
+- **WriteEngine** in `cqlite-core/src/storage/write_engine/`: WAL-backed memtable,
+  STCS compaction, and flush to portable Cassandra 5.0 SSTables. Public methods:
+  `write(mutation)`, `write_async(mutation)`, `flush()`, `maintenance_step(budget)`,
+  `maintenance_stats()`, and `export_sstable(path)`.
+- **Mutation API** (parser-independent): `Mutation { table, partition_key,
+  clustering_key, operations, timestamp_micros, ttl_seconds }` with
+  `CellOperation::Write | WriteWithTtl | Delete | DeleteRow`.
+- **CQL text write path**: `db.execute("INSERT/UPDATE/DELETE …")` as a convenience
+  layer on top of the mutation API (PR #487).
+- **Type coverage** for write roundtrips: Inet, Varint, Duration, Tuple, and
+  Frozen all roundtrip through write→flush→read (Issue #477, #478).
+- **Counter guard**: `WriteEngine::write()` and `write_async()` return
+  `Error::InvalidOperation` immediately when a mutation targets a counter column,
+  preventing silent data corruption (Issue #479, PR #489).
+- **Python bindings write support** (PR #488): `db.execute(INSERT/UPDATE/DELETE)`,
+  `db.flush_run()`, `db.maintenance_step(budget_ms)`, and `db.write_stats` property.
+  Open database with `writable=True, write_dir=path` to enable writes.
+- **Node.js bindings write support** (PR #494): `await db.execute(INSERT/UPDATE/DELETE)`,
+  `await db.flushRun()`, `await db.maintenanceStep({ budgetMs })`, and
+  `db.writeStats` getter. Open with `{ writable: true, writeDir: path }`.
+- **CLI write flags**: `--writable`, `--write-dir`, `--mutation`, `--mutations-file`,
+  `--flush`. Subcommands: `maintenance --budget-ms`, `write-stats`, `export-sstable`.
+- **E2E readback gate** (`test-data/scripts/e2e-cassandra-readback.sh`, PR #508):
+  exercises 5 tables (basic-primitives, collections, udt, static-columns, ttl)
+  through write → flush → Docker copy → `nodetool refresh` → `cqlsh` verify.
 - Write→flush→read roundtrip tests for `Inet`, `Varint`, and `Duration` types
-  (Issue #477)
+  (Issue #477).
 - Write→flush→read roundtrip tests for `Tuple<int, text, uuid>` and
-  `Frozen<udt>` types (Issue #478)
-- `WriteEngine::write()` and `WriteEngine::write_async()` now return
-  `Error::InvalidOperation` immediately when a mutation contains a
-  `Value::Counter` cell, preventing silent data corruption — counter columns
-  require server-side distributed increment semantics (Issue #479)
+  `Frozen<udt>` types (Issue #478).
+
+### Changed
+
+- M5 milestone closed; v0.9.0 marks the first release with full write support.
+- CHANGELOG promoted from `[Unreleased]` to `[v0.9.0]`.
+
+### Fixed
+
+- Static columns could be duplicated in query results; fixed in PR #490
+  (Issue #480, `static_columns_table` xfail removed).
+- `typed_collections_table` V5CompressedLegacy cell extraction returned 1 row
+  instead of 50; reader fallback added in PR #506 (Issue #481).
+- Static-row write path emitted incorrect flags; fixed in PR #509.
+
+### Known Issues
+
+- **Counter writes**: Counter columns cannot be written via CQLite. The `write()`
+  call returns `Error::InvalidOperation` with a descriptive message. Cassandra
+  requires distributed CAS semantics for counter increments.
+- **BTI writer**: The SSTable writer emits BIG format index files. BTI (trie)
+  format indexes are read-only for now.
+- **Python concurrent-query race** (Issue #311): Concurrent queries on the same
+  database handle may see a race in schema metadata access. Run one warm-up query
+  before spawning parallel threads.
+- **Open reader follow-ups**: set-element tombstone decoding (#493), schema-aware
+  tuple decoding (#501), frozen<udt> field decoding (#502).
 
 ## [0.4.0] - 2026-01-27 (M4 Complete)
 
@@ -104,7 +152,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - No external cluster dependencies required
 - Real Cassandra SSTable test data validation
 
-[Unreleased]: https://github.com/pmcfadin/cqlite/compare/v0.4.0...HEAD
+[v0.9.0]: https://github.com/pmcfadin/cqlite/compare/v0.4.0...v0.9.0
 [0.4.0]: https://github.com/pmcfadin/cqlite/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pmcfadin/cqlite/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/pmcfadin/cqlite/compare/v0.1.0...v0.2.0
