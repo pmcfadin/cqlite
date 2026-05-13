@@ -72,9 +72,7 @@ fn test_complete_compression_matrix() {
                         println!("  ✅ Corrupted CRC detection: PASS");
                         passed_tests += 1;
                     } else {
-                        println!(
-                            "  ❌ Corrupted CRC detection: FAIL - wrong error format: {e}"
-                        );
+                        println!("  ❌ Corrupted CRC detection: FAIL - wrong error format: {e}");
                     }
                 }
             }

@@ -413,9 +413,7 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
                 println!("✅ Found key '{}': {} bytes", key_str, value.len());
             }
             None => {
-                println!(
-                    "ℹ️  Key '{key_str}' not found (bloom passed, but not in data)"
-                );
+                println!("ℹ️  Key '{key_str}' not found (bloom passed, but not in data)");
             }
         }
     }
@@ -611,9 +609,7 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
     let test_scenarios = vec![
         (
             "sequential_access",
-            (1..=25)
-                .map(|i| format!("seq_{i:03}"))
-                .collect::<Vec<_>>(),
+            (1..=25).map(|i| format!("seq_{i:03}")).collect::<Vec<_>>(),
         ),
         (
             "random_access",

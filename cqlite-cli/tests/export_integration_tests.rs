@@ -502,9 +502,7 @@ fn test_export_row_count_matches_query() {
     let csv_content = fs::read_to_string(&csv_file).expect("Failed to read CSV");
     let csv_row_count = csv_content.lines().count().saturating_sub(1);
 
-    eprintln!(
-        "Row counts - Query: {query_row_count}, CSV: {csv_row_count}"
-    );
+    eprintln!("Row counts - Query: {query_row_count}, CSV: {csv_row_count}");
 
     assert_eq!(
         csv_row_count, query_row_count,
@@ -872,9 +870,7 @@ fn test_export_csv_json_row_count_matches() {
         serde_json::from_str(&json_content).expect("Should be valid JSON");
     let json_row_count = json_parsed.as_array().map(|a| a.len()).unwrap_or(0);
 
-    eprintln!(
-        "Cross-format row counts - CSV: {csv_row_count}, JSON: {json_row_count}"
-    );
+    eprintln!("Cross-format row counts - CSV: {csv_row_count}, JSON: {json_row_count}");
 
     assert_eq!(
         csv_row_count, json_row_count,
@@ -1039,9 +1035,7 @@ fn test_export_memory_efficiency() {
         peak_memory,
         peak_memory as f64 / (1024.0 * 1024.0)
     );
-    eprintln!(
-        "Memory delta: {memory_delta} bytes ({memory_delta_mb:.1} MB)"
-    );
+    eprintln!("Memory delta: {memory_delta} bytes ({memory_delta_mb:.1} MB)");
 
     // Memory target from CLAUDE.md: <128MB for large files
     const MEMORY_LIMIT_MB: f64 = 128.0;

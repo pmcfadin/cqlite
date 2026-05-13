@@ -87,9 +87,7 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
         lookup_duration.as_micros()
     );
 
-    println!(
-        "  ✅ Non-existent key properly handled in {lookup_duration:?}"
-    );
+    println!("  ✅ Non-existent key properly handled in {lookup_duration:?}");
 
     Ok(())
 }
@@ -267,9 +265,7 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
         }
     };
 
-    println!(
-        "🗜️  Testing decompression integration with: {data_source}"
-    );
+    println!("🗜️  Testing decompression integration with: {data_source}");
 
     let table_id = TableId::new("test_keyspace.test_table");
 
@@ -305,9 +301,7 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
         total_decompressed_bytes += value.len();
     }
 
-    println!(
-        "  📊 Total decompressed data: {total_decompressed_bytes} bytes"
-    );
+    println!("  📊 Total decompressed data: {total_decompressed_bytes} bytes");
 
     // Performance check: decompression should not be prohibitively slow
     // Note: health_metrics not available, performing generic performance check
@@ -369,9 +363,7 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
 
     let avg_stress_time =
         stress_times.iter().sum::<std::time::Duration>() / stress_times.len() as u32;
-    println!(
-        "  ✅ Stress test complete: average {avg_stress_time:?} per operation"
-    );
+    println!("  ✅ Stress test complete: average {avg_stress_time:?} per operation");
 
     // Performance assertion for sustained operations
     assert!(
@@ -422,9 +414,7 @@ async fn test_cross_operation_validation() -> Result<()> {
         }
     };
 
-    println!(
-        "🔄 Testing cross-operation validation with: {data_source}"
-    );
+    println!("🔄 Testing cross-operation validation with: {data_source}");
 
     let table_id = TableId::new("test_keyspace.test_table");
 

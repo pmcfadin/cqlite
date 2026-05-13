@@ -268,9 +268,7 @@ async fn test_golden_path_prefix_scan_operations() -> Result<()> {
         .await?;
     let scan_duration = start_time.elapsed();
 
-    println!(
-        "✅ Prefix scan for '{prefix}' completed in {scan_duration:?}"
-    );
+    println!("✅ Prefix scan for '{prefix}' completed in {scan_duration:?}");
     println!("✅ Prefix scan found {} matching entries", results.len());
 
     // All results should start with the prefix
@@ -508,9 +506,7 @@ async fn test_golden_path_concurrent_scan_operations() -> Result<()> {
         total_duration.as_millis()
     );
 
-    println!(
-        "✅ All concurrent scan operations completed in {total_duration:?}"
-    );
+    println!("✅ All concurrent scan operations completed in {total_duration:?}");
     Ok(())
 }
 

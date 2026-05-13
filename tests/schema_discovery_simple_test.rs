@@ -405,9 +405,7 @@ mod schema_discovery_tests {
                 suggested_indexes.push(format!("{column_name}_idx"));
             }
 
-            println!(
-                "Column: {column_name}, Type: {data_type}, Confidence: {confidence:.2}"
-            );
+            println!("Column: {column_name}, Type: {data_type}, Confidence: {confidence:.2}");
         }
 
         // Step 4: Generate CQL

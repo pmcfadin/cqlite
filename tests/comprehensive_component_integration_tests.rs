@@ -67,9 +67,7 @@ impl ComponentIntegrationTestFixture {
         if fs::metadata(&data_file).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!(
-                    "Minimal fixture not found: {data_file:?}. Fixture files missing."
-                ),
+                format!("Minimal fixture not found: {data_file:?}. Fixture files missing."),
             )));
         }
 

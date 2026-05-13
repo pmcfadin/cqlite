@@ -136,9 +136,7 @@ async fn test_golden_path_single_partition_lookup() -> Result<()> {
     let result = reader.get(&table_id, &partition_key).await?;
     let lookup_duration = start_time.elapsed();
 
-    println!(
-        "✅ Single partition lookup completed in {lookup_duration:?}"
-    );
+    println!("✅ Single partition lookup completed in {lookup_duration:?}");
 
     // Performance assertion: Partition lookups should be very fast
     assert!(
@@ -234,9 +232,7 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
         .await?;
     let scan_duration = start_time.elapsed();
 
-    println!(
-        "✅ Partition boundary scan completed in {scan_duration:?}"
-    );
+    println!("✅ Partition boundary scan completed in {scan_duration:?}");
     println!(
         "✅ Found {} entries across partition boundaries",
         results.len()
@@ -379,9 +375,7 @@ async fn test_golden_path_partition_bloom_filter_efficiency() -> Result<()> {
     let avg_bloom_time =
         bloom_test_times.iter().sum::<std::time::Duration>() / bloom_test_times.len() as u32;
 
-    println!(
-        "✅ Bloom filter efficiency test: average lookup time {avg_bloom_time:?}"
-    );
+    println!("✅ Bloom filter efficiency test: average lookup time {avg_bloom_time:?}");
     println!(
         "✅ All {} non-existent partition lookups were efficient",
         non_existent_partitions.len()
@@ -553,9 +547,7 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
         );
     }
 
-    println!(
-        "✅ Concurrent partition benchmark: 10 lookups in {concurrent_total:?}"
-    );
+    println!("✅ Concurrent partition benchmark: 10 lookups in {concurrent_total:?}");
 
     Ok(())
 }

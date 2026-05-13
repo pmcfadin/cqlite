@@ -24,9 +24,7 @@ pub fn generate_compression_test_matrix() -> Result<(), Box<dyn std::error::Erro
             let dir_path = test_data_dir.join(&dir_name);
             fs::create_dir_all(&dir_path)?;
 
-            println!(
-                "📦 Generating dataset: {algorithm} with {chunk_size} chunks"
-            );
+            println!("📦 Generating dataset: {algorithm} with {chunk_size} chunks");
 
             // Generate CQL commands to create test data
             let cql_script = format!(

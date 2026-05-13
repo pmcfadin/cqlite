@@ -147,9 +147,7 @@ async fn test_golden_path_simple_get_operation() -> Result<()> {
             assert!(!value.is_empty(), "Retrieved value should not be empty");
         }
         None => {
-            println!(
-                "ℹ️  No value found for key {test_key:?} (expected for test dataset)"
-            );
+            println!("ℹ️  No value found for key {test_key:?} (expected for test dataset)");
         }
     }
 
@@ -420,9 +418,7 @@ async fn test_golden_path_concurrent_get_operations() -> Result<()> {
         total_duration.as_millis()
     );
 
-    println!(
-        "✅ Concurrent get operations completed in {total_duration:?}"
-    );
+    println!("✅ Concurrent get operations completed in {total_duration:?}");
     Ok(())
 }
 

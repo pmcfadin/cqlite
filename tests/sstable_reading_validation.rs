@@ -121,11 +121,7 @@ async fn create_test_sstable_file(path: &Path, data: TestSSTableData) -> Result<
 
     file.write_all(format!("Table: {}\n", data.table).as_bytes())
         .await
-        .map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to write table: {e}"
-            )))
-        })?;
+        .map_err(|e| Error::Io(std::io::Error::other(format!("Failed to write table: {e}"))))?;
 
     // Write minimal data
     for row in &data.rows {
@@ -141,11 +137,9 @@ async fn create_test_sstable_file(path: &Path, data: TestSSTableData) -> Result<
         })?;
     }
 
-    file.flush().await.map_err(|e| {
-        Error::Io(std::io::Error::other(format!(
-            "Failed to flush file: {e}"
-        )))
-    })?;
+    file.flush()
+        .await
+        .map_err(|e| Error::Io(std::io::Error::other(format!("Failed to flush file: {e}"))))?;
 
     Ok(())
 }

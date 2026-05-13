@@ -56,16 +56,12 @@ fn test_ci_crc_corruption_detection() {
 
     match result {
         Err(Error::InvalidFormat(msg)) if msg.contains("CRC mismatch for chunk 0") => {
-            println!(
-                "✅ CI Test PASSED: CRC corruption detected with expected error: {msg}"
-            );
+            println!("✅ CI Test PASSED: CRC corruption detected with expected error: {msg}");
             assert!(msg.contains("expected: 0xDEADBEEF"));
             assert!(msg.contains("actual:"));
         }
         Err(other_error) => {
-            panic!(
-                "❌ CI Test FAILED: Expected CRC validation error, got: {other_error:?}"
-            );
+            panic!("❌ CI Test FAILED: Expected CRC validation error, got: {other_error:?}");
         }
         Ok(_) => {
             panic!("❌ CI Test FAILED: Expected CRC validation to fail, but it succeeded");

@@ -32,9 +32,7 @@ fn test_chunked_reader_lz4_direct() {
 
     // Skip if test data not available
     if !ci_path.exists() || !data_path.exists() {
-        println!(
-            "⚠️  LZ4 test data not available at {table_dir:?} - skipping"
-        );
+        println!("⚠️  LZ4 test data not available at {table_dir:?} - skipping");
         return;
     }
 
@@ -99,9 +97,7 @@ fn test_chunked_reader_snappy_direct() {
     let data_path = table_dir.join("nb-1-big-Data.db");
 
     if !ci_path.exists() || !data_path.exists() {
-        println!(
-            "⚠️  Snappy test data not available at {table_dir:?} - skipping"
-        );
+        println!("⚠️  Snappy test data not available at {table_dir:?} - skipping");
         return;
     }
 
