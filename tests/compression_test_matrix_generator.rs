@@ -24,10 +24,7 @@ pub fn generate_compression_test_matrix() -> Result<(), Box<dyn std::error::Erro
             let dir_path = test_data_dir.join(&dir_name);
             fs::create_dir_all(&dir_path)?;
 
-            println!(
-                "📦 Generating dataset: {} with {} chunks",
-                algorithm, chunk_size
-            );
+            println!("📦 Generating dataset: {algorithm} with {chunk_size} chunks");
 
             // Generate CQL commands to create test data
             let cql_script = format!(
@@ -86,7 +83,7 @@ fn generate_corruption_test(
     let mut compression_info_data = Vec::new();
 
     // Algorithm name
-    let algorithm_name = format!("{}Compressor", algorithm);
+    let algorithm_name = format!("{algorithm}Compressor");
     compression_info_data.extend_from_slice(&(algorithm_name.len() as u16).to_be_bytes());
     compression_info_data.extend_from_slice(algorithm_name.as_bytes());
 
@@ -153,7 +150,7 @@ pub fn run_compression_validation_tests() -> Result<(), Box<dyn std::error::Erro
 
         if path.is_dir() {
             let dir_name = path.file_name().unwrap().to_str().unwrap();
-            print!("Testing {}: ", dir_name);
+            print!("Testing {dir_name}: ");
 
             // Check for corrupted file
             let corruption_test = path.join("corrupted-CompressionInfo.db");
@@ -169,7 +166,7 @@ pub fn run_compression_validation_tests() -> Result<(), Box<dyn std::error::Erro
                         passed += 1;
                     }
                     Err(e) => {
-                        println!("⚠️  FAILED - Wrong error: {}", e);
+                        println!("⚠️  FAILED - Wrong error: {e}");
                         failed += 1;
                     }
                 }
@@ -178,12 +175,12 @@ pub fn run_compression_validation_tests() -> Result<(), Box<dyn std::error::Erro
     }
 
     println!("\n📊 Test Results:");
-    println!("  ✅ Passed: {}", passed);
-    println!("  ❌ Failed: {}", failed);
+    println!("  ✅ Passed: {passed}");
+    println!("  ❌ Failed: {failed}");
     println!("  📈 Total:  {}", passed + failed);
 
     if failed > 0 {
-        Err(format!("{} tests failed", failed).into())
+        Err(format!("{failed} tests failed").into())
     } else {
         Ok(())
     }
@@ -231,14 +228,13 @@ mod tests {
 
         for dir_name in expected_dirs {
             let dir_path = test_data_dir.join(dir_name);
-            assert!(dir_path.exists(), "Missing directory: {}", dir_name);
+            assert!(dir_path.exists(), "Missing directory: {dir_name}");
 
             // Check for corruption test file
             let corruption_file = dir_path.join("corrupted-CompressionInfo.db");
             assert!(
                 corruption_file.exists(),
-                "Missing corruption test in {}",
-                dir_name
+                "Missing corruption test in {dir_name}"
             );
         }
     }

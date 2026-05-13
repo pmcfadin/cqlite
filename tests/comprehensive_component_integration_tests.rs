@@ -67,10 +67,7 @@ impl ComponentIntegrationTestFixture {
         if fs::metadata(&data_file).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!(
-                    "Minimal fixture not found: {:?}. Fixture files missing.",
-                    data_file
-                ),
+                format!("Minimal fixture not found: {data_file:?}. Fixture files missing."),
             )));
         }
 
@@ -87,8 +84,7 @@ impl ComponentIntegrationTestFixture {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
-                    "Real dataset not found: {:?}. Please ensure test-data is available.",
-                    fallback_path
+                    "Real dataset not found: {fallback_path:?}. Please ensure test-data is available."
                 ),
             )));
         }
@@ -423,7 +419,7 @@ async fn test_decompression_component_integration() -> Result<()> {
         }
     }
 
-    println!("  📊 Total decompressed data: {} bytes", total_value_size);
+    println!("  📊 Total decompressed data: {total_value_size} bytes");
 
     // Test 4: Test specific partition lookup through decompression
     let test_key = RowKey::from(&1i32.to_be_bytes()[..]);
@@ -512,9 +508,9 @@ async fn test_end_to_end_component_integration() -> Result<()> {
         }
 
         let duration = start_time.elapsed();
-        operation_times.insert(format!("{}_{}", op_type, op_variant), duration);
+        operation_times.insert(format!("{op_type}_{op_variant}"), duration);
 
-        println!("  ✅ {} {}: {:?}", op_type, op_variant, duration);
+        println!("  ✅ {op_type} {op_variant}: {duration:?}");
     }
 
     // Test 3: Performance validation across all operations
@@ -606,7 +602,7 @@ async fn test_component_integration_error_handling() -> Result<()> {
                 );
             }
             Err(e) => {
-                println!("  ✅ Edge case {}: handled error: {}", case_name, e);
+                println!("  ✅ Edge case {case_name}: handled error: {e}");
             }
         }
     }
@@ -636,7 +632,7 @@ async fn test_component_integration_error_handling() -> Result<()> {
                 }
             }
             Err(e) => {
-                println!("  ✅ Invalid scan {}: handled error: {}", case_name, e);
+                println!("  ✅ Invalid scan {case_name}: handled error: {e}");
             }
         }
     }

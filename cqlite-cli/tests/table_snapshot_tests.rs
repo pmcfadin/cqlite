@@ -64,8 +64,7 @@ fn test_table_output_snapshot() -> Result<()> {
     // Assert test data is available
     assert!(
         data_dir.exists() && schema_file.exists(),
-        "Test requires full SSTable dataset: test data not found at {:?}",
-        data_dir
+        "Test requires full SSTable dataset: test data not found at {data_dir:?}"
     );
 
     let output = run_cli_command(&[
@@ -104,8 +103,7 @@ fn test_json_output_deterministic() -> Result<()> {
     // Assert test data is available
     assert!(
         data_dir.exists() && schema_file.exists(),
-        "Test requires full SSTable dataset: test data not found at {:?}",
-        data_dir
+        "Test requires full SSTable dataset: test data not found at {data_dir:?}"
     );
 
     // Run the same query twice to ensure deterministic output
@@ -162,8 +160,7 @@ fn test_csv_output_snapshot() -> Result<()> {
     // Assert test data is available
     assert!(
         data_dir.exists() && schema_file.exists(),
-        "Test requires full SSTable dataset: test data not found at {:?}",
-        data_dir
+        "Test requires full SSTable dataset: test data not found at {data_dir:?}"
     );
 
     let output = run_cli_command(&[
@@ -201,8 +198,7 @@ fn test_collections_table_output_snapshot() -> Result<()> {
     // Assert test data is available
     assert!(
         data_dir.exists() && schema_file.exists(),
-        "Test requires full SSTable dataset: test data not found at {:?}",
-        data_dir
+        "Test requires full SSTable dataset: test data not found at {data_dir:?}"
     );
 
     let output = run_cli_command(&[
@@ -240,8 +236,7 @@ fn test_wide_rows_output_snapshot() -> Result<()> {
     // Assert test data is available
     assert!(
         data_dir.exists() && schema_file.exists(),
-        "Test requires full SSTable dataset: test data not found at {:?}",
-        data_dir
+        "Test requires full SSTable dataset: test data not found at {data_dir:?}"
     );
 
     let output = run_cli_command(&[

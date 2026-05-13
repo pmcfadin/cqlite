@@ -205,7 +205,7 @@ mod schema_discovery_tests {
         assert!(cql.contains("PRIMARY KEY (id)"));
 
         println!("✅ CQL generation tests passed");
-        println!("Generated CQL:\n{}", cql);
+        println!("Generated CQL:\n{cql}");
     }
 
     #[test]
@@ -252,8 +252,7 @@ mod schema_discovery_tests {
 
             assert_eq!(
                 is_udt, expected_is_udt,
-                "UDT detection failed for: {}",
-                type_str
+                "UDT detection failed for: {type_str}"
             );
         }
 
@@ -310,8 +309,7 @@ mod schema_discovery_tests {
 
             assert_eq!(
                 detected_kind, expected_kind,
-                "Collection parsing failed for: {}",
-                type_str
+                "Collection parsing failed for: {type_str}"
             );
         }
 
@@ -340,8 +338,7 @@ mod schema_discovery_tests {
 
             assert_eq!(
                 suggested, should_suggest_index,
-                "Index suggestion failed for: {}",
-                column_name
+                "Index suggestion failed for: {column_name}"
             );
         }
 
@@ -447,6 +444,6 @@ mod schema_discovery_tests {
         assert!(cql.contains("PRIMARY KEY"));
 
         println!("✅ Integration workflow test passed");
-        println!("Final CQL:\n{}", cql);
+        println!("Final CQL:\n{cql}");
     }
 }

@@ -76,8 +76,7 @@ impl GoldenPathPartitionTestFixture {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
-                    "Test SSTable not found: {:?}. Please ensure test-data is available.",
-                    fallback_path
+                    "Test SSTable not found: {fallback_path:?}. Please ensure test-data is available."
                 ),
             )));
         }
@@ -94,7 +93,7 @@ impl GoldenPathPartitionTestFixture {
         if fs::metadata(&fallback_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Test SSTable not found: {:?}", fallback_path),
+                format!("Test SSTable not found: {fallback_path:?}"),
             )));
         }
 
@@ -117,7 +116,7 @@ impl GoldenPathPartitionTestFixture {
     fn create_test_partition_keys(&self) -> Vec<RowKey> {
         (1..=20)
             .map(|i| {
-                let partition_data = format!("partition_{:03}", i);
+                let partition_data = format!("partition_{i:03}");
                 RowKey::from(partition_data.as_bytes())
             })
             .collect()
@@ -137,10 +136,7 @@ async fn test_golden_path_single_partition_lookup() -> Result<()> {
     let result = reader.get(&table_id, &partition_key).await?;
     let lookup_duration = start_time.elapsed();
 
-    println!(
-        "✅ Single partition lookup completed in {:?}",
-        lookup_duration
-    );
+    println!("✅ Single partition lookup completed in {lookup_duration:?}");
 
     // Performance assertion: Partition lookups should be very fast
     assert!(
@@ -201,7 +197,7 @@ async fn test_golden_path_multi_partition_scanning() -> Result<()> {
         found_partitions,
         partition_keys.len()
     );
-    println!("✅ Average partition lookup time: {:?}", avg_lookup_time);
+    println!("✅ Average partition lookup time: {avg_lookup_time:?}");
 
     // Performance assertion for batch lookups
     assert!(
@@ -236,10 +232,7 @@ async fn test_golden_path_partition_boundary_scanning() -> Result<()> {
         .await?;
     let scan_duration = start_time.elapsed();
 
-    println!(
-        "✅ Partition boundary scan completed in {:?}",
-        scan_duration
-    );
+    println!("✅ Partition boundary scan completed in {scan_duration:?}");
     println!(
         "✅ Found {} entries across partition boundaries",
         results.len()
@@ -307,8 +300,8 @@ async fn test_golden_path_clustering_key_operations() -> Result<()> {
     }
 
     // Test: Range scan within partition using clustering key boundaries
-    let partition_start = RowKey::from(format!("{}:cluster_000", base_partition).as_bytes());
-    let partition_end = RowKey::from(format!("{}:cluster_999", base_partition).as_bytes());
+    let partition_start = RowKey::from(format!("{base_partition}:cluster_000").as_bytes());
+    let partition_end = RowKey::from(format!("{base_partition}:cluster_999").as_bytes());
 
     let start_time = Instant::now();
     let range_results = reader
@@ -367,8 +360,7 @@ async fn test_golden_path_partition_bloom_filter_efficiency() -> Result<()> {
         // Should be None for non-existent partitions
         assert!(
             result.is_none(),
-            "Non-existent partition should return None: {}",
-            partition_name
+            "Non-existent partition should return None: {partition_name}"
         );
 
         // Bloom filter should make this very fast
@@ -383,10 +375,7 @@ async fn test_golden_path_partition_bloom_filter_efficiency() -> Result<()> {
     let avg_bloom_time =
         bloom_test_times.iter().sum::<std::time::Duration>() / bloom_test_times.len() as u32;
 
-    println!(
-        "✅ Bloom filter efficiency test: average lookup time {:?}",
-        avg_bloom_time
-    );
+    println!("✅ Bloom filter efficiency test: average lookup time {avg_bloom_time:?}");
     println!(
         "✅ All {} non-existent partition lookups were efficient",
         non_existent_partitions.len()
@@ -442,7 +431,7 @@ async fn test_golden_path_partition_summary_integration() -> Result<()> {
                 );
             }
             None => {
-                println!("ℹ️  Partition {} not found (expected)", partition_name);
+                println!("ℹ️  Partition {partition_name} not found (expected)");
             }
         }
     }
@@ -488,7 +477,7 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
 
     // Benchmark: Batch partition lookups
     let partition_keys = (1..=50)
-        .map(|i| RowKey::from(format!("benchmark_partition_{:03}", i).as_bytes()))
+        .map(|i| RowKey::from(format!("benchmark_partition_{i:03}").as_bytes()))
         .collect::<Vec<_>>();
 
     let start_time = Instant::now();
@@ -530,7 +519,7 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
             let reader = Arc::clone(&reader);
             let table_id = table_id.clone();
             tokio::spawn(async move {
-                let key = RowKey::from(format!("concurrent_partition_{}", i).as_bytes());
+                let key = RowKey::from(format!("concurrent_partition_{i}").as_bytes());
                 let start_time = Instant::now();
                 let result = reader.get(&table_id, &key).await;
                 let duration = start_time.elapsed();
@@ -546,7 +535,7 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
     // Verify concurrent operations
     for handle_result in concurrent_results {
         let (id, lookup_result, duration) =
-            handle_result.map_err(|e| Error::internal(format!("Task failed: {}", e)))?;
+            handle_result.map_err(|e| Error::internal(format!("Task failed: {e}")))?;
 
         lookup_result?; // Verify no errors
 
@@ -558,10 +547,7 @@ async fn test_golden_path_partition_performance_benchmarks() -> Result<()> {
         );
     }
 
-    println!(
-        "✅ Concurrent partition benchmark: 10 lookups in {:?}",
-        concurrent_total
-    );
+    println!("✅ Concurrent partition benchmark: 10 lookups in {concurrent_total:?}");
 
     Ok(())
 }

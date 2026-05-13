@@ -242,7 +242,7 @@ impl MemorySafetyRunner {
         // Always run basic stress tests
         test_count += 1;
         if let Err(e) = self.run_stress_tests() {
-            println!("Stress tests failed: {}", e);
+            println!("Stress tests failed: {e}");
         } else {
             passed_count += 1;
         }
@@ -251,7 +251,7 @@ impl MemorySafetyRunner {
         if self.miri_available {
             test_count += 1;
             if let Err(e) = self.run_miri_tests() {
-                println!("Miri tests failed: {}", e);
+                println!("Miri tests failed: {e}");
             } else {
                 passed_count += 1;
             }
@@ -263,7 +263,7 @@ impl MemorySafetyRunner {
         if self.valgrind_available {
             test_count += 1;
             if let Err(e) = self.run_valgrind_tests() {
-                println!("Valgrind tests failed: {}", e);
+                println!("Valgrind tests failed: {e}");
             } else {
                 passed_count += 1;
             }
@@ -275,7 +275,7 @@ impl MemorySafetyRunner {
         if self.asan_available {
             test_count += 1;
             if let Err(e) = self.run_asan_tests() {
-                println!("AddressSanitizer tests failed: {}", e);
+                println!("AddressSanitizer tests failed: {e}");
             } else {
                 passed_count += 1;
             }
@@ -284,8 +284,8 @@ impl MemorySafetyRunner {
         }
 
         println!("\n=== Memory Safety Test Summary ===");
-        println!("Tests run: {}", test_count);
-        println!("Tests passed: {}", passed_count);
+        println!("Tests run: {test_count}");
+        println!("Tests passed: {passed_count}");
         println!("Tests failed: {}", test_count - passed_count);
 
         if passed_count == test_count {

@@ -106,8 +106,7 @@ fn assert_string_order(haystack: &str, needles: &[&str], context: &str) {
     for (i, needle) in needles.iter().enumerate() {
         let pos = haystack.find(needle).unwrap_or_else(|| {
             panic!(
-                "{}: Expected to find '{}' in output, but it's missing. Full output:\n{}",
-                context, needle, haystack
+                "{context}: Expected to find '{needle}' in output, but it's missing. Full output:\n{haystack}"
             )
         });
 
@@ -197,15 +196,11 @@ fn test_json_key_position_in_string_matches_column_order() {
 
     assert!(
         zebra_pos < apple_pos,
-        "Key 'zebra' at position {} must appear before 'apple' at position {}",
-        zebra_pos,
-        apple_pos
+        "Key 'zebra' at position {zebra_pos} must appear before 'apple' at position {apple_pos}"
     );
     assert!(
         apple_pos < mango_pos,
-        "Key 'apple' at position {} must appear before 'mango' at position {}",
-        apple_pos,
-        mango_pos
+        "Key 'apple' at position {apple_pos} must appear before 'mango' at position {mango_pos}"
     );
 }
 
@@ -293,8 +288,7 @@ fn test_json_ordering_independent_of_hashmap_insertion() {
         assert_eq!(
             keys,
             vec!["third", "first", "second"],
-            "Row {} must have keys in metadata order [third, first, second] regardless of HashMap insertion order",
-            idx
+            "Row {idx} must have keys in metadata order [third, first, second] regardless of HashMap insertion order"
         );
     }
 }
@@ -340,8 +334,7 @@ fn test_json_multiple_rows_maintain_consistent_ordering() {
         assert_eq!(
             keys,
             vec!["col_c", "col_a", "col_b"],
-            "Row {} key order must match metadata.columns",
-            idx
+            "Row {idx} key order must match metadata.columns"
         );
     }
 }
@@ -383,8 +376,7 @@ fn test_json_ordering_with_null_and_missing_values() {
         assert_eq!(
             keys,
             vec!["z_col", "a_col", "m_col"],
-            "Row {} must maintain column order even with null/missing values",
-            idx
+            "Row {idx} must maintain column order even with null/missing values"
         );
     }
 
@@ -675,8 +667,7 @@ fn test_csv_multiple_rows_consistent_column_positions() {
     for (idx, expected) in [(1, "1,2,3"), (2, "4,5,6"), (3, "7,8,9")].iter() {
         assert_eq!(
             lines[*idx], *expected,
-            "Row {} values must be in zebra,apple,mango order",
-            idx
+            "Row {idx} values must be in zebra,apple,mango order"
         );
     }
 }

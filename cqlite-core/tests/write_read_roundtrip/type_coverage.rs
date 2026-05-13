@@ -1225,7 +1225,7 @@ async fn test_types_multiple_rows() {
 
     // Write multiple partitions with all types
     for i in 0..10 {
-        let mutation = create_comprehensive_mutation(i, &format!("row_{}", i), 1000000 + i as i64);
+        let mutation = create_comprehensive_mutation(i, &format!("row_{i}"), 1000000 + i as i64);
         engine
             .write_async(mutation)
             .await

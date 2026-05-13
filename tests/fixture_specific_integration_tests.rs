@@ -59,7 +59,7 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
             } else if let Some(bytes) = value.as_bytes() {
                 println!("  📋 Found value: {:?}", String::from_utf8_lossy(bytes));
             } else {
-                println!("  📋 Found value: {:?}", value);
+                println!("  📋 Found value: {value:?}");
             }
 
             // Performance check
@@ -87,10 +87,7 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
         lookup_duration.as_micros()
     );
 
-    println!(
-        "  ✅ Non-existent key properly handled in {:?}",
-        lookup_duration
-    );
+    println!("  ✅ Non-existent key properly handled in {lookup_duration:?}");
 
     Ok(())
 }
@@ -124,7 +121,7 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
 
     let table_id = TableId::new("test_keyspace.test_table");
 
-    println!("🔍 Testing range scan integration with {}: ", data_source);
+    println!("🔍 Testing range scan integration with {data_source}: ");
 
     // Test 1: Full table scan
     let start_time = Instant::now();
@@ -268,10 +265,7 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
         }
     };
 
-    println!(
-        "🗜️  Testing decompression integration with: {}",
-        data_source
-    );
+    println!("🗜️  Testing decompression integration with: {data_source}");
 
     let table_id = TableId::new("test_keyspace.test_table");
 
@@ -307,10 +301,7 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
         total_decompressed_bytes += value.len();
     }
 
-    println!(
-        "  📊 Total decompressed data: {} bytes",
-        total_decompressed_bytes
-    );
+    println!("  📊 Total decompressed data: {total_decompressed_bytes} bytes");
 
     // Performance check: decompression should not be prohibitively slow
     // Note: health_metrics not available, performing generic performance check
@@ -372,10 +363,7 @@ async fn test_decompression_integration_with_real_data() -> Result<()> {
 
     let avg_stress_time =
         stress_times.iter().sum::<std::time::Duration>() / stress_times.len() as u32;
-    println!(
-        "  ✅ Stress test complete: average {:?} per operation",
-        avg_stress_time
-    );
+    println!("  ✅ Stress test complete: average {avg_stress_time:?} per operation");
 
     // Performance assertion for sustained operations
     assert!(
@@ -426,10 +414,7 @@ async fn test_cross_operation_validation() -> Result<()> {
         }
     };
 
-    println!(
-        "🔄 Testing cross-operation validation with: {}",
-        data_source
-    );
+    println!("🔄 Testing cross-operation validation with: {data_source}");
 
     let table_id = TableId::new("test_keyspace.test_table");
 
@@ -453,13 +438,12 @@ async fn test_cross_operation_validation() -> Result<()> {
             Some(get_value) => {
                 assert_eq!(
                     get_value, *scan_value,
-                    "Get and scan should return identical values for key {:?}",
-                    scan_key
+                    "Get and scan should return identical values for key {scan_key:?}"
                 );
                 validated_count += 1;
             }
             None => {
-                println!("  ⚠️  Key from scan not found in get: {:?}", scan_key);
+                println!("  ⚠️  Key from scan not found in get: {scan_key:?}");
             }
         }
     }
@@ -486,7 +470,7 @@ async fn test_cross_operation_validation() -> Result<()> {
                 .any(|(range_key, range_value)| range_key == scan_key && range_value == scan_value);
 
             if !found_in_range {
-                println!("  ⚠️  Scan entry not found in range scan: {:?}", scan_key);
+                println!("  ⚠️  Scan entry not found in range scan: {scan_key:?}");
             }
         }
 
@@ -504,7 +488,7 @@ async fn test_cross_operation_validation() -> Result<()> {
         let _result = reader.get(&table_id, key).await?;
         let duration = start_time.elapsed();
 
-        println!("  📊 {}: {:?}", test_name, duration);
+        println!("  📊 {test_name}: {duration:?}");
 
         assert!(
             duration.as_millis() < 50,

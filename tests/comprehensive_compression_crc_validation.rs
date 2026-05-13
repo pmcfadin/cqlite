@@ -30,7 +30,7 @@ fn test_complete_compression_matrix() {
         for &chunk_size in &chunk_sizes {
             total_tests += 1;
 
-            println!("🧪 Testing {} with {} byte chunks", algorithm, chunk_size);
+            println!("🧪 Testing {algorithm} with {chunk_size} byte chunks");
 
             // Create valid compression info
             let compression_info = create_valid_compression_info(algorithm, chunk_size);
@@ -53,7 +53,7 @@ fn test_complete_compression_matrix() {
                         );
                         passed_tests += 1;
                     } else {
-                        println!("  ❌ Valid CRC processing: FAIL - {}", e);
+                        println!("  ❌ Valid CRC processing: FAIL - {e}");
                     }
                 }
             }
@@ -72,10 +72,7 @@ fn test_complete_compression_matrix() {
                         println!("  ✅ Corrupted CRC detection: PASS");
                         passed_tests += 1;
                     } else {
-                        println!(
-                            "  ❌ Corrupted CRC detection: FAIL - wrong error format: {}",
-                            e
-                        );
+                        println!("  ❌ Corrupted CRC detection: FAIL - wrong error format: {e}");
                     }
                 }
             }
@@ -85,7 +82,7 @@ fn test_complete_compression_matrix() {
     }
 
     println!("\n📊 Test Matrix Results:");
-    println!("  ✅ Passed: {}/{}", passed_tests, total_tests);
+    println!("  ✅ Passed: {passed_tests}/{total_tests}");
     println!(
         "  ❌ Failed: {}/{}",
         total_tests - passed_tests,
@@ -127,7 +124,7 @@ fn test_missing_crc_requirement_for_modern_format() {
     assert!(error_msg.contains("chunk 0"));
     assert!(error_msg.contains("offset 0x0"));
 
-    println!("✅ Missing CRC requirement test passed: {}", error_msg);
+    println!("✅ Missing CRC requirement test passed: {error_msg}");
 }
 
 /// Test that no decompression guessing occurs in modern paths
@@ -218,7 +215,7 @@ fn test_ci_matrix_integration() {
                             ));
                         }
                         Err(e) => {
-                            results.push((test_name, false, format!("Wrong error: {}", e)));
+                            results.push((test_name, false, format!("Wrong error: {e}")));
                         }
                     }
                 }
@@ -226,7 +223,7 @@ fn test_ci_matrix_integration() {
                     results.push((
                         test_name,
                         false,
-                        format!("Decompressor creation failed: {}", e),
+                        format!("Decompressor creation failed: {e}"),
                     ));
                 }
             }
@@ -239,7 +236,7 @@ fn test_ci_matrix_integration() {
 
     for (test_name, passed, message) in &results {
         let status = if *passed { "✅ PASS" } else { "❌ FAIL" };
-        println!("  {}: {} - {}", test_name, status, message);
+        println!("  {test_name}: {status} - {message}");
 
         if !passed {
             all_passed = false;

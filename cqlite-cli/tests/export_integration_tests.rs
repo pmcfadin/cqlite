@@ -94,9 +94,7 @@ fn assert_test_data_available() -> (PathBuf, PathBuf) {
 
     assert!(
         data_dir.exists() && schema_file.exists(),
-        "Test requires full SSTable dataset. \n        Set CQLITE_DATASETS_ROOT or run: bash test-data/scripts/fetch-datasets.sh\n        data_dir={:?}, schema_file={:?}",
-        data_dir,
-        schema_file
+        "Test requires full SSTable dataset. \n        Set CQLITE_DATASETS_ROOT or run: bash test-data/scripts/fetch-datasets.sh\n        data_dir={data_dir:?}, schema_file={schema_file:?}"
     );
 
     (data_dir, schema_file)
@@ -148,8 +146,7 @@ fn test_export_csv_basic_types() {
     let header = lines[0];
     assert!(
         header.contains("id") || header.contains("name"),
-        "CSV header should contain column names: {}",
-        header
+        "CSV header should contain column names: {header}"
     );
 }
 
@@ -396,11 +393,10 @@ fn test_export_parquet_schema_matches() {
     // simple_table should have 'id' column at minimum
     assert!(
         column_names.contains(&"id"),
-        "Parquet schema should contain 'id' column. Found: {:?}",
-        column_names
+        "Parquet schema should contain 'id' column. Found: {column_names:?}"
     );
 
-    eprintln!("Parquet columns: {:?}", column_names);
+    eprintln!("Parquet columns: {column_names:?}");
 }
 
 // ============================================================================
@@ -446,7 +442,7 @@ fn test_export_with_query_filter() {
 
     // Should have header + at least some data rows
     assert!(line_count >= 1, "CSV should have at least a header row");
-    eprintln!("Filtered CSV rows (including header): {}", line_count);
+    eprintln!("Filtered CSV rows (including header): {line_count}");
 }
 
 #[test]
@@ -506,10 +502,7 @@ fn test_export_row_count_matches_query() {
     let csv_content = fs::read_to_string(&csv_file).expect("Failed to read CSV");
     let csv_row_count = csv_content.lines().count().saturating_sub(1);
 
-    eprintln!(
-        "Row counts - Query: {}, CSV: {}",
-        query_row_count, csv_row_count
-    );
+    eprintln!("Row counts - Query: {query_row_count}, CSV: {csv_row_count}");
 
     assert_eq!(
         csv_row_count, query_row_count,
@@ -559,11 +552,10 @@ fn test_export_with_limit() {
     let data_row_count = lines.len().saturating_sub(1); // Subtract header
     assert_eq!(
         data_row_count, LIMIT,
-        "CSV should have exactly {} data rows (got {}). Full content:\n{}",
-        LIMIT, data_row_count, csv_content
+        "CSV should have exactly {LIMIT} data rows (got {data_row_count}). Full content:\n{csv_content}"
     );
 
-    eprintln!("Limit test passed: {} rows exported as expected", LIMIT);
+    eprintln!("Limit test passed: {LIMIT} rows exported as expected");
 }
 
 // ============================================================================
@@ -610,8 +602,7 @@ fn test_export_csv_deterministic() {
     let data_row_count = lines.len() - 1;
     assert!(
         data_row_count > 0,
-        "Should have at least one data row, got {}",
-        data_row_count
+        "Should have at least one data row, got {data_row_count}"
     );
 
     eprintln!(
@@ -709,8 +700,7 @@ fn test_export_nonexistent_table_behavior() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("column") || stderr.contains("Could not determine"),
-        "Should indicate column metadata issue: {}",
-        stderr
+        "Should indicate column metadata issue: {stderr}"
     );
 
     // Since the command fails, output file should not exist
@@ -752,8 +742,7 @@ fn test_export_invalid_format_error() {
         stderr.to_lowercase().contains("format")
             || stderr.contains("invalid")
             || stderr.contains("possible values"),
-        "Error message should indicate format issue: {}",
-        stderr
+        "Error message should indicate format issue: {stderr}"
     );
 }
 
@@ -787,8 +776,7 @@ fn test_export_missing_table_arg_error() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("--table") || stderr.contains("required") || stderr.contains("table"),
-        "Error message should indicate missing table argument: {}",
-        stderr
+        "Error message should indicate missing table argument: {stderr}"
     );
 }
 
@@ -826,8 +814,7 @@ fn test_export_nonexistent_output_dir_error() {
             || stderr.to_lowercase().contains("path")
             || stderr.to_lowercase().contains("permission")
             || stderr.to_lowercase().contains("no such file"),
-        "Error message should indicate path/directory issue: {}",
-        stderr
+        "Error message should indicate path/directory issue: {stderr}"
     );
 }
 
@@ -883,10 +870,7 @@ fn test_export_csv_json_row_count_matches() {
         serde_json::from_str(&json_content).expect("Should be valid JSON");
     let json_row_count = json_parsed.as_array().map(|a| a.len()).unwrap_or(0);
 
-    eprintln!(
-        "Cross-format row counts - CSV: {}, JSON: {}",
-        csv_row_count, json_row_count
-    );
+    eprintln!("Cross-format row counts - CSV: {csv_row_count}, JSON: {json_row_count}");
 
     assert_eq!(
         csv_row_count, json_row_count,
@@ -945,13 +929,12 @@ async fn test_export_sstable_to_parquet() {
 
     assert!(
         sstable_file.exists(),
-        "Test requires SSTable file: {:?}",
-        sstable_file
+        "Test requires SSTable file: {sstable_file:?}"
     );
 
-    eprintln!("Using SSTable: {:?}", sstable_file);
-    eprintln!("Using schema: {:?}", schema_file);
-    eprintln!("Output file: {:?}", output_file);
+    eprintln!("Using SSTable: {sstable_file:?}");
+    eprintln!("Using schema: {schema_file:?}");
+    eprintln!("Output file: {output_file:?}");
 
     // Call the library function directly
     let result = export_sstable(
@@ -1052,22 +1035,16 @@ fn test_export_memory_efficiency() {
         peak_memory,
         peak_memory as f64 / (1024.0 * 1024.0)
     );
-    eprintln!(
-        "Memory delta: {} bytes ({:.1} MB)",
-        memory_delta, memory_delta_mb
-    );
+    eprintln!("Memory delta: {memory_delta} bytes ({memory_delta_mb:.1} MB)");
 
     // Memory target from CLAUDE.md: <128MB for large files
     const MEMORY_LIMIT_MB: f64 = 128.0;
     assert!(
         memory_delta_mb < MEMORY_LIMIT_MB,
-        "Export memory usage ({:.1} MB) should stay under {} MB limit",
-        memory_delta_mb,
-        MEMORY_LIMIT_MB
+        "Export memory usage ({memory_delta_mb:.1} MB) should stay under {MEMORY_LIMIT_MB} MB limit"
     );
 
     eprintln!(
-        "Memory efficiency test passed: {:.1} MB < {} MB limit",
-        memory_delta_mb, MEMORY_LIMIT_MB
+        "Memory efficiency test passed: {memory_delta_mb:.1} MB < {MEMORY_LIMIT_MB} MB limit"
     );
 }

@@ -50,14 +50,14 @@ fn demonstrate_basic_select() {
     for cql in queries {
         match parse_select(cql) {
             Ok(statement) => {
-                log::info!("OK {}", cql);
+                log::info!("OK {cql}");
                 log::info!("   -> Parsed successfully!");
                 if statement.requires_aggregation() {
                     log::info!("   -> Requires aggregation");
                 }
             }
             Err(e) => {
-                log::info!("ERR {}: {}", cql, e);
+                log::info!("ERR {cql}: {e}");
             }
         }
     }
@@ -81,7 +81,7 @@ fn demonstrate_complex_where() {
     for cql in queries {
         match parse_select(cql) {
             Ok(statement) => {
-                log::info!("OK {}", cql);
+                log::info!("OK {cql}");
                 if let Some(where_clause) = &statement.where_clause {
                     log::info!(
                         "   -> WHERE clause can be pushed to SSTable: {}",
@@ -90,7 +90,7 @@ fn demonstrate_complex_where() {
                 }
             }
             Err(e) => {
-                log::info!("ERR {}: {}", cql, e);
+                log::info!("ERR {cql}: {e}");
             }
         }
     }
@@ -113,7 +113,7 @@ fn demonstrate_aggregation() {
     for cql in queries {
         match parse_select(cql) {
             Ok(statement) => {
-                log::info!("OK {}", cql);
+                log::info!("OK {cql}");
                 log::info!(
                     "   -> Requires aggregation: {}",
                     statement.requires_aggregation()
@@ -130,7 +130,7 @@ fn demonstrate_aggregation() {
                 }
             }
             Err(e) => {
-                log::info!("ERR {}: {}", cql, e);
+                log::info!("ERR {cql}: {e}");
             }
         }
     }
@@ -152,12 +152,12 @@ fn demonstrate_collections() {
     for cql in queries {
         match parse_select(cql) {
             Ok(statement) => {
-                log::info!("OK {}", cql);
+                log::info!("OK {cql}");
                 let column_refs = statement.get_referenced_columns();
                 log::info!("   -> Referenced columns: {}", column_refs.len());
             }
             Err(e) => {
-                log::info!("ERR {}: {}", cql, e);
+                log::info!("ERR {cql}: {e}");
             }
         }
     }
@@ -179,7 +179,7 @@ fn demonstrate_advanced_features() {
     for cql in queries {
         match parse_select(cql) {
             Ok(statement) => {
-                log::info!("OK {}", cql);
+                log::info!("OK {cql}");
                 if statement.order_by.is_some() {
                     log::info!("   -> ORDER BY detected");
                 }
@@ -191,7 +191,7 @@ fn demonstrate_advanced_features() {
                 }
             }
             Err(e) => {
-                log::info!("ERR {}: {}", cql, e);
+                log::info!("ERR {cql}: {e}");
             }
         }
     }
@@ -268,7 +268,7 @@ pub fn demonstrate_real_world_examples() {
     ];
 
     for (category, queries) in examples {
-        log::info!("{}:", category);
+        log::info!("{category}:");
         for query in queries {
             match parse_select(query) {
                 Ok(statement) => {
@@ -280,7 +280,7 @@ pub fn demonstrate_real_world_examples() {
                     );
                 }
                 Err(e) => {
-                    log::info!("   ERR Parse error: {}", e);
+                    log::info!("   ERR Parse error: {e}");
                 }
             }
         }

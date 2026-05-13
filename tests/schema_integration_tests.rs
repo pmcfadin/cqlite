@@ -563,26 +563,21 @@ async fn test_zero_diff_parity_validation() {
         // Validate that the schema is complete and ready for parity testing
         assert!(
             context.is_complete(),
-            "Schema context must be complete for {}",
-            table_name
+            "Schema context must be complete for {table_name}"
         );
 
         // Validate comparator availability for all key columns
         for (i, _) in context.partition_comparators.iter().enumerate() {
             assert!(
                 i < context.schema.partition_keys.len(),
-                "Partition comparator {} missing for {}",
-                i,
-                table_name
+                "Partition comparator {i} missing for {table_name}"
             );
         }
 
         for (i, _) in context.clustering_comparators.iter().enumerate() {
             assert!(
                 i < context.schema.clustering_keys.len(),
-                "Clustering comparator {} missing for {}",
-                i,
-                table_name
+                "Clustering comparator {i} missing for {table_name}"
             );
         }
 
@@ -596,7 +591,7 @@ async fn test_zero_diff_parity_validation() {
             );
         }
 
-        println!("✓ Schema validation passed for table: {}", table_name);
+        println!("✓ Schema validation passed for table: {table_name}");
     }
 }
 

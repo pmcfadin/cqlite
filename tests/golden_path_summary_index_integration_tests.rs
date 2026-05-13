@@ -72,8 +72,7 @@ impl GoldenPathSummaryIndexTestFixture {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 format!(
-                    "Test SSTable not found: {:?}. Please ensure test-data is available.",
-                    sstable_path
+                    "Test SSTable not found: {sstable_path:?}. Please ensure test-data is available."
                 ),
             )));
         }
@@ -89,7 +88,7 @@ impl GoldenPathSummaryIndexTestFixture {
         if fs::metadata(&summary_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Summary file not found: {:?}", summary_path),
+                format!("Summary file not found: {summary_path:?}"),
             )));
         }
 
@@ -105,7 +104,7 @@ impl GoldenPathSummaryIndexTestFixture {
         if fs::metadata(&index_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
-                format!("Index file not found: {:?}", index_path),
+                format!("Index file not found: {index_path:?}"),
             )));
         }
 
@@ -153,8 +152,7 @@ async fn test_golden_path_summary_index_component_availability() -> Result<()> {
     for component in &required_components {
         assert!(
             component_paths.contains_key(*component),
-            "Required component {} not found",
-            component
+            "Required component {component} not found"
         );
 
         let path = &component_paths[*component];
@@ -162,8 +160,7 @@ async fn test_golden_path_summary_index_component_availability() -> Result<()> {
 
         assert!(
             metadata.len() > 0,
-            "Component {} should not be empty",
-            component
+            "Component {component} should not be empty"
         );
 
         println!("✅ Component {}: {} bytes", component, metadata.len());
@@ -181,7 +178,7 @@ async fn test_golden_path_summary_index_component_availability() -> Result<()> {
                 metadata.len()
             );
         } else {
-            println!("ℹ️  Optional component {} not present", component);
+            println!("ℹ️  Optional component {component} not present");
         }
     }
 
@@ -205,7 +202,7 @@ async fn test_golden_path_summary_reader_functionality() -> Result<()> {
             println!("ℹ️  Summary reader created but API methods not yet available");
         }
         Err(e) => {
-            println!("ℹ️  Summary reader not available (may be expected): {}", e);
+            println!("ℹ️  Summary reader not available (may be expected): {e}");
             // This is acceptable if the summary format is not yet supported
         }
     }
@@ -229,7 +226,7 @@ async fn test_golden_path_index_reader_functionality() -> Result<()> {
             println!("ℹ️  Index reader created but API methods not yet available");
         }
         Err(e) => {
-            println!("ℹ️  Index reader not available (may be expected): {}", e);
+            println!("ℹ️  Index reader not available (may be expected): {e}");
             // This is acceptable if the index format is not yet supported
         }
     }
@@ -376,8 +373,7 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
         // Should be None for non-existent keys
         assert!(
             result.is_none(),
-            "Non-existent key should return None: {}",
-            key_str
+            "Non-existent key should return None: {key_str}"
         );
 
         // Bloom filter should make this extremely fast
@@ -417,10 +413,7 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
                 println!("✅ Found key '{}': {} bytes", key_str, value.len());
             }
             None => {
-                println!(
-                    "ℹ️  Key '{}' not found (bloom passed, but not in data)",
-                    key_str
-                );
+                println!("ℹ️  Key '{key_str}' not found (bloom passed, but not in data)");
             }
         }
     }
@@ -437,7 +430,7 @@ async fn test_golden_path_multi_level_index_traversal() -> Result<()> {
 
     // Test: Multi-level index traversal performance
     let traversal_test_keys = (1..=20)
-        .map(|i| RowKey::from(format!("traversal_test_key_{:03}", i).as_bytes()))
+        .map(|i| RowKey::from(format!("traversal_test_key_{i:03}").as_bytes()))
         .collect::<Vec<_>>();
 
     let mut traversal_times = Vec::new();
@@ -469,8 +462,8 @@ async fn test_golden_path_multi_level_index_traversal() -> Result<()> {
         total_time,
         traversal_times.len()
     );
-    println!("   Average: {:?}", avg_time);
-    println!("   Min: {:?}, Max: {:?}", min_time, max_time);
+    println!("   Average: {avg_time:?}");
+    println!("   Min: {min_time:?}, Max: {max_time:?}");
 
     // Performance assertions for batch traversals
     assert!(
@@ -511,7 +504,7 @@ async fn test_golden_path_summary_index_statistics_integration() -> Result<()> {
     // Perform some operations to generate cache statistics
     let table_id = TableId::new("test_keyspace.test_table");
     let test_keys = (1..=10)
-        .map(|i| RowKey::from(format!("stats_test_{}", i).as_bytes()))
+        .map(|i| RowKey::from(format!("stats_test_{i}").as_bytes()))
         .collect::<Vec<_>>();
 
     // Perform lookups to generate statistics
@@ -561,14 +554,13 @@ async fn test_golden_path_summary_index_consistency_validation() -> Result<()> {
                 Some(get_value) => {
                     assert_eq!(
                         get_value, *expected_value,
-                        "Get and scan should return consistent values for key: {:?}",
-                        key
+                        "Get and scan should return consistent values for key: {key:?}"
                     );
                 }
                 None => {
                     // This could indicate an inconsistency, but might be acceptable
                     // depending on the SSTable format and implementation
-                    println!("⚠️  Get returned None for key found in scan: {:?}", key);
+                    println!("⚠️  Get returned None for key found in scan: {key:?}");
                 }
             }
         }
@@ -587,10 +579,7 @@ async fn test_golden_path_summary_index_consistency_validation() -> Result<()> {
             for (range_key, _) in &range_results {
                 assert!(
                     range_key >= range_start && range_key <= range_end,
-                    "Range scan result should be within bounds: {:?} not in [{:?}, {:?}]",
-                    range_key,
-                    range_start,
-                    range_end
+                    "Range scan result should be within bounds: {range_key:?} not in [{range_start:?}, {range_end:?}]"
                 );
             }
 
@@ -620,9 +609,7 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
     let test_scenarios = vec![
         (
             "sequential_access",
-            (1..=25)
-                .map(|i| format!("seq_{:03}", i))
-                .collect::<Vec<_>>(),
+            (1..=25).map(|i| format!("seq_{i:03}")).collect::<Vec<_>>(),
         ),
         (
             "random_access",
@@ -698,8 +685,7 @@ async fn test_golden_path_summary_index_performance_integration() -> Result<()> 
     if total_operations > 0 {
         let overall_avg = total_time / total_operations as u32;
         println!(
-            "✅ Overall performance: {} operations in {:?} (avg: {:?})",
-            total_operations, total_time, overall_avg
+            "✅ Overall performance: {total_operations} operations in {total_time:?} (avg: {overall_avg:?})"
         );
 
         assert!(

@@ -510,7 +510,7 @@ fn test_parquet_many_rows() {
         .map(|i| {
             vec![
                 ("id", Value::Integer(i)),
-                ("value", Value::Text(format!("row_{}", i))),
+                ("value", Value::Text(format!("row_{i}"))),
             ]
         })
         .collect();
@@ -908,7 +908,7 @@ fn test_parquet_tombstone_value() {
 fn test_parquet_wide_table() {
     // Table with many columns (50+)
     // Use owned strings to avoid memory leak from Box::leak
-    let column_names: Vec<String> = (0..50).map(|i| format!("col_{}", i)).collect();
+    let column_names: Vec<String> = (0..50).map(|i| format!("col_{i}")).collect();
 
     let columns_vec: Vec<ColumnInfo> = column_names
         .iter()

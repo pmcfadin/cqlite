@@ -92,7 +92,7 @@ mod schema_discovery_tests {
         ];
 
         for (type_str, expected) in test_cases {
-            assert_eq!(is_udt_type(type_str), expected, "Failed for: {}", type_str);
+            assert_eq!(is_udt_type(type_str), expected, "Failed for: {type_str}");
         }
 
         println!("✅ UDT detection tests passed");
@@ -140,8 +140,7 @@ mod schema_discovery_tests {
             assert_eq!(
                 parse_collection_kind(type_str),
                 expected,
-                "Failed for: {}",
-                type_str
+                "Failed for: {type_str}"
             );
         }
 
@@ -182,8 +181,7 @@ mod schema_discovery_tests {
             assert_eq!(
                 extract_map_types(type_str),
                 expected,
-                "Failed for: {}",
-                type_str
+                "Failed for: {type_str}"
             );
         }
 
@@ -217,8 +215,7 @@ mod schema_discovery_tests {
             assert_eq!(
                 should_suggest_index(column_name),
                 expected,
-                "Failed for: {}",
-                column_name
+                "Failed for: {column_name}"
             );
         }
 
@@ -257,13 +254,11 @@ mod schema_discovery_tests {
 
             assert_eq!(
                 is_partition, expected_partition,
-                "Partition key failed for: {} at position {}",
-                column_name, position
+                "Partition key failed for: {column_name} at position {position}"
             );
             assert_eq!(
                 is_clustering, expected_clustering,
-                "Clustering key failed for: {} at position {}",
-                column_name, position
+                "Clustering key failed for: {column_name} at position {position}"
             );
         }
 
@@ -279,10 +274,10 @@ mod schema_discovery_tests {
             columns: &[(String, String)],
         ) -> String {
             let mut cql = String::new();
-            cql.push_str(&format!("CREATE TABLE {}.{} (\\n", keyspace, table));
+            cql.push_str(&format!("CREATE TABLE {keyspace}.{table} (\\n"));
 
             for (name, data_type) in columns {
-                cql.push_str(&format!("    {} {},\\n", name, data_type));
+                cql.push_str(&format!("    {name} {data_type},\\n"));
             }
 
             // Simple primary key (first column)
@@ -309,7 +304,7 @@ mod schema_discovery_tests {
         assert!(cql.contains("PRIMARY KEY (id)"));
 
         println!("✅ CQL generation logic tests passed");
-        println!("Generated CQL:\\n{}", cql);
+        println!("Generated CQL:\\n{cql}");
     }
 
     #[test]
@@ -342,9 +337,7 @@ mod schema_discovery_tests {
             let confidence = calculate_type_confidence(&type_counts);
             assert!(
                 (confidence - expected_confidence).abs() < 0.001,
-                "Confidence calculation failed: expected {}, got {}",
-                expected_confidence,
-                confidence
+                "Confidence calculation failed: expected {expected_confidence}, got {confidence}"
             );
         }
 
@@ -409,13 +402,10 @@ mod schema_discovery_tests {
                 || column_name.to_lowercase().contains("username");
 
             if should_index && !is_partition_key {
-                suggested_indexes.push(format!("{}_idx", column_name));
+                suggested_indexes.push(format!("{column_name}_idx"));
             }
 
-            println!(
-                "Column: {}, Type: {}, Confidence: {:.2}",
-                column_name, data_type, confidence
-            );
+            println!("Column: {column_name}, Type: {data_type}, Confidence: {confidence:.2}");
         }
 
         // Step 4: Generate CQL
@@ -423,11 +413,11 @@ mod schema_discovery_tests {
         cql.push_str("CREATE TABLE test_ks.discovered_table (\\n");
 
         for (name, data_type) in &partition_keys {
-            cql.push_str(&format!("    {} {},\\n", name, data_type));
+            cql.push_str(&format!("    {name} {data_type},\\n"));
         }
 
         for (name, data_type) in &regular_columns {
-            cql.push_str(&format!("    {} {},\\n", name, data_type));
+            cql.push_str(&format!("    {name} {data_type},\\n"));
         }
 
         if !partition_keys.is_empty() {
@@ -453,9 +443,9 @@ mod schema_discovery_tests {
         );
 
         println!("✅ Integration workflow test passed");
-        println!("Generated CQL:\\n{}", cql);
-        println!("Suggested indexes: {:?}", suggested_indexes);
-        println!("Partition keys: {:?}", partition_keys);
-        println!("Regular columns: {:?}", regular_columns);
+        println!("Generated CQL:\\n{cql}");
+        println!("Suggested indexes: {suggested_indexes:?}");
+        println!("Partition keys: {partition_keys:?}");
+        println!("Regular columns: {regular_columns:?}");
     }
 }

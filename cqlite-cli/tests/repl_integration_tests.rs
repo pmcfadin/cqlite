@@ -282,7 +282,7 @@ fn test_parse_cql_queries() -> Result<()> {
             } => {
                 assert_eq!(parsed_query, query);
             }
-            _ => panic!("Expected CqlQuery for: {}", query),
+            _ => panic!("Expected CqlQuery for: {query}"),
         }
     }
 
@@ -321,8 +321,7 @@ fn test_command_validation() -> Result<()> {
         let parsed = parser.parse(cmd)?;
         assert!(
             parser.validate(&parsed).is_ok(),
-            "Failed to validate: {}",
-            cmd
+            "Failed to validate: {cmd}"
         );
     }
 
@@ -335,8 +334,7 @@ fn test_command_validation() -> Result<()> {
         let parsed = parser.parse(cmd)?;
         assert!(
             parser.validate(&parsed).is_err(),
-            "Should have failed validation: {}",
-            cmd
+            "Should have failed validation: {cmd}"
         );
     }
 
@@ -394,8 +392,7 @@ fn test_balanced_parentheses_validation() -> Result<()> {
         let parsed = parser.parse(query)?;
         assert!(
             parser.validate(&parsed).is_ok(),
-            "Should pass validation: {}",
-            query
+            "Should pass validation: {query}"
         );
     }
 
@@ -410,8 +407,7 @@ fn test_balanced_parentheses_validation() -> Result<()> {
         let parsed = parser.parse(query)?;
         assert!(
             parser.validate(&parsed).is_err(),
-            "Should fail validation: {}",
-            query
+            "Should fail validation: {query}"
         );
     }
 
@@ -433,8 +429,7 @@ fn test_balanced_quotes_validation() -> Result<()> {
         let parsed = parser.parse(query)?;
         assert!(
             parser.validate(&parsed).is_ok(),
-            "Should pass validation: {}",
-            query
+            "Should pass validation: {query}"
         );
     }
 
@@ -448,8 +443,7 @@ fn test_balanced_quotes_validation() -> Result<()> {
         let parsed = parser.parse(query)?;
         assert!(
             parser.validate(&parsed).is_err(),
-            "Should fail validation: {}",
-            query
+            "Should fail validation: {query}"
         );
     }
 
@@ -614,7 +608,7 @@ fn test_keyspace_identifier_validation() -> Result<()> {
 
     for cmd in valid {
         let parsed = parser.parse(cmd)?;
-        assert!(parser.validate(&parsed).is_ok(), "Should validate: {}", cmd);
+        assert!(parser.validate(&parsed).is_ok(), "Should validate: {cmd}");
     }
 
     // Quoted identifiers - test that they parse correctly

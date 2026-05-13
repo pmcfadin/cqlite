@@ -120,14 +120,11 @@ fn test_cli_execute_insert_basic() {
 
     assert!(
         output.status.success(),
-        "INSERT should succeed. stdout: {}, stderr: {}",
-        stdout,
-        stderr
+        "INSERT should succeed. stdout: {stdout}, stderr: {stderr}"
     );
     assert!(
         stdout.contains("OK"),
-        "Should print OK on successful INSERT. stdout: {}",
-        stdout
+        "Should print OK on successful INSERT. stdout: {stdout}"
     );
 }
 
@@ -152,8 +149,7 @@ fn test_cli_execute_insert_with_timestamp() {
 
     assert!(
         output.status.success(),
-        "INSERT with TIMESTAMP should succeed. stderr: {}",
-        stderr
+        "INSERT with TIMESTAMP should succeed. stderr: {stderr}"
     );
     assert!(stdout.contains("OK"));
 }
@@ -179,8 +175,7 @@ fn test_cli_execute_insert_with_clustering_key() {
 
     assert!(
         output.status.success(),
-        "INSERT with clustering key should succeed. stderr: {}",
-        stderr
+        "INSERT with clustering key should succeed. stderr: {stderr}"
     );
     assert!(stdout.contains("OK"));
 }
@@ -222,8 +217,7 @@ fn test_cli_execute_update_basic() {
 
     assert!(
         output.status.success(),
-        "UPDATE should succeed. stderr: {}",
-        stderr
+        "UPDATE should succeed. stderr: {stderr}"
     );
     assert!(stdout.contains("OK"));
 }
@@ -249,8 +243,7 @@ fn test_cli_execute_update_with_clustering() {
 
     assert!(
         output.status.success(),
-        "UPDATE with clustering key should succeed. stderr: {}",
-        stderr
+        "UPDATE with clustering key should succeed. stderr: {stderr}"
     );
     assert!(stdout.contains("OK"));
 }
@@ -292,8 +285,7 @@ fn test_cli_execute_delete_row() {
 
     assert!(
         output.status.success(),
-        "DELETE should succeed. stderr: {}",
-        stderr
+        "DELETE should succeed. stderr: {stderr}"
     );
     assert!(stdout.contains("OK"));
 }
@@ -319,8 +311,7 @@ fn test_cli_execute_delete_with_clustering() {
 
     assert!(
         output.status.success(),
-        "DELETE with clustering key should succeed. stderr: {}",
-        stderr
+        "DELETE with clustering key should succeed. stderr: {stderr}"
     );
     assert!(stdout.contains("OK"));
 }
@@ -346,8 +337,7 @@ fn test_cli_execute_delete_columns() {
 
     assert!(
         output.status.success(),
-        "DELETE columns should succeed. stderr: {}",
-        stderr
+        "DELETE columns should succeed. stderr: {stderr}"
     );
     assert!(stdout.contains("OK"));
 }
@@ -399,12 +389,10 @@ fn test_cli_execute_insert_then_flush() {
 
     assert!(
         output.status.success(),
-        "INSERT + flush should succeed. stderr: {}",
-        stderr
+        "INSERT + flush should succeed. stderr: {stderr}"
     );
     assert!(
         stdout.contains("OK"),
-        "Should print OK for INSERT. stdout: {}",
-        stdout
+        "Should print OK for INSERT. stdout: {stdout}"
     );
 }

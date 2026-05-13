@@ -32,14 +32,11 @@ fn test_chunked_reader_lz4_direct() {
 
     // Skip if test data not available
     if !ci_path.exists() || !data_path.exists() {
-        println!(
-            "⚠️  LZ4 test data not available at {:?} - skipping",
-            table_dir
-        );
+        println!("⚠️  LZ4 test data not available at {table_dir:?} - skipping");
         return;
     }
 
-    println!("✅ Testing LZ4 ChunkedDataReader with: {:?}", ci_path);
+    println!("✅ Testing LZ4 ChunkedDataReader with: {ci_path:?}");
 
     // Parse CompressionInfo
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
@@ -66,7 +63,7 @@ fn test_chunked_reader_lz4_direct() {
     let bytes_read = reader.read(&mut buffer).expect("Failed to read");
 
     assert!(bytes_read > 0, "Should read at least some data");
-    println!("  ✅ Read {} bytes successfully", bytes_read);
+    println!("  ✅ Read {bytes_read} bytes successfully");
 
     // Test 2: Position tracking
     assert_eq!(reader.position(), bytes_read as u64);
@@ -83,7 +80,7 @@ fn test_chunked_reader_lz4_direct() {
             .read(&mut large_buffer)
             .expect("Failed to read large buffer");
         assert!(bytes_read > 0);
-        println!("  ✅ Multi-chunk read: {} bytes", bytes_read);
+        println!("  ✅ Multi-chunk read: {bytes_read} bytes");
     }
 }
 
@@ -100,14 +97,11 @@ fn test_chunked_reader_snappy_direct() {
     let data_path = table_dir.join("nb-1-big-Data.db");
 
     if !ci_path.exists() || !data_path.exists() {
-        println!(
-            "⚠️  Snappy test data not available at {:?} - skipping",
-            table_dir
-        );
+        println!("⚠️  Snappy test data not available at {table_dir:?} - skipping");
         return;
     }
 
-    println!("✅ Testing Snappy ChunkedDataReader with: {:?}", ci_path);
+    println!("✅ Testing Snappy ChunkedDataReader with: {ci_path:?}");
 
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
     let compression_info =
@@ -127,7 +121,7 @@ fn test_chunked_reader_snappy_direct() {
     let bytes_read = reader.read(&mut buffer).expect("Failed to read");
 
     assert!(bytes_read > 0);
-    println!("  ✅ Snappy read {} bytes successfully", bytes_read);
+    println!("  ✅ Snappy read {bytes_read} bytes successfully");
 }
 
 /// Test Seek trait implementation across chunk boundaries
@@ -240,6 +234,6 @@ fn test_row_assembly_across_chunks() {
     assert!(bytes_read > 0);
     assert_eq!(reader.position(), near_boundary + bytes_read as u64);
 
-    println!("  ✅ Read {} bytes spanning chunk boundary", bytes_read);
+    println!("  ✅ Read {bytes_read} bytes spanning chunk boundary");
     println!("  ✅ Position correctly updated: {}", reader.position());
 }

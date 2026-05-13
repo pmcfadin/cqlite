@@ -90,9 +90,7 @@ fn assert_test_data_available() -> (PathBuf, PathBuf) {
 
     assert!(
         data_dir.exists() && schema_file.exists(),
-        "Test requires full SSTable dataset. \n        Set CQLITE_DATASETS_ROOT or run: bash test-data/scripts/fetch-datasets.sh\n        data_dir={:?}, schema_file={:?}",
-        data_dir,
-        schema_file
+        "Test requires full SSTable dataset. \n        Set CQLITE_DATASETS_ROOT or run: bash test-data/scripts/fetch-datasets.sh\n        data_dir={data_dir:?}, schema_file={schema_file:?}"
     );
 
     (data_dir, schema_file)
@@ -197,7 +195,7 @@ fn test_duckdb_reads_parquet_basic_types() {
         )
         .expect("Failed to query Parquet file with DuckDB");
 
-    eprintln!("DuckDB row count: {}", row_count);
+    eprintln!("DuckDB row count: {row_count}");
 
     // We should have at least some data
     assert!(
@@ -205,10 +203,7 @@ fn test_duckdb_reads_parquet_basic_types() {
         "DuckDB should read at least one row from Parquet file"
     );
 
-    eprintln!(
-        "SUCCESS: DuckDB successfully read {} rows from CQLite Parquet export",
-        row_count
-    );
+    eprintln!("SUCCESS: DuckDB successfully read {row_count} rows from CQLite Parquet export");
 }
 
 #[test]
@@ -256,18 +251,15 @@ fn test_duckdb_row_count_parity() {
         )
         .expect("Failed to query Parquet file with DuckDB");
 
-    eprintln!("CQLite JSON row count: {}", json_row_count);
-    eprintln!("DuckDB Parquet row count: {}", duckdb_row_count);
+    eprintln!("CQLite JSON row count: {json_row_count}");
+    eprintln!("DuckDB Parquet row count: {duckdb_row_count}");
 
     assert_eq!(
         json_row_count, duckdb_row_count as usize,
         "Row counts should match between JSON (CQLite) and Parquet (DuckDB)"
     );
 
-    eprintln!(
-        "SUCCESS: Row count parity verified - {} rows in both formats",
-        json_row_count
-    );
+    eprintln!("SUCCESS: Row count parity verified - {json_row_count} rows in both formats");
 }
 
 #[test]
@@ -322,7 +314,7 @@ fn test_duckdb_reads_parquet_with_collections() {
         )
         .expect("Failed to query collections Parquet file with DuckDB");
 
-    eprintln!("DuckDB collections row count: {}", row_count);
+    eprintln!("DuckDB collections row count: {row_count}");
 
     // Verify we can query specific columns (basic smoke test)
     let has_columns: bool = conn
@@ -338,10 +330,7 @@ fn test_duckdb_reads_parquet_with_collections() {
         "DuckDB should be able to read schema or data"
     );
 
-    eprintln!(
-        "SUCCESS: DuckDB successfully read collections Parquet with {} rows",
-        row_count
-    );
+    eprintln!("SUCCESS: DuckDB successfully read collections Parquet with {row_count} rows");
 }
 
 #[test]
@@ -380,7 +369,7 @@ fn test_duckdb_type_compatibility() {
         )
         .expect("COUNT aggregation should work");
 
-    eprintln!("DuckDB COUNT: {}", row_count);
+    eprintln!("DuckDB COUNT: {row_count}");
     assert!(row_count > 0, "Should have rows for aggregation tests");
 
     // Test 2: Try to get column names and types
@@ -393,7 +382,7 @@ fn test_duckdb_type_compatibility() {
         [],
     );
 
-    eprintln!("DuckDB DESCRIBE result: {:?}", describe_result);
+    eprintln!("DuckDB DESCRIBE result: {describe_result:?}");
 
     // Test 3: Try MIN/MAX on numeric columns if 'age' exists
     // This is a best-effort test - we don't fail if the column doesn't exist
@@ -409,10 +398,7 @@ fn test_duckdb_type_compatibility() {
         Ok((min, max))
     }) {
         Ok((min_age, max_age)) => {
-            eprintln!(
-                "DuckDB aggregation - MIN(age): {}, MAX(age): {}",
-                min_age, max_age
-            );
+            eprintln!("DuckDB aggregation - MIN(age): {min_age}, MAX(age): {max_age}");
             assert!(
                 min_age <= max_age,
                 "MIN should be less than or equal to MAX"
@@ -421,17 +407,11 @@ fn test_duckdb_type_compatibility() {
         }
         Err(e) => {
             // Column might not exist or have different name - log but don't fail
-            eprintln!(
-                "INFO: Could not run numeric aggregation (column might not exist): {}",
-                e
-            );
+            eprintln!("INFO: Could not run numeric aggregation (column might not exist): {e}");
         }
     }
 
-    eprintln!(
-        "SUCCESS: DuckDB type compatibility validated with {} rows",
-        row_count
-    );
+    eprintln!("SUCCESS: DuckDB type compatibility validated with {row_count} rows");
 }
 
 // ============================================================================
@@ -468,7 +448,7 @@ fn test_duckdb_schema_inference() {
         .expect("Failed to prepare query");
 
     let column_count = stmt.column_count();
-    eprintln!("DuckDB inferred {} columns from Parquet", column_count);
+    eprintln!("DuckDB inferred {column_count} columns from Parquet");
 
     assert!(
         column_count > 0,
@@ -484,19 +464,15 @@ fn test_duckdb_schema_inference() {
         })
         .collect();
 
-    eprintln!("DuckDB column names: {:?}", column_names);
+    eprintln!("DuckDB column names: {column_names:?}");
 
     // Verify expected columns exist (simple_table should have 'id' at minimum)
     assert!(
         column_names.iter().any(|name| name.to_lowercase() == "id"),
-        "Parquet schema should contain 'id' column. Found: {:?}",
-        column_names
+        "Parquet schema should contain 'id' column. Found: {column_names:?}"
     );
 
-    eprintln!(
-        "SUCCESS: DuckDB schema inference validated - {} columns",
-        column_count
-    );
+    eprintln!("SUCCESS: DuckDB schema inference validated - {column_count} columns");
 }
 
 #[test]
@@ -532,7 +508,7 @@ fn test_duckdb_handles_null_values() {
         )
         .expect("Failed to count total rows");
 
-    eprintln!("Total rows: {}", total_rows);
+    eprintln!("Total rows: {total_rows}");
 
     // Try to count NULL values in 'name' column if it exists
     let null_count_query = format!(
@@ -542,22 +518,16 @@ fn test_duckdb_handles_null_values() {
 
     match conn.query_row(&null_count_query, [], |row| row.get::<_, i64>(0)) {
         Ok(null_count) => {
-            eprintln!("Rows with NULL name: {}", null_count);
+            eprintln!("Rows with NULL name: {null_count}");
             eprintln!("SUCCESS: DuckDB correctly handles NULL values");
         }
         Err(e) => {
             // Column might not exist - log but don't fail
-            eprintln!(
-                "INFO: Could not query NULLs (column might not exist): {}",
-                e
-            );
+            eprintln!("INFO: Could not query NULLs (column might not exist): {e}");
         }
     }
 
-    eprintln!(
-        "SUCCESS: DuckDB NULL handling validated with {} total rows",
-        total_rows
-    );
+    eprintln!("SUCCESS: DuckDB NULL handling validated with {total_rows} total rows");
 }
 
 #[test]
@@ -598,10 +568,7 @@ fn test_duckdb_parquet_metadata() {
         }
         Err(e) => {
             // parquet_metadata might not be available in all DuckDB versions
-            eprintln!(
-                "INFO: parquet_metadata function not available (DuckDB version issue): {}",
-                e
-            );
+            eprintln!("INFO: parquet_metadata function not available (DuckDB version issue): {e}");
         }
     }
 
@@ -617,10 +584,7 @@ fn test_duckdb_parquet_metadata() {
         )
         .expect("Should be able to read Parquet file");
 
-    eprintln!(
-        "SUCCESS: DuckDB Parquet metadata test passed ({} rows)",
-        row_count
-    );
+    eprintln!("SUCCESS: DuckDB Parquet metadata test passed ({row_count} rows)");
 }
 
 // ============================================================================
@@ -681,15 +645,12 @@ fn test_duckdb_reads_empty_parquet() {
         |row| row.get::<_, i64>(0),
     ) {
         Ok(row_count) => {
-            eprintln!("DuckDB read empty Parquet: {} rows", row_count);
+            eprintln!("DuckDB read empty Parquet: {row_count} rows");
             assert_eq!(row_count, 0, "Empty Parquet should have 0 rows");
             eprintln!("SUCCESS: DuckDB handles empty Parquet files");
         }
         Err(e) => {
-            eprintln!(
-                "INFO: DuckDB could not read empty Parquet (expected): {}",
-                e
-            );
+            eprintln!("INFO: DuckDB could not read empty Parquet (expected): {e}");
         }
     }
 }
@@ -741,18 +702,12 @@ fn test_duckdb_concurrent_reads() {
         )
         .expect("Second connection should read successfully");
 
-    eprintln!(
-        "Concurrent reads - Connection 1: {}, Connection 2: {}",
-        count1, count2
-    );
+    eprintln!("Concurrent reads - Connection 1: {count1}, Connection 2: {count2}");
 
     assert_eq!(
         count1, count2,
         "Both connections should read the same row count"
     );
 
-    eprintln!(
-        "SUCCESS: DuckDB concurrent reads validated ({} rows)",
-        count1
-    );
+    eprintln!("SUCCESS: DuckDB concurrent reads validated ({count1} rows)");
 }

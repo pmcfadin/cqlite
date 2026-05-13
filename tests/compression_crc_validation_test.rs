@@ -40,7 +40,7 @@ mod tests {
         assert!(result.is_err());
 
         if let Err(e) = result {
-            let error_msg = format!("{}", e);
+            let error_msg = format!("{e}");
             assert!(error_msg.contains("CRC32 mismatch"));
             assert!(error_msg.contains("stored="));
             assert!(error_msg.contains("calculated="));
@@ -67,7 +67,7 @@ mod tests {
 
         // Test error message format
         if let Err(e) = result {
-            let error_msg = format!("{}", e);
+            let error_msg = format!("{e}");
             assert!(error_msg.contains("CRC32 mismatch for chunk"));
             assert!(error_msg.contains("at offset"));
             assert!(error_msg.contains("stored=0xaaaaaaaa"));
@@ -95,7 +95,7 @@ mod tests {
         assert!(result.is_err());
 
         if let Err(e) = result {
-            let error_msg = format!("{}", e);
+            let error_msg = format!("{e}");
             assert!(error_msg.contains("CRC32 checksum required but not found"));
         }
     }
@@ -211,7 +211,7 @@ mod tests {
 
         assert!(result.is_err());
         if let Err(e) = result {
-            let error_msg = format!("{}", e);
+            let error_msg = format!("{e}");
 
             // Verify error message contains all required components
             assert!(error_msg.contains("chunk 2"));
@@ -219,7 +219,7 @@ mod tests {
             assert!(error_msg.contains("stored=0xdeadbeef"));
             assert!(error_msg.contains("calculated="));
 
-            println!("Error message format: {}", error_msg);
+            println!("Error message format: {error_msg}");
         }
     }
 }
