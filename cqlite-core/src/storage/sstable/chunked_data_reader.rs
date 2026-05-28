@@ -114,9 +114,7 @@ impl<R: Read + Seek> ChunkedDataReader<R> {
             .compression_info
             .compressed_chunk_size(chunk_index, self.file_size)
             .ok_or_else(|| {
-                Error::InvalidFormat(format!(
-                    "Invalid chunk size for chunk index {chunk_index}"
-                ))
+                Error::InvalidFormat(format!("Invalid chunk size for chunk index {chunk_index}"))
             })?;
 
         // Cassandra chunks are laid out as [compressed_data][4-byte trailing CRC32].
