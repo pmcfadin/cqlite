@@ -22,5 +22,11 @@ else
 fi
 
 tar -xzf /tmp/${ASSET} -C .
+
+# Remove macOS AppleDouble shadow files (`._*`). The archive may contain them
+# when produced on macOS, and they break test helpers that scan for files by
+# suffix (e.g., `*-Data.db` matches both the real file and `._..-Data.db`).
+find test-data/datasets -name '._*' -delete 2>/dev/null || true
+
 echo "Dataset extracted to test-data/datasets"
 

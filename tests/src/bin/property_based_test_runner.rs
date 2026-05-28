@@ -193,7 +193,7 @@ impl PropertyBasedTestRunner {
         self.print_summary();
 
         if total_failures > 0 {
-            return Err(anyhow::anyhow!("{} property tests failed", total_failures));
+            return Err(anyhow::anyhow!("{total_failures} property tests failed"));
         }
 
         Ok(())
