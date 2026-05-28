@@ -110,51 +110,59 @@ impl<R: Read + Seek> ChunkedDataReader<R> {
                 ))
             })?;
 
-        let size = self
+        let total_chunk_size = self
             .compression_info
             .compressed_chunk_size(chunk_index, self.file_size)
             .ok_or_else(|| {
-                Error::InvalidFormat(format!(
-                    "Invalid chunk size for chunk index {}",
-                    chunk_index
-                ))
+                Error::InvalidFormat(format!("Invalid chunk size for chunk index {chunk_index}"))
             })?;
 
-        // Seek to chunk start and read compressed data
+        // Cassandra chunks are laid out as [compressed_data][4-byte trailing CRC32].
+        // The chunk size from CompressionInfo includes the trailer, so subtract 4
+        // before reading the compressed payload.
+        if total_chunk_size < 4 {
+            return Err(Error::InvalidFormat(format!(
+                "Chunk {chunk_index} size too small: {total_chunk_size} bytes (minimum 4 for CRC)"
+            )));
+        }
+        let compressed_len = (total_chunk_size - 4) as usize;
+
+        // Seek to chunk start and read compressed data (excluding trailing CRC32).
         self.reader.seek(SeekFrom::Start(offset)).map_err(|e| {
             Error::storage(format!(
-                "Failed to seek to chunk {} at offset {}: {}",
-                chunk_index, offset, e
+                "Failed to seek to chunk {chunk_index} at offset {offset}: {e}"
             ))
         })?;
 
-        let mut compressed = vec![0u8; size as usize];
+        let mut compressed = vec![0u8; compressed_len];
         self.reader.read_exact(&mut compressed).map_err(|e| {
             Error::storage(format!(
-                "Failed to read chunk {} ({} bytes at offset {}): {}",
-                chunk_index, size, offset, e
+                "Failed to read chunk {chunk_index} ({compressed_len} bytes at offset {offset}): {e}"
             ))
         })?;
 
-        // Validate CRC if available (modern Cassandra 5.0+ format)
-        if !self.compression_info.chunk_crcs.is_empty() {
-            self.compression_info
-                .validate_chunk_crc(chunk_index, &compressed)
-                .map_err(|e| {
-                    Error::InvalidFormat(format!(
-                        "CRC validation failed for chunk {}: {}",
-                        chunk_index, e
-                    ))
-                })?;
+        // Read the trailing 4-byte CRC32 (big-endian) and validate against the
+        // compressed payload. This matches Cassandra's NB chunk format.
+        let mut crc_bytes = [0u8; 4];
+        self.reader.read_exact(&mut crc_bytes).map_err(|e| {
+            Error::storage(format!(
+                "Failed to read trailing CRC32 for chunk {chunk_index} at offset {}: {e}",
+                offset + compressed_len as u64
+            ))
+        })?;
+        let expected_crc = u32::from_be_bytes(crc_bytes);
+        let computed_crc = crc32fast::hash(&compressed);
+        if computed_crc != expected_crc {
+            return Err(Error::InvalidFormat(format!(
+                "CRC32 mismatch for chunk {chunk_index} at offset 0x{offset:x}: expected=0x{expected_crc:08x}, computed=0x{computed_crc:08x}, compressed_len={compressed_len}"
+            )));
         }
 
         // Decompress chunk
         let decompressed = self.compression.decompress(&compressed).map_err(|e| {
             Error::storage(format!(
-                "Failed to decompress chunk {} ({} compressed bytes): {}",
-                chunk_index,
-                compressed.len(),
-                e
+                "Failed to decompress chunk {chunk_index} ({} compressed bytes): {e}",
+                compressed.len()
             ))
         })?;
 
