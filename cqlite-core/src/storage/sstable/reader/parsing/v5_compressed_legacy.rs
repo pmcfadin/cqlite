@@ -89,6 +89,23 @@ struct RowHeader {
     missing_columns_bitmap: Option<u64>,
 }
 
+/// Result of parsing a single complex cell (an element of a list/set, or a
+/// key/value entry of a map).  See [`V5CompressedLegacyParser::parse_complex_cell_value`].
+///
+/// `is_deleted` carries the authoritative IS_DELETED (0x01) cell flag so that
+/// collection parsers can distinguish element-level tombstones from live
+/// elements that merely have an empty value (Issue #493).
+struct ComplexCellParse {
+    /// Decoded cell value, or `None` if the cell was deleted or had an empty value.
+    value: Option<Value>,
+    /// Raw cell-path bytes (the element value for sets, the key for maps).
+    path_bytes: Vec<u8>,
+    /// Whether the cell carries the IS_DELETED (0x01) flag (an element tombstone).
+    is_deleted: bool,
+    /// Offset immediately following the parsed cell.
+    next_offset: usize,
+}
+
 // Row header flag constants
 const ROW_HAS_TIMESTAMP: u8 = 0x04;
 const ROW_HAS_TTL: u8 = 0x08;
@@ -4009,12 +4026,18 @@ impl V5CompressedLegacyParser {
             let mut elements = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, _path, new_offset) =
+                let cell =
                     self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
-                offset = new_offset;
+                offset = cell.next_offset;
+
+                // Issue #493: element-level tombstones (IS_DELETED 0x01) are not live
+                // values and must not be surfaced. Skip them regardless of their path.
+                if cell.is_deleted {
+                    continue;
+                }
 
                 // Add non-null values to the list
-                if let Some(val) = cell_value {
+                if let Some(val) = cell.value {
                     elements.push(val);
                 }
             }
@@ -4032,27 +4055,35 @@ impl V5CompressedLegacyParser {
             let mut elements = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, path_bytes, new_offset) =
+                let cell =
                     self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
-                offset = new_offset;
+                offset = cell.next_offset;
+
+                // Issue #493: element-level tombstones must not surface as live members.
+                // For a set, both a live element and a tombstoned element produce
+                // `cell.value == None` with non-empty `path_bytes` (the element key),
+                // because live set elements carry HAS_EMPTY_VALUE (0x04) and store the
+                // element in the path. The authoritative IS_DELETED (0x01) flag is the
+                // ONLY signal that distinguishes them, so we consult it directly and skip
+                // tombstoned elements (no-heuristics mandate, Issue #28).
+                if cell.is_deleted {
+                    log::debug!(
+                        "V5CompressedLegacy: skipping tombstoned set element {} (type={})",
+                        i,
+                        element_type
+                    );
+                    continue;
+                }
 
                 // For sets: the path bytes ARE the element value (cell value is always empty).
-                // If cell_value is Some (unusual case where set cell has a non-empty value),
+                // If cell.value is Some (unusual case where a set cell has a non-empty value),
                 // use it. Otherwise parse the path bytes as the element type.
-                //
-                // Known limitation (Issue #493): tombstone ambiguity.
-                // When `cell_value.is_none() && !path_bytes.is_empty()`, both live elements
-                // (HAS_EMPTY_VALUE flag = 0x04) and element-level tombstones (is_deleted = 0x01
-                // with an identifying path) enter this branch.  Currently both are surfaced as
-                // live values.  Once tombstone tracking lands, this branch should consult the
-                // `is_deleted` flag on the cell and skip tombstoned elements.
-                // TODO(#493): skip element tombstones once tombstone tracking lands.
-                if let Some(val) = cell_value {
+                if let Some(val) = cell.value {
                     elements.push(val);
-                } else if !path_bytes.is_empty() {
+                } else if !cell.path_bytes.is_empty() {
                     // Path bytes are the set element — parse them as the element type
                     match self.parse_value_from_raw_bytes(
-                        &path_bytes,
+                        &cell.path_bytes,
                         &element_type,
                         &column.name,
                         0,
@@ -4079,26 +4110,31 @@ impl V5CompressedLegacyParser {
             let mut entries = Vec::with_capacity(cell_count_usize);
 
             for i in 0..cell_count_usize {
-                let (cell_value, path_bytes, new_offset) =
+                let cell =
                     self.parse_complex_cell_value(data, offset, &value_type, column, i as u64)?;
-                offset = new_offset;
+                offset = cell.next_offset;
 
                 // For maps, the cell path IS the key
                 // Parse the path as the key using the key type
                 // Note: Cell path keys are stored WITHOUT length prefixes (raw bytes only)
-                if !path_bytes.is_empty() {
+                //
+                // Map semantics are intentionally unchanged for Issue #493: a deleted
+                // entry already surfaces as `cell.value == None` and is emitted as
+                // (key, Value::Null), preserving existing behavior. Only set/list
+                // element tombstones are skipped.
+                if !cell.path_bytes.is_empty() {
                     log::debug!(
                         "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
                         column.name,
                         key_type,
-                        path_bytes.len()
+                        cell.path_bytes.len()
                     );
                     // For cell path keys, parse directly without expecting length prefixes
                     let key_value =
-                        self.parse_cell_path_key(&path_bytes, &key_type, &column.name)?;
+                        self.parse_cell_path_key(&cell.path_bytes, &key_type, &column.name)?;
 
                     // Add non-null entries to the map
-                    if let Some(val) = cell_value {
+                    if let Some(val) = cell.value {
                         entries.push((key_value, val));
                     } else {
                         // Map entry with null value (tombstone for that key)
@@ -4128,9 +4164,13 @@ impl V5CompressedLegacyParser {
     /// Parse a single complex cell and extract its value.
     /// Complex cells have: [flags] [timestamp?] [deletion?] [ttl?] [cell_path] [value?]
     ///
-    /// Returns: (Optional<Value>, cell_path_bytes, new_offset)
-    /// - Value is None if cell is deleted or has empty value
-    /// - cell_path contains the raw path bytes (used as map key for map<> types)
+    /// Returns a [`ComplexCellParse`] describing the parsed cell.
+    /// - `value` is None if the cell is deleted or has an empty value
+    /// - `path_bytes` contains the raw path bytes (used as map key for map<> types,
+    ///   and as the element value for set<> types)
+    /// - `is_deleted` reflects the authoritative IS_DELETED (0x01) cell flag, so
+    ///   callers can distinguish element-level tombstones from live elements that
+    ///   simply carry an empty value (Issue #493).
     fn parse_complex_cell_value(
         &self,
         data: &[u8],
@@ -4138,7 +4178,7 @@ impl V5CompressedLegacyParser {
         element_type: &str,
         column: &crate::schema::Column,
         cell_index: u64,
-    ) -> Result<(Option<Value>, Vec<u8>, usize)> {
+    ) -> Result<ComplexCellParse> {
         log::debug!(
             "V5CompressedLegacy: parse_complex_cell_value '{}' cell {} element_type='{}' starting at offset {}",
             column.name,
@@ -4328,7 +4368,12 @@ impl V5CompressedLegacyParser {
             offset
         );
 
-        Ok((value, path_bytes, offset))
+        Ok(ComplexCellParse {
+            value,
+            path_bytes,
+            is_deleted,
+            next_offset: offset,
+        })
     }
 
     /// Skip over a single complex cell without fully parsing its value.
@@ -7919,6 +7964,30 @@ mod tests {
         buf
     }
 
+    /// Build the binary for a single element-level tombstone cell of a set
+    /// (Issue #493).  The element identity lives in the cell PATH, the cell has
+    /// IS_DELETED (0x01) set and no value.
+    ///
+    /// Wire format (Cassandra 5.0 complex-cell layout), matching the read order
+    /// in `parse_complex_cell_value`:
+    ///   [flags:u8] [timestamp:VInt] [localDeletionTime:VUInt] [path_len:VUInt] [path:bytes]
+    ///
+    /// - `flags = 0x01` (IS_DELETED). use_row_timestamp (0x08) is NOT set, so an
+    ///   explicit timestamp follows; use_row_ttl (0x10) is NOT set and IS_DELETED
+    ///   is set, so a localDeletionTime VUInt follows. is_expiring (0x02) is NOT
+    ///   set, so no TTL field follows. No value follows (cell is deleted).
+    fn build_set_tombstone_cell_bytes(path: &[u8]) -> Vec<u8> {
+        let flags: u8 = 0x01; // IS_DELETED
+        let ts_byte: u8 = 0x00; // VInt(0) (ZigZag, single byte)
+        let local_deletion_time: u8 = 0x01; // VUInt(1), single byte
+        let path_len = path.len() as u8;
+        assert!(path_len < 0x80, "helper only supports path lengths < 128");
+
+        let mut buf = vec![flags, ts_byte, local_deletion_time, path_len];
+        buf.extend_from_slice(path);
+        buf
+    }
+
     /// Regression test for Issue #481 bug 2: `parse_complex_cell_value` was
     /// calling `parse_raw_type_value(value_data, 0, ...)` which re-consumed the
     /// already-extracted length prefix, causing the first content byte (e.g.
@@ -7959,14 +8028,15 @@ mod tests {
             0xBB, 0xCC,
         ];
 
-        let (cell_value, path_bytes, consumed) = parser
+        let cell = parser
             .parse_complex_cell_value(&cell_bytes, 0, "blob", &column, 0)
             .expect("parse_complex_cell_value should succeed");
 
-        assert!(path_bytes.is_empty());
-        assert_eq!(consumed, cell_bytes.len());
+        assert!(cell.path_bytes.is_empty());
+        assert!(!cell.is_deleted);
+        assert_eq!(cell.next_offset, cell_bytes.len());
         assert_eq!(
-            cell_value,
+            cell.value,
             Some(Value::Blob(vec![0x2A, 0xBB, 0xCC])),
             "blob value must be the three raw bytes, not a misread length-prefixed parse"
         );
@@ -8157,6 +8227,56 @@ mod tests {
                 Value::Text("world".to_string()),
             ]),
             "set elements stored in cell path must be decoded and returned"
+        );
+    }
+
+    /// Regression test for Issue #493: element-level tombstones in a `set<T>`
+    /// must NOT surface as live members.
+    ///
+    /// In the Cassandra 5.0 complex-cell format a live set element and a
+    /// tombstoned element both produce `cell.value == None` with non-empty path
+    /// bytes (live elements carry HAS_EMPTY_VALUE 0x04 and store the element in
+    /// the path). The ONLY authoritative signal distinguishing them is the
+    /// IS_DELETED (0x01) cell flag, which `parse_complex_cell_value` now surfaces
+    /// via `ComplexCellParse::is_deleted`.
+    ///
+    /// **Without the fix** the set branch only checked `cell.value` / `path_bytes`
+    /// and emitted BOTH "live" and "dead" as members, so the result was
+    /// `Set(["live", "dead"])`.
+    /// **With the fix** the tombstoned element is skipped and the result is
+    /// `Set(["live"])`.
+    #[test]
+    fn test_regression_493_set_element_tombstone_skipped() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+        let column = crate::schema::Column {
+            name: "my_set".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Build a synthetic `set<text>` with two cells:
+        //   cell 0: live element "live"  (HAS_EMPTY_VALUE, element in path)
+        //   cell 1: tombstoned element "dead" (IS_DELETED, element in path)
+        //
+        // Outer format: [cell_count:VUInt] [cell0] [cell1]
+        let live = b"live";
+        let dead = b"dead";
+        let mut blob = vec![0x02u8]; // cell_count = 2
+        blob.extend(build_set_cell_bytes(live));
+        blob.extend(build_set_tombstone_cell_bytes(dead));
+
+        let (value, consumed) = parser
+            .parse_complex_column_inner(&blob, 0, &column, false)
+            .expect("parse_complex_column_inner should succeed");
+
+        assert_eq!(consumed, blob.len(), "parser must consume the entire blob");
+        assert_eq!(
+            value,
+            Value::Set(vec![Value::Text("live".to_string())]),
+            "tombstoned set element must be skipped; only the live element survives"
         );
     }
 }
