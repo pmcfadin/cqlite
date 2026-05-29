@@ -214,11 +214,19 @@ impl SSTableReader {
             None
         };
 
+        // Derive block_count from CompressionInfo.db when available — this is the
+        // authoritative source for compressed SSTables (no-heuristics mandate #28).
+        // Each entry in chunk_offsets corresponds to one compressed block in Data.db.
+        let block_count = compression_info
+            .as_ref()
+            .map(|ci| ci.chunk_offsets.len() as u64)
+            .unwrap_or(0);
+
         let stats = SSTableReaderStats {
             file_size,
             entry_count: header.stats.row_count,
-            table_count: 1,       // Will be updated as we discover tables
-            block_count: 0,       // Will be updated as we scan
+            table_count: 1, // Will be updated as we discover tables
+            block_count,
             index_size: 0,        // Will be updated if index is loaded
             bloom_filter_size: 0, // Will be updated if bloom filter is loaded
             compression_ratio: header.stats.compression_ratio,

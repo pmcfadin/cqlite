@@ -288,11 +288,7 @@ async fn test_golden_path_get_edge_cases() -> Result<()> {
     Ok(())
 }
 
-// Ignored: pre-existing reader issue where stats().block_count returns 0
-// even when the file is valid and readable.  Discovered while reviving
-// this test in issue #514.  Tracked separately for investigation.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: stats().block_count is always 0 (issue #514)"]
 async fn test_golden_path_get_integration_validation() -> Result<()> {
     let fixture = GoldenPathGetTestFixture::new().await?;
     let reader = fixture.setup_test_basic_reader().await?;
