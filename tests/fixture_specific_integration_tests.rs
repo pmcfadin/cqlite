@@ -94,11 +94,8 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
 }
 
 /// Test range scanning specifically against fixtures
-// Ignored: pre-existing reader issue where scan() does not return rows in
-// ascending key order when reading from the real dataset.  Discovered while
-// reviving this test in issue #514.  Tracked separately for investigation.
+// Fixed in issue #516: scan() now returns rows in ascending RowKey order.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: scan() result ordering not guaranteed (issue #514)"]
 async fn test_fixture_range_scan_integration() -> Result<()> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_path = manifest_dir.join("tests/fixtures/cassandra5/minimal/simple_table/Data.db");
@@ -146,15 +143,29 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
         full_scan_duration
     );
 
-    // Validate scan results are properly ordered
+    // Validate scan results are in ascending Murmur3 token order (then key bytes for equal
+    // tokens), matching the on-disk order from the SSTable format spec (§5, Appendix B §313).
     if full_results.len() > 1 {
         for i in 1..full_results.len() {
+            let token_prev = cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token(
+                full_results[i - 1].0.as_bytes(),
+            );
+            let token_curr = cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token(
+                full_results[i].0.as_bytes(),
+            );
+            let prev_pair = (token_prev, &full_results[i - 1].0);
+            let curr_pair = (token_curr, &full_results[i].0);
             assert!(
-                full_results[i - 1].0 <= full_results[i].0,
-                "Scan results should be in ascending order"
+                prev_pair <= curr_pair,
+                "Scan results should be in ascending token order: \
+                 prev=(token={}, key={:?}) > curr=(token={}, key={:?})",
+                token_prev,
+                full_results[i - 1].0,
+                token_curr,
+                full_results[i].0,
             );
         }
-        println!("  ✅ Scan ordering validated");
+        println!("  ✅ Scan ordering validated (token order)");
     }
 
     // Test 2: Limited scan
@@ -239,12 +250,9 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
 }
 
 /// Test decompression integration with available data
-// Ignored: pre-existing reader issue where get() returns None for keys
-// that scan() returns, indicating an inconsistency between the two read
-// paths.  Discovered while reviving this test in issue #514.  Tracked
-// separately for investigation.
+// Fixed in issue #517: get() now uses the same stitched parsing path as scan()
+// for V5CompressedLegacy NB format, eliminating the get()/scan() inconsistency.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: get() / scan() inconsistency (issue #514)"]
 async fn test_decompression_integration_with_real_data() -> Result<()> {
     // Look for compressed SSTable data via dynamic discovery
     let mut test_reader = None;

@@ -6,6 +6,7 @@
 use super::SSTableReader;
 use crate::parser::DataFormat;
 use crate::types::{TableId, Value};
+use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 use crate::{Error, Result, RowKey};
 use log::{debug, warn};
 use std::io::SeekFrom;
@@ -49,7 +50,48 @@ fn table_ids_match(entry_table_id: &TableId, query_table_id: &TableId) -> bool {
     entry_unqualified == query_unqualified
 }
 
+/// Sort a result slice in ascending Cassandra token order.
+///
+/// The authoritative ordering for SSTable partitions is ascending Murmur3 token, with
+/// equal-token ties broken by raw key bytes (lexicographic). This matches the on-disk
+/// physical order (spec §5, Appendix B §313) and the write engine's `PartitionPosition::cmp`.
+///
+/// Computes each key's token once to avoid O(n log n) recomputation inside the comparator.
+fn sort_by_token_order(results: &mut Vec<(RowKey, Value)>) {
+    // Map to (token, RowKey, Value), sort, then reassemble.
+    let mut tagged: Vec<(i64, RowKey, Value)> = results
+        .drain(..)
+        .map(|(k, v)| {
+            let t = cassandra_murmur3_token(k.as_bytes());
+            (t, k, v)
+        })
+        .collect();
+    tagged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    results.extend(tagged.into_iter().map(|(_, k, v)| (k, v)));
+}
+
 impl SSTableReader {
+    /// Return `true` when Data.db uses the V5CompressedLegacy NB chunked format and
+    /// therefore requires all chunks to be stitched before parsing.
+    ///
+    /// The correct predicate is:
+    ///   data_format == V5CompressedLegacy  AND  is_nb_format()
+    ///
+    /// Rationale:
+    /// - `V5CompressedLegacy` identifies the row serialization format (u16 length
+    ///   prefixes, legacy encoding) used by all Cassandra 5 'nb' SSTables.
+    /// - `is_nb_format()` identifies the chunked-compression read path. It intentionally
+    ///   EXCLUDES `V5_0Uncompressed`, which uses the same row format but stores data as
+    ///   a single contiguous block (no chunk boundaries, no stitching needed).
+    /// - Using `is_compressed` (compression_reader.is_some()) would be wrong for NB
+    ///   format because the per-chunk decompression is handled inside `stitch_and_parse_all_chunks`,
+    ///   and `is_compressed` may differ from `is_nb_format` for edge-case versions.
+    fn requires_chunk_stitching(&self) -> bool {
+        let data_format = self.header.cassandra_version.data_format();
+        matches!(data_format, DataFormat::V5CompressedLegacy)
+            && self.header.cassandra_version.is_nb_format()
+    }
+
     /// Get a value by key from the SSTable
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         // First check bloom filter if available
@@ -75,12 +117,21 @@ impl SSTableReader {
                 let file_offset = entry.offset + self.actual_header_size as u64;
                 return self.read_value_at_offset(file_offset, entry.size).await;
             }
+
+            // Issue #517: The SSTableIndex is built from Index.db key *digests* (16-byte
+            // Murmur3 hashes), not raw partition key bytes.  A raw-key lookup via
+            // find_entry() always misses.  Fall back to scan_for_key() so that get()
+            // and scan() agree on which partitions exist.
+            log::debug!(
+                "Index lookup returned no entry for key {:?} (possible digest/raw-key mismatch), \
+                 falling back to sequential scan",
+                key
+            );
+            return self.scan_for_key(table_id, key).await;
         } else {
-            // Fallback to sequential scan
+            // No index at all — fall back to sequential scan
             return self.scan_for_key(table_id, key).await;
         }
-
-        Ok(None)
     }
 
     /// Scan a range of keys
@@ -115,7 +166,6 @@ impl SSTableReader {
         );
 
         let mut results = Vec::new();
-        let mut count = 0;
 
         // Use index for efficient range scan if available
         if let Some(index) = &self.index {
@@ -155,6 +205,7 @@ impl SSTableReader {
                     .await;
             }
 
+            // Collect ALL index entries (limit applied after sort — BLOCKING-1).
             for (i, entry) in entries.iter().enumerate() {
                 // Index offsets are relative to data section start - adjust for header
                 let file_offset = entry.offset + self.actual_header_size as u64;
@@ -163,34 +214,42 @@ impl SSTableReader {
                     i, entry.offset, file_offset, entry.size
                 );
 
-                if let Some(limit) = limit {
-                    if count >= limit {
-                        log::debug!("SSTableReader::scan - Reached limit {}", limit);
-                        break;
-                    }
-                }
-
                 if let Some(value) = self.read_value_at_offset(file_offset, entry.size).await? {
                     log::debug!(
                         "SSTableReader::scan - Successfully read value at offset {}",
                         entry.offset
                     );
                     results.push((entry.key.clone(), value));
-                    count += 1;
                 } else {
                     log::debug!("SSTableReader::scan - Value at offset {} was filtered out (tombstone or expired)", entry.offset);
                 }
             }
         } else {
-            // Fallback to sequential scan
+            // Fallback to sequential scan.  sequential_scan() already returns results in
+            // token order (NON-BLOCKING-1: avoid double-sort — return directly).
             log::debug!("SSTableReader::scan - No index, falling back to sequential scan");
-            results = self
+            let seq_results = self
                 .sequential_scan(table_id, start_key, end_key, limit, schema)
                 .await?;
             log::debug!(
                 "SSTableReader::scan - Sequential scan returned {} results",
-                results.len()
+                seq_results.len()
             );
+            log::debug!(
+                "SSTableReader::scan - Returning {} final results",
+                seq_results.len()
+            );
+            return Ok(seq_results);
+        }
+
+        // Index-based path: sort by Murmur3 token order (ascending token, then key bytes).
+        // This matches the on-disk physical order (spec §5, Appendix B §313) and the write
+        // engine's PartitionPosition::cmp.  Compute each key's token once before sorting to
+        // avoid O(n log n) recomputation inside the comparator.
+        sort_by_token_order(&mut results);
+        // Limit applied AFTER sort so LIMIT N returns the N token-smallest partitions.
+        if let Some(lim) = limit {
+            results.truncate(lim);
         }
 
         log::debug!(
@@ -202,8 +261,6 @@ impl SSTableReader {
 
     /// Get all entries in the SSTable (for compaction)
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
-        use crate::parser::header::DataFormat;
-
         let mut results = Vec::new();
 
         // Reset to beginning of data section
@@ -216,18 +273,7 @@ impl SSTableReader {
         self.current_chunk_index
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
-        // Check if this is V5CompressedLegacy format which requires chunk stitching
-        // IMPORTANT: Only stitch if BOTH conditions are true:
-        // 1. Data format is V5CompressedLegacy (row payloads can span chunk boundaries)
-        // 2. Compression is enabled (chunks exist in CompressionInfo.db)
-        // V5_0Uncompressed uses V5CompressedLegacy row format but has no compression,
-        // so it should NOT be stitched (it's a single contiguous uncompressed block)
-        let data_format = self.header.cassandra_version.data_format();
-        let is_compressed = self.compression_reader.is_some() || self.compression_info.is_some();
-        let requires_stitching =
-            matches!(data_format, DataFormat::V5CompressedLegacy) && is_compressed;
-
-        if requires_stitching {
+        if self.requires_chunk_stitching() {
             // V5CompressedLegacy: Row payloads can span multiple compressed chunks
             // We must decompress and stitch all chunks together before parsing
             log::debug!(
@@ -487,6 +533,46 @@ impl SSTableReader {
     }
 
     async fn scan_for_key(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // For V5CompressedLegacy NB format, partitions can span chunk boundaries.
+        // The block-by-block parser will miss any partition whose bytes cross a
+        // chunk boundary.  Use the same stitched-buffer path that sequential_scan()
+        // uses so that get() and scan() share a consistent view of the data.
+        // (Issue #517)
+        if self.requires_chunk_stitching() {
+            log::debug!(
+                "scan_for_key: V5CompressedLegacy NB detected, using stitched buffer for key lookup"
+            );
+            // Reset chunk index before stitching
+            self.current_chunk_index
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+
+            let all_entries = self.stitch_and_parse_all_chunks(None).await?;
+
+            // NOTE: The SSTableIndex is built from 16-byte Murmur3 *digests*, not raw keys,
+            // so find_entry() always misses and falls through to this path.  For a found key
+            // we stop early (O(found position)); for a key not present we must scan the whole
+            // stitched buffer — O(file size).  This O(file) miss cost is an existing
+            // limitation of the digest-index design and is tracked separately as a follow-up.
+            //
+            // NON-BLOCKING-2: Table-id matching is intentionally skipped in the stitching path
+            // (consistent with sequential_scan's stitching path).  The V5CompressedLegacy parser
+            // returns entries tagged with the table_id from the SSTable header, which may hold
+            // default or incorrect values when headers use bare keyspace/table names rather than
+            // the query's fully-qualified form.  Since all entries in this stitch buffer come from
+            // the single SSTable being queried, skipping the check is correct and safe.
+            for (_, entry_key, entry_value) in all_entries {
+                if entry_key == *key {
+                    // Early-return on first match (BLOCKING-2: don't parse the rest of the file).
+                    if !self.filter_tombstone(&entry_value) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(entry_value));
+                }
+            }
+
+            return Ok(None);
+        }
+
         let header_size = self.calculate_header_size();
         {
             let mut file_guard = self.file.lock().await;
@@ -534,7 +620,6 @@ impl SSTableReader {
         );
 
         let mut results = Vec::new();
-        let mut count = 0;
 
         let header_size = self.calculate_header_size();
         log::debug!(
@@ -554,21 +639,17 @@ impl SSTableReader {
         self.current_chunk_index
             .store(0, std::sync::atomic::Ordering::Relaxed);
 
-        // CRITICAL FIX: V5CompressedLegacy partitions can span chunk boundaries
-        // We must stitch all chunks together before parsing to avoid dropping partitions
-        // Use stitching path for ALL V5CompressedLegacy formats because:
-        // 1. It uses the correct V5CompressedLegacy parser
-        // 2. It skips table_id matching (headers may have incorrect defaults)
-        // 3. For uncompressed NB format, stitch_and_parse reads raw data in one pass
-        // Exception: V5_0Uncompressed uses a different entry point and is handled
-        // by the non-stitching path's block parser.
-        let data_format = self.header.cassandra_version.data_format();
-        let requires_stitching = matches!(data_format, DataFormat::V5CompressedLegacy)
-            && self.header.cassandra_version.is_nb_format();
-
-        if requires_stitching {
+        // CRITICAL FIX: V5CompressedLegacy partitions can span chunk boundaries.
+        // We must stitch all chunks together before parsing to avoid dropping partitions.
+        // Use `requires_chunk_stitching()` as the single source of truth for whether
+        // stitching is needed (BLOCKING-3: unified predicate).
+        //
+        // Note: We intentionally skip table_id matching in the stitching path because the
+        // parser may return incorrect table_ids from header defaults.  Since sequential_scan
+        // is called with a specific table_id, all entries from this SSTable match it.
+        if self.requires_chunk_stitching() {
             log::debug!(
-                "SSTableReader::sequential_scan - V5CompressedLegacy detected, using stitched buffer"
+                "SSTableReader::sequential_scan - V5CompressedLegacy NB detected, using stitched buffer"
             );
 
             // Stitch all chunks together (reuse logic from get_all_entries)
@@ -578,10 +659,10 @@ impl SSTableReader {
                 all_entries.len()
             );
 
-            // Apply filtering (table_id, key range, limit)
-            // Note: We skip table_id matching because the parser may return incorrect table_ids
-            // from header defaults. Since sequential_scan is called with a specific table_id,
-            // all entries from this SSTable should match that table_id.
+            // Apply key-range filter and tombstone filter; collect ALL matching entries
+            // before sorting.  Limit is applied AFTER sort so that LIMIT N returns the N
+            // token-smallest partitions, not the first N encountered in parse order.
+            // (BLOCKING-1: limit-after-order)
             for (_entry_table_id, entry_key, entry_value) in all_entries {
                 if let Some(start) = start_key {
                     if &entry_key < start {
@@ -600,19 +681,23 @@ impl SSTableReader {
                 }
 
                 results.push((entry_key, entry_value));
-                count += 1;
-
-                if let Some(lim) = limit {
-                    if count >= lim {
-                        break;
-                    }
-                }
             }
 
             log::debug!(
-                "SSTableReader::sequential_scan - Filtered to {} results (limit: {:?})",
+                "SSTableReader::sequential_scan - Filtered to {} results before limit (limit: {:?})",
                 results.len(),
                 limit
+            );
+
+            // Sort by Murmur3 token order (spec §5, Appendix B §313), then truncate to limit.
+            sort_by_token_order(&mut results);
+            if let Some(lim) = limit {
+                results.truncate(lim);
+            }
+
+            log::debug!(
+                "SSTableReader::sequential_scan - Returning {} results after sort+limit",
+                results.len()
             );
             return Ok(results);
         }
@@ -679,22 +764,8 @@ impl SSTableReader {
                     continue;
                 }
 
-                log::debug!(
-                    "SSTableReader::sequential_scan - Including entry in results (count={})",
-                    count + 1
-                );
+                log::debug!("SSTableReader::sequential_scan - Including entry in results");
                 results.push((entry_key.clone(), entry_value.clone()));
-                count += 1;
-
-                if let Some(limit) = limit {
-                    if count >= limit {
-                        log::debug!(
-                            "SSTableReader::sequential_scan - Reached limit {}, stopping scan",
-                            limit
-                        );
-                        return Ok(results);
-                    }
-                }
             }
         }
 
@@ -703,10 +774,22 @@ impl SSTableReader {
             block_count
         );
         log::debug!(
-            "SSTableReader::sequential_scan - Returning {} total results",
+            "SSTableReader::sequential_scan - {} results before sort+limit",
             results.len()
         );
 
+        // Sort by Murmur3 token order (spec §5, Appendix B §313), then apply limit.
+        // Limit is applied AFTER sort so that LIMIT N returns the N token-smallest
+        // partitions (BLOCKING-1: limit-after-order).
+        sort_by_token_order(&mut results);
+        if let Some(lim) = limit {
+            results.truncate(lim);
+        }
+
+        log::debug!(
+            "SSTableReader::sequential_scan - Returning {} results after sort+limit",
+            results.len()
+        );
         Ok(results)
     }
 

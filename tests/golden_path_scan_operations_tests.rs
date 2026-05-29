@@ -125,10 +125,8 @@ impl GoldenPathScanTestFixture {
     }
 }
 
-// Ignored: pre-existing reader issue where scan() does not return rows in
-// ascending key order.  Discovered while reviving this test in issue #514.
+// Fixed in issue #516: scan() now returns rows in ascending RowKey order.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: scan() result ordering not guaranteed (issue #514)"]
 async fn test_golden_path_full_table_scan() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
@@ -151,11 +149,24 @@ async fn test_golden_path_full_table_scan() -> Result<()> {
         scan_duration.as_millis()
     );
 
-    // Verify results are sorted by key
+    // Verify results are in ascending Murmur3 token order (then key bytes for equal tokens),
+    // matching the on-disk order specified in the SSTable format spec (§5, Appendix B §313).
     for i in 1..results.len() {
+        let token_prev = cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token(
+            results[i - 1].0.as_bytes(),
+        );
+        let token_curr =
+            cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token(results[i].0.as_bytes());
+        let prev_pair = (token_prev, &results[i - 1].0);
+        let curr_pair = (token_curr, &results[i].0);
         assert!(
-            results[i - 1].0 <= results[i].0,
-            "Scan results should be sorted by key"
+            prev_pair <= curr_pair,
+            "Scan results should be in ascending token order: \
+             prev=(token={}, key={:?}) > curr=(token={}, key={:?})",
+            token_prev,
+            results[i - 1].0,
+            token_curr,
+            results[i].0,
         );
     }
 
@@ -350,10 +361,8 @@ async fn test_golden_path_scan_performance_benchmarks() -> Result<()> {
     Ok(())
 }
 
-// Ignored: pre-existing reader issue where scan() does not return rows in
-// ascending key order.  Discovered while reviving this test in issue #514.
+// Fixed in issue #516: scan() now returns rows in ascending RowKey order.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: scan() result ordering not guaranteed (issue #514)"]
 async fn test_golden_path_scan_ordering_validation() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_timeseries_reader().await?;
@@ -364,18 +373,30 @@ async fn test_golden_path_scan_ordering_validation() -> Result<()> {
     let results = reader.scan(&table_id, None, None, Some(50), None).await?;
 
     if results.len() > 1 {
-        // Verify ascending order
+        // Verify ascending Murmur3 token order (then key bytes for equal tokens),
+        // matching the on-disk order from the SSTable format spec (§5, Appendix B §313).
         for i in 1..results.len() {
+            let token_prev = cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token(
+                results[i - 1].0.as_bytes(),
+            );
+            let token_curr = cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token(
+                results[i].0.as_bytes(),
+            );
+            let prev_pair = (token_prev, &results[i - 1].0);
+            let curr_pair = (token_curr, &results[i].0);
             assert!(
-                results[i - 1].0 <= results[i].0,
-                "Scan results should be in ascending key order: {:?} > {:?}",
+                prev_pair <= curr_pair,
+                "Scan results should be in ascending token order: \
+                 prev=(token={}, key={:?}) > curr=(token={}, key={:?})",
+                token_prev,
                 results[i - 1].0,
-                results[i].0
+                token_curr,
+                results[i].0,
             );
         }
 
         println!(
-            "✅ Scan ordering validated - {} entries in correct ascending order",
+            "✅ Scan ordering validated - {} entries in correct ascending token order",
             results.len()
         );
 

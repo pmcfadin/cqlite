@@ -494,11 +494,42 @@ impl V5CompressedLegacyParser {
                                         );
                                         Value::Null
                                     } else {
-                                        // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map
-                                        let map_entries: Vec<(Value, Value)> = cells
+                                        // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map.
+                                        //
+                                        // Sort alphabetically by column name to guarantee a deterministic
+                                        // ordering across independent parse calls.  HashMap iteration order
+                                        // is randomized per-instance in Rust, so two separate calls to
+                                        // stitch_and_parse_all_chunks (e.g. get() then scan()) would
+                                        // otherwise produce Vec orderings that compare as unequal even
+                                        // though they hold the same data.
+                                        //
+                                        // Alphabetical is not schema column order, but the query layer
+                                        // (executor.rs:storage_data_to_query_row) accesses columns by name
+                                        // (not position), so this ordering does not affect query correctness
+                                        // or sstabledump parity.
+                                        //
+                                        // NON-BLOCKING-3 (Issue #516/517): A future improvement could use
+                                        // serialization-header order (reader.header.columns) rather than
+                                        // alphabetical, matching Cassandra's on-disk column order exactly.
+                                        // That would require threading the column order through ParsedRow
+                                        // to this call site.
+                                        let mut map_entries: Vec<(Value, Value)> = cells
                                             .into_iter()
                                             .map(|(name, value)| (Value::Text(name), value))
                                             .collect();
+                                        map_entries.sort_by(|a, b| {
+                                            let a_key = if let Value::Text(s) = &a.0 {
+                                                s.as_str()
+                                            } else {
+                                                ""
+                                            };
+                                            let b_key = if let Value::Text(s) = &b.0 {
+                                                s.as_str()
+                                            } else {
+                                                ""
+                                            };
+                                            a_key.cmp(b_key)
+                                        });
                                         Value::Map(map_entries)
                                     };
 
