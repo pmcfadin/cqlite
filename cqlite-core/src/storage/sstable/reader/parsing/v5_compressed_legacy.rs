@@ -2579,6 +2579,55 @@ impl V5CompressedLegacyParser {
                     offset += blob_len;
 
                     (udt_value, offset)
+                } else if let Some(udt_def) = self
+                    .udt_registry
+                    .as_ref()
+                    .and_then(|reg| reg.get_udt(&self.keyspace, &inner_type).cloned())
+                {
+                    // frozen<short_udt_name>: look up the concrete UDT definition in the
+                    // registry (Issue #502).  This handles type strings like
+                    // `frozen<person>` where "person" is a registered UDT rather than a
+                    // collection or a full marshal-format UserType string.
+                    log::debug!(
+                        "V5CompressedLegacy: Resolving frozen UDT '{}' via registry for column '{}'",
+                        inner_type,
+                        column.name,
+                    );
+
+                    // Read VUInt-prefixed blob length (same framing as tuple and
+                    // marshal-format UDT cells).
+                    let (remaining, blob_len_raw) = parse_vuint(&data[offset..]).map_err(|e| {
+                        Error::corruption(format!(
+                            "Frozen UDT '{}' (column '{}'): failed to parse blob length: {:?}",
+                            inner_type, column.name, e
+                        ))
+                    })?;
+                    if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+                        return Err(Error::corruption(format!(
+                            "Frozen UDT '{}' (column '{}'): blob_len {} exceeds maximum {}",
+                            inner_type, column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+                        )));
+                    }
+                    let blob_len = blob_len_raw as usize;
+                    let len_bytes_consumed = data[offset..].len() - remaining.len();
+                    offset += len_bytes_consumed;
+
+                    if offset + blob_len > data.len() {
+                        return Err(Error::corruption(format!(
+                            "Frozen UDT '{}' (column '{}'): need {} bytes but only {} available",
+                            inner_type,
+                            column.name,
+                            blob_len,
+                            data.len() - offset
+                        )));
+                    }
+
+                    let udt_data = &data[offset..offset + blob_len];
+                    let (udt_value, _) =
+                        self.parse_udt_value(udt_data, 0, &udt_def, column, _reader)?;
+                    offset += blob_len;
+
+                    (udt_value, offset)
                 } else {
                     // Non-collection frozen type (e.g., frozen<tuple<...>>)
                     let mut inner_column = column.clone();
