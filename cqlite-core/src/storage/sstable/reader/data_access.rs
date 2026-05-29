@@ -259,7 +259,20 @@ impl SSTableReader {
         Ok(results)
     }
 
-    /// Get all entries in the SSTable (for compaction)
+    /// Get all entries in the SSTable.
+    ///
+    /// # Tombstone contract (Issue #505)
+    ///
+    /// This is a **user-facing** accessor: row tombstones are filtered out via
+    /// [`Self::filter_tombstone`] and never appear in the returned entries. The
+    /// underlying `parse_block` path emits `Value::Tombstone(RowTombstone)` for
+    /// deleted rows, but those are suppressed here so callers see exactly the live
+    /// rows (matching the previous `Value::Null` suppression behaviour).
+    ///
+    /// The compaction k-way merger must instead use
+    /// [`Self::iterate_all_partitions_for_compaction`], which preserves
+    /// `Value::Tombstone` entries (with their authoritative deletion timestamps)
+    /// so that tombstone-shadowing semantics can be applied during the merge.
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
         let mut results = Vec::new();
 
@@ -290,6 +303,10 @@ impl SSTableReader {
                 results.extend(entries);
             }
         }
+
+        // Issue #505: suppress row tombstones from user-facing output. The compaction
+        // path (iterate_all_partitions_for_compaction) bypasses this filter.
+        results.retain(|(_tid, _key, value)| self.filter_tombstone(value));
 
         Ok(results)
     }

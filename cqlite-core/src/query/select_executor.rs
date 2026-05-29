@@ -261,7 +261,10 @@ fn build_row_from_scan(
     projection: &[String],
     schema: Option<&crate::schema::TableSchema>,
 ) -> Option<QueryRow> {
-    if matches!(value, Value::Null) {
+    // Suppress tombstoned rows from user-visible output. A row tombstone reaches
+    // here as `Value::Tombstone` (Issue #505); before that change it was `Value::Null`.
+    // Both must be suppressed identically so deleted rows never appear in query results.
+    if matches!(value, Value::Null | Value::Tombstone(_)) {
         return None;
     }
 
