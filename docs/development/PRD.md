@@ -57,6 +57,8 @@ tests/              # shared fixtures (Cassandra 5 SSTables)
 
 > **Revision Note (May 2026)**: M5 complete, v0.9.0 cut. WAL + memtable + STCS compaction + write APIs in Python, Node.js, and CLI ship in this release. M6 (WASM) and M7 (perf + v1.0) are the remaining milestones. See CHANGELOG.md for the full M5 change list.
 
+> **Revision Note (May 2026, v0.9.1)**: Reader-correctness patch. Set-element tombstone skipping (#493), schema-aware tuple decoding for arbitrary arity (#501), and `frozen<udt>` field decoding via the UDT registry (#502) all landed — these are removed from §4.2 Known Issues. Reviving the orphan integration tests (#514) and fixing the aarch64-apple-darwin CI/release runner (#512) also shipped. New reader bugs surfaced by the revived tests are tracked in the v0.9.2 milestone (#516, #517, #518). M6/M7 remain the path to v1.0.
+
 ### 4.1 · M5 Write Support Architecture
 
 **Design Principle**: The write API is **mutation-based**, not CQL-dependent. CQL statement support is a convenience layer built on top of the core mutation API.
@@ -157,16 +159,20 @@ cqlsh -e "SELECT * FROM keyspace.table"
 
 ---
 
-## 4.2 · Known Issues (post-v0.9.0)
+## 4.2 · Known Issues (post-v0.9.1)
 
 The following are tracked follow-ups, not release blockers. All are open GitHub issues.
+The v0.9.0 reader follow-ups (#493 set-element tombstones, #501 tuple decoding,
+#502 frozen<udt> decoding) were **resolved in v0.9.1** and removed from this list.
 
-| Issue | Description | Workaround |
-|-------|-------------|------------|
-| #311 | Python concurrent-query race in schema metadata access | Run one warm-up query before spawning parallel threads on the same handle |
-| #493 | Set-element tombstone decoding | Read-only; tombstones are silently ignored in query results |
-| #501 | Schema-aware tuple decoding | Tuples return as raw byte arrays in some edge cases |
-| #502 | frozen<udt> field decoding | Frozen UDT values may be returned as raw bytes in some edge cases |
+| Issue | Milestone | Description | Workaround |
+|-------|-----------|-------------|------------|
+| #311 | — | Python concurrent-query race in schema metadata access | Run one warm-up query before spawning parallel threads on the same handle |
+| #516 | v0.9.2 | `scan()` result ordering not guaranteed (rows out of RowKey order) | Sort client-side if order matters |
+| #517 | v0.9.2 | `get()` returns `None` for partition keys that `scan()` returns | Use `scan()` to confirm partition presence |
+| #518 | v0.9.2 | `SSTableReader::stats().block_count` always reports 0 | Do not rely on `block_count` for diagnostics |
+| #505 | v0.9.2 | Compaction merger drops row tombstones from input SSTables | Avoid relying on compaction to preserve row tombstones |
+| #498 | v0.9.2 | Compaction equal-timestamp Delete-vs-Live tiebreaker diverges from Cassandra `Cell.reconcile` | Avoid equal-timestamp delete/live conflicts in compacted input |
 
 See [docs/write-support-limitations.md](../write-support-limitations.md) for the full limitations reference.
 
