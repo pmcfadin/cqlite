@@ -5,6 +5,46 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.9.1] — Reader correctness fixes
+
+Reader correctness and test/CI follow-ups to v0.9.0. No writer changes and no
+public API changes.
+
+### Fixed
+
+- **Set-element tombstones** were surfaced as live values by the V5CompressedLegacy
+  parser because the cell `is_deleted` flag was discarded. `parse_complex_cell_value`
+  now returns the deletion flag, and the set (and list) branch skips tombstoned
+  elements (#493).
+- **Schema-aware tuple decoding** for arbitrary arity: tuples with more than two
+  elements (e.g. `tuple<int, text, uuid>`) previously read back as `Null` or `Blob`.
+  The reader now decodes each element using the element types from the schema's
+  type string, with bounds-checked parsing and no heuristics (#501).
+- **Frozen UDT field decoding**: `frozen<NAME>` columns previously read back as
+  `Frozen(Null)`. The reader now resolves the concrete UDT through the UDT registry
+  and decodes fields by name and type, and returns an actionable error when the
+  referenced UDT is not registered (#502).
+
+### Testing & CI
+
+- Revived the orphan root-package integration tests: hardcoded SSTable directory
+  UUIDs (from the retired dataset version) were replaced with dynamic table
+  discovery, and the suite is now wired into CI so it cannot rot again (#514).
+- Fixed the `aarch64-apple-darwin` CI runner where `cargo` was routed to
+  `rustup-init` (the `cargo metadata` / `cargo +1.88.0` failures). The real cargo
+  is now prepended to `PATH` in the Node and Python build workflows, with a
+  toolchain verification step (#512).
+
+### Known Issues
+
+- Reviving the orphan integration tests surfaced three pre-existing reader bugs,
+  now tracked separately and marked `#[ignore]` in the revived tests:
+  `scan()` result ordering is not guaranteed (#516), `get()` misses partitions that
+  `scan()` returns (#517), and `SSTableReader::stats().block_count` always reports
+  0 (#518).
+- The v0.9.0 known issues for counter writes, the BIG-format BTI writer, and the
+  Python concurrent-query race (#311) are unchanged.
+
 ## [v0.9.0] — M5 Write Support
 
 ### Added
@@ -63,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   database handle may see a race in schema metadata access. Run one warm-up query
   before spawning parallel threads.
 - **Open reader follow-ups**: set-element tombstone decoding (#493), schema-aware
-  tuple decoding (#501), frozen<udt> field decoding (#502).
+  tuple decoding (#501), frozen<udt> field decoding (#502). _(Resolved in v0.9.1.)_
 
 ## [0.4.0] - 2026-01-27 (M4 Complete)
 
