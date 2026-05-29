@@ -1000,12 +1000,7 @@ async fn test_type_duration_negative() {
     }
 }
 
-/// Test Tuple type roundtrip
-///
-/// NOTE: The reader does not yet perform schema-aware type decoding for tuple elements.
-/// Tuple bytes are deserialized as raw cell data without element-type awareness, so
-/// individual elements may be misread (e.g. Integer bytes decoded as Blob/Text).
-/// The test verifies that a Tuple is returned and documents the current behavior.
+/// Test Tuple type roundtrip — schema-aware element decoding (Issue #501).
 #[tokio::test]
 async fn test_type_tuple_roundtrip() {
     let temp_dir = TempDir::new().unwrap();
@@ -1016,24 +1011,10 @@ async fn test_type_tuple_roundtrip() {
 
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "tuple_col").await;
-    // The reader returns a Tuple but without schema-aware element decoding:
-    // element types may differ from what was written. Accept any Tuple or Blob.
-    match &read_back {
-        Value::Tuple(_) => {
-            // Tuple container preserved; element-level decoding not yet schema-aware.
-            eprintln!("note: tuple read back as {:?} (element types may differ — schema-aware decoding not yet implemented)", read_back);
-        }
-        Value::Blob(_) => {
-            eprintln!("note: tuple read back as Blob (schema-aware decoding not yet implemented)");
-        }
-        other => panic!("Tuple roundtrip: expected Tuple or Blob, got {:?}", other),
-    }
+    assert_eq!(read_back, original, "Tuple<int,text> roundtrip failed");
 }
 
-/// Test Tuple type with null element
-///
-/// NOTE: The reader does not yet perform schema-aware type decoding for tuple elements.
-/// See `test_type_tuple_roundtrip` for details.
+/// Test Tuple type with null element — schema-aware element decoding (Issue #501).
 #[tokio::test]
 async fn test_type_tuple_with_null() {
     let temp_dir = TempDir::new().unwrap();
@@ -1044,24 +1025,13 @@ async fn test_type_tuple_with_null() {
 
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "tuple_col").await;
-    match &read_back {
-        Value::Tuple(_) => {
-            eprintln!("note: tuple(with_null) read back as {:?} (element types may differ — schema-aware decoding not yet implemented)", read_back);
-        }
-        Value::Blob(_) => {
-            eprintln!("note: tuple(with_null) read back as Blob (schema-aware decoding not yet implemented)");
-        }
-        other => panic!(
-            "Tuple(with_null) roundtrip: expected Tuple or Blob, got {:?}",
-            other
-        ),
-    }
+    assert_eq!(
+        read_back, original,
+        "Tuple<int,text>(with_null) roundtrip failed"
+    );
 }
 
-/// Test Tuple type nested
-///
-/// NOTE: The reader does not yet perform schema-aware type decoding for tuple elements.
-/// See `test_type_tuple_roundtrip` for details.
+/// Test Tuple type nested — schema-aware element decoding (Issue #501).
 #[tokio::test]
 async fn test_type_tuple_nested() {
     let temp_dir = TempDir::new().unwrap();
@@ -1075,20 +1045,10 @@ async fn test_type_tuple_nested() {
 
     assert_single_partition_written(&info);
     let read_back = super::read_back_column(&temp_dir, &schema, "tuple_col").await;
-    match &read_back {
-        Value::Tuple(_) => {
-            eprintln!("note: tuple(nested) read back as {:?} (element types may differ — schema-aware decoding not yet implemented)", read_back);
-        }
-        Value::Blob(_) => {
-            eprintln!(
-                "note: tuple(nested) read back as Blob (schema-aware decoding not yet implemented)"
-            );
-        }
-        other => panic!(
-            "Tuple(nested) roundtrip: expected Tuple or Blob, got {:?}",
-            other
-        ),
-    }
+    assert_eq!(
+        read_back, original,
+        "Tuple<int,tuple<int,text>>(nested) roundtrip failed"
+    );
 }
 
 /// Test Frozen list type roundtrip
@@ -1292,10 +1252,7 @@ async fn test_type_timeuuid_roundtrip() {
     assert_eq!(read_back, original, "Timeuuid type roundtrip failed");
 }
 
-/// Known limitation: the reader does not yet perform schema-aware element-type
-/// decoding for three-element tuples, so `tuple<int, text, uuid>` may read back
-/// as `Value::Null`. The test asserts the write path succeeds and accepts any
-/// non-panicking read-back; tighten once schema-aware decoding lands.
+/// Test Tuple<int,text,uuid> — three-element tuple with schema-aware decoding (Issue #501).
 #[tokio::test]
 async fn test_type_tuple_int_text_uuid() {
     let temp_dir = TempDir::new().unwrap();
@@ -1312,51 +1269,8 @@ async fn test_type_tuple_int_text_uuid() {
 
     assert_single_partition_written(&info);
 
-    // Read back all rows (bypasses column extraction to avoid panicking on Null row)
-    let rows = super::read_back_all_rows(&temp_dir, &schema).await;
-    assert_eq!(rows.len(), 1, "Should have exactly 1 row");
-    let row = &rows[0];
-    // Document current behavior:
-    // - If the type string is recognised: row is a Map with the tuple column.
-    // - If the type string is not recognised: row may be Value::Null.
-    // Both outcomes are acceptable until schema-aware decoding is implemented.
-    match row {
-        Value::Map(entries) => {
-            // Column found in the row map — extract and accept Tuple or Blob
-            if let Some((_, col_val)) = entries
-                .iter()
-                .find(|(k, _)| matches!(k, Value::Text(n) if n == "tuple_col"))
-            {
-                match col_val {
-                    Value::Tuple(_) => eprintln!(
-                        "note: tuple<int,text,uuid> read back as Tuple \
-                         (element types may differ — schema-aware decoding not yet implemented)"
-                    ),
-                    Value::Blob(_) => eprintln!(
-                        "note: tuple<int,text,uuid> read back as Blob \
-                         (schema-aware decoding not yet implemented)"
-                    ),
-                    other => {
-                        eprintln!("note: tuple<int,text,uuid> column read back as {:?}", other)
-                    }
-                }
-            } else {
-                eprintln!("note: tuple<int,text,uuid> column not found in row Map");
-            }
-        }
-        Value::Null => {
-            // Known limitation: reader returns Null when type string is unrecognised
-            eprintln!(
-                "note: tuple<int,text,uuid> row read back as Null \
-                 (reader does not yet support 3-element tuple type string — \
-                 schema-aware decoding not yet implemented)"
-            );
-        }
-        other => panic!(
-            "tuple<int,text,uuid> row read back as unexpected type {:?}",
-            other
-        ),
-    }
+    let read_back = super::read_back_column(&temp_dir, &schema, "tuple_col").await;
+    assert_eq!(read_back, original, "Tuple<int,text,uuid> roundtrip failed");
 }
 
 /// Known limitation: the reader cannot map the generic `frozen<udt>` type
