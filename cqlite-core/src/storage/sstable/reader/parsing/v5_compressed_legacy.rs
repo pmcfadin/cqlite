@@ -5339,6 +5339,14 @@ impl V5CompressedLegacyParser {
             // There is NO outer VUInt blob-length prefix here because parse_raw_type_value is
             // called element-by-element from the frozen-collection parsers which have already
             // consumed the VUInt length for each element (via read_frozen_element).
+            //
+            // Safety invariant: every caller of parse_raw_type_value for a tuple element
+            // pre-slices `data` to the exact element bytes (via read_frozen_element or
+            // parse_frozen_sequence_value_raw), so `data.len()` is the true tuple extent.
+            // parse_tuple_elements_raw iterates only over schema-derived element_types, so it
+            // stops at the schema arity regardless of wire arity, and the returned `offset`
+            // is the position after the last schema-specified element's bytes — which is
+            // correct because the caller already holds the bounded slice.
             type_str if type_str.starts_with("tuple<") => {
                 let element_types = self.extract_tuple_element_types(type_str)?;
                 if element_types.is_empty() {
@@ -5347,7 +5355,7 @@ impl V5CompressedLegacyParser {
                         column_name
                     )));
                 }
-                // Treat the remainder of the data as the blob for this nested tuple.
+                // blob_end = data.len() is correct: callers pre-slice data to the tuple extent.
                 let blob_end = data.len();
                 let mut off = offset;
                 let elements = self.parse_tuple_elements_raw(
@@ -6514,13 +6522,19 @@ impl V5CompressedLegacyParser {
         }
 
         // Read the VUInt outer blob length to bound the tuple bytes
-        let (remaining, blob_len) = parse_vuint(&data[*offset..]).map_err(|e| {
+        let (remaining, blob_len_raw) = parse_vuint(&data[*offset..]).map_err(|e| {
             Error::corruption(format!(
                 "Tuple '{}': failed to parse outer blob length as VUInt: {:?}",
                 column.name, e
             ))
         })?;
-        let blob_len = blob_len as usize;
+        if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+            return Err(Error::corruption(format!(
+                "Tuple '{}': blob_len {} exceeds maximum {}",
+                column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+            )));
+        }
+        let blob_len = blob_len_raw as usize;
         let len_bytes_consumed = data[*offset..].len() - remaining.len();
         *offset += len_bytes_consumed;
 
@@ -6650,6 +6664,12 @@ impl V5CompressedLegacyParser {
                     current.push(ch);
                 }
                 '>' => {
+                    if depth == 0 {
+                        return Err(Error::schema(format!(
+                            "Unmatched '>' in tuple type: {}",
+                            type_str
+                        )));
+                    }
                     depth -= 1;
                     current.push(ch);
                 }
@@ -6758,6 +6778,36 @@ mod tests {
         // Test error cases
         assert!(parser.extract_tuple_element_types("tuple").is_err());
         assert!(parser.extract_tuple_element_types("int").is_err());
+    }
+
+    #[test]
+    fn test_extract_tuple_element_types_unmatched_angle_bracket() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Unmatched '>' inside inner content must return Err, not panic.
+        // "tuple<int>>" — the outer '>' is consumed by starts_with/ends_with stripping,
+        // leaving "int>" as the inner string; the extra '>' hits depth == 0 and must error.
+        let result = parser.extract_tuple_element_types("tuple<int>>");
+        assert!(
+            result.is_err(),
+            "Expected Err for unmatched '>' but got: {:?}",
+            result
+        );
+        let err_msg = format!("{}", result.unwrap_err());
+        assert!(
+            err_msg.contains("Unmatched '>'"),
+            "Error message should mention unmatched '>': {}",
+            err_msg
+        );
+
+        // A second variant: extra '>' after a nested type.
+        let result2 = parser.extract_tuple_element_types("tuple<list<int>>>");
+        assert!(
+            result2.is_err(),
+            "Expected Err for extra '>' but got: {:?}",
+            result2
+        );
     }
 
     /// Helper: build a frozen list<int> raw binary: [i32 count][i32 len][int]...
@@ -7086,11 +7136,57 @@ mod tests {
 
     #[test]
     fn test_tuple_int_text_parsing() {
-        // TODO(Issue #162): Add integration test with real SSTable data containing tuples
-        // This would require:
-        // 1. Real binary data with tuple encoding
-        // 2. Schema definition with tuple column
-        // 3. Expected parsed tuple values
+        // Test parse_tuple_elements_raw with constructed binary data.
+        //
+        // Wire format for each tuple element: [i32 BE elem_len][elem_bytes]
+        // Null element: [i32 BE -1] (no following bytes)
+        //
+        // Tuple: (int=42, text="hi")
+        //   element 0: [0x00, 0x00, 0x00, 0x04][42 as i32 BE] -> [0,0,0,4][0,0,0,42]
+        //   element 1: [0x00, 0x00, 0x00, 0x02]["hi"] -> [0,0,0,2][0x68,0x69]
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let mut data = Vec::new();
+        // element 0: int 42
+        data.extend_from_slice(&4i32.to_be_bytes()); // length
+        data.extend_from_slice(&42i32.to_be_bytes()); // value
+                                                      // element 1: text "hi"
+        let hi = b"hi";
+        data.extend_from_slice(&(hi.len() as i32).to_be_bytes()); // length
+        data.extend_from_slice(hi); // value
+
+        let element_types = vec!["int".to_string(), "text".to_string()];
+        let mut offset = 0usize;
+        let blob_end = data.len();
+        let elements = parser
+            .parse_tuple_elements_raw(&data, &mut offset, blob_end, &element_types, "col", 0)
+            .unwrap();
+
+        assert_eq!(elements.len(), 2);
+        assert_eq!(elements[0], Value::Integer(42));
+        assert_eq!(elements[1], Value::Text("hi".to_string()));
+        assert_eq!(
+            offset, blob_end,
+            "offset should reach blob_end after parsing all elements"
+        );
+
+        // Also test null element: (int=null, text="ok")
+        let mut data2 = Vec::new();
+        data2.extend_from_slice(&(-1i32).to_be_bytes()); // null element 0
+        let ok = b"ok";
+        data2.extend_from_slice(&(ok.len() as i32).to_be_bytes());
+        data2.extend_from_slice(ok);
+
+        let mut offset2 = 0usize;
+        let blob_end2 = data2.len();
+        let elements2 = parser
+            .parse_tuple_elements_raw(&data2, &mut offset2, blob_end2, &element_types, "col", 0)
+            .unwrap();
+
+        assert_eq!(elements2.len(), 2);
+        assert_eq!(elements2[0], Value::Null);
+        assert_eq!(elements2[1], Value::Text("ok".to_string()));
     }
 
     #[test]
