@@ -495,10 +495,24 @@ impl V5CompressedLegacyParser {
                                         Value::Null
                                     } else {
                                         // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map.
-                                        // Sort by column name so the output ordering is deterministic
-                                        // across independent parsing calls (HashMap iteration is
-                                        // non-deterministic).  This ensures get() and scan() agree
-                                        // on row value equality (Issue #517).
+                                        //
+                                        // Sort alphabetically by column name to guarantee a deterministic
+                                        // ordering across independent parse calls.  HashMap iteration order
+                                        // is randomized per-instance in Rust, so two separate calls to
+                                        // stitch_and_parse_all_chunks (e.g. get() then scan()) would
+                                        // otherwise produce Vec orderings that compare as unequal even
+                                        // though they hold the same data.
+                                        //
+                                        // Alphabetical is not schema column order, but the query layer
+                                        // (executor.rs:storage_data_to_query_row) accesses columns by name
+                                        // (not position), so this ordering does not affect query correctness
+                                        // or sstabledump parity.
+                                        //
+                                        // NON-BLOCKING-3 (Issue #516/517): A future improvement could use
+                                        // serialization-header order (reader.header.columns) rather than
+                                        // alphabetical, matching Cassandra's on-disk column order exactly.
+                                        // That would require threading the column order through ParsedRow
+                                        // to this call site.
                                         let mut map_entries: Vec<(Value, Value)> = cells
                                             .into_iter()
                                             .map(|(name, value)| (Value::Text(name), value))

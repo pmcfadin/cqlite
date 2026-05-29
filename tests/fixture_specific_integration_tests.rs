@@ -143,15 +143,29 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
         full_scan_duration
     );
 
-    // Validate scan results are properly ordered
+    // Validate scan results are in ascending Murmur3 token order (then key bytes for equal
+    // tokens), matching the on-disk order from the SSTable format spec (§5, Appendix B §313).
     if full_results.len() > 1 {
         for i in 1..full_results.len() {
+            let token_prev = cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token(
+                full_results[i - 1].0.as_bytes(),
+            );
+            let token_curr = cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token(
+                full_results[i].0.as_bytes(),
+            );
+            let prev_pair = (token_prev, &full_results[i - 1].0);
+            let curr_pair = (token_curr, &full_results[i].0);
             assert!(
-                full_results[i - 1].0 <= full_results[i].0,
-                "Scan results should be in ascending order"
+                prev_pair <= curr_pair,
+                "Scan results should be in ascending token order: \
+                 prev=(token={}, key={:?}) > curr=(token={}, key={:?})",
+                token_prev,
+                full_results[i - 1].0,
+                token_curr,
+                full_results[i].0,
             );
         }
-        println!("  ✅ Scan ordering validated");
+        println!("  ✅ Scan ordering validated (token order)");
     }
 
     // Test 2: Limited scan
