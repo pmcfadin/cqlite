@@ -494,11 +494,28 @@ impl V5CompressedLegacyParser {
                                         );
                                         Value::Null
                                     } else {
-                                        // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map
-                                        let map_entries: Vec<(Value, Value)> = cells
+                                        // Convert HashMap<String, Value> to Vec<(Value, Value)> for Value::Map.
+                                        // Sort by column name so the output ordering is deterministic
+                                        // across independent parsing calls (HashMap iteration is
+                                        // non-deterministic).  This ensures get() and scan() agree
+                                        // on row value equality (Issue #517).
+                                        let mut map_entries: Vec<(Value, Value)> = cells
                                             .into_iter()
                                             .map(|(name, value)| (Value::Text(name), value))
                                             .collect();
+                                        map_entries.sort_by(|a, b| {
+                                            let a_key = if let Value::Text(s) = &a.0 {
+                                                s.as_str()
+                                            } else {
+                                                ""
+                                            };
+                                            let b_key = if let Value::Text(s) = &b.0 {
+                                                s.as_str()
+                                            } else {
+                                                ""
+                                            };
+                                            a_key.cmp(b_key)
+                                        });
                                         Value::Map(map_entries)
                                     };
 

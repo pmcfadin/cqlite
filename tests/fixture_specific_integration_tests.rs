@@ -94,11 +94,8 @@ async fn test_minimal_fixture_partition_lookup_integration() -> Result<()> {
 }
 
 /// Test range scanning specifically against fixtures
-// Ignored: pre-existing reader issue where scan() does not return rows in
-// ascending key order when reading from the real dataset.  Discovered while
-// reviving this test in issue #514.  Tracked separately for investigation.
+// Fixed in issue #516: scan() now returns rows in ascending RowKey order.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: scan() result ordering not guaranteed (issue #514)"]
 async fn test_fixture_range_scan_integration() -> Result<()> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let fixture_path = manifest_dir.join("tests/fixtures/cassandra5/minimal/simple_table/Data.db");
@@ -239,12 +236,9 @@ async fn test_fixture_range_scan_integration() -> Result<()> {
 }
 
 /// Test decompression integration with available data
-// Ignored: pre-existing reader issue where get() returns None for keys
-// that scan() returns, indicating an inconsistency between the two read
-// paths.  Discovered while reviving this test in issue #514.  Tracked
-// separately for investigation.
+// Fixed in issue #517: get() now uses the same stitched parsing path as scan()
+// for V5CompressedLegacy NB format, eliminating the get()/scan() inconsistency.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: get() / scan() inconsistency (issue #514)"]
 async fn test_decompression_integration_with_real_data() -> Result<()> {
     // Look for compressed SSTable data via dynamic discovery
     let mut test_reader = None;

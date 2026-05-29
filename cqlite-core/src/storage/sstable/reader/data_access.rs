@@ -75,12 +75,21 @@ impl SSTableReader {
                 let file_offset = entry.offset + self.actual_header_size as u64;
                 return self.read_value_at_offset(file_offset, entry.size).await;
             }
+
+            // Issue #517: The SSTableIndex is built from Index.db key *digests* (16-byte
+            // Murmur3 hashes), not raw partition key bytes.  A raw-key lookup via
+            // find_entry() always misses.  Fall back to scan_for_key() so that get()
+            // and scan() agree on which partitions exist.
+            log::debug!(
+                "Index lookup returned no entry for key {:?} (possible digest/raw-key mismatch), \
+                 falling back to sequential scan",
+                key
+            );
+            return self.scan_for_key(table_id, key).await;
         } else {
-            // Fallback to sequential scan
+            // No index at all — fall back to sequential scan
             return self.scan_for_key(table_id, key).await;
         }
-
-        Ok(None)
     }
 
     /// Scan a range of keys
@@ -192,6 +201,13 @@ impl SSTableReader {
                 results.len()
             );
         }
+
+        // Issue #516: Sort results by RowKey (byte-lexicographic) so callers receive a
+        // deterministic ascending order regardless of the physical Murmur3 token order
+        // used on disk.  This code path is only reached for the rare case where the
+        // index has non-zero sizes (i.e., NOT the V5CompressedLegacy / NB format path
+        // which exits early via sequential_scan above).
+        results.sort_by(|a, b| a.0.cmp(&b.0));
 
         log::debug!(
             "SSTableReader::scan - Returning {} final results",
@@ -487,6 +503,37 @@ impl SSTableReader {
     }
 
     async fn scan_for_key(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // For V5CompressedLegacy NB format, partitions can span chunk boundaries.
+        // The block-by-block parser will miss any partition whose bytes cross a
+        // chunk boundary.  Use the same stitched-buffer path that sequential_scan()
+        // uses so that get() and scan() share a consistent view of the data.
+        // (Issue #517)
+        let data_format = self.header.cassandra_version.data_format();
+        let requires_stitching = matches!(data_format, DataFormat::V5CompressedLegacy)
+            && self.header.cassandra_version.is_nb_format();
+
+        if requires_stitching {
+            log::debug!(
+                "scan_for_key: V5CompressedLegacy detected, using stitched buffer for key lookup"
+            );
+            // Reset chunk index before stitching
+            self.current_chunk_index
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+
+            let all_entries = self.stitch_and_parse_all_chunks(None).await?;
+
+            for (_entry_table_id, entry_key, entry_value) in all_entries {
+                if entry_key == *key {
+                    if !self.filter_tombstone(&entry_value) {
+                        return Ok(None);
+                    }
+                    return Ok(Some(entry_value));
+                }
+            }
+
+            return Ok(None);
+        }
+
         let header_size = self.calculate_header_size();
         {
             let mut file_guard = self.file.lock().await;
@@ -614,6 +661,9 @@ impl SSTableReader {
                 results.len(),
                 limit
             );
+            // Issue #516: Sort by RowKey (byte-lexicographic) so callers receive a
+            // deterministic ascending order regardless of the on-disk Murmur3 token order.
+            results.sort_by(|a, b| a.0.cmp(&b.0));
             return Ok(results);
         }
 
@@ -692,6 +742,8 @@ impl SSTableReader {
                             "SSTableReader::sequential_scan - Reached limit {}, stopping scan",
                             limit
                         );
+                        // Issue #516: Sort by RowKey before returning.
+                        results.sort_by(|a, b| a.0.cmp(&b.0));
                         return Ok(results);
                     }
                 }
@@ -706,6 +758,10 @@ impl SSTableReader {
             "SSTableReader::sequential_scan - Returning {} total results",
             results.len()
         );
+
+        // Issue #516: Sort by RowKey (byte-lexicographic) so callers receive a
+        // deterministic ascending order regardless of the on-disk Murmur3 token order.
+        results.sort_by(|a, b| a.0.cmp(&b.0));
 
         Ok(results)
     }

@@ -125,10 +125,8 @@ impl GoldenPathScanTestFixture {
     }
 }
 
-// Ignored: pre-existing reader issue where scan() does not return rows in
-// ascending key order.  Discovered while reviving this test in issue #514.
+// Fixed in issue #516: scan() now returns rows in ascending RowKey order.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: scan() result ordering not guaranteed (issue #514)"]
 async fn test_golden_path_full_table_scan() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_wide_rows_reader().await?;
@@ -350,10 +348,8 @@ async fn test_golden_path_scan_performance_benchmarks() -> Result<()> {
     Ok(())
 }
 
-// Ignored: pre-existing reader issue where scan() does not return rows in
-// ascending key order.  Discovered while reviving this test in issue #514.
+// Fixed in issue #516: scan() now returns rows in ascending RowKey order.
 #[tokio::test]
-#[ignore = "pre-existing reader issue: scan() result ordering not guaranteed (issue #514)"]
 async fn test_golden_path_scan_ordering_validation() -> Result<()> {
     let fixture = GoldenPathScanTestFixture::new().await?;
     let reader = fixture.setup_timeseries_reader().await?;
