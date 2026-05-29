@@ -51,7 +51,10 @@ mod summary;
 mod type_coverage;
 
 use cqlite_core::platform::Platform;
-use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+use cqlite_core::schema::{
+    ClusteringColumn, ClusteringOrder, Column, KeyColumn, SchemaRegistry, SchemaRegistryConfig,
+    TableSchema, UdtRegistry,
+};
 use cqlite_core::storage::sstable::SSTableManager;
 use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
@@ -440,6 +443,126 @@ pub async fn read_back_all_rows(temp_dir: &TempDir, schema: &TableSchema) -> Vec
         .expect("Scan should succeed");
 
     results.into_iter().map(|(_key, value)| value).collect()
+}
+
+/// Read back all raw row values from a flushed SSTable with a pre-populated UDT registry.
+///
+/// This variant creates a `SchemaRegistry` populated with the supplied `udt_registry` and
+/// passes it to `SSTableManager::new` so that the reader receives UDT type definitions
+/// before the first scan.  Used by tests that write `frozen<name>` columns where the
+/// concrete UDT must be resolved from the registry (Issue #502).
+#[cfg(feature = "state_machine")]
+pub async fn read_back_all_rows_with_udt_registry(
+    temp_dir: &TempDir,
+    schema: &TableSchema,
+    udt_registry: UdtRegistry,
+) -> Vec<Value> {
+    use tokio::sync::RwLock;
+
+    let data_dir = temp_dir.path().join("data");
+    let config = Config::default();
+    let platform = Arc::new(
+        Platform::new(&config)
+            .await
+            .expect("Platform::new should succeed in test environment"),
+    );
+
+    // Build a SchemaRegistry seeded with the caller-supplied UDT definitions.
+    let schema_registry = SchemaRegistry::new(
+        SchemaRegistryConfig::default(),
+        platform.clone(),
+        config.clone(),
+    )
+    .await
+    .expect("SchemaRegistry::new should succeed in test environment");
+
+    // Register each UDT from the supplied registry into the schema registry.
+    {
+        let all_udts: Vec<cqlite_core::types::UdtTypeDef> = {
+            // UdtRegistry does not expose an iterator, so we snapshot via clone.
+            let tmp = udt_registry.clone();
+            // Collect by draining our local copy's list_udt_names across all keyspaces.
+            // We reach keyspaces through a known-keyspace list derived from the schema.
+            let keyspace = schema.keyspace.as_str();
+            tmp.list_udt_names(keyspace)
+                .into_iter()
+                .filter_map(|name| tmp.get_udt(keyspace, name).cloned())
+                .collect()
+        };
+        for udt_def in all_udts {
+            schema_registry
+                .register_udt(udt_def)
+                .await
+                .expect("register_udt should succeed");
+        }
+    }
+
+    let schema_registry_arc = Arc::new(RwLock::new(schema_registry));
+
+    let manager = SSTableManager::new(&data_dir, &config, platform, Some(schema_registry_arc))
+        .await
+        .expect("SSTableManager should load written SSTables");
+
+    let table_id =
+        cqlite_core::types::TableId::from(format!("{}.{}", schema.keyspace, schema.table).as_str());
+    let results = manager
+        .scan(&table_id, None, None, None, Some(schema))
+        .await
+        .expect("Scan should succeed");
+
+    results.into_iter().map(|(_key, value)| value).collect()
+}
+
+/// Read back a single column value from a flushed SSTable with a pre-populated UDT registry.
+///
+/// Convenience wrapper around `read_back_all_rows_with_udt_registry`.
+#[cfg(feature = "state_machine")]
+pub async fn read_back_column_with_udt_registry(
+    temp_dir: &TempDir,
+    schema: &TableSchema,
+    col_name: &str,
+    udt_registry: UdtRegistry,
+) -> Value {
+    let rows = read_back_all_rows_with_udt_registry(temp_dir, schema, udt_registry).await;
+    assert_eq!(
+        rows.len(),
+        1,
+        "Expected exactly 1 row in {}.{}, got {}",
+        schema.keyspace,
+        schema.table,
+        rows.len()
+    );
+    let row_value = rows.into_iter().next().unwrap();
+
+    match &row_value {
+        Value::Map(entries) => {
+            for (key, value) in entries {
+                if let Value::Text(name) = key {
+                    if name == col_name {
+                        return value.clone();
+                    }
+                }
+            }
+            panic!(
+                "Column '{}' not found in row. Available columns: {:?}",
+                col_name,
+                entries
+                    .iter()
+                    .filter_map(|(k, _)| {
+                        if let Value::Text(n) = k {
+                            Some(n.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            );
+        }
+        other => panic!(
+            "Expected Map row for column '{}', got {:?}",
+            col_name, other
+        ),
+    }
 }
 
 /// Read back a single column value from a flushed SSTable.

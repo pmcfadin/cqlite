@@ -19,7 +19,7 @@
 
 #![cfg(feature = "write-support")]
 
-use cqlite_core::schema::{Column, KeyColumn, TableSchema};
+use cqlite_core::schema::{Column, KeyColumn, TableSchema, UdtRegistry};
 use cqlite_core::storage::write_engine::{CellOperation, Mutation, PartitionKey, TableId};
 use cqlite_core::types::Value;
 use std::collections::HashMap;
@@ -1273,18 +1273,30 @@ async fn test_type_tuple_int_text_uuid() {
     assert_eq!(read_back, original, "Tuple<int,text,uuid> roundtrip failed");
 }
 
-/// Known limitation: the reader cannot map the generic `frozen<udt>` type
-/// string to field names without a concrete UDT name, so the inner UDT bytes
-/// read back as `Value::Frozen(Value::Null)`. The test accepts that outcome
-/// alongside fully-decoded values; tighten once UDT registry support lands.
+/// Verify that `frozen<person>` round-trips correctly when the reader is given a
+/// `UdtRegistry` that carries the "person" type definition (Issue #502).
+///
+/// The concrete UDT name ("person") is placed in the column type string so the
+/// reader can look it up in the registry.  A `UdtRegistry` with the matching
+/// field definitions is injected via `read_back_column_with_udt_registry`.
+#[cfg(feature = "state_machine")]
 #[tokio::test]
 async fn test_type_frozen_udt() {
-    use cqlite_core::types::{UdtField, UdtValue};
+    use cqlite_core::schema::CqlType;
+    use cqlite_core::types::{UdtField, UdtTypeDef, UdtValue};
 
     let temp_dir = TempDir::new().unwrap();
-    let schema = create_type_test_schema("frozen_col", "frozen<udt>");
+    // Use a concrete UDT name so the reader can resolve it from the registry.
+    let schema = create_type_test_schema("frozen_col", "frozen<person>");
 
-    // Build a simple two-field UDT value
+    // Build the matching UDT definition (field names + types).
+    let udt_def = UdtTypeDef::new("test_types".to_string(), "person".to_string())
+        .with_field("name".to_string(), CqlType::Text, true)
+        .with_field("age".to_string(), CqlType::Int, true);
+    let mut udt_registry = UdtRegistry::new();
+    udt_registry.register_udt(udt_def);
+
+    // Build a simple two-field UDT value.
     let inner_udt = Value::Udt(UdtValue {
         type_name: "person".to_string(),
         keyspace: "test_types".to_string(),
@@ -1302,35 +1314,20 @@ async fn test_type_frozen_udt() {
     let original = Value::Frozen(Box::new(inner_udt.clone()));
 
     let info = write_single_value(&temp_dir, &schema, "frozen_col", original.clone()).await;
-
     assert_single_partition_written(&info);
-    let col_value = super::read_back_column(&temp_dir, &schema, "frozen_col").await;
 
-    // Accept:
-    //   • Frozen(Udt(…))  – fully decoded (future ideal)
-    //   • Udt(…)          – unwrapped by reader
-    //   • Frozen(Null)    – current reader behaviour: frozen wrapper present,
-    //                       inner UDT not decoded due to generic type string
-    //   • Blob(…)         – raw bytes fallback
-    match &col_value {
-        v if *v == original || *v == inner_udt => {
-            // Fully decoded — ideal outcome
-        }
-        Value::Frozen(inner) if matches!(inner.as_ref(), Value::Null) => {
-            // Known limitation: reader preserves Frozen wrapper but cannot
-            // decode UDT fields from generic "frozen<udt>" type string
-            eprintln!(
-                "note: frozen<udt> read back as Frozen(Null) — \
-                 reader cannot decode UDT fields without a concrete type name \
-                 (schema-aware UDT decoding not yet implemented for generic type strings)"
-            );
-        }
-        Value::Blob(_) => {
-            eprintln!("note: frozen<udt> read back as Blob (raw bytes fallback)");
-        }
-        other => panic!(
-            "Frozen<udt> roundtrip: unexpected read-back value {:?}",
-            other
-        ),
-    }
+    // Use the UDT-registry-aware scan helper so the reader can resolve "person".
+    let col_value =
+        super::read_back_column_with_udt_registry(&temp_dir, &schema, "frozen_col", udt_registry)
+            .await;
+
+    // The reader must return the fully decoded UDT — either wrapped in Frozen or
+    // unwrapped.  Frozen(Null) and Blob are no longer acceptable outcomes.
+    assert!(
+        col_value == original || col_value == inner_udt,
+        "frozen<person> roundtrip: expected {:?} or {:?}, got {:?}",
+        original,
+        inner_udt,
+        col_value
+    );
 }

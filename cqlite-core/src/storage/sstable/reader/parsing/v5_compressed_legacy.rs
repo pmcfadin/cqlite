@@ -2553,13 +2553,19 @@ impl V5CompressedLegacyParser {
                     let udt_def = Self::parse_udt_type_definition(&column.data_type)?;
 
                     // First read the VInt-prefixed blob length
-                    let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    let (remaining, blob_len_raw) = parse_vuint(&data[offset..]).map_err(|e| {
                         Error::corruption(format!(
                             "Frozen UDT '{}': failed to parse blob length: {:?}",
                             column.name, e
                         ))
                     })?;
-                    let blob_len = blob_len as usize;
+                    if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+                        return Err(Error::corruption(format!(
+                            "Frozen UDT '{}': blob_len {} exceeds maximum {}",
+                            column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+                        )));
+                    }
+                    let blob_len = blob_len_raw as usize;
                     let bytes_consumed = data[offset..].len() - remaining.len();
                     offset += bytes_consumed;
 
@@ -2579,8 +2585,103 @@ impl V5CompressedLegacyParser {
                     offset += blob_len;
 
                     (udt_value, offset)
+                } else if let Some(udt_def) = self
+                    .udt_registry
+                    .as_ref()
+                    .and_then(|reg| reg.get_udt(&self.keyspace, &inner_type).cloned())
+                {
+                    // frozen<short_udt_name>: look up the concrete UDT definition in the
+                    // registry (Issue #502).  This handles type strings like
+                    // `frozen<person>` where "person" is a registered UDT rather than a
+                    // collection or a full marshal-format UserType string.
+                    log::debug!(
+                        "V5CompressedLegacy: Resolving frozen UDT '{}' via registry for column '{}'",
+                        inner_type,
+                        column.name,
+                    );
+
+                    // Read VUInt-prefixed blob length (same framing as tuple and
+                    // marshal-format UDT cells).
+                    let (remaining, blob_len_raw) = parse_vuint(&data[offset..]).map_err(|e| {
+                        Error::corruption(format!(
+                            "Frozen UDT '{}' (column '{}'): failed to parse blob length: {:?}",
+                            inner_type, column.name, e
+                        ))
+                    })?;
+                    if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+                        return Err(Error::corruption(format!(
+                            "Frozen UDT '{}' (column '{}'): blob_len {} exceeds maximum {}",
+                            inner_type, column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+                        )));
+                    }
+                    let blob_len = blob_len_raw as usize;
+                    let len_bytes_consumed = data[offset..].len() - remaining.len();
+                    offset += len_bytes_consumed;
+
+                    if offset + blob_len > data.len() {
+                        return Err(Error::corruption(format!(
+                            "Frozen UDT '{}' (column '{}'): need {} bytes but only {} available",
+                            inner_type,
+                            column.name,
+                            blob_len,
+                            data.len() - offset
+                        )));
+                    }
+
+                    let udt_data = &data[offset..offset + blob_len];
+                    let (udt_value, _) =
+                        self.parse_udt_value(udt_data, 0, &udt_def, column, _reader)?;
+                    offset += blob_len;
+
+                    (udt_value, offset)
                 } else {
-                    // Non-collection frozen type (e.g., frozen<tuple<...>>)
+                    // Detect bare identifiers that look like unregistered UDT names.
+                    // A bare identifier has no '<' (not a container or tuple) and does not
+                    // match any known CQL primitive type.  If we reach this branch with
+                    // such an identifier it means the UDT was not in the registry — return
+                    // an actionable schema error rather than silently producing a Blob.
+                    //
+                    // Legitimate fall-through types handled below:
+                    //   • tuple<...>  (contains '<')
+                    //   • known primitives: int, text, uuid, boolean, blob, float, double,
+                    //     decimal, varint, bigint, counter, timestamp, date, time, duration,
+                    //     inet, smallint, tinyint, varchar, ascii, timeuuid
+                    const KNOWN_PRIMITIVES: &[&str] = &[
+                        "int",
+                        "bigint",
+                        "counter",
+                        "smallint",
+                        "tinyint",
+                        "text",
+                        "varchar",
+                        "ascii",
+                        "uuid",
+                        "timeuuid",
+                        "boolean",
+                        "blob",
+                        "float",
+                        "double",
+                        "decimal",
+                        "varint",
+                        "timestamp",
+                        "date",
+                        "time",
+                        "duration",
+                        "inet",
+                    ];
+                    let is_container = inner_type.contains('<');
+                    let is_primitive = KNOWN_PRIMITIVES.contains(&inner_type.as_str());
+                    if !is_container && !is_primitive {
+                        // Bare identifier that is neither a container nor a primitive —
+                        // this is an unregistered UDT name.
+                        return Err(Error::schema(format!(
+                            "frozen<{inner}>: UDT '{inner}' not found in registry for keyspace '{}'; \
+                             register it before reading",
+                            self.keyspace,
+                            inner = inner_type,
+                        )));
+                    }
+                    // Non-collection / primitive frozen type — recurse normally.
                     let mut inner_column = column.clone();
                     inner_column.data_type = inner_type.clone();
                     self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?
