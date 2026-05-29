@@ -615,12 +615,18 @@ fn compaction_3_sstables_tombstone_shadowing() {
 /// k-way compaction.
 ///
 /// Setup (minimal — two SSTables):
-///   - SSTable X (ts=100): live row for PK=1 (name="live", score=42)
-///   - SSTable Y (ts=300): row tombstone for PK=1
+///   - SSTable X (ts=100): live rows PK=1, PK=2; row tombstone for PK=3 (ts=100)
+///   - SSTable Y (ts=300): row tombstone for PK=1 (ts=300); live row for PK=3 (ts=300)
 ///
 /// Expected after compaction:
-///   - PK=1 is ABSENT from post-compaction scan results
-///   - PK=2 (only in X, not tombstoned) remains present
+///   - PK=1 is ABSENT  — tombstone (ts=300) shadows live (ts=100)  [higher-ts wins]
+///   - PK=2 is PRESENT — only in X, never tombstoned
+///   - PK=3 is PRESENT — live write (ts=300) shadows tombstone (ts=100) [lower-ts loses]
+///
+/// The PK=3 direction is the critical one: it proves the merger uses the DECODED
+/// `markedForDeleteAt` timestamp for the tombstone. If the reader produced a
+/// hardcoded/epoch-0 or always-high deletion timestamp (Issue #505), one of the two
+/// directions would fail — a vacuous pass is therefore impossible.
 ///
 /// This test is intentionally narrower than `compaction_3_sstables_tombstone_shadowing`
 /// to make the failure mode obvious and fast to reproduce.
@@ -639,21 +645,30 @@ fn row_tombstone_shadows_live_row_after_compaction() {
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
     let mut engine = WriteEngine::new(config).expect("engine creation");
 
-    // SSTable X (ts=100): live rows PK=1 and PK=2
+    // SSTable X (ts=100): live rows PK=1 and PK=2, plus a row tombstone for PK=3 at
+    // the LOWER timestamp (ts=100). PK=3's tombstone must later lose to a newer live
+    // write in Y, exercising the lower-ts-does-not-shadow direction.
     for id in 1_i32..=2 {
         let m = write_row(id, &format!("live-{}", id), id * 10, 100);
         engine.write(m).expect("write X");
     }
+    engine
+        .write(delete_row(3, 100))
+        .expect("write low-ts row-tombstone X");
     let info_x = rt
         .block_on(engine.flush())
         .expect("flush X")
         .expect("info X");
-    assert_eq!(info_x.partition_count, 2, "SSTable X: 2 partitions");
+    assert_eq!(info_x.partition_count, 3, "SSTable X: 3 partitions");
 
-    // SSTable Y (ts=300): row tombstone for PK=1
+    // SSTable Y: row tombstone for PK=1 at the HIGHER timestamp (ts=300, shadows X's
+    // live PK=1), and a live write for PK=3 at ts=300 (shadows X's ts=100 tombstone).
     engine
         .write(delete_row(1, 300))
         .expect("write row-tombstone Y");
+    engine
+        .write(write_row(3, "revived-3", 333, 300))
+        .expect("write high-ts live PK=3 Y");
     let info_y = rt
         .block_on(engine.flush())
         .expect("flush Y")
@@ -730,9 +745,41 @@ fn row_tombstone_shadows_live_row_after_compaction() {
         "PK=2 (live, never deleted) must be present after compaction"
     );
 
+    // PK=3 must be PRESENT with the live value: the row tombstone (ts=100) is OLDER
+    // than the live write (ts=300), so it must NOT shadow it. This direction fails if
+    // the decoded tombstone timestamp is wrong (e.g. epoch 0 would still lose to ts=300
+    // and pass, but a hardcoded-high value would WRONGLY shadow the live write here).
+    let key_3: Vec<u8> = 3_i32.to_be_bytes().into();
+    let pk3 = result_map.get(&key_3).unwrap_or_else(|| {
+        panic!(
+            "PK=3 live write (ts=300) must survive the older tombstone (ts=100) \
+             but is absent after compaction — tombstone timestamp regression (Issue #505)"
+        )
+    });
+    match pk3 {
+        Value::Map(pairs) => {
+            let name = pairs.iter().find_map(|(k, v)| match (k, v) {
+                (Value::Text(col), Value::Text(val)) if col == "name" => Some(val.clone()),
+                _ => None,
+            });
+            assert_eq!(
+                name.as_deref(),
+                Some("revived-3"),
+                "PK=3 must carry the live ts=300 value 'revived-3', not be shadowed by the \
+                 older ts=100 tombstone (Issue #505)"
+            );
+        }
+        other => panic!(
+            "PK=3 must be a live row (Value::Map) carrying the ts=300 write, got {:?} (Issue #505)",
+            other
+        ),
+    }
+
     eprintln!(
         "row_tombstone_shadows_live_row_after_compaction PASSED: \
-         PK=1 correctly absent, PK=2 correctly present"
+         PK=1 correctly absent (higher-ts tombstone shadows), \
+         PK=2 correctly present (never deleted), \
+         PK=3 correctly present with live value (lower-ts tombstone does NOT shadow)"
     );
 
     drop(temp_dir);
