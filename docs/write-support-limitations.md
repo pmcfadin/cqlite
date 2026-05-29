@@ -86,10 +86,22 @@ Tuples in pre-existing SSTables written by Cassandra may be affected.
 
 ## frozen<udt> field decoding (Issue #502)
 
-**Behaviour**: Fields within frozen UDT values may be returned as raw byte arrays
-in some edge cases rather than as typed `dict` values.
+**Behaviour** (resolved in v0.9.1): The reader now decodes `frozen<NAME>` columns
+by resolving `NAME` through the UDT registry attached to the parser. When a
+registered UDT definition is found the field bytes are decoded field-by-field into
+a typed `Value::Udt` rather than a raw byte array.
+
+**Requirement**: The UDT must be registered in the `UdtRegistry` before opening
+the SSTable. If `NAME` is not present in the registry the reader returns a
+`schema` error:
+
+```
+frozen<NAME>: UDT 'NAME' not found in registry for keyspace 'KS';
+register it before reading
+```
 
 **Impact**: Read-only. Frozen UDTs created by the CQLite writer decode correctly.
-Pre-existing frozen UDTs from Cassandra may be affected.
+The error is actionable: pass the UDT schema to `UdtRegistry::register_udt` and
+re-open the reader.
 
 **Tracking**: Issue #502.

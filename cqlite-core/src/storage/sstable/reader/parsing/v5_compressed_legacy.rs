@@ -2553,13 +2553,19 @@ impl V5CompressedLegacyParser {
                     let udt_def = Self::parse_udt_type_definition(&column.data_type)?;
 
                     // First read the VInt-prefixed blob length
-                    let (remaining, blob_len) = parse_vuint(&data[offset..]).map_err(|e| {
+                    let (remaining, blob_len_raw) = parse_vuint(&data[offset..]).map_err(|e| {
                         Error::corruption(format!(
                             "Frozen UDT '{}': failed to parse blob length: {:?}",
                             column.name, e
                         ))
                     })?;
-                    let blob_len = blob_len as usize;
+                    if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+                        return Err(Error::corruption(format!(
+                            "Frozen UDT '{}': blob_len {} exceeds maximum {}",
+                            column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+                        )));
+                    }
+                    let blob_len = blob_len_raw as usize;
                     let bytes_consumed = data[offset..].len() - remaining.len();
                     offset += bytes_consumed;
 
@@ -2629,7 +2635,53 @@ impl V5CompressedLegacyParser {
 
                     (udt_value, offset)
                 } else {
-                    // Non-collection frozen type (e.g., frozen<tuple<...>>)
+                    // Detect bare identifiers that look like unregistered UDT names.
+                    // A bare identifier has no '<' (not a container or tuple) and does not
+                    // match any known CQL primitive type.  If we reach this branch with
+                    // such an identifier it means the UDT was not in the registry — return
+                    // an actionable schema error rather than silently producing a Blob.
+                    //
+                    // Legitimate fall-through types handled below:
+                    //   • tuple<...>  (contains '<')
+                    //   • known primitives: int, text, uuid, boolean, blob, float, double,
+                    //     decimal, varint, bigint, counter, timestamp, date, time, duration,
+                    //     inet, smallint, tinyint, varchar, ascii, timeuuid
+                    const KNOWN_PRIMITIVES: &[&str] = &[
+                        "int",
+                        "bigint",
+                        "counter",
+                        "smallint",
+                        "tinyint",
+                        "text",
+                        "varchar",
+                        "ascii",
+                        "uuid",
+                        "timeuuid",
+                        "boolean",
+                        "blob",
+                        "float",
+                        "double",
+                        "decimal",
+                        "varint",
+                        "timestamp",
+                        "date",
+                        "time",
+                        "duration",
+                        "inet",
+                    ];
+                    let is_container = inner_type.contains('<');
+                    let is_primitive = KNOWN_PRIMITIVES.contains(&inner_type.as_str());
+                    if !is_container && !is_primitive {
+                        // Bare identifier that is neither a container nor a primitive —
+                        // this is an unregistered UDT name.
+                        return Err(Error::schema(format!(
+                            "frozen<{inner}>: UDT '{inner}' not found in registry for keyspace '{}'; \
+                             register it before reading",
+                            self.keyspace,
+                            inner = inner_type,
+                        )));
+                    }
+                    // Non-collection / primitive frozen type — recurse normally.
                     let mut inner_column = column.clone();
                     inner_column.data_type = inner_type.clone();
                     self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?
