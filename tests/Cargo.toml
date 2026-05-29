@@ -125,6 +125,36 @@ path = "cassandra5_smoke_test.rs"
 name = "cassandra5_simple_test"
 path = "cassandra5_simple_test.rs"
 
+# Revived orphan tests (issue #514) — use dynamic UUID discovery so they
+# work across dataset versions without hardcoded directory names.
+[[test]]
+name = "chunked_data_reader_direct_test"
+path = "chunked_data_reader_direct_test.rs"
+
+[[test]]
+name = "comprehensive_component_integration_tests"
+path = "comprehensive_component_integration_tests.rs"
+
+[[test]]
+name = "fixture_specific_integration_tests"
+path = "fixture_specific_integration_tests.rs"
+
+[[test]]
+name = "golden_path_get_operations_tests"
+path = "golden_path_get_operations_tests.rs"
+
+[[test]]
+name = "golden_path_partition_lookup_tests"
+path = "golden_path_partition_lookup_tests.rs"
+
+[[test]]
+name = "golden_path_scan_operations_tests"
+path = "golden_path_scan_operations_tests.rs"
+
+[[test]]
+name = "golden_path_summary_index_integration_tests"
+path = "golden_path_summary_index_integration_tests.rs"
+
 [features]
 default = []
 benchmarks = []

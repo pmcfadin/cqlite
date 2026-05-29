@@ -94,11 +94,29 @@ jobs:
           ls -la "$CQLITE_DATASETS_ROOT/sstables/test_basic/" || echo "test_basic directory not found"
           cargo test --package cqlite-core --features cli-helpers -- --skip test_legacy_format_allows_blob_fallback_with_feature
 
+      - name: Run integration tests (issue #514)
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        run: |
+          echo "Running revived orphan integration tests (issue #514)..."
+          # Run the seven golden-path / chunked-reader / component tests that were
+          # revived in issue #514.  The CRC-corruption and compression-matrix tests
+          # are intentionally excluded here because they use synthetic metadata with
+          # inconsistent chunk sizes unrelated to the UUID-discovery fix.
+          cargo test --package cqlite-integration-tests \
+            --test chunked_data_reader_direct_test \
+            --test comprehensive_component_integration_tests \
+            --test fixture_specific_integration_tests \
+            --test golden_path_get_operations_tests \
+            --test golden_path_partition_lookup_tests \
+            --test golden_path_scan_operations_tests \
+            --test golden_path_summary_index_integration_tests
+
       - name: Run CLI unit tests
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: |
-          echo "🧪 Running CLI unit tests (Issue #20)..."
+          echo "Running CLI unit tests (Issue #20)..."
           cargo test --package cqlite-cli --test unit_tests
 
       - name: Build CLI for one-shot smoke tests
