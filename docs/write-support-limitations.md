@@ -61,26 +61,24 @@ with cqlite.open(data_dir, schema=schema) as db:
 
 ## Set-element tombstone decoding (Issue #493)
 
-**Behaviour**: Tombstones for individual set elements within a cell are silently
-ignored during query. The parent set is returned but tombstoned elements may
-appear as still-present.
+**Behaviour** (resolved in v0.9.1): The V5CompressedLegacy parser now carries the
+per-cell `is_deleted` flag out of complex-cell parsing and skips tombstoned set
+(and list) elements. Data deleted at the element level
+(via `DELETE my_set[element] FROM ...`) no longer appears as still-present in
+query results.
 
-**Impact**: Read-only. Writes are unaffected. Data that was deleted at the
-element level (via `DELETE my_set[element] FROM ...`) may appear in query results.
-
-**Tracking**: Issue #493. Planned for v0.9.1.
+**Tracking**: Issue #493 (fixed in v0.9.1).
 
 ---
 
 ## Schema-aware tuple decoding (Issue #501)
 
-**Behaviour**: Tuple fields are decoded without schema context in some edge cases,
-returning raw byte arrays instead of typed values.
+**Behaviour** (resolved in v0.9.1): The reader decodes tuple element types from the
+schema's type string for arbitrary arity (e.g. `tuple<int, text, uuid>`), with
+bounds-checked per-element parsing. Tuples that previously read back as `Null` or
+`Blob` now decode to typed values.
 
-**Impact**: Read-only. Tuples created by the CQLite writer decode correctly.
-Tuples in pre-existing SSTables written by Cassandra may be affected.
-
-**Tracking**: Issue #501.
+**Tracking**: Issue #501 (fixed in v0.9.1).
 
 ---
 

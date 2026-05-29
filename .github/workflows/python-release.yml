@@ -69,6 +69,20 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      - name: Normalize PATH for macOS (prepend ~/.cargo/bin so real cargo wins over rustup-init)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Verify Rust toolchain (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          which -a cargo rustup rustup-init || true
+          cargo --version
+          rustup --version
+
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
         with:
