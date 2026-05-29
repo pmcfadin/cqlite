@@ -268,7 +268,7 @@ The complete row format, confirmed via Cassandra's `UnfilteredSerializer.java`:
 [prev_size: VInt]
 [timestamp: VInt if 0x04 set]          ← Delta from min_timestamp
 [ttl: VInt if 0x08 set]                ← Delta from min_ttl
-[deletion: 2 VInts if 0x10 set]        ← local_deletion_time delta + deletion timestamp
+[deletion: 2 VInts if 0x10 set]        ← markedForDeleteAt delta (signed) + local_deletion_time delta (unsigned)
 [column_bitmap: VInt + bytes if NOT 0x20]
 [cell_data...]
 ```
@@ -332,7 +332,7 @@ Between rows in a partition, or at the end of a partition, the parser may encoun
 |------|------|--------------------|---------|
 | 0x04 | HAS_TIMESTAMP      | Timestamp delta present | Delta-encoded from Statistics.db min_timestamp |
 | 0x08 | HAS_TTL           | TTL delta present | Delta-encoded from Statistics.db min_ttl |
-| 0x10 | HAS_DELETION      | Deletion time present | Two VInts: local_deletion_time delta and deletion timestamp |
+| 0x10 | HAS_DELETION      | Deletion time present | Two VInts in Cassandra canonical order: (1) markedForDeleteAt delta (signed, base `min_timestamp`, microseconds — the authoritative tombstone reconciliation timestamp), then (2) local_deletion_time delta (unsigned, base `min_local_deletion_time`, seconds). See `DeletionTime.Serializer` / `SerializationHeader.writeDeletionTime`. |
 | 0x20 | HAS_ALL_COLUMNS   | All columns present (no bitmap) | When set, all schema columns have values (no NULLs) |
 | 0x80 | HAS_EXTENDED_FLAGS | Extended flags byte follows | Reserved for future format extensions |
 
@@ -343,7 +343,8 @@ All metadata fields use delta encoding against minimum values from Statistics.db
 ```
 absolute_timestamp = min_timestamp + timestamp_delta
 absolute_ttl = min_ttl + ttl_delta
-absolute_deletion_time = min_local_deletion_time + deletion_time_delta
+absolute_marked_for_delete_at = min_timestamp + marked_for_delete_at_delta   # microseconds (reconciliation ts)
+absolute_local_deletion_time   = min_local_deletion_time + local_deletion_time_delta   # seconds
 ```
 
 **Example**: If Statistics.db shows `min_timestamp = 1759713125983682` and row header contains `timestamp_delta = 1000`, the absolute timestamp is `1759713125984682` (microseconds since epoch).

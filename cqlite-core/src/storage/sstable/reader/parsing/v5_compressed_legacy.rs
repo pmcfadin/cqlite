@@ -42,7 +42,7 @@ use log::{debug, warn};
 use crate::{
     parser::vint::{parse_vint, parse_vuint},
     schema::{CqlType, TableSchema, UdtRegistry},
-    types::{TableId, UdtField, UdtTypeDef, UdtValue},
+    types::{TableId, TombstoneInfo, TombstoneType, UdtField, UdtTypeDef, UdtValue},
     Error, Result, RowKey, Value,
 };
 
@@ -76,8 +76,16 @@ struct RowHeader {
     timestamp: Option<i64>,
     /// Row-level TTL (after delta decoding from min_ttl)
     ttl: Option<i32>,
-    /// Row-level local deletion time (after delta decoding from min_local_deletion_time)
+    /// Row-level local deletion time in SECONDS (after delta decoding from
+    /// min_local_deletion_time). This is the GC-grace clock, NOT the reconciliation
+    /// timestamp; do not use it for last-write-wins comparisons.
     local_deletion_time: Option<i32>,
+    /// Row-level `markedForDeleteAt` reconciliation timestamp in MICROSECONDS
+    /// (absolute = min_timestamp + delta). For a row tombstone this is the
+    /// authoritative deletion timestamp used by the compaction merger for
+    /// timestamp-based last-write-wins shadowing (Issue #505). `None` when the
+    /// row has no HAS_DELETION flag.
+    marked_for_delete_at: Option<i64>,
     /// Number of bytes consumed by the header
     header_size: usize,
     /// Length of the row_size VInt in bytes (needed for offset calculation)
@@ -87,6 +95,52 @@ struct RowHeader {
     /// bit=1 means column missing, bit=0 means column present.
     /// None when HAS_ALL_COLUMNS flag is set.
     missing_columns_bitmap: Option<u64>,
+}
+
+impl RowHeader {
+    /// Whether this row header describes a row tombstone (HAS_DELETION was set).
+    ///
+    /// Detected via `local_deletion_time` being present, which is only set when the
+    /// HAS_DELETION (0x10) flag was decoded (Issue #505).
+    fn is_row_tombstone(&self) -> bool {
+        self.local_deletion_time.is_some()
+    }
+
+    /// Build the `Value::Tombstone(RowTombstone)` for this header.
+    ///
+    /// The reconciliation `deletion_time` is `marked_for_delete_at` (the
+    /// `markedForDeleteAt` field, MICROSECONDS — same clock as HAS_TIMESTAMP), NOT
+    /// the row write `timestamp` and NOT `local_deletion_time` (seconds, GC clock).
+    /// For a pure row tombstone HAS_TIMESTAMP is absent, so using the write
+    /// timestamp would yield epoch 0 and lose every merge comparison (Issue #505).
+    ///
+    /// Falls back to `local_deletion_time` promoted to microseconds only if
+    /// `marked_for_delete_at` is somehow absent while a deletion was recorded
+    /// (should not happen given HAS_DELETION always writes both VInts), keeping the
+    /// merger's LWW ordering meaningful rather than defaulting to 0.
+    fn row_tombstone(&self) -> Value {
+        let deletion_time = self.row_tombstone_deletion_time();
+        Value::Tombstone(TombstoneInfo {
+            deletion_time,
+            tombstone_type: TombstoneType::RowTombstone,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        })
+    }
+
+    /// Authoritative reconciliation timestamp (microseconds) for a row tombstone.
+    fn row_tombstone_deletion_time(&self) -> i64 {
+        match self.marked_for_delete_at {
+            Some(ts) => ts,
+            // Defensive fallback: promote the seconds-based local deletion time to
+            // microseconds so ordering remains non-zero and monotonic.
+            None => self
+                .local_deletion_time
+                .map(|s| (s as i64).saturating_mul(1_000_000))
+                .unwrap_or(0),
+        }
+    }
 }
 
 /// Result of parsing a single complex cell (an element of a list/set, or a
@@ -483,7 +537,22 @@ impl V5CompressedLegacyParser {
                                     }
 
                                     // Convert cells HashMap to Value::Map (required by SelectExecutor)
-                                    let row_value = if cells.is_empty() {
+                                    //
+                                    // Issue #505: Row tombstones are detected via HAS_DELETION in the
+                                    // row header.  When present, emit a proper `Value::Tombstone`
+                                    // carrying the authoritative `markedForDeleteAt` (microseconds) so
+                                    // the compaction merger can apply tombstone-shadowing semantics
+                                    // rather than treating the absent cells as a live empty row.
+                                    let row_tombstone =
+                                        row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
+
+                                    let row_value = if let Some(h) = row_tombstone {
+                                        log::debug!(
+                                            "V5CompressedLegacy: Partition {} Row {} - emitting Tombstone(deletion_time={})",
+                                            partition_index, row_count, h.row_tombstone_deletion_time()
+                                        );
+                                        h.row_tombstone()
+                                    } else if cells.is_empty() {
                                         warn!(
                                             "V5CompressedLegacy: No cells extracted for {}.{} partition {} row {} (partition key: {} bytes)",
                                             self.keyspace,
@@ -623,6 +692,191 @@ impl V5CompressedLegacyParser {
             "V5CompressedLegacy: Parsed {} total entries from block",
             results.len()
         );
+
+        Ok(results)
+    }
+
+    /// Parse all partitions in a decompressed block, returning per-row timestamps.
+    ///
+    /// This is the compaction-specific variant of [`parse_block`].  It returns
+    /// `(TableId, RowKey, Value, row_timestamp_micros)` so that the k-way merger
+    /// can perform timestamp-accurate last-write-wins ordering rather than
+    /// falling back to `SystemTime::now()`.
+    ///
+    /// Row tombstones are emitted as `Value::Tombstone(RowTombstone)` with their
+    /// actual `deletion_time`.  Cell tombstones within live rows are stored as
+    /// `Value::Tombstone(CellTombstone)` inside the `Value::Map`, again carrying
+    /// the cell-level deletion timestamp.
+    ///
+    /// The `row_timestamp_micros` in the returned tuple is the row-level write
+    /// timestamp decoded from the `HAS_TIMESTAMP` field in the row header
+    /// (`min_timestamp + delta`).  For row tombstones the same timestamp also
+    /// appears in `TombstoneInfo::deletion_time`.
+    ///
+    /// Normal user-facing scan/get paths should use [`parse_block`] instead.
+    /// (Issue #505)
+    pub fn parse_block_with_timestamps(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<Vec<(TableId, RowKey, Value, i64)>> {
+        // parse_block now emits Value::Tombstone correctly; we just add the
+        // per-row timestamp from the row header.
+        //
+        // Rather than duplicating the entire loop we parse with parse_block and
+        // separately call parse_row_data_with_offset to obtain the timestamp.
+        // However, that would re-parse the data twice.  Instead, we duplicate the
+        // loop here — it is a thin wrapper that adds the timestamp extraction.
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                self.keyspace, self.table_name
+            ))
+        })?;
+
+        let mut results: Vec<(TableId, RowKey, Value, i64)> = Vec::new();
+        let mut offset = 0;
+        let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
+
+        const CASSANDRA_MAX_KEY_SIZE: usize = 65536;
+        const FORMAT_MAX_KEY_SIZE: usize = 255;
+
+        let mut partition_index = 0;
+        let mut skipped_partitions = 0;
+
+        while offset < data.len() {
+            if offset + 2 > data.len() {
+                break;
+            }
+
+            let flags = data[offset];
+            let key_len = data[offset + 1] as usize;
+            let header_min_size = 1 + 1 + key_len + 4 + 8;
+
+            if key_len == 0
+                || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
+                || offset + header_min_size > data.len()
+            {
+                skipped_partitions += 1;
+                offset += 1;
+                let _ = flags; // silence unused warning
+                continue;
+            }
+
+            match self.parse_partition_header(data, offset) {
+                Ok((partition_key, new_offset)) => {
+                    offset = new_offset;
+                    let mut static_cells: HashMap<String, Value> = HashMap::new();
+
+                    loop {
+                        if offset < data.len() && Self::is_end_of_partition(data[offset]) {
+                            offset += 1;
+                            break;
+                        }
+                        if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
+                            match self.skip_range_tombstone_marker(data, offset, schema) {
+                                Ok(next_offset) => {
+                                    offset = next_offset;
+                                    continue;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+
+                        match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
+                            Ok((mut cells, row_header_opt, next_offset, is_static)) => {
+                                offset = next_offset;
+
+                                // For a row tombstone the authoritative timestamp is
+                                // markedForDeleteAt (HAS_TIMESTAMP is absent for pure row
+                                // deletes). For a live row it is the row write timestamp.
+                                // Both the merger tuple `row_ts` and the emitted
+                                // Value::Tombstone must agree, so resolve once here (#505).
+                                let row_tombstone =
+                                    row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
+                                let row_ts = match row_tombstone {
+                                    Some(h) => h.row_tombstone_deletion_time(),
+                                    None => row_header_opt
+                                        .as_ref()
+                                        .and_then(|h| h.timestamp)
+                                        .unwrap_or(0),
+                                };
+
+                                if is_static {
+                                    static_cells = cells;
+                                } else {
+                                    for (k, v) in &static_cells {
+                                        cells.entry(k.clone()).or_insert_with(|| v.clone());
+                                    }
+
+                                    // Row tombstone → Value::Tombstone(markedForDeleteAt)
+                                    let row_value = if let Some(h) = row_tombstone {
+                                        h.row_tombstone()
+                                    } else if cells.is_empty() {
+                                        Value::Null
+                                    } else {
+                                        let mut map_entries: Vec<(Value, Value)> = cells
+                                            .into_iter()
+                                            .map(|(name, value)| (Value::Text(name), value))
+                                            .collect();
+                                        map_entries.sort_by(|a, b| {
+                                            let a_key = if let Value::Text(s) = &a.0 {
+                                                s.as_str()
+                                            } else {
+                                                ""
+                                            };
+                                            let b_key = if let Value::Text(s) = &b.0 {
+                                                s.as_str()
+                                            } else {
+                                                ""
+                                            };
+                                            a_key.cmp(b_key)
+                                        });
+                                        Value::Map(map_entries)
+                                    };
+
+                                    results.push((
+                                        table_id.clone(),
+                                        partition_key.clone(),
+                                        row_value,
+                                        row_ts,
+                                    ));
+                                }
+
+                                if offset >= data.len() {
+                                    break;
+                                }
+                                if self.peek_is_partition_header(data, offset) {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
+                    partition_index += 1;
+                }
+                Err(_) => {
+                    skipped_partitions += 1;
+                    offset += 1;
+                    continue;
+                }
+            }
+        }
+
+        if skipped_partitions > 0 {
+            log::warn!(
+                "V5CompressedLegacy (compaction): parsed {} entries, skipped {} malformed partitions",
+                results.len(),
+                skipped_partitions
+            );
+        }
+        let _ = partition_index; // used for bookkeeping
 
         Ok(results)
     }
@@ -909,38 +1163,58 @@ impl V5CompressedLegacyParser {
             None
         };
 
-        // Read deletion if HAS_DELETION flag is set
-        let local_deletion_time = if (row_flags & ROW_HAS_DELETION) != 0 {
-            // First VInt is local deletion time delta
-            let (remaining, delta) = parse_vuint(&data[pos..]).map_err(|e| {
+        // Read deletion if HAS_DELETION flag is set.
+        //
+        // Cassandra canonical DeletionTime.Serializer order (matches the CQLite writer,
+        // data_writer.rs write_*_row HAS_DELETION block and write_complex_deletion):
+        //   1. markedForDeleteAt: SIGNED VInt delta, base min_timestamp, MICROSECONDS
+        //      -> the authoritative reconciliation timestamp (LWW shadowing).
+        //   2. localDeletionTime: UNSIGNED VInt delta, base min_local_deletion_time, SECONDS
+        //      -> the GC-grace clock, NOT a reconciliation timestamp.
+        //
+        // (The complex-cell deletion reader, parse_complex_column, already uses this
+        // markedForDeleteAt-first order; this aligns the row-level header with it.)
+        let (marked_for_delete_at, local_deletion_time) = if (row_flags & ROW_HAS_DELETION) != 0 {
+            // First VInt: markedForDeleteAt delta (signed).
+            let (remaining, mfda_delta) = parse_vint(&data[pos..]).map_err(|e| {
                 Error::corruption(format!(
-                    "V5CompressedLegacy: Failed to parse deletion time delta at offset {}: {:?}",
+                    "V5CompressedLegacy: Failed to parse markedForDeleteAt delta at offset {}: {:?}",
                     pos, e
                 ))
             })?;
             let bytes_consumed = data[pos..].len() - remaining.len();
             pos += bytes_consumed;
 
-            // Second VInt is deletion timestamp (we can skip for now)
-            let (remaining, _deletion_timestamp) = parse_vint(&data[pos..]).map_err(|e| {
+            // Second VInt: localDeletionTime delta (unsigned).
+            let (remaining, ldt_delta) = parse_vuint(&data[pos..]).map_err(|e| {
                 Error::corruption(format!(
-                    "V5CompressedLegacy: Failed to parse deletion timestamp at offset {}: {:?}",
+                    "V5CompressedLegacy: Failed to parse localDeletionTime delta at offset {}: {:?}",
                     pos, e
                 ))
             })?;
             let bytes_consumed = data[pos..].len() - remaining.len();
             pos += bytes_consumed;
 
-            // Apply delta decoding: absolute_deletion_time = min_local_deletion_time + delta
-            let absolute_deletion_time =
-                self.min_local_deletion_time.wrapping_add(delta as i64) as i32;
+            // markedForDeleteAt: absolute = min_timestamp + delta (microseconds).
+            let absolute_marked_for_delete_at = self.min_timestamp.wrapping_add(mfda_delta);
+            // localDeletionTime: absolute = min_local_deletion_time + delta (seconds).
+            let absolute_local_deletion_time =
+                self.min_local_deletion_time.wrapping_add(ldt_delta as i64) as i32;
             debug!(
-                "V5CompressedLegacy: Row deletion time: delta={}, min={}, absolute={}",
-                delta, self.min_local_deletion_time, absolute_deletion_time
+                "V5CompressedLegacy: Row deletion: markedForDeleteAt(delta={}, min_ts={}, abs={} us), localDeletionTime(delta={}, min_ldt={}, abs={} s)",
+                mfda_delta,
+                self.min_timestamp,
+                absolute_marked_for_delete_at,
+                ldt_delta,
+                self.min_local_deletion_time,
+                absolute_local_deletion_time
             );
-            Some(absolute_deletion_time)
+            (
+                Some(absolute_marked_for_delete_at),
+                Some(absolute_local_deletion_time),
+            )
         } else {
-            None
+            (None, None)
         };
 
         // Parse column bitmap if HAS_ALL_COLUMNS is NOT set
@@ -978,6 +1252,7 @@ impl V5CompressedLegacyParser {
                 timestamp,
                 ttl,
                 local_deletion_time,
+                marked_for_delete_at,
                 header_size,
                 row_size_vint_len,
                 missing_columns_bitmap,
@@ -1862,6 +2137,9 @@ impl V5CompressedLegacyParser {
         // Based on Cassandra 5.0 Cell.Serializer format specification
 
         // Step 1: Read timestamp (if not using row timestamp)
+        // Issue #505: capture the actual cell timestamp so deleted cells can carry it
+        // in a Value::Tombstone.
+        let mut cell_timestamp: Option<i64> = None;
         if !use_row_timestamp {
             let (remaining, timestamp_delta) = parse_vint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
@@ -1871,13 +2149,15 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+            let absolute_ts = self.min_timestamp.wrapping_add(timestamp_delta);
             log::debug!(
-                "V5CompressedLegacy: Cell '{}' timestamp_delta={} (min_timestamp={})",
+                "V5CompressedLegacy: Cell '{}' timestamp_delta={} (min_timestamp={}) absolute={}",
                 column.name,
                 timestamp_delta,
-                self.min_timestamp
+                self.min_timestamp,
+                absolute_ts,
             );
-            // Note: actual timestamp = min_timestamp + timestamp_delta (from Statistics.db)
+            cell_timestamp = Some(absolute_ts);
         }
 
         // Step 2: Read localDeletionTime (if deleted or expiring, and not using row TTL)
@@ -1934,14 +2214,26 @@ impl V5CompressedLegacyParser {
         // 1. Have IS_DELETED flag set
         // 2. May have deletion metadata (timestamp, localDeletionTime)
         // 3. Do NOT have value data (even if HAS_EMPTY_VALUE not set)
+        //
+        // Issue #505: emit Value::Tombstone(CellTombstone) so that the compaction
+        // merger can apply cell-level shadowing semantics.  The actual deletion
+        // timestamp is carried in the tombstone for timestamp-based LWW ordering.
         if is_deleted {
+            let deletion_time = cell_timestamp.unwrap_or(0);
             log::debug!(
-                "V5CompressedLegacy: Cell '{}' is tombstone (deleted), returning Null",
-                column.name
+                "V5CompressedLegacy: Cell '{}' is tombstone (deleted), returning Tombstone(deletion_time={})",
+                column.name, deletion_time
             );
-            // TODO(Issue #191, Phase 2): Parse deletion metadata (timestamp, localDeletionTime)
-            // For now, skip to next cell by returning offset without advancing further
-            return Ok((Value::Null, offset));
+            return Ok((
+                Value::Tombstone(TombstoneInfo {
+                    deletion_time,
+                    tombstone_type: TombstoneType::CellTombstone,
+                    ttl: None,
+                    range_start: None,
+                    range_end: None,
+                }),
+                offset,
+            ));
         }
 
         // Handle empty cells (no value bytes to read)
@@ -7424,34 +7716,63 @@ mod tests {
 
     #[test]
     fn test_row_header_with_deletion_time() {
-        // Test delta decoding of local_deletion_time field
-        // Row header with HAS_DELETION (0x10) + HAS_ALL_COLUMNS (0x20) = 0x30
-        // [row_flags: 0x30] [row_size: VInt] [prev_size: VInt]
-        // [local_deletion_time_delta: unsigned VInt] [deletion_time: signed VInt]
+        // Verify delta decoding of the HAS_DELETION field in Cassandra canonical order
+        // (Issue #505). DeletionTime.Serializer writes markedForDeleteAt FIRST, then
+        // localDeletionTime:
+        //   [row_flags] [row_size: VInt] [prev_size: VInt]
+        //   [markedForDeleteAt_delta: SIGNED VInt]   (base = min_timestamp, micros)
+        //   [localDeletionTime_delta: UNSIGNED VInt] (base = min_local_deletion_time, secs)
+        use crate::parser::vint::{encode_vint, encode_vuint};
 
-        let row_header_hex = "30640032645000"; // flags=0x30, size=100, prev=0, del_delta=50, del_time=80 (signed)
-        let data = hex::decode(row_header_hex).unwrap();
+        // Row header with HAS_DELETION (0x10) + HAS_ALL_COLUMNS (0x20) = 0x30.
+        let mut data: Vec<u8> = Vec::new();
+        data.push(0x30); // flags
+        data.extend(encode_vuint(100)); // row_size = 100
+        data.extend(encode_vuint(0)); // prev_size = 0
+        let mfda_delta: i64 = 80; // markedForDeleteAt delta (signed)
+        let ldt_delta: u64 = 50; // localDeletionTime delta (unsigned)
+        data.extend(encode_vint(mfda_delta));
+        data.extend(encode_vuint(ldt_delta));
 
+        let min_timestamp = 1759713125983682i64;
         let min_local_deletion_time = 1759799525i64;
         let parser = V5CompressedLegacyParser::new(
             "test_basic".to_string(),
             "test_table".to_string(),
-            0,
+            min_timestamp,
             min_local_deletion_time,
             None,
         );
 
-        // Issue #213: Use split functions - parse flags first, then metadata
         let (row_flags, extended_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
         let (row_header, _row_size) = parser
             .parse_row_metadata(&data, flags_size, row_flags, extended_flags)
             .unwrap();
 
-        // Verify delta decoding: absolute_deletion_time = min_local_deletion_time + delta
+        // markedForDeleteAt: absolute = min_timestamp + delta (microseconds). This is
+        // the authoritative reconciliation timestamp used by the compaction merger.
+        assert_eq!(
+            row_header.marked_for_delete_at,
+            Some(min_timestamp + mfda_delta),
+            "markedForDeleteAt must be decoded from the FIRST (signed) VInt as min_timestamp + delta"
+        );
+        // The row-tombstone deletion time (used in Value::Tombstone) must equal it.
+        assert_eq!(
+            row_header.row_tombstone_deletion_time(),
+            min_timestamp + mfda_delta,
+            "row tombstone deletion_time must be markedForDeleteAt, not local_deletion_time"
+        );
+
+        // localDeletionTime: absolute = min_local_deletion_time + delta (seconds).
         assert_eq!(
             row_header.local_deletion_time,
-            Some((min_local_deletion_time + 50) as i32),
-            "Local deletion time should be decoded as min + delta"
+            Some((min_local_deletion_time + ldt_delta as i64) as i32),
+            "localDeletionTime must be decoded from the SECOND (unsigned) VInt as min + delta"
+        );
+
+        assert!(
+            row_header.is_row_tombstone(),
+            "HAS_DELETION row must be reported as a row tombstone"
         );
     }
 

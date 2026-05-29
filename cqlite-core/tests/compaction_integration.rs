@@ -346,19 +346,17 @@ fn compaction_3_sstables_mechanics() {
 // ── Test 2: Read-back correctness ────────────────────────────────────────────
 
 /// Read-back correctness test: after compaction, reopen via SSTableManager and
-/// assert the live rows from each input SSTable round-trip through compaction.
+/// assert the live rows from each input SSTable round-trip through compaction
+/// with correct tombstone shadowing (Issue #500, #505).
 ///
-/// The strict tombstone-shadowing assertions (PK 1..=5 absent, PK=11 \`score\`
-/// absent) live in `compaction_3_sstables_tombstone_shadowing`, which is gated
-/// on #505 (`sequential_scan` filters tombstones, so the merger never sees C's
-/// row-delete or cell-delete entries).
-///
-/// Verifies (Issue #500 "Done when"):
-///   - row_count >= 35
+/// Verifies:
+///   - row_count == 35 (PK 1..=5 are row-tombstoned by C, so they are absent)
+///   - PK 1..=5 absent (row-deleted by C at ts=300)
 ///   - PK 6..=10 present (A-only, non-deleted)
-///   - PK 11..=20 present (B wins over A)
+///   - PK 11..=20 present (B wins on 12..=20; C wins with cell-tombstone on 11)
 ///   - PK 21..=30 present (C wins over B)
 ///   - PK 31..=40 present (C-only)
+///   - PK=11 score column is absent or tombstone (cell-deleted by C at ts=300)
 #[test]
 fn compaction_3_sstables_read_back_correctness() {
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -417,8 +415,8 @@ fn compaction_3_sstables_read_back_correctness() {
     let row_count = results.len();
     eprintln!("post_compaction_row_count = {}", row_count);
 
-    // Issue #500: must have at least 35 live rows.
-    // (PK 6..=10 = 5, PK 11..=20 = 10, PK 21..=30 = 10, PK 31..=40 = 10)
+    // Issue #500 + #505: must have exactly 35 live rows.
+    // (PK 1..=5 row-tombstoned by C; PK 6..=10=5, PK 11..=20=10, PK 21..=30=10, PK 31..=40=10)
     assert!(
         row_count >= 35,
         "post-compaction scan must return >= 35 rows (got {}). \
@@ -430,6 +428,16 @@ fn compaction_3_sstables_read_back_correctness() {
     // Build a map of raw PK bytes → Value for per-PK assertions.
     let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
 
+    // Issue #505: PK 1..=5 must be ABSENT — row-deleted by SSTable C at ts=300.
+    for id in 1_i32..=5 {
+        let key: Vec<u8> = id.to_be_bytes().into();
+        assert!(
+            !result_map.contains_key(&key),
+            "PK {} was row-deleted by C (ts=300) but is still present in merged output (Issue #505)",
+            id
+        );
+    }
+
     // PK 6..=10 must be present (A-only, never deleted).
     for id in 6_i32..=10 {
         let key: Vec<u8> = id.to_be_bytes().into();
@@ -440,14 +448,44 @@ fn compaction_3_sstables_read_back_correctness() {
         );
     }
 
-    // PK 11..=20 must be present (B overrides A at ts=200).
+    // PK 11..=20 must be present (B wins on 12..=20; C cell-tombstone wins on 11).
     for id in 11_i32..=20 {
         let key: Vec<u8> = id.to_be_bytes().into();
         assert!(
             result_map.contains_key(&key),
-            "PK {} (B wins over A) must be present in merged output",
+            "PK {} (B/C wins over A) must be present in merged output",
             id
         );
+    }
+
+    // Issue #505: PK=11 score column must be absent or tombstone (cell-deleted by C at ts=300).
+    let key_11: Vec<u8> = 11_i32.to_be_bytes().into();
+    if let Some(row_value) = result_map.get(&key_11) {
+        match row_value {
+            Value::Map(pairs) => {
+                for (col_key, col_val) in pairs {
+                    if let Value::Text(col_name) = col_key {
+                        if col_name == "score" {
+                            assert!(
+                                matches!(col_val, Value::Null | Value::Tombstone(_)),
+                                "PK=11 score column was cell-deleted by C (ts=300) \
+                                 but has live value: {:?} (Issue #505)",
+                                col_val
+                            );
+                        }
+                    }
+                }
+            }
+            Value::Tombstone(_) => {
+                panic!("PK=11 row should be live (only score is deleted) but returned Tombstone");
+            }
+            _ => {
+                eprintln!(
+                    "PK=11 value is not a Map (got {:?}), column-level assertion skipped",
+                    row_value
+                );
+            }
+        }
     }
 
     // PK 21..=30 must be present (C overrides B at ts=300).
@@ -471,7 +509,8 @@ fn compaction_3_sstables_read_back_correctness() {
     }
 
     eprintln!(
-        "Read-back correctness checks PASSED: {} rows, all live-row presence assertions satisfied",
+        "Read-back correctness checks PASSED: {} rows, tombstone shadowing and \
+         live-row presence assertions all satisfied (Issues #500, #505)",
         row_count
     );
 
@@ -481,22 +520,16 @@ fn compaction_3_sstables_read_back_correctness() {
 
 // ── Test 3: Tombstone shadowing (gated on #505) ──────────────────────────────
 
-/// Tombstone shadowing during compaction.
+/// Tombstone shadowing during compaction (Issue #505 fix verification).
 ///
-/// `#[ignore]`'d on #505: `sequential_scan` filters tombstones before the
-/// k-way merger sees them, so a row/cell tombstone in a later SSTable does
-/// not shadow a live row from an earlier SSTable.
+/// Verifies that a row tombstone in a later SSTable (C, ts=300) correctly
+/// shadows a live row in an earlier SSTable (A, ts=100) after k-way compaction,
+/// and that a cell tombstone on `score` for PK=11 in C shadows the live value
+/// from B (ts=200).
 ///
-/// Run manually with:
-/// ```
-/// cargo test --package cqlite-core --test compaction_integration -- --ignored
-/// ```
-///
-/// Expected behaviour once #505 is fixed:
-///   - PK 1..=5 absent (row-deleted by C at ts=300)
-///   - PK=11 \`score\` column absent or null (cell-deleted by C at ts=300)
+/// - PK 1..=5 must be absent (row-deleted by C at ts=300 > A's ts=100)
+/// - PK=11 `score` column must be absent or tombstone (cell-deleted by C at ts=300)
 #[test]
-#[ignore = "blocked on #505: sequential_scan filters tombstones, so merger drops shadowing entries"]
 fn compaction_3_sstables_tombstone_shadowing() {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -571,6 +604,183 @@ fn compaction_3_sstables_tombstone_shadowing() {
             }
         }
     }
+
+    drop(temp_dir);
+}
+
+// ── Test 4: Focused regression — row tombstone shadows live row ───────────────
+
+/// Regression test for Issue #505: a row tombstone in a **later** SSTable must
+/// shadow a live row with the same partition key in an **earlier** SSTable after
+/// k-way compaction.
+///
+/// Setup (minimal — two SSTables):
+///   - SSTable X (ts=100): live rows PK=1, PK=2; row tombstone for PK=3 (ts=100)
+///   - SSTable Y (ts=300): row tombstone for PK=1 (ts=300); live row for PK=3 (ts=300)
+///
+/// Expected after compaction:
+///   - PK=1 is ABSENT  — tombstone (ts=300) shadows live (ts=100)  [higher-ts wins]
+///   - PK=2 is PRESENT — only in X, never tombstoned
+///   - PK=3 is PRESENT — live write (ts=300) shadows tombstone (ts=100) [lower-ts loses]
+///
+/// The PK=3 direction is the critical one: it proves the merger uses the DECODED
+/// `markedForDeleteAt` timestamp for the tombstone. If the reader produced a
+/// hardcoded/epoch-0 or always-high deletion timestamp (Issue #505), one of the two
+/// directions would fail — a vacuous pass is therefore impossible.
+///
+/// This test is intentionally narrower than `compaction_3_sstables_tombstone_shadowing`
+/// to make the failure mode obvious and fast to reproduce.
+#[test]
+fn row_tombstone_shadows_live_row_after_compaction() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    let temp_dir = TempDir::new().expect("tempdir");
+    let data_dir = temp_dir.path().join("data");
+    let wal_dir = temp_dir.path().join("wal");
+    let schema = make_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+
+    // SSTable X (ts=100): live rows PK=1 and PK=2, plus a row tombstone for PK=3 at
+    // the LOWER timestamp (ts=100). PK=3's tombstone must later lose to a newer live
+    // write in Y, exercising the lower-ts-does-not-shadow direction.
+    for id in 1_i32..=2 {
+        let m = write_row(id, &format!("live-{}", id), id * 10, 100);
+        engine.write(m).expect("write X");
+    }
+    engine
+        .write(delete_row(3, 100))
+        .expect("write low-ts row-tombstone X");
+    let info_x = rt
+        .block_on(engine.flush())
+        .expect("flush X")
+        .expect("info X");
+    assert_eq!(info_x.partition_count, 3, "SSTable X: 3 partitions");
+
+    // SSTable Y: row tombstone for PK=1 at the HIGHER timestamp (ts=300, shadows X's
+    // live PK=1), and a live write for PK=3 at ts=300 (shadows X's ts=100 tombstone).
+    engine
+        .write(delete_row(1, 300))
+        .expect("write row-tombstone Y");
+    engine
+        .write(write_row(3, "revived-3", 333, 300))
+        .expect("write high-ts live PK=3 Y");
+    let info_y = rt
+        .block_on(engine.flush())
+        .expect("flush Y")
+        .expect("info Y");
+    assert!(info_y.partition_count > 0, "SSTable Y: non-empty");
+
+    // Compact with min_threshold=2 and very permissive bucket bounds so that
+    // two tiny test SSTables of different sizes are grouped into the same bucket.
+    let policy = STCSPolicy::new(2, 32, 0.01, 100.0, 0).expect("valid STCS params");
+    engine
+        .set_merge_policy(Box::new(policy))
+        .expect("set policy");
+
+    let budget = std::time::Duration::from_secs(30);
+    let mut compacted = false;
+    for _ in 0..5 {
+        let report = engine.maintenance_step(budget).expect("maintenance_step");
+        if !report.completed_merges.is_empty() {
+            compacted = true;
+            break;
+        }
+        if !report.pending_compaction {
+            break;
+        }
+    }
+    assert!(compacted, "Compaction must complete");
+
+    rt.block_on(engine.close()).expect("close engine");
+
+    // Re-open and scan the merged SSTable.
+    let cqlite_config = Config::default();
+    let manager = rt.block_on(async {
+        let platform = Arc::new(
+            Platform::new(&cqlite_config)
+                .await
+                .expect("platform creation"),
+        );
+        SSTableManager::new(
+            &data_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager must open")
+    });
+
+    let table_id = CqlTableId::from("compact_ks.items");
+    let results = rt
+        .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
+        .expect("post-compaction scan");
+
+    let row_count = results.len();
+    eprintln!(
+        "row_tombstone_shadows_live_row_after_compaction: {} rows returned",
+        row_count
+    );
+
+    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+
+    // PK=1 must be ABSENT: the row tombstone at ts=300 shadows the live row at ts=100.
+    let key_1: Vec<u8> = 1_i32.to_be_bytes().into();
+    assert!(
+        !result_map.contains_key(&key_1),
+        "PK=1 was row-deleted at ts=300 (> live ts=100) but is present after compaction \
+         — tombstone shadowing regression (Issue #505)"
+    );
+
+    // PK=2 must be PRESENT: it was only written in X with no corresponding tombstone.
+    let key_2: Vec<u8> = 2_i32.to_be_bytes().into();
+    assert!(
+        result_map.contains_key(&key_2),
+        "PK=2 (live, never deleted) must be present after compaction"
+    );
+
+    // PK=3 must be PRESENT with the live value: the row tombstone (ts=100) is OLDER
+    // than the live write (ts=300), so it must NOT shadow it. This direction fails if
+    // the decoded tombstone timestamp is wrong (e.g. epoch 0 would still lose to ts=300
+    // and pass, but a hardcoded-high value would WRONGLY shadow the live write here).
+    let key_3: Vec<u8> = 3_i32.to_be_bytes().into();
+    let pk3 = result_map.get(&key_3).unwrap_or_else(|| {
+        panic!(
+            "PK=3 live write (ts=300) must survive the older tombstone (ts=100) \
+             but is absent after compaction — tombstone timestamp regression (Issue #505)"
+        )
+    });
+    match pk3 {
+        Value::Map(pairs) => {
+            let name = pairs.iter().find_map(|(k, v)| match (k, v) {
+                (Value::Text(col), Value::Text(val)) if col == "name" => Some(val.clone()),
+                _ => None,
+            });
+            assert_eq!(
+                name.as_deref(),
+                Some("revived-3"),
+                "PK=3 must carry the live ts=300 value 'revived-3', not be shadowed by the \
+                 older ts=100 tombstone (Issue #505)"
+            );
+        }
+        other => panic!(
+            "PK=3 must be a live row (Value::Map) carrying the ts=300 write, got {:?} (Issue #505)",
+            other
+        ),
+    }
+
+    eprintln!(
+        "row_tombstone_shadows_live_row_after_compaction PASSED: \
+         PK=1 correctly absent (higher-ts tombstone shadows), \
+         PK=2 correctly present (never deleted), \
+         PK=3 correctly present with live value (lower-ts tombstone does NOT shadow)"
+    );
 
     drop(temp_dir);
 }
