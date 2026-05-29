@@ -42,7 +42,7 @@ use log::{debug, warn};
 use crate::{
     parser::vint::{parse_vint, parse_vuint},
     schema::{CqlType, TableSchema, UdtRegistry},
-    types::{TableId, UdtField, UdtTypeDef, UdtValue},
+    types::{TableId, TombstoneInfo, TombstoneType, UdtField, UdtTypeDef, UdtValue},
     Error, Result, RowKey, Value,
 };
 
@@ -483,7 +483,34 @@ impl V5CompressedLegacyParser {
                                     }
 
                                     // Convert cells HashMap to Value::Map (required by SelectExecutor)
-                                    let row_value = if cells.is_empty() {
+                                    //
+                                    // Issue #505: Row tombstones are detected via `local_deletion_time`
+                                    // being set in the row header.  When present, emit a proper
+                                    // `Value::Tombstone` so that the compaction merger can apply
+                                    // tombstone-shadowing semantics rather than treating the absent
+                                    // cells as a live row with no data.
+                                    let is_row_tombstone = row_header_opt
+                                        .as_ref()
+                                        .map(|h| h.local_deletion_time.is_some())
+                                        .unwrap_or(false);
+
+                                    let row_value = if is_row_tombstone {
+                                        let deletion_time = row_header_opt
+                                            .as_ref()
+                                            .and_then(|h| h.timestamp)
+                                            .unwrap_or(0);
+                                        log::debug!(
+                                            "V5CompressedLegacy: Partition {} Row {} - emitting Tombstone(deletion_time={})",
+                                            partition_index, row_count, deletion_time
+                                        );
+                                        Value::Tombstone(TombstoneInfo {
+                                            deletion_time,
+                                            tombstone_type: TombstoneType::RowTombstone,
+                                            ttl: None,
+                                            range_start: None,
+                                            range_end: None,
+                                        })
+                                    } else if cells.is_empty() {
                                         warn!(
                                             "V5CompressedLegacy: No cells extracted for {}.{} partition {} row {} (partition key: {} bytes)",
                                             self.keyspace,
@@ -623,6 +650,193 @@ impl V5CompressedLegacyParser {
             "V5CompressedLegacy: Parsed {} total entries from block",
             results.len()
         );
+
+        Ok(results)
+    }
+
+    /// Parse all partitions in a decompressed block, returning per-row timestamps.
+    ///
+    /// This is the compaction-specific variant of [`parse_block`].  It returns
+    /// `(TableId, RowKey, Value, row_timestamp_micros)` so that the k-way merger
+    /// can perform timestamp-accurate last-write-wins ordering rather than
+    /// falling back to `SystemTime::now()`.
+    ///
+    /// Row tombstones are emitted as `Value::Tombstone(RowTombstone)` with their
+    /// actual `deletion_time`.  Cell tombstones within live rows are stored as
+    /// `Value::Tombstone(CellTombstone)` inside the `Value::Map`, again carrying
+    /// the cell-level deletion timestamp.
+    ///
+    /// The `row_timestamp_micros` in the returned tuple is the row-level write
+    /// timestamp decoded from the `HAS_TIMESTAMP` field in the row header
+    /// (`min_timestamp + delta`).  For row tombstones the same timestamp also
+    /// appears in `TombstoneInfo::deletion_time`.
+    ///
+    /// Normal user-facing scan/get paths should use [`parse_block`] instead.
+    /// (Issue #505)
+    pub fn parse_block_with_timestamps(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<Vec<(TableId, RowKey, Value, i64)>> {
+        // parse_block now emits Value::Tombstone correctly; we just add the
+        // per-row timestamp from the row header.
+        //
+        // Rather than duplicating the entire loop we parse with parse_block and
+        // separately call parse_row_data_with_offset to obtain the timestamp.
+        // However, that would re-parse the data twice.  Instead, we duplicate the
+        // loop here — it is a thin wrapper that adds the timestamp extraction.
+        if data.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                self.keyspace, self.table_name
+            ))
+        })?;
+
+        let mut results: Vec<(TableId, RowKey, Value, i64)> = Vec::new();
+        let mut offset = 0;
+        let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
+
+        const CASSANDRA_MAX_KEY_SIZE: usize = 65536;
+        const FORMAT_MAX_KEY_SIZE: usize = 255;
+
+        let mut partition_index = 0;
+        let mut skipped_partitions = 0;
+
+        while offset < data.len() {
+            if offset + 2 > data.len() {
+                break;
+            }
+
+            let flags = data[offset];
+            let key_len = data[offset + 1] as usize;
+            let header_min_size = 1 + 1 + key_len + 4 + 8;
+
+            if key_len == 0
+                || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
+                || offset + header_min_size > data.len()
+            {
+                skipped_partitions += 1;
+                offset += 1;
+                let _ = flags; // silence unused warning
+                continue;
+            }
+
+            match self.parse_partition_header(data, offset) {
+                Ok((partition_key, new_offset)) => {
+                    offset = new_offset;
+                    let mut static_cells: HashMap<String, Value> = HashMap::new();
+
+                    loop {
+                        if offset < data.len() && Self::is_end_of_partition(data[offset]) {
+                            offset += 1;
+                            break;
+                        }
+                        if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
+                            match self.skip_range_tombstone_marker(data, offset, schema) {
+                                Ok(next_offset) => {
+                                    offset = next_offset;
+                                    continue;
+                                }
+                                Err(_) => break,
+                            }
+                        }
+
+                        match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
+                            Ok((mut cells, row_header_opt, next_offset, is_static)) => {
+                                offset = next_offset;
+
+                                // Extract the row-level timestamp for the merger.
+                                let row_ts = row_header_opt
+                                    .as_ref()
+                                    .and_then(|h| h.timestamp)
+                                    .unwrap_or(0);
+
+                                if is_static {
+                                    static_cells = cells;
+                                } else {
+                                    for (k, v) in &static_cells {
+                                        cells.entry(k.clone()).or_insert_with(|| v.clone());
+                                    }
+
+                                    // Row tombstone → Value::Tombstone
+                                    let is_row_tombstone = row_header_opt
+                                        .as_ref()
+                                        .map(|h| h.local_deletion_time.is_some())
+                                        .unwrap_or(false);
+
+                                    let row_value = if is_row_tombstone {
+                                        Value::Tombstone(TombstoneInfo {
+                                            deletion_time: row_ts,
+                                            tombstone_type: TombstoneType::RowTombstone,
+                                            ttl: None,
+                                            range_start: None,
+                                            range_end: None,
+                                        })
+                                    } else if cells.is_empty() {
+                                        Value::Null
+                                    } else {
+                                        let mut map_entries: Vec<(Value, Value)> = cells
+                                            .into_iter()
+                                            .map(|(name, value)| (Value::Text(name), value))
+                                            .collect();
+                                        map_entries.sort_by(|a, b| {
+                                            let a_key = if let Value::Text(s) = &a.0 {
+                                                s.as_str()
+                                            } else {
+                                                ""
+                                            };
+                                            let b_key = if let Value::Text(s) = &b.0 {
+                                                s.as_str()
+                                            } else {
+                                                ""
+                                            };
+                                            a_key.cmp(b_key)
+                                        });
+                                        Value::Map(map_entries)
+                                    };
+
+                                    results.push((
+                                        table_id.clone(),
+                                        partition_key.clone(),
+                                        row_value,
+                                        row_ts,
+                                    ));
+                                }
+
+                                if offset >= data.len() {
+                                    break;
+                                }
+                                if self.peek_is_partition_header(data, offset) {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+
+                    partition_index += 1;
+                }
+                Err(_) => {
+                    skipped_partitions += 1;
+                    offset += 1;
+                    continue;
+                }
+            }
+        }
+
+        if skipped_partitions > 0 {
+            log::warn!(
+                "V5CompressedLegacy (compaction): parsed {} entries, skipped {} malformed partitions",
+                results.len(),
+                skipped_partitions
+            );
+        }
+        let _ = partition_index; // used for bookkeeping
 
         Ok(results)
     }
@@ -1862,6 +2076,9 @@ impl V5CompressedLegacyParser {
         // Based on Cassandra 5.0 Cell.Serializer format specification
 
         // Step 1: Read timestamp (if not using row timestamp)
+        // Issue #505: capture the actual cell timestamp so deleted cells can carry it
+        // in a Value::Tombstone.
+        let mut cell_timestamp: Option<i64> = None;
         if !use_row_timestamp {
             let (remaining, timestamp_delta) = parse_vint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
@@ -1871,13 +2088,15 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+            let absolute_ts = self.min_timestamp.wrapping_add(timestamp_delta);
             log::debug!(
-                "V5CompressedLegacy: Cell '{}' timestamp_delta={} (min_timestamp={})",
+                "V5CompressedLegacy: Cell '{}' timestamp_delta={} (min_timestamp={}) absolute={}",
                 column.name,
                 timestamp_delta,
-                self.min_timestamp
+                self.min_timestamp,
+                absolute_ts,
             );
-            // Note: actual timestamp = min_timestamp + timestamp_delta (from Statistics.db)
+            cell_timestamp = Some(absolute_ts);
         }
 
         // Step 2: Read localDeletionTime (if deleted or expiring, and not using row TTL)
@@ -1934,14 +2153,26 @@ impl V5CompressedLegacyParser {
         // 1. Have IS_DELETED flag set
         // 2. May have deletion metadata (timestamp, localDeletionTime)
         // 3. Do NOT have value data (even if HAS_EMPTY_VALUE not set)
+        //
+        // Issue #505: emit Value::Tombstone(CellTombstone) so that the compaction
+        // merger can apply cell-level shadowing semantics.  The actual deletion
+        // timestamp is carried in the tombstone for timestamp-based LWW ordering.
         if is_deleted {
+            let deletion_time = cell_timestamp.unwrap_or(0);
             log::debug!(
-                "V5CompressedLegacy: Cell '{}' is tombstone (deleted), returning Null",
-                column.name
+                "V5CompressedLegacy: Cell '{}' is tombstone (deleted), returning Tombstone(deletion_time={})",
+                column.name, deletion_time
             );
-            // TODO(Issue #191, Phase 2): Parse deletion metadata (timestamp, localDeletionTime)
-            // For now, skip to next cell by returning offset without advancing further
-            return Ok((Value::Null, offset));
+            return Ok((
+                Value::Tombstone(TombstoneInfo {
+                    deletion_time,
+                    tombstone_type: TombstoneType::CellTombstone,
+                    ttl: None,
+                    range_start: None,
+                    range_end: None,
+                }),
+                offset,
+            ));
         }
 
         // Handle empty cells (no value bytes to read)

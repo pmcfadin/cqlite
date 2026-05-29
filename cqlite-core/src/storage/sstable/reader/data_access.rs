@@ -411,6 +411,152 @@ impl SSTableReader {
         Ok(entries)
     }
 
+    /// Stitch all compressed chunks and parse with per-row timestamps (for compaction).
+    ///
+    /// Identical to [`stitch_and_parse_all_chunks`] but delegates to
+    /// [`V5CompressedLegacyParser::parse_block_with_timestamps`] so that each
+    /// entry carries its actual row-level write timestamp rather than
+    /// `SystemTime::now()`.  Row and cell tombstones are emitted as
+    /// `Value::Tombstone` with their authoritative deletion timestamps.
+    ///
+    /// Used exclusively by the compaction k-way merger path (Issue #505).
+    async fn stitch_and_parse_all_chunks_for_compaction(
+        &self,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(TableId, RowKey, Value, i64)>> {
+        log::debug!("stitch_and_parse_all_chunks_for_compaction: stitching chunks");
+
+        let mut stitched_buffer = Vec::with_capacity(2_500_000);
+        let mut chunk_count = 0;
+
+        while let Some(compressed_chunk) = self.read_next_block().await? {
+            use crate::storage::sstable::compression::Compression;
+            let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
+                let compression = Compression::new(*compression_reader.algorithm())?;
+                compression.decompress(&compressed_chunk).map_err(|e| {
+                    Error::corruption(format!(
+                        "stitch_and_parse_all_chunks_for_compaction: Failed to decompress chunk {}: {}",
+                        chunk_count, e
+                    ))
+                })?
+            } else {
+                compressed_chunk
+            };
+            stitched_buffer.extend_from_slice(&decompressed_chunk);
+            chunk_count += 1;
+        }
+
+        log::debug!(
+            "stitch_and_parse_all_chunks_for_compaction: {} chunks, {} bytes total",
+            chunk_count,
+            stitched_buffer.len()
+        );
+
+        let keyspace = self.header.keyspace.clone();
+        let table_name = self.header.table_name.clone();
+
+        let (min_timestamp, min_local_deletion_time, min_ttl) =
+            if let Some(stats_reader) = &self.statistics_reader {
+                let ts_stats = &stats_reader.statistics().timestamp_stats;
+                (
+                    ts_stats.min_timestamp,
+                    ts_stats.min_deletion_time,
+                    ts_stats.min_ttl,
+                )
+            } else {
+                (0, 0, None)
+            };
+
+        let parser = crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::new(
+            keyspace,
+            table_name,
+            min_timestamp,
+            min_local_deletion_time,
+            min_ttl,
+        );
+        let parser = if let Some(ref registry) = self.udt_registry {
+            parser.with_udt_registry(registry.clone())
+        } else {
+            parser
+        };
+
+        let reader_schema;
+        let table_schema = if let Some(s) = schema {
+            Some(s)
+        } else {
+            reader_schema = self.get_table_schema(None);
+            reader_schema.as_ref()
+        };
+
+        let entries = parser.parse_block_with_timestamps(&stitched_buffer, table_schema, self)?;
+        log::debug!(
+            "stitch_and_parse_all_chunks_for_compaction: parsed {} entries",
+            entries.len()
+        );
+
+        Ok(entries)
+    }
+
+    /// Iterate all partitions with per-row timestamps, for use by the compaction merger.
+    ///
+    /// Returns `(RowKey, Value, row_timestamp_micros)` for every row in the SSTable.
+    /// Unlike [`iterate_all_partitions`]:
+    ///
+    /// - Row tombstones are returned as `Value::Tombstone(RowTombstone)` carrying
+    ///   the actual deletion timestamp extracted from the on-disk row header.
+    /// - Cell tombstones within live rows are stored as `Value::Tombstone(CellTombstone)`
+    ///   inside the `Value::Map`, also carrying the actual cell-level deletion timestamp.
+    /// - The third tuple element is the decoded row-level write timestamp, so the
+    ///   merger can perform timestamp-accurate last-write-wins comparisons.
+    ///
+    /// Normal user-facing reads use [`scan`] / [`get`] / [`iterate_all_partitions`],
+    /// which apply tombstone filtering.  Do NOT use this method for user-visible queries.
+    ///
+    /// (Issue #505)
+    pub async fn iterate_all_partitions_for_compaction(
+        &self,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, Value, i64)>> {
+        // Only the V5CompressedLegacy NB chunk-stitching path is supported here
+        // (that is the format the WriteEngine produces).  For other formats, fall
+        // back to iterate_all_partitions and attach timestamp 0 as a conservative
+        // default (LWW ordering then relies solely on run_index).
+        if self.requires_chunk_stitching() {
+            // We need schema; retrieve it once.
+            // `schema` is Option<&TableSchema>; clone it into an owned value so we
+            // can pass it to the async helper without borrow-checker issues.
+            let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
+
+            // Reset chunk reader to start of data section.
+            let header_size = self.calculate_header_size();
+            {
+                let mut file_guard = self.file.lock().await;
+                use tokio::io::AsyncSeekExt;
+                file_guard
+                    .seek(std::io::SeekFrom::Start(header_size as u64))
+                    .await?;
+            }
+            self.current_chunk_index
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+
+            let entries = self
+                .stitch_and_parse_all_chunks_for_compaction(owned_schema.as_ref())
+                .await?;
+
+            return Ok(entries
+                .into_iter()
+                .map(|(_tid, key, value, ts)| (key, value, ts))
+                .collect());
+        }
+
+        // Non-stitching fallback: use iterate_all_partitions and attach ts=0.
+        let entries = self.iterate_all_partitions().await?;
+        Ok(entries
+            .into_iter()
+            .map(|(key, value)| (key, value, 0))
+            .collect())
+    }
+
     /// Read value at a specific offset with caching
     pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<Value>> {
         use crate::parser::header::CassandraVersion;

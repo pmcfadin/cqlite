@@ -6,6 +6,7 @@
 use super::{IntegrityCheckResult, IntegrityStatus, SSTableReader, SSTableReaderHealthMetrics};
 use crate::types::Value;
 use crate::Result;
+
 use log::{debug, info};
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
@@ -157,11 +158,28 @@ impl SSTableReader {
         true // Keep valid, non-deleted values
     }
 
-    /// Simple tombstone filtering (fallback when tombstones feature is disabled)
+    /// Simple tombstone filtering (fallback when tombstones feature is disabled).
+    ///
+    /// Row tombstones (`Value::Tombstone(RowTombstone)`) are always filtered out of
+    /// user-facing scan/get results, regardless of the `tombstones` feature flag.
+    /// This prevents deleted rows that are still present on disk (either from a live
+    /// SSTable that contains a tombstone entry, or from a post-compaction SSTable
+    /// that preserved tombstone rows for GC purposes) from appearing in query results.
+    ///
+    /// Cell tombstones (`Value::Tombstone(CellTombstone)`) within a Map are NOT
+    /// filtered here — they are preserved so callers can inspect them.  If a caller
+    /// needs to suppress null-cell entries, it should do so at the query layer.
+    ///
+    /// (Issue #505)
     #[cfg(not(feature = "tombstones"))]
-    pub(super) fn filter_tombstone(&self, _value: &Value) -> bool {
-        // Without tombstone feature, assume all values are valid
-        true
+    pub(super) fn filter_tombstone(&self, value: &Value) -> bool {
+        use crate::types::TombstoneType;
+        // Filter out row-level tombstones; keep everything else.
+        !matches!(
+            value,
+            Value::Tombstone(info)
+                if info.tombstone_type == TombstoneType::RowTombstone
+        )
     }
 
     /// Enhanced multi-generation tombstone filtering for compaction

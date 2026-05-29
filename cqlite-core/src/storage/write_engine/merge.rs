@@ -401,7 +401,12 @@ struct SSTableRowIteratorAdapter {
 
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
-    /// Open an SSTable and load all entries as MergeEntry
+    /// Open an SSTable and load all entries as MergeEntry.
+    ///
+    /// Uses [`SSTableReader::iterate_all_partitions_for_compaction`] which
+    /// returns actual per-row timestamps decoded from the on-disk row headers.
+    /// This allows the k-way merger to perform timestamp-accurate last-write-wins
+    /// ordering, which is essential for tombstone shadowing (Issue #505).
     fn open(path: &Path, run_index: usize) -> Result<Self> {
         use crate::platform::Platform;
         use crate::Config;
@@ -410,29 +415,23 @@ impl SSTableRowIteratorAdapter {
         let config = Config::default();
         let path_buf = path.to_path_buf();
 
-        // Open SSTable reader and load all partitions
-        let (reader, raw_entries) = block_on_async(async move {
+        // Open SSTable reader and load all partitions with actual row timestamps.
+        let raw_entries = block_on_async(async move {
             let platform = Arc::new(Platform::new(&config).await?);
             let reader =
                 crate::storage::sstable::reader::SSTableReader::open(&path_buf, &config, platform)
                     .await?;
-            let entries = reader.iterate_all_partitions().await?;
-            Ok((reader, entries))
+            // Use the compaction-specific path: returns (RowKey, Value, row_timestamp_micros).
+            // Row/cell tombstones are emitted as Value::Tombstone with their actual
+            // deletion timestamps so the merger can apply shadowing semantics (Issue #505).
+            reader.iterate_all_partitions_for_compaction(None).await
         })?;
 
-        // Convert (RowKey, Value) pairs to MergeEntry
+        // Convert (RowKey, Value, timestamp) tuples to MergeEntry
         let mut entries = Vec::with_capacity(raw_entries.len());
-        for (row_key, value) in raw_entries {
+        for (row_key, value, timestamp) in raw_entries {
             let key_bytes = row_key.0;
             let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
-
-            // TODO(#447): extract_write_time_from_entry returns SystemTime::now() for live rows
-            // because the reader doesn't expose per-cell timestamps. This is acceptable for
-            // single-round STCS compaction (run_index breaks ties correctly) but will need
-            // proper timestamp extraction for multi-round compaction correctness.
-            let row_key_ref = crate::types::RowKey::new(decorated_key.key.clone());
-            let timestamp = reader.extract_write_time_from_entry(&row_key_ref, &value);
-
             let row_data = Self::value_to_row_data(&value)?;
 
             entries.push(MergeEntry::new(
@@ -451,7 +450,13 @@ impl SSTableRowIteratorAdapter {
         })
     }
 
-    /// Convert a reader Value to RowData
+    /// Convert a reader Value to RowData.
+    ///
+    /// Issue #505: `Value::Tombstone(RowTombstone)` is now correctly emitted by
+    /// the V5CompressedLegacy parser for deleted rows, and
+    /// `Value::Tombstone(CellTombstone)` appears inside `Value::Map` entries for
+    /// deleted cells.  Both are surfaced here so the merger can apply shadowing
+    /// semantics.
     fn value_to_row_data(value: &crate::types::Value) -> Result<RowData> {
         match value {
             crate::types::Value::Tombstone(info) => Ok(RowData::Tombstone {
@@ -465,10 +470,16 @@ impl SSTableRowIteratorAdapter {
                         crate::types::Value::Text(s) => s.clone(),
                         other => format!("{:?}", other),
                     };
+                    // Issue #505: propagate the cell-level timestamp from the
+                    // tombstone so merge_partition_rows can order correctly.
+                    let cell_ts = match val {
+                        crate::types::Value::Tombstone(info) => info.deletion_time,
+                        _ => 0,
+                    };
                     cells.push(CellData {
                         column,
                         value: val.clone(),
-                        timestamp: 0, // Per-cell timestamps not available from reader
+                        timestamp: cell_ts,
                         ttl: None,
                     });
                 }
@@ -792,6 +803,19 @@ impl KWayMerger {
             RowData::Live { cells } => cells
                 .into_iter()
                 .map(|cell| {
+                    // Issue #505: cell-level tombstones are represented as
+                    // Value::Tombstone(CellTombstone) inside the Map.  Translate
+                    // them to CellOperation::Delete so the SSTableWriter writes a
+                    // proper cell tombstone rather than a live cell with a null value.
+                    if matches!(
+                        cell.value,
+                        crate::types::Value::Tombstone(ref info)
+                            if info.tombstone_type == crate::types::TombstoneType::CellTombstone
+                    ) {
+                        return CellOperation::Delete {
+                            column: cell.column,
+                        };
+                    }
                     if let Some(ttl) = cell.ttl {
                         CellOperation::WriteWithTtl {
                             column: cell.column,
