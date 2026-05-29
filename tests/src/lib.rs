@@ -6,6 +6,53 @@
 // EMERGENCY M1 FIX: Completely disable clippy for CI
 #![allow(clippy::all)]
 
+use std::path::PathBuf;
+
+/// Dynamically discover the directory for a given `<keyspace>/<table>` pair under
+/// `$CQLITE_DATASETS_ROOT/sstables/`.
+///
+/// SSTable directories are named `<table>-<uuid>` so we cannot hardcode them —
+/// this helper finds the first entry whose name starts with `<table>-` and is an
+/// actual directory.  AppleDouble `._*` entries and non-directories are skipped.
+///
+/// Returns `None` when the datasets root is not set, the keyspace directory does
+/// not exist, or no matching table directory can be found.
+///
+/// # Example
+/// ```no_run
+/// # use cqlite_tests::discover_table_dir;
+/// let dir = discover_table_dir("test_basic", "compression_test_table");
+/// ```
+pub fn discover_table_dir(keyspace: &str, table: &str) -> Option<PathBuf> {
+    let datasets_root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
+    let keyspace_dir = PathBuf::from(&datasets_root)
+        .join("sstables")
+        .join(keyspace);
+
+    let prefix = format!("{}-", table);
+
+    let entries = std::fs::read_dir(&keyspace_dir).ok()?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        // Skip AppleDouble resource fork files and non-directories
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_owned(),
+            None => continue,
+        };
+        if name.starts_with("._") {
+            continue;
+        }
+        if !path.is_dir() {
+            continue;
+        }
+        if name.starts_with(&prefix) {
+            return Some(path);
+        }
+    }
+
+    None
+}
+
 // REPL Testing Modules
 pub mod repl_integration_tests;
 pub mod repl_quality_gates;

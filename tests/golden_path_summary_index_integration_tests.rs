@@ -26,12 +26,14 @@ use cqlite_core::{
     types::TableId,
     Config, RowKey,
 };
+use cqlite_tests::discover_table_dir;
 
 use tokio::fs;
 
 /// Test fixture for golden path summary index integration
 pub struct GoldenPathSummaryIndexTestFixture {
-    /// Path to test datasets
+    /// Path to test datasets (kept for potential future fallback use)
+    #[allow(dead_code)]
     datasets_path: PathBuf,
     /// Platform abstraction
     platform: Arc<Platform>,
@@ -64,9 +66,15 @@ impl GoldenPathSummaryIndexTestFixture {
 
     /// Setup complete SSTable reader with all components
     async fn setup_complete_sstable_reader(&self) -> Result<SSTableReader> {
-        let sstable_path = self.datasets_path.join(
-            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
-        );
+        let table_dir =
+            discover_table_dir("test_basic", "compression_test_table").ok_or_else(|| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "test_basic/compression_test_table not found. \
+                     Please ensure CQLITE_DATASETS_ROOT is set and test-data is available.",
+                ))
+            })?;
+        let sstable_path = table_dir.join("nb-1-big-Data.db");
 
         if fs::metadata(&sstable_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
@@ -82,8 +90,14 @@ impl GoldenPathSummaryIndexTestFixture {
 
     /// Setup standalone summary reader for component testing
     async fn setup_summary_reader(&self) -> Result<SummaryReader> {
-        let summary_path = self.datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Summary.db");
+        let table_dir =
+            discover_table_dir("test_basic", "compression_test_table").ok_or_else(|| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "test_basic/compression_test_table not found.",
+                ))
+            })?;
+        let summary_path = table_dir.join("nb-1-big-Summary.db");
 
         if fs::metadata(&summary_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
@@ -97,9 +111,14 @@ impl GoldenPathSummaryIndexTestFixture {
 
     /// Setup standalone index reader for component testing
     async fn setup_index_reader(&self) -> Result<IndexReader> {
-        let index_path = self.datasets_path.join(
-            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Index.db",
-        );
+        let table_dir =
+            discover_table_dir("test_basic", "compression_test_table").ok_or_else(|| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "test_basic/compression_test_table not found.",
+                ))
+            })?;
+        let index_path = table_dir.join("nb-1-big-Index.db");
 
         if fs::metadata(&index_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
@@ -113,9 +132,13 @@ impl GoldenPathSummaryIndexTestFixture {
 
     /// Verify all SSTable component files exist
     async fn verify_component_files(&self) -> Result<HashMap<String, PathBuf>> {
-        let base_path = self
-            .datasets_path
-            .join("test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804");
+        let base_path =
+            discover_table_dir("test_basic", "compression_test_table").ok_or_else(|| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "test_basic/compression_test_table not found.",
+                ))
+            })?;
 
         let components = vec![
             ("Data.db", "nb-1-big-Data.db"),

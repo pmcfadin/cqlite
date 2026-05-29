@@ -24,12 +24,14 @@ use cqlite_core::{
     types::TableId,
     Config, RowKey,
 };
+use cqlite_tests::discover_table_dir;
 
 use tokio::fs;
 
 /// Test fixture for golden path partition operations
 pub struct GoldenPathPartitionTestFixture {
-    /// Path to test datasets
+    /// Path to test datasets (kept for potential future fallback use)
+    #[allow(dead_code)]
     datasets_path: PathBuf,
     /// Platform abstraction
     platform: Arc<Platform>,
@@ -60,17 +62,17 @@ impl GoldenPathPartitionTestFixture {
         })
     }
 
-    /// Setup SSTable reader for partition testing (using collections dataset)
+    /// Setup SSTable reader for partition testing (using test_basic dataset)
     async fn setup_collections_reader(&self) -> Result<SSTableReader> {
-        // Try collections dataset first, fallback to test_basic
-        let _primary_path = self
-            .datasets_path
-            .join("test_collections")
-            .join("*/nb-*-big-Data.db");
-
-        let fallback_path = self.datasets_path.join(
-            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
-        );
+        let table_dir =
+            discover_table_dir("test_basic", "compression_test_table").ok_or_else(|| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "test_basic/compression_test_table not found. \
+                     Please ensure CQLITE_DATASETS_ROOT is set and test-data is available.",
+                ))
+            })?;
+        let fallback_path = table_dir.join("nb-1-big-Data.db");
 
         if fs::metadata(&fallback_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(
@@ -86,9 +88,14 @@ impl GoldenPathPartitionTestFixture {
 
     /// Setup wide rows reader for multi-partition testing
     async fn setup_wide_rows_reader(&self) -> Result<SSTableReader> {
-        let fallback_path = self.datasets_path.join(
-            "test_basic/compression_test_table-6e2f4520934a11f08d448925b7a9e804/nb-1-big-Data.db",
-        );
+        let table_dir =
+            discover_table_dir("test_basic", "compression_test_table").ok_or_else(|| {
+                Error::Io(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "test_basic/compression_test_table not found.",
+                ))
+            })?;
+        let fallback_path = table_dir.join("nb-1-big-Data.db");
 
         if fs::metadata(&fallback_path).await.is_err() {
             return Err(Error::Io(std::io::Error::new(

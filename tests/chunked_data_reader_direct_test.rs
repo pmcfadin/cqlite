@@ -1,42 +1,36 @@
 //! Direct tests for ChunkedDataReader using known test data paths
 //!
-//! This test file directly references known compressed SSTable locations
-//! to ensure reliable test coverage without relying on discovery mechanisms.
+//! This test file uses dynamic table directory discovery so it works across
+//! dataset versions without hardcoded UUIDs.
 
 use cqlite_core::storage::sstable::{
     chunked_data_reader::ChunkedDataReader, compression_info::CompressionInfo,
 };
+use cqlite_tests::discover_table_dir;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
-use std::path::PathBuf;
 use std::sync::Arc;
-
-/// Get the datasets root from environment or use default
-fn datasets_root() -> PathBuf {
-    std::env::var("CQLITE_DATASETS_ROOT")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("test-data/datasets"))
-}
 
 /// Test ChunkedDataReader with real LZ4-compressed SSTable
 #[test]
 fn test_chunked_reader_lz4_direct() {
-    let datasets = datasets_root();
-
-    // Direct path to known LZ4-compressed table
-    let table_dir =
-        datasets.join("sstables/test_timeseries/tick_data-706fe650934a11f08d448925b7a9e804");
+    let table_dir = match discover_table_dir("test_timeseries", "tick_data") {
+        Some(d) => d,
+        None => {
+            println!("LZ4 test data not available - skipping");
+            return;
+        }
+    };
 
     let ci_path = table_dir.join("nb-1-big-CompressionInfo.db");
     let data_path = table_dir.join("nb-1-big-Data.db");
 
-    // Skip if test data not available
     if !ci_path.exists() || !data_path.exists() {
-        println!("⚠️  LZ4 test data not available at {table_dir:?} - skipping");
+        println!("LZ4 test data files not available - skipping");
         return;
     }
 
-    println!("✅ Testing LZ4 ChunkedDataReader with: {ci_path:?}");
+    println!("Testing LZ4 ChunkedDataReader with: {ci_path:?}");
 
     // Parse CompressionInfo
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
@@ -87,21 +81,23 @@ fn test_chunked_reader_lz4_direct() {
 /// Test ChunkedDataReader with real Snappy-compressed SSTable
 #[test]
 fn test_chunked_reader_snappy_direct() {
-    let datasets = datasets_root();
-
-    // Direct path to known Snappy-compressed table
-    let table_dir =
-        datasets.join("sstables/test_timeseries/user_sessions-7063d860934a11f08d448925b7a9e804");
+    let table_dir = match discover_table_dir("test_timeseries", "user_sessions") {
+        Some(d) => d,
+        None => {
+            println!("Snappy test data not available - skipping");
+            return;
+        }
+    };
 
     let ci_path = table_dir.join("nb-1-big-CompressionInfo.db");
     let data_path = table_dir.join("nb-1-big-Data.db");
 
     if !ci_path.exists() || !data_path.exists() {
-        println!("⚠️  Snappy test data not available at {table_dir:?} - skipping");
+        println!("Snappy test data files not available - skipping");
         return;
     }
 
-    println!("✅ Testing Snappy ChunkedDataReader with: {ci_path:?}");
+    println!("Testing Snappy ChunkedDataReader with: {ci_path:?}");
 
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
     let compression_info =
@@ -127,19 +123,23 @@ fn test_chunked_reader_snappy_direct() {
 /// Test Seek trait implementation across chunk boundaries
 #[test]
 fn test_seek_trait_implementation() {
-    let datasets = datasets_root();
-    let table_dir =
-        datasets.join("sstables/test_timeseries/sensor_data-701e1cd0934a11f08d448925b7a9e804");
+    let table_dir = match discover_table_dir("test_timeseries", "sensor_data") {
+        Some(d) => d,
+        None => {
+            println!("Seek test data not available - skipping");
+            return;
+        }
+    };
 
     let ci_path = table_dir.join("nb-1-big-CompressionInfo.db");
     let data_path = table_dir.join("nb-1-big-Data.db");
 
     if !ci_path.exists() || !data_path.exists() {
-        println!("⚠️  Test data not available - skipping seek test");
+        println!("Test data not available - skipping seek test");
         return;
     }
 
-    println!("✅ Testing Seek trait implementation");
+    println!("Testing Seek trait implementation");
 
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
     let compression_info =
@@ -187,19 +187,23 @@ fn test_seek_trait_implementation() {
 /// Test that ChunkedDataReader correctly handles rows spanning chunk boundaries
 #[test]
 fn test_row_assembly_across_chunks() {
-    let datasets = datasets_root();
-    let table_dir =
-        datasets.join("sstables/test_timeseries/log_entries-7046da80934a11f08d448925b7a9e804");
+    let table_dir = match discover_table_dir("test_timeseries", "log_entries") {
+        Some(d) => d,
+        None => {
+            println!("Row assembly test data not available - skipping");
+            return;
+        }
+    };
 
     let ci_path = table_dir.join("nb-1-big-CompressionInfo.db");
     let data_path = table_dir.join("nb-1-big-Data.db");
 
     if !ci_path.exists() || !data_path.exists() {
-        println!("⚠️  Test data not available - skipping row assembly test");
+        println!("Test data not available - skipping row assembly test");
         return;
     }
 
-    println!("✅ Testing row assembly across chunk boundaries");
+    println!("Testing row assembly across chunk boundaries");
 
     let ci_data = fs::read(&ci_path).expect("Failed to read CompressionInfo.db");
     let compression_info =
