@@ -821,11 +821,17 @@ fn test_real_merger_delete_wins_at_equal_timestamp() {
 
     const EQUAL_TS: i64 = 200;
 
-    // SSTable A: live PK=1 at ts=200 (the "newer" live write candidate), plus a
+    // Adversarial setup for #498: the tombstone goes in the OLDER file and the
+    // live write in the NEWER file. The pre-fix tiebreak (equal ts → lower
+    // run_index = newer file wins) would therefore pick the LIVE write and keep
+    // PK=1, so this test fails without the fix. The fix (equal ts → tombstone
+    // wins, independent of file recency) makes PK=1 absent.
+
+    // SSTable A (flushed first = OLDER): row tombstone for PK=1 at ts=200, plus a
     // live PK=2 control that is never deleted.
     engine
-        .write(write_row(1, "live-at-equal-ts", 11, EQUAL_TS))
-        .expect("write live PK=1 A");
+        .write(delete_row(1, EQUAL_TS))
+        .expect("write equal-ts row-tombstone A");
     engine
         .write(write_row(2, "control-live", 22, EQUAL_TS))
         .expect("write live PK=2 A");
@@ -835,10 +841,10 @@ fn test_real_merger_delete_wins_at_equal_timestamp() {
         .expect("info A");
     assert_eq!(info_a.partition_count, 2, "SSTable A: 2 partitions");
 
-    // SSTable B: row tombstone for PK=1 at the SAME timestamp ts=200.
+    // SSTable B (flushed second = NEWER): live PK=1 at the SAME timestamp ts=200.
     engine
-        .write(delete_row(1, EQUAL_TS))
-        .expect("write equal-ts row-tombstone B");
+        .write(write_row(1, "live-at-equal-ts", 11, EQUAL_TS))
+        .expect("write live PK=1 B");
     let info_b = rt
         .block_on(engine.flush())
         .expect("flush B")

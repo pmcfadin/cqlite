@@ -11,11 +11,17 @@
 //!
 //! ## Ordering
 //!
-//! Entries are ordered by:
+//! The `Ord`/`PartialOrd` impl on `MergeEntry` governs **heap routing only**
+//! (which partition/clustering bucket an entry belongs to) — NOT winner
+//! selection. Winner selection among entries with the same clustering key is
+//! done by `merge_partition_rows` (see "Cell Merge Rule" below), which layers a
+//! timestamp + liveness comparison on top.
+//!
+//! Heap-routing order:
 //! 1. Token (ascending) - Primary partitioning
 //! 2. Key bytes (ascending) - Hash collision resolution
 //! 3. Clustering key (schema-aware) - Within partition ordering
-//! 4. Run index (ascending) - Last-write-wins for equal timestamps
+//! 4. Run index (ascending) - Stable tiebreak for routing (NOT the LWW rule)
 //!
 //! ## Memory Budget
 //!
@@ -88,13 +94,17 @@ impl MergeEntry {
     }
 }
 
-/// Ord implementation for min-heap ordering
+/// Ord implementation for min-heap routing ONLY (not LWW winner selection).
+///
+/// This orders entries so the heap yields them grouped by partition and
+/// clustering key. The actual equal-timestamp Delete-vs-Live winner is chosen
+/// in `merge_partition_rows` (timestamp → liveness → run_index), NOT here.
 ///
 /// Order by:
 /// 1. Token (ascending)
 /// 2. Key bytes (ascending, for hash collisions)
 /// 3. Clustering key (ascending, schema-aware)
-/// 4. Run index (ascending, lower = newer = wins in LWW)
+/// 4. Run index (ascending) - stable routing tiebreak only
 #[cfg(feature = "write-support")]
 impl Ord for MergeEntry {
     fn cmp(&self, other: &Self) -> Ordering {
