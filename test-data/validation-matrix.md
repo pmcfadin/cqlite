@@ -122,7 +122,7 @@
 ### ✅ Issue #209: Component Flattening Pre-allocation
 **Status**: COMPLETED
 **Impact**: Performance optimization reducing allocations from O(n) to O(1)
-**Files**: `key_parsing.rs`, `row_cell_state_machine.rs`, `benches/component_flattening.rs` (NEW)
+**Files**: `key_parsing.rs`, `row_cell_state_machine.rs`, `benches/component_flattening.rs` (DELETED in #536 — benched std `Vec`, not cqlite-core code)
 **Result**: 55-75% faster for 2-6 component keys (most common case)
 
 ### ✅ Issue #206: V5_0FormatG Counter Support
