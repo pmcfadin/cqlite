@@ -906,7 +906,11 @@ impl KWayMerger {
 
         // Step 3: apply row-tombstone shadowing per cell. A cell whose timestamp is
         // <= row_del is shadowed (`<=` lets the tombstone win at equal ts, #498).
-        // Cells written strictly after row_del survive.
+        // Cells written strictly after row_del survive. This shadowing applies to
+        // cell tombstones too: a row tombstone at ts=T supersedes a cell tombstone at
+        // ts<=T (real Cassandra semantics). Note this is INTENTIONALLY stricter than
+        // the `reference_merge` model, whose range-tombstone path only suppresses
+        // live cells — `reconcile_cluster` is the authoritative behavior here.
         let surviving: Vec<CellData> = order
             .into_iter()
             .filter_map(|col| winners.remove(&col))
@@ -916,21 +920,20 @@ impl KWayMerger {
             })
             .collect();
 
-        // Step 4: build the merged result.
-        if !surviving.is_empty() {
-            let row_ts = surviving.iter().map(|c| c.timestamp).max().unwrap_or(0);
-            Some(MergeEntry::new(
+        // Step 4: build the merged result. `max()` is `Some` exactly when `surviving`
+        // is non-empty, so this match needs no unreachable fallback timestamp.
+        match surviving.iter().map(|c| c.timestamp).max() {
+            Some(row_ts) => Some(MergeEntry::new(
                 run_index,
                 key,
                 clustering_key,
                 row_ts,
                 RowData::Live { cells: surviving },
-            ))
-        } else {
+            )),
             // No surviving cells. If a row tombstone exists, keep the row shadowed
             // so downstream still emits the deletion (preserves #505/#498 absence).
             // Otherwise the row is empty/absent.
-            row_del.map(|deletion_time| {
+            None => row_del.map(|deletion_time| {
                 MergeEntry::new(
                     run_index,
                     key,
@@ -941,7 +944,7 @@ impl KWayMerger {
                         local_deletion_time: 0,
                     },
                 )
-            })
+            }),
         }
     }
 
@@ -1521,6 +1524,122 @@ mod tests {
         assert_eq!(
             merged[0].timestamp, 200,
             "merged row timestamp must be the max surviving cell timestamp"
+        );
+    }
+
+    #[test]
+    fn test_real_merger_cell_tombstone_beats_live_at_equal_timestamp() {
+        // Issue #533/#498 (per cell): when two SSTables write the SAME column at the
+        // SAME timestamp, a cell tombstone (Delete) must beat the live value,
+        // independent of file recency.
+        //
+        //   A (run_index 0, NEWER file, ts=100): {score: 42}            (live)
+        //   B (run_index 1, OLDER file, ts=100): {score: <cell tombstone>}
+        //
+        // Cassandra `Cells#reconcile` => score is deleted. The adversarial part: A is
+        // the newer file, so a recency-only tiebreak would wrongly keep the live 42.
+        use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+        use crate::types::{TombstoneInfo, TombstoneType};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "ct_ks".to_string(),
+            table: "ct_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: Default::default(),
+            }],
+            columns: vec![Column {
+                name: "score".to_string(),
+                data_type: "int".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+        let ck = ClusteringKey {
+            columns: vec![("ck".to_string(), Value::Integer(1))],
+        };
+
+        // A: newer file (run_index 0), live `score` = 42 at ts=100.
+        let entry_a = MergeEntry::new(
+            0,
+            partition_key.clone(),
+            Some(ck.clone()),
+            100,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "score".to_string(),
+                    value: Value::Integer(42),
+                    timestamp: 100,
+                    ttl: None,
+                }],
+            },
+        );
+
+        // B: older file (run_index 1), cell tombstone on `score` at the SAME ts=100.
+        let entry_b = MergeEntry::new(
+            1,
+            partition_key.clone(),
+            Some(ck.clone()),
+            100,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "score".to_string(),
+                    value: Value::Tombstone(TombstoneInfo {
+                        deletion_time: 100,
+                        tombstone_type: TombstoneType::CellTombstone,
+                        ttl: None,
+                        range_start: None,
+                        range_end: None,
+                    }),
+                    timestamp: 100,
+                    ttl: None,
+                }],
+            },
+        );
+
+        let merger = KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema,
+        };
+
+        // Heap-routing order (run_index ascending): A then B.
+        let merged = merger
+            .merge_partition_rows(vec![entry_a, entry_b])
+            .expect("merge_partition_rows must not fail");
+
+        assert_eq!(merged.len(), 1, "one clustering key => one merged row");
+
+        let cells = match &merged[0].row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected a Live merged row, got {:?}", other),
+        };
+        let score = cells
+            .iter()
+            .find(|c| c.column == "score")
+            .expect("score cell must be present (as a tombstone)");
+
+        assert!(
+            matches!(
+                score.value,
+                Value::Tombstone(ref info) if info.tombstone_type == TombstoneType::CellTombstone
+            ),
+            "at equal ts the cell tombstone must win over the live value (got {:?}) — \
+             a recency-only tiebreak would have kept the newer file's live 42 (#498 per cell)",
+            score.value
         );
     }
 
