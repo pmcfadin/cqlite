@@ -163,16 +163,15 @@ cqlsh -e "SELECT * FROM keyspace.table"
 
 The following are tracked follow-ups, not release blockers. All are open GitHub issues.
 The v0.9.0 reader follow-ups (#493 set-element tombstones, #501 tuple decoding,
-#502 frozen<udt> decoding) were **resolved in v0.9.1** and removed from this list.
+#502 frozen<udt> decoding) were **resolved in v0.9.1**. The v0.9.2 reader and
+compaction correctness fixes (#516 `scan()` token ordering, #517 `get()`/`scan()`
+consistency, #518 `stats().block_count`, #505 compaction row tombstones, #498
+equal-timestamp Delete-vs-Live reconcile) were **resolved in v0.9.2** and removed
+from this list.
 
 | Issue | Milestone | Description | Workaround |
 |-------|-----------|-------------|------------|
 | #311 | — | Python concurrent-query race in schema metadata access | Run one warm-up query before spawning parallel threads on the same handle |
-| #516 | v0.9.2 | `scan()` result ordering not guaranteed (rows out of RowKey order) | Sort client-side if order matters |
-| #517 | v0.9.2 | `get()` returns `None` for partition keys that `scan()` returns | Use `scan()` to confirm partition presence |
-| #518 | v0.9.2 | `SSTableReader::stats().block_count` always reports 0 | Do not rely on `block_count` for diagnostics |
-| #505 | v0.9.2 | Compaction merger drops row tombstones from input SSTables | Avoid relying on compaction to preserve row tombstones |
-| #498 | v0.9.2 | Compaction equal-timestamp Delete-vs-Live tiebreaker diverges from Cassandra `Cell.reconcile` | Avoid equal-timestamp delete/live conflicts in compacted input |
 
 See [docs/write-support-limitations.md](../write-support-limitations.md) for the full limitations reference.
 
