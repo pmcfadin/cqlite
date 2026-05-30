@@ -1,0 +1,12 @@
+{
+  "_comment": "Performance regression gate policy for Epic #541 Phase 1. The CI workflow .github/workflows/perf-regression.yml runs these benches on both the PR and main on the SAME runner and fails if any tracked bench's Criterion median regresses by more than threshold_pct. The baseline is main itself (re-measured each run), so absolute timings are never committed and the gate is immune to cross-machine variance. To adjust the gate, edit this file (threshold or tracked set); see cqlite-core/benches/README.md.",
+  "threshold_pct": 10,
+  "benches": [
+    "read/point_lookup",
+    "read/clustering_slice",
+    "read/full_scan",
+    "read/type_heavy",
+    "write/ingest_wal_on",
+    "write/flush"
+  ]
+}

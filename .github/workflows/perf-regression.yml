@@ -1,0 +1,120 @@
+name: "CI: Performance Regression Gate"
+
+# Phase 1 of the performance plan (Epic #541): an in-repo regression wall.
+# Runs the cqlite-core read + write micro-benchmarks on BOTH the PR and `main`
+# on the SAME runner, then fails if any tracked bench's Criterion median is more
+# than the configured threshold slower on the PR than on main. The baseline is
+# main itself (re-measured every run), so no machine-specific absolute timings
+# are committed and the gate is immune to cross-machine variance.
+#
+# Policy (tracked benches + threshold) lives in cqlite-core/benches/perf-gate.json.
+# See cqlite-core/benches/README.md ("Performance regression gate") for details
+# and the baseline-refresh procedure.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "cqlite-core/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".github/workflows/perf-regression.yml"
+      - "scripts/ci/check_perf_regression.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: perf-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATASET_TAG: datasets-v2
+  DATASET_ASSET: cassandra5-small-full.tar.gz
+  DATASET_SHA256: 5be43811bbee320a412aaf79aa63134ec1e2ec5434c03815a082b4a31bd86c55
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+  # Features needed by the benches: cli-helpers for the read suite (queryable
+  # Database), write-support for the write suite (WriteEngine).
+  BENCH_FEATURES: "cli-helpers,write-support"
+  # Criterion run config — kept small for CI. Tune here if the gate is too noisy
+  # (more samples → stabler medians, slower job).
+  BENCH_ARGS: "--sample-size 20 --warm-up-time 1 --measurement-time 3"
+
+jobs:
+  perf-gate:
+    name: Bench regression vs main
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout (full history so we can also build main)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      # Cache only the registry/git, NOT target/. This job checks out two
+      # different source trees (PR ref, then main) into the same workspace; a
+      # cached target/ would carry incremental-compilation state across that
+      # switch. Rebuilding from clean deps is the robust choice for a gate.
+      - name: Cache Cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-perfgate-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-perfgate-cargo-
+            ${{ runner.os }}-cargo-
+
+      - name: Cache canonical datasets
+        uses: actions/cache@v4
+        with:
+          path: test-data/datasets/
+          key: ${{ runner.os }}-datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch canonical datasets
+        run: bash ./test-data/scripts/fetch-datasets.sh
+
+      - name: Dataset provenance gate
+        run: |
+          scripts/ci/ensure_real_dataset.sh \
+            "${CQLITE_DATASETS_ROOT}" \
+            "${DATASET_ASSET}" \
+            "performance regression gate"
+
+      - name: Record refs
+        id: refs
+        run: |
+          set -euo pipefail
+          # In a pull_request run the workspace is the PR↔main merge commit; that
+          # is exactly what we want to measure (what main becomes if merged).
+          echo "pr_ref=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "PR (merge) ref: $(git rev-parse HEAD)"
+          echo "main baseline ref: $(git rev-parse origin/main)"
+
+      - name: Benchmark PR (merge ref) → baseline 'pr'
+        run: |
+          cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
+            --bench read --bench write -- --save-baseline pr $BENCH_ARGS
+
+      - name: Benchmark main → baseline 'base'
+        run: |
+          set -euo pipefail
+          git checkout --force --detach origin/main
+          git submodule update --init --recursive || true
+          cargo bench -p cqlite-core --features "$BENCH_FEATURES" \
+            --bench read --bench write -- --save-baseline base $BENCH_ARGS
+
+      - name: Restore PR ref (for the gate script + policy)
+        run: git checkout --force --detach ${{ steps.refs.outputs.pr_ref }}
+
+      - name: Compare PR vs main (fail on regression past threshold)
+        run: |
+          python3 scripts/ci/check_perf_regression.py \
+            target/criterion pr base cqlite-core/benches/perf-gate.json
