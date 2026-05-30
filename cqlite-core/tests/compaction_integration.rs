@@ -784,3 +784,143 @@ fn row_tombstone_shadows_live_row_after_compaction() {
 
     drop(temp_dir);
 }
+
+// ── Test 5: Equal-timestamp Delete-vs-Live reconcile (Issue #498) ─────────────
+
+/// Regression test for Issue #498: when a live row and a row tombstone for the
+/// SAME partition key carry the EXACT SAME timestamp, the tombstone must win
+/// after compaction — matching Cassandra `org.apache.cassandra.db.rows.Cells#reconcile`,
+/// independent of which SSTable (file) the entries came from.
+///
+/// Setup (two SSTables, identical timestamp ts=200):
+///   - SSTable A (flushed FIRST): live row PK=1 (ts=200), plus a live PK=2 control.
+///   - SSTable B (flushed SECOND): row tombstone for PK=1 (ts=200).
+///
+/// The pre-fix merger resolved equal-timestamp conflicts by run_index (file
+/// recency) only, so whichever file "won" the tie would decide liveness. With the
+/// fix the tombstone always wins at equal timestamp regardless of file order.
+///
+/// Expected after compaction:
+///   - PK=1 ABSENT  — the equal-ts tombstone shadows the live row.
+///   - PK=2 PRESENT — live, never deleted (proves the merge produced output and
+///     the absence of PK=1 is not a vacuous empty result).
+#[test]
+fn test_real_merger_delete_wins_at_equal_timestamp() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    let temp_dir = TempDir::new().expect("tempdir");
+    let data_dir = temp_dir.path().join("data");
+    let wal_dir = temp_dir.path().join("wal");
+    let schema = make_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+
+    const EQUAL_TS: i64 = 200;
+
+    // Adversarial setup for #498: the tombstone goes in the OLDER file and the
+    // live write in the NEWER file. The pre-fix tiebreak (equal ts → lower
+    // run_index = newer file wins) would therefore pick the LIVE write and keep
+    // PK=1, so this test fails without the fix. The fix (equal ts → tombstone
+    // wins, independent of file recency) makes PK=1 absent.
+
+    // SSTable A (flushed first = OLDER): row tombstone for PK=1 at ts=200, plus a
+    // live PK=2 control that is never deleted.
+    engine
+        .write(delete_row(1, EQUAL_TS))
+        .expect("write equal-ts row-tombstone A");
+    engine
+        .write(write_row(2, "control-live", 22, EQUAL_TS))
+        .expect("write live PK=2 A");
+    let info_a = rt
+        .block_on(engine.flush())
+        .expect("flush A")
+        .expect("info A");
+    assert_eq!(info_a.partition_count, 2, "SSTable A: 2 partitions");
+
+    // SSTable B (flushed second = NEWER): live PK=1 at the SAME timestamp ts=200.
+    engine
+        .write(write_row(1, "live-at-equal-ts", 11, EQUAL_TS))
+        .expect("write live PK=1 B");
+    let info_b = rt
+        .block_on(engine.flush())
+        .expect("flush B")
+        .expect("info B");
+    assert!(info_b.partition_count > 0, "SSTable B: non-empty");
+
+    // Permissive STCS so the two tiny SSTables compact together.
+    let policy = STCSPolicy::new(2, 32, 0.01, 100.0, 0).expect("valid STCS params");
+    engine
+        .set_merge_policy(Box::new(policy))
+        .expect("set policy");
+
+    let budget = Duration::from_secs(30);
+    let mut compacted = false;
+    for _ in 0..5 {
+        let report = engine.maintenance_step(budget).expect("maintenance_step");
+        if !report.completed_merges.is_empty() {
+            compacted = true;
+            break;
+        }
+        if !report.pending_compaction {
+            break;
+        }
+    }
+    assert!(compacted, "Compaction must complete");
+
+    rt.block_on(engine.close()).expect("close engine");
+
+    // Re-open and scan the merged SSTable.
+    let cqlite_config = Config::default();
+    let manager = rt.block_on(async {
+        let platform = Arc::new(
+            Platform::new(&cqlite_config)
+                .await
+                .expect("platform creation"),
+        );
+        SSTableManager::new(
+            &data_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager must open")
+    });
+
+    let table_id = CqlTableId::from("compact_ks.items");
+    let results = rt
+        .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
+        .expect("post-compaction scan");
+
+    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+
+    // PK=1 must be ABSENT: equal-timestamp tombstone wins (Cassandra reconcile).
+    let key_1: Vec<u8> = 1_i32.to_be_bytes().into();
+    assert!(
+        !result_map.contains_key(&key_1),
+        "PK=1 was row-deleted at the SAME timestamp (ts={}) as its live write but is \
+         present after compaction — equal-ts tiebreak reverted to file recency \
+         instead of letting the tombstone win (Issue #498)",
+        EQUAL_TS
+    );
+
+    // PK=2 must be PRESENT: proves the compaction produced real output and PK=1's
+    // absence is the tombstone shadowing, not an empty/failed merge.
+    let key_2: Vec<u8> = 2_i32.to_be_bytes().into();
+    assert!(
+        result_map.contains_key(&key_2),
+        "PK=2 (live control, never deleted) must be present after compaction"
+    );
+
+    eprintln!(
+        "test_real_merger_delete_wins_at_equal_timestamp PASSED: \
+         PK=1 absent (equal-ts tombstone wins), PK=2 present (live control)"
+    );
+
+    drop(temp_dir);
+}
