@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [v0.9.2] — Correctness fixes
+
+Reader and compaction correctness follow-ups to v0.9.1. No new features and no
+public API changes.
+
+### Fixed
+
+- **`scan()` result ordering** is now guaranteed to be ascending Murmur3 token
+  order (with raw key bytes as the equal-token tiebreaker), matching the on-disk
+  SSTable layout and the write engine. Previously rows could come back out of
+  order; `LIMIT` is now applied after ordering (#516).
+- **`get()` / `scan()` partition consistency**: `get()` no longer returns `None`
+  for partition keys that `scan()` returns. An Index.db digest-lookup miss now
+  falls back to a key scan, and the V5CompressedLegacy chunk-stitching parse path
+  is used so partitions spanning chunk boundaries are found (#517).
+- **`SSTableReader::stats().block_count`** is now populated from the authoritative
+  `CompressionInfo.db` chunk count instead of always reporting `0` (#518).
+- **Compaction dropped input tombstones**: the k-way merger now surfaces row and
+  cell tombstones from input SSTables with their authoritative `markedForDeleteAt`
+  timestamps, so a higher-timestamp tombstone in a later SSTable correctly shadows
+  a live row from an earlier one (#505).
+- **Equal-timestamp Delete-vs-Live reconcile** now follows Cassandra
+  `Cells#reconcile`: at equal timestamp the tombstone wins, independent of input
+  file recency (previously the newer file won regardless of liveness) (#498).
+
 ## [v0.9.1] — Reader correctness fixes
 
 Reader correctness and test/CI follow-ups to v0.9.0. No writer changes and no
@@ -37,11 +62,9 @@ public API changes.
 
 ### Known Issues
 
-- Reviving the orphan integration tests surfaced three pre-existing reader bugs,
-  now tracked separately and marked `#[ignore]` in the revived tests:
-  `scan()` result ordering is not guaranteed (#516), `get()` misses partitions that
-  `scan()` returns (#517), and `SSTableReader::stats().block_count` always reports
-  0 (#518).
+- Reviving the orphan integration tests surfaced three pre-existing reader bugs
+  (`scan()` ordering #516, `get()`/`scan()` consistency #517, and
+  `stats().block_count` #518). All three are **resolved in v0.9.2**.
 - The v0.9.0 known issues for counter writes, the BIG-format BTI writer, and the
   Python concurrent-query race (#311) are unchanged.
 

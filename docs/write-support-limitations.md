@@ -103,3 +103,32 @@ The error is actionable: pass the UDT schema to `UdtRegistry::register_udt` and
 re-open the reader.
 
 **Tracking**: Issue #502.
+
+---
+
+## Compaction dropped input tombstones (Issue #505)
+
+**Behaviour** (resolved in v0.9.2): The k-way compaction merger now surfaces row
+and cell tombstones from input SSTables (via a dedicated compaction read path that
+does not filter tombstones) and carries their authoritative `markedForDeleteAt`
+timestamps. A higher-timestamp tombstone in a later SSTable now correctly shadows
+a live row from an earlier SSTable after compaction.
+
+**Tracking**: Issue #505 (fixed in v0.9.2).
+
+---
+
+## Compaction equal-timestamp Delete-vs-Live reconcile (Issue #498)
+
+**Behaviour** (resolved in v0.9.2): At equal timestamp, the merger now resolves a
+Delete-vs-Live conflict in favour of the tombstone, independent of which input
+file it came from — matching Cassandra `Cells#reconcile`. Previously the newer
+input file won regardless of liveness.
+
+**Tracking**: Issue #498 (fixed in v0.9.2).
+
+---
+
+> The v0.9.2 reader correctness fixes (#516 `scan()` token ordering, #517
+> `get()`/`scan()` consistency, #518 `stats().block_count`) are read-side; see the
+> CHANGELOG and PRD §4.2 for details.
