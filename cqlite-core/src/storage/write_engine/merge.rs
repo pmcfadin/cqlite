@@ -444,7 +444,7 @@ impl SSTableRowIteratorAdapter {
         for (row_key, value, timestamp) in raw_entries {
             let key_bytes = row_key.0;
             let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
-            let row_data = Self::value_to_row_data(&value)?;
+            let row_data = Self::value_to_row_data(&value, timestamp)?;
 
             entries.push(MergeEntry::new(
                 run_index,
@@ -464,12 +464,21 @@ impl SSTableRowIteratorAdapter {
 
     /// Convert a reader Value to RowData.
     ///
+    /// `row_timestamp` is the per-row timestamp decoded from the on-disk row
+    /// header (see [`SSTableReader::iterate_all_partitions_for_compaction`]). The
+    /// reader does not surface per-cell timestamps for live cells, so each live
+    /// cell inherits the row timestamp. This is required for per-cell reconcile
+    /// and row-tombstone shadowing to compare cell timestamps correctly
+    /// (Issue #533) — without it live cells would default to 0 and be wrongly
+    /// shadowed by any row tombstone.
+    ///
     /// Issue #505: `Value::Tombstone(RowTombstone)` is now correctly emitted by
     /// the V5CompressedLegacy parser for deleted rows, and
     /// `Value::Tombstone(CellTombstone)` appears inside `Value::Map` entries for
     /// deleted cells.  Both are surfaced here so the merger can apply shadowing
-    /// semantics.
-    fn value_to_row_data(value: &crate::types::Value) -> Result<RowData> {
+    /// semantics.  A cell tombstone keeps its own `deletion_time` so equal-ts
+    /// reconcile still resolves it correctly.
+    fn value_to_row_data(value: &crate::types::Value, row_timestamp: i64) -> Result<RowData> {
         match value {
             crate::types::Value::Tombstone(info) => Ok(RowData::Tombstone {
                 deletion_time: info.deletion_time,
@@ -482,11 +491,12 @@ impl SSTableRowIteratorAdapter {
                         crate::types::Value::Text(s) => s.clone(),
                         other => format!("{:?}", other),
                     };
-                    // Issue #505: propagate the cell-level timestamp from the
-                    // tombstone so merge_partition_rows can order correctly.
+                    // Cell tombstones carry their own deletion_time (Issue #505);
+                    // live cells inherit the row timestamp (Issue #533) so per-cell
+                    // shadowing and LWW order them against row tombstones correctly.
                     let cell_ts = match val {
                         crate::types::Value::Tombstone(info) => info.deletion_time,
-                        _ => 0,
+                        _ => row_timestamp,
                     };
                     cells.push(CellData {
                         column,
@@ -502,7 +512,7 @@ impl SSTableRowIteratorAdapter {
                 cells: vec![CellData {
                     column: "value".to_string(),
                     value: other.clone(),
-                    timestamp: 0,
+                    timestamp: row_timestamp,
                     ttl: None,
                 }],
             }),
@@ -745,29 +755,40 @@ impl KWayMerger {
         Ok(())
     }
 
-    /// Liveness priority used as the equal-timestamp tiebreaker.
+    /// Merge rows within a single partition using **per-cell reconcile**
+    /// (Cassandra `org.apache.cassandra.db.rows.Cells#reconcile`).
     ///
-    /// Cassandra's reconcile rule (`Cells#reconcile`) gives the tombstone (Delete)
-    /// precedence over a live cell/row at the SAME timestamp. We model this with a
-    /// numeric priority where a HIGHER value wins: a row tombstone (Delete) returns
-    /// `1`, a live row returns `0`. The caller sorts so that the higher priority
-    /// sorts first at equal timestamp. (Issue #498)
-    fn tombstone_priority(entry: &MergeEntry) -> u8 {
-        match entry.row_data {
-            RowData::Tombstone { .. } => 1,
-            RowData::Live { .. } => 0,
-        }
-    }
-
-    /// Merge rows within a single partition (last-write-wins by timestamp).
+    /// The pre-#533 implementation selected a single whole winning `MergeEntry`
+    /// per clustering key, which DROPPED columns when two SSTables shared the same
+    /// `(pk, ck)` but carried DISJOINT columns (e.g. A→{name}, B→{score} merged to
+    /// only B's column). This now reconciles cell-by-cell so disjoint columns from
+    /// every input survive (Issue #533).
     ///
-    /// At equal timestamps the tombstone wins (Cassandra `Cells#reconcile`), and
-    /// only when timestamp and liveness are equal does the lower run_index (newer
-    /// file) win. See [`Self::tombstone_priority`].
+    /// Algorithm per clustering-key group:
+    ///   1. **Effective row deletion** — among `RowData::Tombstone` entries take the
+    ///      max `deletion_time` (`row_del`). A row tombstone shadows any cell whose
+    ///      `timestamp <= row_del`.
+    ///   2. **Per-column cell reconcile** — across all `RowData::Live` entries, for
+    ///      each column name pick the winning cell by:
+    ///        - higher `timestamp` wins (last-write-wins);
+    ///        - at EQUAL timestamp a cell tombstone (`Value::Tombstone(CellTombstone)`)
+    ///          beats a live value (same rule as #498, applied per cell);
+    ///        - otherwise the existing winner is kept (stable; heap routing already
+    ///          ordered inputs by run_index so the first-seen at a tie is the newer
+    ///          file).
+    ///   3. **Row-tombstone shadowing per cell** — drop any reconciled cell whose
+    ///      `timestamp <= row_del`. The `<=` makes the tombstone win at equal ts,
+    ///      consistent with #498. Cells written strictly AFTER `row_del` survive.
+    ///   4. **Build the merged result** — if any cells survive, emit a `Live`
+    ///      entry whose row timestamp is the max surviving cell timestamp; else if a
+    ///      row tombstone was present, emit a `Tombstone` entry at `row_del` so the
+    ///      row stays shadowed downstream; else emit nothing.
     fn merge_partition_rows(&self, rows: Vec<MergeEntry>) -> Result<Vec<MergeEntry>> {
         use std::collections::BTreeMap;
 
-        // Group by clustering key using BTreeMap (ClusteringKey implements Ord)
+        // Group by clustering key using BTreeMap (ClusteringKey implements Ord).
+        // Preserve heap-routing order within each group so the per-cell tiebreak
+        // (first-seen wins at equal timestamp+liveness) follows run_index.
         let mut clustered_rows: BTreeMap<Option<ClusteringKey>, Vec<MergeEntry>> = BTreeMap::new();
 
         for row in rows {
@@ -777,36 +798,10 @@ impl KWayMerger {
                 .push(row);
         }
 
-        // Merge cells for each clustering key.
-        //
-        // Resolution order (Cassandra `org.apache.cassandra.db.rows.Cells#reconcile`):
-        //   1. timestamp        — higher wins (last-write-wins).
-        //   2. liveness         — at EQUAL timestamp, a Delete (tombstone) beats a
-        //                         Live row. This is independent of which file the
-        //                         entries came from. (Issue #498)
-        //   3. run_index        — only when timestamp AND liveness are equal, the
-        //                         lower run_index (newer file) wins.
-        //
-        // This comparator is total and transitive: each level only acts as a
-        // tiebreak for the previous, and the final `run_index.cmp` is itself total.
         let mut merged = Vec::new();
-        for (_ck, mut cluster_rows) in clustered_rows {
-            cluster_rows.sort_by(|a, b| {
-                // Primary: higher timestamp first (descending).
-                b.timestamp
-                    .cmp(&a.timestamp)
-                    // Secondary: at equal timestamp, tombstone (Delete) wins.
-                    // `is_tombstone() == true` must sort BEFORE a live row, so we
-                    // compare `b`'s liveness against `a`'s to keep descending order.
-                    .then_with(|| Self::tombstone_priority(b).cmp(&Self::tombstone_priority(a)))
-                    // Tertiary: lower run_index (newer file) wins.
-                    .then_with(|| a.run_index.cmp(&b.run_index))
-            });
-
-            // Take the first entry: highest timestamp, then tombstone at equal ts,
-            // then lowest run_index.
-            if let Some(winner) = cluster_rows.into_iter().next() {
-                merged.push(winner);
+        for (ck, cluster_rows) in clustered_rows {
+            if let Some(entry) = Self::reconcile_cluster(ck, cluster_rows) {
+                merged.push(entry);
             }
         }
 
@@ -828,6 +823,126 @@ impl KWayMerger {
         });
 
         Ok(merged)
+    }
+
+    /// Returns true when a cell carries a cell-level tombstone
+    /// (`Value::Tombstone(CellTombstone)`), the representation produced by #505.
+    ///
+    /// Cell tombstones participate in per-cell reconcile like any other cell, but
+    /// at EQUAL timestamp a cell tombstone beats a live value (Cassandra
+    /// `Cells#reconcile`, same rule as #498 applied per cell).
+    fn is_cell_tombstone(cell: &CellData) -> bool {
+        matches!(
+            cell.value,
+            crate::types::Value::Tombstone(ref info)
+                if info.tombstone_type == crate::types::TombstoneType::CellTombstone
+        )
+    }
+
+    /// Reconcile all entries for a single clustering-key group into at most one
+    /// merged `MergeEntry`, applying per-cell last-write-wins plus row-tombstone
+    /// shadowing (Issue #533). See [`Self::merge_partition_rows`] for the rules.
+    ///
+    /// `cluster_rows` is in heap-routing order (run_index ascending within equal
+    /// keys), so when two cells tie on both timestamp and liveness the first-seen
+    /// (newer file) is kept.
+    fn reconcile_cluster(
+        clustering_key: Option<ClusteringKey>,
+        cluster_rows: Vec<MergeEntry>,
+    ) -> Option<MergeEntry> {
+        use std::collections::HashMap;
+
+        // Carry-through key fields: every entry in this group shares the same
+        // partition key and clustering key. Use the lowest run_index seen (newest
+        // file) so downstream ordering is stable.
+        let mut key = None;
+        let mut run_index = usize::MAX;
+
+        // Step 1: effective row deletion — max deletion_time across row tombstones.
+        let mut row_del: Option<i64> = None;
+
+        // Step 2: per-column cell reconcile. Preserve first-seen column order for
+        // deterministic output while resolving winners in a side map.
+        let mut order: Vec<String> = Vec::new();
+        let mut winners: HashMap<String, CellData> = HashMap::new();
+
+        for entry in &cluster_rows {
+            if key.is_none() {
+                key = Some(entry.key.clone());
+            }
+            run_index = run_index.min(entry.run_index);
+
+            match &entry.row_data {
+                RowData::Tombstone { deletion_time, .. } => {
+                    row_del = Some(row_del.map_or(*deletion_time, |d| d.max(*deletion_time)));
+                }
+                RowData::Live { cells } => {
+                    for cell in cells {
+                        match winners.get(&cell.column) {
+                            None => {
+                                order.push(cell.column.clone());
+                                winners.insert(cell.column.clone(), cell.clone());
+                            }
+                            Some(existing) => {
+                                // Higher timestamp wins. At EQUAL timestamp a cell
+                                // tombstone beats a live value (Issue #498 per cell).
+                                // Otherwise keep the existing (first-seen = newer
+                                // file) winner.
+                                let replace = cell.timestamp > existing.timestamp
+                                    || (cell.timestamp == existing.timestamp
+                                        && Self::is_cell_tombstone(cell)
+                                        && !Self::is_cell_tombstone(existing));
+                                if replace {
+                                    winners.insert(cell.column.clone(), cell.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        let key = key?; // empty group => nothing to emit
+
+        // Step 3: apply row-tombstone shadowing per cell. A cell whose timestamp is
+        // <= row_del is shadowed (`<=` lets the tombstone win at equal ts, #498).
+        // Cells written strictly after row_del survive.
+        let surviving: Vec<CellData> = order
+            .into_iter()
+            .filter_map(|col| winners.remove(&col))
+            .filter(|cell| match row_del {
+                Some(d) => cell.timestamp > d,
+                None => true,
+            })
+            .collect();
+
+        // Step 4: build the merged result.
+        if !surviving.is_empty() {
+            let row_ts = surviving.iter().map(|c| c.timestamp).max().unwrap_or(0);
+            Some(MergeEntry::new(
+                run_index,
+                key,
+                clustering_key,
+                row_ts,
+                RowData::Live { cells: surviving },
+            ))
+        } else {
+            // No surviving cells. If a row tombstone exists, keep the row shadowed
+            // so downstream still emits the deletion (preserves #505/#498 absence).
+            // Otherwise the row is empty/absent.
+            row_del.map(|deletion_time| {
+                MergeEntry::new(
+                    run_index,
+                    key,
+                    clustering_key,
+                    deletion_time,
+                    RowData::Tombstone {
+                        deletion_time,
+                        local_deletion_time: 0,
+                    },
+                )
+            })
+        }
     }
 
     /// Convert a MergeEntry back to Mutation for writing
@@ -1274,6 +1389,441 @@ mod tests {
              the newer file (run_index 0). Got a live row => the equal-ts tiebreak \
              reverted to run_index (Issue #498 regression)."
         );
+    }
+
+    #[test]
+    fn test_real_merger_disjoint_columns_survive_compaction() {
+        // Issue #533: when two SSTables share the same (pk, ck) but carry DISJOINT
+        // columns, per-cell reconcile must keep cells from BOTH. The pre-fix merger
+        // picked one whole winning row and DROPPED the loser's columns.
+        //
+        //   A (run_index 1, ts=100): {name: "alice"}
+        //   B (run_index 0, ts=200): {score: 42}
+        //
+        // Cassandra `Cells#reconcile` => {name: "alice", score: 42}.
+        // The old whole-row-wins code returned only {score: 42} (name LOST).
+        use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "disjoint_ks".to_string(),
+            table: "disjoint_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: Default::default(),
+            }],
+            columns: vec![
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "score".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+        let ck = ClusteringKey {
+            columns: vec![("ck".to_string(), Value::Integer(1))],
+        };
+
+        // A: older file (run_index 1), only `name` at ts=100.
+        let entry_a = MergeEntry::new(
+            1,
+            partition_key.clone(),
+            Some(ck.clone()),
+            100,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "name".to_string(),
+                    value: Value::Text("alice".to_string()),
+                    timestamp: 100,
+                    ttl: None,
+                }],
+            },
+        );
+
+        // B: newer file (run_index 0), only `score` at ts=200.
+        let entry_b = MergeEntry::new(
+            0,
+            partition_key.clone(),
+            Some(ck.clone()),
+            200,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "score".to_string(),
+                    value: Value::Integer(42),
+                    timestamp: 200,
+                    ttl: None,
+                }],
+            },
+        );
+
+        let merger = KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema,
+        };
+
+        // Pass in heap-routing order (run_index ascending): B then A.
+        let merged = merger
+            .merge_partition_rows(vec![entry_b, entry_a])
+            .expect("merge_partition_rows must not fail");
+
+        assert_eq!(merged.len(), 1, "one clustering key => one merged row");
+
+        let cells = match &merged[0].row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected a Live merged row, got {:?}", other),
+        };
+
+        let name = cells.iter().find(|c| c.column == "name");
+        let score = cells.iter().find(|c| c.column == "score");
+
+        assert!(
+            name.is_some(),
+            "disjoint column `name` from the older file was DROPPED — per-cell \
+             reconcile regression (Issue #533). Old whole-row-wins code fails here."
+        );
+        assert!(
+            score.is_some(),
+            "disjoint column `score` from the newer file is missing"
+        );
+        assert_eq!(
+            name.unwrap().value,
+            Value::Text("alice".to_string()),
+            "`name` must carry A's value"
+        );
+        assert_eq!(
+            score.unwrap().value,
+            Value::Integer(42),
+            "`score` must carry B's value"
+        );
+
+        // Row timestamp must be the max surviving cell timestamp.
+        assert_eq!(
+            merged[0].timestamp, 200,
+            "merged row timestamp must be the max surviving cell timestamp"
+        );
+    }
+
+    #[test]
+    fn test_real_merger_same_column_conflict_resolves_by_timestamp() {
+        // Issue #533: when both SSTables write the SAME column, the higher-timestamp
+        // value wins (last-write-wins), but disjoint columns still survive.
+        //
+        //   A (run_index 1, ts=100): {name: "old", extra: "a-only"}
+        //   B (run_index 0, ts=200): {name: "new"}
+        // => {name: "new" (ts=200 wins), extra: "a-only" (survives)}
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "conflict_ks".to_string(),
+            table: "conflict_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "extra".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+
+        let entry_a = MergeEntry::new(
+            1,
+            partition_key.clone(),
+            None,
+            100,
+            RowData::Live {
+                cells: vec![
+                    CellData {
+                        column: "name".to_string(),
+                        value: Value::Text("old".to_string()),
+                        timestamp: 100,
+                        ttl: None,
+                    },
+                    CellData {
+                        column: "extra".to_string(),
+                        value: Value::Text("a-only".to_string()),
+                        timestamp: 100,
+                        ttl: None,
+                    },
+                ],
+            },
+        );
+
+        let entry_b = MergeEntry::new(
+            0,
+            partition_key.clone(),
+            None,
+            200,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "name".to_string(),
+                    value: Value::Text("new".to_string()),
+                    timestamp: 200,
+                    ttl: None,
+                }],
+            },
+        );
+
+        let merger = KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema,
+        };
+
+        let merged = merger
+            .merge_partition_rows(vec![entry_b, entry_a])
+            .expect("merge_partition_rows must not fail");
+
+        assert_eq!(merged.len(), 1);
+        let cells = match &merged[0].row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
+        };
+
+        let name = cells
+            .iter()
+            .find(|c| c.column == "name")
+            .expect("name present");
+        let extra = cells
+            .iter()
+            .find(|c| c.column == "extra")
+            .expect("extra (disjoint) must survive");
+
+        assert_eq!(
+            name.value,
+            Value::Text("new".to_string()),
+            "same-column conflict must resolve to the higher-timestamp value"
+        );
+        assert_eq!(
+            extra.value,
+            Value::Text("a-only".to_string()),
+            "disjoint column from the older file must survive the conflict merge"
+        );
+    }
+
+    #[test]
+    fn test_real_merger_row_tombstone_shadows_old_cells_keeps_new() {
+        // Issue #533 / #505: a row tombstone shadows cells with ts <= row_del but
+        // a cell written strictly AFTER the tombstone survives.
+        //
+        //   A (ts=100): {name: "old"}          -> 100 <= 200 row_del => shadowed
+        //   B (ts=200, row tombstone)
+        //   C (ts=300): {score: 7}             -> 300 > 200            => survives
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "shadow_ks".to_string(),
+            table: "shadow_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "score".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let pk = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+
+        let entry_a = MergeEntry::new(
+            2,
+            pk.clone(),
+            None,
+            100,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "name".to_string(),
+                    value: Value::Text("old".to_string()),
+                    timestamp: 100,
+                    ttl: None,
+                }],
+            },
+        );
+        let entry_b = MergeEntry::new(
+            1,
+            pk.clone(),
+            None,
+            200,
+            RowData::Tombstone {
+                deletion_time: 200,
+                local_deletion_time: 0,
+            },
+        );
+        let entry_c = MergeEntry::new(
+            0,
+            pk.clone(),
+            None,
+            300,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "score".to_string(),
+                    value: Value::Integer(7),
+                    timestamp: 300,
+                    ttl: None,
+                }],
+            },
+        );
+
+        let merger = KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema,
+        };
+
+        let merged = merger
+            .merge_partition_rows(vec![entry_c, entry_b, entry_a])
+            .expect("merge must not fail");
+
+        assert_eq!(merged.len(), 1);
+        let cells = match &merged[0].row_data {
+            RowData::Live { cells } => cells,
+            other => panic!(
+                "expected Live (score survives the tombstone), got {:?}",
+                other
+            ),
+        };
+
+        assert!(
+            cells.iter().all(|c| c.column != "name"),
+            "`name` (ts=100 <= row_del=200) must be shadowed by the row tombstone"
+        );
+        let score = cells
+            .iter()
+            .find(|c| c.column == "score")
+            .expect("`score` (ts=300 > row_del=200) must survive the row tombstone");
+        assert_eq!(score.value, Value::Integer(7));
+    }
+
+    #[test]
+    fn test_real_merger_row_tombstone_only_emits_tombstone() {
+        // When every cell is shadowed by a row tombstone (no later writes), the
+        // merger must emit a Tombstone entry so the row stays deleted downstream
+        // (preserves #505/#498 absence semantics).
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "ts_only_ks".to_string(),
+            table: "ts_only_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        let pk = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+
+        let live = MergeEntry::new(
+            1,
+            pk.clone(),
+            None,
+            100,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "name".to_string(),
+                    value: Value::Text("doomed".to_string()),
+                    timestamp: 100,
+                    ttl: None,
+                }],
+            },
+        );
+        let tomb = MergeEntry::new(
+            0,
+            pk.clone(),
+            None,
+            300,
+            RowData::Tombstone {
+                deletion_time: 300,
+                local_deletion_time: 0,
+            },
+        );
+
+        let merger = KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema,
+        };
+
+        let merged = merger
+            .merge_partition_rows(vec![tomb, live])
+            .expect("merge must not fail");
+
+        assert_eq!(merged.len(), 1);
+        match &merged[0].row_data {
+            RowData::Tombstone { deletion_time, .. } => {
+                assert_eq!(*deletion_time, 300, "tombstone deletion_time preserved");
+            }
+            other => panic!("expected a Tombstone entry, got {:?}", other),
+        }
     }
 
     #[test]

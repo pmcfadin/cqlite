@@ -116,6 +116,28 @@ fn write_row(id: i32, name: &str, score: i32, timestamp: i64) -> Mutation {
     Mutation::new(table_id, pk, None, ops, timestamp, None)
 }
 
+/// Write only the `name` column for `id` (disjoint-column test, Issue #533).
+fn write_name_only(id: i32, name: &str, timestamp: i64) -> Mutation {
+    let table_id = TableId::new("compact_ks", "items");
+    let pk = PartitionKey::single("id", Value::Integer(id));
+    let ops = vec![CellOperation::Write {
+        column: "name".to_string(),
+        value: Value::Text(name.to_string()),
+    }];
+    Mutation::new(table_id, pk, None, ops, timestamp, None)
+}
+
+/// Write only the `score` column for `id` (disjoint-column test, Issue #533).
+fn write_score_only(id: i32, score: i32, timestamp: i64) -> Mutation {
+    let table_id = TableId::new("compact_ks", "items");
+    let pk = PartitionKey::single("id", Value::Integer(id));
+    let ops = vec![CellOperation::Write {
+        column: "score".to_string(),
+        value: Value::Integer(score),
+    }];
+    Mutation::new(table_id, pk, None, ops, timestamp, None)
+}
+
 /// Row tombstone: delete the entire row for `id`.
 fn delete_row(id: i32, timestamp: i64) -> Mutation {
     let table_id = TableId::new("compact_ks", "items");
@@ -920,6 +942,162 @@ fn test_real_merger_delete_wins_at_equal_timestamp() {
     eprintln!(
         "test_real_merger_delete_wins_at_equal_timestamp PASSED: \
          PK=1 absent (equal-ts tombstone wins), PK=2 present (live control)"
+    );
+
+    drop(temp_dir);
+}
+
+// ── Test 6: Disjoint-column per-cell reconcile (Issue #533) ──────────────────
+
+/// End-to-end regression for Issue #533: two SSTables that share the same
+/// partition key but carry DISJOINT columns must both survive compaction.
+///
+/// The pre-fix merger selected one whole winning row per (pk, ck) and DROPPED the
+/// loser's columns (DATA LOSS). With per-cell reconcile, cells from every input
+/// survive.
+///
+/// Setup (write → compact → read via WriteEngine + SSTableManager):
+///   - SSTable A (ts=100): PK=1 writes only `name`="alice"; PK=3 writes `name`="x".
+///   - SSTable B (ts=200): PK=1 writes only `score`=42; PK=3 writes `name`="y".
+///
+/// Expected after compaction:
+///   - PK=1 carries BOTH `name`="alice" (from A) and `score`=42 (from B).
+///   - PK=3 `name` resolves by timestamp to "y" (B ts=200 > A ts=100).
+#[test]
+fn disjoint_columns_survive_compaction() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    let temp_dir = TempDir::new().expect("tempdir");
+    let data_dir = temp_dir.path().join("data");
+    let wal_dir = temp_dir.path().join("wal");
+    let schema = make_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+
+    // SSTable A (ts=100): PK=1 -> {name: "alice"}; PK=3 -> {name: "x"} (column conflict).
+    engine
+        .write(write_name_only(1, "alice", 100))
+        .expect("write A PK=1 name");
+    engine
+        .write(write_name_only(3, "x", 100))
+        .expect("write A PK=3 name");
+    let info_a = rt
+        .block_on(engine.flush())
+        .expect("flush A")
+        .expect("info A");
+    assert_eq!(info_a.partition_count, 2, "SSTable A: 2 partitions");
+
+    // SSTable B (ts=200): PK=1 -> {score: 42} (disjoint); PK=3 -> {name: "y"} (conflict, newer).
+    engine
+        .write(write_score_only(1, 42, 200))
+        .expect("write B PK=1 score");
+    engine
+        .write(write_name_only(3, "y", 200))
+        .expect("write B PK=3 name");
+    let info_b = rt
+        .block_on(engine.flush())
+        .expect("flush B")
+        .expect("info B");
+    assert!(info_b.partition_count > 0, "SSTable B: non-empty");
+
+    // Permissive STCS so the two tiny SSTables compact together.
+    let policy = STCSPolicy::new(2, 32, 0.01, 100.0, 0).expect("valid STCS params");
+    engine
+        .set_merge_policy(Box::new(policy))
+        .expect("set policy");
+
+    let budget = Duration::from_secs(30);
+    let mut compacted = false;
+    for _ in 0..5 {
+        let report = engine.maintenance_step(budget).expect("maintenance_step");
+        if !report.completed_merges.is_empty() {
+            compacted = true;
+            break;
+        }
+        if !report.pending_compaction {
+            break;
+        }
+    }
+    assert!(compacted, "Compaction must complete");
+
+    rt.block_on(engine.close()).expect("close engine");
+
+    // Re-open and scan the merged SSTable.
+    let cqlite_config = Config::default();
+    let manager = rt.block_on(async {
+        let platform = Arc::new(
+            Platform::new(&cqlite_config)
+                .await
+                .expect("platform creation"),
+        );
+        SSTableManager::new(
+            &data_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager must open")
+    });
+
+    let table_id = CqlTableId::from("compact_ks.items");
+    let results = rt
+        .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
+        .expect("post-compaction scan");
+
+    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+
+    // Helper: extract a named text/int column from a row's Value::Map.
+    fn find_col<'a>(row: &'a Value, col: &str) -> Option<&'a Value> {
+        match row {
+            Value::Map(pairs) => pairs.iter().find_map(|(k, v)| match k {
+                Value::Text(name) if name == col => Some(v),
+                _ => None,
+            }),
+            _ => None,
+        }
+    }
+
+    // PK=1 must carry BOTH disjoint columns: name (from A) and score (from B).
+    let key_1: Vec<u8> = 1_i32.to_be_bytes().into();
+    let pk1 = result_map
+        .get(&key_1)
+        .expect("PK=1 must be present after compaction");
+
+    let name_1 = find_col(pk1, "name");
+    let score_1 = find_col(pk1, "score");
+
+    assert_eq!(
+        name_1,
+        Some(&Value::Text("alice".to_string())),
+        "PK=1 `name` from SSTable A was DROPPED after compaction — per-cell reconcile \
+         regression (Issue #533). The old whole-row-wins merger keeps only B's `score`."
+    );
+    assert_eq!(
+        score_1,
+        Some(&Value::Integer(42)),
+        "PK=1 `score` from SSTable B must be present"
+    );
+
+    // PK=3: same column `name` in both SSTables — newer (B, ts=200) wins.
+    let key_3: Vec<u8> = 3_i32.to_be_bytes().into();
+    let pk3 = result_map
+        .get(&key_3)
+        .expect("PK=3 must be present after compaction");
+    assert_eq!(
+        find_col(pk3, "name"),
+        Some(&Value::Text("y".to_string())),
+        "PK=3 `name` conflict must resolve to the higher-timestamp value (B ts=200)"
+    );
+
+    eprintln!(
+        "disjoint_columns_survive_compaction PASSED: PK=1 has both name+score \
+         (disjoint columns preserved), PK=3 name resolves by timestamp (Issue #533)"
     );
 
     drop(temp_dir);
