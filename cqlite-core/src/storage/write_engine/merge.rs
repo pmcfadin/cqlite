@@ -24,9 +24,11 @@
 //!
 //! ## Cell Merge Rule
 //!
-//! Last-write-wins by timestamp:
-//! - Keep cell with highest timestamp
-//! - If timestamps equal, prefer lower run_index (newer file)
+//! Last-write-wins by timestamp, following Cassandra `Cells#reconcile`:
+//! - Keep the entry with the highest timestamp.
+//! - If timestamps are equal, the tombstone (Delete) wins over a live entry,
+//!   independent of which file it came from (Issue #498).
+//! - If timestamp AND liveness are equal, prefer the lower run_index (newer file).
 //!
 //! Implementation for M5.2 (Issue #382)
 
@@ -733,7 +735,25 @@ impl KWayMerger {
         Ok(())
     }
 
-    /// Merge rows within a single partition (last-write-wins by timestamp)
+    /// Liveness priority used as the equal-timestamp tiebreaker.
+    ///
+    /// Cassandra's reconcile rule (`Cells#reconcile`) gives the tombstone (Delete)
+    /// precedence over a live cell/row at the SAME timestamp. We model this with a
+    /// numeric priority where a HIGHER value wins: a row tombstone (Delete) returns
+    /// `1`, a live row returns `0`. The caller sorts so that the higher priority
+    /// sorts first at equal timestamp. (Issue #498)
+    fn tombstone_priority(entry: &MergeEntry) -> u8 {
+        match entry.row_data {
+            RowData::Tombstone { .. } => 1,
+            RowData::Live { .. } => 0,
+        }
+    }
+
+    /// Merge rows within a single partition (last-write-wins by timestamp).
+    ///
+    /// At equal timestamps the tombstone wins (Cassandra `Cells#reconcile`), and
+    /// only when timestamp and liveness are equal does the lower run_index (newer
+    /// file) win. See [`Self::tombstone_priority`].
     fn merge_partition_rows(&self, rows: Vec<MergeEntry>) -> Result<Vec<MergeEntry>> {
         use std::collections::BTreeMap;
 
@@ -747,21 +767,34 @@ impl KWayMerger {
                 .push(row);
         }
 
-        // Merge cells for each clustering key
+        // Merge cells for each clustering key.
+        //
+        // Resolution order (Cassandra `org.apache.cassandra.db.rows.Cells#reconcile`):
+        //   1. timestamp        — higher wins (last-write-wins).
+        //   2. liveness         — at EQUAL timestamp, a Delete (tombstone) beats a
+        //                         Live row. This is independent of which file the
+        //                         entries came from. (Issue #498)
+        //   3. run_index        — only when timestamp AND liveness are equal, the
+        //                         lower run_index (newer file) wins.
+        //
+        // This comparator is total and transitive: each level only acts as a
+        // tiebreak for the previous, and the final `run_index.cmp` is itself total.
         let mut merged = Vec::new();
         for (_ck, mut cluster_rows) in clustered_rows {
-            // Sort by timestamp (descending) then run_index (ascending)
             cluster_rows.sort_by(|a, b| {
-                match b.timestamp.cmp(&a.timestamp) {
-                    Ordering::Equal => {
-                        // Equal timestamps: prefer lower run_index (newer file)
-                        a.run_index.cmp(&b.run_index)
-                    }
-                    other => other,
-                }
+                // Primary: higher timestamp first (descending).
+                b.timestamp
+                    .cmp(&a.timestamp)
+                    // Secondary: at equal timestamp, tombstone (Delete) wins.
+                    // `is_tombstone() == true` must sort BEFORE a live row, so we
+                    // compare `b`'s liveness against `a`'s to keep descending order.
+                    .then_with(|| Self::tombstone_priority(b).cmp(&Self::tombstone_priority(a)))
+                    // Tertiary: lower run_index (newer file) wins.
+                    .then_with(|| a.run_index.cmp(&b.run_index))
             });
 
-            // Take the first entry (highest timestamp, or lowest run_index if tied)
+            // Take the first entry: highest timestamp, then tombstone at equal ts,
+            // then lowest run_index.
             if let Some(winner) = cluster_rows.into_iter().next() {
                 merged.push(winner);
             }
@@ -1141,6 +1174,96 @@ mod tests {
             }
             _ => panic!("Expected Tombstone"),
         }
+    }
+
+    #[test]
+    fn test_real_merger_delete_wins_at_equal_timestamp() {
+        // Issue #498: at EQUAL timestamp, a Delete (tombstone) must beat a Live
+        // row regardless of file recency (Cassandra `Cells#reconcile`).
+        //
+        // We drive the REAL merger entry point (`merge_partition_rows`) with two
+        // entries that share the SAME clustering key and the SAME timestamp:
+        //   - A: Live, run_index 0  (the NEWER file — would win a run_index tiebreak)
+        //   - B: Delete, run_index 1 (the OLDER file)
+        //
+        // The pre-fix merger sorted equal-timestamp ties by run_index only, so the
+        // live row (run_index 0) would win and survive. With the fix the tombstone
+        // wins. This test therefore FAILS if the tiebreak reverts to run_index.
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "reconcile_ks".to_string(),
+            table: "reconcile_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "value".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        const EQUAL_TS: i64 = 1_700_000_000_000_000;
+
+        let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+
+        // A = Live, in the NEWER file (run_index 0).
+        let live_entry = MergeEntry::new(
+            0,
+            partition_key.clone(),
+            None,
+            EQUAL_TS,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "value".to_string(),
+                    value: Value::Text("survivor-if-buggy".to_string()),
+                    timestamp: EQUAL_TS,
+                    ttl: None,
+                }],
+            },
+        );
+
+        // B = Delete (row tombstone), in the OLDER file (run_index 1).
+        let tombstone_entry = MergeEntry::new(
+            1,
+            partition_key.clone(),
+            None,
+            EQUAL_TS,
+            RowData::Tombstone {
+                deletion_time: EQUAL_TS,
+                local_deletion_time: 2_000_000,
+            },
+        );
+
+        let merger = KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema,
+        };
+
+        // Drive the real merger. Order the input so the live (newer-file) entry is
+        // first — pre-fix this is exactly the entry that wins by run_index.
+        let merged = merger
+            .merge_partition_rows(vec![live_entry, tombstone_entry])
+            .expect("merge_partition_rows must not fail");
+
+        assert_eq!(merged.len(), 1, "one clustering key => one merged winner");
+
+        assert!(
+            matches!(merged[0].row_data, RowData::Tombstone { .. }),
+            "At equal timestamp the tombstone must win even though the live row is in \
+             the newer file (run_index 0). Got a live row => the equal-ts tiebreak \
+             reverted to run_index (Issue #498 regression)."
+        );
     }
 
     #[test]
@@ -2093,8 +2216,12 @@ mod merge_property_tests {
                 columns: vec![("ck".to_string(), Value::TinyInt(0))],
             };
 
+            // Deliberately give the LIVE row the NEWER file (run_index 0) and the
+            // tombstone the OLDER file (run_index 1). A run_index-only tiebreak at
+            // equal timestamp would wrongly pick the live row; the Cassandra
+            // liveness rule must pick the tombstone regardless of file recency.
             let live_entry = MergeEntry::new(
-                1, // run_index 1 = older file
+                0, // run_index 0 = newer file
                 partition_key.clone(),
                 Some(ck.clone()),
                 ts_write,
@@ -2108,7 +2235,7 @@ mod merge_property_tests {
                 },
             );
             let tombstone_entry = MergeEntry::new(
-                0, // run_index 0 = newer file
+                1, // run_index 1 = older file
                 partition_key.clone(),
                 Some(ck.clone()),
                 ts_delete,
@@ -2144,8 +2271,17 @@ mod merge_property_tests {
                     "Live(ts={}) must win over Tombstone(ts={})",
                     ts_write, ts_delete
                 );
+            } else {
+                // Equal timestamps: the tombstone (Delete) ALWAYS wins, matching
+                // Cassandra `Cells#reconcile`. This must hold regardless of file
+                // recency — the assertion previously carved this case out, hiding
+                // the run_index-only tiebreak bug (Issue #498).
+                prop_assert!(
+                    matches!(winner.row_data, RowData::Tombstone { .. }),
+                    "At equal ts={}, Tombstone must win over Live (Cassandra reconcile rule)",
+                    ts_delete
+                );
             }
-            // Equal timestamps: run_index 0 (tombstone) wins (newer file) — current merger behaviour.
         }
     }
 }
