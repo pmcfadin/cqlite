@@ -455,10 +455,15 @@ impl DataWriter {
     /// Only valid for writers created via [`DataWriter::new`]. In streaming mode
     /// the bytes live on disk; use [`DataWriter::finish_streaming`] instead.
     pub fn finish(self) -> Result<Vec<u8>> {
-        debug_assert!(
-            self.data_path.is_none(),
-            "DataWriter::finish() called on a streaming writer; use finish_streaming()"
-        );
+        // Hard guard (not debug_assert!, which compiles out in release): on a
+        // streaming writer the bytes live on disk and `buffer` is empty after each
+        // partition flush, so returning it would silently yield a 0-byte Data.db.
+        if self.data_path.is_some() {
+            return Err(Error::InvalidInput(
+                "DataWriter::finish() called on a streaming writer; use finish_streaming()"
+                    .to_string(),
+            ));
+        }
         Ok(self.buffer)
     }
 
@@ -5478,7 +5483,10 @@ mod tests {
         let mut writer = DataWriter::with_sink(create_test_stats(), data_path);
 
         let mut prev_flushed = 0u64;
-        let mut max_scratch = 0usize;
+        // Tracks the largest single-partition flushed size. Because the scratch is
+        // cleared after every partition (asserted below), peak resident Data.db
+        // bytes are bounded by this value, not the whole file.
+        let mut max_partition_size = 0usize;
         for (i, (key, mutations)) in partitions.iter().enumerate() {
             let flushed_before = writer.flushed_position();
             writer
@@ -5501,7 +5509,7 @@ mod tests {
                 "flushed position must grow after writing partition {i}"
             );
             let this_partition_size = (flushed_after - flushed_before) as usize;
-            max_scratch = max_scratch.max(this_partition_size);
+            max_partition_size = max_partition_size.max(this_partition_size);
             assert!(flushed_after > prev_flushed);
             prev_flushed = flushed_after;
         }
@@ -5515,8 +5523,8 @@ mod tests {
         // Peak resident bytes were bounded by the largest single partition,
         // which is far smaller than the whole file for many partitions.
         assert!(
-            (max_scratch as u64) < total,
-            "largest single partition ({max_scratch}) must be smaller than the full file ({total})"
+            (max_partition_size as u64) < total,
+            "largest single partition ({max_partition_size}) must be smaller than the full file ({total})"
         );
     }
 }
