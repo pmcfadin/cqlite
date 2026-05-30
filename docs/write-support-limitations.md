@@ -129,6 +129,29 @@ input file won regardless of liveness.
 
 ---
 
+## Compaction dropped disjoint columns (Issue #533)
+
+**Behaviour** (resolved in v0.9.2): The merger now reconciles cells per column
+(Cassandra `Cells#reconcile`) instead of selecting one whole winning row per
+clustering key. Rows updated across different SSTables on different columns keep
+all their cells after compaction; previously the losing row's columns were dropped.
+
+**Tracking**: Issue #533 (fixed in v0.9.2).
+
+---
+
+## DataWriter buffered the whole SSTable in memory (Issue #492)
+
+**Behaviour** (resolved in v0.9.2): The SSTable writer streams `Data.db` to disk one
+partition at a time via a buffered file sink, instead of accumulating the entire
+component in a `Vec<u8>`. Peak heap during a write/compaction is now bounded by the
+largest single partition rather than the full output size, keeping large compactions
+within the 128 MB memory target. Output bytes are unchanged.
+
+**Tracking**: Issue #492 (fixed in v0.9.2).
+
+---
+
 > The v0.9.2 reader correctness fixes (#516 `scan()` token ordering, #517
 > `get()`/`scan()` consistency, #518 `stats().block_count`) are read-side; see the
 > CHANGELOG and PRD §4.2 for details.
