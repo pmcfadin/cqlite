@@ -7,8 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [v0.9.2] — Correctness fixes
 
-Reader and compaction correctness follow-ups to v0.9.1. No new features and no
-public API changes.
+Reader and compaction correctness follow-ups to v0.9.1, plus a compaction memory
+fix. No new features and no public API changes.
 
 ### Fixed
 
@@ -29,6 +29,14 @@ public API changes.
 - **Equal-timestamp Delete-vs-Live reconcile** now follows Cassandra
   `Cells#reconcile`: at equal timestamp the tombstone wins, independent of input
   file recency (previously the newer file won regardless of liveness) (#498).
+- **Compaction dropped disjoint columns**: the k-way merger now reconciles cells
+  per column (Cassandra `Cells#reconcile`) instead of selecting one whole winning
+  row per clustering key, so rows updated across SSTables on different columns keep
+  all their cells after compaction (#533).
+- **Compaction memory**: the SSTable writer now streams `Data.db` to disk per
+  partition instead of buffering the entire component in memory, bounding peak heap
+  to roughly the largest single partition (was O(whole file), exceeding the 128 MB
+  target on large compactions). Output is byte-identical (#492).
 
 ## [v0.9.1] — Reader correctness fixes
 
