@@ -57,7 +57,6 @@ base64 = "0.21"
 
 # Hashing for Cassandra compatibility
 murmur3 = "0.5"
-md5 = "0.7"
 
 # Features defined at end of file to avoid duplicates
 

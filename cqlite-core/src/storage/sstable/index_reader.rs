@@ -37,12 +37,18 @@ pub struct IndexHeader {
 /// Partition index entry in Index.db
 #[derive(Debug, Clone)]
 pub struct PartitionIndexEntry {
-    /// Partition key hash/digest - using Arc to enable zero-copy sharing in lookup tables
-    /// This eliminates memory explosion from cloning large numbers of partition digests
+    /// Raw partition key bytes (length-prefixed in the on-disk BIG/NB Index.db format).
+    ///
+    /// NOTE (Issue #552): Despite the historical field name `key_digest`, this holds the
+    /// RAW partition key bytes, not an MD5 digest. The real Cassandra 5.0 NB Index.db entry
+    /// format is `[key_len: u16 BE][raw key bytes][data_offset: vint][promoted_len: vint]`.
+    /// There is no `0x0010` marker and no MD5 digest on disk. The field name is retained to
+    /// avoid churn in the zero-copy lookup table and downstream callers; it is used directly
+    /// as the partition key (e.g. for `RowKey`). The leading u16 is the key length
+    /// (e.g. 0x0010 for a 16-byte UUID, 0x0026 for a 38-byte composite key).
     pub key_digest: Arc<[u8]>,
-    /// Raw partition key bytes for BTI format (Issue #212)
-    /// BTI format stores actual partition keys, not MD5 digests. This field enables
-    /// direct key comparison for sequential scan fallback when offsets are unavailable.
+    /// Raw partition key bytes (mirror of `key_digest`, kept for API compatibility).
+    /// Always `Some` now that all entries carry their raw key.
     pub raw_key: Option<Arc<[u8]>>,
     /// Offset in Data.db file
     pub data_offset: u64,
@@ -320,30 +326,46 @@ fn parse_index_data_with_summary<'a>(
     ))
 }
 
-/// Parse all partition key digests from the Index.db file with Summary.db correlation
+/// Parse all partition entries from the Index.db file.
+///
+/// ## Authoritative format (Issue #552, Cassandra 5.0 NB / BIG Index.db)
+///
+/// Index.db is ALWAYS the BIG-format partition index. Each entry is:
+///
+/// ```text
+/// [key_len: u16 BE]                    ← length of the raw partition key
+/// [raw partition key bytes: key_len]   ← the partition key exactly as in Data.db
+/// [data_offset: unsigned vint]         ← byte offset into the Data.db data section
+/// [promoted_index_len: unsigned vint]  ← byte length of the promoted index (0 = none)
+/// [promoted_index_data: promoted_index_len bytes]
+/// ```
+///
+/// The leading u16 is the partition key LENGTH, not a `0x0010` marker, and there is no
+/// MD5 digest on disk (verified against real Cassandra Index.db files: single-UUID keys
+/// start `0x0010`, the composite-key `multi_partition_table` starts `0x0026` = 38 bytes).
+///
+/// There is no separate "BTI" Index.db format: a BTI-indexed SSTable uses Partitions.db /
+/// Rows.db trie structures and does not produce an Index.db at all (see guide Ch.17). So the
+/// previous `detect_index_format` heuristic was entirely spurious (Issue #28 mandate) and has
+/// been removed in favour of this single, spec-accurate parser that works for ANY key length.
+///
+/// The `summary_reader` argument is retained for API compatibility; offsets are now stored
+/// inline so Summary.db correlation is no longer needed for parsing.
 fn parse_all_partition_keys_with_summary<'a>(
     input: &'a [u8],
-    summary_reader: Option<&SummaryReader>,
+    _summary_reader: Option<&SummaryReader>,
 ) -> IResult<&'a [u8], Vec<PartitionIndexEntry>> {
     let mut entries = Vec::new();
     let mut remaining = input;
 
-    // Detect format by checking first 2 bytes
-    let format = detect_index_format(input);
-    log::debug!("Detected Index.db format: {:?}", format);
-
-    // Parse entries until we consume all input
     let mut entry_index = 0;
     while !remaining.is_empty() {
-        let parse_result = match format {
-            IndexFormat::DigestFormat => {
-                parse_simple_partition_key_with_offset(remaining, entry_index, summary_reader)
-            }
-            IndexFormat::BtiFormat => parse_bti_partition_entry(remaining, entry_index),
-        };
-
-        match parse_result {
+        match parse_big_index_entry(remaining) {
             Ok((rest, entry)) => {
+                debug_assert!(
+                    rest.len() < remaining.len(),
+                    "BIG Index.db parser must make forward progress"
+                );
                 entries.push(entry);
                 remaining = rest;
                 entry_index += 1;
@@ -354,268 +376,55 @@ fn parse_all_partition_keys_with_summary<'a>(
                     entry_index,
                     remaining.len()
                 );
-                // Stop parsing if we can't parse more entries
                 break;
             }
         }
     }
 
-    log::debug!(
-        "Parsed {} partition entries from Index.db ({:?} format)",
-        entries.len(),
-        format
-    );
+    log::debug!("Parsed {} partition entries from Index.db", entries.len());
     Ok((remaining, entries))
 }
 
-/// Parse a single partition key from the Index.db format with variable-length offset
-fn parse_simple_partition_key_with_offset<'a>(
-    input: &'a [u8],
-    #[allow(unused_variables)] entry_index: usize,
-    _summary_reader: Option<&SummaryReader>,
-) -> IResult<&'a [u8], PartitionIndexEntry> {
-    // Some Index.db formats have a 2-byte length prefix before each entry
-    // Try to detect and skip it if present
-    let (input, first_word) = be_u16(input)?;
+/// Parse a single BIG-format Index.db entry.
+///
+/// Layout: `[key_len: u16 BE][raw key][data_offset: vint][promoted_len: vint][promoted...]`.
+/// Works for any key length (int, text, UUID, composite). The raw partition key is stored
+/// directly in `key_digest` / `raw_key` (no MD5, no marker).
+fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionIndexEntry> {
+    // Read partition key length (u16 big-endian).
+    let (input, key_len) = be_u16(input)?;
 
-    let (input, marker) = if first_word == 0x0010 {
-        // No length prefix, first_word is the marker
-        (input, first_word)
-    } else {
-        // first_word is likely a length prefix, read the actual marker
-        be_u16(input)?
-    };
+    // Read the raw partition key bytes.
+    let (input, key_bytes) = take(key_len)(input)?;
 
-    if marker != 0x0010 {
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Tag,
-        )));
-    }
-
-    // Read partition key digest (16 bytes)
-    let (input, key_digest) = take(16_u8)(input)?;
-
-    // Read unsigned VInt offset (Cassandra 5.0 NB format)
-    // Offset is relative to data section start, not file start
-    // SSTableReader will add actual_header_size when seeking
+    // Read unsigned VInt data offset (relative to the Data.db data section start;
+    // SSTableReader adds the header size when seeking).
     let (input, data_offset) = parse_vuint(input)?;
 
-    // Read promoted index serialized size (VInt)
-    // If size > 0, there's promoted index data following
-    // For now, we skip the promoted index data since partition lookup works without it
-    let (input, promoted_size) = parse_vuint(input)?;
-    let (input, _promoted_data) = take(promoted_size as usize)(input)?;
-
-    // Debug logging to verify parsing
-    log::debug!(
-        "IndexReader Entry {}: marker={:#06x}, data_offset={}, promoted_size={}",
-        entry_index,
-        marker,
-        data_offset,
-        promoted_size
-    );
-
-    // Size not stored in Index.db - will be determined during data read
-    let data_size = 0;
-
-    Ok((
-        input,
-        PartitionIndexEntry {
-            key_digest: Arc::from(key_digest),
-            raw_key: None, // Digest format doesn't have raw keys
-            data_offset,
-            data_size,
-            promoted_index: None,
-        },
-    ))
-}
-
-// REMOVED: try_parse_enhanced_partition_entry
-// The "enhanced format" with inline offsets was causing false positives
-// Issue #92 mandates using Summary.db for offset correlation, not inline heuristics
-
-/// Index.db format variants
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum IndexFormat {
-    /// MD5 digest format: marker(0x0010) + digest(16) + offset_len(1) + offset(variable)
-    DigestFormat,
-    /// BTI/Partition Key format: entry_len(2) + key_len(2) + key(variable) + metadata(variable)
-    BtiFormat,
-}
-
-/// Detect which Index.db format is in use by examining first 2 bytes
-///
-/// ## TEMPORARY HEURISTIC (Issue #28 Follow-up - Technical Debt)
-///
-/// This function uses byte-pattern detection as a temporary workaround until proper
-/// TOC/Statistics integration in M3. The proper fix is to pass format hint from
-/// SSTableReader (which has authoritative version/format metadata).
-///
-/// **Current approach:**
-/// - Check if first 2 bytes are 0x0010 (digest format marker)
-/// - If yes: DigestFormat (MD5 digest + variable-length offset)
-/// - If no: BtiFormat (byte-comparable key + metadata)
-///
-/// **Future improvement (M3):**
-/// - SSTableReader should read TOC/Statistics to determine format authoritatively
-/// - Pass format hint as parameter to this function
-/// - Only fall back to byte-pattern detection if hint unavailable
-fn detect_index_format(input: &[u8]) -> IndexFormat {
-    if input.len() < 2 {
-        // Default to digest format for empty/invalid input
-        log::warn!(
-            "Index.db input too short ({} bytes), defaulting to DigestFormat",
-            input.len()
-        );
-        return IndexFormat::DigestFormat;
-    }
-
-    let first_word = u16::from_be_bytes([input[0], input[1]]);
-
-    // If first word is the digest format marker (0x0010), it's digest format
-    // Otherwise, treat as BTI format (entry length prefix)
-    if first_word == 0x0010 {
-        log::debug!("Detected DigestFormat (marker: {:#06x})", first_word);
-        IndexFormat::DigestFormat
-    } else {
-        // BTI format starts with entry length (typically 0x000e = 14 bytes for simple text keys)
-        log::info!("BTI format detected, using sequential read mode for partition lookups");
-        IndexFormat::BtiFormat
-    }
-}
-
-/// Parse a single partition entry from BTI/Partition Key format
-///
-/// BTI format structure:
-/// - padding: variable (0-3 null bytes between entries)
-/// - entry_length: 2 bytes (big-endian) - total length of entry excluding this field
-/// - key_length: 2 bytes (big-endian) - length of partition key
-/// - key_bytes: variable - actual partition key bytes
-/// - metadata: variable - clustering data, offset, padding
-///
-/// For stock_prices example:
-/// ```text
-/// 00 0e         - entry_length = 14 bytes
-/// 00 04         - key_length = 4 bytes
-/// 41 4d 5a 4e   - key_bytes = "AMZN"
-/// 00 00 04 80   - metadata (clustering/timestamp?)
-/// 00 4f 88      - metadata (offset?)
-/// 00            - end of entry metadata
-/// 00 00 00      - padding before next entry (Issue #212)
-/// ```
-fn parse_bti_partition_entry(
-    input: &[u8],
-    _entry_index: usize,
-) -> IResult<&[u8], PartitionIndexEntry> {
-    // Issue #212: Skip inter-entry padding/trailer bytes in BTI format
-    // Entries can be separated by variable-length data (typically 0-3 bytes).
-    // This padding can be null bytes (0x00) or non-null bytes (like 0x90 0xdb 0x00).
-    // BTI entry_length is typically 0x000e (14) to 0x0100 (256) for reasonable key sizes.
-    //
-    // Strategy: Scan forward looking for a valid entry_length pattern (0x00 0x04-0xff).
-    // Valid entry_length in BTI format has high byte 0x00 and low byte >= 4.
-    let mut input = input;
-    let max_skip = std::cmp::min(10, input.len().saturating_sub(4)); // Don't skip too many bytes
-    let mut skipped = 0;
-
-    while skipped < max_skip && input.len() >= 4 {
-        // Check if current position looks like a valid entry_length (0x00 0x04-0xff)
-        if input[0] == 0x00 && input[1] >= 4 {
-            // This looks like a valid entry_length - verify by checking key_length follows
-            let potential_entry_len = u16::from_be_bytes([input[0], input[1]]);
-            let potential_key_len = u16::from_be_bytes([input[2], input[3]]);
-
-            // Key length should be reasonable (1-255 bytes for partition keys)
-            if (4..1000).contains(&potential_entry_len)
-                && potential_key_len > 0
-                && potential_key_len < 256
-                && (potential_key_len + 2) <= potential_entry_len
-            {
-                break; // Found valid entry start
-            }
-        }
-        // Skip one byte
-        input = &input[1..];
-        skipped += 1;
-    }
-
-    if input.len() < 4 {
-        // Not enough bytes for minimal entry (2 bytes entry_length + 2 bytes key_length)
-        return Err(nom::Err::Error(nom::error::Error::new(
-            input,
-            nom::error::ErrorKind::Eof,
-        )));
-    }
+    // Read promoted-index length (unsigned VInt) and skip the promoted data.
+    // Partition-level lookups work without decoding the promoted index.
+    let (input, promoted_len) = parse_vuint(input)?;
+    // Saturating cast: on a 32-bit target `promoted_len as usize` could truncate and
+    // misalign subsequent entries. `usize::MAX` makes `take` return an Eof error on a
+    // short buffer instead, which is the safe failure mode for a corrupt Index.db.
+    let promoted_len = usize::try_from(promoted_len).unwrap_or(usize::MAX);
+    let (input, _promoted_data) = take(promoted_len)(input)?;
 
     log::trace!(
-        "BTI padding: skipped {} bytes to find entry start at {:02x?}",
-        skipped,
-        &input[..std::cmp::min(4, input.len())]
+        "Index.db BIG entry: key_len={}, data_offset={}, promoted_len={}",
+        key_len,
+        data_offset,
+        promoted_len
     );
 
-    // Parse entry_length (2 bytes, big-endian)
-    let (input, entry_length) = be_u16(input)?;
-
-    // Parse key_length (2 bytes, big-endian)
-    let (input, key_length) = be_u16(input)?;
-
-    // Read key_bytes
-    let (input, key_bytes) = take(key_length)(input)?;
-
-    // Calculate remaining metadata length
-    // entry_length includes key_length field (2 bytes) + key_bytes + metadata
-    // We've already consumed key_length (2) + key_bytes (key_length)
-    // So metadata_length = entry_length - 2 - key_length
-    let metadata_length = entry_length.saturating_sub(2).saturating_sub(key_length);
-
-    // Read metadata section
-    let (input, metadata) = take(metadata_length)(input)?;
-
-    // TODO (M3 Technical Debt - Issue #208 C3): BTI format offset extraction
-    //
-    // BTI Index.db format does not have a clear specification for inline offset extraction.
-    // The metadata structure is unclear from available documentation and hex analysis.
-    // Setting offset to 0 to indicate sequential read mode is required.
-    //
-    // Proper fix: Research authoritative Cassandra 5.0+ BTI Index.db specification
-    // to determine if and how offsets are encoded in the metadata section.
-    let data_offset = 0;
-
-    log::debug!(
-        "BTI entry parsed: key=\"{}\", key_length={}, metadata_len={}. Offset set to 0 (sequential read mode)",
-        String::from_utf8_lossy(key_bytes),
-        key_length,
-        metadata.len()
-    );
-
-    // Issue #212 Fix: Store raw partition key for BTI format
-    //
-    // BTI format stores actual partition keys (e.g., "AMZN"), not MD5 digests.
-    // We now store the raw key for direct comparison during sequential scan fallback.
-    // The MD5 digest is still computed for compatibility with existing lookup code.
-    let key_digest = md5::compute(key_bytes);
-    let raw_key = Arc::from(key_bytes);
-
-    if data_offset == 0 {
-        log::debug!(
-            "BTI entry has no reliable offset, sequential read mode will be used. \
-             Entry: {:?}, metadata_len: {}",
-            String::from_utf8_lossy(key_bytes),
-            metadata.len()
-        );
-    }
-
-    // Entry structure is: [2-byte length][payload of 'length' bytes]
-    // No padding between entries - the next entry starts immediately with its length field.
-    // Previous code incorrectly skipped 2 bytes thinking it was padding, but hex analysis
-    // shows that was consuming the next entry's length field (Issue #208 C4).
+    let raw_key: Arc<[u8]> = Arc::from(key_bytes);
 
     Ok((
         input,
         PartitionIndexEntry {
-            key_digest: Arc::from(&key_digest[..]),
-            raw_key: Some(raw_key), // Issue #212: Store raw key for BTI matching
+            key_digest: Arc::clone(&raw_key),
+            raw_key: Some(raw_key),
+            // Size is not stored in Index.db; determined during the Data.db read.
             data_offset,
             data_size: 0,
             promoted_index: None,
@@ -643,10 +452,10 @@ fn parse_all_partition_keys(input: &[u8]) -> IResult<&[u8], Vec<PartitionIndexEn
     parse_all_partition_keys_with_summary(input, None)
 }
 
-/// Parse a single partition key from the simple Index.db format - Legacy API
+/// Parse a single BIG-format Index.db partition entry - Legacy API
 #[allow(dead_code)]
 fn parse_simple_partition_key(input: &[u8]) -> IResult<&[u8], PartitionIndexEntry> {
-    parse_simple_partition_key_with_offset(input, 0, None)
+    parse_big_index_entry(input)
 }
 
 // Note: Promoted index parsing removed as it's not present in the simple Index.db format
@@ -863,13 +672,95 @@ mod tests {
         }
     }
 
+    /// Issue #552: Validate the BIG-format parser against REAL Cassandra 5.0 Index.db files.
+    ///
+    /// `simple_table` has a single 16-byte UUID partition key (entries start 0x0010).
+    /// `multi_partition_table` has a 38-byte composite partition key (entries start 0x0026).
+    /// Both must read back ALL entries with monotonically increasing offsets.
+    #[tokio::test]
+    #[ignore = "Requires test data files (CQLITE_DATASETS_ROOT)"]
+    async fn test_real_index_db_big_format() {
+        let datasets_root = env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| {
+            "/Users/patrickmcfadin/local_projects/cqlite/test-data/datasets".to_string()
+        });
+
+        // --- Composite-key table (38-byte keys, entries start 0x0026) ---
+        let multi_dir = format!(
+            "{}/sstables/test_basic/multi_partition_table-6ac52100a25111f0a3fef1a551383fb9",
+            datasets_root
+        );
+        let multi_index = format!("{}/nb-1-big-Index.db", multi_dir);
+        let bytes = std::fs::read(&multi_index).expect("read multi_partition_table Index.db");
+        assert_eq!(
+            u16::from_be_bytes([bytes[0], bytes[1]]),
+            38,
+            "Composite key length should be 38 (0x0026)"
+        );
+        let (rest, entries) = parse_all_partition_keys(&bytes).expect("parse composite Index.db");
+        assert!(rest.is_empty(), "Should consume all Index.db bytes");
+        assert!(
+            entries.len() >= 2,
+            "multi_partition_table should have multiple partitions (got {})",
+            entries.len()
+        );
+        // First key is 38 bytes; first offset must be 0.
+        assert_eq!(
+            entries[0].key_digest.len(),
+            38,
+            "First key should be 38 bytes"
+        );
+        assert_eq!(
+            entries[0].data_offset, 0,
+            "First partition offset should be 0"
+        );
+        // Offsets are strictly increasing in token order.
+        for i in 1..entries.len() {
+            assert!(
+                entries[i].data_offset > entries[i - 1].data_offset,
+                "Offsets must increase: entry {} ({}) <= entry {} ({})",
+                i,
+                entries[i].data_offset,
+                i - 1,
+                entries[i - 1].data_offset
+            );
+        }
+
+        // --- Single-UUID-key table (16-byte keys, entries start 0x0010) ---
+        let simple_index = format!(
+            "{}/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Index.db",
+            datasets_root
+        );
+        let bytes = std::fs::read(&simple_index).expect("read simple_table Index.db");
+        assert_eq!(
+            u16::from_be_bytes([bytes[0], bytes[1]]),
+            16,
+            "UUID key length should be 16 (0x0010)"
+        );
+        let (rest, entries) = parse_all_partition_keys(&bytes).expect("parse simple Index.db");
+        assert!(rest.is_empty(), "Should consume all Index.db bytes");
+        assert!(
+            entries.len() > 3,
+            "simple_table should have many partitions (got {})",
+            entries.len()
+        );
+        assert_eq!(
+            entries[0].key_digest.len(),
+            16,
+            "First key should be 16 bytes"
+        );
+        assert_eq!(
+            entries[0].data_offset, 0,
+            "First partition offset should be 0"
+        );
+    }
+
     #[test]
     fn test_simple_partition_key_parsing() {
-        // NB format: marker(2) + key_digest(16) + vint_offset(1-9) + vint_promoted_size(1-9)
+        // NB BIG format: key_len(2) + raw_key(key_len) + vint_offset(1-9) + vint_promoted_size(1-9)
         // VInt encoding for 256: 0x81, 0x00 (2 bytes, 10xxxxxx format)
         let data = vec![
-            0x00, 0x10, // marker = 0x0010
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // raw key (16 bytes)
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
             0x81, 0x00, // VInt offset = 256
             0x00, // VInt promoted_size = 0 (no promoted index)
@@ -890,36 +781,61 @@ mod tests {
 
     #[test]
     fn test_partition_key_parsing_without_summary() {
-        // NB format: marker(2) + key_digest(16) + vint_offset(1-9) + vint_promoted_size(1-9)
+        // BIG format: key_len(2) + raw key(key_len) + vint_offset + vint_promoted_size
         // VInt encoding for 4096 (0x1000): 0x90, 0x00 (2 bytes, 10xxxxxx format)
         // byte0 = 0x80 | ((4096 >> 8) & 0x3F) = 0x80 | 0x10 = 0x90
         // byte1 = 4096 & 0xFF = 0x00
         let data = vec![
-            0x00, 0x10, // marker = 0x0010
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
-            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
+            0x00, 0x10, // key_len = 16
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // raw key (16 bytes)
+            0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // raw key cont.
             0x90, 0x00, // VInt offset = 4096
             0x00, // VInt promoted_size = 0
         ];
 
-        // Test with different entry indices - should all parse the same data
-        let (_, entry0) = parse_simple_partition_key_with_offset(&data, 0, None).unwrap();
-        let (_, entry1) = parse_simple_partition_key_with_offset(&data, 1, None).unwrap();
-        let (_, entry5) = parse_simple_partition_key_with_offset(&data, 5, None).unwrap();
+        let (_, entry) = parse_simple_partition_key(&data).unwrap();
 
         assert_eq!(
-            entry0.key_digest.as_ref(),
+            entry.key_digest.as_ref(),
             &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+        );
+        assert_eq!(
+            entry.raw_key.as_deref(),
+            Some(&[1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16][..]),
+            "raw_key should mirror the raw partition key"
         );
 
         // Raw offset from Index.db (relative to data section start)
-        assert_eq!(entry0.data_offset, 4096);
-        assert_eq!(entry1.data_offset, 4096);
-        assert_eq!(entry5.data_offset, 4096);
+        assert_eq!(entry.data_offset, 4096);
+    }
 
-        // All should have the same key digest in this test
-        assert_eq!(entry0.key_digest.as_ref(), entry1.key_digest.as_ref());
-        assert_eq!(entry1.key_digest.as_ref(), entry5.key_digest.as_ref());
+    #[test]
+    fn test_variable_length_keys_parse_all_entries() {
+        // Issue #552: prove the parser handles non-16-byte keys (composite/int/text).
+        // Entry 1: 4-byte int key (0x0000002A), offset 100, no promoted index.
+        // Entry 2: 1-byte key (0x07), offset 500 (2-byte vint 0x81 0xF4), no promoted.
+        let data = vec![
+            // Entry 1
+            0x00, 0x04, // key_len = 4
+            0x00, 0x00, 0x00, 0x2A, // raw key (int 42)
+            0x64, // vint offset = 100
+            0x00, // vint promoted_size = 0
+            // Entry 2
+            0x00, 0x01, // key_len = 1
+            0x07, // raw key
+            0x81, 0xF4, // vint offset = 500
+            0x00, // vint promoted_size = 0
+        ];
+
+        let (rest, entries) = parse_all_partition_keys(&data).unwrap();
+        assert!(rest.is_empty(), "All bytes should be consumed");
+        assert_eq!(entries.len(), 2, "Both variable-length entries must parse");
+
+        assert_eq!(entries[0].key_digest.as_ref(), &[0x00, 0x00, 0x00, 0x2A]);
+        assert_eq!(entries[0].data_offset, 100);
+
+        assert_eq!(entries[1].key_digest.as_ref(), &[0x07]);
+        assert_eq!(entries[1].data_offset, 500);
     }
 
     // REMOVED: test_enhanced_partition_entry_parsing
@@ -928,20 +844,20 @@ mod tests {
     #[test]
     fn test_multiple_partition_keys_parsing() {
         // Two partition entries with VInt offsets (NB format)
-        // Format: marker(2) + digest(16) + vint_offset + vint_promoted_size
+        // Format: key_len(2) + raw_key(key_len) + vint_offset + vint_promoted_size
         // VInt encoding for 100 (0x64): 0x64 (1 byte, value < 128)
         // VInt encoding for 500 (0x1F4): 0x81, 0xF4 (2 bytes, 10xxxxxx format)
         //   byte0 = 0x80 | ((500 >> 8) & 0x3F) = 0x80 | 1 = 0x81
         //   byte1 = 500 & 0xFF = 0xF4
         let data = vec![
             // Entry 1
-            0x00, 0x10, // marker = 0x0010
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1 (16 bytes)
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
             0x64, // VInt offset = 100
             0x00, // VInt promoted_size = 0
             // Entry 2
-            0x00, 0x10, // marker = 0x0010
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2 (16 bytes)
             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, // key_digest cont.
             0x81, 0xF4, // VInt offset = 500
@@ -984,18 +900,18 @@ mod tests {
         // to avoid heap allocation on every lookup
 
         // Create index data with two partition entries (NB format with VInt offsets)
-        // Format: marker(2) + digest(16) + vint_offset + vint_promoted_size
+        // Format: key_len(2) + raw_key(key_len) + vint_offset + vint_promoted_size
         // VInt for 100: 0x64 (single byte, value < 128)
         // VInt for 500: 0x81, 0xF4 (2 bytes)
         let data = vec![
             // Entry 1
-            0x00, 0x10, // marker = 0x0010
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
             0x64, // VInt offset = 100
             0x00, // VInt promoted_size = 0
             // Entry 2
-            0x00, 0x10, // marker = 0x0010
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2
             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, // key_digest cont.
             0x81, 0xF4, // VInt offset = 500

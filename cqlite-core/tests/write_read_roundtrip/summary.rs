@@ -523,7 +523,10 @@ async fn test_summary_offset_tracking_with_index() {
     for (sample_idx, summary_entry) in summary_entries.iter().enumerate() {
         let expected_partition_idx = sample_idx * 128;
 
-        // Verify the offset points to a valid Index.db entry marker (0x0010)
+        // Verify the offset points to the start of an Index.db entry. In the real
+        // Cassandra BIG/NB format each entry begins with the partition key LENGTH
+        // (u16 BE), not a 0x0010 marker. These keys are 4 bytes, so the entry starts
+        // with the length prefix 0x0004 (Issue #552).
         let offset = summary_entry.position as usize;
         assert!(
             offset + 2 <= index_bytes_vec.len(),
@@ -531,12 +534,12 @@ async fn test_summary_offset_tracking_with_index() {
             offset
         );
 
-        // Check that the offset points to the Index.db entry marker
-        let marker_bytes = &index_bytes_vec[offset..offset + 2];
+        // Check that the offset points to the Index.db entry's key-length prefix.
+        let key_len_bytes = &index_bytes_vec[offset..offset + 2];
         assert_eq!(
-            marker_bytes,
-            &[0x00, 0x10],
-            "Summary entry {} should point to Index.db entry marker at offset {}",
+            key_len_bytes,
+            &[0x00, 0x04],
+            "Summary entry {} should point to Index.db entry key-length prefix at offset {}",
             sample_idx,
             offset
         );
@@ -550,16 +553,16 @@ async fn test_summary_offset_tracking_with_index() {
         );
 
         println!(
-            "✓ Summary entry {} points to Index.db partition {} at offset {} (verified marker 0x0010)",
+            "✓ Summary entry {} points to Index.db partition {} at offset {} (key-length prefix 0x0004)",
             sample_idx, expected_partition_idx, offset
         );
     }
 
-    // Additional verification: compute expected offsets based on entry sizes
-    // Each Index.db entry: 2 (marker) + 16 (digest) + VInt(data_offset) + VInt(0)
-    // For data_offset values 0, 100, 200, ..., most will be 1-byte VInts (< 128)
-    // Entry size = 2 + 16 + 1 + 1 = 20 bytes for data_offset < 128
-    // Entry size = 2 + 16 + 2 + 1 = 21 bytes for data_offset >= 128
+    // Additional verification: compute expected offsets based on entry sizes.
+    // Each BIG-format Index.db entry: 2 (key_len) + 4 (raw key) + VInt(data_offset) + VInt(0).
+    // For data_offset values 0, 100, 200, ..., most will be 1-byte VInts (< 128).
+    // Entry size = 2 + 4 + 1 + 1 = 8 bytes for data_offset < 128.
+    // Entry size = 2 + 4 + 2 + 1 = 9 bytes for data_offset >= 128.
 
     let mut cumulative_offset = 0u64;
     for i in 0..384 {
@@ -575,7 +578,8 @@ async fn test_summary_offset_tracking_with_index() {
         } else {
             4 // Sufficient for this test
         };
-        let entry_size = 2 + 16 + vint_size + 1; // marker + digest + data_offset_vint + promoted_len_vint(0)
+        // key_len(2) + raw key(4) + data_offset_vint + promoted_len_vint(0)
+        let entry_size = 2 + 4 + vint_size + 1;
 
         // If this is a sampled partition, verify the offset matches
         if i % 128 == 0 {
