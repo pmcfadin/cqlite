@@ -265,7 +265,13 @@ async fn test_index_roundtrip_large_offsets() {
     );
 }
 
-/// Test Index.db partition key digest calculation
+/// Test Index.db stores and reads back the RAW partition key (Issue #552).
+///
+/// The real Cassandra 5.0 NB / BIG Index.db format is
+/// `[key_len: u16 BE][raw key bytes][data_offset: vint][promoted_len: vint]`.
+/// There is NO `0x0010` marker and NO MD5 digest on disk — the leading u16 is the key
+/// length and the bytes that follow are the raw partition key. This test asserts that the
+/// `key_digest` field (historical name) holds the RAW key, not `md5::compute(&pk)`.
 #[tokio::test]
 async fn test_index_partition_key_digest() {
     let temp_dir = TempDir::new().unwrap();
@@ -281,11 +287,20 @@ async fn test_index_partition_key_digest() {
         .add_partition(&key, 0)
         .expect("add_partition should succeed");
 
-    // Calculate expected MD5 digest
-    let expected_digest = md5::compute(&pk_bytes);
-
     // Finalize to bytes
     let index_bytes = writer.finish().expect("IndexWriter finish should succeed");
+
+    // On-disk: [key_len u16 BE = 0x0004][raw key bytes][offset vint][promoted vint].
+    assert_eq!(
+        &index_bytes[0..2],
+        &[0x00, 0x04],
+        "Leading u16 must be the key length (4), not a 0x0010 marker"
+    );
+    assert_eq!(
+        &index_bytes[2..6],
+        pk_bytes.as_slice(),
+        "On-disk bytes after the length prefix must be the RAW key, not an MD5 digest"
+    );
 
     // Write to file
     let mut file = File::create(&index_path)
@@ -312,10 +327,15 @@ async fn test_index_partition_key_digest() {
     let entries = reader.get_partition_entries();
     assert_eq!(entries.len(), 1, "Should have 1 partition entry");
 
-    // Verify key digest matches MD5 of partition key bytes
+    // The stored key is the RAW partition key (NOT md5::compute(&pk_bytes)).
     assert_eq!(
         entries[0].key_digest.as_ref(),
-        expected_digest.as_slice(),
-        "Partition key digest should be MD5 of key bytes"
+        pk_bytes.as_slice(),
+        "Stored key bytes should equal the RAW partition key"
+    );
+    assert_eq!(
+        entries[0].raw_key.as_deref(),
+        Some(pk_bytes.as_slice()),
+        "raw_key should mirror the raw partition key"
     );
 }

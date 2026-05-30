@@ -1222,16 +1222,44 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(
-        expected = "ClusteringKey comparison failed: type mismatch indicates schema validation bug"
-    )]
-    fn test_clustering_key_ord_type_mismatch_panics() {
-        // Test Issue #409: Type mismatch should panic with clear message
+    fn test_clustering_key_ord_type_mismatch_is_total_and_does_not_panic() {
+        // Issue #458/#465: `Ord for ClusteringKey` MUST NOT panic on a type mismatch.
+        // Heterogeneous SSTables can produce mismatched clustering value types, and a
+        // panic in `cmp` would crash the memtable BTreeMap. Instead, the implementation
+        // falls back to a deterministic ordering. This test confirms it is panic-free,
+        // total (antisymmetric), and deterministic.
         let ck1 = ClusteringKey::single("ts", Value::Timestamp(1000));
-        let ck2 = ClusteringKey::single("ts", Value::Integer(2000)); // Wrong type!
+        let ck2 = ClusteringKey::single("ts", Value::Integer(2000)); // Different type
 
-        // This should panic due to type mismatch
-        let _ = ck1.cmp(&ck2);
+        // Must not panic.
+        let ord_12 = ck1.cmp(&ck2);
+        let ord_21 = ck2.cmp(&ck1);
+
+        // Determinism: repeated comparisons return the same result.
+        assert_eq!(ord_12, ck1.cmp(&ck2), "comparison must be deterministic");
+
+        // Antisymmetry / totality: a<b implies b>a (and the mismatch is never reported
+        // as Equal, since the underlying values differ).
+        assert_ne!(
+            ord_12,
+            Ordering::Equal,
+            "mismatched types must not compare Equal"
+        );
+        assert_eq!(
+            ord_12.reverse(),
+            ord_21,
+            "ordering must be antisymmetric (a.cmp(b) == b.cmp(a).reverse())"
+        );
+
+        // Reflexivity: a key compares Equal to itself even across the fallback path.
+        assert_eq!(ck1.cmp(&ck1), Ordering::Equal);
+
+        // It must remain usable as a BTreeMap key without panicking.
+        use std::collections::BTreeMap;
+        let mut map = BTreeMap::new();
+        map.insert(ck1.clone(), "a");
+        map.insert(ck2.clone(), "b");
+        assert_eq!(map.len(), 2, "both distinct keys should be retained");
     }
 
     #[test]

@@ -10,67 +10,60 @@ This chapter explains the partition index (`Index.db`) and the sampled summary (
 
 ## Partition Index Structure
 
-`Index.db` primarily stores partition key digests and, depending on format, may include offsets and sizes.
-
-Annotated example (BIG, one entry):
-```
-00000000: 0010 6b88 bf20 a251 11f0 a3fe f1a5 5138  |..k.. .Q......Q8|
-00000010: 3fb9 00                                   |?. .             |
-```
-- `0010` → marker (partition key digest follows)
-- `6b88…3fb9` → 16-byte digest
-- `00` → unsigned VInt offset (value 0, single byte for values 0-127)
-
-Annotated example (length-prefixed variant — BIG, one entry):
-```
-00000000: 001a 0010 37ac 9f53 bd8e 4da5 a41a 240f  |....7..S..M...$.
-00000010: 8f5a 6cfd 0000 0480 004f 88               |.Zl......O.     |
-```
-- `001a` → entry length (26 bytes)
-- `0010` → marker (partition key digest follows)
-- `37ac…6cfd` → 16-byte digest
-- `0000 0480 004f 88` → variable-length fields: data offset (and optional size/payload per format)
-
-Tiny side-by-side comparison (first 12–16 bytes):
-```
-// No length prefix (legacy/BIG):
-0010 6b88 bf20 a251 11f0 a3fe f1a5 | 0010 + 16B digest ...
-
-// With 2-byte length prefix (some 5.0 BIG tables):
-001a 0010 37ac 9f53 bd8e 4da5 a41a | 001a + 0010 + 16B digest ...
-```
-
-Variant gating (BIG):
-
-Pseudo-structs per variant (field order, big-endian for fixed-width):
+`Index.db` (the BIG / NB partition index) stores, for every partition, the **raw partition
+key** (length-prefixed) together with its byte offset into `Data.db`. There is **no `0x0010`
+marker and no MD5 digest** — that was a long-standing documentation error (Issue #552). Each
+entry is:
 
 ```
-// No length prefix (legacy/BIG variant)
-u16 marker = 0x0010
-u128 partition_key_digest
-varint data_offset
-[optional promoted-index payload]
-
-// With 2-byte length prefix (some 5.0 BIG tables)
-u16 entry_length
-u16 marker = 0x0010
-u128 partition_key_digest
-varint data_offset
-[optional promoted-index payload]
+[key_len: u16 BE]                    ← length of the raw partition key
+[raw partition key bytes: key_len]   ← the partition key exactly as serialized in Data.db
+[data_offset: unsigned vint]         ← byte offset into the Data.db data section
+[promoted_index_len: unsigned vint]  ← byte length of the promoted index (0 = none)
+[promoted_index_data: promoted_index_len bytes]
 ```
 
-**Critical: VInt Offset Encoding (NB Format)**
+> **The leading `u16` is the partition key LENGTH, not a marker.** It varies with the key:
+> `0x0010` for a 16-byte UUID key, `0x0026` (= 38) for a 38-byte composite partition key,
+> `0x0004` for a 4-byte `int` key, and so on. Earlier revisions of this guide misread the
+> `0x0010` produced by single-UUID tables as a fixed marker; it is simply the length of a
+> 16-byte key.
 
-For NB format SSTables (Cassandra 5.0+), the `data_offset` uses **Cassandra VInt encoding**, NOT a length-prefixed byte array:
+Annotated example — single UUID key (`simple_table`, key length 16):
+```
+00000000: 0010 1529 1a77 d739 4e73 8397 b787 442f  |...).w.9Ns....D/|
+00000010: 3a1f 0000 ...                            |:.. .          |
+```
+- `0010` → key length = 16
+- `1529…3a1f` → 16-byte raw partition key (a UUID)
+- `00` → unsigned VInt data offset (value 0)
+- `00` → unsigned VInt promoted-index length (0, no promoted index)
 
+Annotated example — composite key (`multi_partition_table`, `PRIMARY KEY ((tenant_id, user_id), …)`, key length 38):
 ```
-// NB format (Cassandra 5.0+) - DigestFormat
-u16 marker = 0x0010
-u128 partition_key_digest
-vint data_offset          // VInt encoded, 1-9 bytes based on value magnitude
-vint promoted_size        // VInt encoded size of following promoted index data
-byte promoted_data[promoted_size]  // Promoted index (only if size > 0)
+00000000: 0026 0010 98e0 5820 982d 411c 961f 26d1  |.&....X .-A...&.|
+00000010: 0574 74e4 0000 109d 159a 2b08 da4a d1be  |.tt.......+..J..|
+00000020: 78c9 0f87 83e5 c100 ...                  |x..... .       |
 ```
+- `0026` → key length = 38
+- `0010 98e0…74e4 00 0010 9d15…c1 00` → 38-byte composite key. Cassandra frames each
+  component as `[len: u16 BE][value][0x00 end-of-component]`, so two 16-byte UUIDs become
+  `0010<uuid1>00 0010<uuid2>00` = 19 + 19 = 38 bytes.
+- the data-offset and promoted-index-length vints follow the key.
+
+Pseudo-struct (field order; big-endian for fixed-width):
+```
+u16   key_len
+bytes raw_partition_key[key_len]
+vint  data_offset
+vint  promoted_index_len
+bytes promoted_index[promoted_index_len]   // only when promoted_index_len > 0
+```
+
+**Critical: VInt offset encoding (NB format)**
+
+The `data_offset` and `promoted_index_len` fields use **Cassandra unsigned VInt encoding**,
+not a fixed-width or length-prefixed byte array:
 
 VInt encoding (from `DataInputPlus.java`):
 - First byte's leading 1-bits indicate total byte count
@@ -79,45 +72,42 @@ VInt encoding (from `DataInputPlus.java`):
 - `0xC0-0xDF`: 3 bytes
 - etc.
 
-Example from `sensor_data` Index.db:
+Example offsets:
 ```
 0x00       -> 1 byte  -> value = 0
 0xb0 0x5d  -> 2 bytes -> value = 12381
 0xc0 0x5f 0x11 -> 3 bytes -> value = 24337
 ```
 
-**Important**: NB format offsets are **relative to the Data.db data section** (excluding the compression header, typically 30 bytes). Add the header size when seeking:
+**Important**: NB format offsets are **relative to the Data.db data section** (excluding the
+compression header, typically 30 bytes). Add the header size when seeking:
 ```
 file_offset = index_offset + header_size
 ```
 
-Gate detection is handled by the BIG reader; consult `org.apache.cassandra.io.sstable.format.big.BigTableReader` and `RowIndexEntry` for exact parsing. Implementations must handle both variants by detecting an initial length field that precedes the `0x0010` marker.
-
-Digest and collisions:
-- Partition key digest is 16 bytes; derived from the partition key via Cassandra’s partitioner (e.g., Murmur3Partitioner). Treat digest as an index key; on match, validate by reading the `Data.db` key to guard against extremely rare collisions.
+Keys and collisions:
+- The on-disk key is the raw partition key, so lookups can compare keys directly (no digest /
+  collision handling is required at the index layer). On a hash-based point lookup that misses,
+  readers fall back to a full scan that compares raw keys (see Issue #517).
 
 Promoted index payload (BIG):
-- Emitted for wide partitions. The payload follows the offset field when present; readers identify it by entry payload length (length-prefixed variant) or by probing entry structure (non-prefixed). See `RowIndexEntry` for exact fields.
+- Emitted for wide partitions to accelerate within-partition seeks. Its length is given
+  explicitly by `promoted_index_len`; when it is 0 the entry has no promoted index. See
+  `org.apache.cassandra.io.sstable.format.big` reader/writer for the payload fields.
 
-Mini-parser (variant-tolerant) — conceptual:
+Mini-parser — conceptual:
 ```text
 pos = 0
-prefix = read_u16_be()
-if prefix == 0x0010:
-  // non-length-prefixed variant
-  marker = prefix
-else:
-  entry_len = prefix
-  marker = read_u16_be()
-  assert(marker == 0x0010)
-
-digest = read_16_bytes()
-data_offset = read_vint_u64()
-payload_len = (entry_len - bytes_consumed_so_far) if entry_len else 0
-promoted_index = read_bytes(payload_len) if payload_len > 0
+key_len            = read_u16_be()
+raw_key            = read_bytes(key_len)
+data_offset        = read_vint_u64()
+promoted_index_len = read_vint_u64()
+promoted_index     = read_bytes(promoted_index_len)   // empty when length == 0
 ```
 
-Promoted index (BIG): emitted for wide partitions to accelerate within-partition seeks. Readers detect presence via entry payload structure and fall back to scan when absent. See `org.apache.cassandra.io.sstable.format.big` reader/writer for details.
+> Note: a BTI-indexed SSTable does **not** use `Index.db` at all — it uses the
+> `Partitions.db` / `Rows.db` trie structures (see Ch.17). So `Index.db`, when present, is
+> always this BIG-format partition index; there is no separate "BTI Index.db" variant to detect.
 
 ## Summary.db Format
 
@@ -227,24 +217,29 @@ This section documents the SSTable write workflow for generating Index.db and Su
 
 ### Index.db Entry Format (Write)
 
-When writing Index.db entries in BIG format (NB variant), each entry follows this structure:
+When writing Index.db entries in BIG format (NB variant), each entry follows this structure.
+The entry begins with the partition key **length** and the **raw partition key bytes** — there
+is no `0x0010` marker and no MD5 digest (Issue #552):
 
 ```c
 struct index_entry {
-    be16 marker = 0x0010;          // Partition key digest marker
-    byte digest[16];               // MD5 hash of partition key bytes
+    be16 key_len;                  // Length of the raw partition key
+    byte raw_key[key_len];         // Raw partition key bytes (same as in Data.db)
     vint data_offset;              // Byte offset in Data.db (VInt encoded)
-    vint promoted_index_length;    // Length of promoted index data
+    vint promoted_index_length;    // Length of promoted index data (0 = none)
     byte promoted_index_data[promoted_index_length];  // Only if length > 0
 };
 ```
 
 **Key Requirements:**
 
-1. **Marker**: Always `0x0010` (big-endian), indicating partition key digest follows
-2. **Digest**: MD5 hash of raw partition key bytes (16 bytes)
-3. **Data Offset**: VInt-encoded byte offset in Data.db where partition starts
-4. **Promoted Index**: Length of 0 for simple partitions (M5 Stage 0 implementation)
+1. **Key length**: `be16` length of the raw partition key (e.g. `0x0010` for a 16-byte UUID,
+   `0x0026` for a 38-byte composite key, `0x0004` for a 4-byte `int`). This is a LENGTH, not a
+   marker.
+2. **Raw key**: The raw serialized partition key bytes, byte-for-byte identical to the key in
+   Data.db (no hashing, no digest).
+3. **Data Offset**: VInt-encoded byte offset in Data.db where the partition starts.
+4. **Promoted Index**: Length of 0 for simple partitions (M5 Stage 0 implementation).
 
 ### Index.db Offset Tracking
 
@@ -256,7 +251,7 @@ When adding entries to Index.db, the file offset where each entry starts must be
 // Capture the offset BEFORE writing
 let index_offset = buffer.len() as u64;
 
-// Write entry (marker + digest + position + promoted_index_length)
+// Write entry (key_len + raw key + position + promoted_index_length)
 write_entry(&mut buffer, key, data_offset)?;
 
 // Return IndexEntryInfo for Summary.db sampling
@@ -272,18 +267,14 @@ IndexEntryInfo {
 
 This information is used by Summary.db sampling to record accurate Index.db positions.
 
-### MD5 Digest Calculation
+### Raw Key Storage (no digest)
 
-The partition key digest is computed as:
-
-```rust
-let digest = md5::compute(&partition_key_bytes);
-```
-
-The digest is the MD5 hash of the raw partition key bytes (not the token). This allows readers to:
-1. Binary search Index.db by digest
-2. Validate matches against the actual partition key in Data.db
-3. Guard against rare MD5 collisions
+Index.db stores the **raw partition key bytes** length-prefixed; it does NOT store an MD5
+digest. (A prior version of this guide incorrectly described an MD5 digest — see Issue #552.)
+Because the raw key is on disk, readers can:
+1. Binary search / scan Index.db comparing the raw partition key directly
+2. Use the inline `data_offset` to seek straight into Data.db
+3. Avoid any hash-collision handling at the index layer
 
 ### VInt Encoding for Offsets
 
@@ -559,10 +550,10 @@ Data.db:
   [Partition 2 at offset 250]
   [Partition 3 at offset 500]
 
-Index.db:
-  [Entry 1 at offset 0: digest + data_offset=0]
-  [Entry 2 at offset 20: digest + data_offset=250]
-  [Entry 3 at offset 40: digest + data_offset=500]
+Index.db (16-byte UUID keys → each entry is 2 + 16 + vint + vint bytes):
+  [Entry 1 at offset 0:  key_len + raw_key + data_offset=0]
+  [Entry 2 at offset 20: key_len + raw_key + data_offset=250]
+  [Entry 3 at offset 40: key_len + raw_key + data_offset=500]
 
 Summary.db:
   [Entry 0 sampled: key + index_offset=0]    ← Sample every 128th
