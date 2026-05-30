@@ -106,6 +106,10 @@ harness = false
 name = "fixtures_smoke"
 harness = false
 
+[[bench]]
+name = "read"
+harness = false
+
 [features]
 # M2+ production defaults: Full query engine enabled
 default = ["all-compression", "state_machine"]
