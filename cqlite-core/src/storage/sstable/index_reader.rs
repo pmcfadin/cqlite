@@ -404,7 +404,11 @@ fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionIndexEntry> {
     // Read promoted-index length (unsigned VInt) and skip the promoted data.
     // Partition-level lookups work without decoding the promoted index.
     let (input, promoted_len) = parse_vuint(input)?;
-    let (input, _promoted_data) = take(promoted_len as usize)(input)?;
+    // Saturating cast: on a 32-bit target `promoted_len as usize` could truncate and
+    // misalign subsequent entries. `usize::MAX` makes `take` return an Eof error on a
+    // short buffer instead, which is the safe failure mode for a corrupt Index.db.
+    let promoted_len = usize::try_from(promoted_len).unwrap_or(usize::MAX);
+    let (input, _promoted_data) = take(promoted_len)(input)?;
 
     log::trace!(
         "Index.db BIG entry: key_len={}, data_offset={}, promoted_len={}",
@@ -752,11 +756,11 @@ mod tests {
 
     #[test]
     fn test_simple_partition_key_parsing() {
-        // NB format: marker(2) + key_digest(16) + vint_offset(1-9) + vint_promoted_size(1-9)
+        // NB BIG format: key_len(2) + raw_key(key_len) + vint_offset(1-9) + vint_promoted_size(1-9)
         // VInt encoding for 256: 0x81, 0x00 (2 bytes, 10xxxxxx format)
         let data = vec![
-            0x00, 0x10, // marker = 0x0010
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest (16 bytes)
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // raw key (16 bytes)
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
             0x81, 0x00, // VInt offset = 256
             0x00, // VInt promoted_size = 0 (no promoted index)
@@ -840,20 +844,20 @@ mod tests {
     #[test]
     fn test_multiple_partition_keys_parsing() {
         // Two partition entries with VInt offsets (NB format)
-        // Format: marker(2) + digest(16) + vint_offset + vint_promoted_size
+        // Format: key_len(2) + raw_key(key_len) + vint_offset + vint_promoted_size
         // VInt encoding for 100 (0x64): 0x64 (1 byte, value < 128)
         // VInt encoding for 500 (0x1F4): 0x81, 0xF4 (2 bytes, 10xxxxxx format)
         //   byte0 = 0x80 | ((500 >> 8) & 0x3F) = 0x80 | 1 = 0x81
         //   byte1 = 500 & 0xFF = 0xF4
         let data = vec![
             // Entry 1
-            0x00, 0x10, // marker = 0x0010
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1 (16 bytes)
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
             0x64, // VInt offset = 100
             0x00, // VInt promoted_size = 0
             // Entry 2
-            0x00, 0x10, // marker = 0x0010
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2 (16 bytes)
             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, // key_digest cont.
             0x81, 0xF4, // VInt offset = 500
@@ -896,18 +900,18 @@ mod tests {
         // to avoid heap allocation on every lookup
 
         // Create index data with two partition entries (NB format with VInt offsets)
-        // Format: marker(2) + digest(16) + vint_offset + vint_promoted_size
+        // Format: key_len(2) + raw_key(key_len) + vint_offset + vint_promoted_size
         // VInt for 100: 0x64 (single byte, value < 128)
         // VInt for 500: 0x81, 0xF4 (2 bytes)
         let data = vec![
             // Entry 1
-            0x00, 0x10, // marker = 0x0010
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
             0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, // key_digest 1
             0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, // key_digest cont.
             0x64, // VInt offset = 100
             0x00, // VInt promoted_size = 0
             // Entry 2
-            0x00, 0x10, // marker = 0x0010
+            0x00, 0x10, // key_len = 16 (e.g. a 16-byte UUID partition key)
             0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, // key_digest 2
             0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20, // key_digest cont.
             0x81, 0xF4, // VInt offset = 500

@@ -16,7 +16,12 @@ impl SSTableReader {
         partition_key: &[u8],
     ) -> Result<Option<(u64, u32)>> {
         if let Some(index_reader) = &self.index_reader {
-            // Compute the proper key digest for Index.db lookup
+            // KNOWN LIMITATION (tracked in #553): Index.db entries are now
+            // keyed on the RAW partition key (the real Cassandra BIG format, #552),
+            // but this path still computes a hash digest, so the lookup misses and
+            // every caller falls back to a sequential scan (the #517 fallback path).
+            // Reads remain correct; restoring O(1) raw-key point lookup is a separate
+            // optimization, intentionally out of scope for #552.
             let key_digest = match self.compute_partition_key_digest(partition_key).await {
                 Ok(digest) => digest,
                 Err(e) => {
