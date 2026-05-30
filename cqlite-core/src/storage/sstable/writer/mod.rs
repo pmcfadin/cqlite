@@ -228,15 +228,19 @@ impl SSTableWriter {
         stats.min_ttl = i32::MAX;
         stats.min_local_deletion_time = i32::MAX;
 
-        // Create Data.db writer (needs stats for delta encoding)
-        let data_writer = DataWriter::new(stats.clone());
-
-        // Create Index.db writer
-        let index_writer = IndexWriter::new();
-
         // Compute the SSTable output directory: output_dir/keyspace/table/
         // This ensures the reader's extract_table_name() can map files to table names.
         let sstable_dir = output_dir.join(&schema.keyspace).join(&schema.table);
+
+        // Create Data.db writer in streaming mode (Issue #492): each partition is
+        // flushed to the Data.db file as it is written, bounding peak memory to a
+        // single partition instead of buffering the whole component. The file is
+        // opened lazily on the first partition (creating sstable_dir as needed).
+        let data_path = Self::component_path(&sstable_dir, generation, "Data.db");
+        let data_writer = DataWriter::with_sink(stats.clone(), data_path);
+
+        // Create Index.db writer
+        let index_writer = IndexWriter::new();
 
         // Create Filter.db writer (1% false positive rate by default)
         let filter_path = Self::component_path(&sstable_dir, generation, "Filter.db");
@@ -451,8 +455,10 @@ impl SSTableWriter {
     /// ```
     pub async fn finish(mut self) -> Result<SSTableInfo> {
         // Create keyspace/table subdirectory structure so the reader can
-        // extract the table name from the parent directory path.
-        let sstable_dir = &self.sstable_dir;
+        // extract the table name from the parent directory path. Owned clone so
+        // `finish_streaming()` can move `self.data_writer` out below.
+        let sstable_dir = self.sstable_dir.clone();
+        let sstable_dir = sstable_dir.as_path();
         tokio::fs::create_dir_all(sstable_dir).await?;
 
         // Finalize statistics metadata (normalize sentinel values)
@@ -463,11 +469,17 @@ impl SSTableWriter {
         let stats_writer = StatisticsWriter::new(stats_path.clone());
         stats_writer.write(&self.stats, Some(&self.schema))?;
 
-        // 2. Write Data.db
+        // 2. Finalize Data.db (Issue #492)
+        // The DataWriter has been streaming each partition to disk as it was
+        // written, so there is no whole-file buffer to write here. `finish_streaming`
+        // flushes and fsyncs the sink and returns the total byte size. If no
+        // partitions were written, lazily ensure an (empty) Data.db file exists so
+        // the downstream Digest CRC re-read and TOC publication remain valid.
         let data_path = Self::component_path(sstable_dir, self.generation, "Data.db");
-        let data_bytes = self.data_writer.finish()?;
-        tokio::fs::write(&data_path, &data_bytes).await?;
-        let data_size = data_bytes.len() as u64;
+        let data_size = self.data_writer.finish_streaming()?;
+        if data_size == 0 && !data_path.exists() {
+            tokio::fs::write(&data_path, b"").await?;
+        }
 
         // 3. Write Index.db
         let index_path = Self::component_path(sstable_dir, self.generation, "Index.db");
