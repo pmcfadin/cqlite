@@ -17,6 +17,9 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 use std::path::PathBuf;
 use std::sync::Arc;
 
+#[path = "fixtures/mod.rs"]
+mod fixtures;
+
 /// Benchmark context holding real SSTable data from multiple datasets
 struct BenchmarkContext {
     /// Index reader for partition lookup benchmarks
@@ -34,17 +37,6 @@ struct BenchmarkContext {
 
 impl BenchmarkContext {
     async fn new() -> Self {
-        // Prefer CQLITE_DATASETS_ROOT; fall back to the workspace-relative
-        // test-data path derived from CARGO_MANIFEST_DIR so the bench runs
-        // without environment setup (the crate dir is `<workspace>/cqlite-core`).
-        let dataset_root = std::env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| {
-            eprintln!("CQLITE_DATASETS_ROOT not set, using workspace-relative test-data path");
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../test-data/datasets")
-                .to_string_lossy()
-                .into_owned()
-        });
-
         // Initialize platform and config (required for all M1 SSTable APIs)
         let config = Config::default();
         let platform = Arc::new(
@@ -53,9 +45,10 @@ impl BenchmarkContext {
                 .expect("Failed to initialize platform"),
         );
 
-        // Use sensor_data SSTable from test_timeseries for index lookups (85KB)
-        let sensor_data_dir = PathBuf::from(&dataset_root)
-            .join("sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9");
+        // Use sensor_data SSTable from test_timeseries for index lookups (~85KB).
+        // Resolved hash-independently via the shared fixture loader (Issue #537),
+        // which panics with a fetch hint if the fixture is missing.
+        let sensor_data_dir = fixtures::table_dir("test_timeseries", "sensor_data");
         let index_path = sensor_data_dir.join("nb-1-big-Index.db");
 
         // Load Index.db for partition lookup benchmarks
@@ -78,16 +71,13 @@ impl BenchmarkContext {
 
         // Collect SSTable data paths for throughput benchmarks (largest first)
         let sstable_paths = vec![
-            // Largest: simple_table (632KB)
-            PathBuf::from(&dataset_root)
-                .join("sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db"),
-            // compression_test_table (212KB)
-            PathBuf::from(&dataset_root)
-                .join("sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db"),
-            // collection_table (148KB)
-            PathBuf::from(&dataset_root)
-                .join("sstables/test_collections/collection_table-6b8c8fb0a25111f0a3fef1a551383fb9/nb-1-big-Data.db"),
-            // sensor_data (88KB)
+            // Largest: simple_table (~632KB)
+            fixtures::table_dir("test_basic", "simple_table").join("nb-1-big-Data.db"),
+            // compression_test_table (~212KB)
+            fixtures::table_dir("test_basic", "compression_test_table").join("nb-1-big-Data.db"),
+            // collection_table (~148KB)
+            fixtures::table_dir("test_collections", "collection_table").join("nb-1-big-Data.db"),
+            // sensor_data (~88KB)
             sensor_data_dir.join("nb-1-big-Data.db"),
         ];
 
