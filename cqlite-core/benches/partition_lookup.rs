@@ -21,9 +21,15 @@ struct BenchmarkContext {
 
 impl BenchmarkContext {
     async fn new() -> Self {
+        // Prefer CQLITE_DATASETS_ROOT; fall back to the workspace-relative
+        // test-data path derived from CARGO_MANIFEST_DIR so the bench runs
+        // without environment setup (the crate dir is `<workspace>/cqlite-core`).
         let dataset_root = std::env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| {
-            eprintln!("CQLITE_DATASETS_ROOT not set, using default test-data path");
-            "/Users/patrick/local_projects/cqlite/test-data/datasets".to_string()
+            eprintln!("CQLITE_DATASETS_ROOT not set, using workspace-relative test-data path");
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../test-data/datasets")
+                .to_string_lossy()
+                .into_owned()
         });
 
         // Use sensor_data SSTable from test_timeseries

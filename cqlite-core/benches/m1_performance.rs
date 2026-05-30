@@ -34,10 +34,16 @@ struct BenchmarkContext {
 
 impl BenchmarkContext {
     async fn new() -> Self {
-        let dataset_root = std::env::var("CQLITE_DATASETS_ROOT").expect(
-            "CQLITE_DATASETS_ROOT environment variable must be set for benchmarks. \
-                     Example: export CQLITE_DATASETS_ROOT=/path/to/test-data/datasets",
-        );
+        // Prefer CQLITE_DATASETS_ROOT; fall back to the workspace-relative
+        // test-data path derived from CARGO_MANIFEST_DIR so the bench runs
+        // without environment setup (the crate dir is `<workspace>/cqlite-core`).
+        let dataset_root = std::env::var("CQLITE_DATASETS_ROOT").unwrap_or_else(|_| {
+            eprintln!("CQLITE_DATASETS_ROOT not set, using workspace-relative test-data path");
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../test-data/datasets")
+                .to_string_lossy()
+                .into_owned()
+        });
 
         // Initialize platform and config (required for all M1 SSTable APIs)
         let config = Config::default();
