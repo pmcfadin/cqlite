@@ -67,6 +67,7 @@ use crate::storage::write_engine::mutation::{
 };
 use crate::types::{ComparatorType, UdtTypeDef, Value};
 use std::io::Write;
+use std::path::PathBuf;
 
 // Row header flag constants (from V5CompressedLegacy parser)
 const ROW_HAS_TIMESTAMP: u8 = 0x04;
@@ -108,28 +109,136 @@ const END_BOUNDARY: u8 = 5; // Top (end of partition)
 // Partition/row markers
 const END_OF_PARTITION: u8 = 0x01;
 
+/// Capacity of the streaming Data.db `BufWriter` (Issue #492).
+///
+/// Large enough that each flushed partition coalesces into a handful of big
+/// `write()` syscalls instead of many small default-8 KB ones, preserving the
+/// throughput of the previous single whole-file write while keeping resident
+/// memory bounded (this buffer plus one partition's scratch).
+const DATA_SINK_BUFFER_BYTES: usize = 1024 * 1024;
+
 /// Data.db component writer
 ///
 /// Writes partitions and rows in V5CompressedLegacy format with delta encoding.
 /// Caller must provide partitions in token order and rows in clustering order.
+///
+/// # Memory model (Issue #492)
+///
+/// The writer supports two modes that produce **byte-identical** Data.db output:
+///
+/// * **In-memory mode** (`DataWriter::new`): every partition is appended to the
+///   `buffer` scratch and never flushed, so `finish()` returns the full Data.db
+///   bytes. Used by unit tests that inspect the produced bytes directly.
+///
+/// * **Streaming mode** (`DataWriter::with_sink`): each partition is built in the
+///   `buffer` scratch, written to a `BufWriter<File>` over the Data.db path, and
+///   the scratch is cleared. Peak heap is therefore `O(largest partition)` rather
+///   than `O(file)`, keeping a multi-GB compaction within the 128 MB target.
+///
+/// In both modes the file offset of a partition is `position + buffer.len()`
+/// measured before any bytes are written. In streaming mode `buffer` is empty at
+/// that point (just cleared) so the offset is `position`; in memory mode
+/// `position` is always 0 and `buffer` holds all prior partitions, so the offset
+/// equals the legacy `buffer.len()`. The within-partition size math uses relative
+/// deltas into `buffer`, which are identical regardless of mode.
 #[derive(Debug)]
 pub struct DataWriter {
-    /// Output buffer for Data.db content
+    /// Per-partition scratch buffer for Data.db content.
+    ///
+    /// In streaming mode this is cleared at the start of every `write_partition`
+    /// and flushed to `sink` at the end, so only one partition is resident.
+    /// In memory mode it accumulates the entire Data.db output.
     buffer: Vec<u8>,
+    /// Streaming sink over the Data.db path (streaming mode only).
+    ///
+    /// Lazily opened on the first `write_partition` so that the keyspace/table
+    /// directory exists before the first byte is written. `None` in in-memory
+    /// mode.
+    sink: Option<std::io::BufWriter<std::fs::File>>,
+    /// Data.db output path (streaming mode only); used for lazy sink open.
+    data_path: Option<PathBuf>,
+    /// Bytes already flushed to `sink`. Always 0 in in-memory mode.
+    position: u64,
     /// Statistics metadata for delta encoding
     stats: StatisticsMetadata,
 }
 
 impl DataWriter {
-    /// Create a new Data.db writer
+    /// Create a new in-memory Data.db writer.
+    ///
+    /// All partitions accumulate in `buffer`; `finish()` returns the full bytes.
+    /// Prefer [`DataWriter::with_sink`] for production writes to bound memory.
     ///
     /// # Arguments
     /// * `stats` - Statistics metadata for delta encoding baselines
     pub fn new(stats: StatisticsMetadata) -> Self {
         Self {
             buffer: Vec::new(),
+            sink: None,
+            data_path: None,
+            position: 0,
             stats,
         }
+    }
+
+    /// Create a streaming Data.db writer that flushes each partition to `data_path`.
+    ///
+    /// The file is opened lazily on the first `write_partition` (creating the
+    /// parent directory if needed) so the keyspace/table layout is established
+    /// before any bytes are written. Memory is bounded to the largest single
+    /// partition.
+    ///
+    /// # Arguments
+    /// * `stats` - Statistics metadata for delta encoding baselines
+    /// * `data_path` - Destination path for the Data.db component
+    pub fn with_sink(stats: StatisticsMetadata, data_path: PathBuf) -> Self {
+        Self {
+            buffer: Vec::new(),
+            sink: None,
+            data_path: Some(data_path),
+            position: 0,
+            stats,
+        }
+    }
+
+    /// Lazily open the streaming sink (and create the parent directory).
+    ///
+    /// No-op in in-memory mode or once the sink is already open.
+    fn ensure_sink(&mut self) -> Result<()> {
+        if self.sink.is_some() {
+            return Ok(());
+        }
+        if let Some(path) = self.data_path.clone() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::File::create(&path)?;
+            // Use a large BufWriter so a partition's bytes coalesce into a few
+            // big write() syscalls rather than many 8 KB-default ones, matching
+            // the throughput of the old single whole-file write.
+            self.sink = Some(std::io::BufWriter::with_capacity(
+                DATA_SINK_BUFFER_BYTES,
+                file,
+            ));
+        }
+        Ok(())
+    }
+
+    /// In streaming mode, flush the current scratch buffer to the sink, advance
+    /// `position`, and clear the scratch so only one partition is ever resident.
+    /// No-op in in-memory mode (the scratch keeps accumulating).
+    fn flush_partition(&mut self) -> Result<()> {
+        if self.data_path.is_none() {
+            // In-memory mode: keep accumulating in `buffer`.
+            return Ok(());
+        }
+        self.ensure_sink()?;
+        if let Some(sink) = self.sink.as_mut() {
+            sink.write_all(&self.buffer)?;
+        }
+        self.position += self.buffer.len() as u64;
+        self.buffer.clear();
+        Ok(())
     }
 
     /// Update the statistics metadata
@@ -160,7 +269,12 @@ impl DataWriter {
         partition_tombstone: Option<&PartitionTombstone>,
         range_tombstones: &[RangeTombstone],
     ) -> Result<u64> {
-        let partition_offset = self.buffer.len() as u64;
+        // File offset of this partition = bytes already flushed (`position`) plus
+        // whatever is currently buffered. In streaming mode `buffer` is empty at
+        // the start of each partition (flushed + cleared by the previous call),
+        // so this is `position`; in in-memory mode `position` is 0 and `buffer`
+        // holds all prior partitions, matching the legacy `buffer.len()`.
+        let partition_offset = self.position + self.buffer.len() as u64;
 
         // Write partition header (with optional tombstone)
         let header_start = self.buffer.len();
@@ -284,6 +398,10 @@ impl DataWriter {
         // Write end-of-partition marker
         self.buffer.push(END_OF_PARTITION);
 
+        // Streaming mode: flush this partition to disk and clear the scratch so
+        // only one partition is ever resident in memory. No-op in memory mode.
+        self.flush_partition()?;
+
         Ok(partition_offset)
     }
 
@@ -332,9 +450,39 @@ impl DataWriter {
         Ok(self.buffer.len() - start_len)
     }
 
-    /// Finish writing and return the Data.db bytes
+    /// Finish writing and return the Data.db bytes (in-memory mode).
+    ///
+    /// Only valid for writers created via [`DataWriter::new`]. In streaming mode
+    /// the bytes live on disk; use [`DataWriter::finish_streaming`] instead.
     pub fn finish(self) -> Result<Vec<u8>> {
+        debug_assert!(
+            self.data_path.is_none(),
+            "DataWriter::finish() called on a streaming writer; use finish_streaming()"
+        );
         Ok(self.buffer)
+    }
+
+    /// Finish a streaming writer: flush the sink to disk and return the total
+    /// number of Data.db bytes written (i.e. `data_size`).
+    ///
+    /// Any residual scratch (there is none in normal operation, since
+    /// `write_partition` flushes per partition) is flushed first. Returns an
+    /// error if the writer was created in in-memory mode.
+    pub fn finish_streaming(mut self) -> Result<u64> {
+        if self.data_path.is_none() {
+            return Err(Error::InvalidInput(
+                "finish_streaming() called on an in-memory DataWriter".to_string(),
+            ));
+        }
+        // Flush any residual scratch (normally empty), then flush the sink so all
+        // bytes reach the OS file (the subsequent Digest CRC re-read of the same
+        // file sees them via the page cache). This matches the durability of the
+        // previous `tokio::fs::write`, which did not fsync either.
+        self.flush_partition()?;
+        if let Some(mut sink) = self.sink.take() {
+            sink.flush()?;
+        }
+        Ok(self.position)
     }
 
     /// Write partition header
@@ -1746,9 +1894,29 @@ impl DataWriter {
         Ok(self.buffer.len() - start_len)
     }
 
-    /// Get current file position (for Index.db offset tracking)
+    /// Get current file position (for Index.db offset tracking).
+    ///
+    /// This is the total number of Data.db bytes produced so far: bytes already
+    /// flushed to the sink (`position`) plus bytes currently buffered. Identical
+    /// in both streaming and in-memory modes.
     pub fn position(&self) -> u64 {
-        self.buffer.len() as u64
+        self.position + self.buffer.len() as u64
+    }
+
+    /// Length of the per-partition scratch buffer.
+    ///
+    /// In streaming mode this reflects only the most recently written partition
+    /// (the scratch is cleared after each flush), which is the basis of the
+    /// bounded-memory guarantee. Test-only accessor.
+    #[cfg(test)]
+    pub(crate) fn scratch_len(&self) -> usize {
+        self.buffer.len()
+    }
+
+    /// Number of bytes already flushed to the streaming sink. Test-only accessor.
+    #[cfg(test)]
+    pub(crate) fn flushed_position(&self) -> u64 {
+        self.position
     }
 
     fn ordered_columns<'a, F>(&self, schema: &'a TableSchema, predicate: F) -> Vec<&'a Column>
@@ -5203,6 +5371,152 @@ mod tests {
         assert_eq!(
             buf[0], 2,
             "Bitmap should mark 'name' as missing (bit 1) but 'age' as present (bit 0)"
+        );
+    }
+
+    // ========== Issue #492: streaming DataWriter tests ==========
+
+    /// Build a deterministic set of partitions used by the streaming tests.
+    fn streaming_test_partitions() -> Vec<(DecoratedKey, Vec<Mutation>)> {
+        let table_id = TableId::new("test_ks", "test_table");
+        (0..16u32)
+            .map(|i| {
+                let key = DecoratedKey::new(i as i64, i.to_be_bytes().to_vec());
+                let pk = PartitionKey::single("id", Value::Integer(i as i32));
+                let mutation = Mutation::new(
+                    table_id.clone(),
+                    pk,
+                    None,
+                    vec![CellOperation::Write {
+                        column: "name".to_string(),
+                        value: Value::Text(format!("partition-{i}")),
+                    }],
+                    1_001_000 + i as i64,
+                    None,
+                );
+                (key, vec![mutation])
+            })
+            .collect()
+    }
+
+    /// Byte-identical guard (Issue #492): the streaming writer (flushing each
+    /// partition to a file) must produce a Data.db byte sequence that is
+    /// identical to the legacy in-memory writer, and the returned partition
+    /// offsets must match exactly. Anything else breaks Index.db offsets.
+    #[test]
+    fn test_streaming_writer_byte_identical_to_in_memory() {
+        let schema = create_test_schema();
+        let partitions = streaming_test_partitions();
+
+        // In-memory reference: accumulate every partition in `buffer`.
+        let mut mem_writer = DataWriter::new(create_test_stats());
+        let mut mem_offsets = Vec::new();
+        for (key, mutations) in &partitions {
+            mem_offsets.push(
+                mem_writer
+                    .write_partition(key, mutations, &schema, None, &[])
+                    .unwrap(),
+            );
+        }
+        let expected_bytes = mem_writer.finish().unwrap();
+
+        // Streaming: flush each partition to a temp Data.db file.
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("nb-1-big-Data.db");
+        let mut stream_writer = DataWriter::with_sink(create_test_stats(), data_path.clone());
+        let mut stream_offsets = Vec::new();
+        for (key, mutations) in &partitions {
+            stream_offsets.push(
+                stream_writer
+                    .write_partition(key, mutations, &schema, None, &[])
+                    .unwrap(),
+            );
+        }
+        let data_size = stream_writer.finish_streaming().unwrap();
+
+        // Offsets returned to the caller (fed to Index.db) must be identical.
+        assert_eq!(
+            stream_offsets, mem_offsets,
+            "streaming partition offsets must equal in-memory offsets"
+        );
+
+        // The on-disk Data.db must be byte-for-byte identical to the in-memory
+        // bytes, and the reported data_size must match the file length.
+        let on_disk = std::fs::read(&data_path).unwrap();
+        assert_eq!(
+            on_disk, expected_bytes,
+            "streamed Data.db must be byte-identical to in-memory Data.db"
+        );
+        assert_eq!(
+            data_size as usize,
+            expected_bytes.len(),
+            "finish_streaming() data_size must equal file length"
+        );
+
+        // Every returned offset must point at the actual start byte in the file:
+        // a partition starts with its 2-byte key length, here always 0x0004.
+        for &off in &stream_offsets {
+            assert_eq!(
+                &on_disk[off as usize..off as usize + 2],
+                &[0x00, 0x04],
+                "offset {off} must land on a partition's key-length prefix"
+            );
+        }
+    }
+
+    /// Bounded-memory evidence (Issue #492): after each `write_partition` the
+    /// scratch buffer must hold only the most recent partition, while the
+    /// flushed `position` grows monotonically. This is the proof that peak heap
+    /// is O(largest partition) rather than O(file).
+    #[test]
+    fn test_streaming_writer_bounds_memory_to_one_partition() {
+        let schema = create_test_schema();
+        let partitions = streaming_test_partitions();
+
+        let dir = tempfile::tempdir().unwrap();
+        let data_path = dir.path().join("nb-1-big-Data.db");
+        let mut writer = DataWriter::with_sink(create_test_stats(), data_path);
+
+        let mut prev_flushed = 0u64;
+        let mut max_scratch = 0usize;
+        for (i, (key, mutations)) in partitions.iter().enumerate() {
+            let flushed_before = writer.flushed_position();
+            writer
+                .write_partition(key, mutations, &schema, None, &[])
+                .unwrap();
+
+            // After a partition is written it has been flushed and the scratch
+            // cleared: the scratch must be empty, never accumulating prior
+            // partitions.
+            assert_eq!(
+                writer.scratch_len(),
+                0,
+                "scratch must be cleared after partition {i} (bounded memory)"
+            );
+
+            // Flushed bytes must strictly increase by this partition's size.
+            let flushed_after = writer.flushed_position();
+            assert!(
+                flushed_after > flushed_before,
+                "flushed position must grow after writing partition {i}"
+            );
+            let this_partition_size = (flushed_after - flushed_before) as usize;
+            max_scratch = max_scratch.max(this_partition_size);
+            assert!(flushed_after > prev_flushed);
+            prev_flushed = flushed_after;
+        }
+
+        let total = writer.finish_streaming().unwrap();
+        assert_eq!(
+            total, prev_flushed,
+            "total size must equal last flushed pos"
+        );
+
+        // Peak resident bytes were bounded by the largest single partition,
+        // which is far smaller than the whole file for many partitions.
+        assert!(
+            (max_scratch as u64) < total,
+            "largest single partition ({max_scratch}) must be smaller than the full file ({total})"
         );
     }
 }
