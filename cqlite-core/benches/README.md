@@ -70,6 +70,43 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `partition_lookup` | kept | Index.db partition-key lookup (`IndexReader::lookup_partition`) — cold/warm cache, throughput, access-pattern distribution. The latency-sensitive read path. |
 | `m1_performance` | kept | M1 baseline targets: partition-lookup latency plus multi-SSTable read throughput (MB/s). |
 | `fixtures_smoke` | added (#537) | Smoke/acceptance bench proving the fixture loaders are deterministic (seeded RNG + stable scan row count). Read/write portions activate under `cli-helpers` / `write-support`. |
+| `read` | added (#538) | Read suite (needs `--features cli-helpers`): `point_lookup`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. |
+| `write` | added (#539) | Write suite (needs `--features write-support`): `ingest_wal_on` (sustained ingest) and `flush` (memtable→SSTable flush latency) over the M5 `WriteEngine`. |
+
+## Performance regression gate (Issue #540)
+
+CI runs the `read` + `write` benches on **both the PR and `main`, on the same
+runner**, and fails the PR if any tracked bench's Criterion **median** is more
+than the threshold slower than on main. Comparing PR-vs-main on one runner means
+the gate measures *relative* change only, so it is immune to the cross-machine
+(and cross-OS) variance that makes committed absolute-time baselines unreliable.
+
+- **Workflow:** `.github/workflows/perf-regression.yml` (runs on PRs touching
+  `cqlite-core/**` and on manual `workflow_dispatch`).
+- **Policy / baseline:** `cqlite-core/benches/perf-gate.json` — the tracked bench
+  IDs and `threshold_pct` (default **10%**). This file *is* the committed,
+  version-controlled baseline policy; the measured baseline is `main` itself,
+  re-measured on every run.
+- **Comparison:** `scripts/ci/check_perf_regression.py` reads the Criterion
+  median (`estimates.json`) for each tracked bench from the `pr` and `base`
+  baselines and exits non-zero on any regression past the threshold. Benches
+  absent from `main` (e.g. a brand-new bench) are reported `SKIP`, never failed.
+
+### Adjusting / refreshing the gate
+
+There is no committed absolute-time baseline to refresh — **`main` is the living
+baseline**, so merging a legitimate change automatically updates what future PRs
+are compared against. To change *what* the gate enforces, edit
+`cqlite-core/benches/perf-gate.json`:
+
+- raise/lower `threshold_pct` (micro-benchmarks on shared CI runners are noisy;
+  if the gate flaps, raise the threshold or increase `--sample-size` in the
+  workflow's `BENCH_ARGS`);
+- add/remove bench IDs from `benches`.
+
+If a PR intentionally trades performance for another goal, justify the regression
+in the PR description; a reviewer can raise the threshold or merge with the
+explanation on record.
 
 ## Audit (Issue #536)
 
