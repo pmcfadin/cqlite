@@ -8,7 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [v0.9.2] — Correctness fixes
 
 Reader and compaction correctness follow-ups to v0.9.1, plus a compaction memory
-fix. No new features and no public API changes.
+fix and a multi-partition Index.db reader fix. No new features and no public API
+changes.
 
 ### Fixed
 
@@ -37,6 +38,13 @@ fix. No new features and no public API changes.
   partition instead of buffering the entire component in memory, bounding peak heap
   to roughly the largest single partition (was O(whole file), exceeding the 128 MB
   target on large compactions). Output is byte-identical (#492).
+- **Multi-partition Index.db reader**: the reader mis-parsed Index.db entries whose
+  leading `u16` key length was not `0x0010`, treating it as a digest marker and
+  dropping most partitions (e.g. 100 partitions read back as 2). It now parses the
+  real Cassandra BIG format `[key_len][raw key][offset][promoted]` for any key
+  length; the project guide's Index.db documentation was corrected to match, and
+  the `write-support` test targets are now wired into CI so this class of failure
+  can't rot again (#552). Restoring O(1) raw-key point lookup is tracked in #553.
 
 ## [v0.9.1] — Reader correctness fixes
 
