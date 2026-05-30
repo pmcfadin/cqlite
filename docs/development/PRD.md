@@ -166,13 +166,14 @@ The v0.9.0 reader follow-ups (#493 set-element tombstones, #501 tuple decoding,
 #502 frozen<udt> decoding) were **resolved in v0.9.1**. The v0.9.2 reader and
 compaction correctness fixes (#516 `scan()` token ordering, #517 `get()`/`scan()`
 consistency, #518 `stats().block_count`, #505 compaction row tombstones, #498
-equal-timestamp Delete-vs-Live reconcile, #533 per-cell compaction reconcile, and
-#492 streaming `Data.db` writer) were **resolved in v0.9.2** and removed from this
-list.
+equal-timestamp Delete-vs-Live reconcile, #533 per-cell compaction reconcile,
+#492 streaming `Data.db` writer, and #552 multi-partition Index.db reader) were
+**resolved in v0.9.2** and removed from this list.
 
 | Issue | Milestone | Description | Workaround |
 |-------|-----------|-------------|------------|
 | #311 | — | Python concurrent-query race in schema metadata access | Run one warm-up query before spawning parallel threads on the same handle |
+| #553 | — | Index.db point lookup falls back to a full scan (hash digest vs raw-key mismatch); reads correct, not O(1) | None needed; correctness unaffected |
 
 See [docs/write-support-limitations.md](../write-support-limitations.md) for the full limitations reference.
 

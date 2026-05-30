@@ -152,6 +152,21 @@ within the 128 MB memory target. Output bytes are unchanged.
 
 ---
 
+## Multi-partition Index.db read back fewer partitions than written (Issue #552)
+
+**Behaviour** (resolved in v0.9.2): CQLite-written multi-partition SSTables had a
+correct Index.db, but CQLite's *reader* mis-parsed entries whose leading `u16` key
+length was not `0x0010`, dropping most partitions on read-back. The reader now parses
+the real Cassandra BIG format `[key_len][raw key][offset][promoted]` for any key
+length. Reads were previously salvaged by the Data.db scan fallback (#517), so this
+was not user-visible for full-table scans. The `write-support` test targets are now
+run in CI.
+
+**Tracking**: Issue #552 (fixed in v0.9.2). Follow-up #553: restore O(1) raw-key
+Index.db point lookup (reads currently fall back to scan; correctness unaffected).
+
+---
+
 > The v0.9.2 reader correctness fixes (#516 `scan()` token ordering, #517
 > `get()`/`scan()` consistency, #518 `stats().block_count`) are read-side; see the
 > CHANGELOG and PRD §4.2 for details.
