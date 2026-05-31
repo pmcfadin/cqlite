@@ -125,3 +125,45 @@ For the read/query path, open a `Database` and run CQL — this needs only the
 default features (`state_machine` + `all-compression`). See the [README](../README.md)
 Quick Start and [`docs/write-support.md`](write-support.md) for the writable
 `Database` wrapper that combines reads and writes behind one handle.
+
+## 5. Write-path concurrency & durability model
+
+`WriteEngine` is a **single-writer** component. Plan your write path around these
+two properties, both verified in the source
+(`cqlite-core/src/storage/write_engine/mod.rs`):
+
+- **`&mut self` ⇒ one writer at a time.** `write`, `write_async`, `flush`,
+  `maintenance_step`, and `close` all take `&mut self`, so the borrow checker
+  already prevents concurrent calls on a single engine. If multiple threads or
+  tasks produce mutations, funnel them to one owner — e.g. wrap the engine in a
+  `Mutex` / `tokio::sync::Mutex`, or send mutations over a channel to a single
+  writer task. The engine is intentionally **not** internally synchronized; there
+  is no sharded or multi-writer mode.
+
+- **The WAL is fsync'd on every `write` ⇒ durability-first, throughput-bounded.**
+  Each `write` appends to the write-ahead log and fsyncs before returning, so a
+  successful call means the mutation is durable on disk. The cost is that
+  single-thread write throughput is bounded by fsync latency rather than CPU —
+  expect low-hundreds of ops/sec on typical disks (a downstream benchmark harness
+  measured ~282 ops/sec single-thread). Adding threads does **not** raise this:
+  writers serialize through the single engine, and each still pays one fsync.
+
+### Intended usage
+
+- **Throughput comes from batching work *before* the fsync, not from concurrency.**
+  Group many cells into a single `Mutation` where the data model allows, and let
+  the memtable accumulate across many `write` calls before a `flush` — flushing is
+  amortized, the per-write fsync is not.
+- For bulk-load / benchmarking where you can trade durability for speed, an opt-in
+  WAL durability toggle is tracked in
+  [#547](https://github.com/pmcfadin/cqlite/issues/547). That is the planned lever
+  for lifting the per-write fsync bound.
+
+### Is a batched / async write path on the roadmap?
+
+`write_async` already exists for async call sites, but it has the **same**
+single-writer `&mut self` semantics and the same per-write WAL fsync — it is not a
+throughput escape hatch. There is **no separate batched-mutation API currently
+planned**; the single-writer + per-write-durability model above is the intended
+design. The one roadmap item that changes the throughput envelope is the optional
+WAL durability toggle ([#547](https://github.com/pmcfadin/cqlite/issues/547)).
