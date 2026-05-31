@@ -23,6 +23,11 @@ jobs:
             os: ubuntu-latest
             exe_suffix: ""
             use_cross: false
+          # Static musl build — runs on any Linux without a libc dependency
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            exe_suffix: ""
+            use_cross: true
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             exe_suffix: ""
@@ -92,10 +97,25 @@ jobs:
           tar czf ../../../cqlite-${{ matrix.target }}.tar.gz cqlite${{ matrix.exe_suffix }}
         fi
 
-    - name: Upload CLI artifact
+    - name: Generate SHA-256 checksum
+      shell: bash
+      run: |
+        ext=$([[ "${{ matrix.target }}" == *"windows"* ]] && echo zip || echo tar.gz)
+        file="cqlite-${{ matrix.target }}.${ext}"
+        # sha256sum on Linux, shasum on macOS — emit "<hash>  <filename>"
+        if command -v sha256sum >/dev/null 2>&1; then
+          sha256sum "$file" > "${file}.sha256"
+        else
+          shasum -a 256 "$file" > "${file}.sha256"
+        fi
+        cat "${file}.sha256"
+
+    - name: Upload CLI artifact + checksum
       uses: softprops/action-gh-release@v2
       with:
-        files: ./cqlite-${{ matrix.target }}.${{ contains(matrix.target, 'windows') && 'zip' || 'tar.gz' }}
+        files: |
+          ./cqlite-${{ matrix.target }}.${{ contains(matrix.target, 'windows') && 'zip' || 'tar.gz' }}
+          ./cqlite-${{ matrix.target }}.${{ contains(matrix.target, 'windows') && 'zip' || 'tar.gz' }}.sha256
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

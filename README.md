@@ -18,6 +18,40 @@ CQLite aims to become the standard tool for Cassandra SSTable manipulation outsi
 
 CQLite is designed by **Patrick McFadin**, Apache Cassandra PMC member with 13 years of Cassandra experience. The project embodies Apache Cassandra community values and will be donated to the Apache Cassandra project upon maturity.
 
+## Install
+
+### CLI (prebuilt binaries — no Rust toolchain required)
+
+Each [GitHub release](https://github.com/pmcfadin/cqlite/releases) attaches a
+prebuilt `cqlite` CLI binary for the common platforms, each with a `.sha256`
+checksum sidecar:
+
+| Platform | Asset |
+|----------|-------|
+| macOS (Apple Silicon) | `cqlite-aarch64-apple-darwin.tar.gz` |
+| macOS (Intel) | `cqlite-x86_64-apple-darwin.tar.gz` |
+| Linux x86_64 (glibc) | `cqlite-x86_64-unknown-linux-gnu.tar.gz` |
+| Linux x86_64 (static musl) | `cqlite-x86_64-unknown-linux-musl.tar.gz` |
+| Linux arm64 (glibc) | `cqlite-aarch64-unknown-linux-gnu.tar.gz` |
+| Windows x86_64 | `cqlite-x86_64-pc-windows-gnu.zip` |
+
+```bash
+# Example: macOS Apple Silicon
+TARGET=aarch64-apple-darwin
+curl -fsSLO https://github.com/pmcfadin/cqlite/releases/latest/download/cqlite-$TARGET.tar.gz
+curl -fsSLO https://github.com/pmcfadin/cqlite/releases/latest/download/cqlite-$TARGET.tar.gz.sha256
+shasum -a 256 -c cqlite-$TARGET.tar.gz.sha256   # verify (use sha256sum -c on Linux)
+tar xzf cqlite-$TARGET.tar.gz
+./cqlite --help
+```
+
+### Language bindings
+
+```bash
+pip install cqlite-py        # Python
+npm install @cqlite/node     # Node.js
+```
+
 ## Quick Start
 
 ```bash
