@@ -47,11 +47,17 @@ for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
     fi
 done
 
-# Check environment variables
-log "🌍 Scanning environment variables..."
+# Check environment variables — dataset-relevant names only.
+# Restricting to *_ROOT, *_PATH, and DATASET* avoids false positives from
+# CI-injected git-ref variables such as GITHUB_HEAD_REF / GITHUB_REF* /
+# GITHUB_BASE_REF whose values can legitimately contain words like "fixture"
+# or "mock" when those words appear in a branch name (Issue #545).
+log "🌍 Scanning dataset-relevant environment variables..."
 while IFS='=' read -r name value; do
-    # Skip empty values and common system vars
-    [[ -z "$value" || "$name" =~ ^(PATH|HOME|USER|LANG|TERM)$ ]] && continue
+    # Only inspect variables whose names are dataset-relevant.
+    [[ "$name" =~ (_ROOT|_PATH)$ ]] || [[ "$name" =~ ^DATASET ]] || continue
+    # Skip empty values.
+    [[ -z "$value" ]] && continue
 
     for pattern in "${FORBIDDEN_PATTERNS[@]}"; do
         if echo "$value" | grep -E -i "$pattern" >/dev/null 2>&1; then

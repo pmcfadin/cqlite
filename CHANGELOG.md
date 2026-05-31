@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Provenance gate false-positives on branch names**: `scripts/ci/ensure_real_dataset.sh`
+  now restricts its environment-variable scan to dataset-relevant names (`*_ROOT`,
+  `*_PATH`, `DATASET*`) instead of scanning every env var. GitHub CI vars such as
+  `GITHUB_HEAD_REF`, `GITHUB_REF*`, and `GITHUB_BASE_REF` are no longer inspected,
+  so branch names containing words like "fixture" or "mock" no longer cause spurious
+  gate failures. The `DATASET_SHA256` checksum check and CLI-argument scan are
+  unchanged (#545).
+
 ### Changed
 
 - **`write-support` is now a default feature** of `cqlite-core`. The write path
