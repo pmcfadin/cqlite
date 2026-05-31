@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **`write-support` is now a default feature** of `cqlite-core`. The write path
+  (`WriteEngine`, `Mutation`) is available out of the box; downstream consumers no
+  longer need to opt in to enable it. This adds **no new dependencies** —
+  `write-support` gates only first-party code, so the dependency surface for
+  read-only consumers is unchanged. `flush`/`compact` on the high-level `Database`
+  type remain behind the separate `experimental` feature (#558).
+
 ## [v0.9.2] — Correctness fixes
 
 Reader and compaction correctness follow-ups to v0.9.1, plus a compaction memory
