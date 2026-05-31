@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["TypeCategory"],"struct":["ComplexTypeParser","ParsedType","TypeMetadata","TypeParsingContext"]};

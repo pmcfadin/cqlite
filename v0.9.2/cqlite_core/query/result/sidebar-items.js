@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"struct":["ColumnInfo","ParallelizationInfo","PartitionInfo","PerformanceMetrics","PlanInfo","QueryMetadata","QueryResult","QueryResultIterator","QueryRow","RowMetadata","StreamingConfig"]};

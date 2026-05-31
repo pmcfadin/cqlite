@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CachePolicy","CompactionStrategy","CompressionAlgorithm","SyncMode"],"struct":["AllocatorConfig","BackgroundTaskConfig","CacheConfig","CompactionConfig","CompressionConfig","Config","MemoryConfig","ParallelQueryConfig","PerformanceConfig","QueryConfig","StorageConfig"]};
