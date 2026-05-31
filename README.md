@@ -136,7 +136,10 @@ cargo run --package cqlite-cli --features write-support -- \
 ```
 
 See [docs/write-support.md](docs/write-support.md) for the full write guide,
-including the Cassandra export workflow and known limitations.
+including the Cassandra export workflow and known limitations. To embed
+`cqlite-core` in your own Rust project (dependency line, feature flags, and a
+compiling write example), see
+[docs/using-cqlite-core-as-a-dependency.md](docs/using-cqlite-core-as-a-dependency.md).
 
 ## Feature Flags
 
