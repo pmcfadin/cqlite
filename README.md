@@ -140,28 +140,39 @@ including the Cassandra export workflow and known limitations.
 
 ## Feature Flags
 
-CQLite uses Cargo feature flags to control optional functionality:
+`cqlite-core` gates optional functionality behind Cargo features. The table below
+maps the public API you're likely to reach for to the feature that enables it.
 
-### Default Features (M1/M2 Scope)
-- `all-compression` - All compression codecs (LZ4, Snappy, Deflate, Zstd)
-- `state_machine` - Query engine (M2 CLI)
+| Want… | Enable feature | In defaults? |
+|-------|----------------|--------------|
+| Read / query path (`Database::open`, `execute`, `scan`, `get`) | `state_machine` | ✅ yes |
+| Compression (LZ4 / Snappy / Deflate / Zstd) | `all-compression` | ✅ yes |
+| Write path (`WriteEngine`, `Mutation`, `WriteEngine::write`/`flush`) | `write-support` | ✅ yes |
+| `Database::flush` / `Database::compact` (high-level convenience) | `experimental` | ❌ opt-in |
+| CLI ingestion / REPL helpers (`cqlite-cli`) | `cli-helpers` | ❌ opt-in |
+| Performance metrics collection | `metrics` | ❌ opt-in |
 
-### Optional Features
-- `benchmarks` - Performance benchmarks
-- `tombstones` - Tombstone merging (M3+)
-- `metrics` - Performance monitoring and telemetry
+Default features are `["all-compression", "state_machine", "write-support"]`
+(see `cqlite-core/Cargo.toml`). `write-support` was folded into the defaults in
+[#558](https://github.com/pmcfadin/cqlite/issues/558) — it gates only first-party
+code and adds **no extra dependencies**, so read-only consumers pay nothing for it.
+`flush`/`compact` on the high-level `Database` type remain behind `experimental`;
+the equivalent engine-level `WriteEngine::flush` is part of `write-support`.
 
 ### Building with Custom Features
 
 ```bash
-# Default build (M1/M2 features)
+# Default build (read + write + compression)
 cargo build
 
-# Build with metrics enabled
-cargo build --features metrics
+# Read-only consumer: drop the write path (still zero-cost to keep it, but explicit)
+cargo build -p cqlite-core --no-default-features --features all-compression,state_machine
 
-# Minimal build (no compression)
-cargo build --no-default-features
+# Opt into high-level Database::flush / compact
+cargo build -p cqlite-core --features experimental
+
+# Minimal build (no compression, no query engine)
+cargo build -p cqlite-core --no-default-features
 ```
 
 ## Features
