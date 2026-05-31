@@ -92,6 +92,8 @@ fn main() -> cqlite_core::error::Result<()> {
 #[cfg(not(feature = "write-support"))]
 fn main() {
     eprintln!("This example requires the `write-support` feature.");
-    eprintln!("Run with: cargo run -p cqlite-core --example write_a_mutation --features write-support");
+    eprintln!(
+        "Run with: cargo run -p cqlite-core --example write_a_mutation --features write-support"
+    );
     std::process::exit(1);
 }
