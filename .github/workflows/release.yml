@@ -119,6 +119,27 @@ jobs:
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+  # Append the changelog + hosted API-docs links to the auto-generated release
+  # notes. Runs once per tag (no matrix) so the body is set a single time (#563).
+  release-notes:
+    name: Add changelog + API-docs links to release notes
+    runs-on: ubuntu-latest
+    needs: build-cli
+    steps:
+    - uses: actions/checkout@v4
+    - name: Update release body
+      uses: softprops/action-gh-release@v2
+      with:
+        generate_release_notes: true
+        append_body: true
+        body: |
+
+          ---
+          📖 **API docs for this release:** https://pmcfadin.github.io/cqlite/${{ github.ref_name }}/
+          📋 **Changelog:** see [CHANGELOG.md](https://github.com/pmcfadin/cqlite/blob/${{ github.ref_name }}/CHANGELOG.md)
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
   # NOTE: FFI and WASM builds disabled until M4 (Language Bindings)
   # Uncomment when cqlite-ffi and cqlite-wasm packages exist
   #
