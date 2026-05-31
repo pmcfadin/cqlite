@@ -1,0 +1,72 @@
+name: API Docs
+
+# Publishes per-tag rustdoc for cqlite-core to GitHub Pages so downstream
+# consumers (who pin by git tag, since CQLite is not on crates.io) can evaluate a
+# version's API without checking out the repo. Each tag is published under
+# /<tag>/ and the newest also under /latest/; history is preserved (keep_files).
+#
+# Requires GitHub Pages to be enabled for the repo with the "gh-pages branch"
+# source (Settings → Pages). Enabling Pages is a one-time maintainer action.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version subdirectory to publish under (e.g. v0.9.2)"
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rustdoc:
+    name: Build & publish rustdoc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Use stable for doc builds regardless of the pinned toolchain.
+      - name: Override Rust toolchain
+        run: rm -f rust-toolchain.toml
+
+      - name: Resolve version label
+        id: ver
+        shell: bash
+        run: |
+          if [[ -n "${{ github.event.inputs.version }}" ]]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build rustdoc (cqlite-core, all features)
+        run: cargo doc --no-deps --package cqlite-core --all-features
+
+      - name: Add root redirect to crate index
+        run: |
+          echo '<meta http-equiv="refresh" content="0; url=cqlite_core/index.html">' > target/doc/index.html
+
+      - name: Publish to /<version>/ on gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./target/doc
+          destination_dir: ${{ steps.ver.outputs.version }}
+          keep_files: true
+
+      - name: Publish to /latest/ on gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./target/doc
+          destination_dir: latest
+          keep_files: true
