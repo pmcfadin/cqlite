@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **WAL durability toggle on `WriteEngine`** — `WriteEngineConfig` now has a
+  `durability` field (default `Durability::SyncEachWrite`) and a matching builder
+  method `with_durability(Durability)`. When set to `Durability::Disabled`,
+  `write()` and `write_async()` skip WAL append and fsync entirely, buffering
+  mutations in the memtable only; data becomes durable only after a successful
+  `flush()` or `close()`. Default behavior (`SyncEachWrite`) is **unchanged**: a
+  successful `write` call still guarantees the mutation is durable on disk (#547).
+
+  ```toml
+  # Public API additions (cqlite-core::storage::write_engine)
+  pub enum Durability { SyncEachWrite, Disabled }
+  impl WriteEngineConfig { pub fn with_durability(self, Durability) -> Self }
+  ```
+
+  **Hazard note**: `ingest_wal_on` benchmarks may show fsync-latency noise on
+  shared CI runners; this is expected and does not indicate a regression. Only
+  `Durability::Disabled` paths are CPU-bound and gate-able.
+
 ### Fixed
 
 - **Provenance gate false-positives on branch names**: `scripts/ci/ensure_real_dataset.sh`
