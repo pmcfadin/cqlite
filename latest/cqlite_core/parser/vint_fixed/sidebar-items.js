@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"fn":["encode_vint_fixed","parse_vint_fixed"]};

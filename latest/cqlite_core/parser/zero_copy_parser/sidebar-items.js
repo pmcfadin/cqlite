@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["OwnedValue","ZeroCopyValue"],"struct":["StringInterner","ZeroCopyBuffer","ZeroCopyIdentifier","ZeroCopyParser","ZeroCopyStats"]};
