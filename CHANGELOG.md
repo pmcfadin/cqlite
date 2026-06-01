@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **UUID/TIMEUUID WHERE clause returned 0 rows** (Issue #548) — `WHERE id = <uuid-literal>`
+  now correctly returns the matching partition. Four bugs were fixed together:
+  1. `QueryParser::parse_value` now recognises bare UUID literals (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`)
+     and produces `Value::Uuid([u8; 16])` instead of `Value::Text`.
+  2. `QueryExecutor::value_to_row_key` now handles `Value::Uuid` (produces 16 raw bytes)
+     and `Value::Tuple` (composite-PK framing `[len u16 BE][value][0x00]` per component,
+     matching `PartitionKey::to_bytes`). Also adds `Value::BigInt` support.
+  3. `QueryExecutor::compare_values` now has `(Value::Uuid, Value::Uuid)` arms for
+     WHERE-clause filter evaluation in table-scan paths.
+  4. `SSTableManager::get` now routes lookups through `table_readers` (keyed by
+     unqualified table name) instead of `readers` (keyed by filename), which caused
+     all SSTables to share a single HashMap entry and only the last-loaded one to be
+     searched. This also fixes point lookups for all other types.
+
+  Additionally, `SSTableReader::scan_for_key` now passes the reader's own schema to
+  `stitch_and_parse_all_chunks` so V5CompressedLegacy rows parse during the scan
+  fallback without an external schema.
+
 ### Added
 
 - **Performance methodology doc** — new `docs/performance.md` (Issue #575)

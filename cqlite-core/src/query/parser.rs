@@ -374,6 +374,15 @@ impl QueryParser {
             return Ok(Value::Null);
         }
 
+        // UUID literals: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx (36 chars, 5 hex groups)
+        // This handles both UUID and TIMEUUID columns — parse as Value::Uuid in both cases
+        // since the underlying 16-byte representation is identical and compare_values handles it.
+        if is_uuid_literal(value_str) {
+            if let Some(bytes) = parse_uuid_literal(value_str) {
+                return Ok(Value::Uuid(bytes));
+            }
+        }
+
         // Default to text
         Ok(Value::Text(value_str.to_string()))
     }
@@ -487,6 +496,48 @@ fn parse_single_target(cql: &str, query_type: QueryType, err_msg: &str) -> Resul
         Some(name) => Ok(empty_parsed(query_type, Some(TableId::new(name)), cql)),
         None => Err(Error::query_execution(err_msg.to_string())),
     }
+}
+
+/// Returns true when `s` has the canonical UUID textual form:
+/// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12 hex digits).
+///
+/// This check is intentionally conservative so we do not misclassify text
+/// values that happen to look UUID-like. Only the exact 36-character
+/// hyphenated form is recognised.
+fn is_uuid_literal(s: &str) -> bool {
+    if s.len() != 36 {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    if bytes[8] != b'-' || bytes[13] != b'-' || bytes[18] != b'-' || bytes[23] != b'-' {
+        return false;
+    }
+    for (i, &b) in bytes.iter().enumerate() {
+        if i == 8 || i == 13 || i == 18 || i == 23 {
+            continue;
+        }
+        if !b.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Parse a UUID literal string (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`) into
+/// 16 raw bytes. Returns `None` if the string is malformed.
+fn parse_uuid_literal(s: &str) -> Option<[u8; 16]> {
+    // Strip hyphens and decode as 32 hex characters → 16 bytes.
+    let hex: String = s.chars().filter(|&c| c != '-').collect();
+    if hex.len() != 32 {
+        return None;
+    }
+    let mut bytes = [0u8; 16];
+    for (i, chunk) in hex.as_bytes().chunks(2).enumerate() {
+        let hi = char::from(chunk[0]).to_digit(16)? as u8;
+        let lo = char::from(chunk[1]).to_digit(16)? as u8;
+        bytes[i] = (hi << 4) | lo;
+    }
+    Some(bytes)
 }
 
 #[cfg(test)]

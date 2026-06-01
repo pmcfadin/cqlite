@@ -709,7 +709,23 @@ impl SSTableReader {
             self.current_chunk_index
                 .store(0, std::sync::atomic::Ordering::Relaxed);
 
-            let all_entries = self.stitch_and_parse_all_chunks(None).await?;
+            // Pass the reader's own schema so that V5CompressedLegacy rows can be fully
+            // parsed and their partition RowKeys emitted.  Without a schema, parse_row_v5
+            // fails for all rows in a partition, causing no entries to be pushed and making
+            // the key comparison always miss even when the key exists.
+            let schema_opt = self.get_table_schema(None);
+            let all_entries = match self.stitch_and_parse_all_chunks(schema_opt.as_ref()).await {
+                Ok(entries) => entries,
+                Err(e) => {
+                    // Schema may not be available for this reader (e.g., wrong table type).
+                    // Return None so the caller can try the next reader.
+                    log::debug!(
+                        "scan_for_key: stitch_and_parse_all_chunks failed (schema missing?): {}",
+                        e
+                    );
+                    return Ok(None);
+                }
+            };
 
             // NOTE: The SSTableIndex is built from 16-byte Murmur3 *digests*, not raw keys,
             // so find_entry() always misses and falls through to this path.  For a found key
