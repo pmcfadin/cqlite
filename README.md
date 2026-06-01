@@ -345,6 +345,7 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 - **API docs (rustdoc)**: [latest tag](https://pmcfadin.github.io/cqlite/latest/) · published per release tag at `https://pmcfadin.github.io/cqlite/<tag>/`
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md) — what each tagged release contains
 - **Documentation**: [Complete project docs](docs/)
+- **Performance**: [Methodology, local repro, and CI gate policy](docs/performance.md)
 - **CQL Grammar**: [Patrick's Antlr4 CQL Grammar](https://github.com/pmcfadin/cassandra-antlr4-grammar)
 - **Issues**: [GitHub Issues](https://github.com/pmcfadin/cqlite/issues)
 - **Discussions**: [GitHub Discussions](https://github.com/pmcfadin/cqlite/discussions)
