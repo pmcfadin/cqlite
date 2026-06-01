@@ -81,24 +81,65 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `write/ingest_wal_on` | **Advisory** — reported, never fails CI | Identical 256-row ingest with `Durability::SyncEachWrite` (default): every row calls `wal.append()` + `wal.sync()` (fsync). I/O-dominated; fsync latency on shared CI runners makes this too noisy for strict gating, but it documents durability cost. |
 | `write/flush` | **Strictly gated** — strict pass/fail | Pre-filled memtable flushed once per iteration. Throughput reported in MB/s. |
 
-## Performance regression gate (Issue #540)
+## Performance regression gate (Issues #540, #572)
 
 CI runs the `read` + `write` benches on **both the PR and `main`, on the same
-runner**, and fails the PR if any tracked bench's Criterion **median** is more
-than the threshold slower than on main. Comparing PR-vs-main on one runner means
-the gate measures *relative* change only, so it is immune to the cross-machine
-(and cross-OS) variance that makes committed absolute-time baselines unreliable.
+runner**, and fails the PR if any **strictly gated** bench's Criterion **median**
+is more than its configured threshold slower than on main. Comparing PR-vs-main
+on one runner means the gate measures *relative* change only, so it is immune to
+the cross-machine (and cross-OS) variance that makes committed absolute-time
+baselines unreliable.
 
-- **Workflow:** `.github/workflows/perf-regression.yml` (runs on PRs touching
-  `cqlite-core/**` and on manual `workflow_dispatch`).
-- **Policy / baseline:** `cqlite-core/benches/perf-gate.json` — the tracked bench
-  IDs and `threshold_pct` (default **10%**). This file *is* the committed,
-  version-controlled baseline policy; the measured baseline is `main` itself,
-  re-measured on every run.
+- **Workflow:** `.github/workflows/perf-regression.yml` (triggers on PRs touching
+  `cqlite-core/**`, `Cargo.{toml,lock}`, the workflow itself, the gate script,
+  and `perf-gate.json`). Docs-only, examples-only, and non-perf `.github/**`
+  changes do **not** trigger the gate — they cannot affect benchmark results.
+- **Policy:** `cqlite-core/benches/perf-gate.json` — the tracked bench IDs,
+  per-bench `threshold_pct`, and the `advisory_benches` list. This file *is* the
+  committed, version-controlled baseline policy; the measured baseline is `main`
+  itself, re-measured on every run.
 - **Comparison:** `scripts/ci/check_perf_regression.py` reads the Criterion
   median (`estimates.json`) for each tracked bench from the `pr` and `base`
-  baselines and exits non-zero on any regression past the threshold. Benches
-  absent from `main` (e.g. a brand-new bench) are reported `SKIP`, never failed.
+  baselines. Benches absent from `main` (a brand-new bench) are reported `SKIP`,
+  never failed.
+
+### Strict vs advisory benches
+
+The gate distinguishes two classes of benches (configured via `perf-gate.json`):
+
+| Class | Behavior | When to use |
+|-------|----------|-------------|
+| **Strict** | Non-zero exit if delta > `threshold_pct`. Blocks merging. | CPU-bound, stable timings: `read/*`, `write/ingest_wal_off`, `write/flush`. |
+| **Advisory** | Delta reported in CI output, but **never causes a non-zero exit**, regardless of size. | I/O-dominated by fsync: `write/ingest_wal_on`. Variance on shared runners exceeds any useful threshold. |
+
+To mark a bench advisory, add its ID to the `advisory_benches` list in
+`perf-gate.json`. The per-bench `threshold_pct` for advisory benches still
+controls what is highlighted in the output (the "elevated delta" warning level);
+it never triggers a failure.
+
+### Path-ignore behavior (Issue #572)
+
+The gate workflow uses a `paths` allowlist. It activates only when a PR changes
+files that can plausibly affect benchmark results:
+
+- `cqlite-core/**` — library source and bench source
+- `Cargo.toml` / `Cargo.lock` — dependency changes
+- `.github/workflows/perf-regression.yml` — the gate workflow itself
+- `scripts/ci/check_perf_regression.py` — the comparison script
+- `cqlite-core/benches/perf-gate.json` — gate policy
+
+PRs that touch **only** `docs/**`, `**/*.md`, `examples/**`, or other
+`.github/workflows/` files are silently skipped by GitHub Actions' path filter
+and will not trigger the gate, preventing false-positive failure alerts from
+fsync noise on docs-only changes.
+
+### Tolerance model
+
+Each bench entry in `perf-gate.json` has its own `threshold_pct`. The default is
+`10%` for CPU-bound benches and `25%` for the advisory `write/ingest_wal_on`
+(which only affects the "highlight" level in output, not pass/fail). Raise a
+bench's threshold if the gate flaps on a stable CI environment, or increase
+`--sample-size` in the workflow's `BENCH_ARGS` for stabler medians.
 
 ### Adjusting / refreshing the gate
 
@@ -107,14 +148,27 @@ baseline**, so merging a legitimate change automatically updates what future PRs
 are compared against. To change *what* the gate enforces, edit
 `cqlite-core/benches/perf-gate.json`:
 
-- raise/lower `threshold_pct` (micro-benchmarks on shared CI runners are noisy;
-  if the gate flaps, raise the threshold or increase `--sample-size` in the
-  workflow's `BENCH_ARGS`);
-- add/remove bench IDs from `benches`.
+- raise/lower `threshold_pct` per bench;
+- add/remove bench IDs from `benches`;
+- move a bench between strict and advisory by adding/removing its ID from
+  `advisory_benches`.
 
 If a PR intentionally trades performance for another goal, justify the regression
 in the PR description; a reviewer can raise the threshold or merge with the
 explanation on record.
+
+### Tests
+
+`scripts/ci/tests/test_check_perf_regression.py` validates the strict-vs-advisory
+logic against fixture Criterion estimate directories. Run with:
+
+```bash
+# From repo root — uses the venv pytest
+bindings/python/.venv/bin/pytest scripts/ci/tests/test_check_perf_regression.py -v
+```
+
+The tests prove: (a) a CPU-bench regression above threshold exits non-zero;
+(b) a large `write/ingest_wal_on` swing exits zero (advisory reported only).
 
 ## Audit (Issue #536)
 

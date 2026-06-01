@@ -14,12 +14,19 @@ name: "CI: Performance Regression Gate"
 on:
   pull_request:
     branches: [main]
+    # Trigger ONLY when runtime code, bench policy, or this workflow changes.
+    # Docs-only / examples-only / non-perf CI-only PRs are intentionally excluded:
+    # the fsync-bound write/ingest_wal_on bench is noisy enough on shared runners
+    # to produce false-positive regression alerts on PRs that cannot affect
+    # performance (Issue #572). The NOT-matched files are implicitly ignored:
+    #   docs/**  **/*.md  examples/**  .github/workflows/<other-workflows>
     paths:
       - "cqlite-core/**"
       - "Cargo.toml"
       - "Cargo.lock"
       - ".github/workflows/perf-regression.yml"
       - "scripts/ci/check_perf_regression.py"
+      - "cqlite-core/benches/perf-gate.json"
   workflow_dispatch:
 
 permissions:
