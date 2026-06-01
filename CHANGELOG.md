@@ -36,6 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its own). A new `open_write_engine_wal_off` fixture helper in
   `benches/fixtures/mod.rs` constructs the WAL-disabled engine.
 
+- **Perf-gate redesign — strict vs advisory benches** (Issue #572). The CI
+  performance regression gate now distinguishes two bench classes, driven
+  entirely by `cqlite-core/benches/perf-gate.json`:
+
+  - **Strict** (`read/*`, `write/ingest_wal_off`, `write/flush`): non-zero exit
+    on regression beyond per-bench `threshold_pct` — these are CPU-bound with
+    stable timings suitable for reliable regression detection.
+  - **Advisory** (`write/ingest_wal_on`): delta reported in every CI run but
+    **never causes a non-zero exit**, regardless of magnitude. `ingest_wal_on`
+    is I/O-dominated by `fsync`; its wall-clock time varies well beyond 10% on
+    shared GitHub-hosted runners, producing false-positive failures on PRs that
+    cannot affect performance.
+
+  Configuration: `perf-gate.json` now uses per-bench objects (`id`,
+  `threshold_pct`) and an `advisory_benches` string list. The gate script
+  (`scripts/ci/check_perf_regression.py`) is fully data-driven from this file —
+  no bench names are hardcoded in the script. A suite of pytest fixtures in
+  `scripts/ci/tests/` validates the strict-fail / advisory-pass behavior.
+
+- **Gate workflow path filter** (Issue #572, Phase A). The
+  `perf-regression.yml` workflow now uses a `paths` allowlist that excludes
+  `docs/**`, `**/*.md`, `examples/**`, and other non-runtime `.github/**`
+  files. Docs-only / examples-only PRs no longer trigger the benchmark gate,
+  eliminating false-positive regression alerts from fsync noise on those PRs.
+
 ### Fixed
 
 - **Provenance gate false-positives on branch names**: `scripts/ci/ensure_real_dataset.sh`
