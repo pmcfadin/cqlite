@@ -73,6 +73,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`LIMIT` ignored on streaming `SELECT`** (#581): `Database::execute_streaming`
+  yielded the entire result set regardless of `LIMIT`. The streaming producer
+  (`execute_streaming_background`) only logged the `LIMIT` step and relied on a
+  consumer that never enforced it, so `SELECT … LIMIT N` streamed every row — a
+  silent wrong-result bug. The producer now enforces `LIMIT`/`OFFSET` inline
+  during the scan (skip `OFFSET` matches, stop sending once `count` rows are
+  emitted, and return so the scan stops early), matching the non-streaming
+  `execute_limit` semantics. Regression test:
+  `tests/test_issue_581_streaming_limit.rs`.
+
 - **Provenance gate false-positives on branch names**: `scripts/ci/ensure_real_dataset.sh`
   now restricts its environment-variable scan to dataset-relevant names (`*_ROOT`,
   `*_PATH`, `DATASET*`) instead of scanning every env var. GitHub CI vars such as
