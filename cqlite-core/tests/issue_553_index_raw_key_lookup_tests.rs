@@ -198,8 +198,10 @@ async fn test_lookup_returns_some_for_simple_table_uuid() {
 /// Before fix: `lookup_partition_with_index` computed `compute_partition_key_digest(raw_key)`
 ///   → Murmur3 hash bytes → looked those up in a map keyed on RAW bytes → always None.
 /// After fix: raw_key bytes are passed directly → O(1) hit → returns Some.
+// Self-skips at runtime when datasets/Data.db are absent (see body), so it runs
+// and asserts the full index fast path whenever data is present (e.g. CI fetches
+// datasets) rather than being unconditionally ignored.
 #[tokio::test]
-#[ignore = "Requires test data files (CQLITE_DATASETS_ROOT)"]
 async fn test_lookup_partition_with_index_uuid_fast_path() {
     let datasets_root = match get_datasets_root() {
         Some(r) => r,
