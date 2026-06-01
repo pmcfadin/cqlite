@@ -170,7 +170,33 @@ This removes fsync from the equation and makes `ingest_wal_on` behave like
 
 ---
 
-## 4. The single-writer / per-fsync durability model
+## 4. Point-lookup cost model
+
+### O(1) index-based lookup (current, after #553)
+
+A `get()` call for a known partition key goes through:
+
+1. **Bloom filter** (O(1)) — decides whether the key *might* exist in this SSTable.
+   Currently skipped for V5CompressedLegacy/NB format SSTables (tracked separately).
+2. **Index.db raw-key lookup** (O(1)) — `lookup_partition_with_index` looks up the raw
+   partition key bytes directly in the in-memory `IndexReader::key_lookup` HashMap.
+   This was restored to O(1) in Issue #553; prior to that fix every lookup missed
+   (due to a digest/raw-key mismatch introduced in #552) and fell back to the scan path.
+3. **On hit**: seek to offset in Data.db and parse a single partition (O(1) I/O).
+4. **On miss**: return `None` immediately.
+
+`read/point_lookup` is strictly gated in CI.
+
+### O(n) sequential scan fallback
+
+If the index miss occurs (wrong key, missing Index.db, or pre-#553 code), the reader
+falls back to `scan_for_key` which decompresses and scans **all** chunks in Data.db.
+For a 1 000-partition SSTable this is O(file-size) per lookup. This path exists purely
+as a correctness safety net; it should not be the hot path for any production workload.
+
+---
+
+## 5. The single-writer / per-fsync durability model
 
 `WriteEngine` is a **single-writer** component. `write`, `write_async`,
 `flush`, `maintenance_step`, and `close` all take `&mut self`, so the borrow
