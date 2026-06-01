@@ -95,7 +95,12 @@ let mutation = Mutation::new(
     None,                                  // no TTL
 );
 
-// `write` is SYNCHRONOUS, takes `&mut self`, and fsyncs the WAL on every call.
+// `write` is SYNCHRONOUS, takes `&mut self`, and fsyncs the WAL on every call
+// (the default `Durability::SyncEachWrite`).  For bulk-load or benchmarking,
+// disable per-write fsyncs with `Durability::Disabled`:
+//
+//   let config = WriteEngineConfig::new(data, wal, schema)
+//       .with_durability(cqlite_core::storage::write_engine::Durability::Disabled);
 engine.write(mutation)?;
 ```
 
@@ -105,8 +110,9 @@ These trip up first-time consumers because the real API differs from what the
 on-disk format spec implies:
 
 - **`WriteEngine::write(&mut self, Mutation) -> Result<()>` is synchronous** and
-  fsyncs the WAL on every call. (`write_async` exists for async call sites; it has
-  the same `&mut self` / per-write durability semantics.)
+  fsyncs the WAL on every call by default (`Durability::SyncEachWrite`).
+  (`write_async` exists for async call sites; it has the same `&mut self` /
+  per-write durability semantics unless you opt in to `Durability::Disabled`.)
 - **`CellOperation` has no `Insert` variant.** The variants are `Write`,
   `WriteWithTtl`, `Delete`, and `DeleteRow`.
 - **`Mutation` fields**: `table`, `partition_key`, `clustering_key` (`Option`),
@@ -140,13 +146,38 @@ two properties, both verified in the source
   writer task. The engine is intentionally **not** internally synchronized; there
   is no sharded or multi-writer mode.
 
-- **The WAL is fsync'd on every `write` ⇒ durability-first, throughput-bounded.**
-  Each `write` appends to the write-ahead log and fsyncs before returning, so a
-  successful call means the mutation is durable on disk. The cost is that
-  single-thread write throughput is bounded by fsync latency rather than CPU —
-  expect low-hundreds of ops/sec on typical disks (a downstream benchmark harness
-  measured ~282 ops/sec single-thread). Adding threads does **not** raise this:
-  writers serialize through the single engine, and each still pays one fsync.
+- **The WAL is fsync'd on every `write` by default (`Durability::SyncEachWrite`) ⇒
+  durability-first, throughput-bounded.** Each `write` appends to the write-ahead
+  log and fsyncs before returning, so a successful call means the mutation is
+  durable on disk. The cost is that single-thread write throughput is bounded by
+  fsync latency rather than CPU — expect low-hundreds of ops/sec on typical disks
+  (a downstream benchmark harness measured ~282 ops/sec single-thread). Adding
+  threads does **not** raise this: writers serialize through the single engine, and
+  each still pays one fsync.
+
+- **`Durability::Disabled` removes the per-write fsync ⇒ CPU-bound throughput.**
+  When you build the engine with `.with_durability(Durability::Disabled)`, `write`
+  and `write_async` skip WAL append and fsync entirely, buffering mutations in the
+  memtable only. A successful `flush` (or `close`) then persists everything to an
+  SSTable. **Use only for bulk-load pipelines and benchmarks where you can trade
+  crash safety for throughput.**
+
+  ```rust,ignore
+  use cqlite_core::storage::write_engine::{Durability, WriteEngineConfig};
+
+  // Bulk-load / benchmarking — no per-write fsync
+  let config = WriteEngineConfig::new(data, wal, schema)
+      .with_durability(Durability::Disabled);
+  let mut engine = WriteEngine::new(config)?;
+
+  // … write many mutations …
+
+  engine.flush().await?;  // ← data becomes durable here
+  ```
+
+  If the process crashes between `write` calls and the subsequent `flush`, all
+  buffered mutations are lost (no WAL to replay). `Durability::SyncEachWrite`
+  (the default) is the safe choice for production.
 
 ### Intended usage
 
@@ -154,16 +185,14 @@ two properties, both verified in the source
   Group many cells into a single `Mutation` where the data model allows, and let
   the memtable accumulate across many `write` calls before a `flush` — flushing is
   amortized, the per-write fsync is not.
-- For bulk-load / benchmarking where you can trade durability for speed, an opt-in
-  WAL durability toggle is tracked in
-  [#547](https://github.com/pmcfadin/cqlite/issues/547). That is the planned lever
-  for lifting the per-write fsync bound.
+- For bulk-load / benchmarking, use `Durability::Disabled` (shipped in
+  [#547](https://github.com/pmcfadin/cqlite/issues/547)) to lift the per-write
+  fsync bound and measure CPU-bound write throughput.
 
 ### Is a batched / async write path on the roadmap?
 
 `write_async` already exists for async call sites, but it has the **same**
-single-writer `&mut self` semantics and the same per-write WAL fsync — it is not a
-throughput escape hatch. There is **no separate batched-mutation API currently
-planned**; the single-writer + per-write-durability model above is the intended
-design. The one roadmap item that changes the throughput envelope is the optional
-WAL durability toggle ([#547](https://github.com/pmcfadin/cqlite/issues/547)).
+single-writer `&mut self` semantics and the same per-write WAL fsync by default —
+it is not a throughput escape hatch on its own. The lever that lifts the fsync
+bound is `Durability::Disabled` (#547). There is **no separate batched-mutation
+API currently planned**; the single-writer model above is the intended design.

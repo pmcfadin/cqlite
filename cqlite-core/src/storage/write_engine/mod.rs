@@ -152,6 +152,65 @@ struct ActiveMerge {
     started_at: Instant,
 }
 
+/// WAL durability mode for the write engine.
+///
+/// Controls whether `write` and `write_async` append to and fsync the
+/// write-ahead log on every call.  The default (`SyncEachWrite`) matches the
+/// pre-existing behavior and is the **only safe choice for production
+/// workloads** — a process crash between a successful `write` and a later
+/// `flush` will lose mutations written with `Disabled`.
+///
+/// ## When to use `Disabled`
+///
+/// - **Bulk-load / import pipelines** where the source data is replayable and
+///   you are willing to re-run the load on failure.
+/// - **Benchmarking** where you want to isolate CPU-bound write throughput from
+///   fsync latency.  The companion `write/ingest_wal_off` Criterion bench uses
+///   this variant (see `cqlite-core/benches/write.rs`).
+///
+/// In both cases, call [`WriteEngine::flush`] (and, optionally,
+/// [`WriteEngine::close`]) when the load is finished so the data is durably
+/// persisted to SSTables.
+///
+/// ## WAL replay on restart
+///
+/// When `Disabled`, no WAL entries are written.  Reopening the engine on the
+/// same `wal_dir` after a crash will replay **zero** mutations, even if
+/// `flush` was never called.  If you need crash-safe recovery, use
+/// `SyncEachWrite`.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use cqlite_core::storage::write_engine::{Durability, WriteEngineConfig};
+///
+/// // Production (default)
+/// let config = WriteEngineConfig::new(data, wal, schema);
+///
+/// // Bulk-load / benchmarking
+/// let config = WriteEngineConfig::new(data, wal, schema)
+///     .with_durability(Durability::Disabled);
+/// ```
+#[cfg(feature = "write-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Durability {
+    /// Append to the WAL and call `fsync` on every `write` / `write_async`
+    /// call.  A successful return guarantees the mutation is durable on disk.
+    ///
+    /// This is the **default** and the safe choice for all production
+    /// workloads.
+    #[default]
+    SyncEachWrite,
+
+    /// Skip WAL append **and** fsync on every `write` / `write_async` call.
+    /// Mutations are buffered in the memtable only.  Data is durable only
+    /// after a successful [`WriteEngine::flush`].
+    ///
+    /// **Use only for bulk-load pipelines and benchmarks where durability can
+    /// be traded for throughput.**
+    Disabled,
+}
+
 /// Write engine configuration
 #[cfg(feature = "write-support")]
 #[derive(Debug, Clone)]
@@ -167,6 +226,8 @@ pub struct WriteEngineConfig {
     pub memtable_hard_limit: usize,
     /// Table schema for column metadata
     pub schema: TableSchema,
+    /// WAL durability mode (default: [`Durability::SyncEachWrite`])
+    pub durability: Durability,
 }
 
 #[cfg(feature = "write-support")]
@@ -184,6 +245,7 @@ impl WriteEngineConfig {
             memtable_flush_threshold: Self::DEFAULT_FLUSH_THRESHOLD,
             memtable_hard_limit: Self::DEFAULT_HARD_LIMIT,
             schema,
+            durability: Durability::default(),
         }
     }
 
@@ -196,6 +258,25 @@ impl WriteEngineConfig {
     /// Set a custom hard limit
     pub fn with_hard_limit(mut self, limit: usize) -> Self {
         self.memtable_hard_limit = limit;
+        self
+    }
+
+    /// Set the WAL durability mode.
+    ///
+    /// Mirrors `with_flush_threshold` in style. See [`Durability`] for the
+    /// trade-offs between [`Durability::SyncEachWrite`] (default, production)
+    /// and [`Durability::Disabled`] (bulk-load / benchmarking).
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// use cqlite_core::storage::write_engine::{Durability, WriteEngineConfig};
+    ///
+    /// let config = WriteEngineConfig::new(data, wal, schema)
+    ///     .with_durability(Durability::Disabled);
+    /// ```
+    pub fn with_durability(mut self, durability: Durability) -> Self {
+        self.durability = durability;
         self
     }
 }
@@ -434,9 +515,11 @@ impl WriteEngine {
             )));
         }
 
-        // 1. Append to WAL (durability)
-        self.wal.append(&mutation)?;
-        self.wal.sync()?;
+        // 1. Append to WAL (durability) — skipped when Durability::Disabled
+        if self.config.durability == Durability::SyncEachWrite {
+            self.wal.append(&mutation)?;
+            self.wal.sync()?;
+        }
 
         // 2. Compute decorated key from partition key
         let decorated_key = mutation.decorated_key(&self.config.schema)?;
@@ -503,9 +586,11 @@ impl WriteEngine {
             )));
         }
 
-        // 1. Append to WAL (durability)
-        self.wal.append(&mutation)?;
-        self.wal.sync()?;
+        // 1. Append to WAL (durability) — skipped when Durability::Disabled
+        if self.config.durability == Durability::SyncEachWrite {
+            self.wal.append(&mutation)?;
+            self.wal.sync()?;
+        }
 
         // 2. Compute decorated key from partition key
         let decorated_key = mutation.decorated_key(&self.config.schema)?;
@@ -3101,6 +3186,209 @@ mod tests {
         assert_eq!(
             stats.sstables_produced, 1,
             "one output SSTable must have been produced"
+        );
+    }
+
+    // ============================================================================
+    // Issue #547: WAL durability toggle tests
+    // ============================================================================
+
+    /// `Durability::SyncEachWrite` is the default variant.
+    #[test]
+    fn test_durability_default_is_sync_each_write() {
+        assert_eq!(Durability::default(), Durability::SyncEachWrite);
+    }
+
+    /// `WriteEngineConfig` defaults to `Durability::SyncEachWrite`.
+    #[test]
+    fn test_config_default_durability() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        assert_eq!(config.durability, Durability::SyncEachWrite);
+    }
+
+    /// `with_durability` builder sets the field and returns `Self`.
+    #[test]
+    fn test_config_with_durability_builder() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_durability(Durability::Disabled);
+        assert_eq!(config.durability, Durability::Disabled);
+    }
+
+    /// With `Durability::SyncEachWrite`, the WAL grows after each `write`.
+    #[test]
+    fn test_wal_on_produces_wal_growth() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_durability(Durability::SyncEachWrite);
+
+        let mut engine = WriteEngine::new(config).unwrap();
+        assert_eq!(engine.wal_size(), 0, "WAL must start empty");
+
+        let mutation = create_test_mutation(1, "Alice", 1_000_000);
+        engine.write(mutation).unwrap();
+
+        assert!(
+            engine.wal_size() > 0,
+            "WAL must grow after write with SyncEachWrite"
+        );
+    }
+
+    /// With `Durability::Disabled`, the WAL is never written — `wal_size()` stays 0.
+    #[test]
+    fn test_wal_off_produces_no_wal_growth() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_durability(Durability::Disabled);
+
+        let mut engine = WriteEngine::new(config).unwrap();
+        assert_eq!(engine.wal_size(), 0, "WAL must start empty");
+
+        // Write several mutations — none should touch the WAL.
+        for i in 0..10 {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1_000_000 + i as i64);
+            engine.write(mutation).unwrap();
+        }
+
+        assert_eq!(
+            engine.wal_size(),
+            0,
+            "WAL must remain empty with Durability::Disabled"
+        );
+        assert_eq!(
+            engine.memtable_row_count(),
+            10,
+            "Mutations must reach the memtable even without WAL"
+        );
+    }
+
+    /// With `Durability::Disabled`, async writes also skip the WAL.
+    #[tokio::test]
+    async fn test_wal_off_write_async_produces_no_wal_growth() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_durability(Durability::Disabled);
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        for i in 0..5 {
+            let mutation = create_test_mutation(i, &format!("User{}", i), 1_000_000 + i as i64);
+            engine.write_async(mutation).await.unwrap();
+        }
+
+        assert_eq!(
+            engine.wal_size(),
+            0,
+            "WAL must remain empty with Durability::Disabled (async path)"
+        );
+        assert_eq!(engine.memtable_row_count(), 5);
+    }
+
+    /// With `Durability::Disabled`, data that was never WAL'd is NOT replayed on
+    /// restart — confirming the documented durability trade-off.
+    #[test]
+    fn test_wal_off_no_replay_on_restart() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        {
+            let config = WriteEngineConfig::new(
+                temp_dir.path().join("data"),
+                temp_dir.path().join("wal"),
+                schema.clone(),
+            )
+            .with_durability(Durability::Disabled);
+
+            let mut engine = WriteEngine::new(config).unwrap();
+
+            for i in 0..5 {
+                let mutation = create_test_mutation(i, &format!("User{}", i), 1_000_000 + i as i64);
+                engine.write(mutation).unwrap();
+            }
+
+            // Drop without flushing — simulating crash.
+        }
+
+        // Reopen with default durability.  Because the WAL was never written, the
+        // memtable must be empty.
+        let config2 = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        let engine2 = WriteEngine::new(config2).unwrap();
+
+        assert_eq!(
+            engine2.memtable_row_count(),
+            0,
+            "No WAL entries were written with Disabled, so no replay is possible"
+        );
+    }
+
+    /// With `Durability::SyncEachWrite`, mutations ARE replayed after a simulated crash.
+    #[test]
+    fn test_wal_on_replays_on_restart() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        {
+            let config = WriteEngineConfig::new(
+                temp_dir.path().join("data"),
+                temp_dir.path().join("wal"),
+                schema.clone(),
+            )
+            .with_durability(Durability::SyncEachWrite);
+
+            let mut engine = WriteEngine::new(config).unwrap();
+
+            for i in 0..5 {
+                let mutation = create_test_mutation(i, &format!("User{}", i), 1_000_000 + i as i64);
+                engine.write(mutation).unwrap();
+            }
+
+            // Drop without flushing — WAL entries remain on disk.
+        }
+
+        // Reopen — WAL replay must restore the 5 mutations.
+        let config2 = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        )
+        .with_durability(Durability::SyncEachWrite);
+
+        let engine2 = WriteEngine::new(config2).unwrap();
+
+        assert_eq!(
+            engine2.memtable_row_count(),
+            5,
+            "SyncEachWrite must replay mutations durably on restart"
         );
     }
 }
