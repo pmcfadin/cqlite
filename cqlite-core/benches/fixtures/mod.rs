@@ -207,6 +207,10 @@ CREATE TABLE test_basic.simple_table (
 /// [`tempfile::TempDir`]). `flush_threshold` bytes controls when the memtable is
 /// eligible to flush; pass a large value to bench pure ingest, a small value to
 /// force flushes.
+///
+/// The engine is built with the default [`Durability::SyncEachWrite`] policy —
+/// every `write()` call performs `wal.append()` + `wal.sync()` (fsync).  Use
+/// [`open_write_engine_wal_off`] to benchmark the WAL-disabled path.
 #[cfg(feature = "write-support")]
 pub fn open_write_engine(
     dir: &std::path::Path,
@@ -219,6 +223,28 @@ pub fn open_write_engine(
     let cfg = WriteEngineConfig::new(dir.join("data"), dir.join("wal"), schema)
         .with_flush_threshold(flush_threshold);
     WriteEngine::new(cfg).expect("build write engine")
+}
+
+/// Build a [`WriteEngine`](cqlite_core::storage::write_engine::WriteEngine) with
+/// [`Durability::Disabled`] — WAL append and fsync are skipped on every
+/// `write()` call.  Mutations land only in the memtable; data is durable only
+/// after an explicit [`WriteEngine::flush`].
+///
+/// Use this for the `write/ingest_wal_off` bench (Issue #574) to measure the
+/// pure CPU/memtable ingest cost without I/O noise from fsync.
+#[cfg(feature = "write-support")]
+pub fn open_write_engine_wal_off(
+    dir: &std::path::Path,
+    flush_threshold: usize,
+) -> cqlite_core::storage::write_engine::WriteEngine {
+    use cqlite_core::schema::parse_cql_schema;
+    use cqlite_core::storage::write_engine::{Durability, WriteEngine, WriteEngineConfig};
+
+    let schema = parse_cql_schema(WRITE_TABLE_CQL).expect("parse write-bench schema");
+    let cfg = WriteEngineConfig::new(dir.join("data"), dir.join("wal"), schema)
+        .with_flush_threshold(flush_threshold)
+        .with_durability(Durability::Disabled);
+    WriteEngine::new(cfg).expect("build write engine (WAL off)")
 }
 
 /// Recursively copy a directory tree (files only; SSTable dirs are flat).

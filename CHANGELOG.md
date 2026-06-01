@@ -27,6 +27,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared CI runners; this is expected and does not indicate a regression. Only
   `Durability::Disabled` paths are CPU-bound and gate-able.
 
+- **`write/ingest_wal_off` benchmark** — new Criterion bench in
+  `cqlite-core/benches/write.rs` that runs the same 256-row ingest loop as
+  `ingest_wal_on` but with `Durability::Disabled` (#574). The measured path
+  performs no `wal.append()` or `wal.sync()`, isolating pure CPU + memtable
+  cost. This bench is strictly gated in the CI perf regression gate;
+  `ingest_wal_on` is now classified as advisory (reported, never fails CI on
+  its own). A new `open_write_engine_wal_off` fixture helper in
+  `benches/fixtures/mod.rs` constructs the WAL-disabled engine.
+
 ### Fixed
 
 - **Provenance gate false-positives on branch names**: `scripts/ci/ensure_real_dataset.sh`
