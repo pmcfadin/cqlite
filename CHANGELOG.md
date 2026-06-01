@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Performance methodology doc** — new `docs/performance.md` (Issue #575)
+  explains what the CI perf gate enforces (strict: `read/*`, `write/ingest_wal_off`,
+  `write/flush`) versus what it tracks as advisory (`write/ingest_wal_on`), why
+  CI absolute numbers are not authoritative for fsync-bound work, how to
+  reproduce benchmarks locally with exact `cargo bench` invocations and the
+  `Durability` knob, the effect of tmpfs vs disk on `ingest_wal_on` throughput,
+  and a direct answer to "is ~282 ops/sec expected?" (yes — it is disk-bounded
+  by per-write fsync latency at ~1 000 / fsync_ms ops/sec, not a cqlite
+  regression). Linked from README Resources section.
+
 - **WAL durability toggle on `WriteEngine`** — `WriteEngineConfig` now has a
   `durability` field (default `Durability::SyncEachWrite`) and a matching builder
   method `with_durability(Durability)`. When set to `Durability::Disabled`,
