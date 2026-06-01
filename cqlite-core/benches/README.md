@@ -71,7 +71,15 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `m1_performance` | kept | M1 baseline targets: partition-lookup latency plus multi-SSTable read throughput (MB/s). |
 | `fixtures_smoke` | added (#537) | Smoke/acceptance bench proving the fixture loaders are deterministic (seeded RNG + stable scan row count). Read/write portions activate under `cli-helpers` / `write-support`. |
 | `read` | added (#538) | Read suite (needs `--features cli-helpers`): `point_lookup`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. |
-| `write` | added (#539) | Write suite (needs `--features write-support`): `ingest_wal_on` (sustained ingest) and `flush` (memtable→SSTable flush latency) over the M5 `WriteEngine`. |
+| `write` | added (#539, #574) | Write suite (needs `--features write-support`): `ingest_wal_on`, `ingest_wal_off`, and `flush` — see below. |
+
+### `write` bench breakdown
+
+| Bench name | Gate policy | What it measures |
+|------------|-------------|------------------|
+| `write/ingest_wal_off` | **Strictly gated** — strict pass/fail | 256-row ingest with `Durability::Disabled`: WAL append and fsync are skipped. Pure CPU + memtable cost. Stable enough for reliable regression detection. |
+| `write/ingest_wal_on` | **Advisory** — reported, never fails CI | Identical 256-row ingest with `Durability::SyncEachWrite` (default): every row calls `wal.append()` + `wal.sync()` (fsync). I/O-dominated; fsync latency on shared CI runners makes this too noisy for strict gating, but it documents durability cost. |
+| `write/flush` | **Strictly gated** — strict pass/fail | Pre-filled memtable flushed once per iteration. Throughput reported in MB/s. |
 
 ## Performance regression gate (Issue #540)
 
