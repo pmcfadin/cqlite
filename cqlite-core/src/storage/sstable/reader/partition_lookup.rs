@@ -10,37 +10,37 @@ use crate::{Error, Result, RowKey};
 use log::debug;
 
 impl SSTableReader {
-    /// Enhanced partition lookup using Index.db reader with promoted index support
+    /// Enhanced partition lookup using Index.db reader with promoted index support.
+    ///
+    /// `partition_key` must be the raw partition-key bytes as produced by
+    /// [`PartitionKey::to_bytes`](crate::storage::write_engine::mutation::PartitionKey::to_bytes):
+    ///
+    /// - **Single-component keys** — raw value bytes (UUID = 16 bytes, int = 4 BE bytes, etc.).
+    /// - **Multi-component (composite) keys** — `[len: u16 BE][value bytes][0x00]` per component,
+    ///   including a trailing `0x00` after the final component.
+    ///
+    /// The Index.db key_lookup map is keyed on these exact raw bytes (set when the BIG-format
+    /// parser was fixed in Issue #552).  The old digest-based path (which caused every lookup
+    /// to miss) has been removed.  On a miss the function returns `Ok(None)` so callers can
+    /// fall through to their existing sequential-scan fallback.
     pub async fn lookup_partition_with_index(
         &self,
         partition_key: &[u8],
     ) -> Result<Option<(u64, u32)>> {
         if let Some(index_reader) = &self.index_reader {
-            // KNOWN LIMITATION (tracked in #553): Index.db entries are now
-            // keyed on the RAW partition key (the real Cassandra BIG format, #552),
-            // but this path still computes a hash digest, so the lookup misses and
-            // every caller falls back to a sequential scan (the #517 fallback path).
-            // Reads remain correct; restoring O(1) raw-key point lookup is a separate
-            // optimization, intentionally out of scope for #552.
-            let key_digest = match self.compute_partition_key_digest(partition_key).await {
-                Ok(digest) => digest,
-                Err(e) => {
-                    log::warn!("Failed to compute partition key digest: {}", e);
-                    return Ok(None);
-                }
-            };
-
-            // Use spec-compliant Index.db reader for partition lookup
-            if let Some(entry) = index_reader.lookup_partition(&key_digest) {
+            // Direct raw-key lookup — O(1) HashMap lookup.
+            // Index.db entries are keyed on the raw partition key bytes since #552;
+            // no Murmur3 digest computation is needed or correct here.
+            if let Some(entry) = index_reader.lookup_partition(partition_key) {
                 debug!(
-                    "Found partition via Index.db: offset={}, size={}",
+                    "Found partition via Index.db raw-key lookup: offset={}, size={}",
                     entry.data_offset, entry.data_size
                 );
                 return Ok(Some((entry.data_offset, entry.data_size)));
             } else {
                 debug!(
-                    "Partition not found in Index.db for key digest (len={})",
-                    key_digest.len()
+                    "Partition not found in Index.db for raw key (len={})",
+                    partition_key.len()
                 );
             }
         } else {

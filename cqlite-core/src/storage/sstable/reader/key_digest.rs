@@ -6,13 +6,18 @@ use super::super::key_digest::KeyDigestComputer;
 use super::types::SSTableReader;
 
 impl SSTableReader {
-    /// Compute partition key digest for Index.db lookup
+    /// Compute partition key digest for Index.db lookup.
     ///
     /// This method computes the digest from raw partition key bytes using the appropriate
     /// byte-comparable encoding based on the table schema's partition key definition.
     ///
     /// For modern formats (BIG v5, BTI), this MUST use schema-driven Murmur3 digest.
     /// Simple digest is only allowed for legacy formats behind feature flag.
+    ///
+    /// NOTE (Issue #553): This function is no longer called from the main
+    /// `lookup_partition_with_index` path, which now uses raw key bytes directly.
+    /// It is retained for potential future use and for `lookup_partition_with_schema_context`.
+    #[allow(dead_code)]
     pub(crate) async fn compute_partition_key_digest(
         &self,
         partition_key: &[u8],

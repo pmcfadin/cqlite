@@ -27,6 +27,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `stitch_and_parse_all_chunks` so V5CompressedLegacy rows parse during the scan
   fallback without an external schema.
 
+- **Index.db point-lookup performance cliff** (Issue #553) — `lookup_partition_with_index`
+  previously computed a Murmur3 digest of the raw partition key and looked that digest up in
+  the Index.db `key_lookup` map, which is keyed on **raw** partition key bytes (since #552).
+  The digest never matched, so every `get()` call fell back to an O(n) sequential scan of
+  Data.db. Results were always correct but at O(file-size) cost per lookup.
+
+  Fix: the digest computation (`compute_partition_key_digest`) has been removed from the
+  hot path. `lookup_partition_with_index` now passes the raw `partition_key: &[u8]` bytes
+  directly to `index_reader.lookup_partition`, restoring the O(1) HashMap lookup that was
+  present before #552 changed the key representation. Callers already pass raw bytes
+  (single = raw value bytes, composite = `[len u16 BE][value][0x00]` per component).
+
+  `lookup_partition_with_schema_context` (the schema-driven variant) is unchanged.
+
 ### Added
 
 - **Performance methodology doc** — new `docs/performance.md` (Issue #575)
