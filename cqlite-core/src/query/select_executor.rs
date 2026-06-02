@@ -697,6 +697,12 @@ impl SelectExecutor {
     /// - SSTableScan with predicates (streaming)
     /// - Filter/Limit/Project (applied during scan)
     ///
+    /// `LIMIT` (and `OFFSET`, when present in the plan) is enforced by the
+    /// streaming producer (`execute_streaming_background`): it skips `OFFSET`
+    /// matches and stops scanning once `count` rows have been sent, so a
+    /// `LIMIT N` query yields exactly `N` rows without materializing the rest
+    /// (Issue #581).
+    ///
     /// For ORDER BY/GROUP BY/DISTINCT, falls back to full execution then streams results.
     pub async fn execute_streaming(
         &self,
@@ -811,6 +817,30 @@ impl SelectExecutor {
         execution_steps: Vec<ExecutionStep>,
         tx: mpsc::Sender<Result<QueryRow>>,
     ) -> Result<()> {
+        // Issue #581: LIMIT/OFFSET must be enforced by the producer in the
+        // streaming path. The `ExecutionStep::Limit` arm previously only logged a
+        // message and relied on a consumer that never applied it, so
+        // `execute_streaming` yielded the full result set regardless of LIMIT.
+        // Extract the bound up front (steps are ordered with Limit after the scan)
+        // and stop sending once it is satisfied — mirroring `execute_limit`
+        // (drain OFFSET, then truncate to `count`) row-by-row so the producer
+        // stops scanning early.
+        let limit = execution_steps.iter().find_map(|step| match step {
+            ExecutionStep::Limit { count, offset } => Some((*count, offset.unwrap_or(0))),
+            _ => None,
+        });
+        let (limit_count, mut offset_remaining) = match limit {
+            Some((count, offset)) => (Some(count), offset),
+            None => (None, 0),
+        };
+
+        // A `LIMIT 0` means no rows can ever be sent; return before scanning.
+        if limit_count == Some(0) {
+            return Ok(());
+        }
+
+        let mut sent: u64 = 0;
+
         for step in &execution_steps {
             match step {
                 ExecutionStep::SSTableScan {
@@ -839,17 +869,29 @@ impl SelectExecutor {
                             continue;
                         }
 
+                        // Apply OFFSET: skip the first `offset_remaining` matches.
+                        if offset_remaining > 0 {
+                            offset_remaining -= 1;
+                            continue;
+                        }
+
                         // Send row through channel (with backpressure). Consumer drop ends the scan.
                         if tx.send(Ok(row)).await.is_err() {
                             return Ok(());
                         }
+                        sent += 1;
+
+                        // Apply LIMIT: stop scanning once `count` rows have been sent.
+                        if let Some(count) = limit_count {
+                            if sent >= count {
+                                return Ok(());
+                            }
+                        }
                     }
                 }
-                ExecutionStep::Limit { count, .. } => {
-                    log::debug!(
-                        "Streaming execution: LIMIT {} will be applied by consumer",
-                        count
-                    );
+                ExecutionStep::Limit { .. } => {
+                    // Enforced inline during the scan above (see the limit bound
+                    // extracted before the loop).
                 }
                 // Projection and predicate filtering are pushed into SSTableScan above.
                 ExecutionStep::Project { .. } | ExecutionStep::Filter { .. } => {}
