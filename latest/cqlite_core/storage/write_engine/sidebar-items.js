@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["cql_to_mutation","export","memtable","merge","merge_policy","mutation","wal"],"struct":["CompactionStats","MaintenanceReport","WriteEngine","WriteEngineConfig"],"trait":["MergePolicy"]};
+window.SIDEBAR_ITEMS = {"enum":["Durability"],"mod":["cql_to_mutation","export","memtable","merge","merge_policy","mutation","wal"],"struct":["CompactionStats","MaintenanceReport","WriteEngine","WriteEngineConfig"],"trait":["MergePolicy"]};
