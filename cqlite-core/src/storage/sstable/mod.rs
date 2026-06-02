@@ -615,12 +615,31 @@ impl SSTableManager {
     }
 
     /// Get a value by key from all SSTables (simple version without tombstone merging)
+    ///
+    /// Uses `table_readers` (keyed by unqualified table name) so that only the
+    /// SSTables for the requested table are searched.  The legacy `readers` map
+    /// (keyed by SSTableId / filename) cannot be used because all SSTables share
+    /// the same base filename (`nb-1-big-Data.db`) and the HashMap therefore only
+    /// retains the last-inserted reader.
     #[cfg(not(feature = "tombstones"))]
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
-        let readers = self.readers.read().await;
+        let table_readers = self.table_readers.read().await;
 
-        // Return the first value found (simple strategy)
-        for (_sstable_id, reader) in readers.iter() {
+        // Resolve unqualified table name for the lookup (mirrors SSTableManager::scan logic)
+        let table_name = table_id.name();
+        let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
+            &table_name[dot_pos + 1..]
+        } else {
+            table_name
+        };
+
+        let reader_list = match table_readers.get(unqualified_name) {
+            Some(list) => list,
+            None => return Ok(None),
+        };
+
+        // Return the first value found across all SSTables for this table
+        for reader in reader_list {
             if let Some(value) = reader.get(table_id, key).await? {
                 return Ok(Some(value));
             }

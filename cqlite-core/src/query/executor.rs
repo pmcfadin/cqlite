@@ -535,6 +535,9 @@ impl QueryExecutor {
             (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b).unwrap_or(Ordering::Equal)),
             (Value::Text(a), Value::Text(b)) => Ok(a.cmp(b)),
             (Value::Boolean(a), Value::Boolean(b)) => Ok(a.cmp(b)),
+            // UUID comparison: byte-wise (same as Cassandra's ordering).
+            // Covers both UUID and TIMEUUID columns — both are stored as Value::Uuid.
+            (Value::Uuid(a), Value::Uuid(b)) => Ok(a.cmp(b)),
             (Value::Null, Value::Null) => Ok(Ordering::Equal),
             (Value::Null, _) => Ok(Ordering::Less),
             (_, Value::Null) => Ok(Ordering::Greater),
@@ -544,7 +547,17 @@ impl QueryExecutor {
         }
     }
 
-    /// Convert Value to RowKey
+    /// Convert a [`Value`] to the raw partition-key bytes used by [`RowKey`] and
+    /// the Index.db lookup table.
+    ///
+    /// The encoding follows the same contract as
+    /// [`PartitionKey::to_bytes`](crate::storage::write_engine::mutation::PartitionKey::to_bytes):
+    ///
+    /// - **Single-component keys** — raw value bytes (UUID = 16 bytes, Int = 4 BE
+    ///   bytes, Text = UTF-8, BigInt = 8 BE bytes, …).
+    /// - **Multi-component (composite) keys** — `[len: u16 BE][value bytes][0x00]`
+    ///   per component, including a trailing `0x00` after the final component.
+    ///   Pass a `Value::Tuple` whose elements are the ordered PK components.
     fn value_to_row_key(&self, value: &Value) -> Result<RowKey> {
         match value {
             Value::Integer(i) => Ok(RowKey::new(i.to_be_bytes().to_vec())),
@@ -552,7 +565,48 @@ impl QueryExecutor {
             Value::Float(f) => Ok(RowKey::new(f.to_be_bytes().to_vec())),
             Value::Boolean(b) => Ok(RowKey::new(vec![u8::from(*b)])),
             Value::Null => Ok(RowKey::new(vec![0])),
+            // UUID and TIMEUUID are both stored as 16 raw bytes (no framing).
+            // This matches PartitionKey::to_bytes single-component output for a UUID column.
+            Value::Uuid(bytes) => Ok(RowKey::new(bytes.to_vec())),
+            Value::BigInt(i) => Ok(RowKey::new(i.to_be_bytes().to_vec())),
+            // Multi-component (composite) partition key passed as a Tuple.
+            // Encoding: [len: u16 BE][value bytes][0x00] per component, identical to
+            // PartitionKey::to_bytes multi-component output (see mutation.rs ~line 256).
+            Value::Tuple(components) => {
+                let mut result = Vec::new();
+                for component in components {
+                    let raw = self.value_to_raw_pk_bytes(component)?;
+                    let len = raw.len();
+                    if len > u16::MAX as usize {
+                        return Err(Error::query_execution(
+                            "Composite partition key component too large",
+                        ));
+                    }
+                    result.extend_from_slice(&(len as u16).to_be_bytes());
+                    result.extend_from_slice(&raw);
+                    result.push(0x00);
+                }
+                Ok(RowKey::new(result))
+            }
             _ => Err(Error::query_execution("Cannot convert value to row key")),
+        }
+    }
+
+    /// Serialize a single value to raw bytes suitable for inclusion in a
+    /// composite partition key component. Used by [`value_to_row_key`] for
+    /// `Value::Tuple` components.
+    fn value_to_raw_pk_bytes(&self, value: &Value) -> Result<Vec<u8>> {
+        match value {
+            Value::Integer(i) => Ok(i.to_be_bytes().to_vec()),
+            Value::Text(s) => Ok(s.as_bytes().to_vec()),
+            Value::Float(f) => Ok(f.to_be_bytes().to_vec()),
+            Value::Boolean(b) => Ok(vec![u8::from(*b)]),
+            Value::Null => Ok(Vec::new()),
+            Value::Uuid(bytes) => Ok(bytes.to_vec()),
+            Value::BigInt(i) => Ok(i.to_be_bytes().to_vec()),
+            _ => Err(Error::query_execution(
+                "Cannot serialize value as partition key component",
+            )),
         }
     }
 
