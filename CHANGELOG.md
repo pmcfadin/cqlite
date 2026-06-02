@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.10.0] - 2026-06-02
+
+Minor release. Three query-engine correctness/performance fixes (#548, #553,
+#581), the new `Durability` write API (#547), `write-support` enabled by
+default (#558), and a batch of developer-experience, CI, and documentation
+improvements. 14 PRs since v0.9.2.
+
 ### Fixed
 
 - **UUID/TIMEUUID WHERE clause returned 0 rows** (Issue #548) — `WHERE id = <uuid-literal>`
@@ -40,6 +47,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (single = raw value bytes, composite = `[len u16 BE][value][0x00]` per component).
 
   `lookup_partition_with_schema_context` (the schema-driven variant) is unchanged.
+
+- **`LIMIT` ignored on streaming `SELECT`** (#581): `Database::execute_streaming`
+  yielded the entire result set regardless of `LIMIT`. The streaming producer
+  (`execute_streaming_background`) only logged the `LIMIT` step and relied on a
+  consumer that never enforced it, so `SELECT … LIMIT N` streamed every row — a
+  silent wrong-result bug. The producer now enforces `LIMIT`/`OFFSET` inline
+  during the scan (skip `OFFSET` matches, stop sending once `count` rows are
+  emitted, and return so the scan stops early), matching the non-streaming
+  `execute_limit` semantics. Regression test:
+  `tests/test_issue_581_streaming_limit.rs`.
+
+- **Provenance gate false-positives on branch names**: `scripts/ci/ensure_real_dataset.sh`
+  now restricts its environment-variable scan to dataset-relevant names (`*_ROOT`,
+  `*_PATH`, `DATASET*`) instead of scanning every env var. GitHub CI vars such as
+  `GITHUB_HEAD_REF`, `GITHUB_REF*`, and `GITHUB_BASE_REF` are no longer inspected,
+  so branch names containing words like "fixture" or "mock" no longer cause spurious
+  gate failures. The `DATASET_SHA256` checksum check and CLI-argument scan are
+  unchanged (#545).
 
 ### Added
 
@@ -105,25 +130,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   files. Docs-only / examples-only PRs no longer trigger the benchmark gate,
   eliminating false-positive regression alerts from fsync noise on those PRs.
 
-### Fixed
-
-- **`LIMIT` ignored on streaming `SELECT`** (#581): `Database::execute_streaming`
-  yielded the entire result set regardless of `LIMIT`. The streaming producer
-  (`execute_streaming_background`) only logged the `LIMIT` step and relied on a
-  consumer that never enforced it, so `SELECT … LIMIT N` streamed every row — a
-  silent wrong-result bug. The producer now enforces `LIMIT`/`OFFSET` inline
-  during the scan (skip `OFFSET` matches, stop sending once `count` rows are
-  emitted, and return so the scan stops early), matching the non-streaming
-  `execute_limit` semantics. Regression test:
-  `tests/test_issue_581_streaming_limit.rs`.
-
-- **Provenance gate false-positives on branch names**: `scripts/ci/ensure_real_dataset.sh`
-  now restricts its environment-variable scan to dataset-relevant names (`*_ROOT`,
-  `*_PATH`, `DATASET*`) instead of scanning every env var. GitHub CI vars such as
-  `GITHUB_HEAD_REF`, `GITHUB_REF*`, and `GITHUB_BASE_REF` are no longer inspected,
-  so branch names containing words like "fixture" or "mock" no longer cause spurious
-  gate failures. The `DATASET_SHA256` checksum check and CLI-argument scan are
-  unchanged (#545).
+- **Linux x86_64 musl release target + SHA-256 checksums** — release binaries now
+  include a statically-linked `x86_64-unknown-linux-musl` artifact plus a SHA-256
+  checksum per asset, and the README gained an install section (#561, #568).
 
 ### Changed
 
@@ -133,6 +142,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `write-support` gates only first-party code, so the dependency surface for
   read-only consumers is unchanged. `flush`/`compact` on the high-level `Database`
   type remain behind the separate `experimental` feature (#558).
+
+### Documentation
+
+- **README feature → public-API table** mapping each Cargo feature to the API it
+  gates (#557).
+- **"Using cqlite-core as a dependency" guide** plus a compiling write-path example
+  (#559).
+- **Write-path concurrency & durability model** documented end to end (#560).
+- **Per-tag rustdoc published to GitHub Pages** with a discoverable changelog link
+  (#563).
 
 ## [v0.9.2] — Correctness fixes
 
