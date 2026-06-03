@@ -13,13 +13,14 @@ use crate::{Error, Result, RowKey};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::fs::File;
 use tokio::io::{AsyncSeekExt, BufReader};
+
+use super::source::BlockSource;
 
 impl SSTableReader {
     /// Load index from integrated or component-based format
     pub(super) async fn load_index(
-        file: &Arc<tokio::sync::Mutex<BufReader<File>>>,
+        file: &Arc<tokio::sync::Mutex<BlockSource>>,
         header: &crate::parser::SSTableHeader,
         platform: &Arc<Platform>,
         data_file_path: &Path,
@@ -101,7 +102,7 @@ impl SSTableReader {
 
     /// Load bloom filter from integrated or component-based format
     pub(super) async fn load_bloom_filter(
-        file: &Arc<tokio::sync::Mutex<BufReader<File>>>,
+        file: &Arc<tokio::sync::Mutex<BlockSource>>,
         header: &crate::parser::SSTableHeader,
         _platform: &Arc<Platform>,
         data_file_path: &Path,

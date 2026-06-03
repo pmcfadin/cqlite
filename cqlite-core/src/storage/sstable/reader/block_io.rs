@@ -6,17 +6,17 @@
 //! - Retry logic for transient I/O errors
 
 use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 
 use super::header::{detect_ascii_header_corruption, is_ascii_corruption_value};
+use super::source::BlockSource;
 use super::types::SSTableReaderConfig;
 use crate::{Error, Result};
 
 /// Read next block with enhanced error handling and streaming support
 pub(crate) async fn read_next_block(
-    file: &Arc<Mutex<BufReader<File>>>,
+    file: &Arc<Mutex<BlockSource>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
@@ -37,7 +37,7 @@ pub(crate) async fn read_next_block(
 
 /// Read block with retry logic for handling transient I/O errors
 async fn read_next_block_with_retry(
-    file: &Arc<Mutex<BufReader<File>>>,
+    file: &Arc<Mutex<BlockSource>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
@@ -83,7 +83,7 @@ async fn read_next_block_with_retry(
 
 /// Internal block reading implementation
 async fn read_next_block_impl(
-    file: &Arc<Mutex<BufReader<File>>>,
+    file: &Arc<Mutex<BlockSource>>,
     cassandra_version: &crate::parser::header::CassandraVersion,
     config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
@@ -227,7 +227,7 @@ async fn read_next_block_impl(
 /// support where chunk offsets may be relative to compressed data start, but for
 /// NB format it should always be 0.
 async fn read_nb_format_chunk_data(
-    file: &Arc<Mutex<BufReader<File>>>,
+    file: &Arc<Mutex<BlockSource>>,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     file_size: u64,
@@ -383,7 +383,7 @@ async fn read_nb_format_chunk_data(
 
 /// Read block header for BTI format
 async fn read_bti_format_block_header(
-    file: &Arc<Mutex<BufReader<File>>>,
+    file: &Arc<Mutex<BlockSource>>,
 ) -> Result<Option<(u32, u32, u64)>> {
     // BTI format has a slightly different header structure
     let mut header_buffer = [0u8; 12]; // 12-byte header for BTI
@@ -431,7 +431,7 @@ async fn read_bti_format_block_header(
 
 /// Read block header for legacy format
 async fn read_legacy_format_block_header(
-    file: &Arc<Mutex<BufReader<File>>>,
+    file: &Arc<Mutex<BlockSource>>,
 ) -> Result<Option<(u32, u32, u64)>> {
     let mut header_buffer = [0u8; 8]; // Minimal 8-byte header
     let current_pos = {
@@ -468,7 +468,7 @@ async fn read_legacy_format_block_header(
 }
 
 /// Read block data directly for small blocks
-async fn read_block_direct(file: &Arc<Mutex<BufReader<File>>>, size: usize) -> Result<Vec<u8>> {
+async fn read_block_direct(file: &Arc<Mutex<BlockSource>>, size: usize) -> Result<Vec<u8>> {
     let mut block_data = vec![0u8; size];
     {
         let mut file_guard = file.lock().await;
@@ -484,7 +484,7 @@ async fn read_block_direct(file: &Arc<Mutex<BufReader<File>>>, size: usize) -> R
 
 /// Read large block using streaming I/O to reduce memory pressure
 async fn read_large_block_streaming(
-    file: &Arc<Mutex<BufReader<File>>>,
+    file: &Arc<Mutex<BlockSource>>,
     size: usize,
     config: &SSTableReaderConfig,
 ) -> Result<Vec<u8>> {
@@ -531,9 +531,7 @@ async fn read_large_block_streaming(
 /// This format has no compression and no block headers - the entire data section
 /// after the 4096-byte file header is raw partition data. We read remaining data
 /// from current position to EOF, returning it as a single block.
-async fn read_uncompressed_data_block(
-    file: &Arc<Mutex<BufReader<File>>>,
-) -> Result<Option<Vec<u8>>> {
+async fn read_uncompressed_data_block(file: &Arc<Mutex<BlockSource>>) -> Result<Option<Vec<u8>>> {
     let (current_pos, file_size) = {
         let mut file_guard = file.lock().await;
         let current = file_guard.stream_position().await.map_err(|e| {
@@ -791,7 +789,7 @@ mod tests {
         tokio::fs::write(&temp_file, b"").await.unwrap();
 
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         let result = read_block_direct(&file, 0).await;
         assert!(result.is_ok());
@@ -811,7 +809,7 @@ mod tests {
         tokio::fs::write(&temp_file, test_data).await.unwrap();
 
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         let result = read_block_direct(&file, test_data.len()).await;
         assert!(result.is_ok());
@@ -831,7 +829,7 @@ mod tests {
         tokio::fs::write(&temp_file, test_data).await.unwrap();
 
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         let result = read_uncompressed_data_block(&file).await;
         assert!(result.is_ok());
@@ -853,7 +851,7 @@ mod tests {
         tokio::fs::write(&temp_file, b"").await.unwrap();
 
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         // Should return None for EOF
         let result = read_uncompressed_data_block(&file).await;
@@ -875,7 +873,7 @@ mod tests {
             .unwrap();
 
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         // Should return None for incomplete header (EOF)
         let result = read_legacy_format_block_header(&file).await;
@@ -896,7 +894,7 @@ mod tests {
         tokio::fs::write(&temp_file, &header).await.unwrap();
 
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         let result = read_legacy_format_block_header(&file).await;
         assert!(result.is_ok());
@@ -924,7 +922,7 @@ mod tests {
         tokio::fs::write(&temp_file, &header).await.unwrap();
 
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         let result = read_bti_format_block_header(&file).await;
         assert!(result.is_ok());
@@ -949,7 +947,7 @@ mod tests {
         tokio::fs::write(&temp_file, &test_data).await.unwrap();
 
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         let config = SSTableReaderConfig {
             read_buffer_size: 4096, // Small buffer to test streaming
@@ -1032,7 +1030,7 @@ mod tests {
             metadata.len()
         );
 
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         // Try reading a small block
         if metadata.len() > 100 {

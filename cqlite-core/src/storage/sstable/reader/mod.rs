@@ -20,6 +20,7 @@ mod integrity;
 mod key_digest;
 pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
+mod source;
 #[cfg(test)]
 mod tests;
 mod types;
@@ -49,8 +50,10 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use tokio::fs::File;
-use tokio::io::{AsyncReadExt, AsyncSeekExt, BufReader};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
+
+use source::BlockSource;
 
 use crate::{
     parser::{header::CassandraVersion, SSTableHeader, SSTableParser},
@@ -69,9 +72,42 @@ use super::tombstone_merger::TombstoneMerger;
 impl SSTableReader {
     /// Open an SSTable file for reading
     pub async fn open(path: &Path, _config: &Config, platform: Arc<Platform>) -> Result<Self> {
-        let file = File::open(path).await?;
-        let file_size = file.metadata().await?.len();
-        let file = Arc::new(Mutex::new(BufReader::new(file)));
+        let reader_config = SSTableReaderConfig::default();
+        let file_size = tokio::fs::metadata(path).await?.len();
+
+        // Select the backing store for block I/O. Memory-map the file when mmap
+        // is enabled and the file is large enough to be worth it; otherwise use
+        // buffered file I/O. Mapping a zero-length file is invalid, so empty
+        // files always fall back to buffered reads.
+        let use_mmap = reader_config.use_mmap
+            && file_size > 0
+            && file_size >= reader_config.mmap_min_size_bytes as u64;
+        let source = if use_mmap {
+            match Self::map_file(path) {
+                Ok(mmap) => {
+                    log::debug!(
+                        "Opened {} via memory map ({} bytes)",
+                        path.display(),
+                        file_size
+                    );
+                    BlockSource::mapped(Arc::new(mmap))
+                }
+                Err(e) => {
+                    // Memory mapping can fail on some filesystems (e.g. certain
+                    // network mounts). Degrade gracefully to buffered I/O rather
+                    // than failing the open outright.
+                    log::warn!(
+                        "Memory-mapping {} failed ({}); falling back to buffered I/O",
+                        path.display(),
+                        e
+                    );
+                    BlockSource::buffered(File::open(path).await?)
+                }
+            }
+        } else {
+            BlockSource::buffered(File::open(path).await?)
+        };
+        let file = Arc::new(Mutex::new(source));
 
         // Parse header - read available bytes, not a fixed size
         // NOTE: For NB format files (Cassandra 4.x+), Data.db often contains compressed row data
@@ -137,8 +173,6 @@ impl SSTableReader {
 
         // Load bloom filter if available (supports both integrated and component-based)
         let bloom_filter = Self::load_bloom_filter(&file, &header, &platform, path).await?;
-
-        let reader_config = SSTableReaderConfig::default();
 
         // Load spec readers for enhanced metadata and lookups
         let index_reader = Self::load_index_reader(path, &platform).await;
@@ -264,6 +298,23 @@ impl SSTableReader {
             compression_info: compression_info.map(Arc::new),
             current_chunk_index: AtomicUsize::new(0),
         })
+    }
+
+    /// Memory-map an SSTable file read-only.
+    ///
+    /// # Safety / correctness
+    ///
+    /// The returned [`Mmap`](memmap2::Mmap) aliases the file's bytes for its
+    /// entire lifetime. SSTables are immutable once written, and CQLite treats
+    /// them as read-only inputs, so this matches Cassandra's own mmap read
+    /// strategy. Mutating the underlying file while a reader is open is
+    /// undefined behaviour — callers must not do so.
+    fn map_file(path: &Path) -> Result<memmap2::Mmap> {
+        let std_file = std::fs::File::open(path)?;
+        // SAFETY: read-only mapping of a file assumed immutable for the
+        // reader's lifetime; see the function-level note above.
+        let mmap = unsafe { memmap2::MmapOptions::new().map(&std_file)? };
+        Ok(mmap)
     }
 
     /// Load CompressionInfo.db metadata for chunked reading
