@@ -69,10 +69,42 @@ use log::debug;
 #[cfg(feature = "tombstones")]
 use super::tombstone_merger::TombstoneMerger;
 
+/// Returns `true` when memory-mapped reads are force-enabled via the
+/// `CQLITE_USE_MMAP` environment variable.
+///
+/// Accepts `1`, `true`, `yes`, `on` (case-insensitive). Any other value — or
+/// an unset variable — leaves the decision to [`Config`]. This is an opt-in
+/// escape hatch for ad-hoc local use without threading a custom config.
+fn mmap_enabled_via_env() -> bool {
+    std::env::var("CQLITE_USE_MMAP")
+        .ok()
+        .as_deref()
+        .map(parse_truthy_env)
+        .unwrap_or(false)
+}
+
+/// Parse a truthy environment-variable value (`1`/`true`/`yes`/`on`,
+/// case-insensitive). Split out so it can be unit-tested without mutating the
+/// process-global environment (which would race other `open()` tests).
+fn parse_truthy_env(value: &str) -> bool {
+    matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
 impl SSTableReader {
     /// Open an SSTable file for reading
-    pub async fn open(path: &Path, _config: &Config, platform: Arc<Platform>) -> Result<Self> {
-        let reader_config = SSTableReaderConfig::default();
+    pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+        // Honor the caller's storage config for the mmap decision. Memory
+        // mapping is opt-in (buffered I/O is the portable default); it can be
+        // turned on via `config.storage.use_mmap` or the `CQLITE_USE_MMAP`
+        // environment variable. See `Config::storage.use_mmap` for the
+        // platform/filesystem safety constraints.
+        let mut reader_config = SSTableReaderConfig::default();
+        reader_config.use_mmap = config.storage.use_mmap || mmap_enabled_via_env();
+        reader_config.mmap_min_size_bytes = config.storage.mmap_min_size_bytes;
+
         let file_size = tokio::fs::metadata(path).await?.len();
 
         // Select the backing store for block I/O. Memory-map the file when mmap
@@ -300,6 +332,15 @@ impl SSTableReader {
         })
     }
 
+    /// Whether this reader's block source is backed by a memory map.
+    ///
+    /// Test-only hook used to verify that the `use_mmap` config / env wiring
+    /// actually selects the intended backend end-to-end.
+    #[cfg(test)]
+    pub(crate) async fn is_mmap_backed(&self) -> bool {
+        self.file.lock().await.is_mmap()
+    }
+
     /// Memory-map an SSTable file read-only.
     ///
     /// # Safety / correctness
@@ -309,6 +350,12 @@ impl SSTableReader {
     /// them as read-only inputs, so this matches Cassandra's own mmap read
     /// strategy. Mutating the underlying file while a reader is open is
     /// undefined behaviour — callers must not do so.
+    ///
+    /// Note that only the initial mapping is fallible here. Once mapped, a later
+    /// page fault — caused by truncation, deletion, or a network/overlay
+    /// filesystem hiccup — raises `SIGBUS` and **cannot** be recovered as an
+    /// `io::Error`. This is why mmap is opt-in and gated on immutable local
+    /// files; see [`Config`]'s `storage.use_mmap` for the full constraints.
     fn map_file(path: &Path) -> Result<memmap2::Mmap> {
         let std_file = std::fs::File::open(path)?;
         // SAFETY: read-only mapping of a file assumed immutable for the

@@ -52,6 +52,37 @@ pub struct StorageConfig {
 
     /// Sync mode for durability
     pub sync_mode: SyncMode,
+
+    /// Memory-map SSTable Data.db files instead of using buffered file I/O.
+    ///
+    /// **Opt-in.** Defaults to `false` (buffered I/O), which is portable and
+    /// safe on every filesystem. When enabled, the reader maps Data.db files at
+    /// or above [`Self::mmap_min_size_bytes`] into the process address space and
+    /// serves reads from the OS page cache with no per-block `read` syscall,
+    /// mirroring Cassandra's `disk_access_mode: mmap`. This speeds up repeated
+    /// local scans of the same files.
+    ///
+    /// # Safety / platform constraints
+    ///
+    /// A memory map aliases the file's bytes for the reader's lifetime. Only
+    /// enable this when the SSTables are **immutable local files**:
+    /// - Mutating, truncating, or deleting a mapped file out from under a live
+    ///   reader is undefined behaviour and can raise `SIGBUS`, terminating the
+    ///   process. CQLite never rewrites its own mapped inputs, but external
+    ///   tools must not either.
+    /// - Network and overlay filesystems (NFS, SMB, FUSE, some container
+    ///   overlays) can fault mid-read after a successful map; prefer buffered
+    ///   I/O there.
+    ///
+    /// Can also be enabled at runtime by setting `CQLITE_USE_MMAP=1`.
+    pub use_mmap: bool,
+
+    /// Minimum Data.db file size (bytes) before [`Self::use_mmap`] takes effect.
+    ///
+    /// Files smaller than this use buffered I/O even when `use_mmap` is set,
+    /// since the per-file mapping overhead is not worthwhile for tiny files and
+    /// mapping a zero-length file is invalid. Defaults to one page (4096).
+    pub mmap_min_size_bytes: usize,
 }
 
 impl Default for StorageConfig {
@@ -66,6 +97,8 @@ impl Default for StorageConfig {
             bloom_filter_fp_rate: 0.01,
             io_threads: num_cpus::get().min(4),
             sync_mode: SyncMode::Normal,
+            use_mmap: false, // Opt-in; buffered I/O is the portable, safe default
+            mmap_min_size_bytes: 4096, // One page
         }
     }
 }

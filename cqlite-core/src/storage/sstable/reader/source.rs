@@ -114,14 +114,21 @@ impl AsyncRead for MmapCursor {
     ) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         let data: &[u8] = &this.mmap;
-        // Clamp the position to the length; a position past EOF reads nothing,
-        // which drives `read_exact` to return `UnexpectedEof` just like a real
-        // file would. The block-header readers rely on this to detect EOF.
-        let pos = this.pos.min(data.len() as u64) as usize;
+        let len = data.len() as u64;
+        // At or past EOF: read nothing and leave the position untouched. A real
+        // `File` preserves a seeked-past-EOF position across a zero-byte read,
+        // so we must not clamp `pos` back to `len` here (that divergence was the
+        // source-level parity bug). Returning zero bytes still drives
+        // `read_exact` to `UnexpectedEof`, which the block-header readers use to
+        // detect EOF.
+        if this.pos >= len {
+            return Poll::Ready(Ok(()));
+        }
+        let pos = this.pos as usize;
         let remaining = &data[pos..];
         let n = remaining.len().min(buf.remaining());
         buf.put_slice(&remaining[..n]);
-        this.pos = pos as u64 + n as u64;
+        this.pos += n as u64;
         Poll::Ready(Ok(()))
     }
 }
@@ -232,6 +239,87 @@ mod tests {
         let file = tokio::fs::File::open(&path).await.unwrap();
         assert!(!BlockSource::buffered(file).is_mmap());
         tokio::fs::remove_file(&path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn seek_past_eof_preserves_position_like_file() {
+        // Parity with std/tokio `File`: seeking past EOF and issuing a read
+        // returns zero bytes WITHOUT collapsing the cursor back to EOF.
+        let mut c = cursor(b"abc"); // len 3
+        let landed = c.seek(SeekFrom::Start(10)).await.unwrap();
+        assert_eq!(landed, 10);
+
+        let mut b = [0u8; 4];
+        let n = c.read(&mut b).await.unwrap();
+        assert_eq!(n, 0, "read past EOF yields no bytes");
+
+        // The position must still be 10, exactly as a real File would report,
+        // not clamped down to the file length (3).
+        assert_eq!(c.stream_position().await.unwrap(), 10);
+
+        // Seeking back to a valid offset still reads correctly afterwards.
+        c.seek(SeekFrom::Start(1)).await.unwrap();
+        let mut one = [0u8; 1];
+        c.read_exact(&mut one).await.unwrap();
+        assert_eq!(&one, b"b");
+    }
+
+    #[tokio::test]
+    async fn seek_past_eof_position_matches_real_file() {
+        // Cross-check the cursor's behaviour against an actual tokio File so the
+        // parity claim is verified against the reference implementation, not
+        // just asserted in isolation.
+        let bytes = b"abc";
+        let dir = std::env::temp_dir();
+        let path = dir.join("cqlite_mmapcursor_eof_parity.bin");
+        tokio::fs::write(&path, bytes).await.unwrap();
+
+        let mut file = tokio::fs::File::open(&path).await.unwrap();
+        file.seek(SeekFrom::Start(10)).await.unwrap();
+        let mut fb = [0u8; 4];
+        let file_n = file.read(&mut fb).await.unwrap();
+        let file_pos = file.stream_position().await.unwrap();
+        tokio::fs::remove_file(&path).await.ok();
+
+        let mut c = cursor(bytes);
+        c.seek(SeekFrom::Start(10)).await.unwrap();
+        let mut cb = [0u8; 4];
+        let cur_n = c.read(&mut cb).await.unwrap();
+        let cur_pos = c.stream_position().await.unwrap();
+
+        assert_eq!(cur_n, file_n, "byte count parity");
+        assert_eq!(cur_pos, file_pos, "post-read position parity");
+    }
+
+    #[tokio::test]
+    async fn multipage_read_across_page_boundary() {
+        // Exercise a map larger than a single OS page and read straddling the
+        // 4096-byte boundary, ensuring slicing/position math holds beyond one
+        // page.
+        let len = 10_000usize;
+        let mut data = vec![0u8; len];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i % 251) as u8; // deterministic, spans the page boundary
+        }
+        let mut c = cursor(&data);
+
+        // Read a window that starts before page 1 and ends after it.
+        c.seek(SeekFrom::Start(4090)).await.unwrap();
+        let mut window = [0u8; 16]; // covers 4090..4106, crossing 4096
+        c.read_exact(&mut window).await.unwrap();
+        for (k, b) in window.iter().enumerate() {
+            assert_eq!(*b, ((4090 + k) % 251) as u8);
+        }
+        assert_eq!(c.stream_position().await.unwrap(), 4106);
+
+        // Read the final bytes right up to EOF.
+        c.seek(SeekFrom::Start((len - 4) as u64)).await.unwrap();
+        let mut tail = [0u8; 4];
+        c.read_exact(&mut tail).await.unwrap();
+        for (k, b) in tail.iter().enumerate() {
+            assert_eq!(*b, ((len - 4 + k) % 251) as u8);
+        }
+        assert_eq!(c.stream_position().await.unwrap(), len as u64);
     }
 
     #[tokio::test]

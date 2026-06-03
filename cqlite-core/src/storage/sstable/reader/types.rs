@@ -132,10 +132,13 @@ pub struct SSTableReaderConfig {
     pub read_buffer_size: usize,
     /// Whether to memory-map SSTable files instead of using buffered file I/O.
     ///
-    /// When enabled, files at or above [`Self::mmap_min_size_bytes`] are mapped
-    /// into the address space and served from the OS page cache with no
-    /// per-block read syscall. This mirrors Cassandra's default read path and
-    /// benefits repeated local scans of the same files.
+    /// **Opt-in; defaults to `false`.** When enabled, files at or above
+    /// [`Self::mmap_min_size_bytes`] are mapped into the address space and
+    /// served from the OS page cache with no per-block read syscall. This
+    /// mirrors Cassandra's `disk_access_mode: mmap` and benefits repeated local
+    /// scans of the same files. Enable only for immutable local SSTables — see
+    /// [`crate::Config`]'s `storage.use_mmap` for the platform/filesystem
+    /// constraints (network FS and external mutation can `SIGBUS`).
     pub use_mmap: bool,
     /// Minimum file size (bytes) for memory mapping to kick in.
     ///
@@ -157,7 +160,7 @@ impl Default for SSTableReaderConfig {
     fn default() -> Self {
         Self {
             read_buffer_size: 64 * 1024, // 64KB
-            use_mmap: true,              // Memory-map by default (Cassandra-style read path)
+            use_mmap: false,             // Opt-in; buffered I/O is the portable, safe default
             mmap_min_size_bytes: 4096,   // Skip mmap for files smaller than a page
             block_cache_size: 1000,      // Cache 1000 blocks
             validate_checksums: true,
