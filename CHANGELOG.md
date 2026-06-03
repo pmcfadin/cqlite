@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Partition-key column dropped / `WHERE` on TEXT PK returned 0 rows** (Issue #586) —
+  a correctness regression shipped in v0.10.0. On the scan + residual-filter path
+  (used for `WHERE` on a TEXT partition key, unlike the Index.db point-lookup path
+  for UUID keys, #548/#553), partition-key columns are reconstructed from the raw
+  row key. The reconstructor assumed a `u16` length prefix for *every* TEXT key,
+  which is the composite-component framing, not the single-component layout (raw
+  bytes). Consequences, both now fixed:
+  1. A **single-component TEXT partition key** (`id text PRIMARY KEY`) failed to
+     decode; the error was silently swallowed, so `SELECT *` was missing the PK
+     column and `WHERE id = '<literal>'` returned 0 rows.
+  2. A **composite partition key** decoded every column from the first component,
+     so second+ PK columns got the wrong value and non-text components (e.g. a
+     `date`) became debug strings.
+
+  The scan path now decodes through the canonical, always-compiled
+  `storage::partition_key_codec`, the exact codec the write engine's
+  `PartitionKey::from_bytes` uses (single source of truth for both paths). A failed
+  reconstruction is now logged via `log::warn!` instead of being swallowed, so this
+  class of bug cannot ship invisibly again.
+
 ## [v0.10.0] - 2026-06-02
 
 Minor release. Three query-engine correctness/performance fixes (#548, #553,

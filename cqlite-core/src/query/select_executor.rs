@@ -151,66 +151,6 @@ fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     ))
 }
 
-/// Decode a partition-key `Value` from raw `RowKey` bytes based on a
-/// schema-declared CQL type. Returns an error for malformed/short input.
-fn decode_partition_key_value(key: &RowKey, pk_column: &crate::schema::KeyColumn) -> Result<Value> {
-    let key_bytes = key.0.as_slice();
-    match pk_column.data_type.to_lowercase().as_str() {
-        "uuid" | "timeuuid" => {
-            let bytes: [u8; 16] = key_bytes
-                .get(..16)
-                .and_then(|s| s.try_into().ok())
-                .ok_or_else(|| {
-                    Error::query_execution(format!(
-                        "Partition key too short for UUID: {} bytes",
-                        key_bytes.len()
-                    ))
-                })?;
-            Ok(Value::Uuid(bytes))
-        }
-        "text" | "varchar" | "ascii" => {
-            if key_bytes.len() < 2 {
-                return Err(Error::query_execution(
-                    "Partition key too short for text".to_string(),
-                ));
-            }
-            let len = u16::from_be_bytes([key_bytes[0], key_bytes[1]]) as usize;
-            let body = key_bytes.get(2..2 + len).ok_or_else(|| {
-                Error::query_execution("Partition key text length mismatch".to_string())
-            })?;
-            let text = String::from_utf8(body.to_vec()).map_err(|e| {
-                Error::query_execution(format!("Invalid UTF-8 in partition key: {}", e))
-            })?;
-            Ok(Value::Text(text))
-        }
-        "int" => {
-            let bytes: [u8; 4] = key_bytes
-                .get(..4)
-                .and_then(|s| s.try_into().ok())
-                .ok_or_else(|| {
-                    Error::query_execution("Partition key too short for int".to_string())
-                })?;
-            Ok(Value::Integer(i32::from_be_bytes(bytes)))
-        }
-        "bigint" | "counter" => {
-            let bytes: [u8; 8] = key_bytes
-                .get(..8)
-                .and_then(|s| s.try_into().ok())
-                .ok_or_else(|| {
-                    Error::query_execution("Partition key too short for bigint".to_string())
-                })?;
-            Ok(Value::BigInt(i64::from_be_bytes(bytes)))
-        }
-        _ => {
-            log::warn!(
-                "Unsupported partition key type: {}, returning as debug string",
-                pk_column.data_type
-            );
-            Ok(Value::Text(format!("{:?}", key_bytes)))
-        }
-    }
-}
-
 /// Evaluate the SSTable predicate set against a single `QueryRow`.
 ///
 /// Returns `Ok(true)` only if every predicate is satisfied. A missing column
@@ -254,6 +194,14 @@ fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Resul
 /// applying optional projection and synthesising partition-key columns from the
 /// raw key bytes when a schema is available.
 ///
+/// Partition-key columns are never stored in the cell payload, so they are
+/// reconstructed from the raw row key via the canonical
+/// [`crate::storage::partition_key_codec::decode_partition_key_columns`] (the
+/// same codec the write engine uses). This is the fix for Issue #586: the
+/// previous decoder assumed a `u16` length prefix for every TEXT key, which is
+/// only correct for composite components — a single-component TEXT partition key
+/// is raw bytes, so its column was silently dropped from scan-built rows.
+///
 /// Returns `None` for tombstoned rows (so the caller can `continue`).
 fn build_row_from_scan(
     key: RowKey,
@@ -280,13 +228,31 @@ fn build_row_from_scan(
             }
         }
         // Cassandra never serialises partition-key columns in the cell payload;
-        // reconstruct them from the row key when the schema is known.
+        // reconstruct them from the raw row key when the schema is known. We
+        // decode through the canonical codec shared with the write engine so
+        // single-component (raw bytes) and composite (`[u16 len][bytes][0x00]`)
+        // keys are handled identically on both paths (Issue #586).
         if let Some(schema) = schema {
-            for pk in &schema.partition_keys {
-                if project(&pk.name) {
-                    if let Ok(pk_value) = decode_partition_key_value(&key, pk) {
-                        row_values.insert(pk.name.clone(), pk_value);
+            match crate::storage::partition_key_codec::decode_partition_key_columns(&key.0, schema)
+            {
+                Ok(pk_columns) => {
+                    for (name, value) in pk_columns {
+                        if project(&name) {
+                            row_values.insert(name, value);
+                        }
                     }
+                }
+                // Surface — never silently swallow — a decode failure, so a
+                // missing partition-key column can't ship invisibly (Issue #586).
+                Err(e) => {
+                    log::warn!(
+                        "Failed to reconstruct partition-key columns from row key \
+                         (len={} bytes) for {}.{}: {}",
+                        key.0.len(),
+                        schema.keyspace,
+                        schema.table,
+                        e
+                    );
                 }
             }
         }
@@ -1522,5 +1488,75 @@ mod tests {
         assert!(executor.match_like_pattern("hello", "%lo"));
         assert!(executor.match_like_pattern("hello", "h_llo"));
         assert!(!executor.match_like_pattern("hello", "h_l"));
+    }
+
+    // ------------------------------------------------------------------
+    // Issue #586: partition-key reconstruction on the scan path.
+    // ------------------------------------------------------------------
+
+    fn single_pk_schema(name: &str, data_type: &str) -> crate::schema::TableSchema {
+        crate::schema::TableSchema {
+            keyspace: "ks".to_string(),
+            table: "t".to_string(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: name.to_string(),
+                data_type: data_type.to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Issue #586: a single-component TEXT partition key is stored as raw bytes
+    /// with NO length prefix. `build_row_from_scan` must materialise it from the
+    /// `RowKey`. Before the fix the column was silently dropped (the decoder
+    /// read a phantom `u16` prefix, errored, and the error was swallowed).
+    #[test]
+    fn build_row_from_scan_materialises_single_text_pk() {
+        let key = RowKey::new(b"k0000000000000000".to_vec());
+        let value = Value::Map(vec![(
+            Value::Text("name".to_string()),
+            Value::Text("name-0".to_string()),
+        )]);
+        let schema = single_pk_schema("id", "text");
+
+        let row = build_row_from_scan(key, value, &[], Some(&schema))
+            .expect("row must be built (not tombstoned)");
+
+        assert_eq!(
+            row.values.get("id"),
+            Some(&Value::Text("k0000000000000000".to_string())),
+            "Issue #586: single TEXT PK column must be reconstructed from the raw row key"
+        );
+        // Regular columns must still be present.
+        assert_eq!(
+            row.values.get("name"),
+            Some(&Value::Text("name-0".to_string()))
+        );
+    }
+
+    /// Issue #586: with the PK column materialised, a residual `WHERE id = '...'`
+    /// (the path TEXT single-PK queries fall through to) now matches.
+    #[test]
+    fn scan_built_row_matches_text_pk_equality_predicate() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let key = RowKey::new(b"k0000000000000000".to_vec());
+        let value = Value::Map(vec![(Value::Text("age".to_string()), Value::Integer(0))]);
+        let schema = single_pk_schema("id", "text");
+        let row = build_row_from_scan(key, value, &[], Some(&schema)).unwrap();
+
+        let predicate = SSTablePredicate {
+            column: "id".to_string(),
+            operation: SSTableFilterOp::Equal,
+            values: vec![Value::Text("k0000000000000000".to_string())],
+        };
+
+        assert!(
+            evaluate_predicates(&row, std::slice::from_ref(&predicate)).unwrap(),
+            "Issue #586: WHERE id = '<literal>' must match the reconstructed PK column"
+        );
     }
 }

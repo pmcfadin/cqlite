@@ -2,6 +2,11 @@
 
 pub mod sstable;
 
+// Canonical partition-key (de)serialization, shared by the read (query) path
+// and the write engine so the two never drift (Issue #586). Always compiled —
+// the scan path needs it even without `write-support`.
+pub mod partition_key_codec;
+
 // M5: Write engine and serialization (Issue #359)
 #[cfg(feature = "write-support")]
 pub mod serialization;

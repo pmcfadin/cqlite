@@ -85,8 +85,35 @@ Static rows use extended flags format:
 
 Multi-column partition keys use composite encoding:
 
-- Single component: raw bytes (no length prefix)
-- Multi-component: `[u16 BE len][bytes][0x00]...[u16 BE len][bytes]` (no trailing 0x00)
+- Single component: raw value bytes (no length prefix) — e.g. `text` is raw UTF-8,
+  `uuid` is 16 raw bytes, `int` is 4 BE bytes.
+- Multi-component: `[u16 BE len][bytes][0x00]` per component, **including a trailing
+  `0x00` after the final component** (matches `PartitionKey::to_bytes`/`from_bytes`).
+
+This encoding is decoded by the single canonical codec
+`storage::partition_key_codec::decode_partition_key_columns`, shared by the write
+engine and the read/scan path so the two cannot drift.
+
+### Partition-key column reconstruction on the scan path
+
+**Status**: RESOLVED (Issue #586, v0.10.1) — was a correctness defect in v0.10.0.
+
+When a `SELECT` falls to the scan + residual-filter path (rather than the Index.db
+point-lookup path used for `WHERE pk = <uuid>`, see Issues #548/#553), the partition
+key is not present in the cell payload and must be reconstructed from the raw row key.
+
+In v0.10.0 this reconstruction assumed a `u16` length prefix for **every** TEXT key.
+That is the composite-component framing, *not* the single-component layout (which is
+raw bytes), so:
+
+- A **single-component TEXT partition key** (`id text PRIMARY KEY`) failed to decode;
+  the error was silently swallowed and the column was dropped. `SELECT *` was missing
+  `id` and `WHERE id = '<literal>'` returned 0 rows.
+- A **composite partition key** decoded every column from component[0], so the second+
+  columns got the wrong value (and non-text components became debug strings).
+
+Both paths now decode through `partition_key_codec`, and a failed reconstruction is
+logged (`log::warn!`) rather than swallowed.
 
 ### Delta Encoding with Statistics.db Baseline
 
