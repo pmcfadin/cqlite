@@ -221,10 +221,15 @@ async fn test_key_generation_divergence_documented() {
     //! - **Limitation**: Only works for columns named "id" with Integer type
     //! - **Problem**: Violates No-Heuristics Mandate (Issue #28)
     //!
-    //! ### ADVANCED Path (`select_executor.rs:1095-1189`)
+    //! ### ADVANCED Path (`select_executor.rs` → `storage::partition_key_codec`)
     //! - **Purpose**: Reading real Cassandra SSTable partition keys
-    //! - **Key format**: Schema-aware binary decoding via `decode_partition_key_value()`
-    //! - **Supports**: uuid, timeuuid, text, int, bigint, counter, blob
+    //! - **Key format**: Schema-aware binary decoding via the canonical
+    //!   `storage::partition_key_codec::decode_partition_key_columns()`, which
+    //!   `select_executor::build_row_from_scan` delegates to (and the write engine's
+    //!   `PartitionKey::from_bytes` shares). Prior to Issue #586 this lived inline in
+    //!   `select_executor.rs` as `decode_partition_key_value()` and mishandled
+    //!   single-component TEXT keys.
+    //! - **Supports**: uuid, timeuuid, text, int, bigint, counter, blob, date, …
     //! - **Correct for**: Real SSTable data
     //!
     //! ## Why the 8-Token Heuristic Exists
@@ -239,38 +244,41 @@ async fn test_key_generation_divergence_documented() {
     //! For SSTable reading, ADVANCED path is correct. The LEGACY INSERT feature
     //! generates keys that will never match real Cassandra partition keys.
 
-    // Validate the key generation patterns exist in codebase
+    // Validate the key generation patterns exist in the codebase. These are
+    // intentionally light source-text probes that document the Issue #253
+    // divergence; they assert *architecture*, not a function's exact file, so a
+    // legitimate refactor (e.g. Issue #586 relocating partition-key decoding into
+    // the shared `partition_key_codec` module) doesn't falsely flag a regression.
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let read = |rel: &str| {
+        std::fs::read_to_string(manifest.join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+    };
+
+    // LEGACY path: synthetic `user_key_{id}` generation still lives in executor.rs.
     let legacy_pattern = "user_key_";
-    let advanced_function = "decode_partition_key_value";
-
-    // Read executor.rs to verify LEGACY pattern exists
-    let executor_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/query/executor.rs");
-    let executor_content =
-        std::fs::read_to_string(&executor_path).expect("Should read executor.rs");
-
+    let executor_content = read("src/query/executor.rs");
     assert!(
         executor_content.contains(legacy_pattern),
-        "LEGACY path should contain '{}' pattern in executor.rs",
-        legacy_pattern
+        "LEGACY path should contain '{legacy_pattern}' pattern in executor.rs",
     );
 
-    // Read select_executor.rs to verify ADVANCED function exists
-    let select_executor_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/query/select_executor.rs");
-    let select_executor_content =
-        std::fs::read_to_string(&select_executor_path).expect("Should read select_executor.rs");
-
+    // ADVANCED path: schema-aware partition-key decoding is now the canonical
+    // `decode_partition_key_columns` in `partition_key_codec`, which
+    // `select_executor` delegates to (Issue #586). Assert both halves of that
+    // contract rather than grepping for the old inline `decode_partition_key_value`.
+    let codec_content = read("src/storage/partition_key_codec.rs");
     assert!(
-        select_executor_content.contains(advanced_function),
-        "ADVANCED path should contain '{}' function in select_executor.rs",
-        advanced_function
+        codec_content.contains("fn decode_partition_key_columns"),
+        "ADVANCED path: canonical decoder 'decode_partition_key_columns' should live in partition_key_codec.rs",
+    );
+    let select_executor_content = read("src/query/select_executor.rs");
+    assert!(
+        select_executor_content.contains("partition_key_codec::decode_partition_key_columns"),
+        "ADVANCED path: select_executor.rs should delegate partition-key decoding to partition_key_codec",
     );
 
     // Verify the routing hack exists
-    let engine_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/query/engine.rs");
-    let engine_content = std::fs::read_to_string(&engine_path).expect("Should read engine.rs");
-
+    let engine_content = read("src/query/engine.rs");
     assert!(
         engine_content.contains("WHERE id =") && engine_content.contains("count() <= 8"),
         "Routing hack should exist in engine.rs (WHERE id = with 8-token check)"
@@ -278,7 +286,7 @@ async fn test_key_generation_divergence_documented() {
 
     println!("Issue #253 ROOT CAUSE VERIFIED:");
     println!("  LEGACY:   executor.rs contains 'user_key_' synthetic key pattern");
-    println!("  ADVANCED: select_executor.rs contains 'decode_partition_key_value'");
+    println!("  ADVANCED: select_executor.rs delegates to partition_key_codec::decode_partition_key_columns (Issue #586)");
     println!("  HACK:     engine.rs contains 8-token routing workaround");
     println!();
     println!("  This IS a bug - LEGACY key generation violates No-Heuristics Mandate.");
