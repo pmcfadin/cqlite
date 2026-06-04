@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Compaction panicked when triggered from an async context** (Issue #587) —
+  a high-severity panic shipped in v0.10.0. `WriteEngine::maintenance_step()` is
+  synchronous but bridges to async I/O to read a merge's input SSTables. The
+  bridge used `tokio::runtime::Handle::current().block_on(future)` whenever a
+  runtime was already running on the calling thread, which panics with *"Cannot
+  start a runtime from within a runtime"*. Because the bridge is only reached once
+  a merge has input SSTables to read, STCS compaction worked in isolation but was
+  **unreachable from any `#[tokio::main]`/async caller** — including the CLI's
+  `maintenance` and `export-sstable --compact` subcommands (both run under
+  `#[tokio::main]`).
+
+  Fix: the shared async-to-sync bridge (`merge::block_on_async`, now also used by
+  `flush_internal` and `finalize_merge_blocking`) detects an already-running
+  runtime and offloads the future to a dedicated scoped thread with its own
+  runtime, joining before returning. This is runtime-flavor-agnostic (works for
+  both multi-thread and current-thread runtimes, unlike `block_in_place`) and
+  preserves the synchronous public signature of `maintenance_step` that the CLI
+  and Python bindings depend on. The Node binding already wrapped the call in
+  `spawn_blocking` and was unaffected; the Python binding calls from outside any
+  runtime and was likewise unaffected. Regression coverage drives
+  `maintenance_step()` from inside both runtime flavors
+  (`cqlite-core/tests/issue_587_compaction_async_bridge.rs`).
+
 - **Partition-key column dropped / `WHERE` on TEXT PK returned 0 rows** (Issue #586) —
   a correctness regression shipped in v0.10.0. On the scan + residual-filter path
   (used for `WHERE` on a TEXT partition key, unlike the Index.db point-lookup path

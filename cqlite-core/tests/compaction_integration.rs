@@ -36,11 +36,16 @@
 //!
 //! ## Runtime design
 //!
-//! `maintenance_step()` uses an internal `block_on` call (synchronous compaction),
-//! which cannot be invoked from within an active tokio runtime.  The tests are
-//! therefore plain `#[test]` functions that drive all async operations through an
-//! explicit single-threaded `Runtime::block_on` call — the same pattern used by the
-//! existing unit tests in `storage/write_engine/mod.rs`.
+//! `maintenance_step()` uses an internal `block_on` call (synchronous compaction).
+//! These tests are plain `#[test]` functions that drive all async operations
+//! through an explicit single-threaded `Runtime::block_on` call — the same
+//! pattern used by the existing unit tests in `storage/write_engine/mod.rs`.
+//!
+//! NOTE (Issue #587): `maintenance_step()` is now also safe to call from *within*
+//! an active tokio runtime — the async-to-sync bridge offloads to a scoped thread
+//! when a runtime is already running. The async-context regression coverage lives
+//! in `issue_587_compaction_async_bridge.rs`; these tests intentionally keep the
+//! plain-`#[test]` form to also exercise the no-runtime bridge path.
 
 #![cfg(feature = "write-support")]
 
@@ -346,11 +351,12 @@ fn write_three_sstables_and_compact(
 ///   - `maintenance_stats` shows compactions_completed >= 1, sstables_merged_in == 3,
 ///     sstables_produced == 1
 ///
-/// This is a synchronous `#[test]` because `maintenance_step()` calls
-/// `block_on()` internally and cannot be invoked from within an active tokio
-/// runtime.  Async operations are driven via an explicit `Runtime::block_on`
-/// call — the same approach used by the existing compaction unit tests in
-/// `storage/write_engine/mod.rs`.
+/// This is a synchronous `#[test]` that drives `maintenance_step()` with no
+/// surrounding runtime, exercising the bridge's no-runtime path. (Since Issue
+/// #587 it is also safe to call from within an active runtime — see
+/// `issue_587_compaction_async_bridge.rs`.) Async operations are driven via an
+/// explicit `Runtime::block_on` call — the same approach used by the existing
+/// compaction unit tests in `storage/write_engine/mod.rs`.
 #[test]
 fn compaction_3_sstables_mechanics() {
     let rt = tokio::runtime::Builder::new_current_thread()

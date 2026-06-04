@@ -691,22 +691,13 @@ impl WriteEngine {
         self.flush_internal_async().await
     }
 
-    /// Internal synchronous flush helper
+    /// Internal synchronous flush helper.
+    ///
+    /// Bridges to the async flush via [`merge::block_on_async`], which is safe to
+    /// call whether or not a Tokio runtime is already running on this thread
+    /// (Issue #587).
     fn flush_internal(&mut self) -> Result<()> {
-        // Try to use existing runtime, or create a new one if none exists
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                // We're inside a runtime, use it
-                handle.block_on(self.flush_internal_async())?;
-            }
-            Err(_) => {
-                // No runtime, create one
-                let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                    Error::Storage(format!("Failed to create tokio runtime: {}", e))
-                })?;
-                rt.block_on(self.flush_internal_async())?;
-            }
-        }
+        merge::block_on_async(self.flush_internal_async())?;
         Ok(())
     }
 
@@ -939,6 +930,18 @@ impl WriteEngine {
     /// This method performs background compaction work within a time budget.
     /// It can be called repeatedly from a background thread or task scheduler
     /// to make incremental progress on compaction.
+    ///
+    /// ## Runtime contexts
+    ///
+    /// This is a synchronous method, but its internal async-to-sync bridge is
+    /// runtime-aware (see [`merge::block_on_async`]), so it is safe to call from
+    /// **either** a plain synchronous context **or** from within an active Tokio
+    /// runtime — including `#[tokio::main]`/`#[tokio::test]` worker threads and
+    /// `async fn` callers. Prior to Issue #587 calling it from inside a runtime
+    /// panicked with "Cannot start a runtime from within a runtime" once a merge
+    /// had input SSTables to read. The sync signature is preserved so the CLI and
+    /// Python bindings can keep calling it directly. (The Node binding wraps it in
+    /// `spawn_blocking`, which remains correct.)
     ///
     /// ## Behavior
     ///
@@ -1299,22 +1302,15 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Finalize the active merge - blocking version (M5.2 helper)
+    /// Finalize the active merge - blocking version (M5.2 helper).
+    ///
+    /// Bridges to the async finalizer via [`merge::block_on_async`], which is
+    /// safe to call from within an active Tokio runtime (e.g. the CLI's
+    /// `#[tokio::main]` worker threads). A nested `Handle::block_on` here would
+    /// otherwise panic with "Cannot start a runtime from within a runtime"
+    /// (Issue #587).
     fn finalize_merge_blocking(&mut self, report: &mut MaintenanceReport) -> Result<()> {
-        // Use existing runtime or create new one
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                // We're inside a runtime, use it
-                handle.block_on(self.finalize_merge_async(report))
-            }
-            Err(_) => {
-                // No runtime, create one
-                let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                    Error::Storage(format!("Failed to create tokio runtime: {}", e))
-                })?;
-                rt.block_on(self.finalize_merge_async(report))
-            }
-        }
+        merge::block_on_async(self.finalize_merge_async(report))
     }
 
     /// Finalize the active merge - async version (M5.2 helper, Issue #474)
