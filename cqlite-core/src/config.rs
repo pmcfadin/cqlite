@@ -75,6 +75,10 @@ pub struct StorageConfig {
     ///   I/O there.
     ///
     /// Can also be enabled at runtime by setting `CQLITE_USE_MMAP=1`.
+    ///
+    /// `#[serde(default)]` keeps configs serialized before this field existed
+    /// (which omit it) deserializing successfully, defaulting to buffered I/O.
+    #[serde(default = "default_use_mmap")]
     pub use_mmap: bool,
 
     /// Minimum Data.db file size (bytes) before [`Self::use_mmap`] takes effect.
@@ -82,7 +86,20 @@ pub struct StorageConfig {
     /// Files smaller than this use buffered I/O even when `use_mmap` is set,
     /// since the per-file mapping overhead is not worthwhile for tiny files and
     /// mapping a zero-length file is invalid. Defaults to one page (4096).
+    ///
+    /// `#[serde(default)]` for backward compatibility with older payloads.
+    #[serde(default = "default_mmap_min_size_bytes")]
     pub mmap_min_size_bytes: usize,
+}
+
+/// Default for [`StorageConfig::use_mmap`]: mmap is opt-in, so buffered I/O.
+fn default_use_mmap() -> bool {
+    false
+}
+
+/// Default for [`StorageConfig::mmap_min_size_bytes`]: one page.
+fn default_mmap_min_size_bytes() -> usize {
+    4096
 }
 
 impl Default for StorageConfig {
@@ -97,8 +114,10 @@ impl Default for StorageConfig {
             bloom_filter_fp_rate: 0.01,
             io_threads: num_cpus::get().min(4),
             sync_mode: SyncMode::Normal,
-            use_mmap: false, // Opt-in; buffered I/O is the portable, safe default
-            mmap_min_size_bytes: 4096, // One page
+            // Opt-in; buffered I/O is the portable, safe default. Shared with
+            // the serde defaults so the two can never drift.
+            use_mmap: default_use_mmap(),
+            mmap_min_size_bytes: default_mmap_min_size_bytes(),
         }
     }
 }
@@ -692,6 +711,57 @@ mod tests {
 
         config.storage.bloom_filter_fp_rate = 0.99; // Valid rate
         assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn test_storage_config_deserializes_without_mmap_fields() {
+        // Backward compatibility: a config payload serialized before the mmap
+        // fields existed omits `use_mmap` / `mmap_min_size_bytes`. It must still
+        // deserialize, defaulting to the safe buffered backend.
+        let mut value = serde_json::to_value(StorageConfig::default()).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        obj.remove("use_mmap");
+        obj.remove("mmap_min_size_bytes");
+        assert!(!obj.contains_key("use_mmap"));
+
+        let restored: StorageConfig =
+            serde_json::from_value(value).expect("old payload must still deserialize");
+        assert!(!restored.use_mmap, "missing use_mmap must default to false");
+        assert_eq!(
+            restored.mmap_min_size_bytes, 4096,
+            "missing mmap_min_size_bytes must default to one page"
+        );
+    }
+
+    #[test]
+    fn test_full_config_deserializes_without_mmap_fields() {
+        // Same guarantee through the top-level Config, mirroring how the Python
+        // bindings parse a JSON/dict payload into `cqlite_core::Config`.
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        let storage = value
+            .get_mut("storage")
+            .and_then(|s| s.as_object_mut())
+            .unwrap();
+        storage.remove("use_mmap");
+        storage.remove("mmap_min_size_bytes");
+
+        let restored: Config =
+            serde_json::from_value(value).expect("old Config payload must still deserialize");
+        assert!(!restored.storage.use_mmap);
+        assert_eq!(restored.storage.mmap_min_size_bytes, 4096);
+        restored.validate().expect("restored config must validate");
+    }
+
+    #[test]
+    fn test_mmap_fields_roundtrip_when_present() {
+        // When the fields ARE present (e.g. a user opting in), they round-trip.
+        let mut config = StorageConfig::default();
+        config.use_mmap = true;
+        config.mmap_min_size_bytes = 8192;
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: StorageConfig = serde_json::from_str(&json).unwrap();
+        assert!(restored.use_mmap);
+        assert_eq!(restored.mmap_min_size_bytes, 8192);
     }
 
     #[test]

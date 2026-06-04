@@ -157,7 +157,14 @@ impl AsyncSeek for MmapCursor {
 /// subsequent reads simply return zero bytes.
 fn offset_from(base: u64, offset: i64) -> io::Result<u64> {
     let result = if offset >= 0 {
-        base.saturating_add(offset as u64)
+        // Overflowing the u64 address space is rejected rather than clamped, to
+        // mirror `std::fs::File`, which errors on a seek that overflows.
+        base.checked_add(offset as u64).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "invalid seek to an overflowing position",
+            )
+        })?
     } else {
         base.checked_sub(offset.unsigned_abs()).ok_or_else(|| {
             io::Error::new(
@@ -239,6 +246,24 @@ mod tests {
         let file = tokio::fs::File::open(&path).await.unwrap();
         assert!(!BlockSource::buffered(file).is_mmap());
         tokio::fs::remove_file(&path).await.ok();
+    }
+
+    #[tokio::test]
+    async fn positive_seek_overflow_errors() {
+        // A positive offset that overflows the u64 address space is rejected
+        // with InvalidInput (matching `File`), not saturated to u64::MAX.
+        let mut c = cursor(b"abc");
+        // Park the cursor at the very top of the address space (seeking past EOF
+        // is legal), then a positive Current offset overflows.
+        c.seek(SeekFrom::Start(u64::MAX)).await.unwrap();
+        let err = c.seek(SeekFrom::Current(1)).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+
+        // A large-but-non-overflowing positive offset still succeeds (parity:
+        // seeking past EOF is permitted, only overflow is an error).
+        let mut c2 = cursor(b"abc"); // len 3
+        let landed = c2.seek(SeekFrom::End(i64::MAX)).await.unwrap();
+        assert_eq!(landed, 3u64 + i64::MAX as u64);
     }
 
     #[tokio::test]
