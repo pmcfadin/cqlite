@@ -551,4 +551,67 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn test_mmap_env_parsing() {
+        use super::super::parse_truthy_env;
+        for truthy in ["1", "true", "TRUE", "Yes", " on ", "On"] {
+            assert!(parse_truthy_env(truthy), "{truthy:?} should enable mmap");
+        }
+        for falsy in ["0", "false", "no", "off", "", "maybe", "2"] {
+            assert!(!parse_truthy_env(falsy), "{falsy:?} should not enable mmap");
+        }
+    }
+
+    /// End-to-end: the `use_mmap` storage config flag drives backend selection.
+    /// Defaults to buffered (opt-in); flipping the flag maps the file.
+    #[tokio::test]
+    async fn test_config_drives_mmap_backend() -> crate::Result<()> {
+        use super::super::SSTableReader;
+        use crate::{Config, Platform};
+        use std::path::Path;
+        use std::sync::Arc;
+
+        let test_dir = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => Path::new(&root)
+                .join("sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9"),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+                return Ok(());
+            }
+        };
+        let data_file = test_dir.join("nb-1-big-Data.db");
+        if !data_file.exists() {
+            eprintln!("Test data file not found at {:?}, skipping test", data_file);
+            return Ok(());
+        }
+
+        let mut config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await?);
+
+        // Default config: buffered backend (mmap is opt-in).
+        let reader = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        assert!(
+            !reader.is_mmap_backed().await,
+            "default config must use buffered I/O, not mmap"
+        );
+
+        // Opt in via config: file (>4096 bytes) is now mapped.
+        config.storage.use_mmap = true;
+        let mapped = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        assert!(
+            mapped.is_mmap_backed().await,
+            "use_mmap=true must select the mmap backend for a >4KiB file"
+        );
+
+        // A min-size threshold above the file size forces buffered even when on.
+        config.storage.mmap_min_size_bytes = usize::MAX;
+        let buffered = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        assert!(
+            !buffered.is_mmap_backed().await,
+            "files below mmap_min_size_bytes must stay buffered"
+        );
+
+        Ok(())
+    }
 }

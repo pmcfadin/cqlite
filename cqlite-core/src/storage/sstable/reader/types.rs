@@ -4,9 +4,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
-use tokio::fs::File;
-use tokio::io::BufReader;
 use tokio::sync::Mutex;
+
+use super::source::BlockSource;
 
 use crate::{
     parser::SSTableHeader,
@@ -130,8 +130,22 @@ impl Default for SSTableReaderStats {
 pub struct SSTableReaderConfig {
     /// Size of the read buffer in bytes
     pub read_buffer_size: usize,
-    /// Whether to use memory-mapped files
+    /// Whether to memory-map SSTable files instead of using buffered file I/O.
+    ///
+    /// **Opt-in; defaults to `false`.** When enabled, files at or above
+    /// [`Self::mmap_min_size_bytes`] are mapped into the address space and
+    /// served from the OS page cache with no per-block read syscall. This
+    /// mirrors Cassandra's `disk_access_mode: mmap` and benefits repeated local
+    /// scans of the same files. Enable only for immutable local SSTables — see
+    /// [`crate::Config`]'s `storage.use_mmap` for the platform/filesystem
+    /// constraints (network FS and external mutation can `SIGBUS`).
     pub use_mmap: bool,
+    /// Minimum file size (bytes) for memory mapping to kick in.
+    ///
+    /// Files smaller than this use buffered I/O even when [`Self::use_mmap`] is
+    /// set, since the per-file mapping overhead is not worthwhile for tiny
+    /// files and mapping a zero-length file is invalid.
+    pub mmap_min_size_bytes: usize,
     /// Maximum number of blocks to cache
     pub block_cache_size: usize,
     /// Whether to validate checksums
@@ -146,7 +160,8 @@ impl Default for SSTableReaderConfig {
     fn default() -> Self {
         Self {
             read_buffer_size: 64 * 1024, // 64KB
-            use_mmap: false,             // Safer default for cross-platform
+            use_mmap: false,             // Opt-in; buffered I/O is the portable, safe default
+            mmap_min_size_bytes: 4096,   // Skip mmap for files smaller than a page
             block_cache_size: 1000,      // Cache 1000 blocks
             validate_checksums: true,
             use_bloom_filter: true,
@@ -192,8 +207,8 @@ pub struct CachedBlock {
 pub struct SSTableReader {
     /// Path to the SSTable file
     pub(crate) file_path: PathBuf,
-    /// File handle for reading
-    pub(crate) file: Arc<Mutex<BufReader<File>>>,
+    /// Backing byte source for reading (buffered file I/O or memory map)
+    pub(crate) file: Arc<Mutex<BlockSource>>,
     /// SSTable header information
     pub(crate) header: SSTableHeader,
     /// Parser for SSTable format
