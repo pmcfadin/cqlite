@@ -1210,7 +1210,25 @@ impl WriteEngine {
 
             // Only consider Data.db files
             if filename.starts_with("nb-") && filename.ends_with("-big-Data.db") {
-                candidates.push(path);
+                // Honor the TOC.txt publication barrier (Issue #591). A Data.db
+                // without a sibling TOC.txt is NOT a published SSTable: it is
+                // either a crash-interrupted partial rename or a deferred-delete
+                // orphan whose TOC was removed first while its data file stayed
+                // pinned by an open/mapped reader (Windows). Feeding such a file
+                // to the merger would re-compact an unpublished input and could
+                // produce garbled output, so it is skipped here just as the
+                // read path discovers SSTables by TOC.txt. The startup orphan
+                // sweep reclaims the leftover components.
+                let base = filename.trim_end_matches("-Data.db");
+                let toc_path = path.with_file_name(format!("{base}-TOC.txt"));
+                if toc_path.exists() {
+                    candidates.push(path);
+                } else {
+                    log::debug!(
+                        "scan_data_files: skipping unpublished SSTable (no TOC.txt): {:?}",
+                        path
+                    );
+                }
             } else if depth > 0 && path.is_dir() {
                 Self::scan_data_files(&path, candidates, depth - 1)?;
             }
@@ -1441,9 +1459,17 @@ impl WriteEngine {
         }
 
         // Step 3: All renames succeeded. The new SSTable is now visible.
-        // Delete input SSTable files. If deletion fails we log a warning but
-        // do NOT return an error — the merge output is correct, and the stale
-        // inputs will simply be re-evaluated by the merge policy on the next call.
+        // Delete input SSTable files. If deletion fails we log a warning but do
+        // NOT return an error — the merge output is correct.
+        //
+        // Issue #591 (write-while-mapped / Windows policy): the inputs were read
+        // through buffered I/O and fully drained into memory by `KWayMerger::new`
+        // before this point, so the merger holds no mapping over them — deleting
+        // them cannot fault with SIGBUS. `delete_sstable_files` removes each
+        // input's TOC.txt first (unpublishing it) and is best-effort on the data
+        // components, so a component still pinned by a concurrent mapped reader on
+        // Windows becomes an invisible orphan reclaimed on the next startup rather
+        // than a hard failure or a source of duplicate rows.
         for input_path in &merge.input_paths {
             if let Err(e) = self.delete_sstable_files(input_path) {
                 log::warn!(
@@ -1532,6 +1558,26 @@ impl WriteEngine {
     /// Static helper that deletes all component files for an SSTable given the
     /// Data.db path.  Called from both `delete_sstable_files` and the startup
     /// orphan sweep, which runs before `self` is fully constructed.
+    ///
+    /// ## Deferred-delete / Windows policy (Issue #591)
+    ///
+    /// `TOC.txt` is removed **first**. TOC.txt is the publication barrier — both
+    /// the read path (`SSTableManager`) and the compaction candidate scan
+    /// (`scan_data_files`, since #591) treat a Data.db without a sibling TOC.txt
+    /// as unpublished. Removing TOC.txt first therefore *unpublishes* the SSTable
+    /// atomically, before any data component is touched, so it can never be
+    /// observed (no duplicate rows, never re-fed to the merger) even if the
+    /// remaining components cannot be removed yet.
+    ///
+    /// The remaining components are then deleted **best-effort**: a failure on
+    /// any one of them (most plausibly a Windows sharing violation when a
+    /// concurrent reader still has the file open or memory-mapped) is logged but
+    /// does NOT abort the rest or fail the operation. Such a leftover is a
+    /// harmless orphan — invisible because its TOC.txt is gone — and is reclaimed
+    /// by [`Self::sweep_orphaned_partial_sstables`] on the next engine startup,
+    /// by which time the reader's handle has been released. This is the
+    /// "deferred delete" half of the policy; Unix removes the inode immediately
+    /// while any mapping keeps the bytes alive until it is dropped.
     fn delete_sstable_files_static(data_path: &Path) -> Result<()> {
         // Extract base path: nb-{gen}-big
         let filename = data_path
@@ -1543,18 +1589,6 @@ impl WriteEngine {
             .strip_suffix("-Data.db")
             .ok_or_else(|| Error::Storage("Invalid Data.db filename".to_string()))?;
 
-        // Component suffixes to delete
-        let components = [
-            "Data.db",
-            "Index.db",
-            "Summary.db",
-            "Statistics.db",
-            "CompressionInfo.db",
-            "Filter.db",
-            "Digest.crc32",
-            "TOC.txt",
-        ];
-
         let parent_dir = data_path.parent().ok_or_else(|| {
             Error::Storage(format!(
                 "Data.db path has no parent directory: {:?}",
@@ -1562,17 +1596,55 @@ impl WriteEngine {
             ))
         })?;
 
+        // TOC.txt FIRST — the publication barrier (Issue #591). Once it is gone
+        // the SSTable is unpublished regardless of whether the data components
+        // can be removed. Remaining components follow, best-effort.
+        let components = [
+            "TOC.txt",
+            "Data.db",
+            "Index.db",
+            "Summary.db",
+            "Statistics.db",
+            "CompressionInfo.db",
+            "Filter.db",
+            "Digest.crc32",
+        ];
+
+        let mut failures: Vec<String> = Vec::new();
         for component in &components {
             let component_path = parent_dir.join(format!("{}-{}", base, component));
             if component_path.exists() {
-                std::fs::remove_file(&component_path).map_err(|e| {
-                    Error::Storage(format!("Failed to delete {:?}: {}", component_path, e))
-                })?;
-                log::debug!("Deleted compaction input: {:?}", component_path);
+                match std::fs::remove_file(&component_path) {
+                    Ok(()) => log::debug!("Deleted compaction input: {:?}", component_path),
+                    Err(e) => {
+                        // Best-effort: do not abort. A leftover data component
+                        // whose TOC.txt is already gone is an invisible orphan
+                        // reclaimed by the startup sweep (Issue #591).
+                        log::warn!(
+                            "Deferred delete of {:?}: {} (component left as orphan; \
+                             unpublished via TOC.txt removal, reclaimed on next startup)",
+                            component_path,
+                            e
+                        );
+                        failures.push(format!("{:?}: {}", component_path, e));
+                    }
+                }
             }
         }
 
-        Ok(())
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            // Surface a non-fatal error so callers can log it. The SSTable is
+            // already unpublished (TOC.txt removed first), so callers treat this
+            // as a deferred reclamation, not a correctness failure.
+            Err(Error::Storage(format!(
+                "Deferred delete left {} orphaned component(s) (unpublished, reclaimed on \
+                 next startup): {}",
+                failures.len(),
+                failures.join("; ")
+            )))
+        }
     }
 
     /// Convert MergeEntry to Mutation (M5.2 helper)
@@ -2479,21 +2551,35 @@ mod tests {
 
         let engine = WriteEngine::new(config).unwrap();
 
-        // Create dummy SSTable files
+        // Create dummy SSTable files. Each Data.db needs a sibling TOC.txt to
+        // count as a *published* SSTable (the publication barrier, Issue #591) —
+        // a Data.db without TOC.txt is an unpublished partial/orphan and must be
+        // skipped by the candidate scan.
         let data_dir = temp_dir.path().join("data");
         std::fs::create_dir_all(&data_dir).unwrap();
         std::fs::write(data_dir.join("nb-1-big-Data.db"), b"").unwrap();
+        std::fs::write(data_dir.join("nb-1-big-TOC.txt"), b"").unwrap();
         std::fs::write(data_dir.join("nb-2-big-Data.db"), b"").unwrap();
+        std::fs::write(data_dir.join("nb-2-big-TOC.txt"), b"").unwrap();
         std::fs::write(data_dir.join("nb-3-big-Index.db"), b"").unwrap(); // Not a Data.db
         std::fs::write(data_dir.join("other-file.txt"), b"").unwrap(); // Not an SSTable
+                                                                       // An unpublished Data.db (no TOC.txt) must NOT be picked up (Issue #591).
+        std::fs::write(data_dir.join("nb-4-big-Data.db"), b"").unwrap();
 
         let candidates = engine.scan_sstable_candidates().unwrap();
 
-        // Should only find Data.db files
+        // Should only find the two PUBLISHED Data.db files (TOC.txt present);
+        // nb-4 is excluded because it has no TOC.txt.
         assert_eq!(candidates.len(), 2);
         assert!(candidates
             .iter()
             .all(|p| p.to_string_lossy().contains("Data.db")));
+        assert!(
+            !candidates
+                .iter()
+                .any(|p| p.to_string_lossy().contains("nb-4-big")),
+            "unpublished Data.db (no TOC.txt) must be excluded (Issue #591)"
+        );
     }
 
     #[test]
@@ -2537,6 +2623,58 @@ mod tests {
         for component in &components {
             assert!(!data_dir.join(component).exists());
         }
+    }
+
+    /// Issue #591: deletion removes TOC.txt FIRST so the SSTable is unpublished
+    /// before any data component is touched. This guarantees the read path and
+    /// the compaction candidate scan stop seeing it immediately, even if a data
+    /// component cannot be removed yet (e.g. pinned by a mapped reader on
+    /// Windows).
+    #[test]
+    fn test_delete_removes_toc_first_unpublishing_atomically() {
+        let temp_dir = TempDir::new().unwrap();
+        let data_dir = temp_dir.path().join("data");
+        std::fs::create_dir_all(&data_dir).unwrap();
+
+        // A full published SSTable component set including TOC.txt.
+        for comp in &[
+            "nb-7-big-Data.db",
+            "nb-7-big-Index.db",
+            "nb-7-big-Statistics.db",
+            "nb-7-big-TOC.txt",
+        ] {
+            std::fs::write(data_dir.join(comp), b"x").unwrap();
+        }
+
+        let data_path = data_dir.join("nb-7-big-Data.db");
+        WriteEngine::delete_sstable_files_static(&data_path).unwrap();
+
+        // Everything gone on the happy path.
+        assert!(!data_dir.join("nb-7-big-TOC.txt").exists());
+        assert!(!data_path.exists());
+
+        // And critically: scan_data_files (the compaction candidate discovery)
+        // never surfaces a Data.db without a TOC.txt, so a deferred-delete orphan
+        // is not re-fed to the merger. Recreate a TOC-less leftover to prove it.
+        std::fs::write(data_dir.join("nb-8-big-Data.db"), b"x").unwrap();
+        let mut candidates = Vec::new();
+        WriteEngine::scan_data_files(&data_dir, &mut candidates, 1).unwrap();
+        assert!(
+            candidates.is_empty(),
+            "a Data.db without a sibling TOC.txt must NOT be a compaction candidate \
+             (publication barrier, Issue #591); got {:?}",
+            candidates
+        );
+
+        // Add the matching TOC.txt and it becomes a valid candidate again.
+        std::fs::write(data_dir.join("nb-8-big-TOC.txt"), b"x").unwrap();
+        let mut candidates = Vec::new();
+        WriteEngine::scan_data_files(&data_dir, &mut candidates, 1).unwrap();
+        assert_eq!(
+            candidates.len(),
+            1,
+            "a published Data.db (TOC.txt present) must be discovered"
+        );
     }
 
     // Mock merge policy that selects specific files for testing

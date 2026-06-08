@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **mmap write-while-mapped guard + delete/publication policy** (Issue #591) —
+  hardens the opt-in memory-mapped read path (#589, default OFF) against the
+  compaction delete path. A memory map aliases a Data.db file's bytes for the
+  reader's lifetime; deleting or truncating a mapped file can fault with `SIGBUS`
+  on Unix or block deletion on Windows. The invariant is now enforced and tested:
+  1. Compaction reads its inputs through **buffered I/O**, never a memory map
+     (pinned explicitly in `KWayMerger`, independent of the global `use_mmap`
+     setting), and drains them into memory before any delete — so the merger
+     never holds a mapping over a file it removes.
+  2. SSTable deletion removes **`TOC.txt` first** (the publication barrier), then
+     the data components best-effort. The compaction candidate scan
+     (`scan_data_files`) now skips any Data.db lacking a sibling TOC.txt, matching
+     the read path. A component still pinned by a mapped reader on Windows
+     therefore becomes an invisible orphan (reclaimed by the startup sweep)
+     rather than a failed delete or a duplicate-row source.
+
+  Regression coverage: an end-to-end test opens the inputs through a mmap-enabled
+  `SSTableManager` and then compacts/deletes them
+  (`issue_591_mmap_compaction_delete.rs`), plus unit tests for TOC-first deletion
+  and the publication-barrier candidate scan. Constraints documented on
+  `StorageConfig::use_mmap` and the write engine.
+
 - **Compaction panicked when triggered from an async context** (Issue #587) —
   a high-severity panic shipped in v0.10.0. `WriteEngine::maintenance_step()` is
   synchronous but bridges to async I/O to read a merge's input SSTables. The

@@ -466,7 +466,17 @@ impl SSTableRowIteratorAdapter {
         use crate::Config;
         use std::sync::Arc;
 
-        let config = Config::default();
+        let mut config = Config::default();
+        // Issue #591: compaction MUST read its inputs through buffered I/O, never
+        // a memory map. `finalize_merge_async` deletes these input files once the
+        // merged output is published; a live mmap over a file that is then
+        // truncated or removed can fault with SIGBUS on Unix (unrecoverable as an
+        // `io::Error`) and can block deletion on Windows. Reading buffered — and
+        // draining every entry into memory in this constructor, before finalize
+        // deletes the inputs — guarantees no mapping outlives the file. This is
+        // pinned explicitly rather than relying on the (currently `false`) global
+        // default so the invariant cannot silently regress.
+        config.storage.use_mmap = false;
         let path_buf = path.to_path_buf();
 
         // Open SSTable reader and load all partitions with actual row timestamps.

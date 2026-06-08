@@ -74,6 +74,17 @@ pub struct StorageConfig {
     ///   overlays) can fault mid-read after a successful map; prefer buffered
     ///   I/O there.
     ///
+    /// # Interaction with the write engine (Issue #591)
+    ///
+    /// This setting only affects the read path. Compaction always reads its
+    /// input SSTables through buffered I/O regardless of `use_mmap`, and deletes
+    /// each input by removing its `TOC.txt` first (unpublishing it) before the
+    /// data components, best-effort. So enabling mmap for queries is safe
+    /// alongside background compaction: a compaction never holds a mapping over a
+    /// file it then deletes, and on Windows a data file still pinned by a mapped
+    /// reader becomes an invisible orphan (reclaimed on the next startup) rather
+    /// than a failed delete or a source of duplicate rows.
+    ///
     /// Can also be enabled at runtime by setting `CQLITE_USE_MMAP=1`.
     ///
     /// `#[serde(default)]` keeps configs serialized before this field existed
