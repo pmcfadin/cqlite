@@ -37,14 +37,14 @@ Common cell flags (high level):
 
 Bit-level flags (Cassandra 5.0, authoritative references):
 
-| Bit | Meaning                    | When present                                |
-|-----|----------------------------|---------------------------------------------|
-| 0   | isDeleted                  | Cell is a tombstone                         |
-| 1   | isExpiring                 | TTL fields follow                           |
-| 2   | hasEmptyValue              | Zero-length value                           |
-| 3   | hasTimestamp               | Timestamp present in cell header            |
-| 4   | hasLocalDeletionTime       | Local deletion time present                 |
-| 5+  | format extensions/reserved | Format-specific                             |
+| Bit | Name                    | When set                                                                  |
+|-----|-------------------------|---------------------------------------------------------------------------|
+| 0   | `IS_DELETED_MASK`       | Cell is a tombstone                                                       |
+| 1   | `IS_EXPIRING_MASK`      | Cell is expiring (has TTL)                                                |
+| 2   | `HAS_EMPTY_VALUE_MASK`  | Cell value is empty (zero-length but present)                             |
+| 3   | `USE_ROW_TIMESTAMP_MASK`| Cell timestamp **equals** row timestamp — timestamp field is **omitted**  |
+| 4   | `USE_ROW_TTL_MASK`      | Cell TTL/LDT **equals** row TTL/LDT — TTL and LDT fields are **omitted** |
+| 5+  | (reserved)              | Format-specific extensions                                                |
 
 Authoritative classes to consult in Cassandra 5.0:
 - `org.apache.cassandra.db.rows.*` (e.g., `Unfiltered`, `Cell`, `BufferCell`)
@@ -246,9 +246,9 @@ Reference: `org.apache.cassandra.db.context.CounterContext` in Cassandra 5.0 sou
 - For collections with unexpected nulls, check for element tombstones and TTL expiration handling.
 
 ### References
-- Cassandra 5.0.0:
+- Cassandra 5.0.8:
   - Rows and tombstones: `org.apache.cassandra.db.rows.*` (`Unfiltered`, `RangeTombstoneMarker`)
-  - Serialization header: [org.apache.cassandra.db.SerializationHeader](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/SerializationHeader.java)
+  - Serialization header: [org.apache.cassandra.db.SerializationHeader](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java)
   
 For implementation details, see Appendix C.
 
@@ -266,9 +266,10 @@ The complete row format, confirmed via Cassandra's `UnfilteredSerializer.java`:
 [clustering_prefix: variable]          ← For tables with clustering keys
 [row_size: VInt]                       ← Size measured from AFTER this VInt (Issue #237)
 [prev_size: VInt]
-[timestamp: VInt if 0x04 set]          ← Delta from min_timestamp
-[ttl: VInt if 0x08 set]                ← Delta from min_ttl
-[deletion: 2 VInts if 0x10 set]        ← markedForDeleteAt delta (signed) + local_deletion_time delta (unsigned)
+[timestamp: VInt if 0x04 set]          ← Delta from min_timestamp (unsigned VInt)
+[ttl: VInt32 if 0x08 set]              ← TTL delta from min_ttl (unsigned VInt32)
+[liveness_ldt: VInt32 if 0x08 set]    ← Local expiration time delta from min_local_deletion_time (unsigned VInt32)
+[deletion: 2 VInts if 0x10 set]        ← markedForDeleteAt delta (unsigned VInt) + local_deletion_time delta (unsigned VInt32)
 [column_bitmap: VInt + bytes if NOT 0x20]
 [cell_data...]
 ```
@@ -332,9 +333,9 @@ Between rows in a partition, or at the end of a partition, the parser may encoun
 |------|------|--------------------|---------|
 | 0x04 | HAS_TIMESTAMP      | Timestamp delta present | Delta-encoded from Statistics.db min_timestamp |
 | 0x08 | HAS_TTL           | TTL delta present | Delta-encoded from Statistics.db min_ttl |
-| 0x10 | HAS_DELETION      | Deletion time present | Two VInts in Cassandra canonical order: (1) markedForDeleteAt delta (signed, base `min_timestamp`, microseconds — the authoritative tombstone reconciliation timestamp), then (2) local_deletion_time delta (unsigned, base `min_local_deletion_time`, seconds). See `DeletionTime.Serializer` / `SerializationHeader.writeDeletionTime`. |
+| 0x10 | HAS_DELETION      | Deletion time present | Two VInts in Cassandra canonical order: (1) markedForDeleteAt delta (unsigned VInt, base `min_timestamp`, microseconds — the authoritative tombstone reconciliation timestamp), then (2) local_deletion_time delta (unsigned VInt32, base `min_local_deletion_time`, seconds). See `DeletionTime.Serializer` / `SerializationHeader.writeDeletionTime`. |
 | 0x20 | HAS_ALL_COLUMNS   | All columns present (no bitmap) | When set, all schema columns have values (no NULLs) |
-| 0x80 | HAS_EXTENDED_FLAGS | Extended flags byte follows | Reserved for future format extensions |
+| 0x80 | `EXTENSION_FLAG` (source) / `HAS_EXTENDED_FLAGS` (guide alias) | Extended flags byte follows | Reserved for future format extensions |
 
 ### Delta Decoding
 
@@ -351,20 +352,29 @@ absolute_local_deletion_time   = min_local_deletion_time + local_deletion_time_d
 
 ### Column Bitmap
 
-When `HAS_ALL_COLUMNS` (0x20) is **NOT** set, a column bitmap follows the metadata fields:
+When `HAS_ALL_COLUMNS` (0x20) is **NOT** set, a columns-subset field follows the metadata fields.
+Cassandra's on-disk format (`Columns.Serializer.serializeSubset`, `Columns.java:503-531`) encodes
+**missing** columns, not present columns:
+
+- **< 64 columns in superset**: write a single unsigned VInt where bit = 1 means the column at
+  that index is **absent**.
+- **≥ 64 columns**: write an unsigned VInt32 count of missing columns, then either indices of
+  present columns or missing columns (whichever is smaller set) as unsigned VInt32 deltas.
+
+The CQLite write path uses a simplified bitmap format:
 
 ```
-[column_count: VInt]
-[bitmap_bytes: (column_count + 7) / 8 bytes]
+[column_count: VInt]                   ← CQLite internal
+[bitmap_bytes: (column_count + 7) / 8] ← Bit = 1 means column PRESENT (CQLite convention)
 ```
 
-Each bit indicates column presence:
-- Bit = 1: Column has a value in this row
-- Bit = 0: Column is NULL (not present)
+> **Note**: CQLite's write-side bitmap (bit=1 = present) is the inverse of Cassandra's
+> `serializeSubset` (bit=1 = missing). Parsers reading Cassandra-produced SSTables must use
+> the authoritative subset encoding above; the CQLite bitmap is only produced by CQLite's own
+> writer and is parsed by CQLite's own reader accordingly.
 
-**Example**: For a table with 10 columns, if only columns 0, 2, and 9 have values:
-- `column_count = 10` (VInt: 0x0a)
-- `bitmap_bytes = 2` bytes: `0b00000101` (columns 0,2) and `0b00000010` (column 9)
+**Example (Cassandra format)**: For a table with 10 columns, if columns 1 and 3 are absent:
+- Bitmap VInt: bit 1 and bit 3 set = `0b00001010` = `0x0a`
 
 ### Validation
 
@@ -392,19 +402,20 @@ Partitions MUST be written in order of their Murmur3 token values (ascending). W
 
 ### Partition Header Format
 
-Each partition begins with a fixed header structure:
+Each partition begins with:
 
 ```
-[partition_flags: u8]       ← 0x00 for live partitions
-[key_length: u8]           ← Partition key length (max 255 bytes)
+[key_length: u16 BE]       ← Partition key length (2 bytes, big-endian)
 [key_bytes]                ← Raw partition key bytes
-[deletion_time: i32 BE]    ← 0 for live partitions
-[unknown_field: u64 BE]    ← Always 0 in observed data
+[deletion_time]            ← 1 byte 0x80 if LIVE; 12 bytes (u64 mfda + u32 ldt) if deleted
 ```
 
-**Partition Flags**: Currently only 0x00 (no deletion) is supported. Partition-level tombstones would use different flags.
+Source: `SortedTablePartitionWriter.java:104-105` —
+`ByteBufferUtil.writeWithShortLength(key.getKey(), writer)` writes a 2-byte big-endian u16
+length followed by key bytes; then `DeletionTime.getSerializer(version).serialize(...)`.
 
-**Key Length Limit**: V5CompressedLegacy uses a u8 length prefix, limiting partition keys to 255 bytes maximum.
+**There is no leading partition_flags byte and no trailing unknown_field.** The partition key
+length is a 2-byte unsigned short (max 65,535 bytes), not a 1-byte limit.
 
 **End-of-Partition Marker**: Each partition ends with a single byte 0x01 (END_OF_PARTITION) after all rows.
 
@@ -437,7 +448,7 @@ Row flags are constructed by OR-ing flag bits based on the row's properties:
 | Row deletion | ROW_HAS_DELETION | 0x10 | Include deletion fields |
 | All columns present (no NULLs) | ROW_HAS_ALL_COLUMNS | 0x20 | Skip column bitmap |
 | Complex column deletion | ROW_HAS_COMPLEX_DELETION | 0x40 | Complex deletion present |
-| Extended flags follow | ROW_HAS_EXTENDED_FLAGS | 0x80 | Extended flags byte follows |
+| Extended flags follow | `EXTENSION_FLAG` | 0x80 | Extended flags byte follows |
 
 **ROW_HAS_ALL_COLUMNS Truth Table**:
 
@@ -525,12 +536,12 @@ For a table with columns [name, age, city]:
 
 All temporal metadata uses delta encoding against Statistics.db baseline values:
 
-**Timestamp Delta** (signed VInt):
+**Timestamp Delta** (unsigned VInt — `SerializationHeader.writeTimestamp` calls `writeUnsignedVInt`):
 ```
 timestamp_delta = mutation_timestamp - min_timestamp
 ```
 
-**TTL Delta** (signed VInt):
+**TTL Delta** (unsigned VInt32 — `SerializationHeader.writeTTL` calls `writeUnsignedVInt32`):
 ```
 ttl_delta = mutation_ttl - min_ttl
 ```
@@ -541,9 +552,10 @@ deletion_time_delta = local_deletion_time - min_local_deletion_time
 ```
 
 **Constraints**:
-- Timestamp deltas can be negative (if mutation timestamp < min_timestamp)
-- TTL deltas can be negative
-- Deletion time deltas MUST be >= 0 (error if local_deletion_time < min_local_deletion_time)
+- Timestamp deltas MUST be >= 0: `min_timestamp` is the minimum across all rows, so every delta is non-negative.
+- TTL deltas MUST be >= 0: `min_ttl` is the minimum across all rows.
+- Deletion time deltas MUST be >= 0 (error if local_deletion_time < min_local_deletion_time).
+- All three fields use unsigned encoding because the baselines guarantee non-negative deltas.
 
 ### Delta Encoding Examples
 
@@ -560,12 +572,12 @@ Row with timestamp = 1005000:
 ```
 [0x04]                    Row flags: HAS_TIMESTAMP
 [VInt(5000)]              Timestamp delta: 1005000 - 1000000 = 5000
-                          ZigZag(5000) = 10000, encoded as VInt
+                          Unsigned VInt(5000) = 0x93 0x88 (2 bytes)
 ```
 
-Byte-level encoding of VInt(5000):
-- ZigZag encoding: `(5000 << 1) = 10000`
-- VInt encoding of 10000: `0x9C 0x78` (2 bytes)
+Byte-level encoding of unsigned VInt(5000):
+- No ZigZag — timestamps use `writeUnsignedVInt`
+- `5000 = 0x1388`; 2-byte encoding: `(0x13 | 0x80) = 0x93`, `0x88`
 
 **Example 2: Row with TTL**
 
@@ -595,14 +607,11 @@ Tombstone with timestamp = 1003000, local_deletion_time = 1700000100:
 [VUInt(1700000100)]       Deletion time delta: 1700000100 - 0 (unsigned)
 ```
 
-**Example 5: Negative Delta**
+**Example 5: No Negative Deltas**
 
-If min_timestamp = 2000000 and row timestamp = 1500000:
-```
-[0x04]                    Row flags: HAS_TIMESTAMP
-[VInt(-500000)]           Negative delta
-                          ZigZag(-500000) = 999999, encoded as VInt
-```
+Negative timestamp deltas cannot occur in a valid SSTable: `min_timestamp` is computed as
+the minimum of all row timestamps, so every row's delta is >= 0. If you encounter a
+value smaller than `min_timestamp`, the SSTable is malformed.
 
 ### Clustering Prefix Encoding
 
