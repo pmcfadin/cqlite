@@ -1,16 +1,16 @@
-## CQL → SSTable Type Mapping — Complex Types (Cassandra 5.0)
+## CQL -> SSTable Type Mapping -- Complex Types (Cassandra 5.0)
 
 | CQL type | On-disk representation | Notes |
 |---|---|---|
-| `udt<name>` | For each field (in definition order): [4-byte BE i32 length][value bytes] | -1=null, 0=empty, >0=data length |
+| `udt<name>` | For each field (in definition order): [4-byte BE i32 length][value bytes] | -1=null, 0=empty, >0=data length. Source: `TupleType.java:345-359` (UserType delegates to `TupleType.buildValue`). |
 | `frozen<udt<...>>` | Same as UDT, serialized as single blob | Treated atomically, single-cell storage |
 | `list<frozen<udt>>` | Multi-cell: each element is separate cell with frozen UDT blob | Outer list not frozen = multi-cell |
 | `frozen<list<udt>>` | Single-cell: entire list serialized as one blob | Outer frozen = single-cell |
-| `vector<float,n>` | VInt length (n) + `n` 32-bit floats (big-endian) | Vector CQL type introduced in 5.x |
+| `vector<float,n>` | Exactly `n x 4` bytes -- **no length prefix** | Fixed-element vector: `FixedLengthSerializer` concatenates elements with zero framing overhead. Layout = n x elementSize bytes. For variable-element vectors, each element is prefixed with unsigned VInt length. Source: `VectorType.java:477-493,565-576`. |
 
 ### UDT Binary Format Details
 
-**Frozen UDT field encoding** (confirmed via Issue #220):
+**Frozen UDT field encoding** (confirmed via `TupleType.java:345-359`):
 ```
 [field_1_length: 4-byte BE i32][field_1_data: variable bytes]
 [field_2_length: 4-byte BE i32][field_2_data: variable bytes]
@@ -43,6 +43,6 @@ The **outer** type determines storage format. Inner frozen types affect element 
 
 References:
 
-- Cassandra 5.0: `org.apache.cassandra.db.marshal.VectorType` (`https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/marshal/VectorType.java`)
-- Cassandra 5.0: `org.apache.cassandra.db.SerializationHeader` (`https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/SerializationHeader.java`)
-
+- Cassandra 5.0.8: `org.apache.cassandra.db.marshal.VectorType` (`https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/VectorType.java`)
+- Cassandra 5.0.8: `org.apache.cassandra.db.marshal.TupleType` (`https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/marshal/TupleType.java`)
+- Cassandra 5.0.8: `org.apache.cassandra.db.SerializationHeader` (`https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java`)

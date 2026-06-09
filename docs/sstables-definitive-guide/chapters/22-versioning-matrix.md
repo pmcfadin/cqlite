@@ -4,17 +4,27 @@ A one-page map of Cassandra releases to SSTable version tags and on-disk deltas.
 
 | Release | SSTable tag(s) | Notable on-disk deltas | Gates/notes | Anchors |
 |---|---|---|---|---|
-| 3.x | `mc` (and earlier series) | Legacy BIG layouts; size-prefixed Snappy in places; no NB | BIG family only | `Descriptor`, `BigTableReader` |
-| 4.x | `md`/`me` (varies by minor) | BIG refinements; summary/token changes; no NB | Gate by tag; consult per-release notes | `Descriptor`, `IndexSummary` |
-| 5.0 | `V5_0NewBig` (NB coexists with BIG) | NB: header-less `Data.db`, trailing per-chunk CRCs, CompressionInfo-driven chunk map; Index entry variant with optional 2-byte length prefix in BIG | Gate by `Descriptor` format (`nb` vs `big`); detect BIG index entry variant by prefix | `SSTableReader`, `RowIndexEntry`, `CompressionMetadata` |
+| 3.x | `ma`--`me` (BIG only) | Legacy BIG layouts; `ma`=3.0.0 baseline; `mb`=commit-log lower bound; `mc`=commit-log intervals; `md`=accurate min/max (3.0.18); `me`=originating host ID (3.0.25) | BIG family only; `earliest_supported_version = "ma"` | `BigFormat.java:344`, `BigTableReader` |
+| 4.x | `na`/`nb` (BIG only) | `na` (4.0-rc1): max-compressed-length, pending-repair, is-transient, metadata checksum, new Bloom filter format; `nb` (4.0-rc2): no new major features | Gate by version letter `na`/`nb`; `hasOriginatingHostId` fires for `nb`+ **or** `me`+ (straddles series -- see note below) | `BigFormat.java:400-405`, `Descriptor` |
+| 5.0 | `oa` (BIG) / `da` (BTI) | `oa` feature gates: `hasImprovedMinMax`, `hasPartitionLevelDeletionPresenceMarker`, `hasKeyRange`, `hasUIntDeletionTime` (year-2106 safe), `hasTokenSpaceCoverage`; `hasAccurateMinMax`=FALSE (deprecated in `oa`); BTI `da` enables all modern gates | **Default write version is `nb` (BIG).** `BigFormat.java:343`: `current_version = storageCompatibilityMode.isBefore(5) ? "nb" : "oa"`. Stock 5.0 clusters default to `storage_compatibility_mode=CASSANDRA_4` (NEWS.txt), which satisfies `isBefore(5)`, so they write `nb`-versioned BIG SSTables until the operator raises the mode. BTI format always writes `da`. Gate by format **name** (`big` vs `bti`) then version letter (`oa` for 5.0+ BIG; `da` for all BTI). | `BigFormat.java:343,406-410`, `BtiFormat.java:289-290`, `Descriptor.java:85,189` |
+
+### `hasOriginatingHostId` gate note
+
+`BigFormat.java:400`: `hasOriginatingHostId = version.compareTo("nb") >= 0 || version.matches("(m[e-z])")`. This gate straddles two major-letter series: it fires for `me`--`mz` (late 3.x) **and** independently for all `na`+ (4.x and above). Parsers must check both conditions.
+
+### `hasAccurateMinMax` deprecation note
+
+`BigFormat.java:397` comment: `hasAccurateMinMax` applies to versions `md`--`mz` and `na`--`nz`. It is deprecated in `oa` and to be removed after `oa`. The `oa` row uses `hasImprovedMinMax` instead. Set `hasAccurateMinMax=FALSE` for any `oa`+ file.
 
 ### How to use this matrix
-- Read `Descriptor` to determine format/tag; gate parsing paths accordingly.
+- Read `Descriptor` to determine format name and version letter; gate parsing paths accordingly.
+- Filename format: `<version>-<id>-<formatName>-<component>.db` (e.g., `oa-1-big-Data.db`, `da-3-bti-Partitions.db`).
+- Detection is by format **name** (`big` or `bti`), not by version letter alone.
 - For BIG Index entries, handle both variants (non-prefixed and length-prefixed); see Chapter 06.
-- For NB `Data.db`, ignore header/magic and validate trailing per-chunk CRCs using `CompressionInfo.db`.
 
-References (pinned to 5.0.0 where relevant):
-- `Descriptor`: https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/Descriptor.java
-- `SSTableReader`: https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/SSTableReader.java
-- `RowIndexEntry` (BIG): https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/big/RowIndexEntry.java
-- `CompressionMetadata`: https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java
+References (pinned to cassandra-5.0.8):
+- `Descriptor`: https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/Descriptor.java
+- `BigFormat` (versions & gates): https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java
+- `BtiFormat` (version & gates): https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java
+- `SSTableReader`: https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/SSTableReader.java
+- `CompressionMetadata`: https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java
