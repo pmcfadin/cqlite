@@ -178,3 +178,7 @@ cassandra5-small.tar.gz.sha256
 
 # Runtime locks
 .claude/scheduled_tasks.lock
+
+# SSTable guide audit working artifacts (not committed)
+docs/cassandra-5.0-src/
+docs/sstable-guide-audit/
