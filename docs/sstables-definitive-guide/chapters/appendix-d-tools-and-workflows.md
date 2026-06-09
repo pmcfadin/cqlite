@@ -7,16 +7,16 @@ In this appendix you will learn:
 
 ## Cassandra Tools (CLI)
 
-Examples use tiny, trimmed outputs for clarity.
+Examples use tiny, trimmed outputs for clarity. Cassandra 5.0 NB-format files use the `nb-1-big-` prefix.
 
 ```bash
-sstabledump /var/lib/cassandra/data/ks/tbl-.../mb-1-big-Data.db | head -n 10
+sstabledump /var/lib/cassandra/data/ks/tbl-.../nb-1-big-Data.db | head -n 10
 # Example trimmed output (illustrative):
 # {"partition": {"key": "..."}, "row": {"cells": [ ... ]}}
 ```
 
 ```bash
-sstablemetadata /var/lib/cassandra/data/ks/tbl-.../mb-1-big-Data.db
+sstablemetadata /var/lib/cassandra/data/ks/tbl-.../nb-1-big-Data.db
 # Example trimmed output:
 # SSTable Metadata: minTimestamp=..., maxTimestamp=..., partitionCount=...
 ```
@@ -26,9 +26,9 @@ Other tools:
 - `sstablelevelreset` — reset LCS levels
 - `sstableverify` — verify data checksums and components
 
-Pin source classes:
-- `org.apache.cassandra.tools.SSTableDump`
-- `org.apache.cassandra.tools.SSTableMetadata`
+Pin source classes (Cassandra 5.0.8):
+- `org.apache.cassandra.tools.SSTableExport` — implements the `sstabledump` CLI
+- `org.apache.cassandra.tools.SSTableMetadataViewer` — implements the `sstablemetadata` CLI
 
 ## Operational Notes (Cassandra)
 
@@ -40,6 +40,5 @@ Pin source classes:
 - Cross-check TOC and component presence before analysis.
 
 ## References
-- Cassandra 5.0 tools: `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/tools/SSTableDump.java`
-- Cassandra 5.0 tools: `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/tools/SSTableMetadata.java`
-
+- `SSTableExport` (sstabledump): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/tools/SSTableExport.java`
+- `SSTableMetadataViewer` (sstablemetadata): `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/tools/SSTableMetadataViewer.java`

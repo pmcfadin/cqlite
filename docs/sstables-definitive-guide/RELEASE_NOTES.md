@@ -2,6 +2,42 @@
 
 This document captures distribution notes for the Cassandra-focused guide. Keep CQLite mentions minimal; prioritize Cassandra correctness and pinned upstream references.
 
+## 2026-06-09 — Source-verification audit vs Apache Cassandra 5.0.8
+
+Full claim-by-claim audit of all guide chapters against a cassandra-5.0.8 source checkout
+(epic #598, PRs #609–#618 + this PR #619).
+
+### Summary of changes
+
+- All permalinks re-pinned from cassandra-5.0.0 to cassandra-5.0.8 across REFERENCES.md,
+  STYLE_GUIDE.md, source-map.md, context-brief.md, and both appendixes.
+- Major corrections applied (via individual audit PRs):
+  - Cell flag bits 3/4 corrected to USE_ROW_TIMESTAMP / USE_ROW_TTL
+  - Unsigned VInt encoding confirmed for temporal deltas
+  - Filter.db layout verified: `hashCount` (4B) then `wordCount` (4B) then raw bitset bytes;
+    field labels were previously swapped
+  - Inline per-chunk CRC32 clarified: 4-byte big-endian u32 appended in Data.db after each
+    compressed chunk; CompressionInfo.db holds only chunk start offsets
+  - Default chunk length confirmed as 16 KiB (not a different value)
+  - Version letter identifiers: `oa`/`da` replace the former `V5_0NewBig` placeholder names
+  - BIG Index.db entry format corrected: u16 BE key length + raw key bytes + vint position;
+    no 0x0010 marker, no MD5 digest — the bytes `0010` are the key length itself
+  - BTI clarified as "Big Trie-Indexed" format family
+- New coverage added: SAI vector on-disk format, zero-copy streaming, UCS compaction strategy,
+  manifest.json component.
+- Retracted: "Header CRC32 Validation (Legacy/BIG only)" section removed from Appendix C
+  (no BIG-family component prepends a 4-byte CRC32 header prefix; the per-chunk CRC lives
+  inline in NB Data.db only).
+- Moved class paths corrected:
+  - `SSTableReader` → `io/sstable/format/SSTableReader.java`
+  - `SSTableWriter` → `io/sstable/format/SSTableWriter.java`
+  - `IndexSummary` → `io/sstable/indexsummary/IndexSummary.java`
+  - `IndexSummaryBuilder` → `io/sstable/indexsummary/IndexSummaryBuilder.java`
+  - `SSTableDump` (nonexistent) → `tools/SSTableExport.java`
+  - `SSTableMetadata` (nonexistent) → `tools/SSTableMetadataViewer.java`
+
+---
+
 ## v0.1 (Draft for Review)
 
 ### Highlights
