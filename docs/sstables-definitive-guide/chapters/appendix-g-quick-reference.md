@@ -4,43 +4,43 @@
 
 Cassandra 5.0 chunks data and compresses independently. Each algorithm wraps compressed data differently:
 
-| Algorithm | Size Prefix | Order | Notes |
-|-----------|-----------|-------|-------|
-| **LZ4** | 4 bytes | **LE** | Most common; LE is critical! |
-| **Snappy** | None (NB) | - | Cassandra 5.0 format; legacy has BE prefix |
-| **Deflate** | 4 bytes | **BE** | Standard deflate stream |
-| **Zstd** | 4 bytes | **BE** | Frame format with checksum |
+| Algorithm | Size Prefix in Data.db | Order | Notes |
+|-----------|------------------------|-------|-------|
+| **LZ4** | 4 bytes | **LE** | Most common; LE prefix is critical! |
+| **Snappy** | None | — | Raw Snappy frame |
+| **Deflate** | None | — | Raw Deflate stream (no prefix) |
+| **Zstd** | None | — | Zstd frame with internal content checksum |
 
 All chunks end with: `[4-byte BE CRC]`
 
 ## Byte Swaps (Critical!)
 
 ```rust
-// LZ4 ONLY - Little-Endian!
+// LZ4 ONLY — 4-byte Little-Endian uncompressed-length prefix
 let size = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+let compressed = &data[4..];
 
-// Deflate and Zstd - Big-Endian
-let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-
-// Snappy NB - NO PREFIX, raw Snappy
-// (try legacy format first with BE prefix, fallback to raw)
+// Snappy, Deflate, Zstd — NO PREFIX; decompress the whole chunk buffer
+// (Deflate and Zstd have no length header at all)
 ```
 
 ## CompressionInfo.db Reading
 
 ```rust
-// Binary layout:
-[u16 BE] algorithm_name_length
-[UTF-8] algorithm_name
-[u8] null_terminator
-[u32 BE] chunk_length
-[u64 BE] data_length
-[u32 BE] chunk_count
+// Binary layout (Java writeUTF = u16-BE-length-prefix + UTF-8 bytes):
+[writeUTF] algorithm_name        // e.g., "LZ4Compressor"
+[u32 BE]   option_count          // number of key-value pairs (0 for most)
+// repeat option_count times:
+[writeUTF] option_key
+[writeUTF] option_value
+[u32 BE]   chunk_length          // uncompressed chunk size; default 16384 (16 KiB)
+[u32 BE]   max_compressed_length // ONLY for format version >= "na" (Cassandra 3.0+)
+[u64 BE]   data_length           // total uncompressed size
+[u32 BE]   chunk_count
 
-// Then for each chunk:
-[u64 BE] offset          // In Data.db
-[u32 BE] compressed_len  // EXCLUDES 4-byte CRC
-[u32 BE] uncompressed_len
+// Then for each chunk (offsets only — no per-chunk lengths or CRCs):
+[u64 BE]   offset                // byte offset in Data.db
+// compressed_len = next_offset - offset - 4 (subtract trailing CRC)
 ```
 
 ## Finding a Chunk in Data.db
@@ -48,17 +48,15 @@ let size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 ```rust
 // Given position in uncompressed file:
 chunk_index = position / chunk_length
-chunk_metadata = chunks[chunk_index]
+
+// Offsets array from CompressionInfo.db (no per-chunk lengths stored):
+offset = chunk_offsets[chunk_index]
+next_offset = chunk_offsets[chunk_index + 1]  // or compressed_file_size for last
+compressed_len = (next_offset - offset) - 4   // subtract 4-byte trailing CRC
 
 // Read from Data.db:
-chunk_data = read_from(
-    chunk_metadata.offset,
-    chunk_metadata.compressed_len
-)
-
-// Skip CRC (don't read it):
-crc_location = chunk_metadata.offset + chunk_metadata.compressed_len
-// (CRC is 4 bytes, but you can ignore it for decompression)
+chunk_data = read_from(offset, compressed_len)
+crc = read_u32_be_from(offset + compressed_len)  // validate or skip
 ```
 
 ## Decompression Template
@@ -90,19 +88,15 @@ pub fn decompress(algorithm: &str, data: &[u8]) -> Result<Vec<u8>> {
             Ok(result)
         }
         "DEFLATE" => {
-            // Extract BE prefix
-            let size = u32::from_be_bytes(data[0..4].try_into()?);
-            assert!(size <= 128 * 1024 * 1024); // Bomb check
-            let result = deflate_decode(&data[4..])?;
-            assert_eq!(result.len(), size as usize);
+            // No prefix — decompress entire chunk buffer
+            let result = deflate_decode(data)?;
+            assert!(result.len() <= 128 * 1024 * 1024); // Bomb check post-decompress
             Ok(result)
         }
         "ZSTD" => {
-            // Extract BE prefix
-            let size = u32::from_be_bytes(data[0..4].try_into()?);
-            assert!(size <= 128 * 1024 * 1024); // Bomb check
-            let result = zstd_decode(&data[4..])?;
-            assert_eq!(result.len(), size as usize);
+            // No prefix — decompress entire chunk buffer
+            let result = zstd_decode(data)?;
+            assert!(result.len() <= 128 * 1024 * 1024); // Bomb check post-decompress
             Ok(result)
         }
         _ => Err("Unknown algorithm")
@@ -115,8 +109,8 @@ pub fn decompress(algorithm: &str, data: &[u8]) -> Result<Vec<u8>> {
 1. **Using BE for LZ4**: LZ4 uses **little-endian**, not big-endian
    - `u32::from_le_bytes()` not `from_be_bytes()`
 
-2. **Forgetting Snappy NB format**: Cassandra 5.0 has no size prefix for Snappy
-   - Try legacy format, fall back to raw
+2. **Assuming Deflate/Zstd have a size prefix**: Neither algorithm has a length prefix in Data.db
+   - Decompress the entire chunk buffer directly; chunk bounds come from CompressionInfo.db offsets
 
 3. **Including CRC in decompression**: The 4-byte CRC comes AFTER compressed data
    - Don't read it, don't pass it to decompressor
@@ -136,8 +130,7 @@ pub fn decompress(algorithm: &str, data: &[u8]) -> Result<Vec<u8>> {
 "SnappyCompressor"     -> normalize to "SNAPPY"
 "DeflateCompressor"    -> normalize to "DEFLATE"
 "ZstdCompressor"       -> normalize to "ZSTD"
-"NoCompressor"         -> normalize to "NONE"
-"NullCompressor"       -> normalize to "NONE"
+"NoopCompressor"       -> normalize to "NOOP"
 ```
 
 ## Files to Reference
@@ -145,7 +138,10 @@ pub fn decompress(algorithm: &str, data: &[u8]) -> Result<Vec<u8>> {
 - **Full spec**: `/docs/sstables-definitive-guide/chapters/appendix-g-compression-chunk-formats.md`
 - **Research notes**: `/docs/archive/issues/COMPRESSION_CHUNK_FORMAT_RESEARCH.md`
 - **CQLite code**: `/cqlite-core/src/storage/sstable/compression.rs`
-- **Cassandra source**: `apache/cassandra:5.0.0` in `/src/java/org/apache/cassandra/io/compress/`
+- **Cassandra source**: `apache/cassandra:5.0.8` in `/src/java/org/apache/cassandra/io/compress/`
+  - [`CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java)
+  - [`CompressedSequentialWriter.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java)
+  - [`schema/CompressionParams.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) (note: `schema/`, not `io/compress/`)
 
 ## Testing Your Implementation
 
@@ -186,10 +182,10 @@ Typical Data.db compression:
 
 ## In 30 Seconds
 
-1. Read 4-byte prefix (LE for LZ4, BE for others)
-2. Validate size <= 128MB
-3. Decompress remaining bytes using appropriate algorithm
-4. Verify decompressed size matches prefix (or chunk metadata)
-5. Skip the 4-byte CRC at the end
+1. For LZ4: read 4-byte LE prefix; for Snappy/Deflate/Zstd: no prefix — use all chunk bytes
+2. For LZ4: validate prefix size <= 128MB before decompressing
+3. Decompress using appropriate algorithm (LZ4: skip 4-byte prefix)
+4. Validate decompressed size <= 128MB (all algorithms)
+5. The 4-byte CRC follows the compressed bytes in Data.db; validate or skip it
 
 Done.
