@@ -12,7 +12,9 @@ This specification documents the EXACT binary format needed to write valid Stati
 ## 1. File Structure Overview
 
 Statistics.db consists of:
-1. **TOC (Table of Contents)** - 8 + (8 × num_components) bytes
+1. **TOC (Table of Contents)** - `4 + (2 × 4) + (8 × num_components)` bytes for checksummed
+   versions (`nb`/`oa`), or `4 + (8 × num_components)` bytes without checksums. For 4
+   components with checksums: `4 + 8 + 32 = 44` bytes (VALIDATION starts at `0x002c`).
 2. **Component data sections** - VALIDATION, COMPACTION, STATS, HEADER
 
 **Key Encoding Rules**:
@@ -42,17 +44,18 @@ Statistics.db consists of:
 | `0x0020` | 4    | u32 BE  | `component_type`  | 3 (HEADER)                       |
 | `0x0024` | 4    | u32 BE  | `component_offset`| `0x1d2b` (7467 bytes)           |
 
-**TOC ends at**: `0x0028` (40 bytes)
+**TOC ends at**: `0x002b` (44 bytes for checksummed nb/oa). The 4 bytes at `0x0028`–`0x002b` are
+the `toc_block_checksum` (CRC32 over all TOC entries, `MetadataSerializer.java:96`), not padding.
 
 ### MetadataType Enum
 
-From `org.apache.cassandra.db.commitlog.CommitLogSegment.MetadataType`:
+From [`org.apache.cassandra.io.sstable.metadata.MetadataType`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataType.java):
 
 | Value | Name        | Description                              |
 |-------|-------------|------------------------------------------|
 | 0     | VALIDATION  | Partitioner, bloom filter settings       |
 | 1     | COMPACTION  | Ancestor histograms, cardinality         |
-| 2     | STATS       | EncodingStats, distribution histograms   |
+| 2     | STATS       | Full `StatsMetadata` (26 version-gated fields; histograms, timestamps, repair info) |
 | 3     | HEADER      | SerializationHeader (column schema)      |
 
 ---
@@ -68,8 +71,7 @@ From `org.apache.cassandra.db.commitlog.CommitLogSegment.MetadataType`:
 
 | Offset   | Size | Type    | Field Name         | Value                                              |
 |----------|------|---------|--------------------|---------------------------------------------------|
-| `0x002c` | 1    | u8      | `reserved`         | `0x00` (always 0x00, purpose unclear)             |
-| `0x002d` | 1    | VInt    | `partitioner_len`  | `0x2b` (43 bytes)                                 |
+| `0x002c` | 2    | u16 BE  | `partitioner_len`  | `0x00 0x2b` = 43 (Java `writeUTF` 2-byte length prefix) |
 | `0x002e` | 43   | UTF-8   | `partitioner`      | `org.apache.cassandra.dht.Murmur3Partitioner`     |
 | `0x0059` | 8    | f64 BE  | `bloom_fp_chance`  | `0.01` (1% false positive rate)                   |
 
@@ -77,8 +79,8 @@ From `org.apache.cassandra.db.commitlog.CommitLogSegment.MetadataType`:
 
 ### Writer Notes
 
-- `reserved` byte is always `0x00` (possibly version/flags for future use)
-- `partitioner_len` is a single-byte VInt for strings < 128 bytes
+- `partitioner_len` is a **2-byte big-endian** length prefix written by Java `DataOutput.writeUTF`
+  (e.g., `0x00 0x2b` = 43 for Murmur3Partitioner). No reserved byte precedes it.
 - Standard Murmur3 partitioner string is 43 bytes
 - `bloom_fp_chance`: Typical value is `0.01` (1%) or `0.001` (0.1%)
 
@@ -107,7 +109,7 @@ Contains complex `EstimatedHistogram` structures for:
 
 - For MVP writer: Use minimal stub (empty/zero histogram data)
 - Future: Implement full `MetadataCollector` serialization
-- Cassandra source: `org.apache.cassandra.db.compaction.CompactionMetadata`
+- Cassandra source: [`org.apache.cassandra.io.sstable.metadata.CompactionMetadata`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/CompactionMetadata.java)
 
 ---
 
@@ -120,10 +122,13 @@ Contains complex `EstimatedHistogram` structures for:
 
 ### Structure
 
-Contains:
-- `EstimatedHistogram` for partition sizes
-- `EstimatedHistogram` for cell counts per row
-- `EncodingStats` (min_timestamp, min_deletion_time, min_ttl)
+Contains the full `StatsMetadata` serialization (26 version-gated fields including
+`EstimatedHistogram` for partition sizes and cell counts per row, commit-log positions,
+min/max timestamps, deletion times, TTL, compression ratio, `TombstoneHistogram`,
+level, repair metadata, clustering bounds, and more). See `StatsMetadata.java:402–513`.
+
+> **Note**: `EncodingStats` is NOT a sub-block inside the STATS component. It is the
+> leading field of the HEADER component only (`SerializationHeader.java:453`).
 
 **First 64 bytes** (observed):
 ```
@@ -135,10 +140,18 @@ Contains:
 
 ### Writer Notes (DEFERRED TO FUTURE MILESTONE)
 
-- EncodingStats fields are embedded within larger `MetadataCollector` structure
+- `StatsMetadata` is the full serialization (26 fields); `EncodingStats` is the leading
+  field of the HEADER component, not an embedded sub-block here.
 - For MVP writer: Use minimal stub with zero/empty histograms
-- Future: Implement full `MetadataCollector` with real statistics
+- Future: Implement full `StatsMetadata` serializer with version gates
 - **Note**: Current `enhanced_statistics_parser.rs` ONLY extracts EncodingStats
+
+> **TombstoneHistogram legacy format (pre-`oa`)**: The `LegacyHistogramSerializer`
+> writes deletion time as `double` (8 bytes) and tombstone count as `long` (8 bytes)
+> per entry — NOT `int` (4 bytes). Total per entry = 16 bytes (`TombstoneHistogram.java:155–156`).
+> The modern serializer (`oa`+) writes `long` (8) + `int` (4) = 12 bytes per entry.
+> Also: `HistogramSerializer.serializedSize` over-allocates by `4 × histSize` bytes
+> (stale comment assumes 16 bytes/entry); do not use it as a wire-byte guarantee.
 
 ---
 
@@ -151,15 +164,16 @@ Contains:
 
 ### Binary Format
 
-| Offset   | Size | Type    | Field Name         | Value                                              |
-|----------|------|---------|--------------------|---------------------------------------------------|
-| `0x1d2b` | 7    | VInt    | `unknown_field`    | Multi-byte VInt (purpose unclear)                 |
-|          |      |         |                    | Raw: `fd 20 28 75 dc 45 19`                       |
-| `0x1d32` | 2    | u8[2]   | `marker`           | `0x00 0x00` (start of pk descriptor)              |
-| `0x1d34` | 1    | VInt    | `pk_type_len`      | `0x28` (40 bytes)                                 |
-| `0x1d35` | 40   | UTF-8   | `pk_type`          | `org.apache.cassandra.db.marshal.UUIDType`        |
-| `0x1d5d` | 1    | VInt    | `ck_count`         | `0x00` (0 clustering keys)                        |
-| `0x1d5e` | 2    | u8[2]   | `reg_col_marker`   | `0x00 0x12` (possibly column count: 0x12 = 18)   |
+| Offset   | Size   | Type                  | Field Name                   | Value                                                   |
+|----------|--------|-----------------------|------------------------------|---------------------------------------------------------|
+| `0x1d2b` | 7      | UnsignedVInt (64-bit) | `minTimestamp_delta`         | `fd 20 28 75 dc 45 19` (~316 T µs from TIMESTAMP_EPOCH) |
+| `0x1d32` | 1      | UnsignedVInt32        | `minLocalDeletionTime_delta` | `0x00` (no deletions; delta from DELETION_TIME_EPOCH)   |
+| `0x1d33` | 1      | UnsignedVInt32        | `minTTL_delta`               | `0x00` (no TTL; delta from TTL_EPOCH = 0)               |
+| `0x1d34` | 1      | VInt                  | `pk_type_len`                | `0x28` (40 bytes)                                       |
+| `0x1d35` | 40     | UTF-8                 | `pk_type`                    | `org.apache.cassandra.db.marshal.UUIDType`              |
+| `0x1d5d` | 1      | UnsignedVInt32        | `ck_count`                   | `0x00` (0 clustering keys)                              |
+| `0x1d5e` | 1      | UnsignedVInt32        | `static_count`               | `0x00` (0 static columns)                               |
+| `0x1d5f` | 1      | UnsignedVInt32        | `reg_count`                  | `0x12` = 18 regular columns                             |
 
 ### Regular Column Format (repeats for each column)
 
@@ -172,20 +186,29 @@ Contains:
 | `0x1d70` | 1    | VInt    | `col_type_len`     | `0x2b` (43 bytes)                                 |
 | `0x1d71` | 43   | UTF-8   | `col_type`         | `org.apache.cassandra.db.marshal.DecimalType`     |
 
-This pattern repeats for all 19 regular columns.
+This pattern repeats for all 18 regular columns.
 
 ### Complete SerializationHeader Structure
 
-1. **unknown_vint** (7 bytes in this file): Purpose unclear, varies per file
-2. **marker** (2 bytes): `0x00 0x00` - Start of partition key type descriptor
-3. **pk_type_len** (VInt): Length of partition key type string
-4. **pk_type** (UTF-8): CQL type descriptor
-5. **ck_count** (VInt): Number of clustering keys (0 for simple tables)
-6. **(If ck_count > 0)**: For each clustering key:
+The HEADER component MUST begin with `EncodingStats` before any key-type data
+(`SerializationHeader.java:453`). A writer that omits EncodingStats shifts every
+subsequent field and produces a file Cassandra cannot parse.
+
+1. **EncodingStats** (3–14 bytes, variable): Three unsigned VInt delta fields:
+   - `minTimestamp_delta`: `writeUnsignedVInt` (64-bit, up to 8 bytes)
+   - `minLocalDeletionTime_delta`: `writeUnsignedVInt32` (32-bit, up to 5 bytes)
+   - `minTTL_delta`: `writeUnsignedVInt32` (32-bit, up to 5 bytes)
+2. **pk_type_len** (VInt): Length of partition key type string
+3. **pk_type** (UTF-8): CQL type descriptor
+4. **ck_count** (UnsignedVInt32): Number of clustering keys (0 for simple tables)
+5. **(If ck_count > 0)**: For each clustering key:
    - `ck_type_len` (VInt)
    - `ck_type` (UTF-8)
-7. **reg_col_marker** (2 bytes): `0x00 0x12` in this file
-8. **For each regular column** (19 in this file):
+6. **static_count** (UnsignedVInt32): Number of static columns (0 if none)
+7. **(If static_count > 0)**: For each static column:
+   - `col_name_len` (VInt), `col_name` (UTF-8), `col_type_len` (VInt), `col_type` (UTF-8)
+8. **reg_count** (UnsignedVInt32): Number of regular columns (18 in this file)
+9. **For each regular column** (18 in this file):
    - `col_name_len` (VInt)
    - `col_name` (UTF-8)
    - `col_type_len` (VInt)
@@ -296,9 +319,17 @@ fn encode_vint(value: i64) -> Vec<u8> {
 
 ## 11. References
 
-- **Cassandra Source**: `org.apache.cassandra.io.sstable.metadata.MetadataSerializer`
-- **CQLite Parser**: `/Users/patrick/local_projects/cqlite/cqlite-core/src/parser/enhanced_statistics_parser.rs`
-- **Reference File**: `/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db`
+- [`MetadataSerializer.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataSerializer.java)
+- [`MetadataType.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataType.java)
+- [`ValidationMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/ValidationMetadata.java)
+- [`CompactionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/CompactionMetadata.java)
+- [`StatsMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java)
+- [`SerializationHeader.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java)
+- [`EncodingStats.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/EncodingStats.java)
+- [`EstimatedHistogram.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/EstimatedHistogram.java)
+- [`TombstoneHistogram.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/streamhist/TombstoneHistogram.java)
+- **CQLite Parser**: `cqlite-core/src/parser/enhanced_statistics_parser.rs`
+- **Reference File**: `test-data/datasets/sstables/test_basic/simple_table-.../nb-1-big-Statistics.db`
 
 ---
 

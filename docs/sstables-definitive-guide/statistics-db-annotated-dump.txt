@@ -31,15 +31,16 @@ TOC Entry 3 (HEADER):
 0x0020: 00 00 00 03  ← component_type (u32 BE) = 3
 0x0024: 00 00 1d 2b  ← component_offset (u32 BE) = 0x1d2b (7467 bytes)
 
-[Padding/unused: 0x0028-0x002b = 4 bytes]
-0x0028: 09 66 82 16  ← (appears to be start of next section or padding)
+0x0028: 09 66 82 16  ← toc_block_checksum (CRC32 over all TOC entries, 4 bytes)
+                       MetadataSerializer.java:96 — second maybeWriteChecksum() call
 
 ================================================================================
 VALIDATION COMPONENT - Offset 0x002c to 0x0060 (53 bytes)
 ================================================================================
 
-0x002c: 00           ← reserved (u8) = 0x00
-0x002d: 2b           ← partitioner_len (VInt) = 43 bytes
+0x002c: 00 2b        ← partitioner_len (u16 BE) = 43 — Java writeUTF 2-byte length prefix
+                       ValidationMetadata.java:81: out.writeUTF(component.partitioner)
+                       (high byte 0x00 at 0x002c, low byte 0x2b at 0x002d)
 
 Partitioner string (43 bytes UTF-8):
 0x002e: 6f 72 67 2e 61 70 61 63 68 65 2e 63 61 73 73  "org.apache.cass"
@@ -91,11 +92,14 @@ For brevity, showing only first 128 bytes:
 HEADER COMPONENT (SerializationHeader) - Offset 0x1d2b to 0x2122 (1016 bytes)
 ================================================================================
 
-Unknown VInt field (7 bytes):
-0x1d2b: fd 20 28 75 dc 45 19  ← Multi-byte VInt (purpose unclear)
-
-Marker (start of partition key descriptor):
-0x1d32: 00 00  ← 0x00 0x00 marker
+EncodingStats block (SerializationHeader.java:453, EncodingStats.java:272–276):
+0x1d2b: fd 20 28 75 dc 45 19  ← minTimestamp_delta (UnsignedVInt 64-bit, 7 bytes)
+                                 ≈316 trillion µs from TIMESTAMP_EPOCH (~10 years)
+0x1d32: 00                    ← minLocalDeletionTime_delta (UnsignedVInt32, 1 byte) = 0
+                                 delta from DELETION_TIME_EPOCH (Sept 22 2015 in seconds)
+0x1d33: 00                    ← minTTL_delta (UnsignedVInt32, 1 byte) = 0
+                                 delta from TTL_EPOCH = 0 (no TTL in this SSTable)
+                              ── EncodingStats ends (9 bytes total); keyType follows ──
 
 Partition Key Type:
 0x1d34: 28     ← pk_type_len (VInt) = 40 bytes
@@ -106,8 +110,10 @@ Partition Key Type:
 Clustering Key Count:
 0x1d5d: 00     ← ck_count (VInt) = 0 (no clustering keys)
 
-Regular Column Marker:
-0x1d5e: 00 12  ← reg_col_marker = 0x0012 (possibly column count: 18 decimal)
+Static and Regular Column Counts:
+0x1d5e: 00     ← static_count (UnsignedVInt32) = 0 (no static columns)
+0x1d5f: 12     ← reg_count (UnsignedVInt32) = 18 regular columns
+               SerializationHeader.java:458-459
 
 --------------------------------------------------------------------------------
 Regular Column 1: account_balance
@@ -171,9 +177,9 @@ CRITICAL NOTES FOR WRITER IMPLEMENTATION:
 2. TOC checksum MUST match Cassandra's CRC32 algorithm
 3. All strings are UTF-8 with VInt length prefix
 4. All integers are BIG ENDIAN
-5. VALIDATION component has a mysterious 0x00 reserved byte before partitioner
-6. HEADER component has a mysterious 7-byte VInt before the 0x00 0x00 marker
-7. Regular column marker (0x00 0x12) may indicate column count (18 decimal)
+5. VALIDATION `partitioner_len` is a 2-byte big-endian prefix (Java writeUTF); no reserved byte
+6. HEADER component STARTS with EncodingStats (3 unsigned VInt deltas) before pk_type
+7. `static_count` (0x00) and `reg_count` (0x12 = 18) are separate UnsignedVInt32 fields
 
 For MVP writer implementation (Issue #328):
 - Focus on VALIDATION and HEADER components (fully documented above)
