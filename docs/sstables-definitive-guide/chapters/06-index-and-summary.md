@@ -95,6 +95,26 @@ Promoted index payload (BIG):
   explicitly by `promoted_index_len`; when it is 0 the entry has no promoted index. See
   `org.apache.cassandra.io.sstable.format.big` reader/writer for the payload fields.
 
+> **Promoted index trigger (data-size based, not key-count based):** A new
+> `IndexInfo` block is emitted whenever the uncompressed data written for the current
+> partition since the last block boundary reaches `column_index_size` (default 64 KiB).
+> Source: [`BigFormatPartitionWriter.java:49`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormatPartitionWriter.java#L49)
+> (`DEFAULT_GRANULARITY = 64 * 1024`) and line 213 (`if (currentPosition() - startPosition >= indexSize)`).
+> A promoted index is only included when **two or more** `IndexInfo` blocks result
+> (`RowIndexEntry.create()` lines 227-239). Partitions smaller than 64 KiB produce a plain
+> `RowIndexEntry` with serialized size = 0 and no promoted index data.
+
+> **DeletionTime field order ("oa" vs legacy, MC-4):** For SSTable version "oa" (5.0+),
+> `DeletionTime` inside a promoted index is serialized as:
+> - LIVE: 1 byte `0x80` (high bit set)
+> - Non-LIVE: 8 bytes `markedForDeleteAt` (sign bit must be 0, high bit used as flags), then
+>   4 bytes `localDeletionTime` as unsigned int
+>
+> For legacy versions (< "oa") the `LegacySerializer` writes `localDeletionTime` (4 bytes,
+> signed int) **first**, then `markedForDeleteAt` (8 bytes). Gate on
+> `version.hasUintDeletionTime` (`BigFormat.java:409`).
+> Source: [`DeletionTime.java#L210-L219`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DeletionTime.java#L210)
+
 Mini-parser — conceptual:
 ```text
 pos = 0
@@ -204,7 +224,11 @@ First and last keys are serialized at the end of the file for quick boundary loo
 Note: Token-based iteration is not directly supported by Summary.db since tokens are not stored. Token iteration must compute tokens from partition keys.
 
 ### BTI Notes
-- BTI’s indexing can alter how promoted index information is structured; the high-level flow (Summary → Index → Data) remains intact, but entry payloads differ. Ensure readers gate parsing on `Descriptor` format.
+- BTI SSTables do **not** use `Index.db` or `Summary.db` at all. The BIG-format
+  `Summary → Index → Data` flow does not apply to BTI. BTI uses `Partitions.db` (a
+  page-aware trie, `PartitionIndex`) for O(log n) key lookup and `Rows.db` for the
+  row index. See Ch.17 for the complete BTI format.
+  Source: [`BtiFormat.java#L83-L102`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java#L83)
 
 ### Key Takeaways
 - `Index.db` maps partition keys to positions; `Summary.db` accelerates binary search.
@@ -305,7 +329,13 @@ For M5 Stage 0 (simple partitions), promoted index is not written:
 encode_unsigned(0, &mut buffer);
 ```
 
-Promoted index is used for wide partitions (many clustering keys) to enable fast within-partition seeks. This can be added in future stages for wide partition support.
+Promoted index is used for wide partitions — those where uncompressed data written for
+the current partition since the last `IndexInfo` block boundary reaches `column_index_size`
+(default 64 KiB, `BigFormatPartitionWriter.DEFAULT_GRANULARITY`). A partition with few but
+large rows can trigger this; one with many tiny rows below 64 KiB will not. A promoted index
+is only included when **two or more** `IndexInfo` blocks result (`RowIndexEntry.create()`
+lines 227-239). This can be added in future stages for wide partition support.
+Source: [`BigFormatPartitionWriter.java#L49,L213`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormatPartitionWriter.java#L49)
 
 ### Token Ordering Requirement
 
@@ -424,11 +454,18 @@ fn write_header(&self, buffer: &mut Vec<u8>, entries_count: u32, summary_entries
     // summary_entries_size (u64, BE) = offset_table_size + entry_data_size
     buffer.extend_from_slice(&summary_entries_size.to_be_bytes());
 
-    // sampling_level (u32, BE) - typically same as min_index_interval
-    buffer.extend_from_slice(&self.min_index_interval.to_be_bytes());
+    // sampling_level (u32, BE) - downsampling level: 1..BASE_SAMPLING_LEVEL (128).
+    // For a freshly written SSTable use BASE_SAMPLING_LEVEL (128), NOT min_index_interval.
+    // They share the same default value (128) by coincidence but diverge after downsampling.
+    // Source: Downsampling.java:34 (BASE_SAMPLING_LEVEL=128); IndexSummary.java:88-94,226-229
+    buffer.extend_from_slice(&self.sampling_level.to_be_bytes()); // 128 for new SSTables
 
-    // size_at_full_sampling (u32, BE) - entries count at full sampling
-    buffer.extend_from_slice(&entries_count.to_be_bytes());
+    // size_at_full_sampling (u32, BE) - ESTIMATED entry count at full sampling.
+    // Formula: total_partition_count / min_index_interval  (NOT entries_count).
+    // After downsampling, entries_count < size_at_full_sampling; they are only equal for a
+    // freshly written SSTable when sampling_level == BASE_SAMPLING_LEVEL == 128.
+    // Source: IndexSummary.java:235-237 (getMaxNumberOfEntries() returns sizeAtFullSampling)
+    buffer.extend_from_slice(&self.size_at_full_sampling.to_be_bytes());
 }
 ```
 
@@ -465,7 +502,10 @@ The complete SSTable write workflow coordinates all components:
 
 Components MUST be written in this order:
 
-1. **Statistics.db** - Provides delta encoding baseline (FIRST)
+1. **Statistics.db** - Written first in the CQLite implementation to provide a delta
+   encoding baseline. Note: this ordering is a CQLite implementation decision; Cassandra's
+   `BigTableWriter` streams `Data.db` as the primary output and computes statistics
+   alongside—there is no format constraint requiring Statistics.db before Data.db.
 2. **Data.db** - Main partition/row data
 3. **Index.db** - Partition index (uses Data.db offsets)
 4. **Summary.db** - Sampled index entries (uses Index.db offsets)
@@ -581,10 +621,17 @@ Memory usage is bounded by:
 
 ### References
 - Cassandra 5.0.0:
-  - `IndexSummary`: [org.apache.cassandra.io.sstable.IndexSummary](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/IndexSummary.java)
-  - `SSTableReader`: [org.apache.cassandra.io.sstable.SSTableReader](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/SSTableReader.java)
-  - BIG reader: [org/apache/cassandra/io/sstable/format/big/BigTableReader.java](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java)
-  - BIG writer: [org/apache/cassandra/io/sstable/format/big/BigTableWriter.java](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java)
+  - `IndexSummary`: [org.apache.cassandra.io.sstable.indexsummary.IndexSummary](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java) (package path changed in 5.0.x)
+  - BIG reader (was SSTableReader): [org.apache.cassandra.io.sstable.format.big.BigTableReader](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java) (`SSTableReader` is now abstract; BIG reading is in `BigTableReader`)
+  - BIG reader: [org/apache/cassandra/io/sstable/format/big/BigTableReader.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java)
+  - BIG writer: [org/apache/cassandra/io/sstable/format/big/BigTableWriter.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java)
+
+- Cassandra 5.0.8 — additional citations:
+  - IndexSummary offset LE encoding: [`IndexSummary.java#L411-L418`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/indexsummary/IndexSummary.java#L411)
+  - Promoted index 64 KiB trigger: [`BigFormatPartitionWriter.java#L49,L213`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormatPartitionWriter.java#L49)
+  - RowIndexEntry binary format: [`RowIndexEntry.java#L57-L68`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/RowIndexEntry.java#L57)
+  - DeletionTime "oa" serialization (mfda first): [`DeletionTime.java#L210-L219`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/DeletionTime.java#L210)
+  - BASE_SAMPLING_LEVEL=128: [`Downsampling.java#L34`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/Downsampling.java#L34)
 
 - CQLite Implementation:
   - `cqlite-core/src/storage/sstable/writer/index_writer.rs` - Index.db writer
