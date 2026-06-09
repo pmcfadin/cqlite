@@ -10,7 +10,7 @@ Explore compression algorithms, chunk sizes, offset maps, and checksums in `Comp
 
 ## Compression Metadata
 
-`CompressionInfo.db` contains algorithm name, chunk length, total uncompressed length, chunk offsets, and optionally per-chunk CRCs and a metadata CRC.
+`CompressionInfo.db` contains algorithm class name, option count, option key-value pairs, chunk length, max compressed length (SSTable format version "na" / Cassandra 3.0+ only), total uncompressed data length, chunk count, and chunk offsets. Per-chunk CRC32 checksums live inline in `Data.db`, written immediately after each compressed chunk — `CompressionInfo.db` holds no per-chunk CRCs.
 
 For a concise parser walkthrough, see Appendix C.
 
@@ -21,7 +21,7 @@ For a concise parser walkthrough, see Appendix C.
 
 ## Checksums
 
-Modern formats can record per-chunk CRCs and a metadata CRC; readers enforce them for Cassandra 5.0 formats. Digest files (`Digest.crc32`) cover component integrity at a coarse level; per-chunk CRCs catch localized corruption.
+Per-chunk CRC32 checksums are appended inline in `Data.db` after each compressed chunk; readers enforce them for Cassandra 5.0 formats. `Digest.crc32` covers component-level integrity at a coarse level; per-chunk CRCs catch localized corruption within a chunk. `CompressionInfo.db` does not store per-chunk CRCs.
 
 Readers enforce size and CRC expectations for modern formats. For decompressor details, see Appendix C.
 
@@ -45,15 +45,20 @@ Offset 0: [chunk_0_compressed_bytes]
 
 ### CompressionInfo.db Format (serialization exactness)
 
-The compression metadata file encodes:
-- compressor class name (UTF-8 string)
-- chunk length (u32)
-- total uncompressed length (u64)
-- chunk map (offset/length pairs)
+The compression metadata file encodes, in serialization order (`CompressionMetadata.Writer.writeHeader()`):
 
-Exact field order and widths are defined in Cassandra 5.0 by `CompressionMetadata` and friends. See:
-- `org.apache.cassandra.io.compress.CompressionMetadata` (reader)
-- `org.apache.cassandra.io.compress.CompressionParams` (parameters)
+1. **Compressor class name** — UTF-8 string (2-byte length prefix + bytes), e.g., `"LZ4Compressor"`
+2. **Option count** — 4-byte int: number of key-value option pairs
+3. **Options** — repeated UTF-8 key + UTF-8 value pairs (each with 2-byte length prefix)
+4. **Chunk length** — 4-byte int: uncompressed chunk size (default 16 KiB = 16 384 bytes)
+5. **Max compressed length** — 4-byte int: present only for SSTable format version ≥ "na" (Cassandra 3.0+)
+6. **Data length** — 8-byte long: total uncompressed file size
+7. **Chunk count** — 4-byte int: number of chunks
+8. **Chunk offsets** — array of 8-byte longs: byte offset of each chunk in `Data.db`
+
+Authoritative sources:
+- `org.apache.cassandra.io.compress.CompressionMetadata` (reader / writer)
+- `org.apache.cassandra.schema.CompressionParams` (parameters and defaults; in `schema/`, not `io/compress/`)
 
 Authoritative example (first 64 bytes from a real file):
 
@@ -65,7 +70,7 @@ Authoritative example (first 64 bytes from a real file):
 
 Interpretation (trimmed):
 - `000d` → length 13, followed by `LZ4Compressor` (UTF-8)
-- `0040` → chunk length 64 KiB (example)
+- `0040` → chunk length field; raw value 0x00004000 = 16 384 bytes = 16 KiB (the default)
 - `007f ffff ff00 0000 0000` → total uncompressed length (u64 example)
 - subsequent bytes begin the chunk map
 
@@ -75,15 +80,19 @@ Exact widths (NB, Cassandra 5.0):
 
 | Field | Type/width | Endianness | Notes |
 |---|---|---|---|
-| compressor_name_length | u16 | big | length of compressor class name |
+| compressor_name_length | u16 | big | length prefix of class name (Java `writeUTF`) |
 | compressor_name | UTF-8 bytes | — | e.g., `LZ4Compressor`, `SnappyCompressor` |
-| chunk_length | u32 | big | uncompressed bytes per chunk target |
+| option_count | u32 | big | number of key-value option pairs |
+| option_key[i] | UTF-8 string | — | repeated `option_count` times |
+| option_value[i] | UTF-8 string | — | repeated `option_count` times |
+| chunk_length | u32 | big | uncompressed bytes per chunk; default 16 384 (16 KiB) |
+| max_compressed_length | u32 | big | present only for format version ≥ "na" (3.0+) |
 | total_uncompressed_length | u64 | big | table payload size before compression |
 | chunk_count | u32 | big | number of chunks |
-| chunk_offsets[chunk_count] | u32 each | big | offset of each compressed chunk in `Data.db` |
+| chunk_offsets[chunk_count] | u64 each | big | byte offset of each compressed chunk in `Data.db` |
 
 Map encoding by format:
-- NB (5.0): offsets only; per-chunk compressed length = next_offset − offset − 4 (CRC word)
+- NB (5.0): offsets only; per-chunk compressed length = next_offset − offset − 4 (subtract trailing CRC word in `Data.db`)
 - Legacy variants: may differ; this guide focuses on NB; consult sources when targeting older formats
 
 Chunk map (first two entries, decoded — units: bytes, endianness: big):
@@ -137,9 +146,11 @@ chunk 1: start=0x1e35 comp_len=2666 expected=0x657f7155 computed=0x657f7155 matc
 - Readers must pair `CompressionInfo.db` with `Data.db` to read the right byte ranges.
 
 ### References
--- Cassandra 5.0.0:
-  - `CompressionMetadata`: [org.apache/cassandra/io/compress/CompressionMetadata.java](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java)
-  - `CompressionParams`: [org/apache/cassandra/io/compress/CompressionParams.java](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/compress/CompressionParams.java)
+
+- `CompressionMetadata` (reader / writer): [io/compress/CompressionMetadata.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java) — `open()` lines 76–112, `writeHeader()` lines 375–398
+- `CompressionParams` (defaults): [schema/CompressionParams.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH` line 47 (note: `schema/`, not `io/compress/`)
+- `CompressedSequentialWriter` (chunk write + CRC): [io/compress/CompressedSequentialWriter.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java) — `flushData()` lines 140–206
+- `BigFormat` (version gate): [io/sstable/format/big/BigFormat.java](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java) — `hasMaxCompressedLength` line 401
 
 For implementation details, see Appendix C.
 

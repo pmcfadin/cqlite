@@ -114,22 +114,20 @@ Appendix G is a comprehensive guide to Cassandra 5.0 compression chunk formats. 
 
 ## Key Concepts Across Documents
 
-### Byte Order
+### Byte Order / Size Prefixes
 
-All documents consistently reference:
-- **LZ4**: Little-Endian (unusual!)
-- **Deflate**: Big-Endian
-- **Zstd**: Big-Endian
-- **Snappy Legacy**: Big-Endian (if present)
-- **Snappy NB**: No size prefix
+- **LZ4**: 4-byte **Little-Endian** size prefix in `Data.db` (critical — unusual!)
+- **Snappy**: No size prefix — raw Snappy frame
+- **Deflate**: No size prefix — raw Deflate stream
+- **Zstd**: No size prefix — Zstd frame with internal content checksum
 
 ### CRC Checksum
 
-Mentioned in all documents:
-- Location: After compressed chunk in Data.db
-- Byte order: Big-Endian
-- Position: chunk_offset + compressed_length
-- Not included in CompressionInfo.db metadata
+Per-chunk CRC32 checksums live inline in `Data.db` immediately after each compressed chunk:
+- Location: In `Data.db`, immediately after the compressed chunk bytes
+- Position: `chunk_offset + compressed_length` (where `compressed_length` = `next_offset - offset - 4`)
+- `CompressionInfo.db` stores **no** per-chunk CRCs — only chunk byte offsets
+- Byte order: Big-Endian (Java `java.util.zip.CRC32`, IEEE polynomial)
 
 ### Decompression Bomb Protection
 
@@ -138,12 +136,13 @@ Covered in all documents:
 - Validation: Both pre and post-decompression
 - Implementation: In CQLite compression.rs
 
-### Snappy Format Evolution
+### Algorithm Size Prefixes
 
-Mentioned in all implementation documents:
-- Legacy: [4-byte BE prefix] [data] [CRC]
-- Cassandra 5.0 NB: [data] [CRC] (no prefix)
-- Solution: Try both formats
+Only LZ4 has a size prefix in Data.db. Snappy, Deflate, and Zstd do not:
+- **LZ4**: 4-byte little-endian uncompressed-length prefix
+- **Snappy**: No prefix — raw Snappy frame
+- **Deflate**: No prefix — raw Deflate stream
+- **Zstd**: No prefix — Zstd frame with internal content checksum
 
 ## Reading Recommendations
 
@@ -183,16 +182,24 @@ Documents reference each other:
 
 ## Cassandra Source Code References
 
-All documents cite Cassandra 5.0 source code:
+All documents cite Cassandra 5.0.8 source code:
 
 ```
 /src/java/org/apache/cassandra/io/compress/
-├── LZ4Compressor.java (lines 136-165)
-├── SnappyCompressor.java (lines 93-108)
-├── DeflateCompressor.java (lines 199-221)
-├── ZstdCompressorBase.java (lines 107-126)
-├── CompressionMetadata.java (lines 93-134, 293-311)
+├── LZ4Compressor.java        — 4-byte LE prefix in compress() lines 118-134
+├── SnappyCompressor.java     — no prefix, uncompress() lines 93-108
+├── DeflateCompressor.java    — no prefix, uncompress() lines 199-221
+├── ZstdCompressor.java       — no prefix, Zstd frame with checksum
+├── CompressedSequentialWriter.java — per-chunk CRC write, flushData() lines 140-206
+├── CompressionMetadata.java  — header layout, open() lines 76-112, writeHeader() lines 375-398
+├── NoopCompressor.java       — passthrough compressor
 └── ICompressor.java
+
+/src/java/org/apache/cassandra/schema/   ← note: schema/, not io/compress/
+└── CompressionParams.java    — DEFAULT_CHUNK_LENGTH = 16384 (line 47)
+
+/src/java/org/apache/cassandra/io/sstable/format/big/
+└── BigFormat.java            — hasMaxCompressedLength version gate (line 401)
 ```
 
 ## Document Maintenance
@@ -206,13 +213,13 @@ All documents cite Cassandra 5.0 source code:
 
 ### Version Tracking
 
-All documents reference Cassandra 5.0.0 (Apache Cassandra GitHub main branch as of analysis date)
+All documents reference Cassandra 5.0.8. Links are pinned to the `cassandra-5.0.8` tag.
 
 ## External Resources
 
 ### Cassandra 5.0 Source
 - Repository: https://github.com/apache/cassandra
-- Branch: cassandra-5.0.0
+- Branch: cassandra-5.0.8 (pin to this tag for permalink stability)
 - Path: /src/java/org/apache/cassandra/io/compress/
 
 ### CQLite Implementation
@@ -277,6 +284,6 @@ If you find:
 
 ---
 
-**Last Updated**: December 15, 2024
-**Cassandra Version**: 5.0.0
-**Status**: Complete and verified against Cassandra source
+**Last Updated**: June 2026
+**Cassandra Version**: 5.0.8
+**Status**: Verified against Cassandra 5.0.8 source (audit B5)

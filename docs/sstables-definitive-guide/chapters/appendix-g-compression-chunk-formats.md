@@ -2,22 +2,25 @@
 
 ## Overview
 
-Cassandra 5.0 uses a chunked compression approach for Data.db files. Data is split into fixed-size chunks (typically 64KB) and each chunk is independently compressed. The compression metadata is stored in CompressionInfo.db, while the actual compressed data is stored in Data.db.
+Cassandra 5.0 uses a chunked compression approach for Data.db files. Data is split into fixed-size chunks (default 16 KiB / 16 384 bytes) and each chunk is independently compressed. The compression metadata is stored in CompressionInfo.db, while the actual compressed data is stored in Data.db.
 
 ### Compression Architecture
 
 **Two-File System:**
 1. **CompressionInfo.db**: Metadata file containing:
-   - Algorithm name (LZ4, Snappy, Deflate, Zstd)
-   - Chunk length (uncompressed chunk size, typically 65536 bytes)
-   - Array of chunk offsets pointing into Data.db
-   - Optional per-chunk CRC32 checksums
-   - Metadata CRC32 for integrity verification
+   - Algorithm class name (e.g., `LZ4Compressor`, `SnappyCompressor`)
+   - Option count and option key-value pairs
+   - Chunk length (uncompressed chunk size; default 16 384 bytes / 16 KiB)
+   - Max compressed length (present for SSTable format version ≥ "na" / Cassandra 3.0+)
+   - Total uncompressed data length
+   - Chunk count
+   - Array of chunk offsets pointing into `Data.db`
 
 2. **Data.db**: Compressed data file containing:
    - Concatenated compressed chunks (no length prefixes, no delimiters)
-   - Chunk boundaries defined by offsets in CompressionInfo.db
-   - Each chunk may have algorithm-specific size prefixes (see algorithm sections below)
+   - Chunk boundaries defined by offsets in `CompressionInfo.db`
+   - Each chunk followed by a 4-byte CRC32 checksum (computed over the compressed bytes)
+   - Only LZ4 chunks carry an algorithm-specific 4-byte little-endian size prefix; Snappy, Deflate, and Zstd do not
 
 **Key Design Principle**: CompressionInfo.db acts as an index into Data.db, allowing random access to compressed chunks without scanning the entire file.
 
@@ -28,43 +31,44 @@ Cassandra 5.0 uses a chunked compression approach for Data.db files. Data is spl
 CompressionInfo.db contains metadata about the compressed Data.db file. The format is:
 
 ```
-[Algorithm Name Length: 2 bytes BE]
-[Algorithm Name: variable length UTF-8]
-[Padding: 4 bytes]
-[Chunk Length: 4 bytes BE]
-[Options: 4 bytes BE]
-[Compressed Data Length: 8 bytes BE]
+[Algorithm Name: UTF-8 string via writeUTF() — 2-byte BE length + bytes]
+[Option Count: 4 bytes BE — number of key-value pairs]
+[Option Key[i]: UTF-8 string via writeUTF()] (repeated option_count times)
+[Option Value[i]: UTF-8 string via writeUTF()] (repeated option_count times)
+[Chunk Length: 4 bytes BE — uncompressed chunk size, default 16384]
+[Max Compressed Length: 4 bytes BE — only present for format version >= "na" (Cassandra 3.0+)]
+[Data Length: 8 bytes BE — total uncompressed file size]
 [Chunk Count: 4 bytes BE]
-[Chunk Offsets: 8 bytes BE * count]
-[Chunk CRCs: 4 bytes BE * count] (optional)
-[Metadata CRC: 4 bytes BE]
+[Chunk Offsets: 8 bytes BE * count — byte offsets into Data.db]
 ```
 
-**Implementation Reference**: `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs`
+Per-chunk CRC32 checksums are stored in `Data.db` immediately after each compressed chunk, not in `CompressionInfo.db`.
+
+**Authoritative source**: [`io/compress/CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java) — `open()` lines 76–112, `writeHeader()` lines 375–398
 
 ### Field Descriptions
 
 | Field | Type | Size | Byte Order | Description |
 |-------|------|------|-----------|-------------|
-| Algorithm Name Length | u16 | 2 | Big-Endian | Length of algorithm name in bytes (e.g., 13 for "LZ4Compressor") |
-| Algorithm Name | String | variable | UTF-8 | Full algorithm class name (e.g., "LZ4Compressor", "SnappyCompressor") |
-| Padding | Fixed | 4 | - | Fixed padding (0x00000000) for 8-byte alignment |
-| Chunk Length | u32 | 4 | Big-Endian | Size of uncompressed chunks (typically 65536 bytes / 64KB) |
-| Options | u32 | 4 | Big-Endian | Options/flags field (typically 0x7FFFFFFF) |
-| Compressed Data Length | u64 | 8 | Big-Endian | Total compressed Data.db file size in bytes |
+| Algorithm Name | UTF-8 via `writeUTF()` | 2+N | Big-Endian length prefix | Class simple name, e.g., `"LZ4Compressor"`, `"NoopCompressor"` |
+| Option Count | u32 | 4 | Big-Endian | Number of key-value option pairs (0 for most compressors) |
+| Option Key[i] | UTF-8 via `writeUTF()` | 2+N each | Big-Endian length prefix | Repeated `option_count` times |
+| Option Value[i] | UTF-8 via `writeUTF()` | 2+N each | Big-Endian length prefix | Repeated `option_count` times |
+| Chunk Length | u32 | 4 | Big-Endian | Uncompressed chunk size; default 16 384 bytes (16 KiB) |
+| Max Compressed Length | u32 | 4 | Big-Endian | Present only for SSTable format ≥ "na" (Cassandra 3.0+); `Integer.MAX_VALUE` when `minCompressRatio=0` |
+| Data Length | u64 | 8 | Big-Endian | Total uncompressed file size in bytes |
 | Chunk Count | u32 | 4 | Big-Endian | Number of compressed chunks |
-| Chunk Offsets | u64[] | 8 each | Big-Endian | Byte offset of each chunk in Data.db (count entries) |
-| Chunk CRCs | u32[] | 4 each | Big-Endian | Optional: CRC32 of each compressed chunk (count entries) |
-| Metadata CRC | u32 | 4 | Big-Endian | CRC32 checksum of all preceding bytes |
+| Chunk Offsets | u64[] | 8 each | Big-Endian | Byte offset of each chunk in `Data.db` (`count` entries) |
 
 ### Important Notes
 
-1. **Fixed 4-byte Padding**: The padding after algorithm name is NOT alignment-based, but a fixed 4-byte field (always 0x00000000)
-2. **8-byte Offsets Only**: Chunk offsets are simple 8-byte values, NOT 20-byte structures with lengths
-3. **Optional CRCs**: Per-chunk CRCs may be present or absent; metadata CRC is always present
-4. **Compressed vs Uncompressed**: The data length field stores the total COMPRESSED size (Data.db size), not uncompressed size
+1. **No padding field**: There is no fixed padding after the algorithm name. The bytes following the name are the 4-byte option count (u32 BE).
+2. **Option count is required**: Even when there are no options, the option count (0) is written.
+3. **Max compressed length is version-gated**: Present only for SSTable format version ≥ "na" (Cassandra 3.0+); absent in older formats. Source: `BigFormat.java` line 401.
+4. **Data length is uncompressed size**: The data length field stores the total UNCOMPRESSED size, not the compressed `Data.db` size.
+5. **Per-chunk CRCs are in Data.db**: CRC32 values follow each compressed chunk inline in `Data.db`. `CompressionInfo.db` stores no per-chunk CRCs.
 
-### Example: CompressionInfo.db with LZ4 (No Per-Chunk CRCs)
+### Example: CompressionInfo.db with LZ4
 
 Based on the implementation test case from `compression_info_writer.rs`:
 
@@ -74,10 +78,10 @@ Offset  Hex Bytes                       Decoded Field
 0x00    00 0d                           Algorithm name length: 13
 0x02    4c 5a 34 43 6f 6d 70            "LZ4Compressor"
         72 65 73 73 6f 72
-0x0f    00 00 00 00                     Fixed padding (4 bytes)
-0x13    00 01 00 00                     Chunk length: 65536 (0x10000)
-0x17    7f ff ff ff                     Options: 0x7FFFFFFF
-0x1b    00 00 00 00 00 00 3e 80         Compressed data length: 16000
+0x0f    00 00 00 00                     Option count: 0 (no key-value options)
+0x13    00 01 00 00                     Chunk length: 65536 (0x10000) — non-default; default is 16384 (16 KiB)
+0x17    7f ff ff ff                     Max compressed length: 0x7FFFFFFF (Integer.MAX_VALUE, minCompressRatio=0)
+0x1b    00 00 00 00 00 00 3e 80         Uncompressed data length: 16000
 0x23    00 00 00 02                     Chunk count: 2
 0x27    00 00 00 00 00 00 00 00         Chunk 0 offset: 0
 0x2f    00 00 00 00 00 00 20 00         Chunk 1 offset: 8192 (0x2000)
@@ -86,7 +90,7 @@ Offset  Hex Bytes                       Decoded Field
 
 Total size: 59 bytes (55 bytes content + 4 bytes CRC)
 
-### Example: CompressionInfo.db with Snappy (With Per-Chunk CRCs)
+### Example: CompressionInfo.db with Snappy
 
 Based on the implementation test case:
 
@@ -96,37 +100,38 @@ Offset  Hex Bytes                       Decoded Field
 0x00    00 10                           Algorithm name length: 16
 0x02    53 6e 61 70 70 79 43 6f         "SnappyCompressor"
         6d 70 72 65 73 73 6f 72
-0x12    00 00 00 00                     Fixed padding (4 bytes)
+0x12    00 00 00 00                     Option count: 0 (no key-value options)
 0x16    00 00 40 00                     Chunk length: 16384 (0x4000)
-0x1a    7f ff ff ff                     Options: 0x7FFFFFFF
-0x1e    00 00 00 00 00 00 1f 40         Compressed data length: 8000
+0x1a    7f ff ff ff                     Max compressed length: 0x7FFFFFFF (Integer.MAX_VALUE, minCompressRatio=0)
+0x1e    00 00 00 00 00 00 1f 40         Uncompressed data length: 8000
 0x26    00 00 00 02                     Chunk count: 2
 0x2a    00 00 00 00 00 00 00 00         Chunk 0 offset: 0
 0x32    00 00 00 00 00 00 10 00         Chunk 1 offset: 4096 (0x1000)
-0x3a    11 22 33 44                     Chunk 0 CRC: 0x11223344
-0x3e    55 66 77 88                     Chunk 1 CRC: 0x55667788
-0x42    [4-byte CRC32]                  Metadata CRC32
+0x3a    [4-byte CRC32]                  Metadata CRC32
 ```
 
-Total size: 70 bytes (66 bytes content + 4 bytes CRC)
+Total size: 62 bytes (58 bytes content + 4 bytes CRC)
+
+> **Note**: Per-chunk CRCs are NOT stored in `CompressionInfo.db`. They follow each chunk in `Data.db`.
 
 ## Compressed Chunk Format in Data.db
 
-Each compressed chunk in Data.db contains only the compressed data:
+Each compressed chunk in `Data.db` has algorithm-specific content followed by a 4-byte CRC32:
 
 ```
 [Compressed Data: variable length]
+[CRC32: 4 bytes — computed over compressed bytes]
 ```
 
-The actual compressed data format varies by compression algorithm (see below). The compressed data size is determined by the offset difference in CompressionInfo.db's chunk offset array.
+The compressed data format varies by algorithm. The compressed length is derived from consecutive chunk offsets in `CompressionInfo.db` minus 4 (for the CRC word).
 
 ### Important Notes
 
 1. **No explicit length prefixes in Data.db**: Chunk boundaries are defined by offsets in CompressionInfo.db
-2. **CRC checksums**: Optional per-chunk CRC32 values are stored in CompressionInfo.db, not appended to Data.db chunks
+2. **CRC checksums**: Per-chunk CRC32 values are appended inline in `Data.db` immediately after each compressed chunk — they are NOT stored in `CompressionInfo.db`
 3. **Chunk alignment**: Chunks start at the byte offsets specified in the chunk offset array
 4. **Last chunk**: The last chunk may be smaller than the standard chunk size if the total data length is not evenly divisible
-5. **Metadata CRC**: A CRC32 checksum of the entire CompressionInfo.db metadata is stored at the end of CompressionInfo.db
+5. **No metadata CRC in CompressionInfo.db**: The file ends after the last chunk offset. Cassandra does not write a trailing metadata CRC to `CompressionInfo.db`; integrity comes from per-chunk CRCs in `Data.db`.
 
 ## Compression Algorithm Formats
 
@@ -143,7 +148,7 @@ The actual compressed data format varies by compression algorithm (see below). T
 - Size prefix represents the decompressed length in bytes
 - The size prefix is part of the compressed chunk data (included in chunk offset calculation)
 - Cassandra uses LZ4 block format via jpountz library (not LZ4 frame format)
-- No trailing CRC in Data.db - CRCs stored in CompressionInfo.db if present
+- 4-byte CRC32 immediately follows the compressed chunk bytes in `Data.db`
 
 **Decompression Process:**
 ```java
@@ -185,7 +190,7 @@ decompress_size_prepended(data)
 - Cassandra 5.0 NB format uses **raw Snappy** without a size prefix
 - The uncompressed size is determined by decompression (not from metadata)
 - Decompressed size is validated against chunk_length from CompressionInfo.db
-- No trailing CRC in Data.db - CRCs stored in CompressionInfo.db if present
+- 4-byte CRC32 immediately follows the compressed chunk bytes in `Data.db`
 
 **Legacy Format (pre-5.0):**
 ```
@@ -226,19 +231,19 @@ let decompressed = decoder.decompress_vec(data)?;
 
 **Format in Data.db:**
 ```
-[Uncompressed Size: 4 bytes BE]
-[Compressed Data: variable length]
+[Compressed Data: variable length]  (no length prefix)
+[CRC32: 4 bytes]
 ```
 
 **Key Details:**
-- Size prefix is **big-endian**
+- **No 4-byte size prefix** — `DeflateCompressor.compress()` writes raw Deflate bytes with no length header
 - Uses standard zlib Deflate format (RFC 1951 deflate stream format)
 - Deflate level 6 is used by Cassandra
-- No trailing CRC in Data.db - CRCs stored in CompressionInfo.db if present
+- 4-byte CRC32 immediately follows the compressed chunk bytes in `Data.db`
 
 **Decompression Process:**
 ```java
-// Cassandra source: DeflateCompressor.uncompress()
+// Cassandra source: DeflateCompressor.uncompress() — no prefix; inflates all inputLength bytes
 Inflater inf = inflater.get();
 inf.reset();
 inf.setInput(input, inputOffset, inputLength);
@@ -247,37 +252,26 @@ return inf.inflate(output, outputOffset, maxOutputLength);
 
 **CQLite Implementation:**
 ```rust
-// Extract uncompressed size (4 bytes, big-endian)
-let uncompressed_size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-
-// Validate size to prevent decompression bombs
-validate_decompression_size(uncompressed_size)?;
-
-// Decompress the actual data (skip first 4 bytes)
-let compressed_data = &data[4..];
-let mut decoder = DeflateDecoder::new(compressed_data);
+// No size prefix — decompress entire chunk (bounds from CompressionInfo.db offsets)
+let mut decoder = DeflateDecoder::new(data);
 let mut decompressed = Vec::new();
 decoder.read_to_end(&mut decompressed)?;
-
-// Verify decompressed size matches expected
-if decompressed.len() != uncompressed_size {
-    return Err("Deflate size mismatch");
-}
+validate_decompression_size(decompressed.len())?;
 ```
 
 ### Zstd Compression
 
 **Format in Data.db:**
 ```
-[Uncompressed Size: 4 bytes BE]
-[Compressed Data: variable length]
+[Compressed Data: variable length]  (Zstd frame format; no extra length prefix)
+[CRC32: 4 bytes]
 ```
 
 **Key Details:**
-- Size prefix is **big-endian**
-- Uses Zstd frame format with checksum enabled
+- **No 4-byte size prefix** — `ZstdCompressor.compress()` writes a raw Zstd frame with no extra length header
+- Uses Zstd frame format with internal content checksum enabled (`ENABLE_CHECKSUM_FLAG = true`)
 - Compression level 3 is default
-- No trailing CRC in Data.db - CRCs stored in CompressionInfo.db if present
+- 4-byte CRC32 immediately follows the compressed chunk bytes in `Data.db`
 
 **Decompression Process:**
 ```java
@@ -292,20 +286,9 @@ if (Zstd.isError(dsz)) {
 
 **CQLite Implementation:**
 ```rust
-// Extract uncompressed size (4 bytes, big-endian)
-let uncompressed_size = u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-
-// Validate size to prevent decompression bombs
-validate_decompression_size(uncompressed_size)?;
-
-// Decompress the actual data (skip first 4 bytes)
-let compressed_data = &data[4..];
-let decompressed = decode_all(compressed_data)?;
-
-// Verify decompressed size matches expected
-if decompressed.len() != uncompressed_size {
-    return Err("Zstd size mismatch");
-}
+// No size prefix — decompress entire chunk (bounds from CompressionInfo.db offsets)
+let decompressed = decode_all(data)?;
+validate_decompression_size(decompressed.len())?;
 ```
 
 ## Chunk Offset Calculation
@@ -362,7 +345,7 @@ Cassandra stores the full Java class name in CompressionInfo.db:
 | Snappy | `SnappyCompressor` |
 | Deflate | `DeflateCompressor` |
 | Zstd | `ZstdCompressor` |
-| None | `NoCompressor` or `NullCompressor` |
+| Noop | `NoopCompressor` |
 
 CQLite normalizes these to standard names:
 ```rust
@@ -374,35 +357,38 @@ CQLite normalizes these to standard names:
 
 ## Byte Order Summary
 
-| Algorithm | Size Prefix | Byte Order |
-|-----------|-------------|-----------|
-| LZ4 | Yes | Little-Endian |
-| Snappy | No (NB) / Yes (legacy) | N/A / Big-Endian |
-| Deflate | Yes | Big-Endian |
-| Zstd | Yes | Big-Endian |
+| Algorithm | Size Prefix in Data.db | Byte Order | Notes |
+|-----------|------------------------|-----------|-------|
+| LZ4 | Yes — 4 bytes | Little-Endian | Uncompressed length prepended by compressor |
+| Snappy | No | N/A | Raw Snappy frame |
+| Deflate | No | N/A | Raw Deflate stream |
+| Zstd | No | N/A | Zstd frame (internal content checksum enabled) |
 
 ## CRC Checksum Format
 
-CompressionInfo.db contains two types of CRC checksums:
+### Per-Chunk CRC32 (in Data.db)
 
-1. **Per-Chunk CRCs** (optional):
-   - Stored in CompressionInfo.db as an array of u32 values (4 bytes each, big-endian)
-   - One CRC32 value per chunk
-   - Located after the chunk offset array
-   - Used to validate individual compressed chunks
+Each compressed chunk in `Data.db` is immediately followed by a 4-byte CRC32 checksum:
 
-2. **Metadata CRC** (required):
-   - Stored at the end of CompressionInfo.db (last 4 bytes)
-   - CRC32 of all preceding bytes in the file
-   - Uses big-endian byte order
-   - Validated during CompressionInfo.db parsing
+```
+[Compressed Data: variable length]
+[CRC32: 4 bytes — computed over compressed bytes only]
+```
 
-**Implementation Note**: CQLite validates the metadata CRC during parsing. Per-chunk CRC validation is optional and depends on whether the CompressionInfo.db file includes them.
+- Computed using Java `java.util.zip.CRC32` (IEEE polynomial, same as `crc32()` in zlib)
+- Covers the compressed bytes of the chunk — not the CRC field itself
+- Applied to every chunk without exception
+- Source: `CompressedSequentialWriter.flushData()`, `crcMetadata.appendDirect(toWrite, true)` (line ~192)
+- Next chunk offset = current offset + compressed length + 4 (the CRC word)
+
+`CompressionInfo.db` stores **no** per-chunk CRCs — it stores only chunk byte offsets.
+
+**Implementation Note**: CQLite validates per-chunk CRCs during chunk reads.
 
 ## Practical Example: Reading an LZ4 Chunk
 
 Given a file with:
-- CompressionInfo.db showing: chunk_offsets = [0, 1024], chunk_length=65536
+- CompressionInfo.db showing: chunk_offsets = [0, 1024], chunk_length=65536 (non-default; default is 16384)
 - Data.db with compressed data at offset 0
 
 ```
@@ -428,3 +414,15 @@ Reading process:
 - **Appendix F**: Known limitations (what's not supported yet)
 - **Implementation**: `cqlite-core/src/storage/sstable/writer/compression_info_writer.rs`
 - **Parser**: `cqlite-core/src/storage/sstable/compression_info.rs`
+
+### Cassandra 5.0.8 Source References
+
+- [`CompressionMetadata.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java) — `open()` lines 76–112, `writeHeader()` lines 375–398
+- [`CompressedSequentialWriter.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressedSequentialWriter.java) — per-chunk CRC write path, `flushData()` lines 140–206
+- [`schema/CompressionParams.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java) — `DEFAULT_CHUNK_LENGTH = 1024 * 16` (line 47)
+- [`LZ4Compressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/LZ4Compressor.java) — 4-byte LE uncompressed-length prefix
+- [`SnappyCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/SnappyCompressor.java) — no prefix, raw Snappy
+- [`DeflateCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/DeflateCompressor.java) — no prefix, raw Deflate
+- [`ZstdCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/ZstdCompressor.java) — no prefix, Zstd frame with internal checksum
+- [`NoopCompressor.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/NoopCompressor.java) — passthrough compressor
+- [`BigFormat.java`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java) — `hasMaxCompressedLength` version gate (line 401)
