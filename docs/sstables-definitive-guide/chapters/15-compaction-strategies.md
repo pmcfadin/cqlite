@@ -21,7 +21,7 @@ LCS organizes SSTables into size-constrained levels where each SSTable at L1+ co
 Key parameters include `sstable_size_in_mb` and `fanout_size` (how many SSTables per next level target size).
 
 ### Time-Window Compaction Strategy (TWCS)
-TWCS places SSTables into time windows (e.g., 1 hour or 1 day) and compacts only within each window. This isolates older immutable data from newer hot data and is well-suited to time-series and TTL-heavy workloads. It eases tombstone purging when windows close, while accepting overlap across windows for large time-range scans.
+TWCS places SSTables into time windows (defaults to 1 day; configurable to hours or other units) and compacts only within each window. This isolates older immutable data from newer hot data and is well-suited to time-series and TTL-heavy workloads. It eases tombstone purging when windows close, while accepting overlap across windows for large time-range scans.
 
 Key parameters include `compaction_window_unit` and `compaction_window_size` (and optional split during flush).
 
@@ -57,11 +57,47 @@ Small comparison of strategy behaviors (indicative, not absolute):
 Concurrency and throttling:
 - Compaction is typically multi-threaded and rate-limited; per-strategy concurrency interacts with disk bandwidth and page cache. LCS often benefits from stricter throttling to avoid foreground read jitter; STCS benefits from batching/merging larger tiers.
 
-Implementation touchpoints (Cassandra 5.0.0): `CompactionManager`, `CompactionController`, strategy classes listed below.
+Implementation touchpoints (Cassandra 5.0.8): `CompactionManager`, `CompactionController`, strategy classes listed below.
 
-### Sidebar: UCS (Unified Compaction Strategy)
+### Sidebar: Unified Compaction Strategy (UCS)
 
-UCS generalizes compaction with scaling presets to emulate tiered (Tn) or leveled (Ln) behavior while adding shard-based concurrency and configurable target sizes. For migration, you can set scaling parameters to approximate STCS (`T4`) or LCS (`L10`) while maintaining a single strategy across tables. See also the Cassandra 5.0 code for `UnifiedCompactionStrategy` and the operating guide for typical presets.
+UCS ([`UnifiedCompactionStrategy`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/UnifiedCompactionStrategy.java))
+unifies tiered and leveled compaction. It groups SSTables into exponential density levels, compacts when a
+configurable number of SSTables accumulate on a level, and splits output across token-range shards for concurrent
+compaction without cross-node coordination.
+
+#### Scaling Parameter W
+
+The `scaling_parameters` option is a comma-separated list of integers W, one per level
+(the last value extends to all higher levels). The W value encodes both fanout and threshold
+([`UnifiedCompactionStrategy.java:106–113`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/UnifiedCompactionStrategy.java#L106-L113)):
+
+- **W > 0 → tiered (T-style)**: fanout `f = 2 + W`, threshold `t = f`. Written as `T(f)` — e.g. `T4` for W=2 gives
+  f=4, t=4. Compaction fires once four SSTables accumulate; low write amplification, higher read amplification.
+- **W < 0 → leveled (L-style)**: fanout `f = 2 − W`, threshold `t = 2`. Written as `L(f)` — e.g. `L10` for W=−8
+  gives f=10, t=2. Compact aggressively at every two SSTables; low read amplification, higher write amplification.
+- **W = 0 → N**: `f = t = 2`. Midpoint; equivalent to T2 or L2.
+
+**Default `scaling_parameters`**: `T4`, matching STCS default threshold=4. To emulate LCS with fanout 10, use `L10`.
+
+#### Key Options and Defaults
+
+Loaded via `Controller.fromOptions()`
+([`Controller.java:408–461`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/unified/Controller.java#L408-L461));
+documented in [`UnifiedCompactionStrategy.md`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/UnifiedCompactionStrategy.md):
+
+| Option | Default | Notes |
+|--------|---------|-------|
+| `scaling_parameters` | `T4` | Per-level W list; last value repeats |
+| `target_sstable_size` | 1 GiB | Minimum enforced at 1 MiB (`Controller.java:83`) |
+| `base_shard_count` | 4 | Min shards for lowest density levels; 1 for system tables |
+| `sstable_growth` (λ) | 0.333 | 0=fixed target size; 1=fixed shard count; 0.333=sstable size grows as cube-root of density |
+| `min_sstable_size` | 100 MiB | Below this, shards drop below `base_shard_count` |
+| `max_sstables_to_compact` | no limit | Option value ≤ 0 means `Integer.MAX_VALUE` (`Controller.java:202–203`) |
+| `expired_sstable_check_frequency_seconds` | 600 | Same as TWCS default |
+
+Maximum shard splitting is bounded at `base_shard_count × 2^20`
+(`MAX_SHARD_SHIFT = 20`, `Controller.java:139`).
 
 ### Key Takeaways
 - STCS favors write throughput; expect higher read amplification due to overlap.
@@ -84,12 +120,12 @@ For implementation details, see Appendix C.
 
 ### References
 
-- Cassandra 5.0.0 (code):
-  - `SizeTieredCompactionStrategy` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/compaction/SizeTieredCompactionStrategy.java`
-  - `LeveledCompactionStrategy` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/compaction/LeveledCompactionStrategy.java`
-  - `TimeWindowCompactionStrategy` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/compaction/TimeWindowCompactionStrategy.java`
-  - `UnifiedCompactionStrategy` (sidebar) — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/compaction/UnifiedCompactionStrategy.java`
-  - `CompactionController` (tombstone purging) — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/compaction/CompactionController.java`
+- Cassandra 5.0.8 (code):
+  - `SizeTieredCompactionStrategy` — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/SizeTieredCompactionStrategy.java`
+  - `LeveledCompactionStrategy` — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/LeveledCompactionStrategy.java`
+  - `TimeWindowCompactionStrategy` — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/TimeWindowCompactionStrategy.java`
+  - `UnifiedCompactionStrategy` (sidebar) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/UnifiedCompactionStrategy.java`
+  - `CompactionController` (tombstone purging) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/compaction/CompactionController.java`
   
 For implementation details, see Appendix C.
 

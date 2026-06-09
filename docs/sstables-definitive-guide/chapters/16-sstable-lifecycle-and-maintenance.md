@@ -83,8 +83,8 @@ Repair/streaming move SSTables between nodes and reconcile divergent histories; 
 - Streaming integrity: digests are verified per stream; on failure, SSTables are discarded and retried.
 
 Related Cassandra 5.0.0 code (pinned) for further study:
-- Streaming session — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/streaming/StreamSession.java`
-- Active repair service — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/service/ActiveRepairService.java`
+- Streaming session — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/streaming/StreamSession.java`
+- Active repair service — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/service/ActiveRepairService.java`
 
 ### Key Takeaways
 - `TOC.txt` is authoritative; validate both presence and cross-listing of components.
@@ -94,11 +94,11 @@ Related Cassandra 5.0.0 code (pinned) for further study:
 - Repair/streaming rely on the same invariants; broken invariants propagate.
 
 ### References
-**Cassandra 5.0.0 (pinned):**
-- `SSTableMetadata` (tool) — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/tools/SSTableMetadata.java`
-- `SSTableDump` (tool) — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/tools/SSTableDump.java`
-- `Descriptor` (component paths/TOC context) — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/Descriptor.java`
-- `SSTableWriter` (emits `TOC.txt`) — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/SSTableWriter.java`
+**Cassandra 5.0.8 (pinned):**
+- `SSTableMetadataViewer` (tool) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/tools/SSTableMetadataViewer.java`
+- `SSTableExport` (tool, CLI alias: `sstabledump`) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/tools/SSTableExport.java`
+- `Descriptor` (component paths/TOC context) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/Descriptor.java`
+- `SSTableWriter` (emits `TOC.txt`) — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java`
 
 For implementation details, see Appendix C.
 
