@@ -10,10 +10,12 @@ One-paragraph summary: Introduce per-table local indexes, their storage interact
 
 ## Storage and Lifecycle
 
-Secondary indexes (2i) are local, per-table indexes that map a non-primary-key column value to the base table’s primary key. In Cassandra 5.0, built-in 2i implementations attach to the table via the `org.apache.cassandra.index.Index` API and maintain their own index memtables and SSTables. They flush and compact independently of the base table, but reads ultimately retrieve rows from the base table’s `Data.db`.
+Secondary indexes (2i) are local, per-table indexes that map a non-primary-key column value to the base table's primary key. In Cassandra 5.0, built-in 2i implementations attach to the table via the `org.apache.cassandra.index.Index` API and maintain their own index memtables and SSTables. They flush and compact independently of the base table, but reads ultimately retrieve rows from the base table's `Data.db`.
 
-- Index data model: value → set of row identifiers (partition key plus clustering key as needed).
-- Storage: hidden, per-index SSTables managed by the index implementation. These files follow the table’s lifecycle (flush/compaction) but are separate artifacts.
+The built-in implementation is `CassandraIndex` (internal name `legacy_local_table`), which is considered legacy in Cassandra 5.0; SAI is the recommended replacement for new indexes.
+
+- Index data model: value -> set of row identifiers (partition key plus clustering key as needed).
+- Storage: hidden, per-index SSTables managed by the index implementation. These files follow the table's lifecycle (flush/compaction) but are separate artifacts.
 - Local scope: indexes do not span multiple nodes; coordinator nodes query relevant replicas and merge results.
 - Consistency: index updates are part of the base table mutation path; the base row remains the source of truth during reads.
 
@@ -31,7 +33,7 @@ Tiny example (conceptual):
 2. Query: `SELECT id FROM users WHERE email = 'a@example.com' AND age >= 30;`
 3. Execution:
    - 2i lookup yields candidate keys: `{id1, id2, id3}` for `email='a@example.com'`.
-   - Fetch rows from `Data.db` using the normal read path (Bloom → Index → Summary → Data).
+   - Fetch rows from `Data.db` using the normal read path (Bloom -> Index -> Summary -> Data).
    - Apply `age >= 30` as a post-filter to the fetched rows.
 
 Notes:
@@ -56,22 +58,20 @@ Notes:
 ### Complexity Notes
 
 - Equality lookup in 2i: O(log S + K) per segment (binary search/lookup plus iterating K candidates), where S is index segment size.
-- Fetch/validation from base SSTables follows normal read-path complexity (see Ch. 10–12). Overall cost scales with candidate set size.
+- Fetch/validation from base SSTables follows normal read-path complexity (see Ch. 10-12). Overall cost scales with candidate set size.
 
 ### Key Takeaways
 - 2i are local, per-index SSTables that map values to primary keys; base table remains authoritative.
 - Reads consult the index to produce candidate keys, then fetch and filter base rows.
 - Works well for selective equality (and small IN) predicates; avoid low-cardinality columns.
-- 2i lifecycle (flush/compact) is independent but coordinated with the table’s write path.
+- 2i lifecycle (flush/compact) is independent but coordinated with the table's write path.
 - Prefer SAI for range, LIKE, and vector searches in Cassandra 5.0.
 
 ### References
-- Cassandra 5.0.0
-  - Index API: `org.apache.cassandra.index.Index` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/index/Index.java`
-  - Built-in 2i base: `org.apache.cassandra.index.internal.CassandraIndex` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/index/internal/CassandraIndex.java`
-  - Keys index: `org.apache.cassandra.index.internal.KeysIndex` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/index/internal/KeysIndex.java`
-  - Composite index: `org.apache.cassandra.index.internal.CompositesIndex` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/index/internal/CompositesIndex.java`
-  
+- Cassandra 5.0.8
+  - Index API: `org.apache.cassandra.index.Index` -- `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/index/Index.java`
+  - Built-in 2i base (legacy): `org.apache.cassandra.index.internal.CassandraIndex` -- `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/index/internal/CassandraIndex.java`
+  - Keys searcher: `org.apache.cassandra.index.internal.keys.KeysSearcher` -- `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/index/internal/keys/KeysSearcher.java`
+  - Composites searcher: `org.apache.cassandra.index.internal.composites.CompositesSearcher` -- `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/index/internal/composites/CompositesSearcher.java`
+
 For implementation details, see Appendix C.
-
-
