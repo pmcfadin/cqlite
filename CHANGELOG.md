@@ -19,6 +19,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Bounded the uncompressed/headerless read allocation** (Issue #592) — the
+  uncompressed read path (`read_uncompressed_data_block` in
+  `storage/sstable/reader/block_io.rs`) read the entire current-position-to-EOF
+  range with a single `vec![0u8; remaining]`, zero-initializing and copying the
+  whole data section into one heap `Vec`. With the opt-in memory map (#589) the
+  bytes could be resident twice, breaking the <128MB memory target on large
+  uncompressed SSTables. The read now streams through a reusable scratch buffer
+  capped at `read_buffer_size` (shared helper `read_into_vec_capped`, the same
+  shape the compressed large-block path already used), so the transient working
+  set no longer scales with file size and the redundant zeroing is gone.
+  Behavior is byte-identical and the `estimated_memory_usage` health metric is
+  unaffected (it accounts for the block cache, not transient read buffers).
+  Regression coverage: an instrumented-reader unit test asserts the scratch
+  buffer stays capped for a block 64× its size, plus an end-to-end test over the
+  `uncompressed_table` fixture (`issue_592_bounded_uncompressed_read.rs`).
+
 - **mmap write-while-mapped guard + delete/publication policy** (Issue #591) —
   hardens the opt-in memory-mapped read path (#589, default OFF) against the
   compaction delete path. A memory map aliases a Data.db file's bytes for the

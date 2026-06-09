@@ -103,7 +103,7 @@ async fn read_next_block_impl(
         crate::parser::header::CassandraVersion::V5_0Uncompressed
     ) {
         log::debug!("block_io::read_next_block_impl: Using uncompressed direct read");
-        return read_uncompressed_data_block(file).await;
+        return read_uncompressed_data_block(file, config).await;
     }
 
     if cassandra_version.is_nb_format() {
@@ -126,6 +126,7 @@ async fn read_next_block_impl(
         // Therefore, we always use header_offset=0 for NB format chunk reading.
         return read_nb_format_chunk_data(
             file,
+            config,
             compression_info,
             current_chunk_index,
             file_size,
@@ -228,6 +229,7 @@ async fn read_next_block_impl(
 /// NB format it should always be 0.
 async fn read_nb_format_chunk_data(
     file: &Arc<Mutex<BlockSource>>,
+    config: &SSTableReaderConfig,
     compression_info: &Option<Arc<crate::storage::sstable::compression_info::CompressionInfo>>,
     current_chunk_index: &std::sync::atomic::AtomicUsize,
     file_size: u64,
@@ -241,7 +243,7 @@ async fn read_nb_format_chunk_data(
         log::debug!(
             "read_nb_format_chunk_data: No CompressionInfo.db, falling back to raw data read"
         );
-        return read_uncompressed_data_block(file).await;
+        return read_uncompressed_data_block(file, config).await;
     };
 
     let chunk_idx = current_chunk_index.load(std::sync::atomic::Ordering::Relaxed);
@@ -482,48 +484,71 @@ async fn read_block_direct(file: &Arc<Mutex<BlockSource>>, size: usize) -> Resul
     Ok(block_data)
 }
 
+/// Read exactly `size` bytes from `reader` into a freshly allocated `Vec`, using
+/// a reusable scratch buffer capped at `buffer_size`.
+///
+/// The point of this helper is the *allocation shape* (Issue #592): the only
+/// allocation that scales with `size` is the returned buffer the caller asked
+/// for. The transient read scratch is bounded to `buffer_size` regardless of how
+/// large `size` is, so reading a large block never requires a second
+/// file-sized working buffer (and we avoid the redundant zero-initialization of
+/// a `vec![0u8; size]`). The loop yields periodically so a large read does not
+/// starve other tasks on the runtime.
+async fn read_into_vec_capped<R>(
+    reader: &mut R,
+    size: usize,
+    buffer_size: usize,
+) -> std::io::Result<Vec<u8>>
+where
+    R: AsyncReadExt + Unpin,
+{
+    let mut out = Vec::with_capacity(size);
+    if size == 0 {
+        return Ok(out);
+    }
+    // Cap the scratch buffer to `buffer_size` but never exceed `size` (no point
+    // allocating a buffer larger than the data) and never below 1 byte.
+    let cap = buffer_size.clamp(1, size);
+    let mut scratch = vec![0u8; cap];
+    let mut remaining = size;
+
+    while remaining > 0 {
+        let to_read = remaining.min(cap);
+        reader.read_exact(&mut scratch[..to_read]).await?;
+        out.extend_from_slice(&scratch[..to_read]);
+        remaining -= to_read;
+
+        // Allow other tasks to run during large reads.
+        if remaining > 0 && out.len() % (1024 * 1024) == 0 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    Ok(out)
+}
+
 /// Read large block using streaming I/O to reduce memory pressure
 async fn read_large_block_streaming(
     file: &Arc<Mutex<BlockSource>>,
     size: usize,
     config: &SSTableReaderConfig,
 ) -> Result<Vec<u8>> {
-    let mut block_data = Vec::with_capacity(size);
-    let buffer_size = config.read_buffer_size.min(size);
-    let mut buffer = vec![0u8; buffer_size];
-    let mut remaining = size;
-
+    let buffer_size = config.read_buffer_size.min(size.max(1));
     log::info!(
         "Reading large block ({} bytes) using streaming with {} byte buffer",
         size,
         buffer_size
     );
 
-    {
-        let mut file_guard = file.lock().await;
-        while remaining > 0 {
-            let to_read = remaining.min(buffer_size);
-            file_guard
-                .read_exact(&mut buffer[..to_read])
-                .await
-                .map_err(|e| {
-                    Error::Io(std::io::Error::other(format!(
-                        "Failed to read block chunk ({}): {}",
-                        to_read, e
-                    )))
-                })?;
-
-            block_data.extend_from_slice(&buffer[..to_read]);
-            remaining -= to_read;
-
-            // Allow other tasks to run during large reads
-            if remaining > 0 && block_data.len() % (1024 * 1024) == 0 {
-                tokio::task::yield_now().await;
-            }
-        }
-    }
-
-    Ok(block_data)
+    let mut file_guard = file.lock().await;
+    read_into_vec_capped(&mut *file_guard, size, config.read_buffer_size)
+        .await
+        .map_err(|e| {
+            Error::Io(std::io::Error::other(format!(
+                "Failed to read block chunk: {}",
+                e
+            )))
+        })
 }
 
 /// Read uncompressed data block for V5_0Uncompressed format
@@ -531,7 +556,15 @@ async fn read_large_block_streaming(
 /// This format has no compression and no block headers - the entire data section
 /// after the 4096-byte file header is raw partition data. We read remaining data
 /// from current position to EOF, returning it as a single block.
-async fn read_uncompressed_data_block(file: &Arc<Mutex<BlockSource>>) -> Result<Option<Vec<u8>>> {
+///
+/// The returned block is inherently sized to the data section (the parser needs
+/// it contiguous), but the *read itself* streams through a capped scratch buffer
+/// (`config.read_buffer_size`) rather than allocating and zeroing a second
+/// file-sized buffer up front. See [`read_into_vec_capped`] and Issue #592.
+async fn read_uncompressed_data_block(
+    file: &Arc<Mutex<BlockSource>>,
+    config: &SSTableReaderConfig,
+) -> Result<Option<Vec<u8>>> {
     let (current_pos, file_size) = {
         let mut file_guard = file.lock().await;
         let current = file_guard.stream_position().await.map_err(|e| {
@@ -589,17 +622,19 @@ async fn read_uncompressed_data_block(file: &Arc<Mutex<BlockSource>>) -> Result<
         current_pos
     );
 
-    // Read remaining data
-    let mut data = vec![0u8; remaining];
-    {
+    // Read remaining data through a capped scratch buffer so the transient
+    // working set does not scale with the file size (Issue #592).
+    let data = {
         let mut file_guard = file.lock().await;
-        file_guard.read_exact(&mut data).await.map_err(|e| {
-            Error::Io(std::io::Error::other(format!(
-                "Failed to read uncompressed data block ({} bytes): {}",
-                remaining, e
-            )))
-        })?;
-    }
+        read_into_vec_capped(&mut *file_guard, remaining, config.read_buffer_size)
+            .await
+            .map_err(|e| {
+                Error::Io(std::io::Error::other(format!(
+                    "Failed to read uncompressed data block ({} bytes): {}",
+                    remaining, e
+                )))
+            })?
+    };
 
     log::debug!(
         "read_uncompressed_data_block: Successfully read {} bytes",
@@ -831,7 +866,8 @@ mod tests {
         let file = tokio::fs::File::open(&temp_file).await.unwrap();
         let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
-        let result = read_uncompressed_data_block(&file).await;
+        let config = SSTableReaderConfig::default();
+        let result = read_uncompressed_data_block(&file, &config).await;
         assert!(result.is_ok());
 
         let data = result.unwrap();
@@ -854,7 +890,8 @@ mod tests {
         let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         // Should return None for EOF
-        let result = read_uncompressed_data_block(&file).await;
+        let config = SSTableReaderConfig::default();
+        let result = read_uncompressed_data_block(&file, &config).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
@@ -963,6 +1000,100 @@ mod tests {
         assert_eq!(data, test_data);
 
         // Cleanup
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    /// Issue #592: the transient read scratch buffer must stay capped at
+    /// `buffer_size` no matter how large the block is, so a position-to-EOF read
+    /// of a huge uncompressed SSTable never allocates a second file-sized working
+    /// buffer (which would blow the <128MB memory target). A regression to
+    /// `vec![0u8; size]` + a single `read_exact` would hand the reader a
+    /// `size`-sized `ReadBuf` and trip this assertion.
+    #[tokio::test]
+    async fn read_into_vec_capped_bounds_scratch_buffer() {
+        use std::pin::Pin;
+        use std::sync::atomic::Ordering;
+        use std::task::{Context, Poll};
+        use tokio::io::ReadBuf;
+
+        /// A reader that serves `data` and records the largest single read
+        /// request (the capacity of the `ReadBuf` handed to each `poll_read`).
+        struct MaxReadRecorder {
+            data: std::io::Cursor<Vec<u8>>,
+            max_request: Arc<AtomicUsize>,
+        }
+
+        impl tokio::io::AsyncRead for MaxReadRecorder {
+            fn poll_read(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<std::io::Result<()>> {
+                self.max_request
+                    .fetch_max(buf.remaining(), Ordering::Relaxed);
+                let pos = self.data.position() as usize;
+                let inner = self.data.get_ref();
+                let avail = &inner[pos.min(inner.len())..];
+                let n = avail.len().min(buf.remaining());
+                buf.put_slice(&avail[..n]);
+                self.data.set_position((pos + n) as u64);
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let size = 4 * 1024 * 1024; // 4 MiB block
+        let buffer_size = 64 * 1024; // 64 KiB cap (block is 64x larger)
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        let max_request = Arc::new(AtomicUsize::new(0));
+        let mut reader = MaxReadRecorder {
+            data: std::io::Cursor::new(data.clone()),
+            max_request: Arc::clone(&max_request),
+        };
+
+        let out = read_into_vec_capped(&mut reader, size, buffer_size)
+            .await
+            .expect("capped read should succeed");
+
+        // Byte-identical output: only the allocation shape changed.
+        assert_eq!(out.len(), size);
+        assert_eq!(out, data);
+
+        let observed = max_request.load(Ordering::Relaxed);
+        assert!(
+            observed <= buffer_size,
+            "scratch read request {} exceeded cap {} — allocation is scaling with block size",
+            observed,
+            buffer_size
+        );
+    }
+
+    /// Issue #592: end-to-end, `read_uncompressed_data_block` must stream a block
+    /// far larger than `read_buffer_size` through the capped path and return
+    /// byte-identical data.
+    #[tokio::test]
+    async fn uncompressed_data_block_streams_large_block_byte_identical() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("issue_592_uncompressed_large.bin");
+
+        let size = 256 * 1024; // 256 KiB, well above the 8 KiB buffer below
+        let test_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
+        tokio::fs::write(&temp_file, &test_data).await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
+
+        let config = SSTableReaderConfig {
+            read_buffer_size: 8 * 1024, // small buffer forces ~32 streamed chunks
+            ..Default::default()
+        };
+
+        let data = read_uncompressed_data_block(&file, &config)
+            .await
+            .expect("read should succeed")
+            .expect("non-empty block");
+        assert_eq!(data.len(), size);
+        assert_eq!(data, test_data);
+
         tokio::fs::remove_file(&temp_file).await.ok();
     }
 
