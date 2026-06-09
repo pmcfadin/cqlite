@@ -51,9 +51,10 @@ From `test_basic/simple_table`:
 - Range scans mix summary jumps with sequential index advances.
 
 ### References
-- Cassandra 5.0.0:
-  - `IndexSummary`: https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/IndexSummary.java
-  - Read commands: `org.apache.cassandra.db.SinglePartitionReadCommand`
+- Cassandra 5.0.8 (pinned):
+  - `IndexSummary` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IndexSummary.java
+  - `SinglePartitionReadCommand` (read decision tree L701–L807) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SinglePartitionReadCommand.java#L701-L807
+  - `BigTableReader` (per-SSTable read order L220–L278) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L220-L278
   
 For implementation details, see Appendix C.
 

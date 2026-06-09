@@ -58,6 +58,10 @@ nb-1-big-Summary.db
 nb-1-big-TOC.txt
 ```
 
+> **Note**: Cassandra 5.0 nodes write `oa-…-big-*` for new SSTables (version `oa` is current
+> for the BIG format in 5.0; `BigFormat.java:343`). The `nb-…` prefix above is valid for
+> SSTables written by pre-5.0 nodes or during a rolling upgrade.
+
 The `TOC.txt` inside the same directory confirms the components present:
 
 ```1:9:/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/test_basic/simple_table-6de93b70934a11f08d448925b7a9e804/nb-1-big-TOC.txt
@@ -76,15 +80,19 @@ Summary.db
 When BTI is enabled, a generation includes BTI-specific components alongside common ones. During upgrades, directories may contain both BIG and BTI generations. Real filenames (trimmed):
 
 ```text
-na-3-bti-Data.db
-na-3-bti-Partitions.db
-na-3-bti-Rows.db
-na-3-bti-Statistics.db
-na-3-bti-TOC.txt
-na-3-bti-Digest.crc32
+da-3-bti-Data.db
+da-3-bti-Partitions.db
+da-3-bti-Rows.db
+da-3-bti-Statistics.db
+da-3-bti-TOC.txt
+da-3-bti-Digest.crc32
 ```
 
 See the BTI package for details: `org.apache.cassandra.io.sstable.format.bti`.
+
+> **Correction**: BTI only ever uses version `da` (`BtiFormat.java:289`:
+> `current_version = "da"`). Version `na` is a BIG-format version letter and is incompatible
+> with BTI filenames.
 
 ## TOC Invariants and Integrity Checks
 
@@ -107,7 +115,7 @@ While component order in `TOC.txt` does not affect functionality, Cassandra writ
 7. **Index.db** - Partition index
 8. **Summary.db** - Sampled index for acceleration
 
-This ordering matches the implementation in CQLite's `TocWriter` and reflects Cassandra's write patterns.
+This ordering matches the implementation in CQLite's `TocWriter`. Cassandra's source does not enforce a canonical TOC line ordering; the order above is CQLite's own convention.
 
 ### TOC.txt Self-Inclusion
 
@@ -134,9 +142,13 @@ Implementation note: Writers use `fsync()` on each component before writing `TOC
 
 SSTable components have internal dependencies that dictate write ordering beyond the final TOC barrier:
 
-1. **Statistics.db FIRST**: Contains timestamp/tombstone metadata and delta encoding baselines. Must be written before Data.db to establish encoding parameters.
+1. **Data.db first via flush**: Partition rows are streamed to disk first. Statistics accumulate during the write.
 
-2. **Data.db + Index.db**: Written in parallel or sequentially. Index.db entries reference Data.db byte offsets, so Data.db chunks must be flushed before corresponding Index entries.
+2. **Data.db + Index.db**: Written together during the flush pass. Index.db entries reference Data.db byte offsets, so Data.db chunks must be flushed before corresponding Index entries.
+
+   > **Note**: `Statistics.db` is written in `doPrepare()` *after* Data.db is complete
+   > ([SSTableWriter.java:384–392](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java#L384-L394)),
+   > using finalized metadata. It is serialized just before `TOC.txt`, not before Data.db.
 
 3. **Summary.db**: Samples Index.db entries, so Index.db must be complete before Summary generation.
 
@@ -153,7 +165,7 @@ Violating these dependencies results in corrupted SSTables with invalid offsets,
 ### Sidebar: Version Differences (3.x/4.x)
 
 - File family remains multi-component; feature flags and index internals differ
-- `Descriptor` format tags (`big`, `mc/mm`, `bti`) encode capabilities; 5.0 introduces BTI
+- `Descriptor` format **names** are `big` and `bti` only (`BigFormat.java:75`, `BtiFormat.java:64`). `mc`, `mm`, `nb`, and `oa` are version letters within `big`, not format names. 5.0 pairs `big` (version `oa`) with BTI (version `da`).
 - Statistics fields expanded over time; tooling output formatting changed subtly
 
 ### Key Takeaways
@@ -164,10 +176,13 @@ Violating these dependencies results in corrupted SSTables with invalid offsets,
 
 ### References
 
-- Cassandra 5.0.0 (pinned):
-  - `Descriptor` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/Descriptor.java`
-  - `StatsMetadata` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java`
-  - `IndexSummary` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/IndexSummary.java`
+- Cassandra 5.0.8 (pinned):
+  - `Descriptor` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/Descriptor.java
+  - `StatsMetadata` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java
+  - `IndexSummary` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IndexSummary.java
+  - `SSTableWriter.doPrepare()` (Statistics.db write timing) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java#L384-L394
+  - `BigFormat` (current_version = "oa") — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigFormat.java#L343
+  - `BtiFormat` (current_version = "da") — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormat.java#L289-L290
 Reference (diagram source):
 ```1:10:/Users/patrick/local_projects/cqlite/docs/sstables-definitive-guide/diagrams/sstable-components.mmd
 %% SSTable component relationship diagram (stub)

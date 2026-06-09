@@ -15,13 +15,15 @@ At a high level, Cassandra batches updates in a memtable and appends them to a W
 ## Role in Cassandra Read/Write Path
 
 - Write path (implementation view):
-  - Client mutation → append to WAL → update memtable (TrieMemtable: byte-ordered prefix trie with shared prefixes)
+  - Client mutation → append to WAL → update memtable (default: `SkipListMemtable`; `TrieMemtable`
+    is an opt-in alternative — byte-ordered prefix trie with shared prefixes and CPU-core sharding)
   - Flush triggers `SSTableWriter` to build components:
     - Serialize rows into `Data.db` (optionally compressed in fixed-size chunks)
     - Emit partition digests and offsets to `Index.db`; build `Summary.db` samples
     - Construct `Filter.db` (Bloom) and accumulate `Statistics.db`
     - Write `CompressionInfo.db`, `Digest.crc32`, and `TOC.txt`
 - Read path (point read, implementation view):
+  - Check min/max key bounds of the SSTable; outside range → skip entirely (no Bloom check needed)
   - Compute partition key digest and check Bloom (`Filter.db`); negative → stop
   - Use `Summary.db` to narrow a region of `Index.db`; seek to exact index entry
   - Translate to `Data.db` position; read aligned to compression chunk boundaries and decompress just the needed bytes
@@ -59,16 +61,18 @@ Summary.db
 
 ### Key Takeaways
 - SSTables are immutable, sorted disk artifacts produced by memtable flushes
-- Reads follow Bloom → Index → Summary → Data; writes never mutate existing SSTables
+- Reads follow Bloom → Summary → Index → Data (min/max key bounds checked before Bloom for range exclusion); writes never mutate existing SSTables
 - The component set is consistent across versions; 5.0 advances internal layout with BTI
 - `TOC.txt` is the single source of truth for which component files exist
 
 ### References
 
-- Cassandra 5.0.0 (pinned):
-  - `SSTableReader` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/SSTableReader.java`
-  - `SSTableWriter` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/SSTableWriter.java`
-  - `Descriptor` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/Descriptor.java`
+- Cassandra 5.0.8 (pinned):
+  - `SSTableReader` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/SSTableReader.java
+  - `SSTableWriter` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/SSTableWriter.java
+  - `Descriptor` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/Descriptor.java
+  - `MemtableParams` (default factory L99) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/MemtableParams.java#L99-L100
+  - `BigTableReader` (min/max bounds + Bloom order L220–L278) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableReader.java#L220-L278
 - See also: Chapter 2 (components), Chapter 10 (read flow). For an implementation walkthrough, see Appendix C.
 
 

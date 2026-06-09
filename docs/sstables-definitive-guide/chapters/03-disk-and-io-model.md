@@ -42,9 +42,32 @@ Two common strategies exist for SSTable IO:
 
 In practice, chunked compression dominates the read cost model: aligning reads to chunk boundaries reduces amplification for random lookups; sequential scans amortize decompression overhead. Cassandra’s `CompressionMetadata` and related classes define the chunk map used by the readers.
 
+### Cassandra 5.0 Default: `mmap_index_only`
+
+Cassandra 5.0 changed the default `disk_access_mode` from `auto` to `mmap_index_only`
+(CASSANDRA-19021; `NEWS.txt:288`, `CHANGES.txt:349`). Under `mmap_index_only`:
+
+- **Index files** (`Index.db`, `Summary.db`, BTI trie files) are memory-mapped via
+  `ioOptions.indexDiskAccessMode` (mapped to `Config.DiskAccessMode.mmap`).
+- **Data.db** uses buffered I/O via `ioOptions.defaultDiskAccessMode` — not mmap.
+
+This hybrid retains mmap’s lookup speed for index navigation while keeping `Data.db` reads
+buffered, reducing address-space pressure and JVM GC interaction. Source: `IOOptions.java` and
+`SortedTableReaderLoadingBuilder.java:65`. To revert to pre-5.0 behavior, set
+`disk_access_mode: auto` in `cassandra.yaml`.
+
+### ChunkCache and `file_cache_size`
+
+Cassandra optionally wraps buffered readers in a `ChunkCache` (configured via `file_cache_size`
+in `cassandra.yaml`). The cache stores decompressed chunks so repeated random reads into the
+same compressed region avoid re-decompression. Integration point: `FileHandle.java:444–448`
+(`maybeCached()` wraps `SimpleChunkReader` with `CachingRebufferer`). The `BufferPool` backing
+individual read allocations has a hard maximum of **64 KiB**
+(`DiskOptimizationStrategy.java:32`: `MAX_BUFFER_SIZE = 1 << 16`).
+
 ## Practical guidance on chunk sizes
 
-- Server default for `chunk_length` in 5.0: see `CompressionParams` (defaults vary by compressor and release; many deployments use 64 KiB with LZ4 by default)
+- Server default for `chunk_length_in_kb` in 5.0: **16 KiB** with LZ4 compressor (`CompressionParams.java:47`: `DEFAULT_CHUNK_LENGTH = 1024 * 16`). 64 KiB is a common tuning choice, not the default.
 - 32–64 KiB can reduce metadata overhead and improve scan throughput at the cost of higher random-read amplification
 - ≤16 KiB may help highly random access patterns when storage latency is high, but increases metadata and CPU overhead
 
@@ -70,10 +93,12 @@ False positive rate (FPR) refresher:
 - Checksums and digests provide integrity at chunk and file levels
 
 ### References
-- Cassandra 5.0.0 (pinned):
-  - `CompressionMetadata` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java`
-  - `CompressionParams` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/compress/CompressionParams.java`
-  - `BloomFilter` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/utils/bloom/BloomFilter.java`
+- Cassandra 5.0.8 (pinned):
+  - `CompressionMetadata` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/compress/CompressionMetadata.java
+  - `CompressionParams` (DEFAULT_CHUNK_LENGTH=16384, L47) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/CompressionParams.java#L47
+  - `BloomFilter` — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/utils/bloom/BloomFilter.java
+  - `IOOptions` (mmap_index_only wiring) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IOOptions.java
+  - `DiskOptimizationStrategy` (MAX_BUFFER_SIZE L32) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DiskOptimizationStrategy.java#L32
   
 For implementation walkthroughs, see Appendix C.
 

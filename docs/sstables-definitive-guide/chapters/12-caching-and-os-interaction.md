@@ -17,7 +17,11 @@ For a concrete cache/IO implementation walkthrough, see Appendix C.
 
 ## Practical Defaults
 
-- Use mmap for large sequential scans; buffered async for mixed/random workloads
+- Cassandra 5.0 defaults to `mmap_index_only`: index files are mmap'd; `Data.db` uses buffered
+  I/O. This is the recommended baseline — see Ch. 3 for `IOOptions.java` wiring details.
+- For workloads saturating `Data.db` sequentially, `disk_access_mode: mmap` re-enables full mmap;
+  be aware of JVM address-space pressure on large datasets.
+- Buffered async I/O suits mixed/random workloads and bounded-memory `Data.db` reads.
 - Keep Bloom enabled; summary sampling reduces seeks
 - Tune prefetch window to match chunk sizes (see Ch. 9)
 
@@ -31,7 +35,10 @@ For a concrete cache/IO implementation walkthrough, see Appendix C.
 - Fall back to buffered IO when decompression or random access breaks large request alignment.
 
 ### Buffer Pool Sizing
-- Start with pool size ≈ (concurrency × average request size × 2). Bound by memory budget and adjust to keep allocator overhead <5% CPU.
+- The `BufferPool` backing `RandomAccessReader` allocations has a hard ceiling of **64 KiB** per
+  buffer (`DiskOptimizationStrategy.java:32`: `MAX_BUFFER_SIZE = 1 << 16`).
+- Start with pool size ≈ (concurrency × average request size × 2). Bound by memory budget and
+  adjust to keep allocator overhead <5% CPU.
 - Align buffers to chunk size boundaries to minimize partial-chunk decompression and copies.
 
 ### Key Takeaways
@@ -40,7 +47,9 @@ For a concrete cache/IO implementation walkthrough, see Appendix C.
 - Prefetch and block caches mitigate random-read penalties
 
 ### References
-- Cassandra 5.0.0:
+- Cassandra 5.0.8 (pinned):
+  - `IOOptions` (mmap_index_only wiring) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/IOOptions.java
+  - `DiskOptimizationStrategy` (MAX_BUFFER_SIZE L32) — https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/util/DiskOptimizationStrategy.java#L32
   - Reader abstractions and IO options in `org.apache.cassandra.io.*`
   
 For implementation details, see Appendix C.
