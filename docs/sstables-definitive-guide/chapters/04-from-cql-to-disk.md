@@ -17,9 +17,25 @@ A single CQL mutation is normalized into a partition key, zero or more clusterin
 
 On write, Cassandra appends to a commit log segment and updates an in-memory memtable for the affected table. The memtable maintains partitions in sorted order, ready for efficient flush to disk. When the memtable reaches its size threshold or a flush trigger fires, Cassandra converts the in-memory structure into immutable SSTable components and discards the memtable.
 
-### TrieMemtable: Cassandra 5.0's Default
+### TrieMemtable: Cassandra 5.0's Opt-In Trie-Based Memtable
 
-Cassandra 5.0 introduces `TrieMemtable` as the default memtable implementation, replacing the older `SkipListMemtable`. This isn't just a performance optimization—it's an architectural alignment with the BTI (B-Tree/Trie Indexed) SSTable format.
+Cassandra 5.0 ships `TrieMemtable` as an available but non-default implementation.
+`SkipListMemtable` remains the compiled default
+(`MemtableParams.DEFAULT_MEMTABLE_FACTORY = SkipListMemtableFactory.INSTANCE`,
+[`schema/MemtableParams.java:99`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/schema/MemtableParams.java#L99)).
+To activate TrieMemtable cluster-wide, add to `cassandra.yaml`:
+
+```yaml
+memtable:
+  configurations:
+    default:
+      class_name: TrieMemtable
+```
+
+When TrieMemtable is configured, the architectural alignment with the BTI on-disk trie format
+becomes an efficiency advantage — but BTI SSTables can also be produced from SkipList-based
+flushes, and TrieMemtable can flush to BIG-format SSTables. The flush format is determined by
+`sstable_format`, not the memtable implementation.
 
 **Key characteristics of TrieMemtable:**
 
@@ -138,7 +154,7 @@ Note that BTI replaces `Index.db` + `Summary.db` with `Partitions.db` + `Rows.db
 **3.x/4.x vs 5.0:**
 - 3.x/4.x use the classic BIG format exclusively (`Index.db` + `Summary.db`)
 - 5.0 supports both BIG and BTI formats; BTI is selected via `sstable_format` in `cassandra.yaml`
-- Memtables in 5.0 default to trie-based storage (`TrieMemtable`), which aligns naturally with BTI's trie-based indexes
+- Memtables in 5.0 default to `SkipListMemtable`; `TrieMemtable` is opt-in via `cassandra.yaml` and aligns naturally with BTI's trie-based indexes
 
 **Mixed format deployments:**
 - During upgrades or format transitions, a directory may contain both BIG and BTI SSTables
@@ -156,18 +172,18 @@ See detailed format differences in Chapters 5, 6, and 17 where component structu
 - Writers operate in a stable order: write data, derive indexes, then metadata.
 
 ### References
-- Cassandra 5.0.0:
-  - `SSTableWriter`: [org.apache.cassandra.io.sstable.SSTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/SSTableWriter.java)
+- Cassandra 5.0.8:
+  - `SSTableWriter`: [org.apache.cassandra.io.sstable.format.SSTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/SSTableWriter.java)
   - **Classic (BIG) format:**
-    - `BigTableWriter`: [org.apache.cassandra.io.sstable.format.big.BigTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java)
+    - `BigTableWriter`: [org.apache.cassandra.io.sstable.format.big.BigTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/big/BigTableWriter.java)
   - **BTI format:**
-    - `BtiTableWriter`: [org.apache.cassandra.io.sstable.format.bti.BtiTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/BtiTableWriter.java)
-    - `PartitionIndexBuilder`: [org.apache.cassandra.io.sstable.format.bti.PartitionIndexBuilder](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/PartitionIndexBuilder.java)
-    - `RowIndexWriter`: [org.apache.cassandra.io.sstable.format.bti.RowIndexWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/RowIndexWriter.java)
-    - `BtiFormatPartitionWriter`: [org.apache.cassandra.io.sstable.format.bti.BtiFormatPartitionWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormatPartitionWriter.java)
-    - BTI package: [org.apache.cassandra.io.sstable.format.bti](https://github.com/apache/cassandra/tree/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/format/bti)
+    - `BtiTableWriter`: [org.apache.cassandra.io.sstable.format.bti.BtiTableWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiTableWriter.java)
+    - `PartitionIndexBuilder`: [org.apache.cassandra.io.sstable.format.bti.PartitionIndexBuilder](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/PartitionIndexBuilder.java)
+    - `RowIndexWriter`: [org.apache.cassandra.io.sstable.format.bti.RowIndexWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/RowIndexWriter.java)
+    - `BtiFormatPartitionWriter`: [org.apache.cassandra.io.sstable.format.bti.BtiFormatPartitionWriter](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti/BtiFormatPartitionWriter.java)
+    - BTI package: [org.apache.cassandra.io.sstable.format.bti](https://github.com/apache/cassandra/tree/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/format/bti)
   - **Memtables:**
-    - `TrieMemtable`: [org.apache.cassandra.db.memtable.TrieMemtable](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/memtable/TrieMemtable.java)
-    - Memtable package: [org.apache.cassandra.db.memtable](https://github.com/apache/cassandra/tree/cassandra-5.0.0/src/java/org/apache/cassandra/db/memtable)
+    - `TrieMemtable`: [org.apache.cassandra.db.memtable.TrieMemtable](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/memtable/TrieMemtable.java)
+    - Memtable package: [org.apache.cassandra.db.memtable](https://github.com/apache/cassandra/tree/cassandra-5.0.8/src/java/org/apache/cassandra/db/memtable)
 
 For implementation details, see Appendix C.

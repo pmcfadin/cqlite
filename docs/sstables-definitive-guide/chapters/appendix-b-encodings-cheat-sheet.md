@@ -22,7 +22,7 @@ ZigZag (signed) quick reference:
 - Maps signed to unsigned: 0→0, -1→1, 1→2, -2→3, 2→4, ...
 - Used for compactly encoding small negative numbers; lengths/counters remain non-negative.
 
-Upstream anchors (Cassandra 5.0.0):
+Upstream anchors (Cassandra 5.0.8):
 - `org.apache.cassandra.io.util.DataInputPlus` and friends (reading primitives)
 - `org.apache.cassandra.db.SerializationHeader` (presence/length handling)
 
@@ -49,15 +49,34 @@ When writing SSTable data, timestamps, TTL, and deletion times often use ZigZag 
 | 63 | 126 | `0x7E` |
 | -64 | 127 | `0x7F` |
 | 64 | 128 | `0x80 0x80` |
-| 1000 | 2000 | `0x8F 0xD0` |
-| -1000 | 1999 | `0x8F 0xCF` |
+| 1000 | 2000 | `0x87 0xD0` |
+| -1000 | 1999 | `0x87 0xCF` |
 
 **Common use cases**:
-- Timestamp deltas (stored as `timestamp_micros - min_timestamp`)
-- TTL deltas (stored as `ttl_seconds - min_ttl`)
-- Row-level timestamps in V5CompressedLegacy format
+- Legacy wire-protocol (pre-5.0 messaging serialization) for signed integer fields
+
+> **SSTable Data.db does NOT use ZigZag for row-level temporal fields.**
+> Timestamp deltas, TTL deltas, and local deletion time deltas all call `writeUnsignedVInt` or
+> `writeUnsignedVInt32` (see `SerializationHeader.java:167,172,177`). Because the baselines
+> (`min_timestamp`, `min_ttl`, `min_local_deletion_time`) are the minimums across the SSTable,
+> all deltas are guaranteed non-negative, making unsigned encoding both correct and efficient.
 
 **Implementation reference**: `cqlite-core/src/storage/serialization/vint.rs::zigzag_encode()`
+
+### SSTable Row Fields Always Use Unsigned VInt, Not ZigZag
+
+All temporal delta fields written by `SerializationHeader` call the unsigned variant:
+
+| Field | Method | Source |
+|-------|--------|--------|
+| timestamp delta | `writeUnsignedVInt(ts - min_ts)` | `SerializationHeader.java:167` |
+| TTL delta | `writeUnsignedVInt32(ttl - min_ttl)` | `SerializationHeader.java:177` |
+| local_deletion_time delta | `writeUnsignedVInt32(ldt - min_ldt)` | `SerializationHeader.java:172` |
+
+ZigZag encoding (`writeVInt`) appears only in the on-wire messaging serialization path
+(pre-5.0 compatibility) and is absent from SSTable Data.db serialization. Because the
+baselines are chosen to be ≤ the smallest actual value in the SSTable, all deltas are
+non-negative, making unsigned encoding correct and efficient.
 
 ## Delta Encoding Pattern
 
@@ -77,14 +96,14 @@ SSTable components use delta encoding to reduce storage size by storing offsets 
 *Timestamp encoding*:
 - Statistics: `min_timestamp = 1000000`
 - Actual timestamp: `1005000` (microseconds)
-- Stored delta: `5000` (encoded as ZigZag VInt)
-- Bytes: `0x9C 0x78` (zigzag(5000) = 10000, VInt encoded)
+- Stored delta: `5000` (encoded as **unsigned** VInt — `SerializationHeader.writeUnsignedVInt`)
+- Bytes: `0x93 0x88` (unsigned VInt(5000): `5000 = 0x1388`, 2-byte form `0x93 0x88`)
 
 *TTL encoding*:
 - Statistics: `min_ttl = 3600` (1 hour)
 - Actual TTL: `7200` (2 hours)
-- Stored delta: `3600` (encoded as ZigZag VInt)
-- Bytes: `0x9C 0x70` (zigzag(3600) = 7200, VInt encoded)
+- Stored delta: `3600` (encoded as **unsigned** VInt32 — `SerializationHeader.writeUnsignedVInt32`)
+- Bytes: `0x9C 0x20` (unsigned VInt(7200): `7200 = 0x1C20`, 2-byte form `0x9C 0x20`)
 
 *Local deletion time encoding*:
 - Statistics: `min_local_deletion_time = 1700000000` (Jan 2023)
@@ -106,9 +125,11 @@ Row flags appear at the start of each row and control row-level metadata.
 
 | Bit | Name | Value | Description |
 |-----|------|-------|-------------|
+| 0 | `END_OF_PARTITION` | `0x01` | End of partition marker (no row data follows) |
+| 1 | `IS_MARKER` | `0x02` | Unfiltered is a RangeTombstoneMarker, not a Row |
 | 2 | `HAS_TIMESTAMP` | `0x04` | Row-level timestamp present (delta encoded) |
 | 3 | `HAS_TTL` | `0x08` | Row-level TTL present (delta encoded) |
-| 4 | `HAS_DELETION` | `0x10` | Row deletion present (local_deletion_time + timestamp) |
+| 4 | `HAS_DELETION` | `0x10` | Row deletion present (markedForDeleteAt unsigned VInt first, then local_deletion_time unsigned VInt32) |
 | 5 | `HAS_ALL_COLUMNS` | `0x20` | All columns present (no bitmap needed) |
 | 6 | `HAS_COMPLEX_DELETION` | `0x40` | Row contains non-frozen collection column |
 | 7 | `HAS_EXTENDED_FLAGS` | `0x80` | Extended flags byte follows |
@@ -328,6 +349,6 @@ DecoratedKey {
 - **Token ordering**: Partitions must be written in ascending token order (Murmur3 hash of partition key bytes).
 
 ## References
-- Cassandra 5.0: `SerializationHeader` — `https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/SerializationHeader.java`
-- Cassandra 5.0: `rows` — `https://github.com/apache/cassandra/tree/cassandra-5.0.0/src/java/org/apache/cassandra/db/rows`
+- Cassandra 5.0.8: `SerializationHeader` — `https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java`
+- Cassandra 5.0.8: `rows` — `https://github.com/apache/cassandra/tree/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows`
 
