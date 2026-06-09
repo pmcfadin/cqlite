@@ -16,6 +16,11 @@
 
 **See:** ISSUE_149_LEARNINGS.md - Issue #153 section for authoritative NB format documentation.
 
+**Ch.20 update (audit B3, 2026-06-09):** The “Header CRC32 Prefixes” section in
+`chapters/20-checksums-and-integrity.md` has been removed and replaced with a correction
+notice consistent with this retraction. NB format `Data.db` has no header; the section
+described a non-existent feature.
+
 ---
 
 ## Original Documentation (Now Obsolete)
