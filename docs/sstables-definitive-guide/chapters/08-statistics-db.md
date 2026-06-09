@@ -47,7 +47,7 @@ These fields drive compaction policies (e.g., tombstone purging thresholds), rea
 
 Statistics are collected during flush and serialized alongside component files. Readers parse `Statistics.db` to provide summaries and drive decisions (e.g., compaction tuning, bloom FPR reporting).
 
-Pinpoints in Cassandra 5.0.0:
+Pinpoints in Cassandra 5.0.8:
 - `MetadataCollector` gathers live stats during flush (row counts, histograms)
 - `MetadataSerializer` writes and reads the metadata blocks
 - `StatsMetadata` exposes typed accessors for the above
@@ -87,14 +87,18 @@ Statistics.db in Cassandra 5.0 (nb-format) also contains an embedded **Serializa
 The SerializationHeader follows this structure (from `SerializationHeader.java`):
 
 ```
-[VInt pk_type_len] [pk_type_string]           -- partition key type
-[VInt ck_count]                                -- clustering key count
+[UnsignedVInt minTimestamp_delta]              -- 64-bit delta from TIMESTAMP_EPOCH (µs)
+[UnsignedVInt32 minLocalDeletionTime_delta]    -- 32-bit delta from DELETION_TIME_EPOCH (s)
+[UnsignedVInt32 minTTL_delta]                  -- 32-bit delta from TTL_EPOCH (0)
+                                               -- (EncodingStats block: 3–14 bytes total)
+[VInt pk_type_len] [pk_type_string]            -- partition key type
+[UnsignedVInt32 ck_count]                      -- clustering key count
   for each clustering key:
-    [VInt ck_len] [ck_type_string]            -- clustering key type
-[VInt static_count]                            -- static column count (0 if none)
+    [VInt ck_len] [ck_type_string]             -- clustering key type
+[UnsignedVInt32 static_count]                  -- static column count (0 if none)
   for each static column:
     [VInt name_len] [name] [VInt type_len] [type]
-[VInt reg_count]                               -- regular column count
+[UnsignedVInt32 reg_count]                     -- regular column count
   for each regular column:
     [VInt name_len] [name] [VInt type_len] [type]
 ```
@@ -121,11 +125,12 @@ regular_columns: [{name: "row_data", type: "UTF8Type"}, {name: "row_value", type
 ```
 
 ### References
-- Cassandra 5.0.0:
-  - `StatsMetadata`: [org.apache.cassandra.io.sstable.metadata.StatsMetadata](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java)
-  - `MetadataCollector`: [org.apache.cassandra.io.sstable.metadata.MetadataCollector](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)
-  - `MetadataSerializer`: [org.apache.cassandra.io.sstable.metadata.MetadataSerializer](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/io/sstable/metadata/MetadataSerializer.java)
-  - `SerializationHeader`: [org.apache.cassandra.db.SerializationHeader](https://github.com/apache/cassandra/blob/cassandra-5.0.0/src/java/org/apache/cassandra/db/SerializationHeader.java)
+- Cassandra 5.0.8:
+  - [`StatsMetadata`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/StatsMetadata.java)
+  - [`MetadataCollector`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataCollector.java)
+  - [`MetadataSerializer`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/io/sstable/metadata/MetadataSerializer.java)
+  - [`SerializationHeader`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java)
+  - [`EncodingStats`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/EncodingStats.java)
 
 For implementation details, see Appendix C.
 
@@ -151,9 +156,9 @@ Bytes 32+: EncodingStats data
   [VUInt]  43                   - Partitioner string length
   [bytes]  Murmur3Partitioner   - Partitioner class name
   [VUInt]  0, 0                 - Metadata placeholders
-  [VInt]   min_timestamp        - ZigZag encoded microseconds
-  [VInt]   min_deletion_time    - ZigZag encoded seconds
-  [VInt]   min_ttl              - ZigZag encoded seconds
+  [UnsignedVInt]   min_timestamp_delta     - Unsigned VInt 64-bit (delta from TIMESTAMP_EPOCH)
+  [UnsignedVInt32] min_deletion_time_delta - Unsigned VInt32 (delta from DELETION_TIME_EPOCH)
+  [UnsignedVInt32] min_ttl_delta            - Unsigned VInt32 (delta from TTL_EPOCH=0)
 ```
 
 **Magic Number**: The constant `0x26291b05` appears at bytes 4-7 and serves dual purposes:
@@ -173,19 +178,22 @@ The primary purpose of Statistics.db is to provide **baseline values for delta e
 #### min_timestamp
 - **Purpose**: Baseline for timestamp delta encoding
 - **Unit**: Microseconds since Unix epoch
-- **Encoding**: Signed VInt (ZigZag)
+- **Encoding**: `writeUnsignedVInt` (64-bit unsigned VInt, up to 8 bytes; delta from
+  `TIMESTAMP_EPOCH` = Sept 22 2015 in µs). **Not** ZigZag/signed.
 - **Usage**: Data.db encodes cell timestamps as deltas from this value
 
 #### min_local_deletion_time
 - **Purpose**: Baseline for tombstone deletion time encoding
 - **Unit**: Seconds since Unix epoch
-- **Encoding**: Signed VInt (ZigZag, cast from i32)
+- **Encoding**: `writeUnsignedVInt32` (32-bit unsigned VInt, up to 5 bytes; delta from
+  `DELETION_TIME_EPOCH` = Sept 22 2015 in seconds). **Not** ZigZag/signed.
 - **Usage**: Tombstone deletion times in Data.db are encoded as deltas from this value
 
 #### min_ttl
 - **Purpose**: Baseline for TTL delta encoding
 - **Unit**: Seconds
-- **Encoding**: Signed VInt (ZigZag, cast from i32)
+- **Encoding**: `writeUnsignedVInt32` (32-bit unsigned VInt, up to 5 bytes; delta from
+  `TTL_EPOCH` = 0). **Not** ZigZag/signed.
 - **Usage**: Cell TTL values in Data.db are encoded as deltas from this value
 - **Special case**: If no TTL is used in the SSTable, this value is set to 0
 
@@ -201,12 +209,15 @@ The EncodingStats section (starting at byte 32) uses a specific VInt encoding se
    - Length as `VUInt` (43 bytes for Murmur3Partitioner)
    - Full class name: `org.apache.cassandra.dht.Murmur3Partitioner`
 4. **Metadata placeholders** (2x `VUInt` = 0): Purpose unclear, observed in real files
-5. **Delta encoding baselines** (3x `VInt`):
-   - `min_timestamp` (i64)
-   - `min_local_deletion_time` (i32 cast to i64)
-   - `min_ttl` (i32 cast to i64)
+5. **Delta encoding baselines** (3× unsigned VInt):
+   - `min_timestamp` (i64 delta): `writeUnsignedVInt` (64-bit, up to 8 bytes)
+   - `min_local_deletion_time` (i32 delta): `writeUnsignedVInt32` (32-bit, up to 5 bytes)
+   - `min_ttl` (i32 delta): `writeUnsignedVInt32` (32-bit, up to 5 bytes)
 
-**VInt encoding**: All baseline values use signed VInt encoding (ZigZag) to support negative values. See Appendix B for VInt encoding details.
+**VInt encoding**: All baseline values use **unsigned** VInt encoding. Deltas are always
+non-negative (subtracted from their respective epochs). ZigZag (signed) encoding is NOT
+used. Using a 32-bit VInt for `minTimestamp` will corrupt timestamps after 2037. See
+[`EncodingStats.java:272–276`](https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows/EncodingStats.java#L272) and Appendix B for VInt encoding details.
 
 ### Statistics Metadata Collection
 
