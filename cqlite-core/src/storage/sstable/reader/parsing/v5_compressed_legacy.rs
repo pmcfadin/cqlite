@@ -7270,6 +7270,40 @@ impl V5CompressedLegacyParser {
 mod tests {
     use super::*;
 
+    /// Local VInt encoder for test helpers — avoids depending on
+    /// `storage::serialization` which is gated behind `write-support`.
+    /// Byte-identical to Cassandra's writeUnsignedVInt / VIntCoding.java.
+    fn encode_unsigned(value: u64, buf: &mut Vec<u8>) {
+        // Compute byte count using Cassandra's formula:
+        //   size = (639 - leading_zeros(value | 1) * 9) >> 6
+        let magnitude = (value | 1).leading_zeros();
+        let size = ((639 - magnitude * 9) >> 6) as usize;
+
+        if size == 1 {
+            buf.push(value as u8);
+        } else if size == 9 {
+            buf.push(0xFF);
+            buf.extend_from_slice(&value.to_be_bytes());
+        } else {
+            let extra_bytes = size - 1;
+            let shift = 8usize.saturating_sub(extra_bytes);
+            let mask: u8 = if extra_bytes == 0 {
+                0x00
+            } else if extra_bytes >= 8 {
+                0xFF
+            } else {
+                0xFF_u8 << shift
+            };
+            let first_byte_data_bits = 8 - extra_bytes - 1;
+            let data_shift = extra_bytes * 8;
+            let first_byte_data = ((value >> data_shift) & ((1 << first_byte_data_bits) - 1)) as u8;
+            buf.push(mask | first_byte_data);
+            for i in (0..extra_bytes).rev() {
+                buf.push(((value >> (i * 8)) & 0xFF) as u8);
+            }
+        }
+    }
+
     #[test]
     fn test_partition_header_parsing() {
         // Hex from test data: 00 10 15291a77... 7fffffff 8000000000000000
@@ -7783,7 +7817,6 @@ mod tests {
         // for the timestamp and was missing the liveness_ldt field for HAS_TTL.
         //
         // Now: unsigned_vint(1000) = [0x83, 0xE8], plus liveness_ldt_delta = 0 (0x00).
-        use crate::storage::serialization::vint::encode_unsigned;
 
         let min_timestamp = 1759713125983682i64;
         let min_ttl = 86400i64;
@@ -8914,7 +8947,6 @@ mod tests {
     #[test]
     fn s1_c2_unsigned_vint_differs_from_zigzag_for_delta_1000() {
         use crate::parser::vint::{parse_vint, parse_vuint};
-        use crate::storage::serialization::vint::encode_unsigned;
 
         let delta: u64 = 1000;
 
@@ -8963,8 +8995,6 @@ mod tests {
     /// This test asserts the CORRECT behavior and will FAIL until the bug is fixed.
     #[test]
     fn s1_c2_row_timestamp_cassandra_unsigned_encoding_must_decode_correctly() {
-        use crate::storage::serialization::vint::encode_unsigned;
-
         let min_timestamp = 1_000_000i64;
         let delta: u64 = 1000;
         let expected = min_timestamp + delta as i64; // = 1_001_000
@@ -9014,8 +9044,6 @@ mod tests {
     /// CORRECT behavior: mfda = 1_001_000
     #[test]
     fn s1_c2_marked_for_delete_at_cassandra_unsigned_encoding_must_decode_correctly() {
-        use crate::storage::serialization::vint::encode_unsigned;
-
         let min_timestamp = 1_000_000i64;
         let mfda_delta: u64 = 1000;
         let ldt_delta: u64 = 100;
@@ -9092,8 +9120,6 @@ mod tests {
     /// Uses single-byte values (< 128) so encode_unsigned produces 1 byte each.
     #[test]
     fn s1_c3_has_ttl_reads_two_vint_fields_ttl_and_ldt() {
-        use crate::storage::serialization::vint::encode_unsigned;
-
         let ttl_delta: u64 = 100; // 1 byte: 0x64 (100 < 128)
         let ldt_delta: u64 = 50; // 1 byte: 0x32 (50 < 128)
 
@@ -9225,8 +9251,6 @@ mod tests {
     /// bitmap = 0x05 = 0b00000101: columns 0 and 2 absent, column 1 present.
     #[test]
     fn s1_c5_missing_columns_bitmap_bit1_means_absent() {
-        use crate::storage::serialization::vint::encode_unsigned;
-
         let ts_delta: u64 = 0;
         let bitmap: u64 = 0x05; // cols 0 and 2 missing
 
@@ -9288,7 +9312,6 @@ mod tests {
     #[test]
     fn s1_vint_unsigned_encoding_test_vectors() {
         use crate::parser::vint::parse_vuint;
-        use crate::storage::serialization::vint::encode_unsigned;
 
         let test_cases: &[(u64, &[u8])] = &[
             (0, &[0x00]),                 // single byte 0
