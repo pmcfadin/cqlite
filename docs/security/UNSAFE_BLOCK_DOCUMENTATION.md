@@ -131,7 +131,7 @@ unsafe {
 
 #### A. Memory Map Creation
 
-**Location**: `reader.rs:160`, `streaming_reader.rs:252`, `optimized_reader.rs:267`  
+**Location**: `cqlite-core/src/storage/sstable/reader/mod.rs` (the opt-in `BlockSource::Mapped` path, #589)  
 **Pattern**: `unsafe { MmapOptions::new().map(&file) }`
 
 **SAFETY INVARIANTS**:

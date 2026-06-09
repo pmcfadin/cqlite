@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+
+- **Removed three dead mmap-based SSTable readers** (Issue #590) — deleted
+  `SchemaAwareSSTableReader` (`storage/reader.rs`), `OptimizedSSTableReader`
+  (`storage/sstable/optimized_reader.rs`), and `StreamingSSTableReader`
+  (`storage/sstable/streaming_reader.rs`). They were never constructed outside
+  benchmarks and carried divergent, misleading mmap/threshold logic. The single
+  real read path is `SSTableReader` with the opt-in `BlockSource::Mapped` mapping
+  (#589). Benchmark coverage was retained on the real reader.
+
 ### Fixed
 
 - **mmap write-while-mapped guard + delete/publication policy** (Issue #591) —

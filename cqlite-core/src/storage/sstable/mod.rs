@@ -23,7 +23,6 @@ pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;
 pub mod row_cell_state_machine;
 pub mod statistics_reader;
-pub mod streaming_reader;
 #[cfg(feature = "tombstones")]
 pub mod tombstone_merger;
 pub mod validation;

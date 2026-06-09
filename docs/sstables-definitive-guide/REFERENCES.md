@@ -26,7 +26,7 @@
 
 ## CQLite Code Map (for examples in this guide)
 - SSTable components: `cqlite-core/src/storage/sstable/`
-  - Reader: `reader.rs`, `schema_aware_reader.rs`, `streaming_reader.rs`
+  - Reader: `reader.rs` (`SSTableReader`, the single read path; opt-in `BlockSource::Mapped` mmap), `schema_aware_reader.rs`
   - Index: `index.rs`, `index_reader.rs`, `summary_reader.rs`
   - Filter: `bloom.rs`
   - Compression: `compression.rs`, `compression_info.rs`, `chunk_decompressor.rs`

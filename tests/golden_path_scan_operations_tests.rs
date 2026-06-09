@@ -21,10 +21,7 @@ use cqlite_core::{
     error::{Error, Result},
     platform::Platform,
     schema::registry::{SchemaRegistry, SchemaRegistryConfig},
-    storage::sstable::{
-        reader::SSTableReader,
-        // streaming_reader::StreamingReader, // Not exported
-    },
+    storage::sstable::reader::SSTableReader,
     types::TableId,
     Config, RowKey,
 };

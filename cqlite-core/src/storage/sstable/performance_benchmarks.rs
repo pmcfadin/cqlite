@@ -12,11 +12,7 @@ use tokio::fs;
 
 use crate::{platform::Platform, types::TableId, Config, Result, RowKey};
 
-use super::{
-    reader::SSTableReader,
-    // optimized_reader::OptimizedSSTableReader, // TODO: Re-enable when optimized_reader module is available
-    streaming_reader::StreamingSSTableReader,
-};
+use super::reader::SSTableReader;
 
 /// Performance benchmark results
 #[derive(Debug, Clone)]
@@ -109,22 +105,6 @@ impl PerformanceBenchmarks {
             {
                 results.push(standard_result);
             }
-
-            // Benchmark optimized reader
-            if let Ok(optimized_result) = self
-                .benchmark_optimized_reader(&file_path, &table_name)
-                .await
-            {
-                results.push(optimized_result);
-            }
-
-            // Benchmark streaming reader
-            if let Ok(streaming_result) = self
-                .benchmark_streaming_reader(&file_path, &table_name)
-                .await
-            {
-                results.push(streaming_result);
-            }
         }
 
         // Print summary
@@ -197,88 +177,6 @@ impl PerformanceBenchmarks {
                 read_operations: ops_count as u64,
                 avg_read_latency_ms: total_duration.as_millis() as f64 / ops_count as f64,
                 cache_hit_rate: stats.cache_hit_rate,
-            },
-            error_count,
-        })
-    }
-
-    /// Benchmark optimized SSTable reader (TODO: Re-enable when OptimizedSSTableReader is available)
-    pub async fn benchmark_optimized_reader(
-        &self,
-        _file_path: &Path,
-        _table_name: &str,
-    ) -> Result<BenchmarkResults> {
-        // TODO: Re-enable when OptimizedSSTableReader is available
-        Err(crate::Error::not_found(
-            "OptimizedSSTableReader not available".to_string(),
-        ))
-    }
-
-    /// Benchmark streaming SSTable reader
-    pub async fn benchmark_streaming_reader(
-        &self,
-        file_path: &Path,
-        table_name: &str,
-    ) -> Result<BenchmarkResults> {
-        println!("  🌊 Testing streaming reader...");
-
-        let start_time = Instant::now();
-        let reader =
-            StreamingSSTableReader::open(file_path, &self.config, Arc::clone(&self.platform))
-                .await?;
-
-        let table_id = TableId::new(table_name.to_string());
-
-        let mut ops_count = 0;
-        let mut error_count = 0;
-        let _memory_start = get_memory_usage();
-
-        // Test streaming scan
-        match reader
-            .scan_streaming(&table_id, None, None, Some(100))
-            .await
-        {
-            Ok(results) => {
-                ops_count += results.len();
-                println!("    ✅ Streaming scan: {} results", results.len());
-            }
-            Err(_) => {
-                error_count += 1;
-                println!("    ❌ Streaming scan failed");
-            }
-        }
-
-        // Test streaming get operations
-        for i in 0..10 {
-            let test_key = RowKey::from(format!("test_key_{}", i));
-            match reader.get_streaming(&table_id, &test_key).await {
-                Ok(_) => ops_count += 1,
-                Err(_) => error_count += 1,
-            }
-        }
-
-        let _memory_end = get_memory_usage();
-        let total_duration = start_time.elapsed();
-        let file_size = fs::metadata(file_path).await?.len();
-
-        let streaming_stats = reader.get_streaming_stats().await?;
-
-        Ok(BenchmarkResults {
-            reader_type: format!("Streaming ({})", table_name),
-            file_size,
-            total_duration,
-            ops_per_second: ops_count as f64 / total_duration.as_secs_f64(),
-            memory_stats: MemoryStats {
-                peak_memory_mb: streaming_stats.total_memory_mb,
-                average_memory_mb: streaming_stats.total_memory_mb,
-                efficiency_ratio: file_size as f64
-                    / (streaming_stats.total_memory_mb * 1024.0 * 1024.0),
-            },
-            io_stats: IoStats {
-                bytes_read: file_size,
-                read_operations: ops_count as u64,
-                avg_read_latency_ms: total_duration.as_millis() as f64 / ops_count as f64,
-                cache_hit_rate: streaming_stats.buffer_pool_utilization,
             },
             error_count,
         })
