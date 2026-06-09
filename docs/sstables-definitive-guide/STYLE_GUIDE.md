@@ -39,7 +39,7 @@ This guide ensures consistency across chapters and contributors.
 
 ## Citations and Sources
 - Always include at least one Cassandra source link per major claim
-- Pin links to specific git tags/commits; default to `cassandra-5.0.0` tag
+- Pin links to specific git tags/commits; default to `cassandra-5.0.8` tag
 - Cassandra-first policy: keep CQLite references to a minimum. Avoid embedding CQLite code in core chapters; when useful, add a brief cross-link to Appendix C instead of in-body excerpts.
 
 ## Examples and Datasets

@@ -43,7 +43,7 @@ A: Yes, make sure there are clean, permanent links.
 
 ## Further Clarifying Questions
 - Pinning target: do you prefer `cassandra-5.0.0` tag specifically, or `cassandra-5.0` branch for permalinks?
-A: cassandra-5.0.0 branch since it pins a version. 
+A: cassandra-5.0.0 branch since it pins a version. Updated to cassandra-5.0.8 (2026-06-09) after source-verification audit confirmed several class paths changed between 5.0.0 and 5.0.8 (SSTableReader → format/, IndexSummary → indexsummary/, SSTableDump → SSTableExport, SSTableMetadata → SSTableMetadataViewer). All guide permalinks now target cassandra-5.0.8.
 
 - SAI scope: include numeric and text index internals only, or also cover spatial/vector if present in 5.0?
 A: Include vector since it is a part of 5.0 

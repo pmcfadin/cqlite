@@ -89,7 +89,7 @@ Files are numbered (`01-..`, `02-..`, …, `appendix-..`) so globbing `chapters/
 ## Validation Checklist
 - Run diagram render; confirm `.svg` exists for each `.mmd` in `diagrams/`.
 - Build HTML and PDF; open both and spot-check diagrams, tables, and code blocks.
-- Verify citations are pinned to `cassandra-5.0.0` (see `REFERENCES.md`).
+- Verify citations are pinned to `cassandra-5.0.8` (see `REFERENCES.md`).
 - Ensure Cassandra-first terminology per `STYLE_GUIDE.md`.
 
 ## Distribution

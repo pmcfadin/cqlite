@@ -9,7 +9,7 @@ This brief captures shared context, assumptions, and open deltas to align all co
 - Out of scope: encryption at rest, key management, operations-tuning guidance.
 
 ## Key Policies
-- Pin upstream citations to GitHub permalinks under the `cassandra-5.0.0` tag (or a commit SHA when necessary).
+- Pin upstream citations to GitHub permalinks under the `cassandra-5.0.8` tag (or a commit SHA when necessary).
 - Embed only short upstream code excerpts (<30 lines) and include a permalink to the full source.
 - Diagrams authored in Mermaid (`.mmd`) and committed; SVG export is optional for now.
 - Canonical examples must use `test-data/datasets/test_basic`.
@@ -32,7 +32,7 @@ This brief captures shared context, assumptions, and open deltas to align all co
 - Keep chapters ≤ ~500 lines; split where warranted.
 
 ## Open Deltas (to resolve early)
-- Confirm exact permalink scheme for Cassandra 5.0: prefer `cassandra-5.0.0` tag (naming verification) vs branch/tag variants.
+- Confirm exact permalink scheme for Cassandra 5.0: prefer `cassandra-5.0.8` tag (naming verification) vs branch/tag variants.
 - BTI exemplar dataset: choose/build a small canonical workload to illustrate BTI differences (wide partition and clustering variety?).
 - SAI vector coverage: enumerate concrete classes/files to cite (segment writers/readers, query ops) for 5.0.
 - Chapter file layout: confirm `chapters/` directory and naming convention (e.g., `01-what-are-sstables.md`).
