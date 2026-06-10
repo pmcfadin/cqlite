@@ -15,6 +15,9 @@ use std::sync::Arc;
 #[path = "fixtures/mod.rs"]
 mod fixtures;
 
+#[path = "profiling/mod.rs"]
+mod profiling;
+
 /// Benchmark context holding real SSTable data
 struct BenchmarkContext {
     index_reader: IndexReader,
@@ -205,11 +208,12 @@ fn bench_cache_operations(c: &mut Criterion) {
 }
 
 criterion_group!(
-    benches,
-    bench_index_lookup_cold,
-    bench_index_lookup_warm,
-    bench_lookup_throughput,
-    bench_lookup_by_key_distribution,
-    bench_cache_operations,
+    name = benches;
+    config = profiling::configure();
+    targets = bench_index_lookup_cold,
+              bench_index_lookup_warm,
+              bench_lookup_throughput,
+              bench_lookup_by_key_distribution,
+              bench_cache_operations,
 );
 criterion_main!(benches);

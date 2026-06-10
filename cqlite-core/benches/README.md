@@ -34,6 +34,25 @@ to the workspace-relative `test-data/datasets` path (derived from
 `CARGO_MANIFEST_DIR`), so a checkout with fetched datasets runs with no
 environment setup.
 
+## Profiling
+
+Every bench target has an in-process sampling CPU profiler attached
+(`profiling/mod.rs`, [pprof](https://crates.io/crates/pprof) on unix). It is
+inert during normal measurement runs — including the CI gate — and activates
+only when criterion is invoked with `--profile-time`:
+
+```bash
+# 10 s of sampling per selected bench →
+# target/criterion/<group>/<bench>/profile/flamegraph.svg
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo bench -p cqlite-core --features cli-helpers --bench read -- --profile-time 10
+```
+
+See [docs/profiling.md](../../docs/profiling.md) for the full workflow:
+flamegraphs, dhat heap profiling against the 128 MiB budget
+(`examples/heap_profile.rs`), and the `scripts/profile.sh`
+profile → fix → re-measure loop.
+
 ## Fixtures (Issue #537)
 
 `fixtures/mod.rs` is the shared, deterministic fixture loader every bench draws

@@ -142,6 +142,10 @@ strip = true
 
 [profile.bench]
 debug = true
+# bench inherits from release, which sets `strip = true` — that would discard
+# the symbols that profilers (pprof flamegraphs, dhat backtraces) need even
+# with debug = true above. Keep bench binaries unstripped (docs/profiling.md).
+strip = "none"
 
 [profile.dev]
 # Faster builds for development
