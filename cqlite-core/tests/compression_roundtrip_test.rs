@@ -24,10 +24,7 @@ fn test_compression_roundtrip(algorithm: CompressionAlgorithm, data: &[u8]) {
     // Verify metadata
     assert_eq!(metadata.algorithm, algorithm);
     assert!(metadata.chunk_count() > 0, "Should have at least one chunk");
-    assert!(
-        metadata.compressed_length > 0,
-        "Compressed length should be positive"
-    );
+    assert!(metadata.data_length > 0, "Data length should be positive");
 
     // Verify we can write CompressionInfo.db
     let temp_dir = TempDir::new().expect("Failed to create temp dir");
@@ -96,11 +93,12 @@ fn test_lz4_multi_chunk_compression() {
         "Should have at least 4 chunks for 128KB with 32KB chunk size"
     );
 
-    // All chunks should have CRCs
+    // CRCs are inline in Data.db, not in CompressionMetadata (Bug #638 fix)
+    // Verify data_length reflects uncompressed size
     assert_eq!(
-        metadata.chunk_crcs.len(),
-        metadata.chunk_count(),
-        "Should have CRC for each chunk"
+        metadata.data_length,
+        data.len() as u64,
+        "data_length should equal uncompressed input size"
     );
 }
 
@@ -113,73 +111,61 @@ fn test_compression_effectiveness() {
     let compressor = create_compressor(CompressionAlgorithm::Lz4).unwrap();
     let mut writer = CompressedDataWriter::new(compressor);
     writer.write(&compressible_data).unwrap();
-    let (_compressed, metadata) = writer.finish().unwrap();
+    let (compressed, metadata) = writer.finish().unwrap();
 
-    // Compressed size should be significantly smaller
+    // data_length should equal uncompressed input size
+    assert_eq!(
+        metadata.data_length,
+        compressible_data.len() as u64,
+        "data_length should equal uncompressed size"
+    );
+
+    // Compressed output (Data.db bytes) should be significantly smaller than the original.
+    // Each chunk is: [compressed_bytes][4-byte CRC].  For a single 64KB chunk the CRC
+    // overhead is negligible, so the total should still be well under 50% of original.
     let original_size = compressible_data.len();
-    let compressed_size = metadata.compressed_length as usize;
-
     assert!(
-        compressed_size < original_size / 2,
+        compressed.len() < original_size / 2,
         "Highly compressible data should compress to less than 50%: {} -> {}",
         original_size,
-        compressed_size
+        compressed.len()
     );
 }
 
 #[test]
-fn test_compression_info_crc_validation() {
-    let temp_dir = TempDir::new().unwrap();
-    let info_path = temp_dir.path().join("test-CompressionInfo.db");
-
-    let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 65536);
-    metadata.add_chunk(0, Some(0x12345678));
-    metadata.add_chunk(65536, Some(0xABCDEF01));
-    metadata.set_compressed_length(100000);
-
-    let writer = CompressionInfoWriter::new(info_path.clone());
-    writer.write(&metadata).unwrap();
-
-    // Read back and verify CRC is valid
-    let bytes = std::fs::read(&info_path).unwrap();
-
-    // Last 4 bytes should be CRC32
-    let content_len = bytes.len() - 4;
-    let stored_crc = u32::from_be_bytes([
-        bytes[content_len],
-        bytes[content_len + 1],
-        bytes[content_len + 2],
-        bytes[content_len + 3],
-    ]);
-
-    let mut hasher = crc32fast::Hasher::new();
-    hasher.update(&bytes[..content_len]);
-    let computed_crc = hasher.finalize();
-
-    assert_eq!(stored_crc, computed_crc, "CRC should match");
-}
-
-#[test]
 fn test_compression_info_binary_format() {
+    // Bug #638 regression: verify CompressionInfo.db layout matches Cassandra spec
+    // writeUTF(name) + option_count(0) + chunk_length + max_compressed_length + data_length
+    // + chunk_count + offsets  (NO trailing metadata CRC, NO chunk CRC array)
     let temp_dir = TempDir::new().unwrap();
     let info_path = temp_dir.path().join("format-test-CompressionInfo.db");
 
     let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 65536);
-    metadata.add_chunk(0, Some(0xDEADBEEF));
-    metadata.set_compressed_length(50000);
+    metadata.add_chunk(0);
+    metadata.set_data_length(50000);
 
     let writer = CompressionInfoWriter::new(info_path.clone());
     writer.write(&metadata).unwrap();
 
     let bytes = std::fs::read(&info_path).unwrap();
 
-    // Verify algorithm name
+    // Byte 0..2: writeUTF length (2-byte BE)
     let name_len = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
     let name = String::from_utf8(bytes[2..2 + name_len].to_vec()).unwrap();
     assert_eq!(name, "LZ4Compressor");
 
-    // Verify chunk length (after 4-byte padding)
-    let chunk_len_offset = 2 + name_len + 4;
+    // After name: option_count (4-byte BE, 0 for default options)
+    let option_count_offset = 2 + name_len;
+    let option_count = u32::from_be_bytes([
+        bytes[option_count_offset],
+        bytes[option_count_offset + 1],
+        bytes[option_count_offset + 2],
+        bytes[option_count_offset + 3],
+    ]);
+    assert_eq!(option_count, 0, "No options set");
+
+    // After option_count: chunk_length (4-byte BE)
+    let chunk_len_offset = option_count_offset + 4;
     let chunk_len = u32::from_be_bytes([
         bytes[chunk_len_offset],
         bytes[chunk_len_offset + 1],
@@ -187,11 +173,69 @@ fn test_compression_info_binary_format() {
         bytes[chunk_len_offset + 3],
     ]);
     assert_eq!(chunk_len, 65536);
+
+    // After chunk_length: max_compressed_length (4-byte BE) = INT_MAX
+    let mcl_offset = chunk_len_offset + 4;
+    let max_compressed_length = u32::from_be_bytes([
+        bytes[mcl_offset],
+        bytes[mcl_offset + 1],
+        bytes[mcl_offset + 2],
+        bytes[mcl_offset + 3],
+    ]);
+    assert_eq!(max_compressed_length, i32::MAX as u32);
+
+    // After max_compressed_length: data_length (8-byte BE) = 50000
+    let dl_offset = mcl_offset + 4;
+    let data_length = u64::from_be_bytes([
+        bytes[dl_offset],
+        bytes[dl_offset + 1],
+        bytes[dl_offset + 2],
+        bytes[dl_offset + 3],
+        bytes[dl_offset + 4],
+        bytes[dl_offset + 5],
+        bytes[dl_offset + 6],
+        bytes[dl_offset + 7],
+    ]);
+    assert_eq!(data_length, 50000);
+
+    // After data_length: chunk_count (4-byte BE) = 1
+    let cc_offset = dl_offset + 8;
+    let chunk_count = u32::from_be_bytes([
+        bytes[cc_offset],
+        bytes[cc_offset + 1],
+        bytes[cc_offset + 2],
+        bytes[cc_offset + 3],
+    ]);
+    assert_eq!(chunk_count, 1);
+
+    // After chunk_count: 1 offset (8-byte BE) = 0
+    let offset_offset = cc_offset + 4;
+    let offset_val = u64::from_be_bytes([
+        bytes[offset_offset],
+        bytes[offset_offset + 1],
+        bytes[offset_offset + 2],
+        bytes[offset_offset + 3],
+        bytes[offset_offset + 4],
+        bytes[offset_offset + 5],
+        bytes[offset_offset + 6],
+        bytes[offset_offset + 7],
+    ]);
+    assert_eq!(offset_val, 0);
+
+    // File must end exactly here — no trailing CRC bytes (Bug #638)
+    let expected_len = offset_offset + 8;
+    assert_eq!(
+        bytes.len(),
+        expected_len,
+        "File has {} trailing bytes after offsets — should be 0 (Bug #638 regression)",
+        bytes.len() as isize - expected_len as isize
+    );
 }
 
 #[test]
 fn test_trailing_crc_position() {
     // CRITICAL: Verify CRC is TRAILING (after chunk data), NOT leading
+    // This CRC lives in Data.db, not in CompressionInfo.db.
 
     let compressor = create_compressor(CompressionAlgorithm::None).unwrap();
     let mut writer = CompressedDataWriter::with_chunk_size(compressor, 64);

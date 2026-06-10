@@ -1,132 +1,139 @@
-//! CI test that intentionally corrupts chunk CRC to verify validation works
+//! CI test verifying that inline CRC corruption in Data.db is detected (Bug #639 fix).
 //!
-//! This test creates a valid compression metadata file with CRC checksums,
-//! then intentionally corrupts one chunk's CRC to ensure the validation
-//! fails with the expected deterministic error message.
+//! Cassandra stores a 4-byte CRC32 INLINE after each compressed chunk in Data.db.
+//! CompressionInfo.db has NO CRC fields.  ChunkDecompressor reads:
+//!   compressed_len = offset_delta - 4
+//!   compressed_bytes[0..compressed_len]
+//!   crc32_bytes[4]
+//!   validates CRC, then decompresses.
 
 use cqlite_core::parser::header::CassandraVersion;
 use cqlite_core::storage::sstable::chunk_decompressor::ChunkDecompressor;
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
-use cqlite_core::Error;
 use std::io::Cursor;
 
-/// Test that CRC corruption is detected and fails with deterministic error
-#[test]
-fn test_ci_crc_corruption_detection() {
-    // Create compression metadata with valid CRC checksums
-    let mut compression_info = CompressionInfo {
-        algorithm: "LZ4Compressor".to_string(),
-        chunk_length: 16384,
-        data_length: 32768,
-        chunk_offsets: vec![0, 8192, 16384],
-        crc32: Some(0x12345678),
-        chunk_crcs: vec![0xAABBCCDD, 0xEEFF0011, 0x22334455], // Valid CRC checksums
-    };
-
-    // Create decompressor with modern format (CRC validation enabled)
-    let mut decompressor =
-        ChunkDecompressor::new(compression_info.clone(), CassandraVersion::V5_0Release)
-            .expect("Failed to create decompressor");
-
-    // Create fake compressed data (dummy LZ4 compressed chunk)
-    let fake_compressed_data = vec![
-        0x04, 0x22, 0x4D, 0x18, // LZ4 header
-        0x64, 0x40, 0xA7, 0x00, // Block checksum
-        0x10, 0x00, 0x00, 0x00, // Compressed size
-        b'H', b'e', b'l', b'l', b'o', b' ', b'w', b'o', b'r', b'l', b'd', // Data
-    ];
-
-    let mut reader = Cursor::new(&fake_compressed_data);
-
-    // Test 1: With valid CRC, decompression should attempt (might fail on actual decompression but CRC should pass)
-    let _result = decompressor.read_data(&mut reader, 0, 10);
-    // We expect this to pass CRC validation but possibly fail on LZ4 decompression
-
-    // Test 2: Now corrupt the first chunk's CRC
-    compression_info.chunk_crcs[0] = 0xDEADBEEF; // Corrupted CRC
-
-    let mut corrupted_decompressor =
-        ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
-            .expect("Failed to create corrupted decompressor");
-
-    let mut reader2 = Cursor::new(&fake_compressed_data);
-
-    // This should fail with deterministic CRC error
-    let result = corrupted_decompressor.read_data(&mut reader2, 0, 10);
-
-    match result {
-        Err(Error::InvalidFormat(msg)) if msg.contains("CRC mismatch for chunk 0") => {
-            println!("✅ CI Test PASSED: CRC corruption detected with expected error: {msg}");
-            assert!(msg.contains("expected: 0xDEADBEEF"));
-            assert!(msg.contains("actual:"));
-        }
-        Err(other_error) => {
-            panic!("❌ CI Test FAILED: Expected CRC validation error, got: {other_error:?}");
-        }
-        Ok(_) => {
-            panic!("❌ CI Test FAILED: Expected CRC validation to fail, but it succeeded");
-        }
-    }
-
-    // Test 3: Legacy format should skip CRC validation
-    let mut legacy_decompressor = ChunkDecompressor::new(
-        CompressionInfo {
-            algorithm: "LZ4Compressor".to_string(),
-            chunk_length: 16384,
-            data_length: 32768,
-            chunk_offsets: vec![0, 8192, 16384],
-            crc32: Some(0x12345678),
-            chunk_crcs: vec![0xDEADBEEF, 0xEEFF0011, 0x22334455], // Corrupted CRC
-        },
-        CassandraVersion::Legacy,
-    )
-    .expect("Failed to create legacy decompressor");
-
-    let mut reader3 = Cursor::new(&fake_compressed_data);
-
-    // Legacy format should skip CRC validation and proceed to decompression
-    let _result = legacy_decompressor.read_data(&mut reader3, 0, 10);
-    // We expect this to skip CRC validation (might still fail on LZ4 decompression)
-
-    println!("✅ CI Test COMPLETED: CRC corruption detection verified for modern formats, skipped for legacy");
+/// Helper: build a fake Data.db record with a controllable CRC suffix.
+/// `payload` = the "compressed" bytes (can be anything for this test).
+/// `crc`     = the 4-byte BE CRC to append (may be intentionally wrong).
+fn build_data_db_record(payload: &[u8], crc: u32) -> Vec<u8> {
+    let mut v = payload.to_vec();
+    v.extend_from_slice(&crc.to_be_bytes());
+    v
 }
 
-/// Test that multiple chunk CRC corruptions are detected
+/// Compute the CRC32 that would match `payload` (Adler CRC32 / IEEE CRC32).
+fn correct_crc(payload: &[u8]) -> u32 {
+    let mut h = crc32fast::Hasher::new();
+    h.update(payload);
+    h.finalize()
+}
+
+/// Build a CompressionInfo where one chunk occupies `record_size` bytes total
+/// (compressed_len = record_size - 4) starting at offset 0.
+fn make_one_chunk_info(record_size: u64) -> CompressionInfo {
+    CompressionInfo {
+        algorithm: "LZ4Compressor".to_string(),
+        option_pairs: vec![],
+        chunk_length: 65536,
+        max_compressed_length: i32::MAX as u32,
+        data_length: 65536,
+        // Two offsets: [0, record_size] — delta = record_size
+        chunk_offsets: vec![0, record_size],
+    }
+}
+
+/// Test that a chunk with a matching inline CRC is accepted (no error from CRC step).
+/// The subsequent decompression may still fail on garbage payload — that's fine.
 #[test]
-fn test_ci_multiple_crc_corruption() {
-    let compression_info = CompressionInfo {
-        algorithm: "SnappyCompressor".to_string(),
-        chunk_length: 8192,
-        data_length: 24576,
-        chunk_offsets: vec![0, 4096, 8192, 12288],
-        crc32: Some(0x87654321),
-        chunk_crcs: vec![0xCAFEBABE, 0xDEADBEEF, 0xFEEDFACE, 0xBAADF00D], // All corrupted
-    };
+fn test_ci_valid_inline_crc_accepted() {
+    let payload: Vec<u8> = vec![0xAB; 12]; // 12 bytes of fake compressed data
+    let good_crc = correct_crc(&payload);
+    let record = build_data_db_record(&payload, good_crc);
+    let record_size = record.len() as u64; // 12 + 4 = 16
 
-    let mut decompressor = ChunkDecompressor::new(compression_info, CassandraVersion::V5_0Release)
-        .expect("Failed to create decompressor");
+    let info = make_one_chunk_info(record_size);
+    let mut decomp =
+        ChunkDecompressor::new(info, CassandraVersion::V5_0Release).expect("decompressor created");
+    let mut reader = Cursor::new(record);
 
-    let fake_compressed_data = vec![0u8; 1024]; // Dummy data
-    let mut reader = Cursor::new(&fake_compressed_data);
-
-    // Try to read from different chunks - each should fail with CRC error
-    for chunk_offset in [0u64, 8192u64, 16384u64] {
-        let result = decompressor.read_data(&mut reader, chunk_offset, 100);
-
-        match result {
-            Err(Error::InvalidFormat(msg)) if msg.contains("CRC mismatch") => {
-                println!(
-                    "✅ Chunk at offset {chunk_offset} correctly failed CRC validation: {msg}"
-                );
-            }
-            other => {
-                println!("⚠️  Chunk at offset {chunk_offset} result: {other:?}");
-            }
+    // We expect either Ok (unlikely with garbage payload) or an error that is NOT
+    // about CRC mismatch.  A decompression error is acceptable; a CRC error is not.
+    match decomp.read_data(&mut reader, 0, 4) {
+        Ok(_) => { /* fine */ }
+        Err(e) => {
+            let msg = e.to_string().to_lowercase();
+            assert!(
+                !msg.contains("crc") && !msg.contains("checksum") && !msg.contains("mismatch"),
+                "CRC should have been valid but got CRC error: {e}"
+            );
         }
+    }
+}
 
-        // Reset reader position
-        reader.set_position(0);
+/// Test that a chunk with a wrong inline CRC is rejected.
+/// Error must mention CRC/checksum/mismatch.
+#[test]
+fn test_ci_crc_corruption_detection() {
+    let payload: Vec<u8> = vec![0xCC; 16]; // 16 bytes of fake compressed data
+    let bad_crc: u32 = 0xDEADBEEF;
+    let record = build_data_db_record(&payload, bad_crc);
+    let record_size = record.len() as u64; // 16 + 4 = 20
+
+    let info = make_one_chunk_info(record_size);
+    let mut decomp =
+        ChunkDecompressor::new(info, CassandraVersion::V5_0Release).expect("decompressor created");
+    let mut reader = Cursor::new(record);
+
+    let result = decomp.read_data(&mut reader, 0, 4);
+    assert!(result.is_err(), "Expected CRC error, got Ok");
+
+    let msg = result.unwrap_err().to_string().to_lowercase();
+    assert!(
+        msg.contains("crc") || msg.contains("checksum") || msg.contains("mismatch"),
+        "Error should reference CRC validation, got: {msg}"
+    );
+
+    println!("CI Test PASSED: inline CRC corruption detected — {msg}");
+}
+
+/// Test multiple records: verify that each bad CRC is caught independently.
+#[test]
+fn test_ci_multiple_records_each_crc_checked() {
+    // Build three consecutive records in a single fake Data.db buffer.
+    // Each record: 8-byte payload + 4-byte CRC.
+    let chunk_size: u32 = 12; // 8 compressed + 4 CRC
+
+    let payloads: [&[u8]; 3] = [&[0x11; 8], &[0x22; 8], &[0x33; 8]];
+    let bad_crcs: [u32; 3] = [0xBAD00001, 0xBAD00002, 0xBAD00003];
+
+    let mut fake_db: Vec<u8> = Vec::new();
+    for (payload, &crc) in payloads.iter().zip(bad_crcs.iter()) {
+        fake_db.extend_from_slice(payload);
+        fake_db.extend_from_slice(&crc.to_be_bytes());
     }
 
-    println!("✅ CI Test COMPLETED: Multiple chunk CRC corruption detection verified");
+    let offsets: Vec<u64> = (0..=3).map(|i| i * chunk_size as u64).collect();
+    let info = CompressionInfo {
+        algorithm: "SnappyCompressor".to_string(),
+        option_pairs: vec![],
+        chunk_length: 65536,
+        max_compressed_length: i32::MAX as u32,
+        data_length: 65536 * 3,
+        chunk_offsets: offsets,
+    };
+
+    let mut decomp =
+        ChunkDecompressor::new(info, CassandraVersion::V5_0Release).expect("decompressor created");
+
+    // All three chunks have bad CRCs — each read must produce an error
+    for chunk_start in [0u64, 12, 24] {
+        let mut reader = Cursor::new(fake_db.clone());
+        let result = decomp.read_data(&mut reader, chunk_start, 4);
+        assert!(
+            result.is_err(),
+            "Expected error for chunk at offset {chunk_start}, got Ok"
+        );
+    }
+
+    println!("CI Test PASSED: all three chunks detected bad inline CRCs");
 }

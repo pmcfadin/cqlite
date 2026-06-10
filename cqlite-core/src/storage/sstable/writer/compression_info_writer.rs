@@ -3,27 +3,32 @@
 //! Generates the CompressionInfo.db component that describes how Data.db chunks
 //! are compressed. This file is required for readers to decompress Data.db.
 //!
-//! # Binary Format (Cassandra 5.0 NB)
+//! # Binary Format (Cassandra NB / 5.0, CompressionMetadata.java:375-392)
 //!
 //! ```text
-//! [u16 BE: algorithm_name_length]    ← Length of algorithm name
+//! [u16 BE: name_length]              ← Java writeUTF length prefix
 //! [bytes: algorithm_name]            ← "LZ4Compressor", "SnappyCompressor", etc.
-//! [4 bytes: padding]                 ← Fixed 0x00000000 padding
-//! [u32 BE: chunk_length]             ← Uncompressed chunk size (typically 65536)
-//! [u32 BE: options/flags]            ← Options field (0x7FFFFFFF typical)
-//! [u64 BE: compressed_data_length]   ← Total compressed Data.db size
+//! [u32 BE: option_count]             ← Number of key-value option pairs (usually 0)
+//! for each option:
+//!     [u16 BE: key_length][key_bytes]
+//!     [u16 BE: val_length][val_bytes]
+//! [u32 BE: chunk_length]             ← Uncompressed chunk size (default 16384)
+//! [u32 BE: max_compressed_length]    ← INT_MAX when minCompressRatio=0 (default)
+//! [u64 BE: data_length]              ← Total uncompressed Data.db size
 //! [u32 BE: chunk_count]              ← Number of chunks
-//! [u64 BE * chunk_count: offsets]    ← Byte offset of each chunk in Data.db
-//! [u32 BE * chunk_count: crcs]       ← CRC32 of each compressed chunk (optional)
-//! [u32 BE: metadata_crc]             ← CRC32 of all preceding bytes
+//! [u64 BE * chunk_count: offsets]    ← Byte offset of each chunk record in Data.db
 //! ```
+//!
+//! **Note on CRCs**: Per-chunk CRC32 checksums are stored INLINE in Data.db after each
+//! compressed chunk — they are NOT written to CompressionInfo.db.
+//! See: CompressedSequentialWriter.java:192.
+//! There is also NO trailing metadata CRC in CompressionInfo.db.
 //!
 //! References:
 //! - Parser: `cqlite-core/src/storage/sstable/compression_info.rs`
-//! - Format docs: `docs/sstables-definitive-guide/chapters/09-compression.md`
+//! - Cassandra source: `CompressionMetadata.java:375-392`
 
 use crate::error::{Error, Result};
-use crc32fast::Hasher;
 use std::fs::File;
 use std::io::{BufWriter, Write};
 use std::path::PathBuf;
@@ -78,46 +83,56 @@ impl CompressionAlgorithm {
     }
 }
 
-/// Metadata about compressed Data.db
+/// Metadata about compressed Data.db, collected during compression.
 ///
-/// Collected during compression and written to CompressionInfo.db
+/// Written to CompressionInfo.db by `CompressionInfoWriter`.
 #[derive(Debug, Clone)]
 pub struct CompressionMetadata {
     /// Compression algorithm used
     pub algorithm: CompressionAlgorithm,
-    /// Uncompressed chunk size in bytes (typically 65536)
+    /// Uncompressed chunk size in bytes (typically 16384 for Cassandra 5.0)
     pub chunk_length: u32,
-    /// Total compressed data length (Data.db file size)
-    pub compressed_length: u64,
-    /// Byte offset of each compressed chunk in Data.db
+    /// Maximum compressed chunk length. When a compressed chunk reaches or exceeds this
+    /// size, Cassandra stores the chunk uncompressed instead.
+    /// Set to `i32::MAX` (default) when `minCompressRatio=0` (the Cassandra default).
+    /// Source: CompressionParams.java:186-189.
+    pub max_compressed_length: u32,
+    /// Total uncompressed data length (Data.db file, excluding the inline CRC bytes)
+    pub data_length: u64,
+    /// Byte offset of each compressed-chunk record in Data.db.
+    /// Each record is: [compressed_bytes][4-byte inline CRC32].
+    /// The delta between consecutive offsets therefore includes the 4-byte CRC.
     pub chunk_offsets: Vec<u64>,
-    /// CRC32 checksum of each compressed chunk (optional)
-    pub chunk_crcs: Vec<u32>,
+    /// Optional compression parameter key-value pairs (usually empty for default settings)
+    pub option_pairs: Vec<(String, String)>,
 }
 
 impl CompressionMetadata {
-    /// Create new compression metadata
+    /// Create new compression metadata with default settings
+    ///
+    /// Sets `max_compressed_length` to `i32::MAX` (the default when `minCompressRatio=0`).
     pub fn new(algorithm: CompressionAlgorithm, chunk_length: u32) -> Self {
         Self {
             algorithm,
             chunk_length,
-            compressed_length: 0,
+            max_compressed_length: i32::MAX as u32,
+            data_length: 0,
             chunk_offsets: Vec::new(),
-            chunk_crcs: Vec::new(),
+            option_pairs: Vec::new(),
         }
     }
 
-    /// Add a new chunk offset and optional CRC
-    pub fn add_chunk(&mut self, offset: u64, crc: Option<u32>) {
+    /// Add a new chunk offset.
+    ///
+    /// The offset must point to the start of the compressed-chunk record (before the
+    /// compressed bytes), not after the inline CRC.
+    pub fn add_chunk(&mut self, offset: u64) {
         self.chunk_offsets.push(offset);
-        if let Some(crc_value) = crc {
-            self.chunk_crcs.push(crc_value);
-        }
     }
 
-    /// Set the total compressed data length
-    pub fn set_compressed_length(&mut self, length: u64) {
-        self.compressed_length = length;
+    /// Set the total uncompressed data length
+    pub fn set_data_length(&mut self, length: u64) {
+        self.data_length = length;
     }
 
     /// Get the number of chunks
@@ -129,6 +144,7 @@ impl CompressionMetadata {
 /// CompressionInfo.db file writer
 ///
 /// Writes compression metadata to disk in Cassandra's binary format.
+/// Authority: CompressionMetadata.java:375-392.
 #[derive(Debug)]
 pub struct CompressionInfoWriter {
     /// Output file path
@@ -141,13 +157,13 @@ impl CompressionInfoWriter {
         Self { path }
     }
 
-    /// Write compression metadata to file
+    /// Write compression metadata to file in Cassandra's binary format.
     ///
-    /// # Arguments
-    /// * `metadata` - Compression metadata collected during Data.db writing
+    /// This writes the exact layout produced by CompressionMetadata.writeHeader():
+    ///   writeUTF(name) + option_count + options + chunk_length + max_compressed_length
+    ///   + data_length + chunk_count + offsets
     ///
-    /// # Returns
-    /// Ok(()) on success, or error if write fails
+    /// No trailing metadata CRC is written — Cassandra's CompressionInfo.db ends after offsets.
     pub fn write(&self, metadata: &CompressionMetadata) -> Result<()> {
         let file = File::create(&self.path).map_err(|e| {
             Error::Storage(format!(
@@ -158,22 +174,9 @@ impl CompressionInfoWriter {
         })?;
         let mut writer = BufWriter::new(file);
 
-        // Build the binary content first to compute CRC
         let content = self.build_content(metadata)?;
-
-        // Compute CRC32 of content (excluding the CRC itself)
-        let mut hasher = Hasher::new();
-        hasher.update(&content);
-        let crc32 = hasher.finalize();
-
-        // Write content + CRC
         writer.write_all(&content).map_err(|e| {
             Error::Storage(format!("Failed to write CompressionInfo.db content: {}", e))
-        })?;
-
-        // Write trailing CRC32
-        writer.write_all(&crc32.to_be_bytes()).map_err(|e| {
-            Error::Storage(format!("Failed to write CompressionInfo.db CRC: {}", e))
         })?;
 
         writer
@@ -183,14 +186,13 @@ impl CompressionInfoWriter {
         Ok(())
     }
 
-    /// Build the binary content (everything before the trailing CRC)
+    /// Build the binary content matching Cassandra's CompressionMetadata.writeHeader() layout.
     fn build_content(&self, metadata: &CompressionMetadata) -> Result<Vec<u8>> {
         let mut content = Vec::new();
 
-        // Algorithm name
+        // 1. writeUTF(algorithm_name): 2-byte BE length + UTF-8 bytes
         let algorithm_name = metadata.algorithm.cassandra_name();
         let name_bytes = algorithm_name.as_bytes();
-
         if name_bytes.len() > u16::MAX as usize {
             return Err(Error::InvalidInput(format!(
                 "Algorithm name too long: {} bytes (max {})",
@@ -198,26 +200,43 @@ impl CompressionInfoWriter {
                 u16::MAX
             )));
         }
-
-        // Algorithm name length (u16 BE)
         content.extend_from_slice(&(name_bytes.len() as u16).to_be_bytes());
-
-        // Algorithm name bytes
         content.extend_from_slice(name_bytes);
 
-        // Fixed 4-byte padding (0x00000000) - ensures 8-byte alignment for chunk_length field
-        content.extend_from_slice(&[0u8; 4]);
+        // 2. writeInt(option_count)
+        let option_count = metadata.option_pairs.len();
+        if option_count > u32::MAX as usize {
+            return Err(Error::InvalidInput("Too many option pairs".to_string()));
+        }
+        content.extend_from_slice(&(option_count as u32).to_be_bytes());
 
-        // Chunk length (u32 BE)
+        // 3. option key-value pairs (each a writeUTF)
+        for (key, value) in &metadata.option_pairs {
+            let kb = key.as_bytes();
+            let vb = value.as_bytes();
+            if kb.len() > u16::MAX as usize || vb.len() > u16::MAX as usize {
+                return Err(Error::InvalidInput(format!(
+                    "Option key/value too long: key={} bytes, value={} bytes",
+                    kb.len(),
+                    vb.len()
+                )));
+            }
+            content.extend_from_slice(&(kb.len() as u16).to_be_bytes());
+            content.extend_from_slice(kb);
+            content.extend_from_slice(&(vb.len() as u16).to_be_bytes());
+            content.extend_from_slice(vb);
+        }
+
+        // 4. writeInt(chunk_length)
         content.extend_from_slice(&metadata.chunk_length.to_be_bytes());
 
-        // Options/flags field (u32 BE) - typically 0x7FFFFFFF
-        content.extend_from_slice(&0x7FFFFFFFu32.to_be_bytes());
+        // 5. writeInt(max_compressed_length)
+        content.extend_from_slice(&metadata.max_compressed_length.to_be_bytes());
 
-        // Compressed data length (u64 BE)
-        content.extend_from_slice(&metadata.compressed_length.to_be_bytes());
+        // 6. writeLong(data_length)
+        content.extend_from_slice(&metadata.data_length.to_be_bytes());
 
-        // Chunk count (u32 BE)
+        // 7. writeInt(chunk_count)
         if metadata.chunk_offsets.len() > u32::MAX as usize {
             return Err(Error::InvalidInput(format!(
                 "Too many chunks: {} (max {})",
@@ -227,43 +246,20 @@ impl CompressionInfoWriter {
         }
         content.extend_from_slice(&(metadata.chunk_offsets.len() as u32).to_be_bytes());
 
-        // Chunk offsets (u64 BE each)
+        // 8. chunk_count × writeLong(chunk_offset)
         for offset in &metadata.chunk_offsets {
             content.extend_from_slice(&offset.to_be_bytes());
         }
 
-        // Chunk CRCs (u32 BE each) - only if we have them
-        if !metadata.chunk_crcs.is_empty() {
-            if metadata.chunk_crcs.len() != metadata.chunk_offsets.len() {
-                return Err(Error::InvalidInput(format!(
-                    "Chunk CRC count ({}) doesn't match chunk count ({})",
-                    metadata.chunk_crcs.len(),
-                    metadata.chunk_offsets.len()
-                )));
-            }
-
-            for crc in &metadata.chunk_crcs {
-                content.extend_from_slice(&crc.to_be_bytes());
-            }
-        }
+        // NOTE: No trailing metadata CRC — Cassandra's CompressionInfo.db ends after offsets.
+        // Per-chunk CRCs are stored INLINE in Data.db, not here.
 
         Ok(content)
     }
 
-    /// Build content to a buffer instead of file (for testing)
+    /// Build content to a buffer instead of writing to file (for testing/round-trip checks)
     pub fn build_to_vec(&self, metadata: &CompressionMetadata) -> Result<Vec<u8>> {
-        let content = self.build_content(metadata)?;
-
-        // Compute CRC32
-        let mut hasher = Hasher::new();
-        hasher.update(&content);
-        let crc32 = hasher.finalize();
-
-        // Combine content + CRC
-        let mut result = content;
-        result.extend_from_slice(&crc32.to_be_bytes());
-
-        Ok(result)
+        self.build_content(metadata)
     }
 }
 
@@ -313,105 +309,128 @@ mod tests {
 
     #[test]
     fn test_compression_metadata_new() {
-        let metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 65536);
+        let metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 16384);
         assert_eq!(metadata.algorithm, CompressionAlgorithm::Lz4);
-        assert_eq!(metadata.chunk_length, 65536);
-        assert_eq!(metadata.compressed_length, 0);
+        assert_eq!(metadata.chunk_length, 16384);
+        assert_eq!(metadata.max_compressed_length, i32::MAX as u32);
+        assert_eq!(metadata.data_length, 0);
         assert!(metadata.chunk_offsets.is_empty());
-        assert!(metadata.chunk_crcs.is_empty());
+        assert!(metadata.option_pairs.is_empty());
     }
 
     #[test]
     fn test_compression_metadata_add_chunk() {
-        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 65536);
+        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 16384);
 
-        metadata.add_chunk(0, Some(0x12345678));
-        metadata.add_chunk(8192, Some(0xABCDEF01));
+        metadata.add_chunk(0);
+        metadata.add_chunk(8200); // 8196 compressed bytes + 4 CRC
 
         assert_eq!(metadata.chunk_count(), 2);
-        assert_eq!(metadata.chunk_offsets, vec![0, 8192]);
-        assert_eq!(metadata.chunk_crcs, vec![0x12345678, 0xABCDEF01]);
+        assert_eq!(metadata.chunk_offsets, vec![0, 8200]);
     }
 
+    /// Regression test for Bug #638 writer side:
+    /// Verify build_content() matches the exact binary layout Cassandra expects.
+    /// No trailing CRC, no chunk CRC section — just the 8-field header + offsets.
     #[test]
-    fn test_compression_info_writer_build_content() {
-        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 65536);
-        metadata.add_chunk(0, None);
-        metadata.add_chunk(8192, None);
-        metadata.set_compressed_length(16000);
+    fn test_build_content_matches_cassandra_format() {
+        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 16384);
+        metadata.add_chunk(0);
+        metadata.add_chunk(8200);
+        metadata.set_data_length(32768);
 
         let writer = CompressionInfoWriter::new(PathBuf::from("/tmp/test"));
         let content = writer.build_content(&metadata).unwrap();
 
-        // Verify structure:
-        // 2 bytes: name length (13 for "LZ4Compressor")
-        // 13 bytes: algorithm name
-        // 4 bytes: padding
-        // 4 bytes: chunk length
-        // 4 bytes: options
-        // 8 bytes: compressed length
-        // 4 bytes: chunk count
-        // 16 bytes: 2 chunk offsets (8 bytes each)
-        // Total: 55 bytes (no CRCs)
+        // Expected layout:
+        //   [0..2]   u16 BE name_len = 13 (LZ4Compressor)
+        //   [2..15]  "LZ4Compressor"
+        //   [15..19] u32 BE option_count = 0
+        //   [19..23] u32 BE chunk_length = 16384
+        //   [23..27] u32 BE max_compressed_length = INT_MAX
+        //   [27..35] u64 BE data_length = 32768
+        //   [35..39] u32 BE chunk_count = 2
+        //   [39..47] u64 BE offset[0] = 0
+        //   [47..55] u64 BE offset[1] = 8200
+        //   Total: 55 bytes — NO trailing CRC section
 
-        assert_eq!(content.len(), 55);
-
-        // Check algorithm name length
-        assert_eq!(&content[0..2], &[0x00, 0x0D]); // 13 in BE
-
-        // Check algorithm name
-        assert_eq!(&content[2..15], b"LZ4Compressor");
-
-        // Check padding
-        assert_eq!(&content[15..19], &[0x00, 0x00, 0x00, 0x00]);
-
-        // Check chunk length (65536 = 0x00010000)
-        assert_eq!(&content[19..23], &[0x00, 0x01, 0x00, 0x00]);
-
-        // Check options (0x7FFFFFFF)
-        assert_eq!(&content[23..27], &[0x7F, 0xFF, 0xFF, 0xFF]);
-
-        // Check compressed length (16000 = 0x3E80)
         assert_eq!(
-            &content[27..35],
-            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3E, 0x80]
+            content.len(),
+            55,
+            "Bug #638 writer: content must be exactly 55 bytes (no trailing CRC)"
         );
 
-        // Check chunk count (2)
+        // name_len = 13
+        assert_eq!(&content[0..2], &[0x00, 0x0D]);
+        // algorithm name
+        assert_eq!(&content[2..15], b"LZ4Compressor");
+        // option_count = 0
+        assert_eq!(&content[15..19], &[0x00, 0x00, 0x00, 0x00]);
+        // chunk_length = 16384 = 0x00004000
+        assert_eq!(&content[19..23], &[0x00, 0x00, 0x40, 0x00]);
+        // max_compressed_length = i32::MAX = 0x7FFFFFFF
+        assert_eq!(&content[23..27], &[0x7F, 0xFF, 0xFF, 0xFF]);
+        // data_length = 32768 = 0x0000000000008000
+        assert_eq!(
+            &content[27..35],
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00]
+        );
+        // chunk_count = 2
         assert_eq!(&content[35..39], &[0x00, 0x00, 0x00, 0x02]);
-
-        // Check first offset (0)
+        // offset[0] = 0
         assert_eq!(
             &content[39..47],
             &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
-
-        // Check second offset (8192 = 0x2000)
+        // offset[1] = 8200 = 0x0000000000002008
         assert_eq!(
             &content[47..55],
-            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00]
+            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x08]
         );
     }
 
     #[test]
-    fn test_compression_info_writer_with_crcs() {
-        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Snappy, 16384);
-        metadata.add_chunk(0, Some(0x11223344));
-        metadata.add_chunk(4096, Some(0x55667788));
-        metadata.set_compressed_length(8000);
+    fn test_build_content_with_options() {
+        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 16384);
+        metadata.option_pairs = vec![("compression_level".to_string(), "9".to_string())];
+        metadata.add_chunk(0);
+        metadata.set_data_length(16384);
 
         let writer = CompressionInfoWriter::new(PathBuf::from("/tmp/test"));
         let content = writer.build_content(&metadata).unwrap();
 
-        // With CRCs: content should be longer
-        // 2 + 16 (SnappyCompressor) + 4 + 4 + 4 + 8 + 4 + 16 + 8 = 66 bytes
-        assert_eq!(content.len(), 66);
+        // option_count at offset 15 should be 1
+        let option_count = u32::from_be_bytes([content[15], content[16], content[17], content[18]]);
+        assert_eq!(option_count, 1, "option_count must be 1");
 
-        // Check CRCs at end
-        // First CRC: 0x11223344
-        assert_eq!(&content[58..62], &[0x11, 0x22, 0x33, 0x44]);
-        // Second CRC: 0x55667788
-        assert_eq!(&content[62..66], &[0x55, 0x66, 0x77, 0x88]);
+        // Parse the option key at offset 19
+        let key_len = u16::from_be_bytes([content[19], content[20]]) as usize;
+        let key = std::str::from_utf8(&content[21..21 + key_len]).unwrap();
+        assert_eq!(key, "compression_level");
+    }
+
+    /// Verify round-trip: writer produces output that the reader can parse back.
+    #[test]
+    fn test_writer_reader_round_trip() {
+        use crate::storage::sstable::compression_info::CompressionInfo;
+
+        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Snappy, 16384);
+        metadata.add_chunk(0);
+        metadata.add_chunk(9876);
+        metadata.set_data_length(32000);
+
+        let writer = CompressionInfoWriter::new(PathBuf::from("/tmp/test"));
+        let bytes = writer.build_to_vec(&metadata).unwrap();
+
+        let info = CompressionInfo::parse(&bytes)
+            .expect("Writer output must be parseable by CompressionInfo::parse");
+
+        assert_eq!(info.algorithm, "SnappyCompressor");
+        assert_eq!(info.chunk_length, 16384);
+        assert_eq!(info.max_compressed_length, i32::MAX as u32);
+        assert_eq!(info.data_length, 32000);
+        assert_eq!(info.chunk_offsets, vec![0, 9876]);
+        assert!(info.option_pairs.is_empty());
     }
 
     #[test]
@@ -419,9 +438,9 @@ mod tests {
         let temp_dir = TempDir::new().unwrap();
         let path = temp_dir.path().join("nb-1-big-CompressionInfo.db");
 
-        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 65536);
-        metadata.add_chunk(0, Some(0xDEADBEEF));
-        metadata.set_compressed_length(32768);
+        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 16384);
+        metadata.add_chunk(0);
+        metadata.set_data_length(16384);
 
         let writer = CompressionInfoWriter::new(path.clone());
         writer.write(&metadata).unwrap();
@@ -429,69 +448,11 @@ mod tests {
         // Verify file was created
         assert!(path.exists());
 
-        // Read and verify content
+        // Verify the file is parseable
         let bytes = std::fs::read(&path).unwrap();
-
-        // Should have content + 4-byte CRC
-        assert!(bytes.len() > 4);
-
-        // Verify CRC32 is valid
-        let content_len = bytes.len() - 4;
-        let stored_crc = u32::from_be_bytes([
-            bytes[content_len],
-            bytes[content_len + 1],
-            bytes[content_len + 2],
-            bytes[content_len + 3],
-        ]);
-
-        let mut hasher = Hasher::new();
-        hasher.update(&bytes[..content_len]);
-        let computed_crc = hasher.finalize();
-
-        assert_eq!(stored_crc, computed_crc, "CRC mismatch");
-    }
-
-    #[test]
-    fn test_compression_info_writer_build_to_vec() {
-        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Deflate, 32768);
-        metadata.add_chunk(0, None);
-        metadata.set_compressed_length(16384);
-
-        let writer = CompressionInfoWriter::new(PathBuf::from("/tmp/test"));
-        let bytes = writer.build_to_vec(&metadata).unwrap();
-
-        // Verify CRC is appended
-        assert!(bytes.len() > 4);
-
-        // Verify CRC is correct
-        let content_len = bytes.len() - 4;
-        let stored_crc = u32::from_be_bytes([
-            bytes[content_len],
-            bytes[content_len + 1],
-            bytes[content_len + 2],
-            bytes[content_len + 3],
-        ]);
-
-        let mut hasher = Hasher::new();
-        hasher.update(&bytes[..content_len]);
-        let computed_crc = hasher.finalize();
-
-        assert_eq!(stored_crc, computed_crc);
-    }
-
-    #[test]
-    fn test_compression_metadata_crc_count_mismatch() {
-        let mut metadata = CompressionMetadata::new(CompressionAlgorithm::Lz4, 65536);
-        metadata.add_chunk(0, Some(0x11111111));
-        metadata.add_chunk(8192, None); // No CRC for this chunk
-
-        // CRC count (1) doesn't match chunk count (2)
-        // This happens because add_chunk only pushes CRC if Some
-
-        let writer = CompressionInfoWriter::new(PathBuf::from("/tmp/test"));
-        let result = writer.build_content(&metadata);
-
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("CRC count"));
+        let info = crate::storage::sstable::compression_info::CompressionInfo::parse(&bytes)
+            .expect("Written file must be parseable");
+        assert_eq!(info.algorithm, "LZ4Compressor");
+        assert_eq!(info.chunk_length, 16384);
     }
 }

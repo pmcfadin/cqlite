@@ -17,17 +17,19 @@ pub struct ChunkDecompressor {
     chunk_cache: HashMap<usize, Vec<u8>>,
     /// Maximum number of chunks to cache
     max_cached_chunks: usize,
-    /// Cassandra version for format detection
-    cassandra_version: CassandraVersion,
     /// Data file path for error reporting
     data_file_path: Option<String>,
 }
 
 impl ChunkDecompressor {
-    /// Create a new chunk decompressor with compression metadata and format detection
+    /// Create a new chunk decompressor with compression metadata.
+    ///
+    /// The `cassandra_version` parameter is accepted for API compatibility but is no longer
+    /// used: the NB format (all Cassandra 5.0 files) always has inline CRC32 in Data.db
+    /// regardless of version, which is handled deterministically in decompress_chunk().
     pub fn new(
         compression_info: CompressionInfo,
-        cassandra_version: CassandraVersion,
+        _cassandra_version: CassandraVersion,
     ) -> Result<Self> {
         compression_info.validate()?;
 
@@ -35,15 +37,16 @@ impl ChunkDecompressor {
             compression_info,
             chunk_cache: HashMap::new(),
             max_cached_chunks: 16, // Cache up to 16 chunks (16 * 16KB = 256KB max memory)
-            cassandra_version,
             data_file_path: None,
         })
     }
 
-    /// Create a new chunk decompressor with file path for enhanced error reporting
+    /// Create a new chunk decompressor with file path for enhanced error reporting.
+    ///
+    /// See `new()` for notes on `cassandra_version`.
     pub fn new_with_path(
         compression_info: CompressionInfo,
-        cassandra_version: CassandraVersion,
+        _cassandra_version: CassandraVersion,
         data_file_path: String,
     ) -> Result<Self> {
         compression_info.validate()?;
@@ -52,7 +55,6 @@ impl ChunkDecompressor {
             compression_info,
             chunk_cache: HashMap::new(),
             max_cached_chunks: 16,
-            cassandra_version,
             data_file_path: Some(data_file_path),
         })
     }
@@ -132,62 +134,81 @@ impl ChunkDecompressor {
         reader: &mut R,
         chunk_index: usize,
     ) -> Result<Vec<u8>> {
-        // Get compressed chunk offset and size
+        // Get compressed chunk offset
         let compressed_offset = self
             .compression_info
             .compressed_chunk_offset(chunk_index)
             .ok_or_else(|| Error::InvalidFormat(format!("No offset for chunk {}", chunk_index)))?;
 
-        // Determine chunk size by finding the file size
+        // Determine record size (compressed payload + 4-byte inline CRC) using file size
         let current_pos = reader.stream_position().map_err(Error::Io)?;
-
         let file_size = reader.seek(SeekFrom::End(0)).map_err(Error::Io)?;
-
         reader
             .seek(SeekFrom::Start(current_pos))
             .map_err(Error::Io)?;
 
-        let compressed_size = self
+        // compressed_chunk_size returns the full record delta including the 4-byte inline CRC.
+        // CompressedSequentialWriter.java:203: chunkOffset += compressedLength + 4
+        let record_size = self
             .compression_info
             .compressed_chunk_size(chunk_index, file_size)
             .ok_or_else(|| {
                 Error::InvalidFormat(format!("Cannot determine size for chunk {}", chunk_index))
-            })? as usize;
+            })?;
 
-        // Seek to compressed chunk offset
+        // Bug #639 fix: subtract the 4-byte inline CRC from the delta.
+        // The old code passed all (delta) bytes to the decompressor, which included the
+        // trailing CRC and caused decompression failures on well-formed chunks.
+        if record_size < 4 {
+            return Err(Error::InvalidFormat(format!(
+                "Chunk {} record size {} is too small (minimum 4 bytes for inline CRC)",
+                chunk_index, record_size
+            )));
+        }
+        let compressed_len = (record_size - 4) as usize;
+
+        // Seek to compressed chunk offset and read compressed payload only
         reader
             .seek(SeekFrom::Start(compressed_offset))
             .map_err(Error::Io)?;
 
-        // Read compressed chunk data
-        let mut compressed_data = vec![0u8; compressed_size];
+        let mut compressed_data = vec![0u8; compressed_len];
         reader.read_exact(&mut compressed_data).map_err(Error::Io)?;
 
+        // Read the 4-byte inline CRC32 (big-endian) and validate it over the compressed bytes.
+        // Authority: CompressedSequentialWriter.java:192 + read path lines 275-282.
+        let mut crc_bytes = [0u8; 4];
+        reader.read_exact(&mut crc_bytes).map_err(Error::Io)?;
+        let stored_crc = u32::from_be_bytes(crc_bytes);
+        let computed_crc = crc32fast::hash(&compressed_data);
+        if stored_crc != computed_crc {
+            let file_info = match &self.data_file_path {
+                Some(path) => format!(" in file {}", path),
+                None => String::new(),
+            };
+            return Err(Error::InvalidFormat(format!(
+                "CRC32 mismatch for chunk {} at offset 0x{:x}{}: stored=0x{:08x}, computed=0x{:08x}, compressed_len={}",
+                chunk_index, compressed_offset, file_info, stored_crc, computed_crc, compressed_len
+            )));
+        }
+
         log::debug!(
-            "Reading chunk {} at offset {} ({} bytes compressed)",
+            "Reading chunk {} at offset {} ({} bytes compressed, CRC OK)",
             chunk_index,
             compressed_offset,
-            compressed_size
+            compressed_len
         );
 
-        // For modern formats, enforce strict CRC validation
-        // Legacy formats skip CRC validation for compatibility
-        if self.cassandra_version != CassandraVersion::Legacy {
-            // Modern formats require strict CRC validation for all chunks
-            if self.compression_info.chunk_crcs.is_empty() {
-                let file_info = match &self.data_file_path {
-                    Some(path) => format!(" in file {}", path),
-                    None => String::new(),
-                };
-                return Err(Error::InvalidFormat(format!(
-                    "Modern format requires per-chunk CRCs but none found in CompressionInfo.db for chunk {} at offset 0x{:x}{}",
-                    chunk_index, compressed_offset, file_info
-                )));
-            }
-
-            // Validate CRC for the compressed chunk data
-            self.compression_info
-                .validate_chunk_crc(chunk_index, &compressed_data)?;
+        // Incompressible-chunk fallback (Bug #639):
+        // When compressedLength >= maxCompressedLength, Cassandra stored the chunk uncompressed.
+        // CompressedSequentialWriter.java:160-177: if compressedLen >= maxCompressedLen, use raw buffer.
+        let max_compressed_length = self.compression_info.max_compressed_length as usize;
+        if compressed_len >= max_compressed_length {
+            log::debug!(
+                "Chunk {} is incompressible (compressed_len={} >= max_compressed_length={}), returning raw bytes",
+                chunk_index, compressed_len, max_compressed_length
+            );
+            return Ok(compressed_data);
         }
 
         // Decompress based on algorithm
@@ -425,18 +446,10 @@ pub fn create_decompressor_from_file(
 ) -> Result<ChunkDecompressor> {
     let compression_data = std::fs::read(compression_info_path).map_err(Error::Io)?;
 
-    // Parse CompressionInfo with fallback for legacy formats
-    #[cfg(feature = "legacy-heuristics")]
-    let compression_info = CompressionInfo::parse(&compression_data)
-        .or_else(|_| CompressionInfo::parse_alternative_format(&compression_data))?;
-
-    #[cfg(not(feature = "legacy-heuristics"))]
-    let compression_info = CompressionInfo::parse(&compression_data).map_err(|parse_err| {
-        crate::error::Error::InvalidFormat(format!(
-            "Failed to parse CompressionInfo.db in standard format. Enable legacy-heuristics feature for fallback support. Original error: {}",
-            parse_err
-        ))
-    })?;
+    // Parse CompressionInfo using the deterministic Cassandra format.
+    // (Bug #638: old heuristic parse_alternative_format violated the no-heuristics mandate
+    // and has been removed.  The standard parse() is authoritative for all supported files.)
+    let compression_info = CompressionInfo::parse(&compression_data)?;
 
     log::info!("Loaded compression info:");
     log::info!("   Algorithm: {}", compression_info.algorithm);
@@ -458,8 +471,8 @@ mod tests {
             chunk_length: 16384,
             data_length: 32768,
             chunk_offsets: vec![0, 8192, 16384],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let decompressor =
@@ -476,8 +489,8 @@ mod tests {
             chunk_length: 16384,
             data_length: 16384,
             chunk_offsets: vec![0],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let mut decompressor =

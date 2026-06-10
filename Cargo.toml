@@ -27,6 +27,7 @@ tempfile = { workspace = true }
 futures = { workspace = true }
 uuid = { version = "1.6", features = ["v4"] }
 insta = "1.34"
+crc32fast = { workspace = true }
 # Required so that the integration tests in tests/ that import cqlite_tests
 # (issue #514) can compile when the root cqlite package is also a target.
 cqlite-integration-tests = { path = "tests" }

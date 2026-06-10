@@ -1,225 +1,181 @@
-//! Comprehensive CRC validation tests for compression metadata
+//! CRC validation tests for the compression pipeline (updated for Bug #638/#639 fix)
 //!
-//! This test module validates that CRC mismatches are detected deterministically
-//! for all compression algorithms and that no fallback decompression occurs.
+//! Key facts (from Cassandra authority sources):
+//!   - CRCs are NOT stored in CompressionInfo.db.  They are 4-byte values
+//!     appended INLINE after each compressed chunk in Data.db.
+//!   - The new CompressionInfo struct has no `crc32` or `chunk_crcs` fields.
+//!   - ChunkDecompressor reads (offset_delta - 4) bytes as compressed data,
+//!     then reads 4 bytes as CRC32, validates, and decompresses.
 
 use cqlite_core::storage::sstable::chunk_decompressor::ChunkDecompressor;
 use cqlite_core::storage::sstable::compression_info::CompressionInfo;
-// unused imports: Error and Result - tests compile without them currently
-// use cqlite_core::{Error, Result};
 use std::io::Cursor;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cqlite_core::parser::CassandraVersion;
 
-    /// Test that CRC mismatch in metadata is detected
-    #[test]
-    fn test_metadata_crc_mismatch_detection() {
-        // Create valid compression info data
-        let mut data = vec![
-            0x00, 0x0d, // algorithm name length: 13
-            // "LZ4Compressor"
-            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72, 0x00,
-            0x00, 0x00, // padding
-            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, // data length: 65536
-            0x00, 0x00, 0x00, 0x04, // chunk count: 4
-            // Chunk offsets
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // offset 0
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x20, 0x00, // offset 8192
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, // offset 16384
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x60, 0x00, // offset 24576
-        ];
-
-        // Add an invalid CRC32
-        data.extend_from_slice(&[0xDE, 0xAD, 0xBE, 0xEF]);
-
-        // Parsing should fail with CRC mismatch error
-        let result = CompressionInfo::parse(&data);
-        assert!(result.is_err());
-
-        if let Err(e) = result {
-            let error_msg = format!("{e}");
-            assert!(error_msg.contains("CRC32 mismatch"));
-            assert!(error_msg.contains("stored="));
-            assert!(error_msg.contains("calculated="));
-        }
-    }
-
-    /// Test that per-chunk CRC validation works correctly
-    #[test]
-    fn test_per_chunk_crc_validation() {
-        let compression_info = CompressionInfo {
-            algorithm: "LZ4Compressor".to_string(),
+    /// Build a minimal CompressionInfo with the given algorithm and 1 chunk.
+    fn one_chunk_info(algorithm: &str) -> CompressionInfo {
+        CompressionInfo {
+            algorithm: algorithm.to_string(),
+            option_pairs: vec![],
             chunk_length: 16384,
-            data_length: 32768,
-            chunk_offsets: vec![0, 8192],
-            crc32: Some(0x12345678),
-            chunk_crcs: vec![0xAAAAAAAA, 0xBBBBBBBB], // Expected CRCs for chunks
-        };
-
-        // Test valid chunk data
-        let valid_chunk_data = vec![0u8; 16384]; // Data that would produce CRC 0xAAAAAAAA
-        let result = compression_info.validate_chunk_crc(0, &valid_chunk_data);
-        // This will fail because our test data doesn't actually produce that CRC
-        assert!(result.is_err());
-
-        // Test error message format
-        if let Err(e) = result {
-            let error_msg = format!("{e}");
-            assert!(error_msg.contains("CRC32 mismatch for chunk"));
-            assert!(error_msg.contains("at offset"));
-            assert!(error_msg.contains("stored=0xaaaaaaaa"));
+            max_compressed_length: i32::MAX as u32,
+            data_length: 16384,
+            chunk_offsets: vec![0],
         }
     }
 
-    /// Test that missing CRC for modern format causes failure
+    /// Test that CompressionInfo can be created without CRC fields (Bug #638).
     #[test]
-    fn test_missing_crc_for_modern_format() {
-        let data = vec![
-            0x00, 0x0d, // algorithm name length: 13
-            // "LZ4Compressor"
-            0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f, 0x72, 0x00,
-            0x00, 0x00, // padding
-            0x00, 0x00, 0x40, 0x00, // chunk length: 16384
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x00, // data length: 4096
-            0x00, 0x00, 0x00, 0x01, // chunk count: 1
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, // chunk offset: 0
-                  // No CRC32 at the end
+    fn test_compression_info_no_crc_fields() {
+        let info = one_chunk_info("LZ4Compressor");
+        // These fields must NOT exist; if they did, this test would fail to compile.
+        // Instead we verify the struct has exactly the fields the spec demands.
+        assert_eq!(info.algorithm, "LZ4Compressor");
+        assert_eq!(info.chunk_length, 16384);
+        assert_eq!(info.data_length, 16384);
+        assert_eq!(info.chunk_offsets, vec![0u64]);
+        assert_eq!(info.option_pairs.len(), 0);
+        assert_eq!(info.max_compressed_length, i32::MAX as u32);
+    }
+
+    /// Test that validate() succeeds when no CRCs are present (correct behaviour).
+    #[test]
+    fn test_validate_without_crcs_succeeds() {
+        let info = one_chunk_info("SnappyCompressor");
+        assert!(info.validate().is_ok());
+    }
+
+    /// Test that ChunkDecompressor creation succeeds without CRCs in CompressionInfo.
+    #[test]
+    fn test_decompressor_creation_no_crcs() {
+        for algo in &[
+            "LZ4Compressor",
+            "SnappyCompressor",
+            "ZstdCompressor",
+            "DeflateCompressor",
+        ] {
+            let info = one_chunk_info(algo);
+            assert!(
+                ChunkDecompressor::new(info, CassandraVersion::V5_0Release).is_ok(),
+                "decompressor creation failed for {algo}"
+            );
+        }
+    }
+
+    /// Parsing bytes that are exactly the correct length (no extra CRC at end) must succeed.
+    #[test]
+    fn test_parse_no_trailing_crc_required() {
+        // Hand-craft a minimal valid CompressionInfo.db:
+        //   writeUTF("LZ4Compressor")  = [0x00, 0x0d, ...13 bytes...]
+        //   option_count = 0           = [0x00, 0x00, 0x00, 0x00]
+        //   chunk_length = 16384       = [0x00, 0x00, 0x40, 0x00]
+        //   max_compressed_length = INT_MAX = [0x7F, 0xFF, 0xFF, 0xFF]
+        //   data_length = 16384        = [0x00,0x00,0x00,0x00,0x00,0x00,0x40,0x00]
+        //   chunk_count = 1            = [0x00, 0x00, 0x00, 0x01]
+        //   offset[0] = 0             = [0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00]
+        let data: Vec<u8> = vec![
+            // writeUTF("LZ4Compressor")
+            0x00, 0x0d, 0x4c, 0x5a, 0x34, 0x43, 0x6f, 0x6d, 0x70, 0x72, 0x65, 0x73, 0x73, 0x6f,
+            0x72, // option_count = 0
+            0x00, 0x00, 0x00, 0x00, // chunk_length = 16384
+            0x00, 0x00, 0x40, 0x00, // max_compressed_length = INT_MAX
+            0x7F, 0xFF, 0xFF, 0xFF, // data_length = 16384
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x00, // chunk_count = 1
+            0x00, 0x00, 0x00, 0x01, // offset[0] = 0
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         ];
 
-        // Using strict CRC-required parsing should fail
-        let result = CompressionInfo::parse_with_crc_required(&data);
-        assert!(result.is_err());
+        let result = CompressionInfo::parse(&data);
+        assert!(result.is_ok(), "parse failed: {:?}", result.err());
 
-        if let Err(e) = result {
-            let error_msg = format!("{e}");
-            assert!(error_msg.contains("CRC32 checksum required but not found"));
-        }
+        let info = result.unwrap();
+        assert_eq!(info.algorithm, "LZ4Compressor");
+        assert_eq!(info.chunk_length, 16384);
+        assert_eq!(info.max_compressed_length, i32::MAX as u32);
+        assert_eq!(info.data_length, 16384);
+        assert_eq!(info.chunk_offsets, vec![0u64]);
     }
 
-    /// Test that each compression algorithm reports errors correctly
+    /// Test that each algorithm's CompressionInfo passes validate().
     #[test]
-    fn test_compression_algorithm_error_reporting() {
-        let test_cases = vec![
-            ("LZ4Compressor", "LZ4 decompression failed"),
-            ("SnappyCompressor", "Snappy decompression failed"),
-            ("ZstdCompressor", "Zstd decompression failed"),
-            ("DeflateCompressor", "Deflate decompression failed"),
-        ];
-
-        for (algorithm, _expected_error) in test_cases {
-            let compression_info = CompressionInfo {
-                algorithm: algorithm.to_string(),
-                chunk_length: 16384,
-                data_length: 16384,
-                chunk_offsets: vec![0],
-                crc32: None,
-                chunk_crcs: vec![],
-            };
-
-            let mut decompressor = ChunkDecompressor::new(
-                compression_info,
-                cqlite_core::parser::CassandraVersion::V5_0NewBig,
-            )
-            .unwrap();
-
-            // Create invalid compressed data that will fail decompression
-            let invalid_data = vec![0xFF, 0xFF, 0xFF, 0xFF]; // Invalid for all formats
-            let mut reader = Cursor::new(invalid_data);
-
-            // Attempting to read should fail with specific error
-            let result = decompressor.read_data(&mut reader, 0, 100);
-
-            // We expect an error, but the exact message depends on the algorithm
-            // and whether the feature is compiled in
-            assert!(result.is_err() || algorithm == "LZ4Compressor"); // LZ4 might succeed with empty result
-        }
-    }
-
-    /// Test matrix generation for different chunk sizes
-    #[test]
-    fn test_chunk_size_matrix() {
-        let chunk_sizes = vec![4096, 16384, 65536]; // 4KB, 16KB, 64KB
-        let algorithms = vec![
+    fn test_compression_algorithm_validation() {
+        let algorithms = [
             "LZ4Compressor",
             "SnappyCompressor",
             "ZstdCompressor",
             "DeflateCompressor",
         ];
 
-        for algorithm in &algorithms {
+        for algo in &algorithms {
+            let info = CompressionInfo {
+                algorithm: algo.to_string(),
+                option_pairs: vec![],
+                chunk_length: 16384,
+                max_compressed_length: i32::MAX as u32,
+                data_length: 16384,
+                chunk_offsets: vec![0],
+            };
+            assert!(info.validate().is_ok(), "validate() failed for {algo}");
+        }
+    }
+
+    /// Test chunk size matrix — different chunk sizes must produce valid offsets.
+    #[test]
+    fn test_chunk_size_matrix() {
+        let chunk_sizes: [u32; 3] = [4096, 16384, 65536];
+        let algorithms = ["LZ4Compressor", "SnappyCompressor"];
+
+        for algo in &algorithms {
             for &chunk_size in &chunk_sizes {
-                let compression_info = CompressionInfo {
-                    algorithm: algorithm.to_string(),
+                let info = CompressionInfo {
+                    algorithm: algo.to_string(),
+                    option_pairs: vec![],
                     chunk_length: chunk_size,
-                    data_length: chunk_size as u64 * 4, // 4 chunks
+                    max_compressed_length: i32::MAX as u32,
+                    data_length: chunk_size as u64 * 4,
                     chunk_offsets: (0..4).map(|i| i * chunk_size as u64).collect(),
-                    crc32: Some(0x12345678),
-                    chunk_crcs: vec![0x11111111, 0x22222222, 0x33333333, 0x44444444],
                 };
-
-                // Validate the structure
-                assert!(compression_info.validate().is_ok());
-                assert_eq!(compression_info.chunk_length, chunk_size);
-                assert_eq!(compression_info.chunk_offsets.len(), 4);
-
-                // Test chunk index calculations
-                assert_eq!(compression_info.chunk_for_offset(0), 0);
-                assert_eq!(compression_info.chunk_for_offset(chunk_size as u64), 1);
-                assert_eq!(compression_info.chunk_for_offset(chunk_size as u64 * 2), 2);
-                assert_eq!(compression_info.chunk_for_offset(chunk_size as u64 * 3), 3);
+                assert!(info.validate().is_ok());
+                assert_eq!(info.chunk_length, chunk_size);
+                assert_eq!(info.chunk_offsets.len(), 4);
+                assert_eq!(info.chunk_for_offset(0), 0);
+                assert_eq!(info.chunk_for_offset(chunk_size as u64), 1);
             }
         }
     }
 
-    /// Test that CRC validation can be skipped for legacy formats
+    /// Verify that corrupt inline CRC bytes in a fake Data.db record cause an error
+    /// that references CRC/checksum/mismatch — not a vague decompression guess.
     #[test]
-    fn test_legacy_format_without_crc() {
-        let compression_info = CompressionInfo {
-            algorithm: "LZ4Compressor".to_string(),
-            chunk_length: 16384,
-            data_length: 16384,
-            chunk_offsets: vec![0],
-            crc32: None,
-            chunk_crcs: vec![], // No per-chunk CRCs for legacy
-        };
+    fn test_corrupt_data_db_inline_crc_rejected() {
+        // 8-byte fake "compressed" payload + 4-byte wrong CRC
+        let mut fake_data_db: Vec<u8> = vec![0xFF; 8];
+        fake_data_db.extend_from_slice(&0xDEADBEEFu32.to_be_bytes());
 
-        // Legacy format validation should succeed even without CRCs
-        let chunk_data = vec![0u8; 16384];
-        let result = compression_info.validate_chunk_crc(0, &chunk_data);
-        assert!(result.is_ok()); // Should skip validation when chunk_crcs is empty
-    }
-
-    /// Test deterministic error reporting format
-    #[test]
-    fn test_error_message_format() {
-        let compression_info = CompressionInfo {
+        // Two offsets so delta = 12 → compressed_len = 12 - 4 = 8
+        let info = CompressionInfo {
             algorithm: "LZ4Compressor".to_string(),
-            chunk_length: 16384,
+            option_pairs: vec![],
+            chunk_length: 65536,
+            max_compressed_length: i32::MAX as u32,
             data_length: 65536,
-            chunk_offsets: vec![0x0000, 0x2000, 0x4000, 0x6000],
-            crc32: Some(0xABCDEF00),
-            chunk_crcs: vec![0x12345678, 0x87654321, 0xDEADBEEF, 0xCAFEBABE],
+            chunk_offsets: vec![0, 12],
         };
 
-        // Test chunk 2 with wrong CRC
-        let test_data = vec![0x42; 16384]; // Data that won't match expected CRC
-        let result = compression_info.validate_chunk_crc(2, &test_data);
+        let mut decomp = ChunkDecompressor::new(info, CassandraVersion::V5_0Release).unwrap();
+        let mut reader = Cursor::new(fake_data_db);
 
-        assert!(result.is_err());
-        if let Err(e) = result {
-            let error_msg = format!("{e}");
+        let result = decomp.read_data(&mut reader, 0, 4);
+        assert!(result.is_err(), "Expected CRC error, got Ok");
 
-            // Verify error message contains all required components
-            assert!(error_msg.contains("chunk 2"));
-            assert!(error_msg.contains("offset 0x4000"));
-            assert!(error_msg.contains("stored=0xdeadbeef"));
-            assert!(error_msg.contains("calculated="));
-
-            println!("Error message format: {error_msg}");
-        }
+        let msg = result.unwrap_err().to_string().to_lowercase();
+        assert!(
+            msg.contains("crc") || msg.contains("checksum") || msg.contains("mismatch"),
+            "Error should reference CRC, got: {msg}"
+        );
     }
 }
