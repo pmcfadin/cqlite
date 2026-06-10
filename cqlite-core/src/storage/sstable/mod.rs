@@ -40,6 +40,9 @@ mod key_digest_test;
 mod oa_format_compliance_test;
 #[cfg(all(test, feature = "state_machine"))]
 mod row_cell_state_machine_test;
+/// S3 verification tests for Index.db/Summary.db/BTI (epic #622, issue #625).
+#[cfg(test)]
+mod s3_verification_test;
 #[cfg(test)]
 mod schema_aware_reader_test;
 
