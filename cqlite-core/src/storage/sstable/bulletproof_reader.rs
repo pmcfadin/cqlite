@@ -90,7 +90,7 @@ impl BulletproofReader {
 
         info!(
             "Opening SSTable with bulletproof reader: format={:?}, generation={}, size={}, component={:?}, base={}",
-            info.format, info.generation, info.size, info.component, info.base_name
+            info.format, info.generation_numeric().unwrap_or(0), info.size, info.component, info.base_name
         );
 
         let mut reader = Self {
@@ -458,7 +458,7 @@ impl BulletproofReader {
                     .unwrap()
                     .as_millis() as i64,
             ),
-            generation: Some(self.info.generation),
+            generation: Some(self.info.generation_numeric().unwrap_or(0)),
             format_info: format!("oa_format:partition={}", partition_idx),
         };
 
@@ -556,7 +556,7 @@ impl BulletproofReader {
             table_id: [0; 16], // Placeholder
             keyspace: "unknown".to_string(),
             table_name: "unknown".to_string(),
-            generation: self.info.generation,
+            generation: self.info.generation_numeric().unwrap_or(0),
             compression: crate::parser::header::CompressionInfo {
                 algorithm: "NONE".to_string(),
                 chunk_size: 65536,

@@ -1363,7 +1363,9 @@ pub async fn read_sstable(
     let info = bulletproof_reader.info();
     println!(
         "📋 Detected format: {:?} (generation {}, size {})",
-        info.format, info.generation, info.size
+        info.format,
+        info.generation_numeric().unwrap_or(0),
+        info.size
     );
 
     if let Some(compression_info) = bulletproof_reader.compression_info() {
@@ -2368,7 +2370,7 @@ pub async fn validate_sstable(
 
             let info = reader.info();
             println!("   Format: {:?}", info.format);
-            println!("   Generation: {}", info.generation);
+            println!("   Generation: {}", info.generation_numeric().unwrap_or(0));
             println!("   Size: {} bytes", info.size);
 
             if let Some(compression) = reader.compression_info() {
@@ -2550,11 +2552,14 @@ pub async fn analyze_sstable(
         Ok(mut reader) => {
             let info = reader.info();
             println!("   Format: {:?}", info.format);
-            println!("   Generation: {}", info.generation);
+            println!("   Generation: {}", info.generation_numeric().unwrap_or(0));
             println!("   Size: {} bytes", info.size);
 
             analysis_results.push(format!("Format: {:?}", info.format));
-            analysis_results.push(format!("Generation: {}", info.generation));
+            analysis_results.push(format!(
+                "Generation: {}",
+                info.generation_numeric().unwrap_or(0)
+            ));
 
             if let Some(compression) = reader.compression_info() {
                 println!("   Compression: {}", compression.algorithm);
