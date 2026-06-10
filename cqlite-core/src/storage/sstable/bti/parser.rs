@@ -268,7 +268,7 @@ fn parse_bti_node(data: &[u8], offset: u64) -> BtiResult<BtiNode> {
 
             if ordinal == 6 {
                 // Sparse12: each pair of pointers packed into 3 bytes
-                let packed_len = (count * 5).div_ceil(2); // ceil(count * 12 / 8)
+                let packed_len = (count * 3).div_ceil(2); // ceil(count * 12 / 8) = ceil(count * 3 / 2)
                 let needed = pointers_start + packed_len;
                 if data.len() < needed {
                     return Err(Error::Parse(format!(
@@ -996,6 +996,104 @@ mod tests {
         v
     }
 
+    /// Sparse12 (ordinal 6): packed 12-bit pointers.
+    ///
+    /// Layout per TrieNode.java Sparse12.serialize():
+    ///   [0x60|pf] [count] [count transition bytes]
+    ///   [ceil(count*3/2) packed-pointer bytes]
+    ///
+    /// Packing: for each even/odd pair (p0, p1) → 3 bytes [p0>>4, (p0<<4)|(p1>>8), p1&0xFF].
+    /// An odd trailing pointer → 2 bytes [(pd << 4) as short big-endian].
+    ///
+    /// Total node bytes = 2 + count + ceil(count*3/2).
+    /// count=1 → 5 bytes; count=2 → 7 bytes.
+    fn sparse12_node(payload_flags: u8, pairs: &[(u8, u16)]) -> Vec<u8> {
+        let count = pairs.len();
+        let mut v = vec![0x60 | (payload_flags & 0x0F), count as u8];
+        for &(t, _) in pairs {
+            v.push(t);
+        }
+        // Pack pointers: process pairs, then trailing odd entry
+        let mut i = 0;
+        while i + 2 <= count {
+            let p0 = pairs[i].1 as u32;
+            let p1 = pairs[i + 1].1 as u32;
+            v.push((p0 >> 4) as u8);
+            v.push(((p0 << 4) | (p1 >> 8)) as u8);
+            v.push((p1 & 0xFF) as u8);
+            i += 2;
+        }
+        if i < count {
+            // Trailing odd pointer: writeShort((short)(pd << 4)) big-endian
+            let pd = pairs[i].1 as u32;
+            let s = (pd << 4) as u16;
+            v.extend_from_slice(&s.to_be_bytes());
+        }
+        v
+    }
+
+    /// Sparse24 (ordinal 8): [0x80|pf] [count] [count transition bytes] [count * 3-byte big-endian deltas]
+    fn sparse24_node(payload_flags: u8, pairs: &[(u8, u32)]) -> Vec<u8> {
+        let count = pairs.len();
+        let mut v = vec![0x80 | (payload_flags & 0x0F), count as u8];
+        for &(t, _) in pairs {
+            v.push(t);
+        }
+        for &(_, d) in pairs {
+            // 3-byte big-endian
+            v.push(((d >> 16) & 0xFF) as u8);
+            v.push(((d >> 8) & 0xFF) as u8);
+            v.push((d & 0xFF) as u8);
+        }
+        v
+    }
+
+    /// Sparse40 (ordinal 9): [0x90|pf] [count] [count transition bytes] [count * 5-byte big-endian deltas]
+    fn sparse40_node(payload_flags: u8, pairs: &[(u8, u64)]) -> Vec<u8> {
+        let count = pairs.len();
+        let mut v = vec![0x90 | (payload_flags & 0x0F), count as u8];
+        for &(t, _) in pairs {
+            v.push(t);
+        }
+        for &(_, d) in pairs {
+            // 5-byte big-endian
+            v.push(((d >> 32) & 0xFF) as u8);
+            v.push(((d >> 24) & 0xFF) as u8);
+            v.push(((d >> 16) & 0xFF) as u8);
+            v.push(((d >> 8) & 0xFF) as u8);
+            v.push((d & 0xFF) as u8);
+        }
+        v
+    }
+
+    /// Dense12 (ordinal 10): packed 12-bit pointers for a contiguous byte range.
+    ///
+    /// Layout per TrieNode.java Dense12.serialize():
+    ///   [0xA0|pf] [start_byte] [range_len - 1] [ceil(range_len*3/2) packed bytes]
+    ///
+    /// Packing matches write12Bits(): even index → [val>>4, carry=val<<4]; odd index → [carry|(val>>8), val&0xFF].
+    fn dense12_node(payload_flags: u8, start: u8, deltas: &[u16]) -> Vec<u8> {
+        let range_len = deltas.len();
+        let mut v = vec![0xA0 | (payload_flags & 0x0F), start, (range_len - 1) as u8];
+        let mut carry: u8 = 0;
+        for (i, &d) in deltas.iter().enumerate() {
+            let val = d as u32;
+            if (i & 1) == 0 {
+                v.push((val >> 4) as u8);
+                carry = (val << 4) as u8;
+            } else {
+                v.push(carry | (val >> 8) as u8);
+                v.push((val & 0xFF) as u8);
+                carry = 0;
+            }
+        }
+        // If odd number of entries, flush carry byte
+        if (range_len & 1) == 1 {
+            v.push(carry);
+        }
+        v
+    }
+
     // -----------------------------------------------------------------------
     // REGRESSION TEST — proves the pre-fix stub misbehaviour
     //
@@ -1178,6 +1276,202 @@ mod tests {
                 assert_eq!(transitions[2].child.distance, 0x100 - 0x0030);
             }
             other => panic!("Expected Sparse, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_bti_node: Sparse12 (ordinal 6) — exact-minimal size tests
+    //
+    // Per TrieNode.java Sparse12.payloadPosition:
+    //   total = position + 2 + (5*count+1)/2
+    //         = 2 + count_transition_bytes_region + ceil(count*3/2) pointer_region
+    // count=1 → 5 bytes; count=2 → 7 bytes.
+    // The old formula used (count*5).div_ceil(2) for the pointer region alone,
+    // which over-counted by `count` bytes; this was fixed to (count*3).div_ceil(2).
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_bti_node_sparse12_ordinal6_count1_exact_minimal_5_bytes() {
+        // count=1: exact-minimal node is 5 bytes.
+        // Layout: [0x60] [0x01] [transition_byte] [2-byte packed 12-bit pointer]
+        // delta = 0xABC (2748), packed as big-endian short (0xABC << 4 = 0xABC0).
+        // Parent offset = 0x1000; child = 0x1000 - 0xABC = 0x544.
+        let node_bytes = sparse12_node(0, &[(b'a', 0xABC)]);
+        assert_eq!(
+            node_bytes.len(),
+            5,
+            "Sparse12 count=1 must be exactly 5 bytes (was over-counted as 6 with old formula)"
+        );
+        let offset: u64 = 0x1000;
+        let parsed = parse_bti_node(&node_bytes, offset)
+            .expect("exact-minimal Sparse12 count=1 must parse successfully");
+        assert_eq!(parsed.node_type, BtiNodeType::Sparse);
+        match &parsed.data {
+            BtiNodeData::Sparse { transitions } => {
+                assert_eq!(transitions.len(), 1);
+                assert_eq!(transitions[0].byte, b'a');
+                assert_eq!(
+                    transitions[0].child.distance,
+                    offset - 0xABC,
+                    "child offset = parent(0x1000) - delta(0xABC) = 0x544"
+                );
+            }
+            other => panic!("Expected BtiNodeData::Sparse, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_bti_node_sparse12_ordinal6_count2_exact_minimal_7_bytes() {
+        // count=2: exact-minimal node is 7 bytes.
+        // Layout: [0x60] [0x02] [t0] [t1] [3-byte packed for two 12-bit pointers]
+        // p0=0x100 (256), p1=0x200 (512); packed: [0x10, 0x02, 0x00].
+        // Parent offset = 0x800.
+        let node_bytes = sparse12_node(0, &[(b'x', 0x100), (b'y', 0x200)]);
+        assert_eq!(
+            node_bytes.len(),
+            7,
+            "Sparse12 count=2 must be exactly 7 bytes"
+        );
+        let offset: u64 = 0x800;
+        let parsed = parse_bti_node(&node_bytes, offset)
+            .expect("exact-minimal Sparse12 count=2 must parse successfully");
+        assert_eq!(parsed.node_type, BtiNodeType::Sparse);
+        match &parsed.data {
+            BtiNodeData::Sparse { transitions } => {
+                assert_eq!(transitions.len(), 2);
+                assert_eq!(transitions[0].byte, b'x');
+                assert_eq!(transitions[0].child.distance, offset - 0x100);
+                assert_eq!(transitions[1].byte, b'y');
+                assert_eq!(transitions[1].child.distance, offset - 0x200);
+            }
+            other => panic!("Expected BtiNodeData::Sparse, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_bti_node: Sparse24 (ordinal 8) — exact-minimal size test
+    //
+    // Per TrieNode.java Sparse.payloadPosition:
+    //   total = 2 + (bytesPerPointer + 1) * count = 2 + 4*count
+    // count=1 → 6 bytes: [header][count][transition][3-byte delta]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_bti_node_sparse24_ordinal8_count1_exact_minimal_6_bytes() {
+        // delta = 0x010203 (66051)
+        let node_bytes = sparse24_node(0, &[(b'p', 0x010203)]);
+        assert_eq!(
+            node_bytes.len(),
+            6,
+            "Sparse24 count=1 must be exactly 6 bytes"
+        );
+        let offset: u64 = 0x20000;
+        let parsed = parse_bti_node(&node_bytes, offset)
+            .expect("exact-minimal Sparse24 count=1 must parse successfully");
+        assert_eq!(parsed.node_type, BtiNodeType::Sparse);
+        match &parsed.data {
+            BtiNodeData::Sparse { transitions } => {
+                assert_eq!(transitions.len(), 1);
+                assert_eq!(transitions[0].byte, b'p');
+                assert_eq!(transitions[0].child.distance, offset - 0x010203);
+            }
+            other => panic!("Expected BtiNodeData::Sparse, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_bti_node: Sparse40 (ordinal 9) — exact-minimal size test
+    //
+    // Per TrieNode.java Sparse.payloadPosition:
+    //   total = 2 + (bytesPerPointer + 1) * count = 2 + 6*count
+    // count=1 → 8 bytes: [header][count][transition][5-byte delta]
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_bti_node_sparse40_ordinal9_count1_exact_minimal_8_bytes() {
+        // delta = 0x0000_0001_0000 (65536)
+        let delta: u64 = 0x0000_0001_0000;
+        let node_bytes = sparse40_node(0, &[(b'q', delta)]);
+        assert_eq!(
+            node_bytes.len(),
+            8,
+            "Sparse40 count=1 must be exactly 8 bytes"
+        );
+        let offset: u64 = 0x0010_0000;
+        let parsed = parse_bti_node(&node_bytes, offset)
+            .expect("exact-minimal Sparse40 count=1 must parse successfully");
+        assert_eq!(parsed.node_type, BtiNodeType::Sparse);
+        match &parsed.data {
+            BtiNodeData::Sparse { transitions } => {
+                assert_eq!(transitions.len(), 1);
+                assert_eq!(transitions[0].byte, b'q');
+                assert_eq!(transitions[0].child.distance, offset - delta);
+            }
+            other => panic!("Expected BtiNodeData::Sparse, got {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // parse_bti_node: Dense12 (ordinal 10) — exact-minimal size test
+    //
+    // Per TrieNode.java Dense12.payloadPosition:
+    //   total = 3 + (range_len*3 + 1)/2 = 3 + ceil(range_len*3/2)
+    // range_len=1 → 5 bytes: [header][start][0x00][2-byte packed 12-bit pointer]
+    // range_len=2 → 6 bytes: [header][start][0x01][3-byte packed for two 12-bit values]
+    // The existing Dense12 bounds formula is correct; this test pins it.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn parse_bti_node_dense12_ordinal10_range1_exact_minimal_5_bytes() {
+        // range_len=1 (start=b'A', end=b'A'): delta=0x123 (291).
+        let node_bytes = dense12_node(0, b'A', &[0x123]);
+        assert_eq!(
+            node_bytes.len(),
+            5,
+            "Dense12 range_len=1 must be exactly 5 bytes"
+        );
+        let offset: u64 = 0x500;
+        let parsed = parse_bti_node(&node_bytes, offset)
+            .expect("exact-minimal Dense12 range=1 must parse successfully");
+        assert_eq!(parsed.node_type, BtiNodeType::Dense);
+        match &parsed.data {
+            BtiNodeData::Dense {
+                start_byte,
+                children,
+            } => {
+                assert_eq!(*start_byte, b'A');
+                assert_eq!(children.len(), 1);
+                assert_eq!(children[0].distance, offset - 0x123);
+            }
+            other => panic!("Expected BtiNodeData::Dense, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_bti_node_dense12_ordinal10_range2_exact_minimal_6_bytes() {
+        // range_len=2 (start=b'A', spans 'A' and 'B'):
+        // delta[0]=0x100, delta[1]=0x200 (0 = no-child for Dense).
+        let node_bytes = dense12_node(0, b'A', &[0x100, 0x200]);
+        assert_eq!(
+            node_bytes.len(),
+            6,
+            "Dense12 range_len=2 must be exactly 6 bytes"
+        );
+        let offset: u64 = 0x800;
+        let parsed = parse_bti_node(&node_bytes, offset)
+            .expect("exact-minimal Dense12 range=2 must parse successfully");
+        assert_eq!(parsed.node_type, BtiNodeType::Dense);
+        match &parsed.data {
+            BtiNodeData::Dense {
+                start_byte,
+                children,
+            } => {
+                assert_eq!(*start_byte, b'A');
+                assert_eq!(children.len(), 2);
+                assert_eq!(children[0].distance, offset - 0x100);
+                assert_eq!(children[1].distance, offset - 0x200);
+            }
+            other => panic!("Expected BtiNodeData::Dense, got {:?}", other),
         }
     }
 
