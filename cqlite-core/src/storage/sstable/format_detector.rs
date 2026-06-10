@@ -231,24 +231,54 @@ impl SSTableComponent {
 #[derive(Debug, Clone)]
 pub struct SSTableInfo {
     pub format: SSTableFormat,
-    pub generation: u64,
+    /// Raw SSTable identifier as a string.
+    ///
+    /// Cassandra 5.0 supports two id forms (Descriptor.java:95):
+    /// - Sequential integer: `"1"`, `"2"`, …
+    /// - UUID-based hex string: `"6aa08200a25111f0a3fef1a551383fb9"`
+    ///
+    /// This field stores the raw string so both forms round-trip correctly.
+    /// Use `generation_numeric()` when you need an integer id.
+    pub sstable_id: String,
+    /// The `<format>` name segment (`"big"` or `"bti"`).
     pub size: String,
     pub component: SSTableComponent,
     pub base_name: String,
 }
 
 impl SSTableInfo {
-    /// Parse SSTable info from file path
-    pub fn from_path(path: &Path) -> Result<Self> {
-        let detector = FormatDetector::new();
-        let format = detector.detect_from_path(path)?;
+    /// Return the sequential generation number if the id is a plain integer.
+    ///
+    /// Returns `None` for UUID-based ids.
+    pub fn generation_numeric(&self) -> Option<u64> {
+        self.sstable_id.parse::<u64>().ok()
+    }
 
+    /// Parse SSTable info from file path.
+    ///
+    /// Accepts filenames with both sequential and UUID-based SSTable ids:
+    /// - `nb-1-big-Data.db`
+    /// - `nb-6aa08200a25111f0a3fef1a551383fb9-big-Data.db`
+    ///
+    /// The format segment (`big` / `bti`) is located by scanning right-to-left
+    /// from the end of the parts list, so multi-segment UUID ids do not
+    /// interfere with detection.
+    pub fn from_path(path: &Path) -> Result<Self> {
         let filename = path
             .file_name()
             .and_then(|f| f.to_str())
             .ok_or_else(|| Error::InvalidPath(format!("Invalid SSTable filename: {:?}", path)))?;
 
-        let parts: Vec<&str> = filename.split('-').collect();
+        // Strip extension for splitting.
+        let base = if let Some(b) = filename.strip_suffix(".db") {
+            b
+        } else if let Some(b) = filename.strip_suffix(".txt") {
+            b
+        } else {
+            filename
+        };
+
+        let parts: Vec<&str> = base.split('-').collect();
         if parts.len() < 4 {
             return Err(Error::InvalidFormat(format!(
                 "Invalid SSTable filename format: {}",
@@ -256,23 +286,53 @@ impl SSTableInfo {
             )));
         }
 
-        let generation = parts[1].parse::<u64>().map_err(|_| {
-            Error::InvalidFormat(format!("Invalid generation number: {}", parts[1]))
+        let version = parts[0];
+
+        // Locate the format segment ("big"/"bti") by scanning right-to-left.
+        // Start at index 2 so we never confuse the version with the format.
+        let format_idx = parts[2..]
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(_, p)| **p == "big" || **p == "bti")
+            .map(|(i, _)| i + 2);
+
+        let format_idx = format_idx.ok_or_else(|| {
+            Error::InvalidFormat(format!(
+                "No 'big' or 'bti' format segment found in {:?}",
+                filename
+            ))
         })?;
 
-        let size = parts[2].to_string();
+        let size = parts[format_idx].to_string(); // "big" or "bti"
 
-        let component_suffix = parts[3..].join("-");
-        let component = SSTableComponent::from_filename(&format!("-{}", component_suffix))
-            .ok_or_else(|| {
-                Error::InvalidFormat(format!("Unknown component: {}", component_suffix))
-            })?;
+        // id is everything between version and format
+        let sstable_id = parts[1..format_idx].join("-");
 
-        let base_name = format!("{}-{}-{}", parts[0], parts[1], parts[2]);
+        // component is everything after format, re-joined with original extension
+        let component_base = parts[format_idx + 1..].join("-");
+        let extension = if filename.ends_with(".db") {
+            ".db"
+        } else {
+            ".txt"
+        };
+        let component_filename = format!("-{}{}", component_base, extension);
+        let component = SSTableComponent::from_filename(&component_filename).ok_or_else(|| {
+            Error::InvalidFormat(format!(
+                "Unknown SSTable component {:?} in {:?}",
+                component_base, filename
+            ))
+        })?;
+
+        // base_name is <version>-<id>-<format>  (used to build sibling filenames)
+        let base_name = format!("{}-{}-{}", version, sstable_id, size);
+
+        let detector = FormatDetector::new();
+        let format = detector.detect_from_version(version)?;
 
         Ok(SSTableInfo {
             format,
-            generation,
+            sstable_id,
             size,
             component,
             base_name,
@@ -293,7 +353,7 @@ impl Default for SSTableInfo {
     fn default() -> Self {
         Self {
             format: SSTableFormat::Unknown("unknown".to_string()),
-            generation: 0,
+            sstable_id: "0".to_string(),
             size: "unknown".to_string(),
             component: SSTableComponent::Data,
             base_name: "unknown".to_string(),
@@ -335,15 +395,67 @@ mod tests {
     }
 
     #[test]
-    fn test_sstable_info_parsing() {
+    fn test_sstable_info_parsing_sequential_id() {
         let path = PathBuf::from("nb-1-big-Data.db");
         let info = SSTableInfo::from_path(&path).unwrap();
 
         assert_eq!(info.format, SSTableFormat::V4x("nb".to_string()));
-        assert_eq!(info.generation, 1);
+        assert_eq!(info.sstable_id, "1");
+        assert_eq!(info.generation_numeric(), Some(1));
         assert_eq!(info.size, "big");
         assert_eq!(info.component, SSTableComponent::Data);
         assert_eq!(info.base_name, "nb-1-big");
+    }
+
+    /// Regression test: UUID-based SSTable ids must parse without error.
+    ///
+    /// Real Cassandra 5.0 clusters write UUID-based ids by default
+    /// (`uuid_sstable_identifiers_enabled: true`, Descriptor.java:95).
+    /// The old code called `parts[1].parse::<u64>()` which failed for hex ids.
+    #[test]
+    fn test_sstable_info_parsing_uuid_id() {
+        let path = PathBuf::from("nb-6aa08200a25111f0a3fef1a551383fb9-big-Data.db");
+        let info = SSTableInfo::from_path(&path).unwrap();
+
+        assert_eq!(info.format, SSTableFormat::V4x("nb".to_string()));
+        assert_eq!(info.sstable_id, "6aa08200a25111f0a3fef1a551383fb9");
+        assert_eq!(info.generation_numeric(), None, "UUID id is not numeric");
+        assert_eq!(info.size, "big");
+        assert_eq!(info.component, SSTableComponent::Data);
+        assert_eq!(info.base_name, "nb-6aa08200a25111f0a3fef1a551383fb9-big");
+    }
+
+    /// Regression test: oa-version UUID-id files parse correctly.
+    #[test]
+    fn test_sstable_info_parsing_oa_uuid_id() {
+        let path = PathBuf::from("oa-6aa08200a25111f0a3fef1a551383fb9-big-Data.db");
+        let info = SSTableInfo::from_path(&path).unwrap();
+        assert_eq!(info.format, SSTableFormat::V5x("oa".to_string()));
+        assert_eq!(info.sstable_id, "6aa08200a25111f0a3fef1a551383fb9");
+        assert_eq!(info.size, "big");
+    }
+
+    /// BTI da-version Data.db files parse correctly.
+    #[test]
+    fn test_sstable_info_parsing_da_bti_data() {
+        let path = PathBuf::from("da-1-bti-Data.db");
+        let info = SSTableInfo::from_path(&path).unwrap();
+        assert_eq!(info.sstable_id, "1");
+        assert_eq!(info.size, "bti");
+        assert_eq!(info.component, SSTableComponent::Data);
+    }
+
+    /// BTI Partitions.db is a BTI-specific component not in SSTableComponent enum;
+    /// from_path returns an error for unknown components.
+    #[test]
+    fn test_sstable_info_parsing_da_bti_partitions_unknown() {
+        let path = PathBuf::from("da-1-bti-Partitions.db");
+        // Partitions.db is a BTI-specific component not registered in SSTableComponent
+        let result = SSTableInfo::from_path(&path);
+        assert!(
+            result.is_err(),
+            "da-1-bti-Partitions.db should fail with unknown component"
+        );
     }
 
     #[test]

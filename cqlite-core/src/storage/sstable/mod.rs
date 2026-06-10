@@ -18,6 +18,7 @@ pub mod key_digest;
 pub mod performance_benchmarks;
 pub mod reader;
 pub mod summary_reader;
+pub mod version_gate;
 pub use reader::SSTableReader;
 pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;

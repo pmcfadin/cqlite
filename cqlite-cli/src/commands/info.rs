@@ -325,7 +325,7 @@ async fn analyze_with_bulletproof_reader(file_path: &Path) -> Result<Bulletproof
     // Get all information first to avoid borrowing conflicts
     let info = reader.info();
     let format_info = format!("{:?}", info.format);
-    let generation = info.generation as u32;
+    let generation = info.generation_numeric().unwrap_or(0) as u32;
     let detected_size = info.size.parse().unwrap_or(0);
 
     let compression_info = reader.compression_info().map(|c| CompressionInfo {
