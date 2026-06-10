@@ -240,6 +240,10 @@ where
 }
 
 /// Parse tuple value with recursive field parsing via closure
+///
+/// Cassandra tuple field lengths are encoded as 4-byte big-endian signed int32
+/// (TupleType.java uses `accessor.putInt`), with -1 meaning null.
+/// This is NOT VInt encoding.
 pub(crate) fn parse_tuple_value_with<F>(
     data: &[u8],
     field_comparators: &[ComparatorType],
@@ -248,8 +252,6 @@ pub(crate) fn parse_tuple_value_with<F>(
 where
     F: Fn(&[u8], &ComparatorType) -> Result<Value>,
 {
-    use crate::parser::vint::parse_vint_length;
-
     let mut offset = 0;
     let mut fields = Vec::new();
 
@@ -259,20 +261,42 @@ where
             break;
         }
 
-        // Parse field length
-        let (remaining, field_len) = parse_vint_length(&data[offset..])
-            .map_err(|_| Error::corruption(format!("Failed to parse tuple field {} length", i)))?;
-        offset = data.len() - remaining.len();
-
-        if field_len > remaining.len() {
+        // Parse field length as 4-byte big-endian signed int32 (Cassandra specification)
+        // -1 = null field, 0 = empty field, >0 = byte count
+        if offset + 4 > data.len() {
             return Err(Error::corruption(format!(
-                "Tuple field {} length exceeds available data",
+                "Tuple field {} length prefix truncated",
                 i
+            )));
+        }
+        let field_len_i32 =
+            i32::from_be_bytes(data[offset..offset + 4].try_into().map_err(|_| {
+                Error::corruption(format!("Tuple field {} length bytes invalid", i))
+            })?);
+        offset += 4;
+
+        if field_len_i32 == -1 {
+            // Null field
+            fields.push(Value::Null);
+            continue;
+        }
+        if field_len_i32 < 0 {
+            return Err(Error::corruption(format!(
+                "Tuple field {} has invalid negative length {}",
+                i, field_len_i32
+            )));
+        }
+        let field_len = field_len_i32 as usize;
+
+        if offset + field_len > data.len() {
+            return Err(Error::corruption(format!(
+                "Tuple field {} length {} exceeds available data",
+                i, field_len
             )));
         }
 
         // Parse field value using provided closure
-        let field_data = &remaining[..field_len];
+        let field_data = &data[offset..offset + field_len];
         let field_value = parse_element(field_data, field_comparator)?;
         fields.push(field_value);
         offset += field_len;
@@ -282,6 +306,10 @@ where
 }
 
 /// Parse UDT value with recursive field parsing via closure
+///
+/// Cassandra UDT field lengths are encoded as 4-byte big-endian signed int32
+/// (TupleType.java / UserType.java use `accessor.putInt`), with -1 meaning null.
+/// This is NOT VInt encoding.
 #[allow(dead_code)] // Used in tests; may be used by future refactoring
 pub(crate) fn parse_udt_value_with<F>(
     data: &[u8],
@@ -291,8 +319,6 @@ pub(crate) fn parse_udt_value_with<F>(
 where
     F: Fn(&[u8], &ComparatorType) -> Result<Value>,
 {
-    use crate::parser::vint::parse_vint_length;
-
     let mut offset = 0;
     let mut fields = Vec::new();
 
@@ -302,21 +328,45 @@ where
             break;
         }
 
-        // Parse field length
-        let (remaining, field_len) = parse_vint_length(&data[offset..]).map_err(|_| {
-            Error::corruption(format!("Failed to parse UDT field {} length", field_name))
-        })?;
-        offset = data.len() - remaining.len();
-
-        if field_len > remaining.len() {
+        // Parse field length as 4-byte big-endian signed int32 (Cassandra specification)
+        // -1 = null field, 0 = empty field, >0 = byte count
+        if offset + 4 > data.len() {
             return Err(Error::corruption(format!(
-                "UDT field {} length exceeds available data",
+                "UDT field {} length prefix truncated",
                 field_name
+            )));
+        }
+        let field_len_i32 =
+            i32::from_be_bytes(data[offset..offset + 4].try_into().map_err(|_| {
+                Error::corruption(format!("UDT field {} length bytes invalid", field_name))
+            })?);
+        offset += 4;
+
+        if field_len_i32 == -1 {
+            // Null field
+            fields.push(UdtField {
+                name: field_name.clone(),
+                value: None,
+            });
+            continue;
+        }
+        if field_len_i32 < 0 {
+            return Err(Error::corruption(format!(
+                "UDT field {} has invalid negative length {}",
+                field_name, field_len_i32
+            )));
+        }
+        let field_len = field_len_i32 as usize;
+
+        if offset + field_len > data.len() {
+            return Err(Error::corruption(format!(
+                "UDT field {} length {} exceeds available data",
+                field_name, field_len
             )));
         }
 
         // Parse field value using provided closure
-        let field_data = &remaining[..field_len];
+        let field_data = &data[offset..offset + field_len];
         let field_value = parse_element(field_data, field_comparator)?;
 
         fields.push(UdtField {
@@ -443,8 +493,6 @@ impl SSTableReader {
         value_data: &[u8],
         comparator: &ComparatorType,
     ) -> Result<Value> {
-        use crate::parser::vint::parse_vint_length;
-
         match comparator {
             ComparatorType::Boolean => parse_boolean_value(value_data),
             ComparatorType::TinyInt => parse_tinyint_value(value_data),
@@ -476,6 +524,7 @@ impl SSTableReader {
                 // Parse UDT fields inline with full type info (Issue #238 fix)
                 // This avoids the V5 format check in parse_udt_value() which incorrectly
                 // returns an error even when we have complete schema information.
+                // Field lengths are 4-byte big-endian signed int32 per Cassandra specification.
                 let mut offset = 0;
                 let mut fields = Vec::new();
 
@@ -483,23 +532,43 @@ impl SSTableReader {
                     if offset >= value_data.len() {
                         break;
                     }
-                    let (remaining, field_len) =
-                        parse_vint_length(&value_data[offset..]).map_err(|_| {
-                            Error::corruption(format!(
-                                "Failed to parse UDT field {} length",
-                                field_name
-                            ))
-                        })?;
-                    offset = value_data.len() - remaining.len();
-
-                    if field_len > remaining.len() {
+                    // Parse field length as 4-byte big-endian signed int32 (Cassandra spec)
+                    if offset + 4 > value_data.len() {
                         return Err(Error::corruption(format!(
-                            "UDT field {} length exceeds available data",
+                            "UDT field {} length prefix truncated",
                             field_name
                         )));
                     }
+                    let field_len_i32 = i32::from_be_bytes(
+                        value_data[offset..offset + 4].try_into().map_err(|_| {
+                            Error::corruption(format!("UDT field {} length invalid", field_name))
+                        })?,
+                    );
+                    offset += 4;
 
-                    let field_data = &remaining[..field_len];
+                    if field_len_i32 == -1 {
+                        fields.push(UdtField {
+                            name: field_name.clone(),
+                            value: None,
+                        });
+                        continue;
+                    }
+                    if field_len_i32 < 0 {
+                        return Err(Error::corruption(format!(
+                            "UDT field {} has invalid negative length {}",
+                            field_name, field_len_i32
+                        )));
+                    }
+                    let field_len = field_len_i32 as usize;
+
+                    if offset + field_len > value_data.len() {
+                        return Err(Error::corruption(format!(
+                            "UDT field {} length {} exceeds available data",
+                            field_name, field_len
+                        )));
+                    }
+
+                    let field_data = &value_data[offset..offset + field_len];
                     let field_value =
                         self.parse_value_with_comparator(field_data, field_comparator)?;
 
@@ -578,13 +647,13 @@ impl SSTableReader {
     }
 
     /// Parse UDT value using field comparators
+    ///
+    /// Cassandra UDT field lengths are 4-byte big-endian signed int32 (not VInt).
     pub(in crate::storage::sstable::reader) fn parse_udt_value(
         &self,
         value_data: &[u8],
         field_comparators: &[(String, ComparatorType)],
     ) -> Result<Value> {
-        use crate::parser::vint::parse_vint_length;
-
         let mut offset = 0;
         let mut fields = Vec::new();
 
@@ -594,29 +663,50 @@ impl SSTableReader {
                 break;
             }
 
-            // Parse field length
-            let (remaining, field_len) =
-                parse_vint_length(&value_data[offset..]).map_err(|_| {
-                    Error::corruption(format!("Failed to parse UDT field {} length", field_name))
-                })?;
-            offset = value_data.len() - remaining.len();
-
-            if field_len > remaining.len() {
+            // Parse field length as 4-byte big-endian signed int32 (Cassandra specification)
+            if offset + 4 > value_data.len() {
                 return Err(Error::corruption(format!(
-                    "UDT field {} length exceeds available data",
+                    "UDT field {} length prefix truncated",
                     field_name
+                )));
+            }
+            let field_len_i32 =
+                i32::from_be_bytes(value_data[offset..offset + 4].try_into().map_err(|_| {
+                    Error::corruption(format!("UDT field {} length invalid", field_name))
+                })?);
+            offset += 4;
+
+            if field_len_i32 == -1 {
+                fields.push(UdtField {
+                    name: field_name.clone(),
+                    value: None,
+                });
+                continue;
+            }
+            if field_len_i32 < 0 {
+                return Err(Error::corruption(format!(
+                    "UDT field {} has invalid negative length {}",
+                    field_name, field_len_i32
+                )));
+            }
+            let field_len = field_len_i32 as usize;
+
+            if offset + field_len > value_data.len() {
+                return Err(Error::corruption(format!(
+                    "UDT field {} length {} exceeds available data",
+                    field_name, field_len
                 )));
             }
 
             // Parse field value using field comparator
-            let field_data = &remaining[..field_len];
+            let field_data = &value_data[offset..offset + field_len];
             let field_value = self.parse_value_with_comparator(field_data, field_comparator)?;
+            offset += field_len;
 
             fields.push(UdtField {
                 name: field_name.clone(),
                 value: Some(field_value),
             });
-            offset += field_len;
         }
 
         // Modern formats should never use generic UDT fabrication without schema
@@ -1074,15 +1164,16 @@ mod tests {
 
     #[test]
     fn test_parse_tuple_int_text() {
+        // Cassandra tuple field lengths use 4-byte big-endian signed int32 (not VInt).
         let mut data = Vec::new();
 
-        // Field 0: int = 42
-        data.extend_from_slice(&encode_vint(4));
+        // Field 0: int = 42 (4 bytes)
+        data.extend_from_slice(&4i32.to_be_bytes()); // 4-byte length prefix
         data.extend_from_slice(&42i32.to_be_bytes());
 
-        // Field 1: text = "hello"
+        // Field 1: text = "hello" (5 bytes)
         let text = "hello";
-        data.extend_from_slice(&encode_vint(text.len() as i64));
+        data.extend_from_slice(&(text.len() as i32).to_be_bytes()); // 4-byte length prefix
         data.extend_from_slice(text.as_bytes());
 
         let field_comparators = vec![ComparatorType::Int, ComparatorType::Text];
@@ -1105,29 +1196,22 @@ mod tests {
 
     #[test]
     fn test_parse_tuple_with_null() {
-        // Note: In Cassandra tuples, null fields are represented by negative length
-        // However, parse_vint_length will reject negative values
-        // For this test, we'll test a tuple with a field that has 0-length data
+        // Cassandra uses 4-byte big-endian signed int32 for field lengths.
+        // -1 means null field.
         let mut data = Vec::new();
 
-        // Field 0: int = 42
-        data.extend_from_slice(&encode_vint(4));
+        // Field 0: int = 42 (4 bytes)
+        data.extend_from_slice(&4i32.to_be_bytes()); // length = 4
         data.extend_from_slice(&42i32.to_be_bytes());
 
-        // Field 1: empty text (0 bytes)
-        data.extend_from_slice(&encode_vint(0));
+        // Field 1: null text (-1 sentinel)
+        data.extend_from_slice(&(-1i32).to_be_bytes()); // -1 = null
 
         let field_comparators = vec![ComparatorType::Int, ComparatorType::Text];
 
         let result = parse_tuple_value_with(&data, &field_comparators, |d, comp| match comp {
             ComparatorType::Int => parse_int_value(d),
-            ComparatorType::Text => {
-                if d.is_empty() {
-                    Ok(Value::Text(String::new()))
-                } else {
-                    parse_text_value(d)
-                }
-            }
+            ComparatorType::Text => parse_text_value(d),
             _ => panic!("Unexpected comparator"),
         })
         .unwrap();
@@ -1135,7 +1219,11 @@ mod tests {
         if let Value::Tuple(fields) = result {
             assert_eq!(fields.len(), 2);
             assert_eq!(fields[0], Value::Integer(42));
-            assert_eq!(fields[1], Value::Text(String::new()));
+            assert_eq!(
+                fields[1],
+                Value::Null,
+                "null field should decode to Value::Null"
+            );
         } else {
             panic!("Expected Tuple value");
         }
@@ -1143,15 +1231,16 @@ mod tests {
 
     #[test]
     fn test_parse_udt_simple() {
+        // Cassandra UDT field lengths use 4-byte big-endian signed int32 (not VInt).
         let mut data = Vec::new();
 
-        // Field "id": int = 123
-        data.extend_from_slice(&encode_vint(4));
+        // Field "id": int = 123 (4 bytes)
+        data.extend_from_slice(&4i32.to_be_bytes()); // 4-byte length prefix
         data.extend_from_slice(&123i32.to_be_bytes());
 
-        // Field "name": text = "Alice"
+        // Field "name": text = "Alice" (5 bytes)
         let name = "Alice";
-        data.extend_from_slice(&encode_vint(name.len() as i64));
+        data.extend_from_slice(&(name.len() as i32).to_be_bytes()); // 4-byte length prefix
         data.extend_from_slice(name.as_bytes());
 
         let field_comparators = vec![
@@ -1178,20 +1267,23 @@ mod tests {
 
     #[test]
     fn test_parse_udt_with_collection() {
+        // Cassandra UDT field lengths use 4-byte big-endian signed int32 (not VInt).
+        // Note: the list *elements* still use VInt lengths (CollectionSerializer format).
         let mut data = Vec::new();
 
-        // Field "id": int = 456
-        data.extend_from_slice(&encode_vint(4));
+        // Field "id": int = 456 (4 bytes)
+        data.extend_from_slice(&4i32.to_be_bytes()); // 4-byte UDT field length prefix
         data.extend_from_slice(&456i32.to_be_bytes());
 
         // Field "tags": list<text> = ["tag1", "tag2"]
         let mut list_data = Vec::new();
-        list_data.extend_from_slice(&encode_vint(2)); // 2 elements
+        list_data.extend_from_slice(&encode_vint(2)); // 2 elements (VInt count per CollectionSerializer)
         for tag in ["tag1", "tag2"] {
-            list_data.extend_from_slice(&encode_vint(tag.len() as i64));
+            list_data.extend_from_slice(&encode_vint(tag.len() as i64)); // VInt element length
             list_data.extend_from_slice(tag.as_bytes());
         }
-        data.extend_from_slice(&encode_vint(list_data.len() as i64));
+        // UDT field length prefix = 4-byte BE i32
+        data.extend_from_slice(&(list_data.len() as i32).to_be_bytes());
         data.extend_from_slice(&list_data);
 
         let field_comparators = vec![
@@ -1286,6 +1378,135 @@ mod tests {
         let data = [0x00, 0x00, 0x00]; // Only 3 bytes instead of 4
         let result = parse_date_value(&data);
         assert!(result.is_err());
+    }
+
+    // ============================================================================
+    // S2 Type System Verification Tests (Issue #624, Epic #622)
+    // ============================================================================
+
+    /// A-07: Tuple field with length >= 128 bytes uses 4-byte BE i32, not VInt.
+    /// Before this fix, parse_vint_length would read 0x00 as length=0 for a
+    /// 4-byte field-length header like [0x00, 0x00, 0x00, 0x80], corrupting data.
+    #[test]
+    fn s2_a07_tuple_field_128_bytes_cassandra_format() {
+        // 128-byte blob field followed by int field = 99
+        let blob_data: Vec<u8> = (0u8..=127u8).collect(); // 128 bytes
+        let mut data = Vec::new();
+        // 4-byte BE i32 length = 128 = [0x00, 0x00, 0x00, 0x80]
+        data.extend_from_slice(&128i32.to_be_bytes());
+        data.extend_from_slice(&blob_data);
+        // Second field: int = 99
+        data.extend_from_slice(&4i32.to_be_bytes());
+        data.extend_from_slice(&99i32.to_be_bytes());
+
+        let field_comparators = vec![ComparatorType::Blob, ComparatorType::Int];
+        let result = parse_tuple_value_with(&data, &field_comparators, |d, comp| match comp {
+            ComparatorType::Blob => parse_blob_value(d),
+            ComparatorType::Int => parse_int_value(d),
+            _ => panic!("Unexpected comparator"),
+        })
+        .unwrap();
+
+        if let Value::Tuple(fields) = result {
+            assert_eq!(fields.len(), 2);
+            assert_eq!(
+                fields[0],
+                Value::Blob(blob_data),
+                "128-byte blob should be intact"
+            );
+            assert_eq!(
+                fields[1],
+                Value::Integer(99),
+                "int after 128-byte blob should be 99"
+            );
+        } else {
+            panic!("Expected Tuple value");
+        }
+    }
+
+    /// A-07/A-08: Tuple null field uses -1 sentinel (4-byte BE i32).
+    #[test]
+    fn s2_a08_tuple_null_field_minus_one_sentinel() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(-1i32).to_be_bytes()); // null
+        data.extend_from_slice(&4i32.to_be_bytes()); // int length
+        data.extend_from_slice(&7i32.to_be_bytes()); // int = 7
+
+        let field_comparators = vec![ComparatorType::Int, ComparatorType::Int];
+        let result =
+            parse_tuple_value_with(&data, &field_comparators, |d, _| parse_int_value(d)).unwrap();
+
+        if let Value::Tuple(fields) = result {
+            assert_eq!(fields[0], Value::Null, "first field should be null");
+            assert_eq!(fields[1], Value::Integer(7), "second field should be 7");
+        } else {
+            panic!("Expected Tuple value");
+        }
+    }
+
+    /// A-08: UDT field with length >= 128 bytes uses 4-byte BE i32, not VInt.
+    #[test]
+    fn s2_a08_udt_field_128_bytes_cassandra_format() {
+        let text_data: Vec<u8> = b"A".repeat(128);
+        let mut data = Vec::new();
+        data.extend_from_slice(&128i32.to_be_bytes()); // 4-byte BE i32 length
+        data.extend_from_slice(&text_data);
+
+        let field_comparators = vec![("data".to_string(), ComparatorType::Text)];
+        let result =
+            parse_udt_value_with(&data, &field_comparators, |d, _| parse_text_value(d)).unwrap();
+
+        assert_eq!(result.fields.len(), 1);
+        assert_eq!(
+            result.fields[0].value,
+            Some(Value::Text("A".repeat(128))),
+            "128-char text field should be intact"
+        );
+    }
+
+    /// A-08: UDT null field uses -1 sentinel (4-byte BE i32).
+    #[test]
+    fn s2_a08_udt_null_field_minus_one_sentinel() {
+        let mut data = Vec::new();
+        data.extend_from_slice(&(-1i32).to_be_bytes()); // null field
+
+        let field_comparators = vec![("x".to_string(), ComparatorType::Int)];
+        let result =
+            parse_udt_value_with(&data, &field_comparators, |d, _| parse_int_value(d)).unwrap();
+
+        assert_eq!(result.fields.len(), 1);
+        assert_eq!(
+            result.fields[0].value, None,
+            "null field should have value=None"
+        );
+    }
+
+    /// A-02: Date epoch bias - 0x80000000 on disk decodes to day 0 (1970-01-01).
+    #[test]
+    fn s2_a02_date_epoch_bias_0x80000000() {
+        let data = 0x80000000u32.to_be_bytes();
+        let result = parse_date_value(&data).unwrap();
+        assert_eq!(
+            result,
+            Value::Date(0),
+            "0x80000000 should decode to epoch day 0"
+        );
+    }
+
+    /// A-02: Date 1 day after epoch = 0x80000001 on disk.
+    #[test]
+    fn s2_a02_date_one_day_after_epoch() {
+        let data = 0x80000001u32.to_be_bytes();
+        let result = parse_date_value(&data).unwrap();
+        assert_eq!(result, Value::Date(1));
+    }
+
+    /// A-02: Date 1 day before epoch = 0x7FFFFFFF on disk.
+    #[test]
+    fn s2_a02_date_one_day_before_epoch() {
+        let data = 0x7FFFFFFFu32.to_be_bytes();
+        let result = parse_date_value(&data).unwrap();
+        assert_eq!(result, Value::Date(-1));
     }
 
     // Issue #264: Blob fallback disabled test - type-specific parsers enforce strict validation

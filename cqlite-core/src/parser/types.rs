@@ -312,28 +312,48 @@ pub fn parse_varint(input: &[u8]) -> IResult<&[u8], Value> {
     Ok((input, Value::Varint(bytes.to_vec())))
 }
 
-/// Parse decimal (scale + unscaled value)
+/// Parse decimal (scale + unscaled BigInteger bytes)
+///
+/// Cassandra SSTable format (DecimalType.java:275-278):
+///   - 4 bytes: scale as big-endian signed int32
+///   - remaining bytes: unscaled value as raw BigInteger two's-complement big-endian bytes
+///
+/// The unscaled bytes are NOT VInt-encoded; they are the raw Java BigInteger
+/// byte array written by `ByteBuffer.putInt(scale)` then `unscaledValue.toByteArray()`.
 pub fn parse_decimal(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, scale) = be_i32(input)?;
-    let (input, unscaled) = parse_vint(input)?;
-
-    // For now, convert to float (losing precision)
-    let value = (unscaled as f64) / (10.0_f64.powi(scale));
-    Ok((input, Value::Float(value)))
+    // All remaining bytes in this cell's data are the BigInteger unscaled bytes.
+    // In the SSTable cell framing, each cell value is already length-delimited by
+    // the surrounding cell header, so we consume all of `input` here.
+    let unscaled = input.to_vec();
+    Ok((
+        &input[input.len()..], // empty remaining slice
+        Value::Decimal { scale, unscaled },
+    ))
 }
 
 /// Parse duration (months, days, nanoseconds)
+///
+/// Cassandra SSTable format (DurationType.java / DurationSerializer):
+///   - months:  signed VInt (zigzag-encoded)
+///   - days:    signed VInt (zigzag-encoded)
+///   - nanos:   signed VInt (zigzag-encoded)
+///
+/// All three components are returned as-is in `Value::Duration` to preserve
+/// calendar semantics (months ≠ 30 days; days ≠ 24 hours in all time zones).
 pub fn parse_duration(input: &[u8]) -> IResult<&[u8], Value> {
     let (input, months) = parse_vint(input)?;
     let (input, days) = parse_vint(input)?;
     let (input, nanos) = parse_vint(input)?;
 
-    // Convert to total microseconds (approximate)
-    let total_micros = (months * 30 * 24 * 60 * 60 * 1_000_000)
-        + (days * 24 * 60 * 60 * 1_000_000)
-        + (nanos / 1000);
-
-    Ok((input, Value::BigInt(total_micros)))
+    Ok((
+        input,
+        Value::Duration {
+            months: months as i32,
+            days: days as i32,
+            nanos,
+        },
+    ))
 }
 
 /// Parse inet address (4 or 16 bytes)
@@ -2284,35 +2304,65 @@ mod tests {
 
     #[test]
     fn test_parse_decimal() {
-        // Decimal is: scale (i32) + unscaled value (vint)
-        // e.g., 123.45 = scale 2, unscaled 12345
-        use super::super::vint::encode_vint;
+        // Cassandra decimal: 4-byte BE i32 scale + raw BigInteger bytes (NOT VInt).
+        // e.g., 1.23 = scale 2, unscaled raw bytes = [0x7B] (= 123)
         let mut data = Vec::new();
         data.extend_from_slice(&2i32.to_be_bytes()); // scale = 2
-        data.extend_from_slice(&encode_vint(12345)); // unscaled = 12345
+        data.push(0x7B); // unscaled BigInteger bytes = 123
         let (remaining, value) = parse_decimal(&data).unwrap();
         assert!(remaining.is_empty());
-        if let Value::Float(f) = value {
-            assert!((f - 123.45).abs() < 0.001, "Expected ~123.45, got {}", f);
-        } else {
-            panic!("Expected Float value, got {:?}", value);
+        match value {
+            Value::Decimal {
+                scale,
+                ref unscaled,
+            } => {
+                assert_eq!(scale, 2, "scale should be 2");
+                assert_eq!(unscaled, &[0x7B], "unscaled should be [0x7B]=123 (= 1.23)");
+            }
+            other => panic!("Expected Decimal value, got {:?}", other),
         }
     }
 
     #[test]
     fn test_parse_decimal_negative_scale() {
-        // Negative scale means multiply by 10^|scale|
-        // e.g., scale -2, unscaled 5 = 500
-        use super::super::vint::encode_vint;
+        // scale = -2, unscaled = [0x05] = 5 → value is 500 (5 × 10^2)
         let mut data = Vec::new();
         data.extend_from_slice(&(-2i32).to_be_bytes()); // scale = -2
-        data.extend_from_slice(&encode_vint(5)); // unscaled = 5
+        data.push(0x05); // unscaled = 5
         let (remaining, value) = parse_decimal(&data).unwrap();
         assert!(remaining.is_empty());
-        if let Value::Float(f) = value {
-            assert!((f - 500.0).abs() < 0.001, "Expected ~500, got {}", f);
-        } else {
-            panic!("Expected Float value, got {:?}", value);
+        match value {
+            Value::Decimal {
+                scale,
+                ref unscaled,
+            } => {
+                assert_eq!(scale, -2, "scale should be -2");
+                assert_eq!(unscaled, &[0x05], "unscaled should be [0x05]=5");
+            }
+            other => panic!("Expected Decimal value, got {:?}", other),
+        }
+    }
+
+    /// S2 regression: decimal unscaled bytes > 127 must NOT be VInt-decoded.
+    /// If decoded as VInt, byte 0x80 would be misread (high bit set = multi-byte VInt).
+    #[test]
+    fn test_parse_decimal_large_unscaled_no_vint_misread() {
+        // scale = 0, unscaled = [0x01, 0x00] = 256 (big-endian BigInteger)
+        let mut data = Vec::new();
+        data.extend_from_slice(&0i32.to_be_bytes()); // scale = 0
+        data.push(0x01); // MSB of 256
+        data.push(0x00); // LSB of 256
+        let (remaining, value) = parse_decimal(&data).unwrap();
+        assert!(remaining.is_empty());
+        match value {
+            Value::Decimal {
+                scale,
+                ref unscaled,
+            } => {
+                assert_eq!(scale, 0);
+                assert_eq!(unscaled, &[0x01, 0x00], "unscaled [0x01,0x00] = 256");
+            }
+            other => panic!("Expected Decimal value, got {:?}", other),
         }
     }
 
@@ -2346,7 +2396,8 @@ mod tests {
 
     #[test]
     fn test_parse_duration() {
-        // Duration: months (vint) + days (vint) + nanos (vint)
+        // Duration: months (signed VInt) + days (signed VInt) + nanos (signed VInt)
+        // Returns Value::Duration { months, days, nanos } preserving calendar semantics.
         use super::super::vint::encode_vint;
         let mut data = Vec::new();
         data.extend_from_slice(&encode_vint(1)); // 1 month
@@ -2354,17 +2405,63 @@ mod tests {
         data.extend_from_slice(&encode_vint(3_600_000_000_000_i64)); // 1 hour in nanos
         let (remaining, value) = parse_duration(&data).unwrap();
         assert!(remaining.is_empty());
-        // Result is total microseconds
-        if let Value::BigInt(micros) = value {
-            // 1 month ≈ 30 days, 15 days, 1 hour
-            // = (30*24*60*60 + 15*24*60*60 + 3600) * 1_000_000 μs
-            let expected = (30 * 24 * 60 * 60 * 1_000_000_i64)
-                + (15 * 24 * 60 * 60 * 1_000_000_i64)
-                + (3_600_000_000_000_i64 / 1000);
-            assert_eq!(micros, expected);
-        } else {
-            panic!("Expected BigInt value, got {:?}", value);
+        match value {
+            Value::Duration {
+                months,
+                days,
+                nanos,
+            } => {
+                assert_eq!(months, 1, "months should be 1");
+                assert_eq!(days, 15, "days should be 15");
+                assert_eq!(
+                    nanos, 3_600_000_000_000,
+                    "nanos should be 1 hour in nanoseconds"
+                );
+            }
+            other => panic!("Expected Duration value, got {:?}", other),
         }
+    }
+
+    /// S2 regression: duration with all-zero components should produce Duration{{0,0,0}}.
+    #[test]
+    fn test_parse_duration_zero() {
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(0));
+        data.extend_from_slice(&encode_vint(0));
+        data.extend_from_slice(&encode_vint(0));
+        let (remaining, value) = parse_duration(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(
+            value,
+            Value::Duration {
+                months: 0,
+                days: 0,
+                nanos: 0
+            },
+            "zero duration should be Duration{{0,0,0}}"
+        );
+    }
+
+    /// S2 regression: duration with negative nanos (nanoseconds can be negative).
+    #[test]
+    fn test_parse_duration_negative_nanos() {
+        use super::super::vint::encode_vint;
+        let mut data = Vec::new();
+        data.extend_from_slice(&encode_vint(0));
+        data.extend_from_slice(&encode_vint(0));
+        data.extend_from_slice(&encode_vint(-1_i64));
+        let (remaining, value) = parse_duration(&data).unwrap();
+        assert!(remaining.is_empty());
+        assert_eq!(
+            value,
+            Value::Duration {
+                months: 0,
+                days: 0,
+                nanos: -1
+            },
+            "duration with -1 nanos should be Duration{{0,0,-1}}"
+        );
     }
 
     #[test]
