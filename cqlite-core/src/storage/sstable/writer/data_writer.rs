@@ -787,12 +787,19 @@ impl DataWriter {
         let mut body = Vec::new();
 
         // Write timestamp delta (if HAS_TIMESTAMP)
+        //
+        // Fix #644 (S6): Cassandra writes UNSIGNED VInt for all temporal deltas.
+        // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp)
         if (flags & ROW_HAS_TIMESTAMP) != 0 {
-            let timestamp_delta = mutation.timestamp_micros - self.stats.min_timestamp;
-            encode_signed(timestamp_delta, &mut body);
+            let timestamp_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
+            encode_unsigned(timestamp_delta, &mut body);
         }
 
         // Write TTL delta (if HAS_TTL)
+        //
+        // Fix #644 (S6): Both TTL and LDT deltas are UNSIGNED VInt.
+        // SerializationHeader.java:177: out.writeUnsignedVInt32(ttl - stats.minTTL)
+        // SerializationHeader.java:172: out.writeUnsignedVInt32(ldt - stats.minLocalDeletionTime)
         if (flags & ROW_HAS_TTL) != 0 {
             if let Some(ttl) = mutation.ttl_seconds {
                 let ttl_delta = ttl as i64 - self.stats.min_ttl as i64;
@@ -802,7 +809,7 @@ impl DataWriter {
                         ttl, self.stats.min_ttl
                     )));
                 }
-                encode_signed(ttl_delta, &mut body);
+                encode_unsigned(ttl_delta as u64, &mut body);
 
                 let local_deletion_time = self.expiring_local_deletion_time(ttl)?;
                 let ldt_delta =
@@ -821,8 +828,9 @@ impl DataWriter {
         if (flags & ROW_HAS_DELETION) != 0 {
             // Row tombstone: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
             // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
-            let ts_delta = mutation.timestamp_micros - self.stats.min_timestamp;
-            encode_signed(ts_delta, &mut body);
+            // Fix #644 (S6): both are UNSIGNED VInt.
+            let ts_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
+            encode_unsigned(ts_delta, &mut body);
 
             let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
             let ldt_delta =
@@ -949,12 +957,19 @@ impl DataWriter {
         let mut body = Vec::new();
 
         // Write timestamp delta (if HAS_TIMESTAMP)
+        //
+        // Fix #644 (S6): Cassandra writes UNSIGNED VInt for all temporal deltas.
+        // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp)
         if (flags & ROW_HAS_TIMESTAMP) != 0 {
-            let timestamp_delta = mutation.timestamp_micros - self.stats.min_timestamp;
-            encode_signed(timestamp_delta, &mut body);
+            let timestamp_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
+            encode_unsigned(timestamp_delta, &mut body);
         }
 
         // Write TTL delta (if HAS_TTL)
+        //
+        // Fix #644 (S6): Both TTL and LDT deltas are UNSIGNED VInt.
+        // SerializationHeader.java:177: out.writeUnsignedVInt32(ttl - stats.minTTL)
+        // SerializationHeader.java:172: out.writeUnsignedVInt32(ldt - stats.minLocalDeletionTime)
         if (flags & ROW_HAS_TTL) != 0 {
             if let Some(ttl) = mutation.ttl_seconds {
                 let ttl_delta = ttl as i64 - self.stats.min_ttl as i64;
@@ -964,7 +979,7 @@ impl DataWriter {
                         ttl, self.stats.min_ttl
                     )));
                 }
-                encode_signed(ttl_delta, &mut body);
+                encode_unsigned(ttl_delta as u64, &mut body);
 
                 let local_deletion_time = self.expiring_local_deletion_time(ttl)?;
                 let ldt_delta =
@@ -983,8 +998,9 @@ impl DataWriter {
         if (flags & ROW_HAS_DELETION) != 0 {
             // Row tombstone: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
             // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
-            let ts_delta = mutation.timestamp_micros - self.stats.min_timestamp;
-            encode_signed(ts_delta, &mut body);
+            // Fix #644 (S6): both are UNSIGNED VInt.
+            let ts_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
+            encode_unsigned(ts_delta, &mut body);
 
             let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
             let ldt_delta =
@@ -1276,9 +1292,10 @@ impl DataWriter {
         // Write complex deletion time: DeletionTime.LIVE
         // Cassandra canonical order: markedForDeleteAt first, then localDeletionTime
         // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
-        // markedForDeleteAt delta = Long.MIN_VALUE - stats.min_timestamp (signed VInt)
-        let ts_delta = i64::MIN.wrapping_sub(self.stats.min_timestamp);
-        encode_signed(ts_delta, buf);
+        // Fix #644 (S6): markedForDeleteAt delta is UNSIGNED VInt.
+        // DeletionTime.LIVE.markedForDeleteAt = Long.MIN_VALUE; delta wraps to large positive u64.
+        let ts_delta = i64::MIN.wrapping_sub(self.stats.min_timestamp) as u64;
+        encode_unsigned(ts_delta, buf);
         // localDeletionTime delta = Integer.MAX_VALUE - stats.min_local_deletion_time (unsigned VInt)
         let ldt_delta = i32::MAX.wrapping_sub(self.stats.min_local_deletion_time) as u32;
         encode_unsigned(ldt_delta as u64, buf);
@@ -1310,7 +1327,7 @@ impl DataWriter {
     /// Wire format: active deletion time + zero cells.
     /// Per SerializationHeader.writeDeletionTime(): timestamp first, LDT second.
     /// ```text
-    /// [marked_for_delete_at: signed VInt]   ← mutation timestamp (delta from min)
+    /// [marked_for_delete_at: unsigned VInt]  ← mutation timestamp (delta from min)
     /// [local_deletion_time: unsigned VInt]   ← seconds since epoch (delta from min)
     /// [cell_count: unsigned VInt]            ← 0 (no cells)
     /// ```
@@ -1321,9 +1338,9 @@ impl DataWriter {
     ) -> Result<()> {
         // Active deletion: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
         // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
-        // marked_for_delete_at = mutation timestamp (signed VInt delta)
-        let ts_delta = timestamp_micros - self.stats.min_timestamp;
-        encode_signed(ts_delta, buf);
+        // Fix #644 (S6): marked_for_delete_at delta is UNSIGNED VInt.
+        let ts_delta = (timestamp_micros - self.stats.min_timestamp) as u64;
+        encode_unsigned(ts_delta, buf);
 
         // local_deletion_time = mutation timestamp as seconds (unsigned VInt delta)
         let local_deletion_time = (timestamp_micros / 1_000_000) as i32;
@@ -1340,7 +1357,7 @@ impl DataWriter {
     ///
     /// When TTL is present, writes:
     /// - flags: CELL_IS_EXPIRING (0x02), NO USE_ROW_TIMESTAMP
-    /// - timestamp delta (signed VInt)
+    /// - timestamp delta (unsigned VInt; fix #644: all temporal deltas are unsigned)
     /// - local_deletion_time delta (unsigned VInt)
     /// - TTL delta (unsigned VInt)
     ///
@@ -1361,9 +1378,10 @@ impl DataWriter {
                 let flags = base_flags | CELL_IS_EXPIRING;
                 buf.push(flags);
 
-                // Timestamp delta (signed VInt, NOT USE_ROW_TIMESTAMP)
-                let timestamp_delta = timestamp_micros - self.stats.min_timestamp;
-                encode_signed(timestamp_delta, buf);
+                // Timestamp delta (UNSIGNED VInt, NOT USE_ROW_TIMESTAMP)
+                // Fix #644 (S6): SerializationHeader.java:167 uses writeUnsignedVInt.
+                let timestamp_delta = (timestamp_micros - self.stats.min_timestamp) as u64;
+                encode_unsigned(timestamp_delta, buf);
 
                 // local_deletion_time = now + ttl
                 let now_seconds = std::time::SystemTime::now()
@@ -1594,9 +1612,11 @@ impl DataWriter {
         buf.push(flags);
 
         // Timestamp (skip if USE_ROW_TIMESTAMP)
+        // Fix #644 (S6): Cell timestamp delta is UNSIGNED VInt per Cassandra
+        // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp).
         if (flags & CELL_USE_ROW_TIMESTAMP) == 0 {
-            let timestamp_delta = timestamp - self.stats.min_timestamp;
-            encode_signed(timestamp_delta, buf);
+            let timestamp_delta = (timestamp - self.stats.min_timestamp) as u64;
+            encode_unsigned(timestamp_delta, buf);
         }
 
         if (flags & CELL_HAS_EMPTY_VALUE) != 0 {
@@ -1666,8 +1686,10 @@ impl DataWriter {
         buf.push(flags);
 
         // Timestamp delta (required for expiring cells)
-        let timestamp_delta = timestamp - self.stats.min_timestamp;
-        encode_signed(timestamp_delta, buf);
+        // Fix #644 (S6): Cell timestamp delta is UNSIGNED VInt.
+        // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp)
+        let timestamp_delta = (timestamp - self.stats.min_timestamp) as u64;
+        encode_unsigned(timestamp_delta, buf);
 
         // Local deletion time delta
         let ldt_delta = (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
@@ -1787,8 +1809,10 @@ impl DataWriter {
         buf.push(flags);
 
         // Timestamp delta (VInt) - required for tombstones
-        let timestamp_delta = timestamp - self.stats.min_timestamp;
-        encode_signed(timestamp_delta, buf);
+        // Fix #644 (S6): tombstone timestamp delta is UNSIGNED VInt per Cassandra.
+        // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp)
+        let timestamp_delta = (timestamp - self.stats.min_timestamp) as u64;
+        encode_unsigned(timestamp_delta, buf);
 
         // Local deletion time delta (VUInt) - required for tombstones
         let deletion_time_delta =
@@ -1889,12 +1913,16 @@ impl DataWriter {
         }
 
         // Deletion time delta
-        let ts_delta = deletion_time - self.stats.min_timestamp;
-        encode_signed(ts_delta, &mut self.buffer);
+        // Fix #644 (S6): range tombstone bound deltas are UNSIGNED VInt per Cassandra.
+        // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp)
+        let ts_delta = (deletion_time - self.stats.min_timestamp) as u64;
+        encode_unsigned(ts_delta, &mut self.buffer);
 
-        // Local deletion time delta
-        let ldt_delta = (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
-        encode_signed(ldt_delta, &mut self.buffer);
+        // Local deletion time delta (UNSIGNED VInt)
+        // SerializationHeader.java:172: out.writeUnsignedVInt32(ldt - stats.minLocalDeletionTime)
+        let ldt_delta =
+            (local_deletion_time as i64 - self.stats.min_local_deletion_time as i64) as u64;
+        encode_unsigned(ldt_delta, &mut self.buffer);
 
         Ok(self.buffer.len() - start_len)
     }
@@ -2801,6 +2829,82 @@ mod tests {
         assert_eq!(bytes[bytes.len() - 1], END_OF_PARTITION);
     }
 
+    /// Regression test for bug #644 (S6): temporal deltas MUST use unsigned VInt.
+    ///
+    /// The writer previously used ZigZag-encoded signed VInt (`encode_signed`) for
+    /// all row-header temporal deltas (timestamp, TTL, LDT).  ZigZag maps positive
+    /// integer n → 2n, so a delta of 5000 would be encoded as 10000, which the
+    /// reader (fixed in S1, using `parse_vuint` = unsigned VInt) would decode as
+    /// 10000 — doubling every timestamp on readback.
+    ///
+    /// Per Cassandra `SerializationHeader.java:167`:
+    ///   `out.writeUnsignedVInt(timestamp - stats.minTimestamp)`
+    ///   `out.writeUnsignedVInt(ttl - stats.minTTL)`
+    ///   `out.writeUnsignedVInt(localDeletionTime - stats.minLocalDeletionTime)`
+    ///
+    /// Expected encodings (2-byte unsigned VInt, Cassandra format: leading 1-bits + data):
+    ///   unsigned VInt(5000 = 0x1388):
+    ///     extra_bytes=1, first=(0x80 | (0x1388>>8)&0x3F)=0x93, second=0x88  → [0x93, 0x88]
+    ///     ZigZag(5000)=10000 would give [0xA7, 0x10]  ← WRONG (pre-fix value)
+    ///
+    ///   unsigned VInt(3600 = 0x0E10):
+    ///     extra_bytes=1, first=(0x80 | (0x0E10>>8)&0x3F)=0x8E, second=0x10  → [0x8E, 0x10]
+    ///     ZigZag(3600)=7200 would give [0x9C, 0x20]  ← WRONG (pre-fix value)
+    #[test]
+    fn test_delta_encoding_unsigned_vint_fix_644() {
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 3_600;
+        stats.min_local_deletion_time = 0;
+
+        let writer = DataWriter::new(stats.clone());
+        let schema = create_test_schema();
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::Text("Test".to_string()),
+            }],
+            1_005_000,  // timestamp_micros; delta from min_timestamp(1_000_000) = 5_000
+            Some(7200), // ttl; delta from min_ttl(3_600) = 3_600
+        );
+
+        let row_body = writer
+            .build_row_body(&mutation, &schema, ROW_HAS_TIMESTAMP | ROW_HAS_TTL)
+            .unwrap();
+        assert!(!row_body.is_empty(), "row body must be non-empty");
+
+        // The row body for HAS_TIMESTAMP | HAS_TTL starts with:
+        //   [0..2] timestamp delta as unsigned VInt
+        //   [2..4] ttl delta as unsigned VInt
+        //   [4..]  ldt delta as unsigned VInt (time-dependent, not asserted)
+        //   ...    column bitmap, cells
+        //
+        // timestamp_delta = 5000 → unsigned VInt = [0x93, 0x88]
+        // ZigZag(5000) = 10000 → would give [0xA7, 0x10]  ← OLD/WRONG pre-fix encoding
+        assert_eq!(
+            &row_body[0..2],
+            &[0x93u8, 0x88u8],
+            "Fix #644: timestamp delta=5000 must encode as unsigned VInt [0x93, 0x88], \
+             not ZigZag [0xA7, 0x10]. Reader uses parse_vuint (unsigned), so ZigZag would \
+             double the delta on readback (5000 → decoded as 10000)."
+        );
+
+        // ttl_delta = 7200 - 3600 = 3600 → unsigned VInt = [0x8E, 0x10]
+        // ZigZag(3600) = 7200 → would give [0x9C, 0x20]  ← OLD/WRONG pre-fix encoding
+        assert_eq!(
+            &row_body[2..4],
+            &[0x8Eu8, 0x10u8],
+            "Fix #644: TTL delta=3600 must encode as unsigned VInt [0x8E, 0x10], \
+             not ZigZag [0x9C, 0x20]. This is the first of two HAS_TTL fields."
+        );
+    }
+
     #[test]
     fn test_delta_encoding() {
         let mut stats = create_test_stats();
@@ -2828,10 +2932,6 @@ mod tests {
             .build_row_body(&mutation, &schema, ROW_HAS_TIMESTAMP | ROW_HAS_TTL)
             .unwrap();
         assert!(!row_body.is_empty());
-
-        // Verify timestamp delta is encoded
-        // Delta = 5000, should be at start of row body
-        // VInt encoding of 5000 as signed: zigzag(5000) = 10000, encoded as VInt
     }
 
     #[test]
