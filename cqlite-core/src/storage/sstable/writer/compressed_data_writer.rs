@@ -232,8 +232,12 @@ pub fn create_compressor(algorithm: CompressionAlgorithm) -> Result<Box<dyn Comp
 
 /// Compressed Data.db writer
 ///
-/// Accumulates uncompressed data in chunks, compresses each chunk,
-/// and writes to the output with trailing CRC32 checksums.
+/// Accumulates uncompressed data in chunks, compresses each chunk, and writes
+/// each chunk record to the output as: [compressed_bytes][4-byte inline CRC32].
+///
+/// The CRC32 is computed over the compressed bytes and stored inline in Data.db —
+/// it is NOT stored in CompressionInfo.db. This matches Cassandra's
+/// CompressedSequentialWriter.java:192.
 pub struct CompressedDataWriter {
     /// Output buffer for compressed data
     output: Vec<u8>,
@@ -243,10 +247,10 @@ pub struct CompressedDataWriter {
     chunk_size: usize,
     /// Buffer for accumulating uncompressed data
     buffer: Vec<u8>,
-    /// Byte offset of each compressed chunk (for CompressionInfo.db)
+    /// Byte offset of each compressed-chunk record in output (for CompressionInfo.db)
     chunk_offsets: Vec<u64>,
-    /// CRC32 of each compressed chunk (for CompressionInfo.db)
-    chunk_crcs: Vec<u32>,
+    /// Total uncompressed bytes written (for CompressionInfo.db data_length)
+    uncompressed_length: u64,
     /// Current write position in output
     position: u64,
 }
@@ -268,7 +272,7 @@ impl CompressedDataWriter {
             chunk_size,
             buffer: Vec::with_capacity(chunk_size),
             chunk_offsets: Vec::new(),
-            chunk_crcs: Vec::new(),
+            uncompressed_length: 0,
             position: 0,
         }
     }
@@ -302,24 +306,26 @@ impl CompressedDataWriter {
             return Ok(());
         }
 
-        // Record chunk offset BEFORE writing
+        // Record chunk offset BEFORE writing (points to start of chunk record)
         self.chunk_offsets.push(self.position);
+        self.uncompressed_length += self.buffer.len() as u64;
 
         // Compress the buffer
         let compressed = self.compressor.compress(&self.buffer)?;
 
-        // Compute CRC32 of compressed data
+        // Compute CRC32 of compressed data — stored INLINE in Data.db after compressed bytes.
+        // Authority: CompressedSequentialWriter.java:192.
+        // This CRC is NOT written to CompressionInfo.db.
         let mut hasher = Hasher::new();
         hasher.update(&compressed);
         let crc32 = hasher.finalize();
-
-        self.chunk_crcs.push(crc32);
 
         // Write compressed data
         self.output.extend_from_slice(&compressed);
         self.position += compressed.len() as u64;
 
-        // Write CRC32 (TRAILING - after compressed data)
+        // Write CRC32 inline (TRAILING - after compressed data)
+        // CompressedSequentialWriter.java:203: chunkOffset += compressedLength + 4
         self.output.extend_from_slice(&crc32.to_be_bytes());
         self.position += 4;
 
@@ -331,7 +337,8 @@ impl CompressedDataWriter {
 
     /// Finish writing and return compression metadata
     ///
-    /// Flushes any remaining data in the buffer.
+    /// Flushes any remaining data in the buffer and builds CompressionMetadata
+    /// for writing to CompressionInfo.db.
     pub fn finish(mut self) -> Result<(Vec<u8>, CompressionMetadata)> {
         // Flush any remaining data
         self.flush_chunk()?;
@@ -340,10 +347,10 @@ impl CompressedDataWriter {
         let mut metadata =
             CompressionMetadata::new(self.compressor.algorithm(), self.chunk_size as u32);
 
-        metadata.set_compressed_length(self.position);
+        metadata.set_data_length(self.uncompressed_length);
 
-        for (offset, crc) in self.chunk_offsets.iter().zip(self.chunk_crcs.iter()) {
-            metadata.add_chunk(*offset, Some(*crc));
+        for offset in &self.chunk_offsets {
+            metadata.add_chunk(*offset);
         }
 
         Ok((self.output, metadata))

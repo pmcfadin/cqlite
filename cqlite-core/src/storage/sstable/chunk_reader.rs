@@ -213,8 +213,8 @@ mod tests {
             chunk_length: 16384,
             data_length: compressed_data.len() as u64,
             chunk_offsets: vec![0],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let cursor = Cursor::new(data);
@@ -243,8 +243,8 @@ mod tests {
             chunk_length: 16384,
             data_length: compressed_data.len() as u64,
             chunk_offsets: vec![0],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let cursor = Cursor::new(data);
@@ -280,8 +280,8 @@ mod tests {
             chunk_length: 16384,
             data_length: (chunk1_data.len() + chunk2_data.len()) as u64,
             chunk_offsets: vec![0, chunk1_size as u64],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let cursor = Cursor::new(data);
@@ -322,8 +322,8 @@ mod tests {
             chunk_length: 16384,
             data_length: total_uncompressed,
             chunk_offsets: offsets,
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let cursor = Cursor::new(data);
@@ -355,8 +355,8 @@ mod tests {
             chunk_length: 16384,
             data_length: compressed_data.len() as u64,
             chunk_offsets: vec![0],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let cursor = Cursor::new(data);
@@ -379,8 +379,8 @@ mod tests {
             chunk_length: 16384,
             data_length: 0,
             chunk_offsets: vec![0],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let cursor = Cursor::new(data.clone());
@@ -400,8 +400,8 @@ mod tests {
             chunk_length: 32768,
             data_length: 65536,
             chunk_offsets: vec![0, 16384, 32768],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         let cursor = Cursor::new(vec![]);

@@ -43,6 +43,9 @@ mod row_cell_state_machine_test;
 /// S3 verification tests for Index.db/Summary.db/BTI (epic #622, issue #625).
 #[cfg(test)]
 mod s3_verification_test;
+/// S4 verification tests for Statistics.db/CompressionInfo.db/Filter.db (epic #622, issue #626).
+#[cfg(test)]
+mod s4_verification_test;
 #[cfg(test)]
 mod schema_aware_reader_test;
 

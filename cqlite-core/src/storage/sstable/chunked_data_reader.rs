@@ -322,8 +322,8 @@ mod tests {
             chunk_length,
             data_length: (chunk_offsets.len() as u64) * (chunk_length as u64),
             chunk_offsets,
-            crc32: None,
-            chunk_crcs: vec![], // No CRC validation in basic tests
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32, // No CRC validation in basic tests
         }
     }
 
@@ -375,40 +375,39 @@ mod tests {
     // See integration tests for full validation
 
     #[test]
-    fn test_crc_validation_error() {
-        // Create CompressionInfo with CRC checksums
+    fn test_read_error_on_bad_data() {
+        // Per Bug #638 fix: per-chunk CRCs are INLINE in Data.db (CompressedSequentialWriter.java:192),
+        // not stored in CompressionInfo.db. This test verifies that reading corrupt data produces
+        // a meaningful error rather than silently returning garbage.
         let compression_info = CompressionInfo {
             algorithm: "LZ4Compressor".to_string(),
             chunk_length: 100,
             data_length: 100,
             chunk_offsets: vec![0],
-            crc32: None,
-            chunk_crcs: vec![0x12345678], // Expected CRC
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
-        // Create corrupted compressed data (LZ4 format with size prepended)
-        // LZ4 format: 4-byte little-endian uncompressed size + compressed data
-        let mut corrupted_data = Vec::new();
-        corrupted_data.extend_from_slice(&100u32.to_le_bytes()); // Uncompressed size = 100
-        corrupted_data.extend_from_slice(&[0xFF; 96]); // Corrupted compressed data
+        // Create corrupt data: valid CRC bytes but corrupt LZ4 payload.
+        // LZ4 format: [4-byte LE uncompressed size][compressed payload][4-byte CRC32]
+        let mut corrupt_data = Vec::new();
+        let fake_uncompressed_len: u32 = 100;
+        corrupt_data.extend_from_slice(&fake_uncompressed_len.to_le_bytes()); // LE size prefix
+        corrupt_data.extend_from_slice(&[0xFF; 92]); // Corrupt payload (not valid LZ4)
+        let fake_crc: u32 = crc32fast::hash(&corrupt_data);
+        corrupt_data.extend_from_slice(&fake_crc.to_be_bytes()); // Inline CRC
 
-        let cursor = Cursor::new(corrupted_data);
+        let data_len = corrupt_data.len() as u64;
+        let cursor = Cursor::new(corrupt_data);
         let compression_info_arc = Arc::new(compression_info);
 
-        let mut reader = ChunkedDataReader::new(cursor, 100, compression_info_arc)
+        let mut reader = ChunkedDataReader::new(cursor, data_len, compression_info_arc)
             .expect("Failed to create ChunkedDataReader");
 
-        // Try to read - should fail with CRC mismatch
+        // Should fail with decompression error (invalid LZ4 data), not a CRC error
         let mut buffer = vec![0u8; 100];
         let result = reader.read(&mut buffer);
-
-        assert!(result.is_err(), "Should fail due to CRC mismatch");
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("CRC") || err_msg.contains("validation"),
-            "Error should mention CRC validation: {}",
-            err_msg
-        );
+        assert!(result.is_err(), "Should fail to decompress corrupt data");
     }
 
     #[test]
@@ -419,8 +418,8 @@ mod tests {
             chunk_length: 50,
             data_length: 150, // 3 chunks
             chunk_offsets: vec![0, 50, 100],
-            crc32: None,
-            chunk_crcs: vec![],
+            option_pairs: vec![],
+            max_compressed_length: i32::MAX as u32,
         };
 
         // Create mock compressed data (simplified - would be real LZ4 in practice)

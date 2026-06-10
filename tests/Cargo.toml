@@ -47,6 +47,8 @@ regex = "1.10"
 clap = { version = "4.0", features = ["derive"] }
 chrono = { version = "0.4", features = ["serde"] }
 
+crc32fast = { workspace = true }
+
 # Additional missing dependencies for test compilation
 colored = { workspace = true }
 hex = "0.4"

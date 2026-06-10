@@ -6,6 +6,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use cqlite_core::storage::sstable::compression_info::CompressionInfo;
 use cqlite_core::storage::sstable::reader::{extract_sstable_base_name, SSTableReader};
 use cqlite_core::{Config, Platform};
 
@@ -421,5 +422,119 @@ async fn test_open_all_test_basic_tables_with_compression() {
     assert!(
         success_count > 0,
         "Expected at least some tables to open successfully"
+    );
+}
+
+/// Helper: find any nb-1-big-CompressionInfo.db under the datasets root.
+/// Prefers the sensor_data table; falls back to any match for robustness.
+fn find_compression_info_file(datasets_root: &Path) -> Option<std::path::PathBuf> {
+    // Preferred path
+    let preferred = datasets_root.join(
+        "sstables/test_timeseries/sensor_data-6c698230a25111f0a3fef1a551383fb9/nb-1-big-CompressionInfo.db",
+    );
+    if preferred.exists() {
+        return Some(preferred);
+    }
+
+    // Fallback: walk sstables directory for any CompressionInfo.db
+    let sstables_root = datasets_root.join("sstables");
+    if !sstables_root.exists() {
+        return None;
+    }
+    for keyspace_entry in std::fs::read_dir(&sstables_root)
+        .ok()?
+        .filter_map(|e| e.ok())
+    {
+        let keyspace_dir = keyspace_entry.path();
+        if !keyspace_dir.is_dir() {
+            continue;
+        }
+        for table_entry in std::fs::read_dir(&keyspace_dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+        {
+            let table_dir = table_entry.path();
+            if !table_dir.is_dir() {
+                continue;
+            }
+            for file_entry in std::fs::read_dir(&table_dir).ok()?.filter_map(|e| e.ok()) {
+                let path = file_entry.path();
+                if path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| n.ends_with("-CompressionInfo.db"))
+                    .unwrap_or(false)
+                {
+                    return Some(path);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Real-fixture integration test: parse a CompressionInfo.db file from the test
+/// dataset and validate the key fields (Issue #638 fix).
+///
+/// Asserts:
+/// - algorithm == "LZ4Compressor"
+/// - chunk_length == 16384
+/// - chunk_offsets is non-empty
+/// - chunk_offsets are strictly increasing
+#[test]
+fn test_real_fixture_compression_info_parse() {
+    let Some(datasets_root) = std::env::var("CQLITE_DATASETS_ROOT")
+        .ok()
+        .map(std::path::PathBuf::from)
+    else {
+        eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+        return;
+    };
+
+    let Some(ci_path) = find_compression_info_file(&datasets_root) else {
+        eprintln!("No CompressionInfo.db found under datasets root, skipping test");
+        return;
+    };
+
+    eprintln!("Parsing: {:?}", ci_path);
+
+    let data =
+        std::fs::read(&ci_path).unwrap_or_else(|e| panic!("Failed to read {:?}: {}", ci_path, e));
+
+    let info = CompressionInfo::parse(&data)
+        .unwrap_or_else(|e| panic!("CompressionInfo::parse failed on {:?}: {}", ci_path, e));
+
+    assert_eq!(
+        info.algorithm, "LZ4Compressor",
+        "Expected LZ4Compressor, got {:?}",
+        info.algorithm
+    );
+
+    assert_eq!(
+        info.chunk_length, 16384,
+        "Expected chunk_length == 16384, got {}",
+        info.chunk_length
+    );
+
+    assert!(
+        !info.chunk_offsets.is_empty(),
+        "chunk_offsets must be non-empty"
+    );
+
+    // Verify chunk_offsets are strictly increasing
+    for window in info.chunk_offsets.windows(2) {
+        assert!(
+            window[1] > window[0],
+            "chunk_offsets must be strictly increasing: {} >= {}",
+            window[0],
+            window[1]
+        );
+    }
+
+    eprintln!(
+        "CompressionInfo parsed OK: algorithm={}, chunk_length={}, offsets={}",
+        info.algorithm,
+        info.chunk_length,
+        info.chunk_offsets.len()
     );
 }
