@@ -59,7 +59,10 @@ use crate::{
     parser::{header::CassandraVersion, SSTableHeader, SSTableParser},
     platform::Platform,
     schema::TableSchema,
-    storage::sstable::compression_info::CompressionInfo,
+    storage::sstable::{
+        compression_info::CompressionInfo,
+        version_gate::{BigVersionGates, VersionGates},
+    },
     Config, Error, Result, RowKey, Value,
 };
 
@@ -153,10 +156,33 @@ impl SSTableReader {
             header_buffer.truncate(bytes_read);
         }
 
+        // Derive VersionGates from the SSTable filename BEFORE header parsing so
+        // parse_header_with_version_detection can receive them.  Gates are derived
+        // solely from the filename and need no file I/O, so this is safe to do here.
+        //
+        // Falls back to nb-compatible BIG gates when the filename is not a valid
+        // SSTable descriptor (e.g. paths used in unit tests).  Using nb-fallback
+        // maintains existing behaviour — the gates will not change parsing
+        // decisions until VG3 actually flips behaviour.
+        let version_gates = Arc::new(match VersionGates::from_path(path) {
+            Ok(gates) => gates,
+            Err(e) => {
+                log::debug!(
+                    "SSTableReader::open: could not derive VersionGates from {:?} ({}); \
+                     defaulting to nb-compatible BIG gates",
+                    path,
+                    e
+                );
+                VersionGates::Big(BigVersionGates::nb_fallback())
+            }
+        });
+
         let config = crate::cql::config::ParserConfig::default();
         let parser = SSTableParser::new(config)?;
-        // Parse the header using enhanced version detection - strict error propagation
-        let header = parse_header_with_version_detection(&header_buffer, path)
+        // Parse the header using enhanced version detection - strict error propagation.
+        // VersionGates are passed so VG3 can flip version-sensitive parsing decisions
+        // inside header parsing without re-deriving gates from the filename.
+        let header = parse_header_with_version_detection(&header_buffer, path, &version_gates)
             .await
             .map_err(|e| {
                 Error::corruption(format!(
@@ -329,6 +355,7 @@ impl SSTableReader {
             udt_registry: None, // Will be set when available for UDT-aware parsing
             compression_info: compression_info.map(Arc::new),
             current_chunk_index: AtomicUsize::new(0),
+            version_gates,
         })
     }
 

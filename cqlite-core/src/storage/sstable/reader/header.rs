@@ -10,6 +10,7 @@ use crate::{
         parse_sstable_header, CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader,
         SSTableStats, SUPPORTED_MAGIC_NUMBERS,
     },
+    storage::sstable::version_gate::VersionGates,
     Error, Result,
 };
 
@@ -105,9 +106,21 @@ pub(crate) fn detect_ascii_header_corruption(header: &[u8]) -> bool {
 }
 
 /// Enhanced header parsing with version detection using spec-driven approach
+///
+/// # VG1 plumbing note
+///
+/// `gates` is derived from the filename by `SSTableReader::open` BEFORE calling
+/// this function and stored on `SSTableReader::version_gates`.  Decision points
+/// within header parsing that WILL be gated in VG3 are marked with `// VG3:`
+/// comments below; they currently retain `nb`-compatible behaviour.  The
+/// parameter is accepted here so VG3 can flip those decisions without
+/// re-deriving gates from the filename and without signature surgery up the
+/// call stack.
 pub(crate) async fn parse_header_with_version_detection(
     header_buffer: &[u8],
     path: &Path,
+    // VG3: use `gates` here to flip version-sensitive header parsing decisions.
+    _gates: &VersionGates,
 ) -> Result<SSTableHeader> {
     // Validate minimum header size
     if header_buffer.len() < 8 {
@@ -121,6 +134,12 @@ pub(crate) async fn parse_header_with_version_detection(
 
     // Detect NB format (Cassandra 4.x+) from filename FIRST - these files don't have magic numbers
     // Pattern: nb-{generation}-big-{component}.db (e.g., "nb-1-big-Data.db")
+    //
+    // VG3: After VG1 plumbing is complete, replace this filename string-scan with a
+    // VersionGates query: `gates.Big(g) if !g.has_improved_min_max` (nb/oa pre-flag
+    // detection).  Currently the heuristic string check is retained for nb backward
+    // compat.  The full `VersionGates` for this path is available on `SSTableReader`
+    // after `open()` returns; see `SSTableReader::version_gates`.
     let is_nb_format = path
         .file_name()
         .and_then(|n| n.to_str())

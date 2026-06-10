@@ -153,6 +153,7 @@ async fn test_data_db_timestamp_parity() -> CqliteResult<()> {
     let (_, stats) =
         cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
             &stats_data,
+            None,
         )?;
 
     assert_eq!(
@@ -217,6 +218,7 @@ async fn test_data_db_ttl_parity() -> CqliteResult<()> {
     let stats_data = std::fs::read(&info.stats_path)?;
     let result = cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
         &stats_data,
+        None,
     );
     assert!(result.is_ok(), "Statistics.db should parse with TTL data");
 
@@ -340,6 +342,7 @@ async fn test_data_db_timestamp_delta_encoding() -> CqliteResult<()> {
     let (_, stats) =
         cqlite_core::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
             &stats_data,
+            None,
         )?;
 
     assert_eq!(

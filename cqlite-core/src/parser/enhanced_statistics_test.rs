@@ -55,8 +55,8 @@ mod tests {
                         println!();
                     }
 
-                    // Test enhanced parsing
-                    match parse_enhanced_statistics_file(&file_data) {
+                    // Test enhanced parsing (pass None for gates — tests don't need version gating)
+                    match parse_enhanced_statistics_file(&file_data, None) {
                         Ok((_, statistics)) => {
                             successful_parses += 1;
                             println!("  ✅ Successfully parsed with enhanced parser!");
@@ -351,7 +351,7 @@ mod tests {
         // (Issue #162: Minimal parser implemented for EncodingStats only)
         let insufficient_data = vec![0u8; 10]; // Not enough for full parse
         let result =
-            parse_nb_format_statistics_data(&insufficient_data, &header, &insufficient_data);
+            parse_nb_format_statistics_data(&insufficient_data, &header, &insufficient_data, None);
         assert!(
             result.is_err(),
             "Statistics data extraction should fail with insufficient data"
@@ -367,7 +367,7 @@ mod tests {
     fn test_parser_fallback() {
         // Test with invalid data that should fail both parsers
         let invalid_data = vec![0xFF; 10];
-        let result = parse_statistics_with_fallback(&invalid_data);
+        let result = parse_statistics_with_fallback(&invalid_data, None);
         assert!(result.is_err(), "Invalid data should fail to parse");
 
         // Test with valid header - should now fail since parsing is deferred to M2
@@ -382,7 +382,7 @@ mod tests {
             0x00, 0x00, 0x14, 0xd4, // checksum = 5332
         ];
 
-        let result = parse_statistics_with_fallback(&minimal_data);
+        let result = parse_statistics_with_fallback(&minimal_data, None);
         assert!(
             result.is_err(),
             "Valid header should fail since statistics parsing is deferred to M2"

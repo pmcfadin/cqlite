@@ -373,6 +373,39 @@ impl BigVersionGates {
     pub fn is_cassandra5_native(&self) -> bool {
         self.version == "oa"
     }
+
+    /// Infallible constructor returning gates for the `nb` version (stock Cassandra 5.0
+    /// `storage_compatibility_mode = CASSANDRA_4`).
+    ///
+    /// Use this instead of `from_version("nb").expect(…)` in library code, which
+    /// violates the project's no-`expect` mandate.  The field values are the literal
+    /// results of evaluating `from_version("nb")`; a unit test in this module keeps
+    /// them in sync with `from_version`.
+    ///
+    /// VG3 fall-back: when the SSTable filename cannot be parsed the reader defaults
+    /// to these gates so existing behaviour is preserved.
+    pub fn nb_fallback() -> Self {
+        Self {
+            version: "nb".to_string(),
+            // Gates matching BigFormat.java for version "nb" ----------------
+            has_commit_log_lower_bound: true, // "nb" >= "mb"
+            has_commit_log_intervals: true,   // "nb" >= "mc"
+            has_accurate_min_max: true,       // "nb" in n[a-z]
+            has_legacy_min_max: true,         // "nb" in n[a-z]
+            has_originating_host_id: true,    // "nb" >= "nb"
+            has_max_compressed_length: true,  // "nb" >= "na"
+            has_pending_repair: true,         // "nb" >= "na"
+            has_is_transient: true,           // "nb" >= "na"
+            has_metadata_checksum: true,      // "nb" >= "na"
+            has_old_bf_format: false,         // "nb" NOT < "na"
+            // oa-only gates — all FALSE for nb
+            has_improved_min_max: false,
+            has_partition_level_deletion_presence_marker: false,
+            has_key_range: false,
+            has_uint_deletion_time: false,
+            has_token_space_coverage: false,
+        }
+    }
 }
 
 /// Feature gates for a BTI-format SSTable.
@@ -394,6 +427,20 @@ pub struct BtiVersionGates {
     /// `hasOldBfFormat` is **FALSE** for BTI (BtiFormat.java:357-360).
     pub has_old_bf_format: bool,
     pub has_originating_host_id: bool,
+    /// `hasAccurateMinMax` — **TRUE** for BTI `da`.
+    ///
+    /// Source: BtiFormat.java:363-366
+    /// ```java
+    /// public boolean hasAccurateMinMax() { return true; }
+    /// ```
+    pub has_accurate_min_max: bool,
+    /// `hasLegacyMinMax` — **FALSE** for BTI `da`.
+    ///
+    /// Source: BtiFormat.java:368-371
+    /// ```java
+    /// public boolean hasLegacyMinMax() { return false; }
+    /// ```
+    pub has_legacy_min_max: bool,
     pub has_improved_min_max: bool,
     pub has_token_space_coverage: bool,
     pub has_partition_level_deletion_presence_marker: bool,
@@ -422,8 +469,12 @@ impl BtiVersionGates {
             has_pending_repair: true,
             has_is_transient: true,
             has_metadata_checksum: true,
-            has_old_bf_format: false, // Always false for BTI
+            has_old_bf_format: false, // Always false for BTI (BtiFormat.java:357-360)
             has_originating_host_id: true,
+            // BtiFormat.java:363-366: `public boolean hasAccurateMinMax() { return true; }`
+            has_accurate_min_max: true,
+            // BtiFormat.java:368-371: `public boolean hasLegacyMinMax() { return false; }`
+            has_legacy_min_max: false,
             has_improved_min_max: true,
             has_token_space_coverage: true,
             has_partition_level_deletion_presence_marker: true,
@@ -799,6 +850,60 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // BigVersionGates::nb_fallback — must match from_version("nb") exactly
+    // -----------------------------------------------------------------------
+
+    /// Verify that `BigVersionGates::nb_fallback()` produces the same gate
+    /// values as `BigVersionGates::from_version("nb")`.  This test is the
+    /// automated guard that keeps the two in sync.
+    #[test]
+    fn test_nb_fallback_matches_from_version() {
+        let from_fn = BigVersionGates::from_version("nb").unwrap();
+        let fallback = BigVersionGates::nb_fallback();
+
+        assert_eq!(fallback.version, from_fn.version);
+        assert_eq!(
+            fallback.has_commit_log_lower_bound,
+            from_fn.has_commit_log_lower_bound
+        );
+        assert_eq!(
+            fallback.has_commit_log_intervals,
+            from_fn.has_commit_log_intervals
+        );
+        assert_eq!(fallback.has_accurate_min_max, from_fn.has_accurate_min_max);
+        assert_eq!(fallback.has_legacy_min_max, from_fn.has_legacy_min_max);
+        assert_eq!(
+            fallback.has_originating_host_id,
+            from_fn.has_originating_host_id
+        );
+        assert_eq!(
+            fallback.has_max_compressed_length,
+            from_fn.has_max_compressed_length
+        );
+        assert_eq!(fallback.has_pending_repair, from_fn.has_pending_repair);
+        assert_eq!(fallback.has_is_transient, from_fn.has_is_transient);
+        assert_eq!(
+            fallback.has_metadata_checksum,
+            from_fn.has_metadata_checksum
+        );
+        assert_eq!(fallback.has_old_bf_format, from_fn.has_old_bf_format);
+        assert_eq!(fallback.has_improved_min_max, from_fn.has_improved_min_max);
+        assert_eq!(
+            fallback.has_partition_level_deletion_presence_marker,
+            from_fn.has_partition_level_deletion_presence_marker
+        );
+        assert_eq!(fallback.has_key_range, from_fn.has_key_range);
+        assert_eq!(
+            fallback.has_uint_deletion_time,
+            from_fn.has_uint_deletion_time
+        );
+        assert_eq!(
+            fallback.has_token_space_coverage,
+            from_fn.has_token_space_coverage
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // BigVersionGates: invalid input
     // -----------------------------------------------------------------------
 
@@ -825,6 +930,16 @@ mod tests {
         assert!(g.has_metadata_checksum);
         assert!(!g.has_old_bf_format, "da: !hasOldBfFormat");
         assert!(g.has_originating_host_id);
+        // BtiFormat.java:363-366: hasAccurateMinMax() → true
+        assert!(
+            g.has_accurate_min_max,
+            "da: hasAccurateMinMax (BtiFormat.java:363)"
+        );
+        // BtiFormat.java:368-371: hasLegacyMinMax() → false
+        assert!(
+            !g.has_legacy_min_max,
+            "da: !hasLegacyMinMax (BtiFormat.java:368)"
+        );
         assert!(g.has_improved_min_max);
         assert!(g.has_token_space_coverage);
         assert!(g.has_partition_level_deletion_presence_marker);
@@ -979,6 +1094,9 @@ mod tests {
                 );
                 assert!(!g.has_old_bf_format, "da: !hasOldBfFormat");
                 assert!(g.has_originating_host_id, "da: hasOriginatingHostId");
+                // BtiFormat.java:363-371
+                assert!(g.has_accurate_min_max, "da: hasAccurateMinMax");
+                assert!(!g.has_legacy_min_max, "da: !hasLegacyMinMax");
             }
             VersionGates::Big(_) => panic!("Expected Bti gates for da-2-bti-Data.db"),
         }

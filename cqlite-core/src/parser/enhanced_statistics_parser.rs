@@ -39,6 +39,7 @@
 use super::statistics::*;
 use super::vint::parse_vuint;
 use crate::error::{Error, Result};
+use crate::storage::sstable::version_gate::VersionGates;
 use nom::{bytes::complete::take, number::complete::be_u32, IResult};
 
 /// Cassandra MetadataType enum ordinals (from MetadataType.java)
@@ -256,6 +257,11 @@ pub fn parse_nb_format_statistics_data(
     input: &[u8],
     header: &StatisticsHeader,
     full_input: &[u8],
+    // VG3 plumbing: gates are threaded here so version-sensitive decisions in
+    // parse_encoding_stats_vuints (e.g. has_uint_deletion_time) can be flipped
+    // without re-deriving gates from the filename.
+    // Pass `None` from callers that do not have gates (standalone tools, tests).
+    gates: Option<&VersionGates>,
 ) -> Result<(
     RowStatistics,
     TimestampStatistics,
@@ -270,7 +276,7 @@ pub fn parse_nb_format_statistics_data(
     let header_offset = parse_statistics_toc_for_header_offset(full_input);
 
     // Parse the EncodingStats section from the data following the header
-    let result = parse_minimal_encoding_stats(input, full_input, header_offset);
+    let result = parse_minimal_encoding_stats(input, full_input, header_offset, gates);
 
     match result {
         Ok((
@@ -2067,10 +2073,13 @@ fn parse_serialization_header_schema(input: &[u8]) -> IResult<&[u8], Serializati
 /// * `input` - The data starting at the STATS component
 /// * `full_input` - The complete Statistics.db content (needed for TOC-based HEADER lookup)
 /// * `header_offset` - Optional offset to SerializationHeader from TOC (Issue #216)
+/// * `gates` - Optional VersionGates for VG3 version-sensitive decoding decisions.
+///   Pass `None` from standalone tools/tests to use nb-compatible defaults.
 fn parse_minimal_encoding_stats<'a>(
     input: &'a [u8],
     full_input: &'a [u8],
     header_offset: Option<usize>,
+    gates: Option<&VersionGates>,
 ) -> IResult<&'a [u8], EncodingStatsResult> {
     // The SERIALIZATION_HEADER component (type 3) starts with EncodingStats:
     //   [vuint minTimestamp_delta] [vuint minLocalDeletionTime_delta] [vuint minTTL_delta]
@@ -2079,7 +2088,7 @@ fn parse_minimal_encoding_stats<'a>(
 
     let Some(offset) = header_offset else {
         log::debug!("No HEADER TOC offset, using fallback EncodingStats parsing");
-        return parse_encoding_stats_fallback(input);
+        return parse_encoding_stats_fallback(input, gates);
     };
 
     if offset >= full_input.len() {
@@ -2088,7 +2097,7 @@ fn parse_minimal_encoding_stats<'a>(
             offset,
             full_input.len()
         );
-        return parse_encoding_stats_fallback(input);
+        return parse_encoding_stats_fallback(input, gates);
     }
 
     let header_data = &full_input[offset..];
@@ -2100,7 +2109,7 @@ fn parse_minimal_encoding_stats<'a>(
 
     // Parse EncodingStats (3 unsigned VInts at start of SERIALIZATION_HEADER)
     let (rest, (min_timestamp, min_deletion_time, min_ttl)) =
-        parse_encoding_stats_vuints(header_data)?;
+        parse_encoding_stats_vuints(header_data, gates)?;
 
     log::debug!(
         "EncodingStats from HEADER: min_timestamp={}, min_deletion_time={}, min_ttl={:?}",
@@ -2140,7 +2149,22 @@ fn parse_minimal_encoding_stats<'a>(
 
 /// Parse 3 EncodingStats unsigned VInt deltas and convert to absolute values by adding epochs.
 /// Returns (min_timestamp, min_deletion_time, min_ttl).
-fn parse_encoding_stats_vuints(input: &[u8]) -> IResult<&[u8], (i64, i64, Option<i64>)> {
+///
+/// # VG3 plumbing note
+///
+/// The `min_deletion_time` field uses the `DELETION_TIME_EPOCH` offset for `nb` format
+/// (signed delta, seconds since epoch).  For `oa`/`da` (`has_uint_deletion_time == true`)
+/// Cassandra switches to an unsigned 32-bit representation (BigFormat.java:409,
+/// BtiFormat.java).  `gates` is already threaded here (via `parse_enhanced_statistics_file`
+/// and `parse_statistics_with_fallback`) so VG3 can flip the interpretation WITHOUT
+/// re-deriving gates from the filename and without further signature surgery.
+///
+/// When `gates` is `None` (standalone tools, tests) the nb-compatible behaviour is used.
+fn parse_encoding_stats_vuints<'a>(
+    input: &'a [u8],
+    // VG3: use `gates` to flip deletion-time interpretation for oa/da.
+    _gates: Option<&VersionGates>,
+) -> IResult<&'a [u8], (i64, i64, Option<i64>)> {
     let (rest, min_ts_delta) = parse_vuint(input)?;
     let (rest, min_ldt_delta) = parse_vuint(rest)?;
     let (rest, min_ttl_delta) = parse_vuint(rest)?;
@@ -2149,6 +2173,8 @@ fn parse_encoding_stats_vuints(input: &[u8]) -> IResult<&[u8], (i64, i64, Option
         rest,
         (
             min_ts_delta as i64 + TIMESTAMP_EPOCH,
+            // VG3: for oa/da (has_uint_deletion_time), drop DELETION_TIME_EPOCH
+            // and interpret min_ldt_delta as raw u32 seconds since Unix epoch.
             min_ldt_delta as i64 + DELETION_TIME_EPOCH,
             Some(min_ttl_delta as i64 + TTL_EPOCH),
         ),
@@ -2177,7 +2203,10 @@ fn build_column_infos(
 
 /// Fallback EncodingStats parser for when no TOC HEADER offset is available.
 /// Uses ad-hoc parsing from the data following the file header.
-fn parse_encoding_stats_fallback(input: &[u8]) -> IResult<&[u8], EncodingStatsResult> {
+fn parse_encoding_stats_fallback<'a>(
+    input: &'a [u8],
+    gates: Option<&VersionGates>,
+) -> IResult<&'a [u8], EncodingStatsResult> {
     // Skip metadata_type (u32 BE) at start of data section
     let (rest, _metadata_type) = be_u32(input)?;
 
@@ -2195,7 +2224,8 @@ fn parse_encoding_stats_fallback(input: &[u8]) -> IResult<&[u8], EncodingStatsRe
     let (rest, _metadata2) = parse_vuint(rest)?;
 
     // Parse EncodingStats fields (unsigned VInt deltas from epoch)
-    let (rest, (min_timestamp, min_deletion_time, min_ttl)) = parse_encoding_stats_vuints(rest)?;
+    let (rest, (min_timestamp, min_deletion_time, min_ttl)) =
+        parse_encoding_stats_vuints(rest, gates)?;
 
     // Fall back to marker-based header search for schema
     let (_, (partition_types, clustering_types, columns)) = parse_serialization_header(rest)?;
@@ -2225,16 +2255,25 @@ fn parse_encoding_stats_fallback(input: &[u8]) -> IResult<&[u8], EncodingStatsRe
 /// This is sufficient for V5CompressedLegacy parser which requires min_timestamp,
 /// min_local_deletion_time, and min_ttl for delta decoding baseline.
 ///
+/// # Arguments
+///
+/// * `gates` - Optional [`VersionGates`] for version-sensitive decoding decisions
+///   (VG1 plumbing).  Pass `None` from standalone tools/tests to use nb-compatible
+///   defaults; pass `Some(&gates)` from `SSTableReader` to enable VG3 gating.
+///
 /// # Returns
 ///
 /// SSTableStatistics with only header and timestamp_stats populated from real data.
-pub fn parse_enhanced_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> {
+pub fn parse_enhanced_statistics_file<'a>(
+    input: &'a [u8],
+    gates: Option<&VersionGates>,
+) -> IResult<&'a [u8], SSTableStatistics> {
     // Parse the 32-byte header
     let (remaining, header) = parse_nb_format_header(input)?;
 
     // Parse minimal statistics data (EncodingStats + SerializationHeader columns)
     // Pass full input for TOC-based HEADER offset lookup (Issue #216)
-    let result = parse_nb_format_statistics_data(remaining, &header, input);
+    let result = parse_nb_format_statistics_data(remaining, &header, input, gates);
 
     match result {
         Ok((
@@ -2286,12 +2325,21 @@ pub fn parse_enhanced_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableSta
 /// Attempts to parse nb-format Statistics.db with minimal EncodingStats extraction.
 /// This provides the minimum fields needed for delta-coded timestamp decoding.
 ///
+/// # Arguments
+///
+/// * `gates` - Optional [`VersionGates`] threaded from `SSTableReader` for VG3
+///   version-sensitive decoding.  Pass `None` from standalone tools/tests; the
+///   nb-compatible behaviour is used when `gates` is `None`.
+///
 /// # Returns
 ///
 /// SSTableStatistics with minimal fields populated, or error if parsing fails.
-pub fn parse_statistics_with_fallback(input: &[u8]) -> IResult<&[u8], SSTableStatistics> {
+pub fn parse_statistics_with_fallback<'a>(
+    input: &'a [u8],
+    gates: Option<&VersionGates>,
+) -> IResult<&'a [u8], SSTableStatistics> {
     // Try the minimal enhanced parser
-    parse_enhanced_statistics_file(input)
+    parse_enhanced_statistics_file(input, gates)
 }
 
 #[cfg(test)]
@@ -2624,7 +2672,7 @@ mod tests {
         };
 
         let dummy_data = vec![0xFF; 10]; // Too short to parse properly
-        let result = parse_nb_format_statistics_data(&dummy_data, &header, &dummy_data);
+        let result = parse_nb_format_statistics_data(&dummy_data, &header, &dummy_data, None);
 
         // Should return error because data is too short for VInt parsing
         assert!(result.is_err());
@@ -2646,7 +2694,7 @@ mod tests {
                   // No data section - should fail parsing
         ];
 
-        let result = parse_enhanced_statistics_file(&test_data);
+        let result = parse_enhanced_statistics_file(&test_data, None);
 
         // Should fail since there's no data section to parse
         assert!(result.is_err());
@@ -2666,7 +2714,7 @@ mod tests {
             0x00, 0x00, 0x14, 0xd4, // checksum = 5332
         ];
 
-        let result = parse_statistics_with_fallback(&test_data);
+        let result = parse_statistics_with_fallback(&test_data, None);
 
         // Should fail - incomplete data
         assert!(result.is_err());
@@ -2676,7 +2724,7 @@ mod tests {
     fn test_invalid_data_returns_error() {
         // Test with insufficient data
         let invalid_data = vec![0xFF; 10];
-        let result = parse_statistics_with_fallback(&invalid_data);
+        let result = parse_statistics_with_fallback(&invalid_data, None);
         assert!(result.is_err(), "Invalid data should fail to parse");
     }
 

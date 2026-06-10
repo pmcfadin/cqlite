@@ -4,6 +4,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::error::{Error, Result};
+use crate::storage::sstable::version_gate::SsTableDescriptor;
 
 use super::types::{SSTableComponent, SSTableGeneration, SecondaryIndex};
 
@@ -52,7 +53,9 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
                 continue;
             }
 
-            if let Some((generation, format, component)) = parse_sstable_filename(file_name)? {
+            if let Some((version, generation, format, component)) =
+                parse_sstable_filename(file_name)?
+            {
                 valid_sstable_files += 1;
                 let key = (generation, format.clone());
 
@@ -60,6 +63,7 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
                     generations_map
                         .entry(key.clone())
                         .or_insert_with(|| SSTableGeneration {
+                            version: version.clone(),
                             generation,
                             format,
                             table_name: table_name.to_string(),
@@ -103,36 +107,61 @@ pub(crate) fn scan_sstable_files(path: &Path, table_name: &str) -> Result<Vec<SS
     Ok(generations)
 }
 
-/// Parse SSTable filename to extract generation, format, and component
-/// Examples: "nb-1-big-Data.db" -> (1, "big", Data)
-///           "nb-2-da-Partitions.db" -> (2, "da", Partitions)
+/// Parse SSTable filename to extract version, generation, format, and component.
+///
+/// Returns `Ok(Some((version, generation, format, component)))` for recognised
+/// SSTable filenames.  Returns `Ok(None)` for non-SSTable files (e.g. `.jmx`,
+/// unknown extensions) or files whose SSTable id is not a plain integer (UUID-
+/// based ids are not yet supported by the `u32` generation field; see the
+/// `SSTableGeneration.sstable_id` tracking item).
+///
+/// # Examples
+/// ```text
+/// "nb-1-big-Data.db"     -> Some(("nb", 1, "big",  Data))
+/// "da-2-bti-Rows.db"     -> Some(("da", 2, "bti",  Rows))
+/// "oa-1-big-Data.db"     -> Some(("oa", 1, "big",  Data))
+/// ".gitignore"           -> None
+/// ```
+///
+/// The version letter is extracted via [`SsTableDescriptor`] which also validates
+/// the filename structure and supports both sequential and UUID-based SSTable ids.
+/// UUID-based ids are silently skipped (returning `None`) because the current
+/// `SSTableGeneration.generation` field is `u32`.
 pub(crate) fn parse_sstable_filename(
     filename: &str,
-) -> Result<Option<(u32, String, SSTableComponent)>> {
-    // Pattern: {prefix}-{generation}-{format}-{component}
-    let parts: Vec<&str> = filename.split('-').collect();
+) -> Result<Option<(String, u32, String, SSTableComponent)>> {
+    use std::path::Path;
 
-    if parts.len() < 4 {
-        return Ok(None); // Not an SSTable file
-    }
+    // Use SsTableDescriptor for authoritative filename parsing (handles both
+    // sequential and UUID-based ids, validates version letter format).
+    let desc = match SsTableDescriptor::parse(Path::new(filename)) {
+        Ok(d) => d,
+        Err(_) => {
+            // Not a recognised SSTable filename (e.g. .gitignore, jmx files).
+            return Ok(None);
+        }
+    };
 
-    // Extract generation number (second part)
-    let generation: u32 = parts[1].parse().map_err(|_| {
-        Error::invalid_format(format!(
-            "Invalid generation number in filename: {}",
-            filename
-        ))
-    })?;
+    // The generation field is u32; UUID-based ids (e.g. "6aa08200a251…") cannot
+    // be coerced to u32.  Skip them silently — these files will still be picked
+    // up once SSTableGeneration is upgraded to carry a String sstable_id.
+    let generation: u32 = match desc.sstable_id.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            log::debug!(
+                "parse_sstable_filename: skipping UUID-id file {} (not a plain integer generation)",
+                filename
+            );
+            return Ok(None);
+        }
+    };
 
-    // Extract format (third part)
-    let format = parts[2].to_string();
+    let format = desc.format.as_str().to_string();
+    let version = desc.version.clone();
 
-    // Extract component (everything after third hyphen)
-    let component_str = parts[3..].join("-");
-
-    // Return None for unrecognized components instead of propagating error
-    // This follows the same pattern as TOC parsing (toc.rs:53-73)
-    let component = match SSTableComponent::from_str(&component_str) {
+    // Return None for unrecognized components instead of propagating error.
+    // This follows the same pattern as TOC parsing (toc.rs:53-73).
+    let component = match SSTableComponent::from_str(&desc.component) {
         Ok(c) => c,
         Err(_) => {
             log::debug!(
@@ -143,7 +172,7 @@ pub(crate) fn parse_sstable_filename(
         }
     };
 
-    Ok(Some((generation, format, component)))
+    Ok(Some((version, generation, format, component)))
 }
 
 /// Scan directory for secondary index subdirectories

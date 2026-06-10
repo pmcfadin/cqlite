@@ -32,7 +32,7 @@ fn test_real_statistics_db_parsing() {
     println!("File size: {} bytes", file_data.len());
 
     // Parse the Statistics.db file
-    let result = parse_enhanced_statistics_file(&file_data);
+    let result = parse_enhanced_statistics_file(&file_data, None);
 
     match result {
         Ok((remaining, statistics)) => {

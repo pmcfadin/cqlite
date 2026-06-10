@@ -23,23 +23,44 @@ mod tests {
 
     #[test]
     fn test_parse_sstable_filename() {
-        let (generation, fmt, comp) = scan::parse_sstable_filename("nb-1-big-Data.db")
+        let (version, generation, fmt, comp) = scan::parse_sstable_filename("nb-1-big-Data.db")
             .unwrap()
             .unwrap();
+        assert_eq!(version, "nb");
         assert_eq!(generation, 1);
         assert_eq!(fmt, "big");
         assert_eq!(comp, types::SSTableComponent::Data);
 
-        let (generation, fmt, comp) = scan::parse_sstable_filename("nb-2-da-Partitions.db")
+        // da/bti files are now supported (VG1: FormatDetector maps `da` to V5x)
+        let (version, generation, fmt, comp) = scan::parse_sstable_filename("da-2-bti-Rows.db")
             .unwrap()
             .unwrap();
+        assert_eq!(version, "da");
         assert_eq!(generation, 2);
-        assert_eq!(fmt, "da");
-        assert_eq!(comp, types::SSTableComponent::Partitions);
+        assert_eq!(fmt, "bti");
+        assert_eq!(comp, types::SSTableComponent::Rows);
 
         assert!(scan::parse_sstable_filename("not-an-sstable.txt")
             .unwrap()
             .is_none());
+    }
+
+    /// VG1: parse_sstable_filename now carries the version letter for each filename.
+    #[test]
+    fn test_parse_sstable_filename_version_letter() {
+        for (filename, expected_version) in &[
+            ("nb-1-big-Data.db", "nb"),
+            ("oa-1-big-Data.db", "oa"),
+            ("da-1-bti-Data.db", "da"),
+        ] {
+            let (version, _gen, _fmt, _comp) =
+                scan::parse_sstable_filename(filename).unwrap().unwrap();
+            assert_eq!(
+                &version, expected_version,
+                "version mismatch for {}",
+                filename
+            );
+        }
     }
 
     /// Test for Issue #232: parse_sstable_filename should ignore auxiliary files
@@ -62,9 +83,10 @@ mod tests {
             .is_none());
 
         // Should still parse valid SSTable files correctly
-        let (generation, fmt, comp) = scan::parse_sstable_filename("nb-1-big-Data.db")
+        let (version, generation, fmt, comp) = scan::parse_sstable_filename("nb-1-big-Data.db")
             .unwrap()
             .unwrap();
+        assert_eq!(version, "nb");
         assert_eq!(generation, 1);
         assert_eq!(fmt, "big");
         assert_eq!(comp, types::SSTableComponent::Data);
@@ -263,6 +285,7 @@ mod tests {
         components.insert(types::SSTableComponent::TOC, toc_file);
 
         let generation = types::SSTableGeneration {
+            version: "nb".to_string(),
             generation: 1,
             format: "big".to_string(),
             table_name: "test".to_string(),
@@ -408,6 +431,7 @@ mod tests {
         components.insert(types::SSTableComponent::Statistics, stats_file);
 
         let generation = types::SSTableGeneration {
+            version: "nb".to_string(),
             generation: 1,
             format: "big".to_string(),
             table_name: "test".to_string(),
@@ -458,6 +482,7 @@ mod tests {
         components.insert(types::SSTableComponent::Statistics, stats_file);
 
         let generation = types::SSTableGeneration {
+            version: "nb".to_string(),
             generation: 1,
             format: "big".to_string(),
             table_name: "test".to_string(),

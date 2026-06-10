@@ -42,6 +42,7 @@ use log::{debug, warn};
 use crate::{
     parser::vint::{parse_vint, parse_vuint},
     schema::{CqlType, TableSchema, UdtRegistry},
+    storage::sstable::version_gate::{BigVersionGates, VersionGates},
     types::{TableId, TombstoneInfo, TombstoneType, UdtField, UdtTypeDef, UdtValue},
     Error, Result, RowKey, Value,
 };
@@ -193,6 +194,14 @@ pub struct V5CompressedLegacyParser {
     min_ttl: Option<i64>,
     /// Optional UDT registry for resolving short UDT type names (Issue #238)
     udt_registry: Option<UdtRegistry>,
+    /// Version-feature gates derived from the SSTable filename.
+    ///
+    /// Threaded here from `SSTableReader::version_gates` (VG1 plumbing).
+    /// Decision points that WILL be gated in VG3 are annotated with
+    /// `// VG3:` comments throughout this file.  Until VG3, behavior is
+    /// identical to the existing `nb`-compatible path regardless of the gate
+    /// values stored here.
+    version_gates: std::sync::Arc<VersionGates>,
 }
 
 impl V5CompressedLegacyParser {
@@ -211,6 +220,9 @@ impl V5CompressedLegacyParser {
         min_local_deletion_time: i64,
         min_ttl: Option<i64>,
     ) -> Self {
+        // Default to nb-compatible BIG gates when not supplied by the caller.
+        // Use the infallible nb_fallback() constructor (no expect/unwrap in lib code).
+        let version_gates = std::sync::Arc::new(VersionGates::Big(BigVersionGates::nb_fallback()));
         Self {
             keyspace,
             table_name,
@@ -218,7 +230,18 @@ impl V5CompressedLegacyParser {
             min_local_deletion_time,
             min_ttl,
             udt_registry: None,
+            version_gates,
         }
+    }
+
+    /// Set the version gates for version-sensitive parsing decisions (VG1 plumbing).
+    ///
+    /// Call this after `new()` with the `Arc<VersionGates>` from `SSTableReader`.
+    /// Until VG3 lands, passing gates here has no effect on parsing behaviour —
+    /// the gate values are stored for future use only.
+    pub fn with_version_gates(mut self, gates: std::sync::Arc<VersionGates>) -> Self {
+        self.version_gates = gates;
+        self
     }
 
     /// Set the UDT registry for resolving short UDT type names in frozen collections (Issue #238)
@@ -1213,6 +1236,12 @@ impl V5CompressedLegacyParser {
             pos += bytes_consumed;
 
             // Second VInt: localDeletionTime delta (unsigned).
+            //
+            // VG3: When `self.version_gates` has `has_uint_deletion_time` == true (oa/da),
+            // Cassandra writes a *32-bit unsigned* deletion time rather than a signed delta
+            // here (BigFormat.java:409, BtiFormat.java).  Until VG3 flips the switch this
+            // path always uses the signed-delta (nb) interpretation, which is correct for
+            // the current test corpus.
             let (remaining, ldt_delta) = parse_vuint(&data[pos..]).map_err(|e| {
                 Error::corruption(format!(
                     "V5CompressedLegacy: Failed to parse localDeletionTime delta at offset {}: {:?}",
@@ -1225,6 +1254,8 @@ impl V5CompressedLegacyParser {
             // markedForDeleteAt: absolute = min_timestamp + delta (microseconds).
             let absolute_marked_for_delete_at = self.min_timestamp.wrapping_add(mfda_delta as i64);
             // localDeletionTime: absolute = min_local_deletion_time + delta (seconds).
+            //
+            // VG3: oa/da (has_uint_deletion_time) uses raw u32, not delta; flip here.
             let absolute_local_deletion_time =
                 self.min_local_deletion_time.wrapping_add(ldt_delta as i64) as i32;
             debug!(
