@@ -1,0 +1,65 @@
+SSTable: /var/lib/cassandra/data/test_oa/udt_table-4b9f738064e711f1bd3ac7dbf655c673/oa-2-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 06/10/2026 16:14:00 (1781108040837839)
+Maximum timestamp: 06/10/2026 16:14:00 (1781108040840878)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: no tombstones (9223372036854775807)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.8014842300556586
+TTL min: 0
+TTL max: 0
+First token: -8014336752682146646 (dddddddd-dddd-dddd-dddd-dddddddddddd)
+Last token: 3571580605950003513 (eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee)
+Covered clusterings: [, ]
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: bb515a3f-c802-4921-83de-733bb2da4510
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1781107962741, position=122093)=CommitLogPosition(segmentId=1781107962741, position=134848)}
+totalColumnsSet: 6
+totalRows: 2
+Estimated tombstone drop times: 
+   Drop Time | Count  (%)  Histogram 
+   Percentiles
+   50th      0 
+   75th      0 
+   95th      0 
+   98th      0 
+   99th      0 
+   Min       0 
+   Max       0 
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   310 (310 B)  |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      310 (310 B)
+   75th      310 (310 B)
+   95th      310 (310 B)
+   98th      310 (310 B)
+   99th      310 (310 B)
+   Min       259 (259 B)
+   Max       310 (310 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   3       |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      3
+   75th      3
+   95th      3
+   98th      3
+   99th      3
+   Min       3
+   Max       3
+Local token space coverage: NaN
+Estimated cardinality: 2
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
+EncodingStats minTimestamp: 06/10/2026 16:14:00 (1781108040837839)
+KeyType: org.apache.cassandra.db.marshal.UUIDType
+ClusteringTypes: []
+StaticColumns: 
+RegularColumns: address:org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(test_oa,616464726573735f74797065,737472656574:org.apache.cassandra.db.marshal.UTF8Type,63697479:org.apache.cassandra.db.marshal.UTF8Type,636f756e747279:org.apache.cassandra.db.marshal.UTF8Type,706f7374616c5f636f6465:org.apache.cassandra.db.marshal.UTF8Type)), large_field:org.apache.cassandra.db.marshal.UTF8Type, name:org.apache.cassandra.db.marshal.UTF8Type
+IsTransient: false
