@@ -5190,9 +5190,97 @@ mod tests {
         );
     }
 
+    /// Parse a `write_complex_column` output buffer and return the flag byte for every cell.
+    ///
+    /// The buffer has this deterministic structure:
+    /// ```text
+    /// [complex_deletion_ts_delta:  unsigned VInt]  ← 2 VInts, time-derived but fixed per stats
+    /// [complex_deletion_ldt_delta: unsigned VInt]
+    /// [cell_count: unsigned VInt]
+    /// per cell:
+    ///   [flags: u8]
+    ///   if IS_EXPIRING (0x02 set):
+    ///     [ts_delta:  unsigned VInt]
+    ///     [ldt_delta: unsigned VInt]   ← wall-clock-derived
+    ///     [ttl_delta: unsigned VInt]
+    ///   [path_len:  unsigned VInt]
+    ///   [path_bytes: path_len]
+    ///   if !HAS_EMPTY_VALUE (0x04 NOT set):
+    ///     [value_len: unsigned VInt]
+    ///     [value_bytes: value_len]
+    /// ```
+    ///
+    /// Scanning the raw buffer for a flag byte value is fragile because
+    /// wall-clock-derived LDT bytes can coincidentally equal the flag byte (~1-2% of CI runs).
+    /// This helper walks the structure deterministically so each flag byte is read at
+    /// its exact position.
+    fn parse_complex_cell_flags(buf: &[u8]) -> Vec<u8> {
+        /// Read one unsigned VInt from `buf` starting at `*pos`; advance `*pos`.
+        fn read_uvint(buf: &[u8], pos: &mut usize) -> u64 {
+            let first = buf[*pos];
+            *pos += 1;
+            if first == 0xFF {
+                // 9-byte form: 0xFF + 8 big-endian bytes
+                let mut v = 0u64;
+                for _ in 0..8 {
+                    v = (v << 8) | buf[*pos] as u64;
+                    *pos += 1;
+                }
+                return v;
+            }
+            // Count leading 1-bits in `first` to determine extra bytes
+            let extra = first.leading_ones() as usize;
+            // Data bits in first byte: mask off the leading 1s and the 0 separator
+            let mask = 0xFF_u8.wrapping_shr((extra + 1) as u32);
+            let mut v = (first & mask) as u64;
+            for _ in 0..extra {
+                v = (v << 8) | buf[*pos] as u64;
+                *pos += 1;
+            }
+            v
+        }
+
+        let mut pos = 0usize;
+        // Skip complex deletion header: 2 unsigned VInts
+        read_uvint(buf, &mut pos);
+        read_uvint(buf, &mut pos);
+
+        // Cell count
+        let cell_count = read_uvint(buf, &mut pos) as usize;
+
+        let mut flags_out = Vec::with_capacity(cell_count);
+        for _ in 0..cell_count {
+            let flags = buf[pos];
+            pos += 1;
+            flags_out.push(flags);
+
+            if (flags & CELL_IS_EXPIRING) != 0 {
+                // IS_EXPIRING: ts_delta + ldt_delta + ttl_delta (3 unsigned VInts)
+                read_uvint(buf, &mut pos);
+                read_uvint(buf, &mut pos);
+                read_uvint(buf, &mut pos);
+            }
+            // USE_ROW_TIMESTAMP / non-expiring cells: no extra fields before path
+
+            // Cell path: path_len VInt + path_len bytes
+            let path_len = read_uvint(buf, &mut pos) as usize;
+            pos += path_len;
+
+            // Cell value: only present when HAS_EMPTY_VALUE is NOT set
+            if (flags & CELL_HAS_EMPTY_VALUE) == 0 {
+                let value_len = read_uvint(buf, &mut pos) as usize;
+                pos += value_len;
+            }
+        }
+
+        flags_out
+    }
+
     #[test]
     fn test_set_complex_column_with_ttl() {
-        // SET with TTL should write IS_EXPIRING flag per cell, not USE_ROW_TIMESTAMP
+        // SET with TTL should write IS_EXPIRING flag per cell, not USE_ROW_TIMESTAMP.
+        // Uses structural parsing to read cell flags at their exact byte positions,
+        // avoiding false positives from time-derived LDT bytes that can equal 0x02.
         let stats = create_test_stats();
         let writer = DataWriter::new(stats);
 
@@ -5214,28 +5302,37 @@ mod tests {
             .write_complex_column(&mut buf, &column, &value, 1001000, Some(3600))
             .unwrap();
 
-        // With TTL: cells should have IS_EXPIRING (0x02) | HAS_EMPTY_VALUE (0x04) = 0x06
-        // NOT USE_ROW_TIMESTAMP (0x08)
+        // Parse cell flags structurally so wall-clock LDT bytes in the header and
+        // per-cell TTL fields cannot be misidentified as flag bytes.
+        let cell_flags = parse_complex_cell_flags(&buf);
         let expected_flags = CELL_IS_EXPIRING | CELL_HAS_EMPTY_VALUE; // 0x06
-        let cell_flag_count = buf.iter().filter(|&&b| b == expected_flags).count();
+
         assert_eq!(
-            cell_flag_count, 2,
-            "SET with TTL should have 2 cells with IS_EXPIRING | HAS_EMPTY_VALUE (0x06), got flags: {:?}",
-            buf.iter().take(30).collect::<Vec<_>>()
+            cell_flags.len(),
+            2,
+            "SET with 2 elements should produce 2 cells"
+        );
+        assert!(
+            cell_flags.iter().all(|&f| f == expected_flags),
+            "SET with TTL: all cells should have IS_EXPIRING | HAS_EMPTY_VALUE (0x06), got: {:?}",
+            cell_flags
         );
 
-        // Should NOT have USE_ROW_TIMESTAMP flags
-        let row_ts_flags = CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE; // 0x0C
-        let row_ts_count = buf.iter().filter(|&&b| b == row_ts_flags).count();
-        assert_eq!(
-            row_ts_count, 0,
-            "SET with TTL should NOT have USE_ROW_TIMESTAMP cells"
+        // Confirm absence of USE_ROW_TIMESTAMP on all cells
+        assert!(
+            cell_flags
+                .iter()
+                .all(|&f| (f & CELL_USE_ROW_TIMESTAMP) == 0),
+            "SET with TTL should NOT have USE_ROW_TIMESTAMP on any cell, got: {:?}",
+            cell_flags
         );
     }
 
     #[test]
     fn test_map_complex_column_with_ttl() {
-        // MAP with TTL should write IS_EXPIRING flag per cell
+        // MAP with TTL should write IS_EXPIRING flag per cell.
+        // Uses structural parsing to read cell flags at their exact byte positions,
+        // avoiding false positives from time-derived LDT bytes that can equal 0x02.
         let stats = create_test_stats();
         let writer = DataWriter::new(stats);
 
@@ -5254,11 +5351,26 @@ mod tests {
             .write_complex_column(&mut buf, &column, &value, 1001000, Some(7200))
             .unwrap();
 
-        // MAP cell with TTL: IS_EXPIRING (0x02), no HAS_EMPTY_VALUE
-        let cell_flag_count = buf.iter().filter(|&&b| b == CELL_IS_EXPIRING).count();
+        // Parse cell flags structurally so wall-clock LDT bytes cannot be
+        // misidentified as IS_EXPIRING (0x02) flag bytes.
+        let cell_flags = parse_complex_cell_flags(&buf);
+
         assert_eq!(
-            cell_flag_count, 1,
-            "MAP with TTL should have 1 cell with IS_EXPIRING flag"
+            cell_flags.len(),
+            1,
+            "MAP with 1 entry should produce 1 cell"
+        );
+        assert_eq!(
+            cell_flags[0] & CELL_IS_EXPIRING,
+            CELL_IS_EXPIRING,
+            "MAP with TTL: cell should have IS_EXPIRING flag set, got flags byte: 0x{:02X}",
+            cell_flags[0]
+        );
+        assert_eq!(
+            cell_flags[0] & CELL_HAS_EMPTY_VALUE,
+            0,
+            "MAP with TTL: cell should NOT have HAS_EMPTY_VALUE, got flags byte: 0x{:02X}",
+            cell_flags[0]
         );
     }
 
@@ -5266,6 +5378,8 @@ mod tests {
     fn test_list_complex_column_with_ttl() {
         // LIST with TTL should write IS_EXPIRING per cell, producing a larger
         // output than without TTL (extra timestamp/LDT/TTL delta fields).
+        // Uses structural parsing to read cell flags at their exact byte positions,
+        // avoiding false positives from time-derived LDT bytes.
         let stats = create_test_stats();
         let writer_ttl = DataWriter::new(stats.clone());
         let writer_no_ttl = DataWriter::new(stats);
@@ -5295,7 +5409,7 @@ mod tests {
             .unwrap();
 
         // TTL version must be larger: each cell gets timestamp + LDT + TTL deltas
-        // instead of just USE_ROW_TIMESTAMP flag
+        // instead of just USE_ROW_TIMESTAMP flag.
         assert!(
             buf_ttl.len() > buf_no_ttl.len(),
             "LIST with TTL ({} bytes) should be larger than without TTL ({} bytes)",
@@ -5303,16 +5417,28 @@ mod tests {
             buf_no_ttl.len()
         );
 
-        // Without TTL, cells use USE_ROW_TIMESTAMP (0x08).
-        // With TTL, cells should NOT use USE_ROW_TIMESTAMP.
-        // Verify no 0x08 flag bytes in TTL version at cell-flag positions.
-        // The complex deletion header is 2 VInts, then cell_count VInt.
-        // After that, each cell starts with a flags byte.
-        // Since the no-TTL version has 0x08 at cell positions, we verify
-        // the TTL version doesn't have the same pattern at those offsets.
-        assert_ne!(
-            buf_ttl, buf_no_ttl,
-            "TTL and non-TTL versions should produce different output"
+        // Structurally verify IS_EXPIRING is set on every cell in the TTL version.
+        let cell_flags_ttl = parse_complex_cell_flags(&buf_ttl);
+        assert_eq!(
+            cell_flags_ttl.len(),
+            3,
+            "LIST with 3 elements should produce 3 cells"
+        );
+        assert!(
+            cell_flags_ttl.iter().all(|&f| (f & CELL_IS_EXPIRING) != 0),
+            "LIST with TTL: all cells should have IS_EXPIRING flag set, got: {:?}",
+            cell_flags_ttl
+        );
+
+        // Verify the no-TTL version uses USE_ROW_TIMESTAMP instead.
+        let cell_flags_no_ttl = parse_complex_cell_flags(&buf_no_ttl);
+        assert_eq!(cell_flags_no_ttl.len(), 3);
+        assert!(
+            cell_flags_no_ttl
+                .iter()
+                .all(|&f| (f & CELL_IS_EXPIRING) == 0),
+            "LIST without TTL: no cells should have IS_EXPIRING flag, got: {:?}",
+            cell_flags_no_ttl
         );
     }
 
