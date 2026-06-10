@@ -177,6 +177,20 @@ impl SSTableReader {
             }
         });
 
+        // VG5: BTI (da) read support is not yet implemented.
+        // Detect the BTI format early — before header parsing — and return a
+        // structured, actionable error rather than a confusing parse failure.
+        // Full BTI reading is tracked in the scoping issue created by issue #657.
+        if matches!(*version_gates, VersionGates::Bti(_)) {
+            return Err(Error::unsupported_format(format!(
+                "BTI (da) read support not yet implemented for '{}'. \
+                 da-format SSTables use Partitions.db/Rows.db trie indexes instead of \
+                 Index.db/Summary.db and require a dedicated BTI read path. \
+                 See docs/reports/bti-read-support-scoping.md for the implementation plan.",
+                path.display()
+            )));
+        }
+
         let config = crate::cql::config::ParserConfig::default();
         let parser = SSTableParser::new(config)?;
         // Parse the header using enhanced version detection - strict error propagation.
