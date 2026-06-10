@@ -390,7 +390,7 @@ fn parse_all_partition_keys_with_summary<'a>(
 /// Layout: `[key_len: u16 BE][raw key][data_offset: vint][promoted_len: vint][promoted...]`.
 /// Works for any key length (int, text, UUID, composite). The raw partition key is stored
 /// directly in `key_digest` / `raw_key` (no MD5, no marker).
-fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionIndexEntry> {
+pub(crate) fn parse_big_index_entry(input: &[u8]) -> IResult<&[u8], PartitionIndexEntry> {
     // Read partition key length (u16 big-endian).
     let (input, key_len) = be_u16(input)?;
 
@@ -448,7 +448,7 @@ fn parse_index_data(input: &[u8]) -> IResult<&[u8], IndexData> {
 
 /// Parse all partition key digests from the Index.db file - Legacy API
 #[allow(dead_code)]
-fn parse_all_partition_keys(input: &[u8]) -> IResult<&[u8], Vec<PartitionIndexEntry>> {
+pub(crate) fn parse_all_partition_keys(input: &[u8]) -> IResult<&[u8], Vec<PartitionIndexEntry>> {
     parse_all_partition_keys_with_summary(input, None)
 }
 

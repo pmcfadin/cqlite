@@ -32,8 +32,14 @@
 //!     be32 min_index_interval;      // Minimum partitions between entries (usually 128)
 //!     be32 entries_count;           // Number of sampled entries
 //!     be64 summary_entries_size;    // Size of offset table + entry data
-//!     be32 sampling_level;          // Sampling level (1-128)
-//!     be32 size_at_full_sampling;   // Entries at full sampling
+//!     be32 sampling_level;          // Downsampling level (1–128). For a freshly written
+//!                                   // SSTable this is always BASE_SAMPLING_LEVEL (128).
+//!                                   // It only decreases when Cassandra downsamples during
+//!                                   // compaction. It does NOT equal min_index_interval.
+//!                                   // Source: IndexSummary.java:88-94, 226-229 (Cassandra 5.0.8)
+//!     be32 size_at_full_sampling;   // Estimated entry count if sampled at BASE_SAMPLING_LEVEL.
+//!                                   // = total_partition_count / min_index_interval.
+//!                                   // Source: IndexSummary.java:235-237 (getMaxNumberOfEntries())
 //! };
 //! ```
 //!
@@ -63,6 +69,15 @@
 
 use crate::error::Result;
 use crate::storage::write_engine::mutation::DecoratedKey;
+
+/// `sampling_level` written for a freshly constructed SSTable.
+///
+/// Cassandra stores a downsampling level between 1 and `BASE_SAMPLING_LEVEL` in the
+/// Summary.db header.  For a new SSTable that has never been downsampled the level is
+/// always `BASE_SAMPLING_LEVEL` (128).  It is **independent of `min_index_interval`**.
+///
+/// Source: `IndexSummary.java:88-94` (Cassandra 5.0.8, `org.apache.cassandra.io.sstable.indexsummary`).
+pub const BASE_SAMPLING_LEVEL: u32 = 128;
 
 /// Summary.db component writer
 ///
@@ -101,6 +116,11 @@ use crate::storage::write_engine::mutation::DecoratedKey;
 pub struct SummaryWriter {
     /// Minimum index interval (sampling rate)
     min_index_interval: u32,
+    /// Total number of partitions seen (used for size_at_full_sampling calculation).
+    ///
+    /// `size_at_full_sampling` = `total_partition_count / min_index_interval`.
+    /// Source: `IndexSummary.java:235-237` (`getMaxNumberOfEntries()`).
+    total_partition_count: u32,
     /// Sampled entries (partition key + Index.db position)
     entries: Vec<SummaryEntry>,
     /// First partition key (always included)
@@ -137,6 +157,7 @@ impl SummaryWriter {
     pub fn new(min_index_interval: u32) -> Self {
         Self {
             min_index_interval,
+            total_partition_count: 0,
             entries: Vec::new(),
             first_key: None,
             last_key: None,
@@ -180,6 +201,14 @@ impl SummaryWriter {
 
         // Always update last key
         self.last_key = Some(key_bytes.clone());
+
+        // Count every partition that results in a sampled entry.
+        // The caller adds one entry per `min_index_interval` partitions, so each
+        // call here represents `min_index_interval` total partitions for the purpose
+        // of reconstructing `size_at_full_sampling`.
+        self.total_partition_count = self
+            .total_partition_count
+            .saturating_add(self.min_index_interval);
 
         // Add entry
         self.entries.push(SummaryEntry {
@@ -297,11 +326,34 @@ impl SummaryWriter {
         // summary_entries_size (u64, BE)
         buffer.extend_from_slice(&summary_entries_size.to_be_bytes());
 
-        // sampling_level (u32, BE) - typically same as min_index_interval
-        buffer.extend_from_slice(&self.min_index_interval.to_be_bytes());
+        // sampling_level (u32, BE).
+        //
+        // For a freshly written SSTable this is ALWAYS BASE_SAMPLING_LEVEL (128),
+        // regardless of min_index_interval.  Cassandra only writes a value < 128 when
+        // it has downsampled an existing Summary.db during compaction.
+        //
+        // BUG FIX (Issue #636): Previously emitted `min_index_interval` here, which
+        // is wrong.  Any reader that checks `sampling_level < BASE_SAMPLING_LEVEL` to
+        // detect downsampling would incorrectly treat a CQLite-written Summary.db as
+        // downsampled when min_index_interval ≠ 128.
+        //
+        // Source: IndexSummary.java:88–94, 226–229 (Cassandra 5.0.8).
+        buffer.extend_from_slice(&BASE_SAMPLING_LEVEL.to_be_bytes());
 
-        // size_at_full_sampling (u32, BE) - entries count at full sampling
-        buffer.extend_from_slice(&entries_count.to_be_bytes());
+        // size_at_full_sampling (u32, BE).
+        //
+        // This is the *estimated* number of index entries if the table were sampled at
+        // the full base level (= total_partition_count / min_index_interval).  For a
+        // new SSTable that has never been downsampled this equals entries_count, but
+        // the two fields are logically distinct and must be tracked independently.
+        //
+        // Source: IndexSummary.java:235–237 (`getMaxNumberOfEntries()`).
+        let size_at_full_sampling = if self.min_index_interval > 0 {
+            self.total_partition_count / self.min_index_interval
+        } else {
+            entries_count
+        };
+        buffer.extend_from_slice(&size_at_full_sampling.to_be_bytes());
     }
 }
 
@@ -632,8 +684,11 @@ mod tests {
         // Verify min_index_interval in header
         assert_eq!(&bytes[0..4], &[0x00, 0x00, 0x00, 0x40]); // 64 in BE
 
-        // Verify sampling_level matches
-        assert_eq!(&bytes[16..20], &[0x00, 0x00, 0x00, 0x40]); // 64 in BE
+        // sampling_level must always be BASE_SAMPLING_LEVEL (128) for a fresh SSTable,
+        // independent of min_index_interval.  Previously the writer emitted
+        // min_index_interval (64) here — that was wrong (Issue #636).
+        // Source: IndexSummary.java:88–94, 226–229 (Cassandra 5.0.8).
+        assert_eq!(&bytes[16..20], &[0x00, 0x00, 0x00, 0x80]); // 128 in BE
     }
 
     #[test]

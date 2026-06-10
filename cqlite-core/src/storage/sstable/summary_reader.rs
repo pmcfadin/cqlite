@@ -341,7 +341,7 @@ fn parse_summary_data(input: &[u8]) -> Result<SummaryData> {
 }
 
 /// Parse Summary.db header (24 bytes, big-endian)
-fn parse_summary_header(input: &[u8]) -> IResult<&[u8], SummaryHeader> {
+pub(crate) fn parse_summary_header(input: &[u8]) -> IResult<&[u8], SummaryHeader> {
     let (input, min_index_interval) = be_u32(input)?;
     let (input, entries_count) = be_u32(input)?;
     let (input, summary_entries_size) = be_u64(input)?;
