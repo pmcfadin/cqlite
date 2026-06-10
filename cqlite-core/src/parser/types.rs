@@ -108,28 +108,47 @@ pub fn parse_cql_value(input: &[u8], type_id: CqlTypeId) -> IResult<&[u8], Value
         CqlTypeId::Float => parse_float(input),
         CqlTypeId::Double => parse_double(input),
         CqlTypeId::Ascii | CqlTypeId::Varchar => {
-            // Try 4-byte big-endian length prefix first (for test compatibility)
-            if input.len() >= 4 {
-                let length = u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as usize;
-                if input.len() >= 4 + length {
-                    let text_bytes = &input[4..4 + length];
-                    if let Ok(text) = String::from_utf8(text_bytes.to_vec()) {
-                        return Ok((&input[4 + length..], Value::Text(text)));
+            // In the SSTable cell format the caller has already extracted exactly
+            // the bytes belonging to this cell (length-framing is done at the cell
+            // level before parse_cql_value is invoked).  The entire `input` slice
+            // IS the text value — no additional length prefix to strip.
+            //
+            // For Ascii, Cassandra's AsciiSerializer requires every byte to be in
+            // the 0x00-0x7F range.  For Varchar/Text any valid UTF-8 is accepted.
+            // We accept both under the same validation path here; a stricter
+            // Ascii-only byte check can be added when needed.
+            #[cfg(feature = "legacy-heuristics")]
+            {
+                // Legacy path: try 4-byte big-endian length prefix, then null-terminated,
+                // then raw UTF-8 (kept for pre-5.0 compatibility only).
+                if input.len() >= 4 {
+                    let length =
+                        u32::from_be_bytes([input[0], input[1], input[2], input[3]]) as usize;
+                    if input.len() >= 4 + length {
+                        let text_bytes = &input[4..4 + length];
+                        if let Ok(text) = String::from_utf8(text_bytes.to_vec()) {
+                            return Ok((&input[4 + length..], Value::Text(text)));
+                        }
                     }
                 }
-            }
-            // Try null-terminated string (for test compatibility)
-            if let Some(null_pos) = input.iter().position(|&b| b == 0) {
-                if let Ok(text) = String::from_utf8(input[..null_pos].to_vec()) {
-                    return Ok((&input[null_pos + 1..], Value::Text(text)));
+                if let Some(null_pos) = input.iter().position(|&b| b == 0) {
+                    if let Ok(text) = String::from_utf8(input[..null_pos].to_vec()) {
+                        return Ok((&input[null_pos + 1..], Value::Text(text)));
+                    }
                 }
+                if let Ok(text) = String::from_utf8(input.to_vec()) {
+                    return Ok((&[], Value::Text(text)));
+                }
+                parse_text(input)
             }
-            // Try raw UTF-8 without prefix (for test compatibility)
-            if let Ok(text) = String::from_utf8(input.to_vec()) {
-                return Ok((&[], Value::Text(text)));
+            #[cfg(not(feature = "legacy-heuristics"))]
+            {
+                // Deterministic path: treat the entire input as the UTF-8 text value.
+                let text = String::from_utf8(input.to_vec()).map_err(|_| {
+                    nom::Err::Error(nom::error::Error::new(input, nom::error::ErrorKind::Verify))
+                })?;
+                Ok((&[], Value::Text(text)))
             }
-            // Fallback to VInt parsing
-            parse_text(input)
         }
         CqlTypeId::Blob => {
             // For test compatibility, if input is exactly the expected size without length prefix, return it as-is

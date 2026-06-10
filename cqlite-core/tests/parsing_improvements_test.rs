@@ -49,39 +49,82 @@ mod parsing_improvements_tests {
     }
 
     #[test]
-    fn test_text_field_extraction_improvements() {
-        // Test case 1: Length-prefixed text (4-byte length)
-        let mut length_prefixed = Vec::new();
+    fn test_text_field_extraction_deterministic() {
+        // SSTable cell framing: the caller strips the cell length prefix before
+        // invoking parse_cql_value.  The entire `input` slice IS the text value.
+
+        // Test case 1: Plain ASCII text (cell already framed — no extra length prefix)
         let text = "Hello, CQLite!";
+        let (remaining, value) = parse_cql_value(text.as_bytes(), CqlTypeId::Varchar).unwrap();
+        match value {
+            Value::Text(parsed_text) => assert_eq!(parsed_text, text),
+            _ => panic!("Expected text value"),
+        }
+        assert!(remaining.is_empty(), "should consume all input");
+
+        // Test case 2: Ascii type — same raw bytes, no prefix
+        let ascii_text = "Hello from Ascii";
+        let (remaining, value) = parse_cql_value(ascii_text.as_bytes(), CqlTypeId::Ascii).unwrap();
+        match value {
+            Value::Text(parsed_text) => assert_eq!(parsed_text, ascii_text),
+            _ => panic!("Expected text value for Ascii type"),
+        }
+        assert!(remaining.is_empty(), "should consume all input");
+
+        // Test case 3: UTF-8 with multi-byte characters
+        let valid_utf8 = "🚀 CQLite with emojis! 🎉";
+        let (remaining, value) =
+            parse_cql_value(valid_utf8.as_bytes(), CqlTypeId::Varchar).unwrap();
+        match value {
+            Value::Text(parsed_text) => {
+                assert!(parsed_text.contains("🚀"));
+                assert_eq!(parsed_text, valid_utf8);
+            }
+            _ => panic!("Expected text value"),
+        }
+        assert!(remaining.is_empty(), "should consume all input");
+
+        // Test case 4: Empty string (cell with 0 bytes; caller handles null vs empty at cell level)
+        let (remaining, value) = parse_cql_value(&[], CqlTypeId::Varchar).unwrap();
+        match value {
+            Value::Text(text) => assert!(text.is_empty()),
+            _ => panic!("Expected empty text value"),
+        }
+        assert!(remaining.is_empty());
+
+        // Test case 5: Invalid UTF-8 must be rejected (not silently accepted)
+        let invalid_utf8 = &[0xFF, 0xFE, 0xFD, 0xFC];
+        assert!(
+            parse_cql_value(invalid_utf8, CqlTypeId::Varchar).is_err(),
+            "invalid UTF-8 must be a parse error, not silently accepted"
+        );
+    }
+
+    #[cfg(feature = "legacy-heuristics")]
+    #[test]
+    fn test_text_field_extraction_legacy_heuristics() {
+        // These tests only run when the legacy-heuristics feature is enabled.
+        // They document the old behavior that is now opt-in only.
+
+        // Legacy path 1: 4-byte big-endian length prefix
+        let text = "Hello, CQLite!";
+        let mut length_prefixed = Vec::new();
         length_prefixed.extend_from_slice(&(text.len() as u32).to_be_bytes());
         length_prefixed.extend_from_slice(text.as_bytes());
 
-        // Should correctly parse the length-prefixed text
         let (_, value) = parse_cql_value(&length_prefixed, CqlTypeId::Varchar).unwrap();
         match value {
             Value::Text(parsed_text) => assert_eq!(parsed_text, text),
             _ => panic!("Expected text value"),
         }
 
-        // Test case 2: Null-terminated text
+        // Legacy path 2: Null-terminated string
         let null_terminated = b"Hello\0";
         let (_, value) = parse_cql_value(null_terminated, CqlTypeId::Varchar).unwrap();
         match value {
             Value::Text(parsed_text) => assert_eq!(parsed_text, "Hello"),
             _ => panic!("Expected text value"),
         }
-
-        // Test case 3: UTF-8 validation
-        let valid_utf8 = "🚀 CQLite with emojis! 🎉".as_bytes();
-        let (_, value) = parse_cql_value(valid_utf8, CqlTypeId::Varchar).unwrap();
-        match value {
-            Value::Text(parsed_text) => assert!(parsed_text.contains("🚀")),
-            _ => panic!("Expected text value"),
-        }
-
-        // Test case 4: Invalid UTF-8 should fallback to blob
-        let _invalid_utf8 = &[0xFF, 0xFE, 0xFD, 0xFC];
-        // Should not panic and should handle gracefully
     }
 
     #[test]
@@ -131,12 +174,13 @@ mod parsing_improvements_tests {
         // Should handle empty data gracefully
 
         // Test case 2: Zero-length string
-        let zero_length_string = &[0u8, 0u8, 0u8, 0u8]; // 4-byte length prefix = 0
-        let (_, value) = parse_cql_value(zero_length_string, CqlTypeId::Varchar).unwrap();
+        // In SSTable cell framing a zero-length cell is handled at the cell level
+        // (typically encoded as null/absent).  When parse_cql_value IS called with
+        // an empty slice the deterministic path returns an empty Text value.
+        let (_, value) = parse_cql_value(&[], CqlTypeId::Varchar).unwrap();
         match value {
             Value::Text(text) => assert!(text.is_empty()),
-            Value::Null => {} // Also acceptable
-            _ => panic!("Expected empty text or null value"),
+            _ => panic!("Expected empty text value"),
         }
 
         // Test case 3: Null value handling
