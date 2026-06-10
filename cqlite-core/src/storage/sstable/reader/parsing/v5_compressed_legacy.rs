@@ -1115,9 +1115,13 @@ impl V5CompressedLegacyParser {
         );
         pos += bytes_consumed;
 
-        // Read timestamp if HAS_TIMESTAMP flag is set
+        // Read timestamp if HAS_TIMESTAMP flag is set.
+        //
+        // Fix #629 (C2): Cassandra writes an UNSIGNED VInt delta here
+        // (SerializationHeader.java:165: out.writeUnsignedVInt(timestamp - stats.minTimestamp)).
+        // The old code used parse_vint (ZigZag), causing ~50% undercount of timestamp deltas.
         let timestamp = if (row_flags & ROW_HAS_TIMESTAMP) != 0 {
-            let (remaining, delta) = parse_vint(&data[pos..]).map_err(|e| {
+            let (remaining, delta) = parse_vuint(&data[pos..]).map_err(|e| {
                 Error::corruption(format!(
                     "V5CompressedLegacy: Failed to parse timestamp delta at offset {}: {:?}",
                     pos, e
@@ -1127,7 +1131,7 @@ impl V5CompressedLegacyParser {
             pos += bytes_consumed;
 
             // Apply delta decoding: absolute_timestamp = min_timestamp + delta
-            let absolute_timestamp = self.min_timestamp.wrapping_add(delta);
+            let absolute_timestamp = self.min_timestamp.wrapping_add(delta as i64);
             debug!(
                 "V5CompressedLegacy: Row timestamp: delta={}, min={}, absolute={}",
                 delta, self.min_timestamp, absolute_timestamp
@@ -1137,9 +1141,16 @@ impl V5CompressedLegacyParser {
             None
         };
 
-        // Read TTL if HAS_TTL flag is set
-        let ttl = if (row_flags & ROW_HAS_TTL) != 0 {
-            let (remaining, delta) = parse_vuint(&data[pos..]).map_err(|e| {
+        // Read TTL and liveness local expiration time if HAS_TTL flag is set.
+        //
+        // Fix #630 (C3): Cassandra writes TWO VInt32 fields when HAS_TTL is set
+        // (UnfilteredSerializer.java:225-228):
+        //   1. pk_liveness.ttl()               → header.writeTTL(ttl, out)        [VInt32]
+        //   2. pk_liveness.localExpirationTime()→ header.writeLocalDeletionTime(ldt, out) [VInt32]
+        // The old code read only ONE VInt (TTL), leaving the LDT byte(s) unread and
+        // misaligning all subsequent fields in HAS_TTL rows.
+        let (ttl, ttl_liveness_ldt) = if (row_flags & ROW_HAS_TTL) != 0 {
+            let (remaining, ttl_delta) = parse_vuint(&data[pos..]).map_err(|e| {
                 Error::corruption(format!(
                     "V5CompressedLegacy: Failed to parse TTL delta at offset {}: {:?}",
                     pos, e
@@ -1150,33 +1161,49 @@ impl V5CompressedLegacyParser {
 
             // Apply delta decoding: absolute_ttl = min_ttl + delta
             let absolute_ttl = if let Some(min_ttl) = self.min_ttl {
-                min_ttl.wrapping_add(delta as i64) as i32
+                min_ttl.wrapping_add(ttl_delta as i64) as i32
             } else {
-                delta as i32
+                ttl_delta as i32
             };
+
+            // Read liveness local expiration time (second mandatory field after TTL).
+            let (remaining, ldt_delta) = parse_vuint(&data[pos..]).map_err(|e| {
+                Error::corruption(format!(
+                    "V5CompressedLegacy: Failed to parse liveness LDT delta at offset {}: {:?}",
+                    pos, e
+                ))
+            })?;
+            let ldt_bytes_consumed = data[pos..].len() - remaining.len();
+            pos += ldt_bytes_consumed;
+
+            let absolute_ldt = self.min_local_deletion_time.wrapping_add(ldt_delta as i64) as i32;
+
             debug!(
-                "V5CompressedLegacy: Row TTL: delta={}, min={:?}, absolute={}",
-                delta, self.min_ttl, absolute_ttl
+                "V5CompressedLegacy: Row TTL: ttl_delta={}, min={:?}, ttl={}, ldt_delta={}, ldt={}",
+                ttl_delta, self.min_ttl, absolute_ttl, ldt_delta, absolute_ldt
             );
-            Some(absolute_ttl)
+            (Some(absolute_ttl), Some(absolute_ldt))
         } else {
-            None
+            (None, None)
         };
 
         // Read deletion if HAS_DELETION flag is set.
         //
         // Cassandra canonical DeletionTime.Serializer order (matches the CQLite writer,
         // data_writer.rs write_*_row HAS_DELETION block and write_complex_deletion):
-        //   1. markedForDeleteAt: SIGNED VInt delta, base min_timestamp, MICROSECONDS
+        //   1. markedForDeleteAt: UNSIGNED VInt delta, base min_timestamp, MICROSECONDS
         //      -> the authoritative reconciliation timestamp (LWW shadowing).
         //   2. localDeletionTime: UNSIGNED VInt delta, base min_local_deletion_time, SECONDS
         //      -> the GC-grace clock, NOT a reconciliation timestamp.
         //
+        // Fix #629 (C2): Both deltas are UNSIGNED per Cassandra SerializationHeader.java.
+        // The old code used parse_vint (ZigZag) for markedForDeleteAt, causing ~50% undercount.
+        //
         // (The complex-cell deletion reader, parse_complex_column, already uses this
         // markedForDeleteAt-first order; this aligns the row-level header with it.)
         let (marked_for_delete_at, local_deletion_time) = if (row_flags & ROW_HAS_DELETION) != 0 {
-            // First VInt: markedForDeleteAt delta (signed).
-            let (remaining, mfda_delta) = parse_vint(&data[pos..]).map_err(|e| {
+            // First VInt: markedForDeleteAt delta (unsigned).
+            let (remaining, mfda_delta) = parse_vuint(&data[pos..]).map_err(|e| {
                 Error::corruption(format!(
                     "V5CompressedLegacy: Failed to parse markedForDeleteAt delta at offset {}: {:?}",
                     pos, e
@@ -1196,7 +1223,7 @@ impl V5CompressedLegacyParser {
             pos += bytes_consumed;
 
             // markedForDeleteAt: absolute = min_timestamp + delta (microseconds).
-            let absolute_marked_for_delete_at = self.min_timestamp.wrapping_add(mfda_delta);
+            let absolute_marked_for_delete_at = self.min_timestamp.wrapping_add(mfda_delta as i64);
             // localDeletionTime: absolute = min_local_deletion_time + delta (seconds).
             let absolute_local_deletion_time =
                 self.min_local_deletion_time.wrapping_add(ldt_delta as i64) as i32;
@@ -1246,6 +1273,14 @@ impl V5CompressedLegacyParser {
             "V5CompressedLegacy: Row header parsing complete: offset_start={}, pos_end={}, header_size={} bytes, row_size={} bytes (total row including cells), timestamp={:?}, ttl={:?}, deletion={:?}",
             offset, pos, header_size, row_size, timestamp, ttl, local_deletion_time
         );
+
+        // Note: ttl_liveness_ldt (from HAS_TTL) is the pk_liveness local expiration time.
+        // It is distinct from local_deletion_time (from HAS_DELETION, row tombstone GC clock).
+        // We consume ttl_liveness_ldt to maintain correct stream alignment (fix #630),
+        // but do not store it in RowHeader as it is not needed for current query semantics.
+        // is_row_tombstone() checks local_deletion_time (HAS_DELETION only), so TTL rows
+        // are NOT incorrectly classified as tombstones.
+        let _ = ttl_liveness_ldt;
 
         Ok((
             RowHeader {
@@ -2139,17 +2174,20 @@ impl V5CompressedLegacyParser {
         // Step 1: Read timestamp (if not using row timestamp)
         // Issue #505: capture the actual cell timestamp so deleted cells can carry it
         // in a Value::Tombstone.
+        //
+        // Fix #629 (C2): Cell timestamp delta is UNSIGNED VInt per Cassandra
+        // SerializationHeader.java:165: out.writeUnsignedVInt(timestamp - stats.minTimestamp).
         let mut cell_timestamp: Option<i64> = None;
         if !use_row_timestamp {
-            let (remaining, timestamp_delta) = parse_vint(&data[offset..]).map_err(|e| {
+            let (remaining, timestamp_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
-                    "Cell '{}': failed to parse timestamp delta as VInt at offset {}: {:?}",
+                    "Cell '{}': failed to parse timestamp delta as VUInt at offset {}: {:?}",
                     column.name, offset, e
                 ))
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
-            let absolute_ts = self.min_timestamp.wrapping_add(timestamp_delta);
+            let absolute_ts = self.min_timestamp.wrapping_add(timestamp_delta as i64);
             log::debug!(
                 "V5CompressedLegacy: Cell '{}' timestamp_delta={} (min_timestamp={}) absolute={}",
                 column.name,
@@ -7158,11 +7196,113 @@ impl V5CompressedLegacyParser {
 
         Ok(types)
     }
+
+    /// Test-only helper that parses the cell header (flags + conditional temporal
+    /// metadata) and returns the offset at which the value bytes begin.
+    ///
+    /// This mirrors the logic in `parse_cell_value_schema_order` for the conditional
+    /// sections (Steps 1-3), but stops before the value parse.  It is used by the
+    /// S1 audit verification tests (Issue #623) to confirm that:
+    ///   - USE_ROW_TIMESTAMP (0x08) causes the timestamp VInt to be ABSENT
+    ///   - USE_ROW_TTL (0x10) without IS_EXPIRING causes LDT/TTL to be ABSENT
+    ///
+    /// Returns `(flags, value_start_offset)`.
+    #[cfg(test)]
+    fn parse_cell_header_end_offset(
+        &self,
+        data: &[u8],
+        start_offset: usize,
+    ) -> Result<(u8, usize)> {
+        const CELL_IS_DELETED: u8 = 0x01;
+        const CELL_IS_EXPIRING: u8 = 0x02;
+        const CELL_USE_ROW_TIMESTAMP: u8 = 0x08;
+        const CELL_USE_ROW_TTL: u8 = 0x10;
+
+        if start_offset >= data.len() {
+            return Err(Error::corruption(
+                "cell_header_end_offset: no flags byte".to_string(),
+            ));
+        }
+        let flags = data[start_offset];
+        let mut offset = start_offset + 1;
+
+        let is_deleted = (flags & CELL_IS_DELETED) != 0;
+        let is_expiring = (flags & CELL_IS_EXPIRING) != 0;
+        let use_row_timestamp = (flags & CELL_USE_ROW_TIMESTAMP) != 0;
+        let use_row_ttl = (flags & CELL_USE_ROW_TTL) != 0;
+
+        // Step 1: skip timestamp VInt if not using row timestamp
+        if !use_row_timestamp {
+            let (remaining, _ts_delta) = parse_vint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "cell_header_end_offset: failed to parse timestamp VInt: {:?}",
+                    e
+                ))
+            })?;
+            offset += data[offset..].len() - remaining.len();
+        }
+        // Step 2: skip LDT VUInt if not using row TTL and (deleted or expiring)
+        if !use_row_ttl && (is_deleted || is_expiring) {
+            let (remaining, _ldt_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "cell_header_end_offset: failed to parse LDT VUInt: {:?}",
+                    e
+                ))
+            })?;
+            offset += data[offset..].len() - remaining.len();
+        }
+        // Step 3: skip TTL VUInt if not using row TTL and expiring
+        if !use_row_ttl && is_expiring {
+            let (remaining, _ttl_delta) = parse_vuint(&data[offset..]).map_err(|e| {
+                Error::corruption(format!(
+                    "cell_header_end_offset: failed to parse TTL VUInt: {:?}",
+                    e
+                ))
+            })?;
+            offset += data[offset..].len() - remaining.len();
+        }
+
+        Ok((flags, offset))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Local VInt encoder for test helpers — avoids depending on
+    /// `storage::serialization` which is gated behind `write-support`.
+    /// Byte-identical to Cassandra's writeUnsignedVInt / VIntCoding.java.
+    fn encode_unsigned(value: u64, buf: &mut Vec<u8>) {
+        // Compute byte count using Cassandra's formula:
+        //   size = (639 - leading_zeros(value | 1) * 9) >> 6
+        let magnitude = (value | 1).leading_zeros();
+        let size = ((639 - magnitude * 9) >> 6) as usize;
+
+        if size == 1 {
+            buf.push(value as u8);
+        } else if size == 9 {
+            buf.push(0xFF);
+            buf.extend_from_slice(&value.to_be_bytes());
+        } else {
+            let extra_bytes = size - 1;
+            let shift = 8usize.saturating_sub(extra_bytes);
+            let mask: u8 = if extra_bytes == 0 {
+                0x00
+            } else if extra_bytes >= 8 {
+                0xFF
+            } else {
+                0xFF_u8 << shift
+            };
+            let first_byte_data_bits = 8 - extra_bytes - 1;
+            let data_shift = extra_bytes * 8;
+            let first_byte_data = ((value >> data_shift) & ((1 << first_byte_data_bits) - 1)) as u8;
+            buf.push(mask | first_byte_data);
+            for i in (0..extra_bytes).rev() {
+                buf.push(((value >> (i * 8)) & 0xFF) as u8);
+            }
+        }
+    }
 
     #[test]
     fn test_partition_header_parsing() {
@@ -7668,22 +7808,36 @@ mod tests {
         //
         // Row header format with HAS_TIMESTAMP (0x04) + HAS_TTL (0x08) + HAS_ALL_COLUMNS (0x20) = 0x2C
         // [row_flags: 0x2C] [row_size: VInt] [prev_size: VInt]
-        // [timestamp_delta: VInt] [ttl_delta: VInt]
+        // [timestamp_delta: UNSIGNED VInt]   ← fix #629: was ZigZag, now unsigned
+        // [ttl_delta: UNSIGNED VInt]
+        // [liveness_ldt_delta: UNSIGNED VInt] ← fix #630: was absent, now required
         // (NO column bitmap because HAS_ALL_COLUMNS is set)
-
-        // Construct row header with flags 0x2C (HAS_TIMESTAMP | HAS_TTL | HAS_ALL_COLUMNS)
-        // row_size=100 (encoded as 0x64), prev_size=0 (encoded as 0x00)
-        // timestamp_delta=1000 (signed VInt: 0x87d0), ttl_delta=0 (unsigned VInt: 0x00)
-        let row_header_hex = "2c640087d000"; // flags=0x2C, size=100, prev=0, ts_delta=1000, ttl_delta=0
-        let data = hex::decode(row_header_hex).unwrap();
+        //
+        // Updated from original: was "2c640087d000" which used ZigZag(1000)=[0x87,0xD0]
+        // for the timestamp and was missing the liveness_ldt field for HAS_TTL.
+        //
+        // Now: unsigned_vint(1000) = [0x83, 0xE8], plus liveness_ldt_delta = 0 (0x00).
 
         let min_timestamp = 1759713125983682i64;
         let min_ttl = 86400i64;
+        let min_ldt = 1759799525i64;
+        let ts_delta: u64 = 1000;
+        let ttl_delta: u64 = 0;
+        let ldt_delta: u64 = 0;
+
+        let mut data: Vec<u8> = Vec::new();
+        data.push(0x2Cu8); // flags: HAS_TIMESTAMP(0x04)|HAS_TTL(0x08)|HAS_ALL_COLUMNS(0x20)
+        encode_unsigned(100, &mut data); // row_size = 100 → [0x64]
+        encode_unsigned(0, &mut data); // prev_size = 0  → [0x00]
+        encode_unsigned(ts_delta, &mut data); // timestamp_delta = 1000 → [0x83, 0xE8]
+        encode_unsigned(ttl_delta, &mut data); // ttl_delta = 0 → [0x00]
+        encode_unsigned(ldt_delta, &mut data); // liveness_ldt_delta = 0 → [0x00]
+
         let parser = V5CompressedLegacyParser::new(
             "test_basic".to_string(),
             "ttl_test_table".to_string(),
             min_timestamp,
-            1759799525, // min_local_deletion_time
+            min_ldt,
             Some(min_ttl),
         );
 
@@ -7696,11 +7850,11 @@ mod tests {
             .parse_row_metadata(&data, flags_size, row_flags, extended_flags)
             .unwrap();
 
-        // Verify delta decoding: absolute_timestamp = min_timestamp + delta
+        // Verify delta decoding: absolute_timestamp = min_timestamp + delta (unsigned)
         assert_eq!(
             row_header.timestamp,
-            Some(min_timestamp + 1000),
-            "Timestamp should be decoded as min_timestamp + delta"
+            Some(min_timestamp + ts_delta as i64),
+            "Timestamp should be decoded as min_timestamp + delta (unsigned VInt, fix #629)"
         );
 
         // Verify TTL delta decoding: absolute_ttl = min_ttl + delta
@@ -7720,18 +7874,21 @@ mod tests {
         // (Issue #505). DeletionTime.Serializer writes markedForDeleteAt FIRST, then
         // localDeletionTime:
         //   [row_flags] [row_size: VInt] [prev_size: VInt]
-        //   [markedForDeleteAt_delta: SIGNED VInt]   (base = min_timestamp, micros)
-        //   [localDeletionTime_delta: UNSIGNED VInt] (base = min_local_deletion_time, secs)
-        use crate::parser::vint::{encode_vint, encode_vuint};
+        //   [markedForDeleteAt_delta: UNSIGNED VInt]  (base = min_timestamp, micros)
+        //   [localDeletionTime_delta: UNSIGNED VInt]  (base = min_local_deletion_time, secs)
+        //
+        // Fix #629 (C2): Both deltas are UNSIGNED per Cassandra SerializationHeader.java.
+        // Test updated to encode mfda_delta as unsigned VInt (was ZigZag/signed before).
+        use crate::parser::vint::encode_vuint;
 
         // Row header with HAS_DELETION (0x10) + HAS_ALL_COLUMNS (0x20) = 0x30.
         let mut data: Vec<u8> = Vec::new();
         data.push(0x30); // flags
         data.extend(encode_vuint(100)); // row_size = 100
         data.extend(encode_vuint(0)); // prev_size = 0
-        let mfda_delta: i64 = 80; // markedForDeleteAt delta (signed)
+        let mfda_delta: u64 = 80; // markedForDeleteAt delta (unsigned, fix #629)
         let ldt_delta: u64 = 50; // localDeletionTime delta (unsigned)
-        data.extend(encode_vint(mfda_delta));
+        data.extend(encode_vuint(mfda_delta));
         data.extend(encode_vuint(ldt_delta));
 
         let min_timestamp = 1759713125983682i64;
@@ -7749,17 +7906,17 @@ mod tests {
             .parse_row_metadata(&data, flags_size, row_flags, extended_flags)
             .unwrap();
 
-        // markedForDeleteAt: absolute = min_timestamp + delta (microseconds). This is
-        // the authoritative reconciliation timestamp used by the compaction merger.
+        // markedForDeleteAt: absolute = min_timestamp + delta (microseconds, UNSIGNED delta).
+        // This is the authoritative reconciliation timestamp used by the compaction merger.
         assert_eq!(
             row_header.marked_for_delete_at,
-            Some(min_timestamp + mfda_delta),
-            "markedForDeleteAt must be decoded from the FIRST (signed) VInt as min_timestamp + delta"
+            Some(min_timestamp + mfda_delta as i64),
+            "markedForDeleteAt must be decoded from the FIRST (unsigned) VInt as min_timestamp + delta"
         );
         // The row-tombstone deletion time (used in Value::Tombstone) must equal it.
         assert_eq!(
             row_header.row_tombstone_deletion_time(),
-            min_timestamp + mfda_delta,
+            min_timestamp + mfda_delta as i64,
             "row tombstone deletion_time must be markedForDeleteAt, not local_deletion_time"
         );
 
@@ -8630,5 +8787,595 @@ mod tests {
             Value::Set(vec![Value::Text("live".to_string())]),
             "tombstoned set element must be skipped; only the live element survives"
         );
+    }
+
+    // =========================================================================
+    // S1 Audit Verification Tests — Issue #623
+    //
+    // Behavioural tests verifying CQLite's read-path cell/row encoding against
+    // Apache Cassandra 5.0.8 source (report-B1.md / facts-B1.md).
+    //
+    // Claim summary:
+    //   C1: USE_ROW_TIMESTAMP (0x08) / USE_ROW_TTL (0x10) — field OMITTED when set
+    //   C2: All temporal deltas are UNSIGNED VInt (never ZigZag)
+    //   C3: HAS_TTL implies TWO fields: [ttl VInt32] + [liveness_ldt VInt32]
+    //   C4: Partition header = u16 BE key_len + key + DeletionTime (writer correct;
+    //       V5CompressedLegacy reader uses legacy format with u8 key_len, different variant)
+    //   C5: Missing-columns bitmap: bit=1 means MISSING; unsigned VInt
+    // =========================================================================
+
+    // -------------------------------------------------------------------------
+    // C1: Cell flags 0x08/0x10 — USE_ROW_TIMESTAMP_MASK / USE_ROW_TTL_MASK
+    //
+    // Cassandra Cell.java:262-266:
+    //   0x08 = USE_ROW_TIMESTAMP_MASK → timestamp field OMITTED from cell stream
+    //   0x10 = USE_ROW_TTL_MASK       → LDT + TTL fields OMITTED from cell stream
+    //
+    // Verdict: CORRECT_BUT_UNTESTED → now tested.
+    // -------------------------------------------------------------------------
+
+    /// C1-a: Cell with USE_ROW_TIMESTAMP (0x08): no timestamp bytes between flags and value.
+    ///
+    /// When bit 0x08 is set, the timestamp field is ABSENT from the cell stream.
+    /// The value bytes immediately follow the flags byte.
+    ///
+    /// Stream layout: [flags=0x08][int_value_4_bytes]
+    /// Expected value_start_offset: 1 (flags only, no temporal bytes)
+    #[test]
+    fn s1_c1_cell_use_row_timestamp_omits_timestamp_field() {
+        // flags = 0x08 (USE_ROW_TIMESTAMP_MASK): timestamp reused from row, not present here
+        // Normally a cell without this flag would have a VInt timestamp delta here.
+        // With 0x08 set, the VInt is ABSENT — value bytes start immediately at offset 1.
+        let data = vec![
+            0x08u8, // USE_ROW_TIMESTAMP only — timestamp absent
+            0xABu8, // sentinel bytes that would be wrong if timestamp was consumed
+            0xCDu8, 0xEFu8,
+        ];
+
+        let parser =
+            V5CompressedLegacyParser::new("ks".to_string(), "tbl".to_string(), 1_000_000, 0, None);
+        let (flags_out, value_start) = parser
+            .parse_cell_header_end_offset(&data, 0)
+            .expect("parse_cell_header_end_offset must succeed for USE_ROW_TIMESTAMP");
+
+        assert_eq!(flags_out, 0x08u8);
+        assert_eq!(
+            value_start, 1,
+            "USE_ROW_TIMESTAMP (0x08): value must start at offset 1 (flags only).\n\
+             If value_start > 1, timestamp bytes were wrongly consumed."
+        );
+    }
+
+    /// C1-b: Cell with IS_EXPIRING (0x02) + USE_ROW_TTL (0x10): LDT and TTL bytes ABSENT.
+    ///
+    /// When IS_EXPIRING is set WITHOUT USE_ROW_TTL, two extra fields appear: LDT VUInt + TTL VUInt.
+    /// When IS_EXPIRING + USE_ROW_TTL (0x12), those two fields are OMITTED.
+    ///
+    /// To isolate the TTL omission from timestamp, we also set USE_ROW_TIMESTAMP (0x08).
+    /// flags = 0x1A = IS_EXPIRING | USE_ROW_TIMESTAMP | USE_ROW_TTL
+    ///   → no timestamp bytes (0x08 set)
+    ///   → no LDT/TTL bytes (0x10 set overrides IS_EXPIRING LDT/TTL)
+    ///   → value starts immediately at offset 1
+    ///
+    /// Compare with IS_EXPIRING + USE_ROW_TIMESTAMP alone (0x0A = 0x08 | 0x02):
+    ///   → no timestamp bytes, BUT LDT and TTL bytes ARE present
+    #[test]
+    fn s1_c1_cell_use_row_ttl_with_expiring_omits_ldt_ttl() {
+        // flags = 0x1A = USE_ROW_TIMESTAMP (0x08) | IS_EXPIRING (0x02) | USE_ROW_TTL (0x10)
+        // All three flags: timestamp absent, LDT absent, TTL absent → value at offset 1
+        let data_with_use_row_ttl = vec![0x1Au8, 0xFFu8, 0xFFu8, 0xFFu8];
+
+        // flags = 0x0A = USE_ROW_TIMESTAMP (0x08) | IS_EXPIRING (0x02)
+        // No USE_ROW_TTL: timestamp absent but LDT + TTL VUInts are present
+        // Use VUInt(50) = 0x32 (1 byte, < 128) for both LDT and TTL deltas
+        let data_without_use_row_ttl = vec![0x0Au8, 0x32u8, 0x32u8, 0xFFu8];
+
+        let parser = V5CompressedLegacyParser::new("ks".to_string(), "tbl".to_string(), 0, 0, None);
+
+        // With USE_ROW_TTL: value starts at offset 1 (no LDT, no TTL consumed)
+        let (_, value_start_with) = parser
+            .parse_cell_header_end_offset(&data_with_use_row_ttl, 0)
+            .expect("parse_cell_header_end_offset for IS_EXPIRING+USE_ROW_TTL");
+        assert_eq!(
+            value_start_with, 1,
+            "IS_EXPIRING+USE_ROW_TTL (0x1A): LDT and TTL must be ABSENT, value starts at 1"
+        );
+
+        // Without USE_ROW_TTL: value starts at offset 3 (LDT=1byte + TTL=1byte after flags)
+        let (_, value_start_without) = parser
+            .parse_cell_header_end_offset(&data_without_use_row_ttl, 0)
+            .expect("parse_cell_header_end_offset for IS_EXPIRING without USE_ROW_TTL");
+        assert_eq!(
+            value_start_without, 3,
+            "IS_EXPIRING without USE_ROW_TTL (0x0A): LDT+TTL present, value starts at 3"
+        );
+
+        // This contrast proves the USE_ROW_TTL flag causes LDT and TTL bytes to be omitted.
+        assert!(
+            value_start_with < value_start_without,
+            "USE_ROW_TTL must reduce header size by omitting LDT+TTL bytes"
+        );
+    }
+
+    /// C1-c: Cell with BOTH 0x08 and 0x10: no timestamp, no LDT, no TTL.
+    ///
+    /// Both USE_ROW_TIMESTAMP and USE_ROW_TTL set — all temporal fields absent.
+    #[test]
+    fn s1_c1_cell_use_row_timestamp_and_ttl_combined() {
+        // 0x18 = USE_ROW_TIMESTAMP | USE_ROW_TTL
+        let data = vec![0x18u8, 0xFFu8]; // sentinel
+
+        let parser =
+            V5CompressedLegacyParser::new("ks".to_string(), "tbl".to_string(), 1_000_000, 0, None);
+        let (flags_out, value_start) = parser
+            .parse_cell_header_end_offset(&data, 0)
+            .expect("parse_cell_header_end_offset must succeed for USE_ROW_TIMESTAMP|USE_ROW_TTL");
+
+        assert_eq!(flags_out, 0x18u8);
+        assert_eq!(
+            value_start, 1,
+            "USE_ROW_TIMESTAMP|USE_ROW_TTL (0x18): value must start at offset 1.\n\
+             All temporal fields must be absent."
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // C2: All temporal deltas must be UNSIGNED VInt (not ZigZag)
+    //
+    // Cassandra SerializationHeader.java:165-177:
+    //   writeTimestamp()         → writeUnsignedVInt(ts - min_ts)
+    //   writeTTL()               → writeUnsignedVInt32(ttl - min_ttl)
+    //   writeLocalDeletionTime() → writeUnsignedVInt32(ldt - min_ldt)
+    //
+    // BUG: parse_row_metadata() uses parse_vint (ZigZag) for:
+    //   - row-level timestamp delta (HAS_TIMESTAMP, line ~1120)
+    //   - markedForDeleteAt delta (HAS_DELETION, line ~1179)
+    // These must use parse_vuint (unsigned VInt) per Cassandra source.
+    //
+    // Verdict: BUG — failing tests document the required correct behavior.
+    // Bug issue: see child issues filed for #623.
+    // -------------------------------------------------------------------------
+
+    /// C2-proof: Show that unsigned VInt(1000) ≠ ZigZag VInt(1000).
+    /// This documents the byte-level discrepancy.
+    ///
+    ///   unsigned VInt(1000):  [0x83, 0xE8]  (1000 = 0x3E8 → 10_000011 11101000)
+    ///   ZigZag VInt(1000):    [0x87, 0xD0]  (zigzag(1000)=2000 → 10_000111 11010000)
+    ///
+    /// When Cassandra writes unsigned VInt and CQLite reads with parse_vint (ZigZag):
+    ///   parse_vint([0x83, 0xE8]) = zigzag_decode(1000) = 500  ← WRONG, should be 1000
+    #[test]
+    fn s1_c2_unsigned_vint_differs_from_zigzag_for_delta_1000() {
+        use crate::parser::vint::{parse_vint, parse_vuint};
+
+        let delta: u64 = 1000;
+
+        // What Cassandra writes (unsigned VInt):
+        let mut cassandra_bytes = Vec::new();
+        encode_unsigned(delta, &mut cassandra_bytes);
+        assert_eq!(
+            cassandra_bytes,
+            vec![0x83, 0xE8],
+            "unsigned VInt(1000) must be [0x83, 0xE8]"
+        );
+
+        // What CQLite currently reads with parse_vint (ZigZag) applied to Cassandra bytes:
+        let (_, from_zigzag) = parse_vint(&cassandra_bytes).unwrap();
+        // zigzag_decode(1000) = 500, not 1000!
+        assert_ne!(
+            from_zigzag, 1000i64,
+            "parse_vint (ZigZag decoder) mis-decodes Cassandra unsigned VInt(1000) as {}",
+            from_zigzag
+        );
+        // Document what the wrong value is
+        assert_eq!(
+            from_zigzag, 500i64,
+            "ZigZag mis-decode of unsigned VInt(1000) must yield 500 (proving the bug)"
+        );
+
+        // Correct decode via parse_vuint:
+        let (_, correct) = parse_vuint(&cassandra_bytes).unwrap();
+        assert_eq!(
+            correct, 1000u64,
+            "parse_vuint must correctly decode to 1000"
+        );
+    }
+
+    /// C2: Row timestamp delta with Cassandra-canonical unsigned encoding must decode correctly.
+    ///
+    /// min_timestamp = 1_000_000, delta = 1000
+    /// Expected absolute = 1_001_000
+    ///
+    /// Row bytes (HAS_TIMESTAMP | HAS_ALL_COLUMNS = 0x24, no clustering):
+    ///   [0x24][row_size=0x00][prev_size=0x00][unsigned_vint(1000)]
+    ///
+    /// CURRENT behavior (ZigZag bug): 1_000_000 + 500 = 1_000_500
+    /// CORRECT behavior (unsigned VInt): 1_000_000 + 1000 = 1_001_000
+    ///
+    /// This test asserts the CORRECT behavior and will FAIL until the bug is fixed.
+    #[test]
+    fn s1_c2_row_timestamp_cassandra_unsigned_encoding_must_decode_correctly() {
+        let min_timestamp = 1_000_000i64;
+        let delta: u64 = 1000;
+        let expected = min_timestamp + delta as i64; // = 1_001_000
+
+        let mut ts_bytes = Vec::new();
+        encode_unsigned(delta, &mut ts_bytes); // [0x83, 0xE8]
+
+        let mut data = Vec::new();
+        data.push(0x24u8); // HAS_TIMESTAMP (0x04) | HAS_ALL_COLUMNS (0x20)
+        data.push(0x00u8); // row_size VInt = 0
+        data.push(0x00u8); // prev_size VInt = 0
+        data.extend_from_slice(&ts_bytes);
+
+        let parser = V5CompressedLegacyParser::new(
+            "ks".to_string(),
+            "tbl".to_string(),
+            min_timestamp,
+            0,
+            None,
+        );
+        let (row_flags, ext_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
+        let (row_header, _) = parser
+            .parse_row_metadata(&data, flags_size, row_flags, ext_flags)
+            .unwrap();
+
+        assert_eq!(
+            row_header.timestamp,
+            Some(expected),
+            "Row timestamp delta must use unsigned VInt.\n\
+             Expected {} (= min_timestamp {} + delta {})\n\
+             Got {:?}\n\
+             Note: if got Some({}), ZigZag is being used (bug C2)",
+            expected,
+            min_timestamp,
+            delta,
+            row_header.timestamp,
+            min_timestamp + (delta as i64 >> 1), // what ZigZag would give
+        );
+    }
+
+    /// C2: markedForDeleteAt delta (HAS_DELETION) must use unsigned VInt.
+    ///
+    /// Row bytes (HAS_DELETION | HAS_ALL_COLUMNS = 0x30):
+    ///   [0x30][row_size=0x00][prev_size=0x00][unsigned_vint(mfda_delta)][unsigned_vint(ldt_delta)]
+    ///
+    /// CURRENT behavior (ZigZag bug): mfda decoded as 500 instead of 1000
+    /// CORRECT behavior: mfda = 1_001_000
+    #[test]
+    fn s1_c2_marked_for_delete_at_cassandra_unsigned_encoding_must_decode_correctly() {
+        let min_timestamp = 1_000_000i64;
+        let mfda_delta: u64 = 1000;
+        let ldt_delta: u64 = 100;
+        let expected_mfda = min_timestamp + mfda_delta as i64; // 1_001_000
+
+        let mut mfda_bytes = Vec::new();
+        encode_unsigned(mfda_delta, &mut mfda_bytes);
+        let mut ldt_bytes = Vec::new();
+        encode_unsigned(ldt_delta, &mut ldt_bytes);
+
+        let mut data = Vec::new();
+        data.push(0x30u8); // HAS_DELETION (0x10) | HAS_ALL_COLUMNS (0x20)
+        data.push(0x00u8); // row_size
+        data.push(0x00u8); // prev_size
+        data.extend_from_slice(&mfda_bytes);
+        data.extend_from_slice(&ldt_bytes);
+
+        let parser = V5CompressedLegacyParser::new(
+            "ks".to_string(),
+            "tbl".to_string(),
+            min_timestamp,
+            0,
+            None,
+        );
+        let (row_flags, ext_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
+        let (row_header, _) = parser
+            .parse_row_metadata(&data, flags_size, row_flags, ext_flags)
+            .unwrap();
+
+        assert_eq!(
+            row_header.marked_for_delete_at,
+            Some(expected_mfda),
+            "markedForDeleteAt delta must use unsigned VInt.\n\
+             Expected {} (= min {} + delta {})\n\
+             Got {:?}\n\
+             Note: if got Some({}), ZigZag is being used (bug C2)",
+            expected_mfda,
+            min_timestamp,
+            mfda_delta,
+            row_header.marked_for_delete_at,
+            min_timestamp + (mfda_delta as i64 >> 1),
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // C3: HAS_TTL (0x08) implies TWO fields: [ttl: VInt32] + [liveness_ldt: VInt32]
+    //
+    // Cassandra UnfilteredSerializer.java:225-228:
+    //   if ((flags & HAS_TTL) != 0) {
+    //       header.writeTTL(pkLiveness.ttl(), out);                         // VInt32
+    //       header.writeLocalDeletionTime(pkLiveness.localExpirationTime(), out); // VInt32
+    //   }
+    //
+    // BUG: parse_row_metadata reads only ONE VInt (TTL), skips the LDT VInt.
+    // This causes misalignment of all subsequent fields in TTL rows.
+    //
+    // Verdict: BUG — header_size must cover both VInts.
+    // Bug issue: see child issues filed for #623.
+    // -------------------------------------------------------------------------
+
+    /// C3: Row with HAS_TTL must consume BOTH TTL and LDT VInts from the stream.
+    ///
+    /// Row bytes (HAS_TTL | HAS_ALL_COLUMNS = 0x28, no timestamp):
+    ///   [flags=0x28][row_size=0x00][prev_size=0x00][ttl_delta=0x64][ldt_delta=0x32]
+    ///   ^--- ttl=100 (1 byte, <128)                                 ^--- ldt=50 (1 byte, <128)
+    ///
+    /// parse_row_metadata starts at pos=flags_size=1 (flags already consumed):
+    ///   row_size(1) + prev_size(1) + ttl(1) + ldt(1) = 4 bytes consumed after flags
+    ///   header_size = pos_end - flags_size = 5 - 1 = 4
+    ///
+    /// PREVIOUS (bug): header_size = 3 — LDT byte not consumed, misaligning later fields.
+    /// CORRECT after fix: header_size = 4 — both TTL and LDT consumed.
+    ///
+    /// Uses single-byte values (< 128) so encode_unsigned produces 1 byte each.
+    #[test]
+    fn s1_c3_has_ttl_reads_two_vint_fields_ttl_and_ldt() {
+        let ttl_delta: u64 = 100; // 1 byte: 0x64 (100 < 128)
+        let ldt_delta: u64 = 50; // 1 byte: 0x32 (50 < 128)
+
+        let mut ttl_bytes = Vec::new();
+        encode_unsigned(ttl_delta, &mut ttl_bytes); // [0x64]
+        assert_eq!(ttl_bytes.len(), 1, "ttl_delta=100 must encode to 1 byte");
+        let mut ldt_bytes = Vec::new();
+        encode_unsigned(ldt_delta, &mut ldt_bytes); // [0x32]
+        assert_eq!(ldt_bytes.len(), 1, "ldt_delta=50 must encode to 1 byte");
+
+        let mut data = Vec::new();
+        data.push(0x28u8); // HAS_TTL (0x08) | HAS_ALL_COLUMNS (0x20)
+        data.push(0x00u8); // row_size VInt = 0
+        data.push(0x00u8); // prev_size VInt = 0
+        data.extend_from_slice(&ttl_bytes); // TTL delta (1 byte = 0x64)
+        data.extend_from_slice(&ldt_bytes); // LDT delta (1 byte = 0x32) — fix: must now be read
+        data.push(0xFFu8); // sentinel — must NOT be consumed by metadata parsing
+
+        let parser = V5CompressedLegacyParser::new(
+            "ks".to_string(),
+            "tbl".to_string(),
+            0,
+            1_600_000_000,
+            Some(3600),
+        );
+        let (row_flags, ext_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
+        assert_eq!(flags_size, 1);
+
+        let result = parser.parse_row_metadata(&data, flags_size, row_flags, ext_flags);
+        assert!(
+            result.is_ok(),
+            "parse_row_metadata must succeed for HAS_TTL row"
+        );
+        let (row_header, _row_size) = result.unwrap();
+
+        // TTL must decode correctly
+        let expected_ttl = (3600i64 + ttl_delta as i64) as i32;
+        assert_eq!(
+            row_header.ttl,
+            Some(expected_ttl),
+            "TTL delta must decode correctly"
+        );
+
+        // header_size must include BOTH TTL (1) and LDT (1) bytes plus row_size(1) + prev_size(1) = 4
+        // Explanation: parse_row_metadata starts at pos=flags_size=1; after consuming
+        //   row_size(1), prev_size(1), ttl(1), ldt(1) → pos=5; header_size = 5-1 = 4.
+        // Before fix: header_size was 3 (ldt not consumed).
+        assert_eq!(
+            row_header.header_size, 4,
+            "HAS_TTL row_header.header_size must be 4 (row_size + prev_size + ttl + ldt).\n\
+             Got {} — if 3, the LDT VInt after TTL was NOT consumed (C3 bug present)",
+            row_header.header_size
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // C4: Partition header format — u16 BE key_len + key + DeletionTime
+    //
+    // Cassandra SortedTablePartitionWriter.java:104-105:
+    //   ByteBufferUtil.writeWithShortLength(key) → [u16 BE key_len][key_bytes]
+    //   then DeletionTime serialized.
+    //
+    // V5CompressedLegacyParser.parse_partition_header() uses [u8 flags][u8 key_len]
+    // which is the legacy compressed block format — intentionally different from the
+    // modern Cassandra BigFormat. The data_writer.rs correctly uses u16 BE key_len.
+    //
+    // Verdict: CORRECT (writer uses Cassandra-canonical u16 BE key length).
+    //          V5CompressedLegacy reader uses legacy format by design.
+    // -------------------------------------------------------------------------
+
+    /// C4: Verify partition key length in data_writer uses u16 BE (Cassandra-canonical).
+    /// Tests existing data_writer unit test vectors to confirm the format.
+    ///
+    /// data_writer.rs write_partition_header():
+    ///   self.buffer.write_all(&(key.key.len() as u16).to_be_bytes())
+    ///
+    /// The existing test at line ~2664 in data_writer.rs already verifies:
+    ///   assert_eq!(&bytes[0..2], &[0x00, 0x04])  // key length 4 as u16 BE
+    ///
+    /// This test documents C4 as CORRECT by verifying the legacy reader format:
+    /// [u8 flags=0x00][u8 key_len][key_bytes][i32 del_time][u64 unknown] = 30 bytes for UUID.
+    #[test]
+    fn s1_c4_v5_legacy_reader_partition_header_format_documented() {
+        // The V5CompressedLegacy format uses [u8 flags][u8 key_len] — legacy design.
+        // This test documents and validates the legacy format is handled consistently.
+        //
+        // Real Cassandra SSTable partition header hex from test_basic/simple_table:
+        //   00 10 15291a77d7394e738397b787442f3a1f 7fffffff 8000000000000000
+        //   ^flags ^len  ^16-byte UUID                  ^i32 del  ^u64 unknown
+        let hex_str = "001015291a77d7394e738397b787442f3a1f7fffffff8000000000000000";
+        let data = hex::decode(hex_str).unwrap();
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "simple_table".to_string(),
+            0,
+            0,
+            None,
+        );
+        let (row_key, offset) = parser.parse_partition_header(&data, 0).unwrap();
+        assert_eq!(row_key.0.len(), 16, "UUID partition key must be 16 bytes");
+        // Total: 1 (flags) + 1 (len) + 16 (UUID) + 4 (del_time) + 8 (unknown) = 30
+        assert_eq!(
+            offset, 30,
+            "Legacy partition header must consume 30 bytes for UUID key"
+        );
+
+        // For contrast: the writer (data_writer.rs) uses u16 BE key length (Cassandra-canonical).
+        // That format is: [u16 key_len][key_bytes][DeletionTime].
+        // The legacy reader and the writer serve different format variants.
+        // Both are intentional and consistent with their respective format specs.
+    }
+
+    // -------------------------------------------------------------------------
+    // C5: Missing-columns bitmap — bit=1 means MISSING (Cassandra convention)
+    //
+    // Cassandra Columns.java:519-530:
+    //   For superset < 64 cols: single unsigned VInt where bit=1 = column ABSENT
+    //   For superset >= 64 cols: delta + column indices
+    //
+    // CQLite parse_row_metadata() uses parse_vuint and comment says "bit=1 means missing".
+    //
+    // Verdict: CORRECT_BUT_UNTESTED → now tested.
+    // -------------------------------------------------------------------------
+
+    /// C5-a: NOT HAS_ALL_COLUMNS → bitmap present; bit=1 means column MISSING.
+    ///
+    /// Row: HAS_TIMESTAMP (0x04) only (NOT HAS_ALL_COLUMNS).
+    /// bitmap = 0x05 = 0b00000101: columns 0 and 2 absent, column 1 present.
+    #[test]
+    fn s1_c5_missing_columns_bitmap_bit1_means_absent() {
+        let ts_delta: u64 = 0;
+        let bitmap: u64 = 0x05; // cols 0 and 2 missing
+
+        let mut ts_bytes = Vec::new();
+        encode_unsigned(ts_delta, &mut ts_bytes);
+        let mut bm_bytes = Vec::new();
+        encode_unsigned(bitmap, &mut bm_bytes);
+
+        let mut data = Vec::new();
+        data.push(0x04u8); // HAS_TIMESTAMP only (no HAS_ALL_COLUMNS)
+        data.push(0x00u8); // row_size = 0
+        data.push(0x00u8); // prev_size = 0
+        data.extend_from_slice(&ts_bytes);
+        data.extend_from_slice(&bm_bytes);
+
+        let parser =
+            V5CompressedLegacyParser::new("ks".to_string(), "tbl".to_string(), 1_000_000, 0, None);
+        let (row_flags, ext_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
+        let (row_header, _) = parser
+            .parse_row_metadata(&data, flags_size, row_flags, ext_flags)
+            .unwrap();
+
+        assert_eq!(
+            row_header.missing_columns_bitmap,
+            Some(0x05),
+            "Missing columns bitmap must be 0x05"
+        );
+
+        let bm = row_header.missing_columns_bitmap.unwrap();
+        // Cassandra bit=1 means column ABSENT:
+        assert_ne!(bm & (1 << 0), 0, "Column 0 must be MISSING (bit 0 set)");
+        assert_eq!(bm & (1 << 1), 0, "Column 1 must be PRESENT (bit 1 clear)");
+        assert_ne!(bm & (1 << 2), 0, "Column 2 must be MISSING (bit 2 set)");
+    }
+
+    /// C5-b: HAS_ALL_COLUMNS (0x20) → no bitmap field → None.
+    #[test]
+    fn s1_c5_has_all_columns_no_bitmap() {
+        let data = vec![0x20u8, 0x00u8, 0x00u8]; // HAS_ALL_COLUMNS only, row_size=0, prev_size=0
+
+        let parser = V5CompressedLegacyParser::new("ks".to_string(), "tbl".to_string(), 0, 0, None);
+        let (row_flags, ext_flags, flags_size) = parser.parse_row_flags(&data, 0).unwrap();
+        let (row_header, _) = parser
+            .parse_row_metadata(&data, flags_size, row_flags, ext_flags)
+            .unwrap();
+
+        assert_eq!(
+            row_header.missing_columns_bitmap, None,
+            "HAS_ALL_COLUMNS must not read a bitmap"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // VInt correctness: unsigned VInt vs ZigZag encoding test vectors
+    // -------------------------------------------------------------------------
+
+    /// VInt-a: Cassandra unsigned VInt (writeUnsignedVInt) encoding test vectors.
+    /// Verified against Cassandra VIntCoding.java algorithm and facts-B1.md §VInt.
+    #[test]
+    fn s1_vint_unsigned_encoding_test_vectors() {
+        use crate::parser::vint::parse_vuint;
+
+        let test_cases: &[(u64, &[u8])] = &[
+            (0, &[0x00]),                 // single byte 0
+            (1, &[0x01]),                 // single byte 1
+            (127, &[0x7F]),               // max single byte
+            (128, &[0x80, 0x80]),         // min 2-byte
+            (1000, &[0x83, 0xE8]),        // 2-byte: 10_000011 11101000
+            (5000, &[0x93, 0x88]),        // audit report-B1 finding #30: unsigned(5000) = 0x93 0x88
+            (7200, &[0x9C, 0x20]),        // audit report-B1 finding #31: unsigned(7200) = 0x9C 0x20
+            (16383, &[0xBF, 0xFF]),       // max 2-byte
+            (16384, &[0xC0, 0x40, 0x00]), // min 3-byte
+        ];
+
+        for (value, expected) in test_cases {
+            let mut buf = Vec::new();
+            encode_unsigned(*value, &mut buf);
+            assert_eq!(
+                buf.as_slice(),
+                *expected,
+                "encode_unsigned({}) = {:?}, expected {:?}",
+                value,
+                buf,
+                expected
+            );
+
+            let (rem, decoded) = parse_vuint(&buf).unwrap();
+            assert!(
+                rem.is_empty(),
+                "parse_vuint must consume all bytes for {}",
+                value
+            );
+            assert_eq!(decoded, *value, "round-trip failed for {}", value);
+        }
+    }
+
+    /// VInt-b: ZigZag encoding test vectors (used only for signed fields, NOT for SSTable temporal fields).
+    /// Facts-B1.md confirms: ZigZag is used only in on-wire messaging, not SSTable row serialization.
+    #[test]
+    fn s1_vint_zigzag_encoding_test_vectors() {
+        use crate::parser::vint::{zigzag_decode, zigzag_encode};
+
+        let test_cases: &[(i64, u64)] = &[
+            (0, 0),
+            (-1, 1),
+            (1, 2),
+            (-2, 3),
+            (2, 4),
+            (63, 126),
+            (-64, 127),
+            (64, 128),
+        ];
+        for (signed, unsigned) in test_cases {
+            assert_eq!(
+                zigzag_encode(*signed),
+                *unsigned,
+                "zigzag_encode({})",
+                signed
+            );
+            assert_eq!(
+                zigzag_decode(*unsigned),
+                *signed,
+                "zigzag_decode({})",
+                unsigned
+            );
+        }
     }
 }
