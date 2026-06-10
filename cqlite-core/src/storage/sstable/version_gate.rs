@@ -394,6 +394,20 @@ pub struct BtiVersionGates {
     /// `hasOldBfFormat` is **FALSE** for BTI (BtiFormat.java:357-360).
     pub has_old_bf_format: bool,
     pub has_originating_host_id: bool,
+    /// `hasAccurateMinMax` — **TRUE** for BTI `da`.
+    ///
+    /// Source: BtiFormat.java:363-366
+    /// ```java
+    /// public boolean hasAccurateMinMax() { return true; }
+    /// ```
+    pub has_accurate_min_max: bool,
+    /// `hasLegacyMinMax` — **FALSE** for BTI `da`.
+    ///
+    /// Source: BtiFormat.java:368-371
+    /// ```java
+    /// public boolean hasLegacyMinMax() { return false; }
+    /// ```
+    pub has_legacy_min_max: bool,
     pub has_improved_min_max: bool,
     pub has_token_space_coverage: bool,
     pub has_partition_level_deletion_presence_marker: bool,
@@ -422,8 +436,12 @@ impl BtiVersionGates {
             has_pending_repair: true,
             has_is_transient: true,
             has_metadata_checksum: true,
-            has_old_bf_format: false, // Always false for BTI
+            has_old_bf_format: false, // Always false for BTI (BtiFormat.java:357-360)
             has_originating_host_id: true,
+            // BtiFormat.java:363-366: `public boolean hasAccurateMinMax() { return true; }`
+            has_accurate_min_max: true,
+            // BtiFormat.java:368-371: `public boolean hasLegacyMinMax() { return false; }`
+            has_legacy_min_max: false,
             has_improved_min_max: true,
             has_token_space_coverage: true,
             has_partition_level_deletion_presence_marker: true,
@@ -825,6 +843,16 @@ mod tests {
         assert!(g.has_metadata_checksum);
         assert!(!g.has_old_bf_format, "da: !hasOldBfFormat");
         assert!(g.has_originating_host_id);
+        // BtiFormat.java:363-366: hasAccurateMinMax() → true
+        assert!(
+            g.has_accurate_min_max,
+            "da: hasAccurateMinMax (BtiFormat.java:363)"
+        );
+        // BtiFormat.java:368-371: hasLegacyMinMax() → false
+        assert!(
+            !g.has_legacy_min_max,
+            "da: !hasLegacyMinMax (BtiFormat.java:368)"
+        );
         assert!(g.has_improved_min_max);
         assert!(g.has_token_space_coverage);
         assert!(g.has_partition_level_deletion_presence_marker);
@@ -979,6 +1007,9 @@ mod tests {
                 );
                 assert!(!g.has_old_bf_format, "da: !hasOldBfFormat");
                 assert!(g.has_originating_host_id, "da: hasOriginatingHostId");
+                // BtiFormat.java:363-371
+                assert!(g.has_accurate_min_max, "da: hasAccurateMinMax");
+                assert!(!g.has_legacy_min_max, "da: !hasLegacyMinMax");
             }
             VersionGates::Big(_) => panic!("Expected Bti gates for da-2-bti-Data.db"),
         }

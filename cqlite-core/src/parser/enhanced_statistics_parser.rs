@@ -2140,6 +2140,15 @@ fn parse_minimal_encoding_stats<'a>(
 
 /// Parse 3 EncodingStats unsigned VInt deltas and convert to absolute values by adding epochs.
 /// Returns (min_timestamp, min_deletion_time, min_ttl).
+///
+/// # VG3 plumbing note
+///
+/// The `min_deletion_time` field uses the `DELETION_TIME_EPOCH` offset for `nb` format
+/// (signed delta, seconds since epoch).  For `oa`/`da` (`has_uint_deletion_time == true`)
+/// Cassandra switches to an unsigned 32-bit representation (BigFormat.java:409,
+/// BtiFormat.java).  The gate value needed to flip this is available on
+/// `SSTableReader::version_gates` after VG1 plumbing; VG3 will thread it here
+/// and change the interpretation accordingly.
 fn parse_encoding_stats_vuints(input: &[u8]) -> IResult<&[u8], (i64, i64, Option<i64>)> {
     let (rest, min_ts_delta) = parse_vuint(input)?;
     let (rest, min_ldt_delta) = parse_vuint(rest)?;
@@ -2149,6 +2158,8 @@ fn parse_encoding_stats_vuints(input: &[u8]) -> IResult<&[u8], (i64, i64, Option
         rest,
         (
             min_ts_delta as i64 + TIMESTAMP_EPOCH,
+            // VG3: for oa/da (has_uint_deletion_time), drop DELETION_TIME_EPOCH
+            // and interpret min_ldt_delta as raw u32 seconds since Unix epoch.
             min_ldt_delta as i64 + DELETION_TIME_EPOCH,
             Some(min_ttl_delta as i64 + TTL_EPOCH),
         ),

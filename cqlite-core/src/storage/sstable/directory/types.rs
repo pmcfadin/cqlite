@@ -11,7 +11,18 @@ use crate::error::{Error, Result};
 pub struct SSTableGeneration {
     /// Generation number (e.g., 1 for "nb-1-big")
     pub generation: u32,
-    /// Format type (e.g., "big", "da" for BTI)
+    /// Two-letter version string from the filename (e.g., `"nb"`, `"oa"`, `"da"`).
+    ///
+    /// This is the authoritative version letter used to construct `VersionGates`
+    /// (see `storage/sstable/version_gate.rs`).  The field is populated by
+    /// `parse_sstable_filename` when scanning a directory.
+    ///
+    /// Cassandra 5.0 supports two SSTable ID forms (Descriptor.java:85, 95):
+    /// - Sequential: `nb-1-big-Data.db`  (integer id)
+    /// - UUID-based: `nb-6aa08200…-big-Data.db`  (hex string)
+    ///   Both are accepted; the version letter is always the first segment.
+    pub version: String,
+    /// Format type (e.g., "big", "bti")
     pub format: String,
     /// Table name
     pub table_name: String,

@@ -59,7 +59,10 @@ use crate::{
     parser::{header::CassandraVersion, SSTableHeader, SSTableParser},
     platform::Platform,
     schema::TableSchema,
-    storage::sstable::compression_info::CompressionInfo,
+    storage::sstable::{
+        compression_info::CompressionInfo,
+        version_gate::{BigVersionGates, VersionGates},
+    },
     Config, Error, Result, RowKey, Value,
 };
 
@@ -302,6 +305,28 @@ impl SSTableReader {
         // Extract generation from filename or use default
         let generation = extract_generation_from_path(path);
 
+        // Compute VersionGates from the SSTable filename.  This is the single
+        // derivation point; the Arc is cloned to any context that needs gates
+        // (header parsing, statistics parsing, row parsing).
+        //
+        // Falls back to nb-compatible BIG gates when the filename is not a valid
+        // SSTable descriptor (e.g. paths used in unit tests).  Using nb-fallback
+        // maintains existing behaviour — the gates will not change parsing
+        // decisions until VG3 actually flips behaviour.
+        let version_gates = Arc::new(match VersionGates::from_path(path) {
+            Ok(gates) => gates,
+            Err(e) => {
+                log::debug!(
+                    "SSTableReader::open: could not derive VersionGates from {:?} ({}); \
+                     defaulting to nb-compatible BIG gates",
+                    path,
+                    e
+                );
+                // Safe unwrap: "nb" is a valid BIG version string.
+                VersionGates::Big(BigVersionGates::from_version("nb").expect("nb is valid"))
+            }
+        });
+
         Ok(Self {
             file_path: path.to_path_buf(),
             file,
@@ -329,6 +354,7 @@ impl SSTableReader {
             udt_registry: None, // Will be set when available for UDT-aware parsing
             compression_info: compression_info.map(Arc::new),
             current_chunk_index: AtomicUsize::new(0),
+            version_gates,
         })
     }
 

@@ -20,7 +20,7 @@ use crate::{
 use super::super::{
     bloom::BloomFilter, compression::CompressionReader, compression_info::CompressionInfo,
     index::SSTableIndex, index_reader::IndexReader, statistics_reader::StatisticsReader,
-    summary_reader::SummaryReader,
+    summary_reader::SummaryReader, version_gate::VersionGates,
 };
 
 #[cfg(feature = "tombstones")]
@@ -261,4 +261,14 @@ pub struct SSTableReader {
     pub compression_info: Option<Arc<CompressionInfo>>,
     /// Current chunk index for sequential chunk reading
     pub(super) current_chunk_index: AtomicUsize,
+    /// Version-feature gates derived from the SSTable filename.
+    ///
+    /// Computed once in `SSTableReader::open` via `VersionGates::from_path` and
+    /// stored here so every downstream consumer (header parsing,
+    /// enhanced_statistics_parser, v5_compressed_legacy row parsing) can read the
+    /// gate values without re-deriving them from the filename each time.
+    ///
+    /// Decision points that WILL be gated in VG3 are annotated with
+    /// `// VG3: use self.version_gates.has_XXX()` comments at each call site.
+    pub(crate) version_gates: Arc<VersionGates>,
 }

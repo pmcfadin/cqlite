@@ -105,6 +105,13 @@ pub(crate) fn detect_ascii_header_corruption(header: &[u8]) -> bool {
 }
 
 /// Enhanced header parsing with version detection using spec-driven approach
+///
+/// # VG1 plumbing note
+///
+/// `VersionGates` is computed by `SSTableReader::open` **after** this function
+/// returns and stored on `SSTableReader::version_gates`.  Decision points within
+/// header parsing that WILL be gated in VG3 are marked with `// VG3:` comments
+/// below; they currently retain `nb`-compatible behaviour.
 pub(crate) async fn parse_header_with_version_detection(
     header_buffer: &[u8],
     path: &Path,
@@ -121,6 +128,12 @@ pub(crate) async fn parse_header_with_version_detection(
 
     // Detect NB format (Cassandra 4.x+) from filename FIRST - these files don't have magic numbers
     // Pattern: nb-{generation}-big-{component}.db (e.g., "nb-1-big-Data.db")
+    //
+    // VG3: After VG1 plumbing is complete, replace this filename string-scan with a
+    // VersionGates query: `gates.Big(g) if !g.has_improved_min_max` (nb/oa pre-flag
+    // detection).  Currently the heuristic string check is retained for nb backward
+    // compat.  The full `VersionGates` for this path is available on `SSTableReader`
+    // after `open()` returns; see `SSTableReader::version_gates`.
     let is_nb_format = path
         .file_name()
         .and_then(|n| n.to_str())

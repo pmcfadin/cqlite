@@ -97,6 +97,10 @@ impl FormatDetector {
 
         // Cassandra 5.x formats
         format_map.insert("oa".to_string(), SSTableFormat::V5x("oa".to_string()));
+        // BTI format (BtiFormat.java:287-420): `da` is the only BTI version letter.
+        // Mapped to V5x rather than Unknown so callers can select the BTI read path.
+        // Full BTI routing is completed in VG5; here we ensure `da` is not Unknown.
+        format_map.insert("da".to_string(), SSTableFormat::V5x("da".to_string()));
 
         Self { format_map }
     }
@@ -435,7 +439,7 @@ mod tests {
         assert_eq!(info.size, "big");
     }
 
-    /// BTI da-version Data.db files parse correctly.
+    /// BTI da-version Data.db files parse correctly; `da` maps to V5x (not Unknown).
     #[test]
     fn test_sstable_info_parsing_da_bti_data() {
         let path = PathBuf::from("da-1-bti-Data.db");
@@ -443,6 +447,28 @@ mod tests {
         assert_eq!(info.sstable_id, "1");
         assert_eq!(info.size, "bti");
         assert_eq!(info.component, SSTableComponent::Data);
+        // FormatDetector must map `da` to V5x, not Unknown (VG1 requirement).
+        assert_eq!(
+            info.format,
+            SSTableFormat::V5x("da".to_string()),
+            "da must be V5x, not Unknown"
+        );
+    }
+
+    /// FormatDetector: `da` must resolve to V5x (not Unknown).
+    #[test]
+    fn test_format_detector_da_is_v5x_not_unknown() {
+        let detector = FormatDetector::new();
+        let fmt = detector.detect_from_version("da").unwrap();
+        assert_eq!(
+            fmt,
+            SSTableFormat::V5x("da".to_string()),
+            "FormatDetector must return V5x for 'da', not Unknown"
+        );
+        assert!(
+            detector.is_supported("da"),
+            "da must be a supported version"
+        );
     }
 
     /// BTI Partitions.db is a BTI-specific component not in SSTableComponent enum;

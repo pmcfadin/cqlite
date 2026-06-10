@@ -401,7 +401,10 @@ impl SSTableReader {
             min_timestamp,
             min_local_deletion_time,
             min_ttl,
-        );
+        )
+        // VG1: thread VersionGates from SSTableReader down to row parser so
+        // that VG3 can flip gate-sensitive code paths without re-deriving gates.
+        .with_version_gates(self.version_gates.clone());
         // Add UDT registry if available for UDT-aware collection parsing (Issue #238)
         let parser = if let Some(ref registry) = self.udt_registry {
             parser.with_udt_registry(registry.clone())
@@ -490,7 +493,9 @@ impl SSTableReader {
             min_timestamp,
             min_local_deletion_time,
             min_ttl,
-        );
+        )
+        // VG1: thread VersionGates from SSTableReader down to row parser.
+        .with_version_gates(self.version_gates.clone());
         let parser = if let Some(ref registry) = self.udt_registry {
             parser.with_udt_registry(registry.clone())
         } else {

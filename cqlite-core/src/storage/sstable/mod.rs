@@ -33,6 +33,9 @@ pub mod validation;
 pub mod writer;
 
 // Test modules
+/// VG1: Thread VersionGates through the read path (Issue #653).
+#[cfg(test)]
+mod issue_653_version_gates_plumbing_test;
 #[cfg(test)]
 mod key_digest_integration_test;
 #[cfg(test)]
