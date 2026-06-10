@@ -35,7 +35,7 @@ fn test_statistics_roundtrip() {
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read file");
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(
         result.is_ok(),

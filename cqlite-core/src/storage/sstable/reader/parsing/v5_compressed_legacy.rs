@@ -221,10 +221,8 @@ impl V5CompressedLegacyParser {
         min_ttl: Option<i64>,
     ) -> Self {
         // Default to nb-compatible BIG gates when not supplied by the caller.
-        // Safe unwrap: "nb" is always a valid BIG version string.
-        let version_gates = std::sync::Arc::new(VersionGates::Big(
-            BigVersionGates::from_version("nb").expect("nb is a valid BIG version"),
-        ));
+        // Use the infallible nb_fallback() constructor (no expect/unwrap in lib code).
+        let version_gates = std::sync::Arc::new(VersionGates::Big(BigVersionGates::nb_fallback()));
         Self {
             keyspace,
             table_name,

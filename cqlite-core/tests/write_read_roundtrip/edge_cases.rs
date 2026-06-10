@@ -465,7 +465,7 @@ async fn test_edge_ttl_values() {
 
     // Verify Statistics.db captured TTL
     let stats_data = std::fs::read(&info.stats_path).expect("Should read Statistics.db");
-    let result = parse_statistics_with_fallback(&stats_data);
+    let result = parse_statistics_with_fallback(&stats_data, None);
     assert!(result.is_ok(), "Should parse Statistics.db with TTL data");
 }
 

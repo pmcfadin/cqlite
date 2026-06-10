@@ -10,6 +10,7 @@ use crate::{
         parse_sstable_header, CassandraVersion, ColumnInfo, CompressionInfo, SSTableHeader,
         SSTableStats, SUPPORTED_MAGIC_NUMBERS,
     },
+    storage::sstable::version_gate::VersionGates,
     Error, Result,
 };
 
@@ -108,13 +109,18 @@ pub(crate) fn detect_ascii_header_corruption(header: &[u8]) -> bool {
 ///
 /// # VG1 plumbing note
 ///
-/// `VersionGates` is computed by `SSTableReader::open` **after** this function
-/// returns and stored on `SSTableReader::version_gates`.  Decision points within
-/// header parsing that WILL be gated in VG3 are marked with `// VG3:` comments
-/// below; they currently retain `nb`-compatible behaviour.
+/// `gates` is derived from the filename by `SSTableReader::open` BEFORE calling
+/// this function and stored on `SSTableReader::version_gates`.  Decision points
+/// within header parsing that WILL be gated in VG3 are marked with `// VG3:`
+/// comments below; they currently retain `nb`-compatible behaviour.  The
+/// parameter is accepted here so VG3 can flip those decisions without
+/// re-deriving gates from the filename and without signature surgery up the
+/// call stack.
 pub(crate) async fn parse_header_with_version_detection(
     header_buffer: &[u8],
     path: &Path,
+    // VG3: use `gates` here to flip version-sensitive header parsing decisions.
+    _gates: &VersionGates,
 ) -> Result<SSTableHeader> {
     // Validate minimum header size
     if header_buffer.len() < 8 {

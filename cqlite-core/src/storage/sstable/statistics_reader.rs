@@ -58,8 +58,11 @@ impl StatisticsReader {
         let mut buffer = Vec::new();
         file.read_to_end(&mut buffer).await?;
 
-        // Parse the statistics data using enhanced parser with fallback
-        let statistics = match parse_statistics_with_fallback(&buffer) {
+        // Parse the statistics data using enhanced parser with fallback.
+        // Gates are not available at StatisticsReader construction time (the reader
+        // is opened before SSTableReader has gates). Pass None here; nb-compatible
+        // defaults apply. VG3 will wire gates through SSTableReader instead.
+        let statistics = match parse_statistics_with_fallback(&buffer, None) {
             Ok((_, stats)) => stats,
             Err(e) => {
                 return Err(Error::corruption(format!(

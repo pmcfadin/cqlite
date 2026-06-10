@@ -89,7 +89,7 @@ async fn test_nb_format_returns_error_not_fabrication() {
     );
 
     // Attempt to parse the nb-format Statistics.db with enhanced parser
-    let result = parse_enhanced_statistics_file(&file_bytes);
+    let result = parse_enhanced_statistics_file(&file_bytes, None);
 
     // Issue #162: Minimal nb-format parsing now succeeds (EncodingStats extraction)
     // This is CORRECT behavior - we read real binary data, not fabricated values
@@ -143,7 +143,7 @@ async fn test_nb_format_data_extraction_returns_error() {
     );
 
     // Attempt to extract statistics data (Issue #162: now succeeds for minimal EncodingStats)
-    let result = parse_nb_format_statistics_data(remaining, &header, &file_bytes);
+    let result = parse_nb_format_statistics_data(remaining, &header, &file_bytes, None);
 
     // Issue #162: Minimal parsing succeeds (extracts EncodingStats only)
     assert!(
@@ -579,7 +579,7 @@ async fn test_multiple_real_statistics_files() {
         assert_eq!(header.version, 4, "All test files should be nb-format");
 
         // Test 2: Full file parsing succeeds with minimal EncodingStats (Issue #162)
-        let full_result = parse_statistics_with_fallback(&file_bytes);
+        let full_result = parse_statistics_with_fallback(&file_bytes, None);
         assert!(
             full_result.is_ok(),
             "Full parsing should succeed with minimal EncodingStats for {} (Issue #162)",
@@ -622,8 +622,12 @@ fn test_error_messages_reference_issues() {
     };
 
     let insufficient_data = vec![0u8; 5]; // Too little data for VInt parsing
-    let result =
-        parse_nb_format_statistics_data(&insufficient_data, &dummy_header, &insufficient_data);
+    let result = parse_nb_format_statistics_data(
+        &insufficient_data,
+        &dummy_header,
+        &insufficient_data,
+        None,
+    );
 
     // Issue #162: Parser now attempts minimal parsing and fails on insufficient data
     assert!(result.is_err(), "Should return error for insufficient data");

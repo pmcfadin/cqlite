@@ -373,6 +373,39 @@ impl BigVersionGates {
     pub fn is_cassandra5_native(&self) -> bool {
         self.version == "oa"
     }
+
+    /// Infallible constructor returning gates for the `nb` version (stock Cassandra 5.0
+    /// `storage_compatibility_mode = CASSANDRA_4`).
+    ///
+    /// Use this instead of `from_version("nb").expect(…)` in library code, which
+    /// violates the project's no-`expect` mandate.  The field values are the literal
+    /// results of evaluating `from_version("nb")`; a unit test in this module keeps
+    /// them in sync with `from_version`.
+    ///
+    /// VG3 fall-back: when the SSTable filename cannot be parsed the reader defaults
+    /// to these gates so existing behaviour is preserved.
+    pub fn nb_fallback() -> Self {
+        Self {
+            version: "nb".to_string(),
+            // Gates matching BigFormat.java for version "nb" ----------------
+            has_commit_log_lower_bound: true, // "nb" >= "mb"
+            has_commit_log_intervals: true,   // "nb" >= "mc"
+            has_accurate_min_max: true,       // "nb" in n[a-z]
+            has_legacy_min_max: true,         // "nb" in n[a-z]
+            has_originating_host_id: true,    // "nb" >= "nb"
+            has_max_compressed_length: true,  // "nb" >= "na"
+            has_pending_repair: true,         // "nb" >= "na"
+            has_is_transient: true,           // "nb" >= "na"
+            has_metadata_checksum: true,      // "nb" >= "na"
+            has_old_bf_format: false,         // "nb" NOT < "na"
+            // oa-only gates — all FALSE for nb
+            has_improved_min_max: false,
+            has_partition_level_deletion_presence_marker: false,
+            has_key_range: false,
+            has_uint_deletion_time: false,
+            has_token_space_coverage: false,
+        }
+    }
 }
 
 /// Feature gates for a BTI-format SSTable.
@@ -814,6 +847,60 @@ mod tests {
         let oa = BigVersionGates::from_version("oa").unwrap();
         assert!(!oa.is_cassandra5_compat_mode());
         assert!(oa.is_cassandra5_native());
+    }
+
+    // -----------------------------------------------------------------------
+    // BigVersionGates::nb_fallback — must match from_version("nb") exactly
+    // -----------------------------------------------------------------------
+
+    /// Verify that `BigVersionGates::nb_fallback()` produces the same gate
+    /// values as `BigVersionGates::from_version("nb")`.  This test is the
+    /// automated guard that keeps the two in sync.
+    #[test]
+    fn test_nb_fallback_matches_from_version() {
+        let from_fn = BigVersionGates::from_version("nb").unwrap();
+        let fallback = BigVersionGates::nb_fallback();
+
+        assert_eq!(fallback.version, from_fn.version);
+        assert_eq!(
+            fallback.has_commit_log_lower_bound,
+            from_fn.has_commit_log_lower_bound
+        );
+        assert_eq!(
+            fallback.has_commit_log_intervals,
+            from_fn.has_commit_log_intervals
+        );
+        assert_eq!(fallback.has_accurate_min_max, from_fn.has_accurate_min_max);
+        assert_eq!(fallback.has_legacy_min_max, from_fn.has_legacy_min_max);
+        assert_eq!(
+            fallback.has_originating_host_id,
+            from_fn.has_originating_host_id
+        );
+        assert_eq!(
+            fallback.has_max_compressed_length,
+            from_fn.has_max_compressed_length
+        );
+        assert_eq!(fallback.has_pending_repair, from_fn.has_pending_repair);
+        assert_eq!(fallback.has_is_transient, from_fn.has_is_transient);
+        assert_eq!(
+            fallback.has_metadata_checksum,
+            from_fn.has_metadata_checksum
+        );
+        assert_eq!(fallback.has_old_bf_format, from_fn.has_old_bf_format);
+        assert_eq!(fallback.has_improved_min_max, from_fn.has_improved_min_max);
+        assert_eq!(
+            fallback.has_partition_level_deletion_presence_marker,
+            from_fn.has_partition_level_deletion_presence_marker
+        );
+        assert_eq!(fallback.has_key_range, from_fn.has_key_range);
+        assert_eq!(
+            fallback.has_uint_deletion_time,
+            from_fn.has_uint_deletion_time
+        );
+        assert_eq!(
+            fallback.has_token_space_coverage,
+            from_fn.has_token_space_coverage
+        );
     }
 
     // -----------------------------------------------------------------------

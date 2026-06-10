@@ -42,7 +42,7 @@ fn test_statistics_roundtrip_minimal() {
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(
         result.is_ok(),
@@ -78,7 +78,7 @@ fn test_statistics_roundtrip_timestamp_range() {
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(
         result.is_ok(),
@@ -114,7 +114,7 @@ fn test_statistics_roundtrip_with_ttl() {
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(result.is_ok(), "Should parse Statistics.db with TTL");
 
@@ -147,7 +147,7 @@ fn test_statistics_roundtrip_with_deletion_time() {
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(
         result.is_ok(),
@@ -202,7 +202,7 @@ async fn test_statistics_roundtrip_via_write_engine() {
 
     // Read and parse Statistics.db
     let file_data = std::fs::read(&info.stats_path).expect("Should read Statistics.db");
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(
         result.is_ok(),
@@ -289,7 +289,7 @@ fn test_statistics_hex_dump_format_comparison() {
     );
 
     // Verify the file can still be parsed (functional check)
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
     assert!(result.is_ok(), "Written Statistics.db should be parseable");
 
     let (_remaining, stats) = result.unwrap();
@@ -319,7 +319,7 @@ fn test_statistics_roundtrip_extreme_timestamps() {
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path).expect("Should read Statistics.db");
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(
         result.is_ok(),

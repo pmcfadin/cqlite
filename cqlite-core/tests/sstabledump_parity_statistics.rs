@@ -220,7 +220,7 @@ async fn validate_table_statistics_parity(
     let stats_bytes = std::fs::read(&stats_file)
         .map_err(|e| Error::internal(format!("Failed to read Statistics.db: {e}")))?;
 
-    match parse_statistics_with_fallback(&stats_bytes) {
+    match parse_statistics_with_fallback(&stats_bytes, None) {
         Ok((_, stats)) => {
             validation_result.min_timestamp = stats.timestamp_stats.min_timestamp;
 
@@ -389,7 +389,7 @@ async fn test_statistics_ttl_parity() -> CqliteResult<()> {
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path)?;
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(
         result.is_ok(),
@@ -419,7 +419,7 @@ async fn test_statistics_deletion_time_parity() -> CqliteResult<()> {
 
     // Read back and parse
     let file_data = std::fs::read(&stats_path)?;
-    let result = parse_statistics_with_fallback(&file_data);
+    let result = parse_statistics_with_fallback(&file_data, None);
 
     assert!(
         result.is_ok(),

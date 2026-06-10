@@ -152,7 +152,7 @@ async fn test_data_single_partition_stats_cross_validation() {
     // Read Statistics.db to verify min_timestamp matches our written data
     let stats_data = std::fs::read(&info.stats_path).expect("Should read Statistics.db");
     let (_, stats) =
-        parse_statistics_with_fallback(&stats_data).expect("Should parse Statistics.db");
+        parse_statistics_with_fallback(&stats_data, None).expect("Should parse Statistics.db");
 
     // The min_timestamp in Statistics.db should match what we wrote
     assert_eq!(

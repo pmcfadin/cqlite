@@ -487,7 +487,7 @@ async fn test_data_cross_component_validation() {
     // Cross-validation 2: Statistics.db min_timestamp matches first mutation
     let stats_data = std::fs::read(&info.stats_path).expect("Should read Statistics.db");
     let (_, stats) =
-        parse_statistics_with_fallback(&stats_data).expect("Should parse Statistics.db");
+        parse_statistics_with_fallback(&stats_data, None).expect("Should parse Statistics.db");
     assert_eq!(
         stats.timestamp_stats.min_timestamp, 1000000,
         "Statistics.db min_timestamp should match first mutation"
