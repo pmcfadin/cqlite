@@ -4,9 +4,9 @@ set -euo pipefail
 # Fetch canonical Cassandra 5 datasets into test-data/datasets
 # Usage: DATASET_TAG=datasets-v2 DATASET_ASSET=cassandra5-small-full.tar.gz DATASET_SHA256=<sha> ./test-data/scripts/fetch-datasets.sh
 
-TAG="${DATASET_TAG:-datasets-v2}"
-ASSET="${DATASET_ASSET:-cassandra5-small-full.tar.gz}"
-SHA256_EXPECTED="${DATASET_SHA256:-5be43811bbee320a412aaf79aa63134ec1e2ec5434c03815a082b4a31bd86c55}"
+TAG="${DATASET_TAG:-datasets-v3}"
+ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.tar.gz}"
+SHA256_EXPECTED="${DATASET_SHA256:-69950feaaf45854e38c467087911d2d9772eeb459b6131adb676a342d7dfa983}"
 
 echo "Fetching dataset ${ASSET} (tag ${TAG})"
 mkdir -p test-data/datasets

@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Comprehensive Smoke Test Script for All Test Tables
-# Issue #200: Validate that all 33 test tables can be loaded successfully
+# Issue #200: Validate that all 33 nb test tables can be loaded successfully
+# Issue #654: Also discover oa/da keyspaces (reported as SKIP-PENDING until VG3/VG4)
 #
-# This script discovers all test tables across all keyspaces (test_basic,
-# test_collections, test_timeseries, test_wide_rows) and validates that
-# each can be loaded using the read-sstable command. It validates row
-# counts against JSONL reference files and reports comprehensive results.
+# This script discovers all test tables across all keyspaces:
+#   - nb (enforced): test_basic, test_collections, test_timeseries, test_wide_rows
+#   - oa (skip-pending, VG4): test_oa
+#   - da/bti (skip-pending, future BTI epic): test_da
 #
-# Test command used for each table:
+# Tables in SKIP_PENDING_KEYSPACES are discovered and listed, but not run
+# through the read-sstable command. They appear explicitly in the summary
+# as "SKIP-PENDING" so CI can see them (not silent, not failing).
+#
+# Test command used for each nb table:
 #   cargo run --bin cqlite -- read-sstable <table_dir> --format json
 #
 # Usage:
@@ -32,6 +37,7 @@ NC='\033[0m' # No Color
 declare -a PASSED_TABLES=()
 declare -a FAILED_TABLES=()
 declare -a FAILED_DETAILS=()
+declare -a SKIPPED_PENDING_TABLES=()
 
 # Get script directory (resolve symlinks)
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -42,8 +48,31 @@ DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-${WORKSPACE_ROOT}/test-data/datasets}"
 SSTABLES_DIR="${DATASETS_ROOT}/sstables"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/smoke-test-all-tables-results}"
 
-# Expected keyspaces to test
+# Enforced keyspaces (must all pass, failures exit non-zero)
 KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows")
+
+# Skip-pending keyspaces (Issue #654):
+#   - test_oa: oa format (BIG) - skip until VG4 (oa parser lands)
+#   - test_da: da format (BTI) - skip until future BTI read epic
+# These keyspaces are discovered and listed explicitly as SKIP-PENDING,
+# but are not run through read-sstable (would produce parse errors).
+SKIP_PENDING_KEYSPACES=("test_oa" "test_da")
+# Reason per keyspace (parallel arrays, bash 3.x compatible)
+SKIP_PENDING_KEYSPACE_NAMES=("test_oa" "test_da")
+SKIP_PENDING_KEYSPACE_REASONS=("oa-format parsing not yet implemented (lands in VG4)" "da/BTI-format parsing not yet implemented (future BTI epic)")
+
+# Get skip reason for a keyspace (bash 3.x compatible, no associative arrays)
+get_skip_reason() {
+    local ks="$1"
+    local i
+    for i in "${!SKIP_PENDING_KEYSPACE_NAMES[@]}"; do
+        if [[ "${SKIP_PENDING_KEYSPACE_NAMES[$i]}" == "$ks" ]]; then
+            echo "${SKIP_PENDING_KEYSPACE_REASONS[$i]}"
+            return
+        fi
+    done
+    echo "pending"
+}
 
 # Logging functions
 log_info() {
@@ -85,7 +114,7 @@ validate_environment() {
         exit 1
     fi
 
-    # Verify all expected keyspaces exist
+    # Verify all enforced keyspaces exist
     local missing_keyspaces=()
     for keyspace in "${KEYSPACES[@]}"; do
         if [[ ! -d "${SSTABLES_DIR}/${keyspace}" ]]; then
@@ -98,6 +127,13 @@ validate_environment() {
         log_error "Expected keyspaces: ${KEYSPACES[*]}"
         exit 1
     fi
+
+    # Warn (but do not fail) if skip-pending keyspaces are absent
+    for keyspace in "${SKIP_PENDING_KEYSPACES[@]}"; do
+        if [[ ! -d "${SSTABLES_DIR}/${keyspace}" ]]; then
+            log_warn "Skip-pending keyspace not present (OK): ${keyspace}"
+        fi
+    done
 
     log_success "Environment validation passed"
     log_info "  SSTables directory: ${SSTABLES_DIR}"
@@ -316,6 +352,28 @@ test_table() {
     return 0
 }
 
+# Discover and register skip-pending tables (oa, da)
+# These are listed in the summary but not run through read-sstable.
+register_skip_pending_tables() {
+    for keyspace in "${SKIP_PENDING_KEYSPACES[@]}"; do
+        local keyspace_dir="${SSTABLES_DIR}/${keyspace}"
+        if [[ ! -d "${keyspace_dir}" ]]; then
+            continue
+        fi
+        while IFS= read -r table_dir; do
+            local table_dir_name
+            table_dir_name=$(basename "${table_dir}")
+            local table_name
+            table_name=$(extract_table_name "${table_dir_name}")
+            local qualified_name="${keyspace}.${table_name}"
+            local reason
+            reason=$(get_skip_reason "${keyspace}")
+            log_warn "${qualified_name} ... SKIP-PENDING (${reason})"
+            SKIPPED_PENDING_TABLES+=("${qualified_name} [${reason}]")
+        done < <(find "${keyspace_dir}" -maxdepth 1 -type d -name "*-*" | sort)
+    done
+}
+
 # Run all table tests
 run_all_tests() {
     log_info "Discovering test tables..."
@@ -347,6 +405,11 @@ run_all_tests() {
     set -e
 
     echo ""
+    log_info "Checking skip-pending keyspaces (oa/da - not enforced yet)..."
+    echo ""
+    register_skip_pending_tables
+
+    echo ""
     log_info "All table tests completed"
 }
 
@@ -359,13 +422,17 @@ print_summary() {
     echo "    SMOKE TEST SUMMARY - ALL TABLES"
     echo "========================================="
     echo ""
-    echo "  Total Tables Tested: ${total_tables}/33"
+    echo "  Total Tables Tested: ${total_tables}/33 (nb enforced)"
     echo -e "  ${GREEN}Passed:              ${#PASSED_TABLES[@]}${NC}"
 
     if [[ ${#FAILED_TABLES[@]} -gt 0 ]]; then
         echo -e "  ${RED}Failed:              ${#FAILED_TABLES[@]}${NC}"
     else
         echo "  Failed:              ${#FAILED_TABLES[@]}"
+    fi
+
+    if [[ ${#SKIPPED_PENDING_TABLES[@]} -gt 0 ]]; then
+        echo -e "  ${YELLOW}Skip-pending:        ${#SKIPPED_PENDING_TABLES[@]} (oa/da - not enforced until VG4/BTI epic)${NC}"
     fi
 
     echo ""
@@ -382,14 +449,25 @@ print_summary() {
         echo ""
     fi
 
+    # List skip-pending tables
+    if [[ ${#SKIPPED_PENDING_TABLES[@]} -gt 0 ]]; then
+        echo -e "${YELLOW}Skip-Pending Tables (fixtures present, parser not yet wired):${NC}"
+        echo ""
+        for entry in "${SKIPPED_PENDING_TABLES[@]}"; do
+            echo -e "${YELLOW}  • ${entry}${NC}"
+        done
+        echo ""
+    fi
+
     if [[ ${#FAILED_TABLES[@]} -eq 0 ]]; then
         echo -e "${GREEN}=========================================${NC}"
-        echo -e "${GREEN}  ✅ All tables passed smoke test${NC}"
+        echo -e "${GREEN}  All nb tables passed smoke test${NC}"
+        echo -e "${GREEN}  oa/da tables present but skip-pending${NC}"
         echo -e "${GREEN}=========================================${NC}"
         return 0
     else
         echo -e "${RED}=========================================${NC}"
-        echo -e "${RED}  ❌ Some tables failed${NC}"
+        echo -e "${RED}  Some nb tables failed${NC}"
         echo -e "${RED}=========================================${NC}"
         return 1
     fi
@@ -398,7 +476,8 @@ print_summary() {
 # Main execution
 main() {
     log_info "CQLite Comprehensive Table Loading Smoke Test"
-    log_info "Issue #200: Validate all 33 test tables load successfully"
+    log_info "Issue #200: Validate all 33 nb test tables load successfully"
+    log_info "Issue #654: oa/da tables discovered and listed as SKIP-PENDING"
     echo ""
 
     detect_timeout_command
@@ -412,7 +491,8 @@ main() {
     log_info "  Datasets Root:      ${DATASETS_ROOT}"
     log_info "  SSTables Directory: ${SSTABLES_DIR}"
     log_info "  Output Directory:   ${OUTPUT_DIR}"
-    log_info "  Test Keyspaces:     ${KEYSPACES[*]}"
+    log_info "  Enforced Keyspaces: ${KEYSPACES[*]}"
+    log_info "  Skip-Pending:       ${SKIP_PENDING_KEYSPACES[*]}"
     echo ""
 
     # Run all tests (continue on error to collect all results)
