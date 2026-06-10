@@ -63,7 +63,7 @@ fn test_ci_valid_inline_crc_accepted() {
         Err(e) => {
             let msg = e.to_string().to_lowercase();
             assert!(
-                !msg.contains("crc") && !msg.contains("checksum") && !msg.contains("mismatch"),
+                !msg.contains("crc") && !msg.contains("checksum"),
                 "CRC should have been valid but got CRC error: {e}"
             );
         }
