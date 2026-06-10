@@ -143,6 +143,11 @@ docker exec cqlite-oa-gen nodetool flush test_da trie_test
 
 ## 3. Gate Coverage by Fixture Tier
 
+> **Note:** `version_gate.rs` is a reference module; the CQLite parsers do not yet
+> consume these gates. "TESTED" below means the gate *values* are unit-tested against
+> `BigFormat.java`/`BtiFormat.java` — not that any parser enforces them. Wiring the
+> gates into the read path is future work (see Section 4 and S6 of epic #622).
+
 ### Gates exercised by `nb` corpus (33 tables, 59 files)
 
 | Gate | Status |
