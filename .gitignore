@@ -83,6 +83,12 @@ package-lock.json
 website/dist/
 website/.astro/
 
+# Format Guide: generated pages and copied assets (sync-format-guide.mjs)
+# The source of truth is docs/sstables-definitive-guide/; never commit these.
+website/src/content/docs/sstable-format/ch*.md
+website/src/content/docs/sstable-format/appendix-*.md
+website/public/format-guide/
+
 # Python bindings
 *.pyc
 __pycache__/

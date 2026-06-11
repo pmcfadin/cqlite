@@ -11,7 +11,7 @@ Snapshots and incremental backups are filesystem-level artifacts that preserve S
 ## Directory Layout
 Tiny example (trimmed) of a snapshot directory structure:
 
-```startLine:endLine:filepath
+```
 # Example reference listing sourced from canonical datasets (names illustrative)
 # keyspace/table-<uuid>/
 # ├─ snapshots/<snapshot_name>/
