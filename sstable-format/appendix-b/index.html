@@ -1,0 +1,530 @@
+<!DOCTYPE html><html lang="en" dir="ltr" data-theme="dark" data-has-toc data-has-sidebar class="astro-bguv2lll"> <head><meta charset="utf-8"/><meta name="viewport" content="width=device-width, initial-scale=1"/><title>Appendix B — On-Disk Encodings Cheat Sheet | CQLite</title><link rel="canonical" href="https://pmcfadin.github.io/cqlite/sstable-format/appendix-b/"/><link rel="sitemap" href="/cqlite/sitemap-index.xml"/><link rel="shortcut icon" href="/cqlite/favicon.svg" type="image/svg+xml"/><meta name="generator" content="Astro v5.18.2"/><meta name="generator" content="Starlight v0.34.3"/><meta property="og:title" content="Appendix B — On-Disk Encodings Cheat Sheet"/><meta property="og:type" content="article"/><meta property="og:url" content="https://pmcfadin.github.io/cqlite/sstable-format/appendix-b/"/><meta property="og:locale" content="en"/><meta property="og:description" content="In this appendix you will..."/><meta property="og:site_name" content="CQLite"/><meta name="twitter:card" content="summary_large_image"/><meta name="description" content="In this appendix you will..."/><script>
+	window.StarlightThemeProvider = (() => {
+		const storedTheme =
+			typeof localStorage !== 'undefined' && localStorage.getItem('starlight-theme');
+		const theme =
+			storedTheme ||
+			(window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+		document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+		return {
+			updatePickers(theme = storedTheme || 'auto') {
+				document.querySelectorAll('starlight-theme-select').forEach((picker) => {
+					const select = picker.querySelector('select');
+					if (select) select.value = theme;
+					/** @type {HTMLTemplateElement | null} */
+					const tmpl = document.querySelector(`#theme-icons`);
+					const newIcon = tmpl && tmpl.content.querySelector('.' + theme);
+					if (newIcon) {
+						const oldIcon = picker.querySelector('svg.label-icon');
+						if (oldIcon) {
+							oldIcon.replaceChildren(...newIcon.cloneNode(true).childNodes);
+						}
+					}
+				});
+			},
+		};
+	})();
+</script><template id="theme-icons"><svg aria-hidden="true" class="light astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M5 12a1 1 0 0 0-1-1H3a1 1 0 0 0 0 2h1a1 1 0 0 0 1-1Zm.64 5-.71.71a1 1 0 0 0 0 1.41 1 1 0 0 0 1.41 0l.71-.71A1 1 0 0 0 5.64 17ZM12 5a1 1 0 0 0 1-1V3a1 1 0 0 0-2 0v1a1 1 0 0 0 1 1Zm5.66 2.34a1 1 0 0 0 .7-.29l.71-.71a1 1 0 1 0-1.41-1.41l-.66.71a1 1 0 0 0 0 1.41 1 1 0 0 0 .66.29Zm-12-.29a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.71-.71a1.004 1.004 0 1 0-1.43 1.41l.73.71ZM21 11h-1a1 1 0 0 0 0 2h1a1 1 0 0 0 0-2Zm-2.64 6A1 1 0 0 0 17 18.36l.71.71a1 1 0 0 0 1.41 0 1 1 0 0 0 0-1.41l-.76-.66ZM12 6.5a5.5 5.5 0 1 0 5.5 5.5A5.51 5.51 0 0 0 12 6.5Zm0 9a3.5 3.5 0 1 1 0-7 3.5 3.5 0 0 1 0 7Zm0 3.5a1 1 0 0 0-1 1v1a1 1 0 0 0 2 0v-1a1 1 0 0 0-1-1Z"/></svg><svg aria-hidden="true" class="dark astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.64 13a1 1 0 0 0-1.05-.14 8.049 8.049 0 0 1-3.37.73 8.15 8.15 0 0 1-8.14-8.1 8.59 8.59 0 0 1 .25-2A1 1 0 0 0 8 2.36a10.14 10.14 0 1 0 14 11.69 1 1 0 0 0-.36-1.05Zm-9.5 6.69A8.14 8.14 0 0 1 7.08 5.22v.27a10.15 10.15 0 0 0 10.14 10.14 9.784 9.784 0 0 0 2.1-.22 8.11 8.11 0 0 1-7.18 4.32v-.04Z"/></svg><svg aria-hidden="true" class="auto astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg></template><link rel="stylesheet" href="/cqlite/_astro/print.DNXP8c50.css" media="print"><link rel="stylesheet" href="/cqlite/_astro/index.BgRBqwuz.css">
+<style>@layer starlight.components{:root{--sl-badge-default-border: var(--sl-color-accent);--sl-badge-default-bg: var(--sl-color-accent-low);--sl-badge-default-text: #fff;--sl-badge-note-border: var(--sl-color-blue);--sl-badge-note-bg: var(--sl-color-blue-low);--sl-badge-note-text: #fff;--sl-badge-danger-border: var(--sl-color-red);--sl-badge-danger-bg: var(--sl-color-red-low);--sl-badge-danger-text: #fff;--sl-badge-success-border: var(--sl-color-green);--sl-badge-success-bg: var(--sl-color-green-low);--sl-badge-success-text: #fff;--sl-badge-caution-border: var(--sl-color-orange);--sl-badge-caution-bg: var(--sl-color-orange-low);--sl-badge-caution-text: #fff;--sl-badge-tip-border: var(--sl-color-purple);--sl-badge-tip-bg: var(--sl-color-purple-low);--sl-badge-tip-text: #fff}[data-theme=light]:root{--sl-badge-default-bg: var(--sl-color-accent-high);--sl-badge-note-bg: var(--sl-color-blue-high);--sl-badge-danger-bg: var(--sl-color-red-high);--sl-badge-success-bg: var(--sl-color-green-high);--sl-badge-caution-bg: var(--sl-color-orange-high);--sl-badge-tip-bg: var(--sl-color-purple-high)}.sl-badge:where(.astro-avdet4wd){display:inline-block;border:1px solid var(--sl-color-border-badge);border-radius:.25rem;font-family:var(--sl-font-system-mono);line-height:normal;color:var(--sl-color-text-badge);background-color:var(--sl-color-bg-badge);overflow-wrap:anywhere}.sidebar-content .sl-badge:where(.astro-avdet4wd){line-height:1;font-size:var(--sl-text-xs);padding:.125rem .375rem}.sidebar-content a[aria-current=page]>.sl-badge:where(.astro-avdet4wd){--sl-color-bg-badge: transparent;--sl-color-border-badge: currentColor;color:inherit}.default:where(.astro-avdet4wd){--sl-color-bg-badge: var(--sl-badge-default-bg);--sl-color-border-badge: var(--sl-badge-default-border);--sl-color-text-badge: var(--sl-badge-default-text)}.note:where(.astro-avdet4wd){--sl-color-bg-badge: var(--sl-badge-note-bg);--sl-color-border-badge: var(--sl-badge-note-border);--sl-color-text-badge: var(--sl-badge-note-text)}.danger:where(.astro-avdet4wd){--sl-color-bg-badge: var(--sl-badge-danger-bg);--sl-color-border-badge: var(--sl-badge-danger-border);--sl-color-text-badge: var(--sl-badge-danger-text)}.success:where(.astro-avdet4wd){--sl-color-bg-badge: var(--sl-badge-success-bg);--sl-color-border-badge: var(--sl-badge-success-border);--sl-color-text-badge: var(--sl-badge-success-text)}.tip:where(.astro-avdet4wd){--sl-color-bg-badge: var(--sl-badge-tip-bg);--sl-color-border-badge: var(--sl-badge-tip-border);--sl-color-text-badge: var(--sl-badge-tip-text)}.caution:where(.astro-avdet4wd){--sl-color-bg-badge: var(--sl-badge-caution-bg);--sl-color-border-badge: var(--sl-badge-caution-border);--sl-color-text-badge: var(--sl-badge-caution-text)}.small:where(.astro-avdet4wd){font-size:var(--sl-text-xs);padding:.125rem .25rem}.medium:where(.astro-avdet4wd){font-size:var(--sl-text-sm);padding:.175rem .35rem}.large:where(.astro-avdet4wd){font-size:var(--sl-text-base);padding:.225rem .45rem}.sl-markdown-content :is(h1,h2,h3,h4,h5,h6) .sl-badge:where(.astro-avdet4wd){vertical-align:middle}}
+@layer starlight.components{.card:where(.astro-v5tidmuc){--sl-card-border: var(--sl-color-purple);--sl-card-bg: var(--sl-color-purple-low);border:1px solid var(--sl-color-gray-5);background-color:var(--sl-color-black);padding:clamp(1rem,calc(.125rem + 3vw),2.5rem);flex-direction:column;gap:clamp(.5rem,calc(.125rem + 1vw),1rem)}.card:where(.astro-v5tidmuc):nth-child(4n+1){--sl-card-border: var(--sl-color-orange);--sl-card-bg: var(--sl-color-orange-low)}.card:where(.astro-v5tidmuc):nth-child(4n+3){--sl-card-border: var(--sl-color-green);--sl-card-bg: var(--sl-color-green-low)}.card:where(.astro-v5tidmuc):nth-child(4n+4){--sl-card-border: var(--sl-color-red);--sl-card-bg: var(--sl-color-red-low)}.card:where(.astro-v5tidmuc):nth-child(4n+5){--sl-card-border: var(--sl-color-blue);--sl-card-bg: var(--sl-color-blue-low)}.title:where(.astro-v5tidmuc){font-weight:600;font-size:var(--sl-text-h4);color:var(--sl-color-white);line-height:var(--sl-line-height-headings);gap:1rem;align-items:center}.card:where(.astro-v5tidmuc) .icon:where(.astro-v5tidmuc){border:1px solid var(--sl-card-border);background-color:var(--sl-card-bg);padding:.2em;border-radius:.25rem}.card:where(.astro-v5tidmuc) .body:where(.astro-v5tidmuc){margin:0;font-size:clamp(var(--sl-text-sm),calc(.5rem + 1vw),var(--sl-text-body))}}
+@layer starlight.components{.card-grid:where(.astro-zntqmydn){display:grid;grid-template-columns:100%;gap:1rem}.card-grid:where(.astro-zntqmydn)>*{margin-top:0!important}@media(min-width:50rem){.card-grid:where(.astro-zntqmydn){grid-template-columns:1fr 1fr;gap:1.5rem}.stagger:where(.astro-zntqmydn){--stagger-height: 5rem;padding-bottom:var(--stagger-height)}.stagger:where(.astro-zntqmydn)>*:nth-child(2n){transform:translateY(var(--stagger-height))}}}
+@layer starlight.components{svg:where(.astro-c6vsoqas){color:var(--sl-icon-color);font-size:var(--sl-icon-size, 1em);width:1em;height:1em}}
+@layer starlight.components{.sl-link-card:where(.astro-mf7fz2mj){display:grid;grid-template-columns:1fr auto;gap:.5rem;border:1px solid var(--sl-color-gray-5);border-radius:.5rem;padding:1rem;box-shadow:var(--sl-shadow-sm);position:relative}a:where(.astro-mf7fz2mj){text-decoration:none;line-height:var(--sl-line-height-headings)}a:where(.astro-mf7fz2mj):before{content:"";position:absolute;inset:0}.stack:where(.astro-mf7fz2mj){flex-direction:column;gap:.5rem}.title:where(.astro-mf7fz2mj){color:var(--sl-color-white);font-weight:600;font-size:var(--sl-text-lg)}.description:where(.astro-mf7fz2mj){color:var(--sl-color-gray-3);line-height:1.5}.icon:where(.astro-mf7fz2mj){color:var(--sl-color-gray-3)}.sl-link-card:where(.astro-mf7fz2mj):hover{background:var(--sl-color-gray-7, var(--sl-color-gray-6));border-color:var(--sl-color-gray-2)}.sl-link-card:where(.astro-mf7fz2mj):hover .icon:where(.astro-mf7fz2mj){color:var(--sl-color-white)}}
+@layer starlight.components{.sl-steps{--bullet-size: calc(var(--sl-line-height) * 1rem);--bullet-margin: .375rem;list-style:none;counter-reset:steps-counter var(--sl-steps-start, 0);padding-inline-start:0}.sl-steps>li{counter-increment:steps-counter;position:relative;padding-inline-start:calc(var(--bullet-size) + 1rem);padding-bottom:1px;min-height:calc(var(--bullet-size) + var(--bullet-margin))}.sl-steps>li+li{margin-top:0}.sl-steps>li:before{content:counter(steps-counter);position:absolute;top:0;inset-inline-start:0;width:var(--bullet-size);height:var(--bullet-size);line-height:var(--bullet-size);font-size:var(--sl-text-xs);font-weight:600;text-align:center;color:var(--sl-color-white);background-color:var(--sl-color-gray-6);border-radius:99rem;box-shadow:inset 0 0 0 1px var(--sl-color-gray-5)}.sl-steps>li:after{--guide-width: 1px;content:"";position:absolute;top:calc(var(--bullet-size) + var(--bullet-margin));bottom:var(--bullet-margin);inset-inline-start:calc((var(--bullet-size) - var(--guide-width)) / 2);width:var(--guide-width);background-color:var(--sl-color-hairline-light)}}@layer starlight.content{.sl-steps>li>:first-child{--lh: calc(1em * var(--sl-line-height));--shift-y: calc(.5 * (var(--bullet-size) - var(--lh)));transform:translateY(var(--shift-y));margin-bottom:var(--shift-y)}.sl-steps>li>:first-child:where(h1,h2,h3,h4,h5,h6){--lh: calc(1em * var(--sl-line-height-headings))}@supports (--prop: 1lh){.sl-steps>li>:first-child{--lh: 1lh}}}
+@layer starlight.components{.sl-link-button:where(.astro-xwgiixxa){align-items:center;border:1px solid transparent;border-radius:999rem;display:inline-flex;font-size:var(--sl-text-sm);gap:.5em;line-height:1.1875;outline-offset:.25rem;padding:.4375rem 1.125rem;text-decoration:none}.sl-link-button:where(.astro-xwgiixxa).primary{background:var(--sl-color-text-accent);border-color:var(--sl-color-text-accent);color:var(--sl-color-black)}.sl-link-button:where(.astro-xwgiixxa).primary:hover{color:var(--sl-color-black)}.sl-link-button:where(.astro-xwgiixxa).secondary{border-color:inherit;color:var(--sl-color-white)}.sl-link-button:where(.astro-xwgiixxa).minimal{color:var(--sl-color-white);padding-inline:0}.sl-link-button:where(.astro-xwgiixxa) svg{flex-shrink:0}@media(min-width:50rem){.sl-link-button:where(.astro-xwgiixxa){font-size:var(--sl-text-base);padding:.9375rem 1.25rem}}.sl-markdown-content .sl-link-button:where(.astro-xwgiixxa){margin-inline-end:1rem}.sl-markdown-content .sl-link-button:where(.astro-xwgiixxa):not(:where(p *)){margin-block:1rem}}
+</style><script type="module" src="/cqlite/_astro/page.B1D-nYk3.js"></script></head> <body class="astro-bguv2lll"> <a href="#_top" class="astro-7q3lir66">Skip to content</a>  <div class="page sl-flex astro-vrdttmbt"> <header class="header astro-vrdttmbt"><div class="header astro-kmkmnagf"> <div class="title-wrapper sl-flex astro-kmkmnagf"> <a href="/cqlite/" class="site-title sl-flex astro-m46x6ez3">  <span class="astro-m46x6ez3" translate="no"> CQLite </span> </a>  </div> <div class="sl-flex print:hidden astro-kmkmnagf"> <site-search class="astro-kmkmnagf astro-v37mnknz" data-translations="{&#34;placeholder&#34;:&#34;Search&#34;}"> <button data-open-modal disabled aria-label="Search" aria-keyshortcuts="Control+K" class="astro-v37mnknz"> <svg aria-hidden="true" class="astro-v37mnknz astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21.71 20.29 18 16.61A9 9 0 1 0 16.61 18l3.68 3.68a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.39ZM11 18a7 7 0 1 1 0-14 7 7 0 0 1 0 14Z"/></svg> <span class="sl-hidden md:sl-block astro-v37mnknz" aria-hidden="true">Search</span> <kbd class="sl-hidden md:sl-flex astro-v37mnknz" style="display: none;"> <kbd class="astro-v37mnknz">Ctrl</kbd><kbd class="astro-v37mnknz">K</kbd> </kbd> </button> <dialog style="padding:0" aria-label="Search" class="astro-v37mnknz"> <div class="dialog-frame sl-flex astro-v37mnknz">  <button data-close-modal class="sl-flex md:sl-hidden astro-v37mnknz"> Cancel </button> <div class="search-container astro-v37mnknz"> <div id="starlight__search" class="astro-v37mnknz"></div> </div> </div> </dialog> </site-search>  <script>
+	(() => {
+		const openBtn = document.querySelector('button[data-open-modal]');
+		const shortcut = openBtn?.querySelector('kbd');
+		if (!openBtn || !(shortcut instanceof HTMLElement)) return;
+		const platformKey = shortcut.querySelector('kbd');
+		if (platformKey && /(Mac|iPhone|iPod|iPad)/i.test(navigator.platform)) {
+			platformKey.textContent = '⌘';
+			openBtn.setAttribute('aria-keyshortcuts', 'Meta+K');
+		}
+		shortcut.style.display = '';
+	})();
+</script> <script type="module" src="/cqlite/_astro/Search.astro_astro_type_script_index_0_lang.D8kKfDX6.js"></script>   </div> <div class="sl-hidden md:sl-flex print:hidden right-group astro-kmkmnagf"> <div class="sl-flex social-icons astro-kmkmnagf"> <a href="https://github.com/pmcfadin/cqlite" rel="me" class="sl-flex astro-wy4te6ga"><span class="sr-only astro-wy4te6ga">GitHub</span><svg aria-hidden="true" class="astro-wy4te6ga astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-4yphtoen"> <span class="sr-only astro-4yphtoen">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-4yphtoen astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> <select value="auto" autocomplete="off" class="astro-4yphtoen"> <option value="dark" class="astro-4yphtoen">Dark</option><option value="light" class="astro-4yphtoen">Light</option><option value="auto" selected class="astro-4yphtoen">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-4yphtoen astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg> </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script> <script type="module">const r="starlight-theme",o=e=>e==="auto"||e==="dark"||e==="light"?e:"auto",c=()=>o(typeof localStorage<"u"&&localStorage.getItem(r));function n(e){typeof localStorage<"u"&&localStorage.setItem(r,e==="light"||e==="dark"?e:"")}const l=()=>matchMedia("(prefers-color-scheme: light)").matches?"light":"dark";function t(e){StarlightThemeProvider.updatePickers(e),document.documentElement.dataset.theme=e==="auto"?l():e,n(e)}matchMedia("(prefers-color-scheme: light)").addEventListener("change",()=>{c()==="auto"&&t("auto")});class s extends HTMLElement{constructor(){super(),t(c()),this.querySelector("select")?.addEventListener("change",a=>{a.currentTarget instanceof HTMLSelectElement&&t(o(a.currentTarget.value))})}}customElements.define("starlight-theme-select",s);</script> <script type="module">class s extends HTMLElement{constructor(){super();const e=this.querySelector("select");e&&(e.addEventListener("change",t=>{t.currentTarget instanceof HTMLSelectElement&&(window.location.pathname=t.currentTarget.value)}),window.addEventListener("pageshow",t=>{if(!t.persisted)return;const n=e.querySelector("option[selected]")?.index;n!==e.selectedIndex&&(e.selectedIndex=n??0)}))}}customElements.define("starlight-lang-select",s);</script> </div> </div> </header> <nav class="sidebar print:hidden astro-vrdttmbt" aria-label="Main"> <starlight-menu-button class="print:hidden astro-jif73yzw"> <button aria-expanded="false" aria-label="Menu" aria-controls="starlight__sidebar" class="sl-flex md:sl-hidden astro-jif73yzw"> <svg aria-hidden="true" class="open-menu astro-jif73yzw astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M3 8h18a1 1 0 1 0 0-2H3a1 1 0 0 0 0 2Zm18 8H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Zm0-5H3a1 1 0 0 0 0 2h18a1 1 0 0 0 0-2Z"/></svg> <svg aria-hidden="true" class="close-menu astro-jif73yzw astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="m13.41 12 6.3-6.29a1.004 1.004 0 1 0-1.42-1.42L12 10.59l-6.29-6.3a1.004 1.004 0 0 0-1.42 1.42l6.3 6.29-6.3 6.29a1 1 0 0 0 0 1.42.998.998 0 0 0 1.42 0l6.29-6.3 6.29 6.3a.999.999 0 0 0 1.42 0 1 1 0 0 0 0-1.42L13.41 12Z"/></svg> </button> </starlight-menu-button> <script type="module">class s extends HTMLElement{constructor(){super(),this.btn=this.querySelector("button"),this.btn.addEventListener("click",()=>this.toggleExpanded());const t=this.closest("nav");t&&t.addEventListener("keyup",e=>this.closeOnEscape(e))}setExpanded(t){this.setAttribute("aria-expanded",String(t)),document.body.toggleAttribute("data-mobile-menu-expanded",t)}toggleExpanded(){this.setExpanded(this.getAttribute("aria-expanded")!=="true")}closeOnEscape(t){t.code==="Escape"&&(this.setExpanded(!1),this.btn.focus())}}customElements.define("starlight-menu-button",s);</script>   <div id="starlight__sidebar" class="sidebar-pane astro-vrdttmbt"> <div class="sidebar-content sl-flex astro-vrdttmbt"> <sl-sidebar-state-persist data-hash="1e7r1gr" class="astro-kku4brbg"> <script aria-hidden="true">
+		(() => {
+			try {
+				if (!matchMedia('(min-width: 50em)').matches) return;
+				/** @type {HTMLElement | null} */
+				const target = document.querySelector('sl-sidebar-state-persist');
+				const state = JSON.parse(sessionStorage.getItem('sl-sidebar-state') || '0');
+				if (!target || !state || target.dataset.hash !== state.hash) return;
+				window._starlightScrollRestore = state.scroll;
+				customElements.define(
+					'sl-sidebar-restore',
+					class SidebarRestore extends HTMLElement {
+						connectedCallback() {
+							try {
+								const idx = parseInt(this.dataset.index || '');
+								const details = this.closest('details');
+								if (details && typeof state.open[idx] === 'boolean') details.open = state.open[idx];
+							} catch {}
+						}
+					}
+				);
+			} catch {}
+		})();
+	</script>  <ul class="top-level astro-3ii7xxms"> <li class="astro-3ii7xxms"> <details open class="astro-3ii7xxms"> <sl-sidebar-restore data-index="0"></sl-sidebar-restore> <summary class="astro-3ii7xxms"> <div class="group-label astro-3ii7xxms"> <span class="large astro-3ii7xxms">User Docs</span>  </div> <svg aria-hidden="true" class="caret astro-3ii7xxms astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </summary> <ul class="astro-3ii7xxms"> <li class="astro-3ii7xxms"> <a href="/cqlite/user-docs/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Overview</span>  </a> </li> </ul>  </details> </li><li class="astro-3ii7xxms"> <details open class="astro-3ii7xxms"> <sl-sidebar-restore data-index="1"></sl-sidebar-restore> <summary class="astro-3ii7xxms"> <div class="group-label astro-3ii7xxms"> <span class="large astro-3ii7xxms">SSTable Format Guide</span>  </div> <svg aria-hidden="true" class="caret astro-3ii7xxms astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </summary> <ul class="astro-3ii7xxms"> <li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Overview</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch01/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">What Are SSTables?</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch02/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Anatomy of an SSTable</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch03/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Disk and IO Model</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch04/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">From CQL to Disk</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch05/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Data.db Format</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch06/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Index.db and Summary.db</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch07/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Filter.db (Bloom)</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch08/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Statistics.db</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch09/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">CompressionInfo.db and Chunking</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch10/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Point Reads and Slices</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch11/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Merging, Tombstones, and Shadowing</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch12/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Caching and OS Interaction</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch13/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Secondary Indexes (2i)</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch14/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Storage-Attached Index (SAI)</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch15/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Compaction Strategies</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch16/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">SSTable Lifecycle and Maintenance</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch17/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">BTI (Big Trie-Indexed) Formats</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch18/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Repair, Streaming, and Bootstrap (Overview)</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch19/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Example reference listing sourced from canonical datasets...</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch20/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Checksums and Integrity</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch21/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">How to find a row by key (flow card)</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/ch22/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Versioning and Format Matrix (quick reference)</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/appendix-a/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Appendix A -- CQL-&gt;SSTable Type Mapping</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/appendix-b/" aria-current="page" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Appendix B — On-Disk Encodings Cheat Sheet</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/appendix-c/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Appendix C — Reference Walkthroughs with Code</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/appendix-d/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Appendix D — Tools &amp; Workflows</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/appendix-e/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Appendix E — Glossary</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/appendix-f/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Appendix F — Known Limitations</span>  </a> </li><li class="astro-3ii7xxms"> <a href="/cqlite/sstable-format/appendix-g/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Appendix G: Cassandra 5.0 Compression Chunk Formats</span>  </a> </li> </ul>  </details> </li><li class="astro-3ii7xxms"> <details open class="astro-3ii7xxms"> <sl-sidebar-restore data-index="2"></sl-sidebar-restore> <summary class="astro-3ii7xxms"> <div class="group-label astro-3ii7xxms"> <span class="large astro-3ii7xxms">For Agents: Using CQLite</span>  </div> <svg aria-hidden="true" class="caret astro-3ii7xxms astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </summary> <ul class="astro-3ii7xxms"> <li class="astro-3ii7xxms"> <a href="/cqlite/agents-using/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Overview</span>  </a> </li> </ul>  </details> </li><li class="astro-3ii7xxms"> <details open class="astro-3ii7xxms"> <sl-sidebar-restore data-index="3"></sl-sidebar-restore> <summary class="astro-3ii7xxms"> <div class="group-label astro-3ii7xxms"> <span class="large astro-3ii7xxms">For Agents: Developing CQLite</span>  </div> <svg aria-hidden="true" class="caret astro-3ii7xxms astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.25rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg> </summary> <ul class="astro-3ii7xxms"> <li class="astro-3ii7xxms"> <a href="/cqlite/agents-developing/" aria-current="false" class="astro-3ii7xxms"> <span class="astro-3ii7xxms">Overview</span>  </a> </li> </ul>  </details> </li> </ul>   <script aria-hidden="true">
+		(() => {
+			const scroller = document.getElementById('starlight__sidebar');
+			if (!window._starlightScrollRestore || !scroller) return;
+			scroller.scrollTop = window._starlightScrollRestore;
+			delete window._starlightScrollRestore;
+		})();
+	</script> </sl-sidebar-state-persist>  <div class="md:sl-hidden"> <div class="mobile-preferences sl-flex astro-wu23bvmt"> <div class="social-icons astro-wu23bvmt"> <a href="https://github.com/pmcfadin/cqlite" rel="me" class="sl-flex astro-wy4te6ga"><span class="sr-only astro-wy4te6ga">GitHub</span><svg aria-hidden="true" class="astro-wy4te6ga astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M12 .3a12 12 0 0 0-3.8 23.38c.6.12.83-.26.83-.57L9 21.07c-3.34.72-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.08-.74.09-.73.09-.73 1.2.09 1.83 1.24 1.83 1.24 1.08 1.83 2.81 1.3 3.5 1 .1-.78.42-1.31.76-1.61-2.67-.3-5.47-1.33-5.47-5.93 0-1.31.47-2.38 1.24-3.22-.14-.3-.54-1.52.1-3.18 0 0 1-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.28-1.55 3.29-1.23 3.29-1.23.64 1.66.24 2.88.12 3.18a4.65 4.65 0 0 1 1.23 3.22c0 4.61-2.8 5.63-5.48 5.92.42.36.81 1.1.81 2.22l-.01 3.29c0 .31.2.69.82.57A12 12 0 0 0 12 .3Z"/></svg></a> </div> <starlight-theme-select>  <label style="--sl-select-width: 6.25em" class="astro-4yphtoen"> <span class="sr-only astro-4yphtoen">Select theme</span> <svg aria-hidden="true" class="icon label-icon astro-4yphtoen astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M21 14h-1V7a3 3 0 0 0-3-3H7a3 3 0 0 0-3 3v7H3a1 1 0 0 0-1 1v2a3 3 0 0 0 3 3h14a3 3 0 0 0 3-3v-2a1 1 0 0 0-1-1ZM6 7a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v7H6V7Zm14 10a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1v-1h16v1Z"/></svg> <select value="auto" autocomplete="off" class="astro-4yphtoen"> <option value="dark" class="astro-4yphtoen">Dark</option><option value="light" class="astro-4yphtoen">Light</option><option value="auto" selected class="astro-4yphtoen">Auto</option> </select> <svg aria-hidden="true" class="icon caret astro-4yphtoen astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1em;"><path d="M17 9.17a1 1 0 0 0-1.41 0L12 12.71 8.46 9.17a1 1 0 1 0-1.41 1.42l4.24 4.24a1.002 1.002 0 0 0 1.42 0L17 10.59a1.002 1.002 0 0 0 0-1.42Z"/></svg> </label>  </starlight-theme-select>  <script>
+	StarlightThemeProvider.updatePickers();
+</script>   </div>  </div> </div> </div> </nav> <div class="main-frame astro-vrdttmbt">  <script type="module">const a=document.getElementById("starlight__sidebar"),n=a?.querySelector("sl-sidebar-state-persist"),o="sl-sidebar-state",i=()=>{let t=[];const e=n?.dataset.hash||"";try{const s=sessionStorage.getItem(o),r=JSON.parse(s||"{}");Array.isArray(r.open)&&r.hash===e&&(t=r.open)}catch{}return{hash:e,open:t,scroll:a?.scrollTop||0}},c=t=>{try{sessionStorage.setItem(o,JSON.stringify(t))}catch{}},d=()=>c(i()),l=(t,e)=>{const s=i();s.open[e]=t,c(s)};n?.addEventListener("click",t=>{if(!(t.target instanceof Element))return;const e=t.target.closest("summary")?.closest("details");if(!e)return;const s=e.querySelector("sl-sidebar-restore"),r=parseInt(s?.dataset.index||"");isNaN(r)||l(!e.open,r)});addEventListener("visibilitychange",()=>{document.visibilityState==="hidden"&&d()});addEventListener("pageHide",d);</script> <div class="lg:sl-flex astro-67yu43on"> <aside class="right-sidebar-container print:hidden astro-67yu43on"> <div class="right-sidebar astro-67yu43on"> <script type="module" src="/cqlite/_astro/MobileTableOfContents.astro_astro_type_script_index_0_lang.C181hMzK.js"></script><script type="module" src="/cqlite/_astro/TableOfContents.astro_astro_type_script_index_0_lang.CKWWgpjV.js"></script><div class="lg:sl-hidden astro-pb3aqygn"><mobile-starlight-toc data-min-h="2" data-max-h="3" class="astro-doynk5tl"><nav aria-labelledby="starlight__on-this-page--mobile" class="astro-doynk5tl"><details id="starlight__mobile-toc" class="astro-doynk5tl"><summary id="starlight__on-this-page--mobile" class="sl-flex astro-doynk5tl"><div class="toggle sl-flex astro-doynk5tl">On this page<svg aria-hidden="true" class="caret astro-doynk5tl astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1rem;"><path d="m14.83 11.29-4.24-4.24a1 1 0 1 0-1.42 1.41L12.71 12l-3.54 3.54a1 1 0 0 0 0 1.41 1 1 0 0 0 .71.29 1 1 0 0 0 .71-.29l4.24-4.24a1.002 1.002 0 0 0 0-1.42Z"/></svg></div><span class="display-current astro-doynk5tl"></span></summary><div class="dropdown astro-doynk5tl"><ul class="isMobile astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#vint-variable-length-integer" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">VInt (Variable-length integer)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#zigzag-encoding-for-writers" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">ZigZag Encoding for Writers</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#sstable-row-fields-always-use-unsigned-vint-not-zigzag" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">SSTable Row Fields Always Use Unsigned VInt, Not ZigZag</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#delta-encoding-pattern" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Delta Encoding Pattern</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#rowcell-flag-quick-reference" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Row/Cell Flag Quick Reference</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#row-flags-1-byte" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Row Flags (1 byte)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#cell-flags-1-byte" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Cell Flags (1 byte)</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#udt-field-encoding-issue-220" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">UDT Field Encoding (Issue #220)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#row-size-measurement-issue-237" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Row Size Measurement (Issue #237)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#vint-safety-limits-issue-264" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">VInt Safety Limits (Issue #264)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#partition-key-serialization" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Partition Key Serialization</span> </a> <ul class="isMobile astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#single-component-keys" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Single-Component Keys</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#multi-component-composite-keys-issue-380-422" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Multi-Component (Composite) Keys (Issue #380, #422)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#token-computation" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Token Computation</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#references" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">References</span> </a>  </li> </ul> </div></details></nav></mobile-starlight-toc></div><div class="right-sidebar-panel sl-hidden lg:sl-block astro-pb3aqygn"><div class="sl-container astro-pb3aqygn"><starlight-toc data-min-h="2" data-max-h="3"><nav aria-labelledby="starlight__on-this-page"><h2 id="starlight__on-this-page">On this page</h2><ul class="astro-g2bywc46" style="--depth: 0;"> <li class="astro-g2bywc46" style="--depth: 0;"> <a href="#_top" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Overview</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#vint-variable-length-integer" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">VInt (Variable-length integer)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#zigzag-encoding-for-writers" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">ZigZag Encoding for Writers</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#sstable-row-fields-always-use-unsigned-vint-not-zigzag" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">SSTable Row Fields Always Use Unsigned VInt, Not ZigZag</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#delta-encoding-pattern" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Delta Encoding Pattern</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#rowcell-flag-quick-reference" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Row/Cell Flag Quick Reference</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#row-flags-1-byte" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Row Flags (1 byte)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#cell-flags-1-byte" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Cell Flags (1 byte)</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#udt-field-encoding-issue-220" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">UDT Field Encoding (Issue #220)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#row-size-measurement-issue-237" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Row Size Measurement (Issue #237)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#vint-safety-limits-issue-264" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">VInt Safety Limits (Issue #264)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#partition-key-serialization" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Partition Key Serialization</span> </a> <ul class="astro-g2bywc46" style="--depth: 1;"> <li class="astro-g2bywc46" style="--depth: 1;"> <a href="#single-component-keys" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Single-Component Keys</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#multi-component-composite-keys-issue-380-422" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Multi-Component (Composite) Keys (Issue #380, #422)</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 1;"> <a href="#token-computation" class="astro-g2bywc46" style="--depth: 1;"> <span class="astro-g2bywc46" style="--depth: 1;">Token Computation</span> </a>  </li> </ul>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#key-takeaways" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">Key Takeaways</span> </a>  </li><li class="astro-g2bywc46" style="--depth: 0;"> <a href="#references" class="astro-g2bywc46" style="--depth: 0;"> <span class="astro-g2bywc46" style="--depth: 0;">References</span> </a>  </li> </ul> </nav></starlight-toc></div></div> </div> </aside> <div class="main-pane astro-67yu43on">  <main data-pagefind-body class="astro-bguv2lll" lang="en" dir="ltr">    <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <h1 id="_top" class="astro-j6tvhyss">Appendix B — On-Disk Encodings Cheat Sheet</h1>  </div> </div>  <div class="content-panel astro-7nkwcw3z"> <div class="sl-container astro-7nkwcw3z"> <div class="sl-markdown-content"> <p>In this appendix you will learn:</p>
+<ul>
+<li>How VInt and ZigZag encodings appear on disk in Cassandra</li>
+<li>Common row/cell header bits and where to find them upstream</li>
+<li>Quick rules for reading variable-length values</li>
+<li>Write-side encoding patterns for SSTable generation</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="vint-variable-length-integer">VInt (Variable-length integer)</h2><a class="sl-anchor-link" href="#vint-variable-length-integer"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “VInt (Variable-length integer)”</span></a></div>
+<ul>
+<li>Cassandra uses a variable-length integer format; lengths and many counters are VInt.</li>
+</ul>
+<p>VInt is used extensively for lengths and counters in SSTable payloads.</p>
+<p>Examples (unsigned lengths shown as hex bytes → value):</p>
+<ul>
+<li><code dir="auto">00</code> → 0</li>
+<li><code dir="auto">0A</code> → 10</li>
+<li><code dir="auto">81 00</code> → 256 (two-byte: 10xxxxxx xxxxxxxx)</li>
+<li><code dir="auto">C1 00 00</code> → 0x10000 - 1 example boundary (three-byte: 110xxxxx …)</li>
+</ul>
+<p>ZigZag (signed) quick reference:</p>
+<ul>
+<li>Maps signed to unsigned: 0→0, -1→1, 1→2, -2→3, 2→4, …</li>
+<li>Used for compactly encoding small negative numbers; lengths/counters remain non-negative.</li>
+</ul>
+<p>Upstream anchors (Cassandra 5.0.8):</p>
+<ul>
+<li><code dir="auto">org.apache.cassandra.io.util.DataInputPlus</code> and friends (reading primitives)</li>
+<li><code dir="auto">org.apache.cassandra.db.SerializationHeader</code> (presence/length handling)</li>
+</ul>
+<p>Rules of thumb:</p>
+<ul>
+<li>Length prefixes for <code dir="auto">text</code>, <code dir="auto">blob</code>, collection elements, and UDT fields are VInt.</li>
+<li>Signed values may use ZigZag in compatibility layers; lengths are non-negative.</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="zigzag-encoding-for-writers">ZigZag Encoding for Writers</h2><a class="sl-anchor-link" href="#zigzag-encoding-for-writers"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “ZigZag Encoding for Writers”</span></a></div>
+<p>When writing SSTable data, timestamps, TTL, and deletion times often use ZigZag encoding to efficiently represent signed values with small absolute magnitudes.</p>
+<p><strong>ZigZag formula</strong>: <code dir="auto">(n &#x3C;&#x3C; 1) ^ (n >> 63)</code> for 64-bit signed integers</p>
+<p><strong>Encoding pattern</strong>:</p>
+<ul>
+<li>Positive values: <code dir="auto">zigzag(n) = 2 * n</code></li>
+<li>Negative values: <code dir="auto">zigzag(n) = 2 * |n| - 1</code></li>
+</ul>
+<p><strong>Examples</strong>:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Original (i64)</th><th>ZigZag (u64)</th><th>VInt Bytes</th></tr></thead><tbody><tr><td>0</td><td>0</td><td><code dir="auto">0x00</code></td></tr><tr><td>1</td><td>2</td><td><code dir="auto">0x02</code></td></tr><tr><td>-1</td><td>1</td><td><code dir="auto">0x01</code></td></tr><tr><td>63</td><td>126</td><td><code dir="auto">0x7E</code></td></tr><tr><td>-64</td><td>127</td><td><code dir="auto">0x7F</code></td></tr><tr><td>64</td><td>128</td><td><code dir="auto">0x80 0x80</code></td></tr><tr><td>1000</td><td>2000</td><td><code dir="auto">0x87 0xD0</code></td></tr><tr><td>-1000</td><td>1999</td><td><code dir="auto">0x87 0xCF</code></td></tr></tbody></table>
+<p><strong>Common use cases</strong>:</p>
+<ul>
+<li>Legacy wire-protocol (pre-5.0 messaging serialization) for signed integer fields</li>
+</ul>
+<blockquote>
+<p><strong>SSTable Data.db does NOT use ZigZag for row-level temporal fields.</strong>
+Timestamp deltas, TTL deltas, and local deletion time deltas all call <code dir="auto">writeUnsignedVInt</code> or
+<code dir="auto">writeUnsignedVInt32</code> (see <code dir="auto">SerializationHeader.java:167,172,177</code>). Because the baselines
+(<code dir="auto">min_timestamp</code>, <code dir="auto">min_ttl</code>, <code dir="auto">min_local_deletion_time</code>) are the minimums across the SSTable,
+all deltas are guaranteed non-negative, making unsigned encoding both correct and efficient.</p>
+</blockquote>
+<p><strong>Implementation reference</strong>: <code dir="auto">cqlite-core/src/storage/serialization/vint.rs::zigzag_encode()</code></p>
+<div class="sl-heading-wrapper level-h3"><h3 id="sstable-row-fields-always-use-unsigned-vint-not-zigzag">SSTable Row Fields Always Use Unsigned VInt, Not ZigZag</h3><a class="sl-anchor-link" href="#sstable-row-fields-always-use-unsigned-vint-not-zigzag"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “SSTable Row Fields Always Use Unsigned VInt, Not ZigZag”</span></a></div>
+<p>All temporal delta fields written by <code dir="auto">SerializationHeader</code> call the unsigned variant:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Method</th><th>Source</th></tr></thead><tbody><tr><td>timestamp delta</td><td><code dir="auto">writeUnsignedVInt(ts - min_ts)</code></td><td><code dir="auto">SerializationHeader.java:167</code></td></tr><tr><td>TTL delta</td><td><code dir="auto">writeUnsignedVInt32(ttl - min_ttl)</code></td><td><code dir="auto">SerializationHeader.java:177</code></td></tr><tr><td>local_deletion_time delta</td><td><code dir="auto">writeUnsignedVInt32(ldt - min_ldt)</code></td><td><code dir="auto">SerializationHeader.java:172</code></td></tr></tbody></table>
+<p>ZigZag encoding (<code dir="auto">writeVInt</code>) appears only in the on-wire messaging serialization path
+(pre-5.0 compatibility) and is absent from SSTable Data.db serialization. Because the
+baselines are chosen to be ≤ the smallest actual value in the SSTable, all deltas are
+non-negative, making unsigned encoding correct and efficient.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="delta-encoding-pattern">Delta Encoding Pattern</h2><a class="sl-anchor-link" href="#delta-encoding-pattern"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Delta Encoding Pattern”</span></a></div>
+<p>SSTable components use delta encoding to reduce storage size by storing offsets from baseline values. These baselines are tracked in Statistics.db and used during both read and write operations.</p>
+<p><strong>Formula</strong>: <code dir="auto">stored_value = actual_value - baseline_value</code></p>
+<p><strong>Statistics.db baselines</strong>:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Field</th><th>Purpose</th><th>Format</th></tr></thead><tbody><tr><td><code dir="auto">min_timestamp</code></td><td>Timestamp baseline</td><td>i64, microseconds since epoch</td></tr><tr><td><code dir="auto">min_ttl</code></td><td>TTL baseline</td><td>i32, seconds</td></tr><tr><td><code dir="auto">min_local_deletion_time</code></td><td>Deletion time baseline</td><td>i32, seconds since epoch</td></tr></tbody></table>
+<p><strong>Examples</strong>:</p>
+<p><em>Timestamp encoding</em>:</p>
+<ul>
+<li>Statistics: <code dir="auto">min_timestamp = 1000000</code></li>
+<li>Actual timestamp: <code dir="auto">1005000</code> (microseconds)</li>
+<li>Stored delta: <code dir="auto">5000</code> (encoded as <strong>unsigned</strong> VInt — <code dir="auto">SerializationHeader.writeUnsignedVInt</code>)</li>
+<li>Bytes: <code dir="auto">0x93 0x88</code> (unsigned VInt(5000): <code dir="auto">5000 = 0x1388</code>, 2-byte form <code dir="auto">0x93 0x88</code>)</li>
+</ul>
+<p><em>TTL encoding</em>:</p>
+<ul>
+<li>Statistics: <code dir="auto">min_ttl = 3600</code> (1 hour)</li>
+<li>Actual TTL: <code dir="auto">7200</code> (2 hours)</li>
+<li>Stored delta: <code dir="auto">3600</code> (encoded as <strong>unsigned</strong> VInt32 — <code dir="auto">SerializationHeader.writeUnsignedVInt32</code>)</li>
+<li>Bytes: <code dir="auto">0x9C 0x20</code> (unsigned VInt(7200): <code dir="auto">7200 = 0x1C20</code>, 2-byte form <code dir="auto">0x9C 0x20</code>)</li>
+</ul>
+<p><em>Local deletion time encoding</em>:</p>
+<ul>
+<li>Statistics: <code dir="auto">min_local_deletion_time = 1700000000</code> (Jan 2023)</li>
+<li>Actual deletion time: <code dir="auto">1700000010</code></li>
+<li>Stored delta: <code dir="auto">10</code> (encoded as unsigned VInt)</li>
+<li>Bytes: <code dir="auto">0x0A</code></li>
+</ul>
+<p><strong>Important</strong>: When writing multiple partitions, compute Statistics.db values FIRST by scanning all mutations to find minimum values, then use these baselines during Data.db encoding.</p>
+<p><strong>Implementation reference</strong>: <code dir="auto">cqlite-core/src/storage/sstable/writer/data_writer.rs::write_cell()</code>, <code dir="auto">data_writer.rs::write_tombstone_cell()</code></p>
+<div class="sl-heading-wrapper level-h2"><h2 id="rowcell-flag-quick-reference">Row/Cell Flag Quick Reference</h2><a class="sl-anchor-link" href="#rowcell-flag-quick-reference"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Row/Cell Flag Quick Reference”</span></a></div>
+<p>V5CompressedLegacy format uses bit flags in row and cell headers to indicate field presence and semantics. These flags are critical for both reading and writing SSTables.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="row-flags-1-byte">Row Flags (1 byte)</h3><a class="sl-anchor-link" href="#row-flags-1-byte"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Row Flags (1 byte)”</span></a></div>
+<p>Row flags appear at the start of each row and control row-level metadata.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Bit</th><th>Name</th><th>Value</th><th>Description</th></tr></thead><tbody><tr><td>0</td><td><code dir="auto">END_OF_PARTITION</code></td><td><code dir="auto">0x01</code></td><td>End of partition marker (no row data follows)</td></tr><tr><td>1</td><td><code dir="auto">IS_MARKER</code></td><td><code dir="auto">0x02</code></td><td>Unfiltered is a RangeTombstoneMarker, not a Row</td></tr><tr><td>2</td><td><code dir="auto">HAS_TIMESTAMP</code></td><td><code dir="auto">0x04</code></td><td>Row-level timestamp present (delta encoded)</td></tr><tr><td>3</td><td><code dir="auto">HAS_TTL</code></td><td><code dir="auto">0x08</code></td><td>Row-level TTL present (delta encoded)</td></tr><tr><td>4</td><td><code dir="auto">HAS_DELETION</code></td><td><code dir="auto">0x10</code></td><td>Row deletion present (markedForDeleteAt unsigned VInt first, then local_deletion_time unsigned VInt32)</td></tr><tr><td>5</td><td><code dir="auto">HAS_ALL_COLUMNS</code></td><td><code dir="auto">0x20</code></td><td>All columns present (no bitmap needed)</td></tr><tr><td>6</td><td><code dir="auto">HAS_COMPLEX_DELETION</code></td><td><code dir="auto">0x40</code></td><td>Row contains non-frozen collection column</td></tr><tr><td>7</td><td><code dir="auto">HAS_EXTENDED_FLAGS</code></td><td><code dir="auto">0x80</code></td><td>Extended flags byte follows</td></tr></tbody></table>
+<p><strong>Common flag combinations</strong>:</p>
+<ul>
+<li><code dir="auto">0x24</code>: Simple write (timestamp + all columns)</li>
+<li><code dir="auto">0x2C</code>: TTL write (timestamp + TTL + all columns)</li>
+<li><code dir="auto">0x04</code>: Partial update (timestamp, no HAS_ALL_COLUMNS)</li>
+<li><code dir="auto">0x14</code>: Row deletion (timestamp + deletion)</li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="expressive-code"><link rel="stylesheet" href="/cqlite/_astro/ec.v4551.css"><script type="module" src="/cqlite/_astro/ec.0vx5m.js"></script><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Row with timestamp and all columns present:</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[0x24]  ← flags (HAS_TIMESTAMP | HAS_ALL_COLUMNS)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← clustering prefix (if present)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← row_size VInt</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← timestamp delta VInt</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← cell data (no bitmap needed)</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="Row with timestamp and all columns present:[0x24]  ← flags (HAS_TIMESTAMP | HAS_ALL_COLUMNS)[...]   ← clustering prefix (if present)[...]   ← row_size VInt[...]   ← timestamp delta VInt[...]   ← cell data (no bitmap needed)"><div></div></button></div></figure></div>
+<div class="sl-heading-wrapper level-h3"><h3 id="cell-flags-1-byte">Cell Flags (1 byte)</h3><a class="sl-anchor-link" href="#cell-flags-1-byte"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Cell Flags (1 byte)”</span></a></div>
+<p>Cell flags appear at the start of each cell and control cell-level metadata.</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Bit</th><th>Name</th><th>Value</th><th>Description</th></tr></thead><tbody><tr><td>0</td><td><code dir="auto">IS_DELETED</code></td><td><code dir="auto">0x01</code></td><td>Cell is a tombstone (no value)</td></tr><tr><td>1</td><td><code dir="auto">IS_EXPIRING</code></td><td><code dir="auto">0x02</code></td><td>TTL fields follow (expiring cell)</td></tr><tr><td>2</td><td><code dir="auto">HAS_EMPTY_VALUE</code></td><td><code dir="auto">0x04</code></td><td>Zero-length value (not NULL)</td></tr><tr><td>3</td><td><code dir="auto">USE_ROW_TIMESTAMP</code></td><td><code dir="auto">0x08</code></td><td>Use row-level timestamp (no cell timestamp)</td></tr><tr><td>4</td><td><code dir="auto">USE_ROW_TTL</code></td><td><code dir="auto">0x10</code></td><td>Use row-level TTL (no cell TTL)</td></tr></tbody></table>
+<p><strong>Common flag combinations</strong>:</p>
+<ul>
+<li><code dir="auto">0x08</code>: Normal write (use row timestamp)</li>
+<li><code dir="auto">0x0C</code>: Empty string write (use row timestamp + empty value)</li>
+<li><code dir="auto">0x01</code>: Tombstone (deleted, must include timestamp)</li>
+<li><code dir="auto">0x02</code>: Expiring cell with own timestamp (IS_EXPIRING, no USE_ROW_TIMESTAMP)</li>
+<li><code dir="auto">0x12</code>: Expiring cell with row TTL (IS_EXPIRING + USE_ROW_TTL)</li>
+</ul>
+<p><strong>Critical distinction</strong>:</p>
+<ul>
+<li><strong>Tombstones</strong> (<code dir="auto">IS_DELETED</code>): MUST NOT set <code dir="auto">USE_ROW_TIMESTAMP</code> - tombstones require explicit timestamps and local_deletion_time</li>
+<li><strong>Empty strings</strong>: Use <code dir="auto">HAS_EMPTY_VALUE</code> flag with zero-length value bytes (distinct from NULL)</li>
+<li><strong>NULL values</strong>: NOT written as cells - represented by absence in column bitmap</li>
+</ul>
+<p><strong>Example</strong>:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Normal cell (use row timestamp):</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[0x08]  ← flags (USE_ROW_TIMESTAMP)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← value_length VInt</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← value bytes</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Tombstone cell:</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[0x01]  ← flags (IS_DELETED only)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← timestamp delta VInt (required)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[...]   ← local_deletion_time delta VUInt (required)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">(no value bytes)</span></div></div><div class="ec-line"><div class="code">
+</div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">Empty string cell:</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[0x0C]  ← flags (USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[0x00]  ← value_length = 0</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">(no value bytes)</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="Normal cell (use row timestamp):[0x08]  ← flags (USE_ROW_TIMESTAMP)[...]   ← value_length VInt[...]   ← value bytesTombstone cell:[0x01]  ← flags (IS_DELETED only)[...]   ← timestamp delta VInt (required)[...]   ← local_deletion_time delta VUInt (required)(no value bytes)Empty string cell:[0x0C]  ← flags (USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE)[0x00]  ← value_length = 0(no value bytes)"><div></div></button></div></figure></div>
+<p><strong>Upstream references</strong>:</p>
+<ul>
+<li><code dir="auto">org.apache.cassandra.db.SerializationHeader</code></li>
+<li><code dir="auto">org.apache.cassandra.db.rows.*</code></li>
+<li><code dir="auto">org.apache.cassandra.db.rows.UnfilteredSerializer</code> (V5CompressedLegacy encoding)</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="udt-field-encoding-issue-220">UDT Field Encoding (Issue #220)</h2><a class="sl-anchor-link" href="#udt-field-encoding-issue-220"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “UDT Field Encoding (Issue #220)”</span></a></div>
+<p>UDT fields use <strong>4-byte big-endian i32</strong> length prefixes (NOT VInt):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[field_length: 4-byte BE i32][field_data: variable]</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="[field_length: 4-byte BE i32][field_data: variable]"><div></div></button></div></figure></div>
+<p><strong>Length semantics</strong>:</p>
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+<table><thead><tr><th>Value</th><th>Meaning</th></tr></thead><tbody><tr><td><code dir="auto">-1</code> (0xFFFFFFFF)</td><td>NULL field</td></tr><tr><td><code dir="auto">0</code> (0x00000000)</td><td>Empty field (zero-length, present)</td></tr><tr><td><code dir="auto">>0</code></td><td>Byte count of field data</td></tr></tbody></table>
+<p><strong>UDT type string format</strong> (in Statistics.db):</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">org.apache.cassandra.db.marshal.UserType(keyspace,hex_name,field:type,...)</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="org.apache.cassandra.db.marshal.UserType(keyspace,hex_name,field:type,...)"><div></div></button></div></figure></div>
+<ul>
+<li>Names are hex-encoded: <code dir="auto">616464726573735f74797065</code> = “address_type”</li>
+<li>Can exceed 500 bytes for complex nested UDTs (up to 5000 bytes supported)</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="row-size-measurement-issue-237">Row Size Measurement (Issue #237)</h2><a class="sl-anchor-link" href="#row-size-measurement-issue-237"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Row Size Measurement (Issue #237)”</span></a></div>
+<p><strong>Critical detail for V5CompressedLegacy format</strong>:</p>
+<p>The <code dir="auto">row_size</code> VInt field indicates the byte count of row data, but this count is measured from AFTER the VInt itself is consumed, not from where it starts.</p>
+<p><strong>Offset calculation</strong>:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">next_row_offset = (row_size_vint_start_offset + row_size_vint_byte_length) + row_size_value</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="next_row_offset = (row_size_vint_start_offset + row_size_vint_byte_length) + row_size_value"><div></div></button></div></figure></div>
+<p><strong>Example</strong>:</p>
+<ul>
+<li>Row metadata starts at offset 100</li>
+<li><code dir="auto">row_size</code> VInt is 2 bytes (value: 150)</li>
+<li>Row data starts at offset 102 (100 + 2)</li>
+<li>Next row starts at offset 252 (102 + 150)</li>
+</ul>
+<p><strong>Important</strong>: There is NO trailing field after row data - the next partition/row starts immediately after <code dir="auto">row_size</code> bytes.</p>
+<p>This matches Cassandra’s <code dir="auto">getFilePointer()</code> semantics where the file position after reading the VInt is used as the base for measuring <code dir="auto">row_size</code>.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="vint-safety-limits-issue-264">VInt Safety Limits (Issue #264)</h2><a class="sl-anchor-link" href="#vint-safety-limits-issue-264"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “VInt Safety Limits (Issue #264)”</span></a></div>
+<p>For security and memory safety, CQLite’s <code dir="auto">parse_vint_length()</code> enforces a maximum of <strong>1GB</strong> (<code dir="auto">MAX_VINT_LENGTH = 1,073,741,824 bytes</code>) for any length field. This prevents:</p>
+<ul>
+<li><strong>Overflow on 32-bit platforms</strong>: Where <code dir="auto">usize</code> is only 4 bytes, values > 4GB would wrap</li>
+<li><strong>Memory exhaustion attacks</strong>: Malicious input claiming huge lengths could cause OOM</li>
+<li><strong>Allocation attacks</strong>: Preventing attempts to allocate unreasonable buffer sizes</li>
+</ul>
+<p>The 1GB limit is generous for real Cassandra data (where individual values rarely exceed 16MB) while providing robust protection against malformed or malicious input.</p>
+<p><strong>Error handling</strong>: Values exceeding <code dir="auto">MAX_VINT_LENGTH</code> return <code dir="auto">nom::error::ErrorKind::TooLarge</code>.</p>
+<div class="sl-heading-wrapper level-h2"><h2 id="partition-key-serialization">Partition Key Serialization</h2><a class="sl-anchor-link" href="#partition-key-serialization"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Partition Key Serialization”</span></a></div>
+<p>Partition keys are serialized differently depending on whether they are single-component or multi-component (composite) keys.</p>
+<div class="sl-heading-wrapper level-h3"><h3 id="single-component-keys">Single-Component Keys</h3><a class="sl-anchor-link" href="#single-component-keys"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Single-Component Keys”</span></a></div>
+<p>Single-component keys are serialized as raw bytes with no length prefix:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[value_bytes]  ← Direct type-specific encoding</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="[value_bytes]  ← Direct type-specific encoding"><div></div></button></div></figure></div>
+<p><strong>Examples</strong>:</p>
+<ul>
+<li><code dir="auto">int(42)</code>: <code dir="auto">0x00 0x00 0x00 0x2A</code> (4 bytes, big-endian i32)</li>
+<li><code dir="auto">bigint(1000)</code>: <code dir="auto">0x00 0x00 0x00 0x00 0x00 0x00 0x03 0xE8</code> (8 bytes, big-endian i64)</li>
+<li><code dir="auto">text("hello")</code>: <code dir="auto">0x68 0x65 0x6C 0x6C 0x6F</code> (5 bytes, UTF-8)</li>
+<li><code dir="auto">uuid(...)</code>: 16 bytes (raw UUID bytes)</li>
+</ul>
+<div class="sl-heading-wrapper level-h3"><h3 id="multi-component-composite-keys-issue-380-422">Multi-Component (Composite) Keys (Issue #380, #422)</h3><a class="sl-anchor-link" href="#multi-component-composite-keys-issue-380-422"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Multi-Component (Composite) Keys (Issue #380, #422)”</span></a></div>
+<p>Multi-component keys use 2-byte big-endian length prefixes with 0x00 separators between components:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[u16 BE: len1][component1_bytes][0x00]</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[u16 BE: len2][component2_bytes][0x00]</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">...</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">[u16 BE: lenN][componentN_bytes]  ← NO trailing 0x00</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="[u16 BE: len1][component1_bytes][0x00][u16 BE: len2][component2_bytes][0x00]...[u16 BE: lenN][componentN_bytes]  ← NO trailing 0x00"><div></div></button></div></figure></div>
+<p><strong>CRITICAL</strong>: The 0x00 separator appears after each component EXCEPT the last.</p>
+<p><strong>Example 1</strong>: <code dir="auto">(int(42), text("hello"))</code> partition key</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">0x00 0x04                 ← length of int component (4 bytes)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">0x00 0x00 0x00 0x2A       ← int value 42</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">0x00                      ← separator after first component</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">0x00 0x05                 ← length of text component (5 bytes)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">0x68 0x65 0x6C 0x6C 0x6F  ← text value "hello"</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">                          </span></span><span style="--0:#d6deeb;--1:#403f53">← NO trailing 0x00 after last component</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="0x00 0x04                 ← length of int component (4 bytes)0x00 0x00 0x00 0x2A       ← int value 420x00                      ← separator after first component0x00 0x05                 ← length of text component (5 bytes)0x68 0x65 0x6C 0x6C 0x6F  ← text value &#x22;hello&#x22;                          ← NO trailing 0x00 after last component"><div></div></button></div></figure></div>
+<p>Total: 13 bytes (2 + 4 + 1 + 2 + 5)</p>
+<p><strong>Example 2</strong>: <code dir="auto">(year int, month int, day int)</code> with values <code dir="auto">(2024, 6, 15)</code>:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">00 04 00 00 07 E8 00    ← year=2024: len(4) + value + separator</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">00 04 00 00 00 06 00    ← month=6: len(4) + value + separator</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">00 04 00 00 00 0F       ← day=15: len(4) + value (NO trailing 0x00)</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="00 04 00 00 07 E8 00    ← year=2024: len(4) + value + separator00 04 00 00 00 06 00    ← month=6: len(4) + value + separator00 04 00 00 00 0F       ← day=15: len(4) + value (NO trailing 0x00)"><div></div></button></div></figure></div>
+<p>Total: 20 bytes (7 + 7 + 6)</p>
+<p><strong>Size limits</strong>:</p>
+<ul>
+<li>Single-component: No inherent limit (but V5CompressedLegacy partition header uses u8 length, limiting total to 255 bytes)</li>
+<li>Multi-component: Each component limited to 65,535 bytes (u16 length prefix)</li>
+</ul>
+<div class="sl-heading-wrapper level-h3"><h3 id="token-computation">Token Computation</h3><a class="sl-anchor-link" href="#token-computation"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Token Computation”</span></a></div>
+<p>Partition keys are mapped to tokens using Murmur3 hash for cluster distribution:</p>
+<p><strong>Algorithm</strong>:</p>
+<ol>
+<li>Serialize partition key to bytes (single or composite format)</li>
+<li>Compute Murmur3 32-bit hash with seed 0</li>
+<li>Token is the hash value as i64 (sign-extended from i32)</li>
+</ol>
+<p><strong>Example</strong>:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="rust"><code><div class="ec-line"><div class="code"><span style="--0:#919F9F;--1:#5D6376">// For int(42) partition key</span></div></div><div class="ec-line"><div class="code"><span style="--0:#C792EA;--1:#8844AE">let</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C5E478;--1:#3B61B0">key_bytes</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> [</span><span style="--0:#F78C6C;--1:#AA0982">0x00</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#F78C6C;--1:#AA0982">0x00</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#F78C6C;--1:#AA0982">0x00</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#F78C6C;--1:#AA0982">0x2A</span><span style="--0:#D6DEEB;--1:#403F53">];</span></div></div><div class="ec-line"><div class="code"><span style="--0:#C792EA;--1:#8844AE">let</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C5E478;--1:#3B61B0">hash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">murmur3_32</span><span style="--0:#D6DEEB;--1:#403F53">(</span><span style="--0:#C5E478;--1:#3B61B0">key_bytes</span><span style="--0:#D6DEEB;--1:#403F53">, </span><span style="--0:#C5E478;--1:#3B61B0">seed</span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#F78C6C;--1:#AA0982">0</span><span style="--0:#D6DEEB;--1:#403F53">);  </span><span style="--0:#919F9F;--1:#5D6376">// Returns u32</span></div></div><div class="ec-line"><div class="code"><span style="--0:#C792EA;--1:#8844AE">let</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C5E478;--1:#3B61B0">token</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C792EA;--1:#8844AE">=</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C5E478;--1:#3B61B0">hash</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#C792EA;--1:#8844AE">as</span><span style="--0:#D6DEEB;--1:#403F53"> i32 </span><span style="--0:#C792EA;--1:#8844AE">as</span><span style="--0:#D6DEEB;--1:#403F53"> i64;             </span><span style="--0:#919F9F;--1:#5D6376">// Sign-extend to i64</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="// For int(42) partition keylet key_bytes = [0x00, 0x00, 0x00, 0x2A];let hash = murmur3_32(key_bytes, seed=0);  // Returns u32let token = hash as i32 as i64;             // Sign-extend to i64"><div></div></button></div></figure></div>
+<p><strong>Decorated keys</strong>: Writers use <code dir="auto">DecoratedKey</code> structs that bundle the token and raw key bytes together:</p>
+<div class="expressive-code"><figure class="frame not-content"><figcaption class="header"></figcaption><pre data-language="plaintext"><code><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">DecoratedKey {</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">    </span></span><span style="--0:#d6deeb;--1:#403f53">token: i64,        // Murmur3 hash (for ordering)</span></div></div><div class="ec-line"><div class="code"><span class="indent"><span style="--0:#d6deeb;--1:#403f53">    </span></span><span style="--0:#d6deeb;--1:#403f53">key: Vec&#x3C;u8>,      // Raw key bytes (for partition header)</span></div></div><div class="ec-line"><div class="code"><span style="--0:#d6deeb;--1:#403f53">}</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="DecoratedKey {    token: i64,        // Murmur3 hash (for ordering)    key: Vec<u8>,      // Raw key bytes (for partition header)}"><div></div></button></div></figure></div>
+<p><strong>Ordering requirement</strong>: Partitions MUST be written to Data.db in ascending token order. For equal tokens, order by raw key bytes (lexicographic).</p>
+<p><strong>Implementation references</strong>:</p>
+<ul>
+<li><code dir="auto">cqlite-core/src/storage/write_engine/mutation.rs::PartitionKey::to_bytes()</code></li>
+<li><code dir="auto">cqlite-core/src/storage/write_engine/mutation.rs::calculate_murmur3_token()</code></li>
+<li><code dir="auto">cqlite-core/src/storage/sstable/key_digest.rs::KeyDigestComputer</code></li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="key-takeaways">Key Takeaways</h2><a class="sl-anchor-link" href="#key-takeaways"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Key Takeaways”</span></a></div>
+<ul>
+<li>Expect VInt before variable-sized payloads; decode, then slice the value.</li>
+<li><strong>Exception</strong>: UDT fields use fixed 4-byte BE i32 lengths, not VInt.</li>
+<li>Signed fields that use ZigZag appear primarily in legacy contexts; length fields are non-negative.</li>
+<li><strong>Row size measurement</strong>: VInt values like <code dir="auto">row_size</code> are measured from AFTER the VInt is consumed (Issue #237).</li>
+<li><strong>Safety limit</strong>: Length VInts are capped at 1GB to prevent overflow and allocation attacks (Issue #264).</li>
+<li><strong>Write guidance</strong>: Use delta encoding for timestamps/TTL/deletion times; compute Statistics.db baselines first.</li>
+<li><strong>Partition keys</strong>: Single-component keys have no length prefix; multi-component keys use 2-byte BE lengths with 0x00 separators EXCEPT after the last component (Issue #380, #422).</li>
+<li><strong>Token ordering</strong>: Partitions must be written in ascending token order (Murmur3 hash of partition key bytes).</li>
+</ul>
+<div class="sl-heading-wrapper level-h2"><h2 id="references">References</h2><a class="sl-anchor-link" href="#references"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “References”</span></a></div>
+<ul>
+<li>Cassandra 5.0.8: <code dir="auto">SerializationHeader</code> — <code dir="auto">https://github.com/apache/cassandra/blob/cassandra-5.0.8/src/java/org/apache/cassandra/db/SerializationHeader.java</code></li>
+<li>Cassandra 5.0.8: <code dir="auto">rows</code> — <code dir="auto">https://github.com/apache/cassandra/tree/cassandra-5.0.8/src/java/org/apache/cassandra/db/rows</code></li>
+</ul> </div> <footer class="sl-flex astro-3yyafb3n"> <div class="meta sl-flex astro-3yyafb3n"> <a href="https://github.com/pmcfadin/cqlite/edit/main/website/src/content/docs/sstable-format/appendix-b.md" class="sl-flex print:hidden astro-eez2twj6"><svg aria-hidden="true" class="astro-eez2twj6 astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg>Edit page</a>  </div> <div class="pagination-links print:hidden astro-u2l5gyhi" dir="ltr"> <a href="/cqlite/sstable-format/appendix-a/" rel="prev" class="astro-u2l5gyhi"> <svg aria-hidden="true" class="astro-u2l5gyhi astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg> <span class="astro-u2l5gyhi"> Previous <br class="astro-u2l5gyhi"> <span class="link-title astro-u2l5gyhi">Appendix A -- CQL-&gt;SSTable Type Mapping</span> </span> </a> <a href="/cqlite/sstable-format/appendix-c/" rel="next" class="astro-u2l5gyhi"> <svg aria-hidden="true" class="astro-u2l5gyhi astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg> <span class="astro-u2l5gyhi"> Next <br class="astro-u2l5gyhi"> <span class="link-title astro-u2l5gyhi">Appendix C — Reference Walkthroughs with Code</span> </span> </a> </div>   </footer>  </div> </div>   </main> </div> </div>  </div> </div>  </body></html>
