@@ -5,8 +5,8 @@ set -euo pipefail
 # Usage: DATASET_TAG=datasets-v2 DATASET_ASSET=cassandra5-small-full.tar.gz DATASET_SHA256=<sha> ./test-data/scripts/fetch-datasets.sh
 
 TAG="${DATASET_TAG:-datasets-v3}"
-ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.tar.gz}"
-SHA256_EXPECTED="${DATASET_SHA256:-69950feaaf45854e38c467087911d2d9772eeb459b6131adb676a342d7dfa983}"
+ASSET="${DATASET_ASSET:-cassandra5-small-full-v3.1.tar.gz}"
+SHA256_EXPECTED="${DATASET_SHA256:-98fa1c924e439a5ffb03309b0cbdf4611894357b84061bde33ecefe499571729}"
 
 echo "Fetching dataset ${ASSET} (tag ${TAG})"
 mkdir -p test-data/datasets
@@ -21,12 +21,12 @@ else
   echo "Warning: no sha256 checker found; skipping verification" >&2
 fi
 
-tar -xzf /tmp/${ASSET} -C .
+tar -xzf /tmp/${ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 
 # Remove macOS AppleDouble shadow files (`._*`). The archive may contain them
 # when produced on macOS, and they break test helpers that scan for files by
 # suffix (e.g., `*-Data.db` matches both the real file and `._..-Data.db`).
-find test-data/datasets -name '._*' -delete 2>/dev/null || true
+find test-data/datasets \( -name '._*' -o -name '.DS_Store' \) -delete 2>/dev/null || true
 
 echo "Dataset extracted to test-data/datasets"
 
