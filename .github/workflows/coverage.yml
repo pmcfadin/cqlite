@@ -58,32 +58,32 @@ jobs:
     - name: Install llvm-cov (validation)
       run: cargo install cargo-llvm-cov
       
-    - name: Restore datasets-v2 cache (same as ci.yml)
+    - name: Restore datasets-v3 cache (same as ci.yml)
       uses: actions/cache/restore@v4
       with:
         path: |
           test-data/datasets/
           validation_artifacts/sstabledump/
-        key: datasets-v2-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v3-f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v2-
-        
+          datasets-v3-
+
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
         echo "🔍 Checking for existing datasets..."
         ls -la test-data/ || echo "📁 test-data directory does not exist"
-        
+
         DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
         echo "📊 Current dataset count: $DB_COUNT SSTable files"
-        
+
         if [ "$DB_COUNT" -eq 0 ]; then
           echo "📦 No datasets found - downloading full Cassandra 5 datasets from release..."
           mkdir -p test-data
-          echo "🔍 Downloading cassandra5-small-full.tar.gz from datasets-v2 release..."
-          gh release download datasets-v2 --pattern "cassandra5-small-full.tar.gz" --dir /tmp
-          echo "4eb496339a5f4bc62c3490b75e57966317d7e5c216bbffe8161a659e87cbb56b  /tmp/cassandra5-small-full.tar.gz" | sha256sum -c -
+          echo "🔍 Downloading cassandra5-small-full-v3.1.tar.gz from datasets-v3 release..."
+          gh release download datasets-v3 --pattern "cassandra5-small-full-v3.1.tar.gz" --dir /tmp
+          echo "f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb  /tmp/cassandra5-small-full-v3.1.tar.gz" | sha256sum -c -
           echo "📦 Extracting datasets to repo root..."
-          tar -xzf /tmp/cassandra5-small-full.tar.gz -C .
+          tar -xzf /tmp/cassandra5-small-full-v3.1.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
           
           # Verify extraction
           NEW_DB_COUNT=$(find test-data -name '*.db' 2>/dev/null | wc -l)
@@ -109,7 +109,7 @@ jobs:
         
         if [ "$DB_COUNT" -eq 0 ]; then
           echo "❌ CRITICAL: No real Cassandra 5 datasets found"
-          echo "❌ Expected: Real SSTable files from datasets-v2 release"
+          echo "❌ Expected: Real SSTable files from datasets-v3 release"
           echo "❌ This workflow requires REAL data - no synthetic/mock data allowed"
           exit 1
         fi
@@ -131,7 +131,7 @@ jobs:
           done < <(find test-data/datasets/sstables -type f -name "*-Data.db" -print0 2>/dev/null || true)
           echo "References validation complete; missing_count=$MISSING"
         else
-          echo "ℹ️ references.yml not found; skipping (until datasets-v2)."
+          echo "ℹ️ references.yml not found; skipping (until datasets-v3)."
         fi
         echo "::endgroup::"
         

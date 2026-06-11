@@ -16,9 +16,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  DATASET_TAG: datasets-v2
-  DATASET_ASSET: cassandra5-small-full.tar.gz
-  DATASET_SHA256: 5be43811bbee320a412aaf79aa63134ec1e2ec5434c03815a082b4a31bd86c55
+  DATASET_TAG: datasets-v3
+  DATASET_ASSET: cassandra5-small-full-v3.1.tar.gz
+  DATASET_SHA256: f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb
   APP_NAME: cqlite-node
 
 jobs:
@@ -151,7 +151,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test-data/datasets
-          key: datasets-${{ env.DATASET_TAG }}
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
       - name: Fetch datasets if cache miss (Unix)
         if: steps.dataset-cache.outputs.cache-hit != 'true' && runner.os != 'Windows'
@@ -161,7 +161,7 @@ jobs:
           curl -fsSL -o /tmp/${DATASET_ASSET} \
             https://github.com/pmcfadin/cqlite/releases/download/${DATASET_TAG}/${DATASET_ASSET}
           echo "${DATASET_SHA256}  /tmp/${DATASET_ASSET}" | sha256sum -c -
-          tar -xzf /tmp/${DATASET_ASSET} -C .
+          tar -xzf /tmp/${DATASET_ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 
       - name: Fetch datasets if cache miss (Windows)
         if: steps.dataset-cache.outputs.cache-hit != 'true' && runner.os == 'Windows'
@@ -174,7 +174,7 @@ jobs:
           if ($hash -ne $env:DATASET_SHA256) {
             throw "SHA256 mismatch: expected $env:DATASET_SHA256, got $hash"
           }
-          tar -xzf "$env:TEMP\$env:DATASET_ASSET" -C .
+          tar -xzf "$env:TEMP\$env:DATASET_ASSET" -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
 
       - name: Sanity check dataset
         shell: bash

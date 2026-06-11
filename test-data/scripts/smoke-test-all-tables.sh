@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # Comprehensive Smoke Test Script for All Test Tables
 # Issue #200: Validate that all 33 nb test tables can be loaded successfully
-# Issue #654: Also discover oa/da keyspaces (reported as SKIP-PENDING until VG3/VG4)
+# Issue #654: Also discover oa/da keyspaces
+# Issue #656 (VG4): Promote test_oa to enforced (nb + oa = 39 tables); test_da stays skip-pending
 #
 # This script discovers all test tables across all keyspaces:
 #   - nb (enforced): test_basic, test_collections, test_timeseries, test_wide_rows
-#   - oa (skip-pending, VG4): test_oa
-#   - da/bti (skip-pending, future BTI epic): test_da
+#   - oa (enforced, VG4): test_oa — oa format BIG read implemented in #655
+#   - da/bti (skip-pending, BTI read epic #660): test_da
 #
 # Tables in SKIP_PENDING_KEYSPACES are discovered and listed, but not run
 # through the read-sstable command. They appear explicitly in the summary
@@ -49,17 +50,17 @@ SSTABLES_DIR="${DATASETS_ROOT}/sstables"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/smoke-test-all-tables-results}"
 
 # Enforced keyspaces (must all pass, failures exit non-zero)
-KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows")
+# Issue #656 (VG4): test_oa promoted from skip-pending to enforced (nb=33 + oa=6 = 39 tables)
+KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa")
 
 # Skip-pending keyspaces (Issue #654):
-#   - test_oa: oa format (BIG) - skip until VG4 (oa parser lands)
-#   - test_da: da format (BTI) - skip until future BTI read epic
+#   - test_da: da/BTI format - skip until BTI read epic #660
 # These keyspaces are discovered and listed explicitly as SKIP-PENDING,
 # but are not run through read-sstable (would produce parse errors).
-SKIP_PENDING_KEYSPACES=("test_oa" "test_da")
+SKIP_PENDING_KEYSPACES=("test_da")
 # Reason per keyspace (parallel arrays, bash 3.x compatible)
-SKIP_PENDING_KEYSPACE_NAMES=("test_oa" "test_da")
-SKIP_PENDING_KEYSPACE_REASONS=("oa-format parsing not yet implemented (lands in VG4)" "da/BTI-format parsing not yet implemented (future BTI epic)")
+SKIP_PENDING_KEYSPACE_NAMES=("test_da")
+SKIP_PENDING_KEYSPACE_REASONS=("da/BTI-format parsing not yet implemented (see BTI read epic #660)")
 
 # Get skip reason for a keyspace (bash 3.x compatible, no associative arrays)
 get_skip_reason() {
@@ -405,7 +406,7 @@ run_all_tests() {
     set -e
 
     echo ""
-    log_info "Checking skip-pending keyspaces (oa/da - not enforced yet)..."
+    log_info "Checking skip-pending keyspaces (da/BTI - not enforced, see #660)..."
     echo ""
     register_skip_pending_tables
 
@@ -422,7 +423,7 @@ print_summary() {
     echo "    SMOKE TEST SUMMARY - ALL TABLES"
     echo "========================================="
     echo ""
-    echo "  Total Tables Tested: ${total_tables}/33 (nb enforced)"
+    echo "  Total Tables Tested: ${total_tables}/39 (nb=33 + oa=6, enforced)"
     echo -e "  ${GREEN}Passed:              ${#PASSED_TABLES[@]}${NC}"
 
     if [[ ${#FAILED_TABLES[@]} -gt 0 ]]; then
@@ -432,7 +433,7 @@ print_summary() {
     fi
 
     if [[ ${#SKIPPED_PENDING_TABLES[@]} -gt 0 ]]; then
-        echo -e "  ${YELLOW}Skip-pending:        ${#SKIPPED_PENDING_TABLES[@]} (oa/da - not enforced until VG4/BTI epic)${NC}"
+        echo -e "  ${YELLOW}Skip-pending:        ${#SKIPPED_PENDING_TABLES[@]} (da/BTI - not enforced until BTI read epic #660)${NC}"
     fi
 
     echo ""
@@ -461,8 +462,8 @@ print_summary() {
 
     if [[ ${#FAILED_TABLES[@]} -eq 0 ]]; then
         echo -e "${GREEN}=========================================${NC}"
-        echo -e "${GREEN}  All nb tables passed smoke test${NC}"
-        echo -e "${GREEN}  oa/da tables present but skip-pending${NC}"
+        echo -e "${GREEN}  All nb+oa tables (39) passed smoke test${NC}"
+        echo -e "${GREEN}  da/BTI tables present but skip-pending (BTI read epic #660)${NC}"
         echo -e "${GREEN}=========================================${NC}"
         return 0
     else
@@ -477,7 +478,7 @@ print_summary() {
 main() {
     log_info "CQLite Comprehensive Table Loading Smoke Test"
     log_info "Issue #200: Validate all 33 nb test tables load successfully"
-    log_info "Issue #654: oa/da tables discovered and listed as SKIP-PENDING"
+    log_info "Issue #656 (VG4): oa tables (test_oa) now enforced; da tables listed as SKIP-PENDING"
     echo ""
 
     detect_timeout_command
