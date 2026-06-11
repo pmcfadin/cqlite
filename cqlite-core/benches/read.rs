@@ -40,6 +40,9 @@ use criterion::{criterion_group, criterion_main, Criterion};
 #[path = "fixtures/mod.rs"]
 mod fixtures;
 
+#[path = "profiling/mod.rs"]
+mod profiling;
+
 // ---------------------------------------------------------------------------
 // cli-helpers benches
 // ---------------------------------------------------------------------------
@@ -204,11 +207,12 @@ fn bench_type_heavy(c: &mut Criterion) {
 
 #[cfg(feature = "cli-helpers")]
 criterion_group!(
-    benches,
-    bench_point_lookup,
-    bench_clustering_slice,
-    bench_full_scan,
-    bench_type_heavy
+    name = benches;
+    config = profiling::configure();
+    targets = bench_point_lookup,
+              bench_clustering_slice,
+              bench_full_scan,
+              bench_type_heavy
 );
 
 #[cfg(not(feature = "cli-helpers"))]
@@ -218,6 +222,10 @@ fn bench_noop(_c: &mut Criterion) {
 }
 
 #[cfg(not(feature = "cli-helpers"))]
-criterion_group!(benches, bench_noop);
+criterion_group!(
+    name = benches;
+    config = profiling::configure();
+    targets = bench_noop
+);
 
 criterion_main!(benches);

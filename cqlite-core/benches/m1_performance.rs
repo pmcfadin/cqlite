@@ -20,6 +20,9 @@ use std::sync::Arc;
 #[path = "fixtures/mod.rs"]
 mod fixtures;
 
+#[path = "profiling/mod.rs"]
+mod profiling;
+
 /// Benchmark context holding real SSTable data from multiple datasets
 struct BenchmarkContext {
     /// Index reader for partition lookup benchmarks
@@ -488,7 +491,7 @@ fn bench_m1_comprehensive_validation(c: &mut Criterion) {
 
 criterion_group!(
     name = m1_partition_lookups;
-    config = Criterion::default();
+    config = profiling::configure();
     targets = bench_partition_lookup_cold_cache,
               bench_partition_lookup_warm_cache,
               bench_partition_lookup_throughput
@@ -496,21 +499,21 @@ criterion_group!(
 
 criterion_group!(
     name = m1_read_throughput;
-    config = Criterion::default();
+    config = profiling::configure();
     targets = bench_sstable_read_throughput,
               bench_multi_sstable_read_throughput
 );
 
 criterion_group!(
     name = m1_memory_efficiency;
-    config = Criterion::default();
+    config = profiling::configure();
     targets = bench_memory_usage_large_sstable,
               bench_sequential_memory_efficiency
 );
 
 criterion_group!(
     name = m1_comprehensive;
-    config = Criterion::default();
+    config = profiling::configure();
     targets = bench_m1_comprehensive_validation
 );
 

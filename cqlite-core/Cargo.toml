@@ -82,6 +82,10 @@ web-sys = { workspace = true, features = ["console"], optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+# Heap profiling harness (examples/heap_profile.rs). The dhat allocator is only
+# installed when the `dhat-heap` feature is enabled; the dependency itself is
+# dev-only and never ships in the library.
+dhat = "0.3"
 proptest = { workspace = true }
 tempfile = "3.8"
 rand = "0.8"
@@ -92,6 +96,13 @@ fastrand = "2.0"
 libc = { workspace = true }
 num-bigint = "0.4"  # For varint/decimal validation in tests
 num-traits = "0.2"  # Required for BigInt conversion methods
+
+# In-process sampling CPU profiler for the criterion benches (signal-based, so
+# it works in containers and on CI runners where `perf` is unavailable).
+# Unix-only: pprof does not build on Windows; benches fall back to the plain
+# criterion config there (see benches/profiling/mod.rs).
+[target.'cfg(unix)'.dev-dependencies]
+pprof = { version = "0.14", features = ["flamegraph", "criterion"] }
 
 [[bench]]
 name = "partition_lookup"
@@ -180,6 +191,11 @@ test-quality-gates = []        # Quality gate enforcement
 
 # M5: Write support - SSTable generation and persistence (Issue #359)
 write-support = []
+
+# Heap profiling: installs the dhat global allocator in examples/heap_profile.rs.
+# Dev/profiling only — never enable for production builds (allocation tracking
+# adds overhead). See docs/profiling.md.
+dhat-heap = []
 
 [lints]
 workspace = true

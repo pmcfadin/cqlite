@@ -44,6 +44,9 @@ use criterion::{black_box, Throughput};
 #[path = "fixtures/mod.rs"]
 mod fixtures;
 
+#[path = "profiling/mod.rs"]
+mod profiling;
+
 /// Number of rows inserted per ingest iteration.
 #[cfg(feature = "write-support")]
 const INGEST_ROWS: u64 = 256;
@@ -264,7 +267,11 @@ fn bench_flush(c: &mut Criterion) {
 // every feature combination without dead-code noise.
 
 #[cfg(feature = "write-support")]
-criterion_group!(benches, bench_ingest, bench_ingest_wal_off, bench_flush);
+criterion_group!(
+    name = benches;
+    config = profiling::configure();
+    targets = bench_ingest, bench_ingest_wal_off, bench_flush
+);
 
 #[cfg(not(feature = "write-support"))]
 fn bench_noop(_c: &mut Criterion) {
@@ -273,6 +280,10 @@ fn bench_noop(_c: &mut Criterion) {
 }
 
 #[cfg(not(feature = "write-support"))]
-criterion_group!(benches, bench_noop);
+criterion_group!(
+    name = benches;
+    config = profiling::configure();
+    targets = bench_noop
+);
 
 criterion_main!(benches);

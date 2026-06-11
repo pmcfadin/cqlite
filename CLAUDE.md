@@ -64,6 +64,13 @@ cargo fmt
 # Smoke test all tables
 bash test-data/scripts/smoke-test-all-tables.sh
 
+# Profiling loop (see docs/profiling.md)
+./scripts/profile.sh baseline        # save criterion baseline
+./scripts/profile.sh flame           # CPU flamegraphs (pprof, works in containers)
+./scripts/profile.sh heap            # dhat heap profile vs <128MB budget
+./scripts/profile.sh bench && ./scripts/profile.sh compare   # re-measure vs baseline
+./scripts/profile.sh report          # ranked bottleneck report + history.jsonl ledger
+
 # Run CLI
 cargo run --package cqlite-cli -- <command>
 
