@@ -50,7 +50,7 @@ jobs:
       with:
         path: |
           test-data/datasets/
-        key: datasets-v3-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v3-f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
           datasets-v3-
 
@@ -268,7 +268,7 @@ jobs:
       with:
         path: |
           test-data/datasets/
-        key: datasets-v3-${{ hashFiles('test-data/**/*.md') }}
+        key: datasets-v3-f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
           datasets-v3-
 

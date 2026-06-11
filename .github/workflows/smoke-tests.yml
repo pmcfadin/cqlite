@@ -57,7 +57,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: test-data/datasets
-          key: datasets-${{ env.DATASET_TAG }}
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
 
       - name: Fetch datasets if cache miss
         if: steps.dataset-cache.outputs.cache-hit != 'true'
