@@ -1,0 +1,190 @@
+name: "CI: E2E Cassandra Readback Gate"
+
+# PRD §4.1 acceptance gate (epic #663, issue #664):
+# Validates that SSTables produced by CQLite can be loaded by a real
+# Cassandra 5.0.2 cluster via `nodetool refresh` and queried with cqlsh.
+#
+# Runs:
+#   - Nightly (schedule) to catch regressions on main
+#   - On PRs touching writer/serialization/schema paths or the script/compose file itself
+
+on:
+  schedule:
+    # Nightly at 02:30 UTC
+    - cron: '30 2 * * *'
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'cqlite-core/src/storage/**'
+      - 'cqlite-core/src/parser/**'
+      - 'cqlite-core/src/schema/**'
+      - 'test-data/scripts/e2e-cassandra-readback.sh'
+      - 'test-data/docker/docker-compose-cassandra5.yml'
+      - '.github/workflows/e2e-readback.yml'
+  workflow_dispatch:
+    inputs:
+      tables:
+        description: 'Comma-separated table subset (default: all). Labels: basic-primitives,collections,udt,static-columns,ttl'
+        required: false
+        default: ''
+      keep_running:
+        description: 'Keep Cassandra container running after the job (for debugging)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel any in-progress PR run when a new push arrives; let scheduled runs complete.
+concurrency:
+  group: e2e-readback-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  e2e-cassandra-readback:
+    name: E2E Cassandra Readback (${{ github.event_name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-e2e-readback-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-e2e-readback-
+            ${{ runner.os }}-cargo-
+
+      - name: Build cqlite-cli with write support
+        run: |
+          cargo build --package cqlite-cli --features write-support
+          echo "Build complete: $(./target/debug/cqlite --version 2>/dev/null || echo 'binary at target/debug/cqlite')"
+
+      # The script manages the compose stack itself (start-clean.sh + trap cleanup).
+      # We pass --no-build so it uses the binary we just compiled, and --bin to
+      # point at the exact path.  On failure we preserve workdir artifacts via
+      # the upload step below.
+      - name: Run e2e Cassandra readback
+        id: readback
+        shell: bash
+        env:
+          # Force docker compose (available on ubuntu-latest GitHub runners)
+          COMPOSE_CMD: "docker compose"
+        run: |
+          EXTRA_ARGS=""
+          if [[ -n "${{ github.event.inputs.tables }}" ]]; then
+            EXTRA_ARGS="$EXTRA_ARGS --tables ${{ github.event.inputs.tables }}"
+          fi
+          if [[ "${{ github.event.inputs.keep_running }}" == "true" ]]; then
+            EXTRA_ARGS="$EXTRA_ARGS --keep-running"
+          fi
+
+          bash test-data/scripts/e2e-cassandra-readback.sh \
+            --no-build \
+            --bin "$(pwd)/target/debug/cqlite" \
+            $EXTRA_ARGS \
+            2>&1 | tee /tmp/e2e-readback.log
+          # tee swallows the exit code; use PIPESTATUS to propagate it
+          exit "${PIPESTATUS[0]}"
+
+      # Collect logs and Cassandra container logs as artifacts on failure.
+      # Note: the script's EXIT trap calls rm -rf on its workdir ($WORKDIR under
+      # /tmp/cqlite-e2e-readback.*) so per-table mutation/spec files are gone by
+      # the time this step runs.  The full script stdout+stderr is captured in
+      # /tmp/e2e-readback.log (from the tee above) and is always present.
+      - name: Collect failure artifacts
+        if: failure()
+        run: |
+          mkdir -p /tmp/e2e-artifacts
+
+          # Full script log (always present — captured by tee before the script exits)
+          if [[ -f /tmp/e2e-readback.log ]]; then
+            cp /tmp/e2e-readback.log /tmp/e2e-artifacts/
+          fi
+
+          # If the script was abruptly killed (SIGTERM from timeout) the workdir
+          # cleanup trap may not have run yet; capture any remaining files.
+          for d in /tmp/cqlite-e2e-readback.*; do
+            [[ -d "$d" ]] && cp -r "$d" /tmp/e2e-artifacts/ || true
+          done
+
+          # Cassandra container logs
+          docker compose \
+            -f test-data/docker/docker-compose-cassandra5.yml \
+            logs --no-color cassandra-5-0 \
+            > /tmp/e2e-artifacts/cassandra.log 2>&1 || true
+
+          echo "Artifact contents:"
+          find /tmp/e2e-artifacts -type f | sort
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-readback-failure-${{ github.run_id }}
+          path: /tmp/e2e-artifacts/
+          retention-days: 14
+
+      # Best-effort container cleanup (the script's EXIT trap handles the
+      # happy path; this catches runner-level abrupt termination).
+      - name: Tear down Cassandra stack (cleanup guard)
+        if: always()
+        run: |
+          docker compose \
+            -f test-data/docker/docker-compose-cassandra5.yml \
+            down -v --remove-orphans 2>/dev/null || true
+
+      - name: Comment on PR (Success)
+        if: success() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## E2E Cassandra Readback: PASSED
+
+            All selected tables passed the full write -> flush -> export -> \`nodetool refresh\` -> \`cqlsh\` verification cycle against Cassandra 5.0.2.
+
+            See the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}) for details.`
+            });
+
+      - name: Comment on PR (Failure)
+        if: failure() && github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## E2E Cassandra Readback: FAILED
+
+            The PRD §4.1 acceptance gate failed on this PR. One or more tables did not pass the CQLite write -> Cassandra readback cycle.
+
+            ### Debugging
+            Download the \`e2e-readback-failure-${context.runId}\` artifact from the [workflow run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}).
+
+            \`\`\`bash
+            # Run the gate locally
+            cargo build --package cqlite-cli --features write-support
+            bash test-data/scripts/e2e-cassandra-readback.sh \\
+              --no-build --bin ./target/debug/cqlite
+            \`\`\`
+
+            See artifact \`e2e-readback.log\` and per-table \`spec.txt\` / mutation JSONL files for details.`
+            });
