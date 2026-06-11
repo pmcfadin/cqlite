@@ -340,18 +340,27 @@ generate_sstabledump_jsonl() {
   while IFS= read -r -d '' data_file; do
     local rel
     rel="${data_file#"$sstables_dir"/}"
+    # The tar archive was created from /var/lib/cassandra so paths start with
+    # "data/".  Strip that prefix before prepending the sstabledump base path
+    # to avoid a doubled "data/data/" segment.
+    local rel_sstabledump="${rel#data/}"
     local jsonl_file="${data_file%.db}.db.jsonl"
     log "  sstabledump: $rel"
     if [[ "$DRY_RUN" -eq 1 ]]; then
       echo "[dry-run] sstabledump $data_file > $jsonl_file"
     else
       $ENGINE exec "$CONTAINER_NAME" bash -lc \
-        "/opt/cassandra/tools/bin/sstabledump /var/lib/cassandra/data/${rel} -l" \
+        "/opt/cassandra/tools/bin/sstabledump /var/lib/cassandra/data/${rel_sstabledump} -l" \
         | python3 -c "
 import json, sys
 try:
-    items = json.loads(sys.stdin.read())
-    for item in items:
+    # sstabledump -l emits one JSON object per line (NDJSON), not a JSON array.
+    # Parse line-by-line and pass each object through as a JSONL record.
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        item = json.loads(line)
         print(json.dumps(item, separators=(',', ': ')))
 except Exception as e:
     print(json.dumps({'error': str(e)}), file=sys.stderr)
@@ -392,6 +401,10 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
 fi
 
 # Install cassandra-driver inside container (needed for row insertion)
+# python3-pip is not present in the cassandra:5.0.2 image; install it first.
+log "Installing python3-pip in container..."
+run $ENGINE exec "$CONTAINER_NAME" bash -c "apt-get update && apt-get install -y python3-pip"
+
 log "Installing cassandra-driver in container..."
 run $ENGINE exec "$CONTAINER_NAME" pip3 install --quiet cassandra-driver
 
