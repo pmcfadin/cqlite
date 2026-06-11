@@ -407,6 +407,49 @@ PY
   fi
   log "Self-test PASSED: absent_row_cluster correctly fails for existing row (exit $rc)"
 
+  # --- Test absent_col: target row does NOT exist must fail ---
+  # An absent_col directive asserts a column was cell-deleted but the row
+  # still exists.  When the entire row is missing the verifier must FAIL
+  # loudly rather than silently passing (the old "partition gone" shortcut).
+  local missing_row_json
+  missing_row_json='[]'   # empty result — no rows for this partition
+
+  rc=0
+  python3 - "cccccccc-cccc-cccc-cccc-cccccccccccc" "$missing_row_json" <<'PY' || rc=$?
+import sys, json, re
+pk_val   = sys.argv[1]
+rows_raw = sys.argv[2]
+rows = json.loads(rows_raw)
+flat_row = rows[0] if len(rows) == 1 else None
+col_name = 'name'
+failures = []
+
+# Simulate the fixed absent_col handler from verify_table
+if not rows:
+    failures.append(
+        f"absent_col target row pk={pk_val!r} not found — "
+        f"row is missing entirely "
+        f"(use absent_row/row_count for row-level deletion)"
+    )
+else:
+    actual = flat_row.get(col_name, '__MISSING__') if flat_row else None
+    if actual is not None and actual != '__MISSING__':
+        failures.append(
+            f"absent_col: column {col_name!r} pk={pk_val!r} expected null/absent, got {actual!r}"
+        )
+
+if failures:
+    for f in failures:
+        print(f"  FAIL: {f}", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+  if [[ "$rc" -eq 0 ]]; then
+    warn "Self-test FAILED: absent_col against missing row did NOT fail (it should have)"
+    exit 1
+  fi
+  log "Self-test PASSED: absent_col correctly fails when target row is entirely missing (exit $rc)"
+
   log "Self-test: all checks passed"
   exit 0
 }
@@ -1362,7 +1405,16 @@ for line in spec_lines:
         if spec_pk != pk_val:
             continue
         if not rows:
-            # If partition is entirely gone that satisfies absence
+            # absent_col asserts a *column* was deleted; the row itself must
+            # still exist.  If no rows were returned the partition is entirely
+            # missing, which is a different condition (use absent_row/row_count
+            # for row-level deletion).  Report a clear failure so this is not
+            # silently masked.
+            failures.append(
+                f"absent_col target row pk={pk_val!r} not found — "
+                f"row is missing entirely "
+                f"(use absent_row/row_count for row-level deletion)"
+            )
             continue
         if flat_row is None:
             failures.append(
