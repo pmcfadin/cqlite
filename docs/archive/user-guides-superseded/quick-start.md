@@ -1,3 +1,5 @@
+> **ARCHIVED** — superseded by `website/src/content/docs/user-docs/quick-start.md` (issue #736).
+
 # CQLite Quick Start Guide
 
 ## 🎯 Fast Track to Implementation

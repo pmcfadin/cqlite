@@ -1,3 +1,5 @@
+> **ARCHIVED** — superseded by `website/src/content/docs/user-docs/installation.md` (issue #736). Note: this file described aspirational features (Docker Hub images, Kubernetes Helm, OAuth2, etc.) not yet shipped; the site page documents what is actually available.
+
 # CQLite Installation and Setup Guide
 
 ## 🎯 **Complete Installation Solution**

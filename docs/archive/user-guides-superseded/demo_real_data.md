@@ -1,3 +1,5 @@
+> **ARCHIVED** — internal development notes from early demo work; not migrated to the documentation site (issue #736).
+
 # 🚀 CQLite Real Data Demo - WORKING!
 
 ## 🎯 What We Have Successfully Built
