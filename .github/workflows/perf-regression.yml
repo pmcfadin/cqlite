@@ -39,7 +39,7 @@ concurrency:
 env:
   DATASET_TAG: datasets-v3
   DATASET_ASSET: cassandra5-small-full-v3.1.tar.gz
-  DATASET_SHA256: 98fa1c924e439a5ffb03309b0cbdf4611894357b84061bde33ecefe499571729
+  DATASET_SHA256: f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb
   CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
   # Features needed by the benches: cli-helpers for the read suite (queryable
   # Database), write-support for the write suite (WriteEngine).

@@ -81,7 +81,7 @@ jobs:
           mkdir -p test-data
           echo "🔍 Downloading cassandra5-small-full-v3.1.tar.gz from datasets-v3 release..."
           gh release download datasets-v3 --pattern "cassandra5-small-full-v3.1.tar.gz" --dir /tmp
-          echo "98fa1c924e439a5ffb03309b0cbdf4611894357b84061bde33ecefe499571729  /tmp/cassandra5-small-full-v3.1.tar.gz" | sha256sum -c -
+          echo "f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb  /tmp/cassandra5-small-full-v3.1.tar.gz" | sha256sum -c -
           echo "📦 Extracting datasets to repo root..."
           tar -xzf /tmp/cassandra5-small-full-v3.1.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
           
