@@ -19,6 +19,16 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # This job compiles core+integration+write-support+CLI test deps into one
+      # debug target/ and sits at the standard runner's disk ceiling — 2 of the
+      # 6 epic-663 merge-train runs died of ENOSPC at 'Run CLI unit tests'
+      # (issue #722). Dropping preinstalled toolchains we never use frees ~14 GB.
+      - name: Free disk space (issue #722)
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
