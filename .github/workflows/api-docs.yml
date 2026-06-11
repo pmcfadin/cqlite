@@ -75,16 +75,16 @@ jobs:
           keep_files: true
 
       - name: Publish redirect stubs for old per-tag URLs
-        # Old rustdoc was published under /<tag>/ (e.g. /v0.9.2/, /v0.10.0/).
+        # Old rustdoc was published under /<tag>/ (e.g. /v0.9.2/, /v0.10.0/, /latest/).
         # These stubs redirect those URLs to the new /api/<tag>/ locations so
         # links in past release notes and external references keep working.
-        # Tags with confirmed old-style directories on gh-pages: v0.9.2, v0.10.0.
+        # Tags with confirmed old-style directories on gh-pages: v0.9.2, v0.10.0, latest.
         run: |
           python3 - <<'PYEOF'
           import os, textwrap
           # Tags confirmed to have old-style /<tag>/ directories on gh-pages.
           # Redirect path: from /<tag>/index.html to /api/<tag>/ is ../api/<tag>/
-          tags = ["v0.9.2", "v0.10.0"]
+          tags = ["v0.9.2", "v0.10.0", "latest"]
           for tag in tags:
               out_dir = f"/tmp/redirects/{tag}"
               os.makedirs(out_dir, exist_ok=True)
