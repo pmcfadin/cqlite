@@ -1582,7 +1582,7 @@ process_table() {
 #               valid Snappy chunk-length prefix; the file appears truncated.
 #   Evidence:   data length 179 == cell-delete nb-2-big-Data.db size
 #               data length 174 == partition-tombstone nb-2-big-Data.db size
-#   Track:      file a follow-up issue for the SSTable writer
+#   Track:      Issue #716
 #
 # Bug 2 (row-delete, range-tombstone):
 #   Affects: test_basic.static_columns_table (Snappy-compressed, 1 clustering col)
@@ -1595,7 +1595,7 @@ process_table() {
 #               tombstone also contain this bitmask error.
 #   Evidence:   data length 157 == row-delete nb-2-big-Data.db size
 #               data length 243 == range-tombstone nb-2-big-Data.db size
-#   Track:      same follow-up issue as Bug 1 (or a sibling issue)
+#   Track:      Issue #717
 #
 # To re-enable a label once the engine bug is fixed, remove it from this list.
 declare -a KNOWN_FAILING=(
@@ -1657,10 +1657,10 @@ phase "Summary"
 log "Passed:  ${#PASSED_LIST[@]} (${PASSED_LIST[*]:-})"
 if (( ${#SKIPPED_KNOWN_FAILING[@]} > 0 )); then
   warn "Skipped (known engine bugs, Issue #667): ${#SKIPPED_KNOWN_FAILING[@]} (${SKIPPED_KNOWN_FAILING[*]})"
-  warn "  Bug 1 (cell-delete, partition-tombstone): CorruptSSTableException — Snappy chunk header incomplete in Data.db"
-  warn "  Bug 2 (row-delete, range-tombstone): IOException 'Invalid Columns subset bytes; too many bits set:1001'"
+  warn "  Bug 1 (cell-delete, partition-tombstone): CorruptSSTableException — Snappy chunk header incomplete in Data.db (Issue #716)"
+  warn "  Bug 2 (row-delete, range-tombstone): IOException 'Invalid Columns subset bytes; too many bits set:1001' (Issue #717)"
   warn "  SSTable generation confirmed working (write path does not crash)."
-  warn "  Track in a follow-up issue to fix the SSTable writer."
+  warn "  Fix tracked in Issue #716 (Bug 1) and Issue #717 (Bug 2)."
 fi
 if (( ${#FAILED_LIST[@]} > 0 )); then
   warn "Failed:  ${#FAILED_LIST[@]} (${FAILED_LIST[*]})"
