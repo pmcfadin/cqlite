@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # Comprehensive Smoke Test Script for All Test Tables
 # Issue #200: Validate that all 33 nb test tables can be loaded successfully
-# Issue #654: Also discover oa/da keyspaces (reported as SKIP-PENDING until VG3/VG4)
+# Issue #654: Also discover oa/da keyspaces
+# Issue #655: VG3 lands — test_oa is now an enforced keyspace
 #
 # This script discovers all test tables across all keyspaces:
 #   - nb (enforced): test_basic, test_collections, test_timeseries, test_wide_rows
-#   - oa (skip-pending, VG4): test_oa
+#   - oa (enforced, VG3 complete): test_oa
 #   - da/bti (skip-pending, future BTI epic): test_da
 #
 # Tables in SKIP_PENDING_KEYSPACES are discovered and listed, but not run
@@ -49,17 +50,17 @@ SSTABLES_DIR="${DATASETS_ROOT}/sstables"
 OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/smoke-test-all-tables-results}"
 
 # Enforced keyspaces (must all pass, failures exit non-zero)
-KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows")
+# Issue #655: test_oa promoted from SKIP-PENDING to enforced (VG3 complete)
+KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa")
 
 # Skip-pending keyspaces (Issue #654):
-#   - test_oa: oa format (BIG) - skip until VG4 (oa parser lands)
 #   - test_da: da format (BTI) - skip until future BTI read epic
 # These keyspaces are discovered and listed explicitly as SKIP-PENDING,
 # but are not run through read-sstable (would produce parse errors).
-SKIP_PENDING_KEYSPACES=("test_oa" "test_da")
+SKIP_PENDING_KEYSPACES=("test_da")
 # Reason per keyspace (parallel arrays, bash 3.x compatible)
-SKIP_PENDING_KEYSPACE_NAMES=("test_oa" "test_da")
-SKIP_PENDING_KEYSPACE_REASONS=("oa-format parsing not yet implemented (lands in VG4)" "da/BTI-format parsing not yet implemented (future BTI epic)")
+SKIP_PENDING_KEYSPACE_NAMES=("test_da")
+SKIP_PENDING_KEYSPACE_REASONS=("da/BTI-format parsing not yet implemented (future BTI epic)")
 
 # Get skip reason for a keyspace (bash 3.x compatible, no associative arrays)
 get_skip_reason() {

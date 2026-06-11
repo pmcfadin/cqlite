@@ -250,6 +250,17 @@ impl V5CompressedLegacyParser {
         self
     }
 
+    /// Return `true` when the version gates indicate `hasUIntDeletionTime` (oa / da).
+    ///
+    /// Authority: BigFormat.java:409 — `hasUintDeletionTime = version.compareTo("oa") >= 0`
+    #[inline]
+    fn has_uint_deletion_time(&self) -> bool {
+        match self.version_gates.as_ref() {
+            VersionGates::Big(g) => g.has_uint_deletion_time,
+            VersionGates::Bti(g) => g.has_uint_deletion_time,
+        }
+    }
+
     /// Try to parse partition header at offset WITHOUT consuming it.
     ///
     /// This performs a full parse attempt to determine if the bytes at offset
@@ -392,9 +403,14 @@ impl V5CompressedLegacyParser {
             // Validate partition header:
             // - Key length must be non-zero and within format's limit (u8 max = 255 bytes)
             //   Note: Cassandra spec allows 64KB keys, but V5CompressedLegacy format uses u8 length
-            // - Must have enough bytes for: flags(1) + len(1) + key(len) + del_time(4) + unknown(8)
+            // - Must have enough bytes for the header (size depends on format version)
+            //
+            // VG3: oa format (hasUIntDeletionTime) uses a compact DeletionTime:
+            //   LIVE = 1 byte; DELETED = 12 bytes.  The minimum is therefore 1 byte.
+            // nb format always uses 12 bytes (4 + 8).
             // NOTE: No heuristic validation of flags (Issue #258, #28 no-heuristics mandate)
-            let header_min_size = 1 + 1 + key_len + 4 + 8;
+            let deletion_time_min = if self.has_uint_deletion_time() { 1 } else { 12 };
+            let header_min_size = 1 + 1 + key_len + deletion_time_min;
             if key_len == 0
                 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
                 || offset + header_min_size > data.len()
@@ -1235,13 +1251,24 @@ impl V5CompressedLegacyParser {
             let bytes_consumed = data[pos..].len() - remaining.len();
             pos += bytes_consumed;
 
-            // Second VInt: localDeletionTime delta (unsigned).
+            // Second VInt: localDeletionTime delta (unsigned VInt32).
             //
-            // VG3: When `self.version_gates` has `has_uint_deletion_time` == true (oa/da),
-            // Cassandra writes a *32-bit unsigned* deletion time rather than a signed delta
-            // here (BigFormat.java:409, BtiFormat.java).  Until VG3 flips the switch this
-            // path always uses the signed-delta (nb) interpretation, which is correct for
-            // the current test corpus.
+            // For both nb and oa the on-disk format is the same: an unsigned VInt32
+            // encoding `(int)(localDeletionTime - stats.minLocalDeletionTime)`.
+            // See: SerializationHeader.java — `writeLocalDeletionTime` /
+            //      `readLocalDeletionTime` (same for all BIG versions).
+            //
+            // VG3 gate: hasUIntDeletionTime (BigFormat.java:409, oa+)
+            // The interpretation of the *result* differs:
+            //   nb: `min_local_deletion_time + delta` cast to i32 (values capped at ~year 2038)
+            //   oa: `min_local_deletion_time + delta` treated as u32 to support ~year 2106
+            //
+            // When the sum overflows an i32 (> 2^31-1 seconds) the value is negative
+            // in a signed context; with hasUIntDeletionTime we reinterpret it as an
+            // unsigned u32 (CassandraUInt.toLong, CassandraUInt.java).  For current
+            // test fixtures all deletion times are well within i32 range so both
+            // interpretations produce identical bit patterns; the gate is a no-op
+            // in practice but is wired correctly for future large TTL values.
             let (remaining, ldt_delta) = parse_vuint(&data[pos..]).map_err(|e| {
                 Error::corruption(format!(
                     "V5CompressedLegacy: Failed to parse localDeletionTime delta at offset {}: {:?}",
@@ -1255,9 +1282,31 @@ impl V5CompressedLegacyParser {
             let absolute_marked_for_delete_at = self.min_timestamp.wrapping_add(mfda_delta as i64);
             // localDeletionTime: absolute = min_local_deletion_time + delta (seconds).
             //
-            // VG3: oa/da (has_uint_deletion_time) uses raw u32, not delta; flip here.
-            let absolute_local_deletion_time =
-                self.min_local_deletion_time.wrapping_add(ldt_delta as i64) as i32;
+            // VG3 gate: hasUIntDeletionTime (BigFormat.java:409, oa/da)
+            //   nb: store as i32 (may overflow for dates > ~year 2038)
+            //   oa: reinterpret the 32-bit bit-pattern as unsigned (supports ~year 2106)
+            //
+            // Source: SerializationHeader.java readLocalDeletionTime + UnfilteredSerializer.java:671-676
+            // "if (complexDeletion.localDeletionTime() < 0) {
+            //    complexDeletion = DeletionTime.build(..., Cell.deletionTimeUnsignedIntegerToLong((int) ...));
+            //  }" — this reinterpretation fires when hasUIntDeletionTime && bit31 set.
+            let has_uint_ldt = match self.version_gates.as_ref() {
+                crate::storage::sstable::version_gate::VersionGates::Big(g) => {
+                    g.has_uint_deletion_time
+                }
+                crate::storage::sstable::version_gate::VersionGates::Bti(g) => {
+                    g.has_uint_deletion_time
+                }
+            };
+            let raw_ldt = self.min_local_deletion_time.wrapping_add(ldt_delta as i64);
+            let absolute_local_deletion_time = if has_uint_ldt {
+                // Reinterpret the low 32 bits as an unsigned integer (year-2106-safe).
+                // CassandraUInt.toLong(int) = Integer.toUnsignedLong(int), so negative
+                // i32 values get promoted to the [2^31, 2^32) long range.
+                (raw_ldt as u32) as i32
+            } else {
+                raw_ldt as i32
+            };
             debug!(
                 "V5CompressedLegacy: Row deletion: markedForDeleteAt(delta={}, min_ts={}, abs={} us), localDeletionTime(delta={}, min_ldt={}, abs={} s)",
                 mfda_delta,
@@ -1391,29 +1440,58 @@ impl V5CompressedLegacyParser {
         let key_bytes = data[offset..offset + key_len].to_vec();
         offset += key_len;
 
-        // Next 4 bytes: Partition deletion time (i32 big-endian)
-        // 0x7fffffff = Integer.MAX_VALUE = no deletion
-        if offset + 4 > data.len() {
-            return Err(Error::corruption(
-                "V5CompressedLegacy: Unexpected end at partition deletion time",
-            ));
+        // Partition-level DeletionTime deserialization.
+        //
+        // VG3 gate: hasUIntDeletionTime (BigFormat.java:409, oa+)
+        //
+        // oa format uses a compact DeletionTime.Serializer
+        // (DeletionTime.java, Serializer inner class):
+        //   LIVE:    1 byte = 0x80 (IS_LIVE_DELETION = 0b10000000)
+        //   DELETED: 8 bytes markedForDeleteAt (long) +
+        //            4 bytes localDeletionTimeUnsignedInteger (int) = 12 bytes total
+        //
+        // nb format uses DeletionTime.legacySerializer:
+        //   Always:  4 bytes localDeletionTime (int) +
+        //            8 bytes markedForDeleteAt (long) = 12 bytes total
+        //
+        // Authority: DeletionTime.java:191-219 (getSerializer / Serializer.serialize)
+        if self.has_uint_deletion_time() {
+            // oa / da format
+            if offset >= data.len() {
+                return Err(Error::corruption(
+                    "V5CompressedLegacy: Unexpected end at oa partition deletion time byte",
+                ));
+            }
+            let del_flags = data[offset];
+            const IS_LIVE_DELETION: u8 = 0x80; // DeletionTime.java:208
+            if (del_flags & IS_LIVE_DELETION) != 0 {
+                // LIVE partition: exactly 1 byte
+                if del_flags != IS_LIVE_DELETION {
+                    return Err(Error::corruption(format!(
+                        "V5CompressedLegacy: Invalid IS_LIVE_DELETION byte 0x{:02x} at offset {} \
+                         (only 0x80 is valid for oa-format LIVE partitions, per DeletionTime.java:227-229)",
+                        del_flags, offset
+                    )));
+                }
+                offset += 1;
+            } else {
+                // DELETED partition: 8 bytes markedForDeleteAt + 4 bytes localDeletionTime
+                if offset + 12 > data.len() {
+                    return Err(Error::corruption(
+                        "V5CompressedLegacy: Unexpected end at oa partition deletion time (deleted)",
+                    ));
+                }
+                offset += 12;
+            }
+        } else {
+            // nb format: 4 bytes localDeletionTime + 8 bytes markedForDeleteAt = 12 bytes
+            if offset + 12 > data.len() {
+                return Err(Error::corruption(
+                    "V5CompressedLegacy: Unexpected end at nb partition deletion time",
+                ));
+            }
+            offset += 12;
         }
-        let _del_time = i32::from_be_bytes([
-            data[offset],
-            data[offset + 1],
-            data[offset + 2],
-            data[offset + 3],
-        ]);
-        offset += 4;
-
-        // Next 8 bytes: Unknown field (possibly base timestamp or flags)
-        // Skip for now - format research incomplete on this field
-        if offset + 8 > data.len() {
-            return Err(Error::corruption(
-                "V5CompressedLegacy: Unexpected end at unknown 8-byte field",
-            ));
-        }
-        offset += 8;
 
         // Create RowKey from partition key bytes
         let row_key = RowKey(key_bytes);

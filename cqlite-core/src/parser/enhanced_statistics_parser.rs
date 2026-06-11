@@ -2150,19 +2150,33 @@ fn parse_minimal_encoding_stats<'a>(
 /// Parse 3 EncodingStats unsigned VInt deltas and convert to absolute values by adding epochs.
 /// Returns (min_timestamp, min_deletion_time, min_ttl).
 ///
-/// # VG3 plumbing note
+/// # VG3 authority note
 ///
-/// The `min_deletion_time` field uses the `DELETION_TIME_EPOCH` offset for `nb` format
-/// (signed delta, seconds since epoch).  For `oa`/`da` (`has_uint_deletion_time == true`)
-/// Cassandra switches to an unsigned 32-bit representation (BigFormat.java:409,
-/// BtiFormat.java).  `gates` is already threaded here (via `parse_enhanced_statistics_file`
-/// and `parse_statistics_with_fallback`) so VG3 can flip the interpretation WITHOUT
-/// re-deriving gates from the filename and without further signature surgery.
+/// The `EncodingStats.Serializer` (EncodingStats.java:274-276) uses the SAME unsigned-VInt
+/// + epoch-offset format for **both** `nb` and `oa`:
 ///
-/// When `gates` is `None` (standalone tools, tests) the nb-compatible behaviour is used.
+/// ```text
+/// out.writeUnsignedVInt(stats.minTimestamp - TIMESTAMP_EPOCH)
+/// out.writeUnsignedVInt32((int)(stats.minLocalDeletionTime - DELETION_TIME_EPOCH))
+/// out.writeUnsignedVInt32(stats.minTTL - TTL_EPOCH)
+/// ```
+///
+/// The `hasUIntDeletionTime` gate (BigFormat.java:409) affects only the **StatsMetadata**
+/// (STATS component in Statistics.db), not the SerializationHeader component where
+/// EncodingStats lives.  The epoch-relative decoding here is correct for both nb and oa.
+/// `gates` is accepted (not consumed) for API completeness; `None` is fine too.
 fn parse_encoding_stats_vuints<'a>(
     input: &'a [u8],
-    // VG3: use `gates` to flip deletion-time interpretation for oa/da.
+    // VG3: gates threaded here for authority completeness.
+    // Authority investigation: the EncodingStats.Serializer (EncodingStats.java:274-276)
+    // uses the SAME unsigned VInt + epoch format for both nb and oa:
+    //   out.writeUnsignedVInt(stats.minTimestamp - TIMESTAMP_EPOCH)
+    //   out.writeUnsignedVInt32((int)(stats.minLocalDeletionTime - DELETION_TIME_EPOCH))
+    //   out.writeUnsignedVInt32(stats.minTTL - TTL_EPOCH)
+    // The `hasUIntDeletionTime` gate (BigFormat.java:409) affects ONLY the
+    // StatsMetadata section (Statistics.db STATS component), NOT the
+    // SerializationHeader component where EncodingStats lives.  No decode
+    // difference applies here.  Gates accepted but not consumed.
     _gates: Option<&VersionGates>,
 ) -> IResult<&'a [u8], (i64, i64, Option<i64>)> {
     let (rest, min_ts_delta) = parse_vuint(input)?;
@@ -2173,8 +2187,8 @@ fn parse_encoding_stats_vuints<'a>(
         rest,
         (
             min_ts_delta as i64 + TIMESTAMP_EPOCH,
-            // VG3: for oa/da (has_uint_deletion_time), drop DELETION_TIME_EPOCH
-            // and interpret min_ldt_delta as raw u32 seconds since Unix epoch.
+            // EncodingStats.java:289: `long minLocalDeletionTime = in.readUnsignedVInt32() + DELETION_TIME_EPOCH`
+            // Same formula for nb and oa — DELETION_TIME_EPOCH is always added back.
             min_ldt_delta as i64 + DELETION_TIME_EPOCH,
             Some(min_ttl_delta as i64 + TTL_EPOCH),
         ),
