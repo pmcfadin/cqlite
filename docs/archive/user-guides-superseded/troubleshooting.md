@@ -1,3 +1,5 @@
+> **ARCHIVED** — superseded by `website/src/content/docs/user-docs/troubleshooting.md` (issue #736). Note: this file described aspirational features (server mode, Kubernetes, enterprise support) not yet shipped; the site page documents real, tested scenarios only.
+
 # CQLite Troubleshooting Guide
 
 ## 🎯 **Complete Problem Resolution Guide**

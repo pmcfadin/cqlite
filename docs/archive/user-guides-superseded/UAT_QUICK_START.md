@@ -1,3 +1,5 @@
+> **ARCHIVED** — superseded by `website/src/content/docs/user-docs/quick-start.md` (issue #736).
+
 # CQLite UAT Quick Start Guide
 
 ## 🚀 5-Minute Validation Test

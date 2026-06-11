@@ -1,3 +1,5 @@
+> **ARCHIVED** — superseded by `website/src/content/docs/user-docs/quick-start.md` (issue #736).
+
 # 🚀 CQLite Issue #17 - Quick Start Guide
 
 ## How to Run and Test the Cassandra 5+ SSTable Reader

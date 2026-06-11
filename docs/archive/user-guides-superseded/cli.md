@@ -1,3 +1,5 @@
+> **ARCHIVED** — CLI reference content will be migrated to `website/src/content/docs/user-docs/cli-reference.md` in W4 (issue #736). Current source archived here to avoid orphaning.
+
 # CQLite CLI User Guide
 
 ## Quick Start with Cassandra 5+ SSTable Files
