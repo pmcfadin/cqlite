@@ -157,18 +157,17 @@ impl QueryParser {
             None => Vec::new(),
         };
 
-        // Extract table name (handle qualified names like keyspace.table)
+        // Extract table name, preserving the full qualified name (e.g.
+        // "test_basic.simple_table") so that SSTableManager::get/scan can look up the
+        // correct table_readers entry.  Stripping the keyspace caused point-lookup
+        // queries (WHERE pk = ...) to miss the "keyspace.table" registry key and
+        // return 0 rows (Issue #680).
         let table = match extract_after(cql, &upper, "FROM") {
             Some(from_part) => {
                 let qualified_name = from_part.split_whitespace().next().ok_or_else(|| {
                     Error::query_execution("Missing table name after FROM".to_string())
                 })?;
-                // For "test_basic.simple_table" we want just "simple_table".
-                let table_name = qualified_name
-                    .split('.')
-                    .next_back()
-                    .unwrap_or(qualified_name);
-                Some(TableId::new(table_name))
+                Some(TableId::new(qualified_name))
             }
             None => None,
         };
@@ -641,8 +640,8 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.query_type, QueryType::Select);
-        // Should extract only the table name, not the keyspace
-        assert_eq!(result.table, Some(TableId::new("simple_table")));
+        // Preserve the full qualified name so SSTableManager can find the table (Issue #680)
+        assert_eq!(result.table, Some(TableId::new("test_basic.simple_table")));
         assert_eq!(result.columns, vec!["*"]);
         assert_eq!(result.limit, Some(5));
     }
