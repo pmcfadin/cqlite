@@ -49,6 +49,13 @@ Subagents in `.claude/agents/` for specialized tasks:
 ## Essential Commands
 
 ```bash
+# Canonical agent gate (issue #719) - THE pre-PR gate for agents.
+# Runs fmt, clippy -D warnings, core tests (cli-helpers), integration tests,
+# write-support tests, CLI tests, minimal-features build, and smoke, then
+# emits a machine-checkable summary block. Paste that block verbatim when
+# reporting validation; ad-hoc cargo runs do not count as "the gate passed".
+scripts/agent-gate.sh
+
 # Build
 cargo build
 
