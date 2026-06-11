@@ -153,7 +153,12 @@ def _count_rows_in_jsonl_impl(jsonl_path: Path) -> int:
     """Implementation: Count total rows in a JSONL reference file.
 
     JSONL format: One partition per line, each partition has a "rows" array.
-    Returns the sum of len(partition["rows"]) across all partitions.
+    Returns the sum of live row entries across all partitions.
+
+    Counts only entries that match CQLite query results:
+    - type == "row" (not range_tombstone_bound)
+    - no row-level deletion_info (row tombstones are suppressed by CQLite,
+      which correctly excludes deleted rows from query output)
     """
     total_rows = 0
     with open(jsonl_path, "r") as f:
@@ -161,10 +166,15 @@ def _count_rows_in_jsonl_impl(jsonl_path: Path) -> int:
             if line.strip():
                 partition = json.loads(line)
                 rows = partition.get("rows", [])
-                # Count actual row entries (type == "row"), excluding tombstones
                 for row in rows:
-                    if row.get("type") == "row":
-                        total_rows += 1
+                    # Exclude range tombstone markers
+                    if row.get("type") != "row":
+                        continue
+                    # Exclude row tombstones (row-level deletion_info means the
+                    # entire row is deleted; CQLite suppresses these from results)
+                    if "deletion_info" in row and not row.get("cells"):
+                        continue
+                    total_rows += 1
     return total_rows
 
 
@@ -937,38 +947,27 @@ class TestOaRowCountParity:
     Issue #656 (VG4): oa tables are now enforced in CI.  The db_oa fixture
     skips gracefully when oa binary files are absent (goldens-only checkout).
 
-    Known issues in Python binding layer (not hacked around — documented here):
-    - simple_table / tombstone_table: ValueError "year must be in 1..9999" when
-      converting oa-format liveness timestamps via Python's datetime module.
-      The oa hasUIntDeletionTime reinterpretation causes a far-future epoch
-      that Python datetime cannot represent.  Tracked for fix in a follow-up PR.
-    - collection_table: Returns 47 rows vs 3 expected.  oa collection parsing
-      produces collection element rows instead of aggregate rows.
-      Tracked for fix in a follow-up PR.
+    VG6 (Issue #672): All 6 oa tables now pass row-count parity. The
+    range-tombstone-marker skip function was fixed to correctly read the u16
+    cluster_count + marker_body_size fields (ClusteringBoundOrBoundary.java:105,
+    UnfilteredSerializer.java:291), and count_rows_in_jsonl was updated to
+    exclude row-level tombstones from the expected count (matching CQLite's
+    behaviour of suppressing deleted rows from query results).
     """
 
-    # Tables that work correctly through the Python binding layer
-    WORKING_TABLES = ["udt_table", "static_table", "ttl_table"]
-
-    # Tables with known Python-layer issues (not hacking, documenting)
-    KNOWN_BINDING_ISSUES = {
-        "simple_table": (
-            "ValueError: year must be in 1..9999 — oa hasUIntDeletionTime "
-            "liveness timestamp exceeds Python datetime range"
-        ),
-        "tombstone_table": (
-            "ValueError: year must be in 1..9999 — oa hasUIntDeletionTime "
-            "liveness timestamp exceeds Python datetime range"
-        ),
-        "collection_table": (
-            "Row count mismatch: Python returns collection elements as separate "
-            "rows instead of aggregated collection values (oa collection parsing issue)"
-        ),
-    }
+    # All 6 oa tables now work correctly through the Python binding layer (VG6)
+    WORKING_TABLES = [
+        "udt_table",
+        "static_table",
+        "ttl_table",
+        "simple_table",
+        "tombstone_table",
+        "collection_table",
+    ]
 
     @pytest.mark.parametrize("table", WORKING_TABLES)
-    def test_oa_row_count_working(self, db_oa, table):
-        """Row count for test_oa.{table} must match JSONL golden."""
+    def test_oa_row_count(self, db_oa, table):
+        """Row count for test_oa.{table} must match JSONL golden (VG6, Issue #672)."""
         jsonl_file = find_oa_jsonl_file("test_oa", table)
         if jsonl_file is None:
             pytest.skip(f"JSONL reference not found for test_oa.{table}")
@@ -980,21 +979,6 @@ class TestOaRowCountParity:
         assert actual_count == expected_count, (
             f"Row count mismatch for test_oa.{table}: "
             f"got {actual_count}, expected {expected_count} (from JSONL golden)"
-        )
-
-    @pytest.mark.parametrize("table,issue", list(KNOWN_BINDING_ISSUES.items()))
-    def test_oa_row_count_known_issues(self, db_oa, table, issue):
-        """Document known Python-layer issues for oa tables.
-
-        These are xfail tests that confirm the known issue is reproducible,
-        without masking any regressions.
-        """
-        jsonl_file = find_oa_jsonl_file("test_oa", table)
-        if jsonl_file is None:
-            pytest.skip(f"JSONL reference not found for test_oa.{table}")
-
-        pytest.xfail(
-            f"test_oa.{table}: {issue}"
         )
 
 

@@ -996,16 +996,42 @@ impl V5CompressedLegacyParser {
         (flags & IS_MARKER) != 0 && (flags & END_OF_PARTITION) == 0
     }
 
-    /// Skip a range tombstone marker body (Issue #229 fix)
+    /// Skip a range tombstone marker body (Issue #229 fix, VG6 fix)
     ///
-    /// Range tombstone markers have format (per UnfilteredSerializer.java lines 282-305, 549-561):
-    /// - flags byte (already at offset, IS_MARKER bit set)
-    /// - clustering bound/boundary (variable, includes bound kind and clustering values)
-    /// - deletion time(s) (one for simple bounds, two for boundaries)
+    /// Range tombstone markers for SSTable format have this on-disk layout:
+    ///   [flags: u8]                        ← IS_MARKER (0x02) bit set
+    ///   [extended_flags: u8]               ← only if ROW_HAS_EXTENDED_FLAGS set
+    ///   [bound_kind: u8]                   ← ordinal of ClusteringBoundOrBoundary.Kind
+    ///   [cluster_count: u16 big-endian]    ← number of clustering values (bound.size())
+    ///   [cluster_header: VUInt]            ← 2 bits per value (0=present, 1=empty, 2=null)
+    ///   [cluster_values: ...]              ← type-specific bytes for non-null/non-empty values
+    ///   [marker_body_size: VUInt]          ← size of the body that follows (including prev_size)
+    ///   [prev_unfiltered_size: VUInt]      ← size of the previous unfiltered item
+    ///   [marked_for_delete_at: VUInt]      ← timestamp delta from min_timestamp (µs)
+    ///   [local_deletion_time: VUInt32]     ← seconds delta from min_local_deletion_time
+    ///   [marked_for_delete_at2: VUInt]     ← ONLY for boundaries (kind 2 or 5)
+    ///   [local_deletion_time2: VUInt32]    ← ONLY for boundaries (kind 2 or 5)
     ///
-    /// For now, we use a simplified skip approach that reads the flags and attempts to
-    /// skip past the marker to the next unfiltered entry. A full implementation would
-    /// parse ClusteringBoundOrBoundary and the deletion times properly.
+    /// Authority:
+    ///   UnfilteredSerializer.java:282-303  (serialize(RangeTombstoneMarker, ...))
+    ///   ClusteringBoundOrBoundary.Serializer.serialize (lines 103-107):
+    ///     out.writeByte(bound.kind().ordinal())   ← kind byte
+    ///     out.writeShort(bound.size())            ← u16 cluster count
+    ///     ClusteringPrefix.serializer.serializeValuesWithoutSize(...)
+    ///   SerializationHeader.writeDeletionTime (lines 180-183):
+    ///     writeTimestamp → writeUnsignedVInt      ← VUInt, NOT ZigZag
+    ///     writeLocalDeletionTime → writeUnsignedVInt32 ← VUInt, NOT ZigZag
+    ///
+    /// VG6 fix: The previous implementation had three bugs:
+    ///   1. After kind byte: did not read the u16 cluster_count before the VUInt header.
+    ///      The 2-byte short was being consumed as part of the clustering values, causing
+    ///      all deletion-time bytes to be misaligned.
+    ///   2. After clustering values: did not skip marker_body_size + prev_unfiltered_size
+    ///      VUInts that precede the deletion times in SSTable format.
+    ///   3. Used parse_vint (ZigZag) instead of parse_vuint (unsigned) for deletion times.
+    ///
+    /// Implementation strategy: use marker_body_size to skip the entire body
+    /// (prev_size + deletion times) without manually decoding individual fields.
     fn skip_range_tombstone_marker(
         &self,
         data: &[u8],
@@ -1039,39 +1065,97 @@ impl V5CompressedLegacyParser {
             pos += 1;
         }
 
-        // Skip clustering bound - the clustering prefix parser can be reused
-        // (markers have similar structure but with bound kind info in the header)
-        let (_, new_pos) = self.parse_clustering_prefix(data, pos, schema)?;
-        pos = new_pos;
-
-        // Skip deletion time(s)
-        // For simple bounds (INCL_START, EXCL_START, INCL_END, EXCL_END): 1 deletion time
-        // For boundaries (EXCL_END_INCL_START, INCL_END_EXCL_START): 2 deletion times
-        // Each deletion time is: [localDeletionTime: VInt] [markedForDeleteAt: VInt]
+        // Read bound kind byte.
+        // Authority: ClusteringBoundOrBoundary.Serializer.serialize (line 104):
+        //   out.writeByte(bound.kind().ordinal())
         //
-        // We skip 2 VInts for the first deletion time
-        // Issue #258 fix: Calculate bytes consumed correctly by incrementing pos
-        let (remaining, _local_del_time) = parse_vint(&data[pos..]).map_err(|e| {
+        // Kind ordinals (ClusteringPrefix.java:67-81):
+        //   0 = EXCL_END_BOUND (simple, 1 deletion time)
+        //   1 = INCL_START_BOUND (simple, 1 deletion time)
+        //   2 = EXCL_END_INCL_START_BOUNDARY (boundary, 2 deletion times)
+        //   5 = INCL_END_EXCL_START_BOUNDARY (boundary, 2 deletion times)
+        //   6 = INCL_END_BOUND (simple, 1 deletion time)
+        //   7 = EXCL_START_BOUND (simple, 1 deletion time)
+        if pos >= data.len() {
+            return Err(Error::corruption(
+                "V5CompressedLegacy: Unexpected end reading range tombstone bound kind",
+            ));
+        }
+        let bound_kind = data[pos];
+        pos += 1;
+
+        log::debug!(
+            "V5CompressedLegacy: Range tombstone bound_kind={}",
+            bound_kind,
+        );
+
+        // Read cluster count (u16 big-endian).
+        // Authority: ClusteringBoundOrBoundary.Serializer.serialize (line 105):
+        //   out.writeShort(bound.size())
+        //
+        // This is the number of clustering values in the bound. It is NOT the same as
+        // schema.clustering_keys.len() — for regular rows, no count is written; for markers,
+        // a u16 is always present. Failing to read this u16 causes all subsequent bytes to
+        // be misaligned (the two count bytes get consumed as the VUInt header + first value
+        // byte, producing garbage alignment).
+        if pos + 2 > data.len() {
+            return Err(Error::corruption(
+                "V5CompressedLegacy: Unexpected end reading range tombstone cluster count (u16)",
+            ));
+        }
+        let cluster_count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+
+        log::debug!(
+            "V5CompressedLegacy: Range tombstone cluster_count={}",
+            cluster_count,
+        );
+
+        // Read the clustering VUInt header + clustering values.
+        // Authority: ClusteringPrefix.Serializer.serializeValuesWithoutSize (lines 455-477):
+        //   Writes VUInt header (2 bits per value, 0=present/1=empty/2=null), then value bytes.
+        //
+        // We use parse_clustering_prefix to consume the VUInt header and the value bytes for
+        // the schema's clustering columns. The cluster_count from the u16 should match
+        // schema.clustering_keys.len() for well-formed data; any mismatch is handled gracefully
+        // by parse_clustering_prefix using schema as the canonical source for type info.
+        if cluster_count > 0 {
+            let (_, new_pos) = self.parse_clustering_prefix(data, pos, schema)?;
+            pos = new_pos;
+        }
+
+        // Read marker_body_size and skip the body.
+        // Authority: UnfilteredSerializer.java:291 (for SSTable format):
+        //   out.writeUnsignedVInt(serializedMarkerBodySize(marker, header, previousUnfilteredSize, version))
+        //   out.writeUnsignedVInt(previousUnfilteredSize)
+        //   ... deletion time(s) ...
+        //
+        // serializedMarkerBodySize() returns the size of (prev_size + deletion_times).
+        // So after reading marker_body_size, we can skip exactly that many bytes to reach
+        // the next unfiltered item, without needing to decode individual deletion time VUInts.
+        //
+        // This is exactly the same pattern as regular row_size: after reading row_size,
+        // skip row_size bytes to reach the next row/marker.
+        let (remaining, marker_body_size) = parse_vuint(&data[pos..]).map_err(|e| {
             Error::corruption(format!(
-                "V5CompressedLegacy: Failed to parse marker deletion time at offset {}: {:?}",
+                "V5CompressedLegacy: Failed to parse marker_body_size at offset {}: {:?}",
                 pos, e
             ))
         })?;
-        let bytes_consumed = data[pos..].len() - remaining.len();
-        pos += bytes_consumed;
+        let body_size_vint_len = data[pos..].len() - remaining.len();
+        pos += body_size_vint_len;
 
-        let (remaining, _del_timestamp) = parse_vint(&data[pos..]).map_err(|e| {
-            Error::corruption(format!(
-                "V5CompressedLegacy: Failed to parse marker deletion timestamp at offset {}: {:?}",
-                pos, e
-            ))
-        })?;
-        let bytes_consumed = data[pos..].len() - remaining.len();
-        pos += bytes_consumed;
-
-        // For boundaries, there would be a second deletion time, but we can check the next byte
-        // to see if it looks like another deletion time or the next unfiltered entry.
-        // For simplicity in this fix, we assume simple bounds (most common case).
+        // Skip marker_body_size bytes (prev_size + deletion time(s))
+        let body_end = pos + marker_body_size as usize;
+        if body_end > data.len() {
+            return Err(Error::corruption(format!(
+                "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {}",
+                marker_body_size,
+                pos,
+                data.len()
+            )));
+        }
+        pos = body_end;
 
         log::debug!(
             "V5CompressedLegacy: Skipped range tombstone marker, advanced from {} to {}",

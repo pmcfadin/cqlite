@@ -381,23 +381,14 @@ function oaBinariesPresent() {
   return false;
 }
 
-/**
- * Known issues for oa tables in the Node.js binding layer (documented, not hacked around).
- * Same root causes as Python binding layer:
- * - simple_table / tombstone_table: timestamp overflow — oa hasUIntDeletionTime
- *   liveness timestamp renders as year 73326 / 16050, which the Date constructor
- *   accepts but produces wrong values.  Row count appears wrong because the binding
- *   returns rows with garbled timestamps.
- * - collection_table: Returns 47 rows vs 3 expected — oa collection parsing
- *   produces collection element rows instead of aggregated collection values.
- */
-const OA_KNOWN_BINDING_ISSUES = new Set(['simple_table', 'collection_table', 'tombstone_table']);
+// VG6 (Issue #672): All 6 oa tables now pass row-count parity.
+// The range-tombstone-marker skip function was fixed to correctly parse the
+// u16 cluster_count + marker_body_size fields per the Cassandra serializer
+// (ClusteringBoundOrBoundary.java:105, UnfilteredSerializer.java:291).
+// countRowsInJsonl now excludes row-level tombstones (matching CQLite's behaviour
+// of suppressing deleted rows from query results).
 
-// Working oa tables (correct row count and values through the Node.js binding layer)
-const OA_WORKING_TABLES = OA_TABLES.filter((t) => !OA_KNOWN_BINDING_ISSUES.has(t));
-// ['udt_table', 'ttl_table', 'static_table']
-
-describe('VG4: OA Format Parity — Row Count (Issue #656)', () => {
+describe('VG6: OA Format Parity — Row Count (Issue #672)', () => {
   let dbOa = null;
 
   beforeAll(async () => {
@@ -425,8 +416,8 @@ describe('VG4: OA Format Parity — Row Count (Issue #656)', () => {
     }
   });
 
-  // Tier 1a: Row count parity for working oa tables (no binding-layer issues)
-  test.each(OA_WORKING_TABLES)('test_oa.%s row count matches JSONL golden', async (table) => {
+  // All 6 oa tables now enforce row count parity (VG6, Issue #672)
+  test.each(OA_TABLES)('test_oa.%s row count matches JSONL golden', async (table) => {
     if (!dbOa) {
       console.log(`  Skipping test_oa.${table}: oa binaries absent (run fetch-datasets.sh)`);
       return; // graceful skip (no assert failures)
@@ -444,26 +435,6 @@ describe('VG4: OA Format Parity — Row Count (Issue #656)', () => {
     expect(result.rowCount).toBe(expectedCount);
     console.log(`  test_oa.${table}: ${result.rowCount} rows (match)`);
   });
-
-  // Tier 1b: Document known binding-layer issues for the remaining oa tables.
-  // These are NOT skipped silently — they're listed explicitly so regressions
-  // (if an issue gets worse) can be detected.
-  test.each([...OA_KNOWN_BINDING_ISSUES])(
-    'test_oa.%s — known binding issue (documented, not enforced)',
-    async (table) => {
-      if (!dbOa) {
-        console.log(`  Skipping test_oa.${table}: oa binaries absent`);
-        return;
-      }
-      // Log the known issue and skip without failing.  A future PR that fixes
-      // the binding bug should move this table to OA_WORKING_TABLES.
-      console.log(
-        `  KNOWN ISSUE test_oa.${table}: binding-layer incompatibility — ` +
-        `timestamp overflow (simple_table/tombstone_table) or collection parsing ` +
-        `row-count mismatch (collection_table).  Tracked for follow-up fix.`
-      );
-    }
-  );
 });
 
 describe('VG4: OA Format Parity — Value Spot Check (Issue #656)', () => {

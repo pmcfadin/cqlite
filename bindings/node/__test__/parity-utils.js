@@ -130,9 +130,13 @@ function countRowsInJsonl(jsonlPath) {
       const rows = partition.rows || [];
 
       for (const row of rows) {
-        if (row.type === 'row') {
-          totalRows++;
-        }
+        // Count live rows only — exclude range_tombstone_bound entries and
+        // row-level tombstones (rows with deletion_info but no cells).
+        // CQLite suppresses deleted rows from query results, so expected count
+        // must match what the engine returns (VG6, Issue #672).
+        if (row.type !== 'row') continue;
+        if (row.deletion_info && (!row.cells || row.cells.length === 0)) continue;
+        totalRows++;
       }
     } catch (error) {
       throw new Error(
