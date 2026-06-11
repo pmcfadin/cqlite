@@ -29,6 +29,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -587,7 +588,7 @@ try:
         if not line:
             continue
         item = json.loads(line)
-        print(json.dumps(item, separators=(',', ': ')))
+        print(json.dumps(item, separators=(',', ':')))
 except Exception as e:
     print(json.dumps({'error': str(e)}), file=sys.stderr)
     raise
@@ -599,6 +600,41 @@ except Exception as e:
 # ---------------------------------------------------------------------------
 # Main procedure
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Guard: refuse dangerous --out paths before any destructive rm -rf
+# ---------------------------------------------------------------------------
+# Canonicalize: turn relative paths into absolute ones using the working dir.
+# OUT_DIR may not exist yet (we are about to create it), so we cannot use
+# realpath -e.  Instead: if it starts with '/' it is already absolute;
+# otherwise prepend $PWD.
+if [[ "$OUT_DIR" != /* ]]; then
+  OUT_DIR="$PWD/$OUT_DIR"
+fi
+
+# Strip any trailing slash for consistent comparisons.
+OUT_DIR="${OUT_DIR%/}"
+
+if [[ "${#OUT_DIR}" -lt 4 ]]; then
+  fail "OUT_DIR '$OUT_DIR' is suspiciously short (< 4 chars). Refusing to rm -rf."
+fi
+
+case "$OUT_DIR" in
+  /)
+    fail "Refusing to rm -rf '/'. Specify a safe --out directory." ;;
+  /tmp)
+    fail "Refusing to rm -rf '/tmp' directly. Use a subdirectory, e.g. /tmp/my-datasets." ;;
+esac
+
+# Allow only paths that are a strict descendant of the repo root or of /tmp.
+_under_repo=0
+_under_tmp=0
+[[ "$OUT_DIR" == "$REPO_ROOT/"* ]] && _under_repo=1
+[[ "$OUT_DIR" == /tmp/*          ]] && _under_tmp=1
+
+if [[ "$_under_repo" -eq 0 && "$_under_tmp" -eq 0 ]]; then
+  fail "OUT_DIR '$OUT_DIR' is neither under the repo root ('$REPO_ROOT') nor under /tmp/. Refusing to rm -rf an arbitrary path. Pass --out to a path inside the repo or under /tmp/."
+fi
+
 log "Starting dataset regeneration (nb + oa + da)"
 log "Output directory: $OUT_DIR"
 log "Rows per table (nb corpus): $ROWS_PER_TABLE"
