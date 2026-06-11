@@ -37,9 +37,12 @@ bash test-data/scripts/smoke-test-all-tables.sh
 ### CI Integration
 
 Tests run automatically via GitHub Actions on every pull request:
-- `rust-ci.yml` — Rust unit and integration tests
+- `ci.yml` — Rust unit and integration tests
 - `python-ci.yml` — Python binding tests (pytest, 360+ tests)
 - `node-ci.yml` — Node.js binding tests (Jest, 255+ tests)
+- `cassandra-validation.yml` — sstableloader-based write-path validation: writes CQLite-generated SSTables into a live Cassandra 5.0 cluster and reads them back to confirm round-trip correctness
+
+Write-path acceptance is gated by `test-data/scripts/e2e-cassandra-readback.sh` (a dedicated end-to-end readback harness; a GitHub Actions wrapper is being added in #711).
 
 Integration tests pass `CQLITE_DATASETS_ROOT` pointing at the fetched dataset directory.
 The 33 tables across four keyspaces (`test_basic`, `test_collections`, `test_timeseries`,
