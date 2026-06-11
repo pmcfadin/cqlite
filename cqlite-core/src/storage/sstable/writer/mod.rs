@@ -416,6 +416,12 @@ impl SSTableWriter {
             filter.add_key(&key);
         }
 
+        // Track every partition for first_key / last_key / total_partition_count.
+        // These fields must cover the full SSTable, not just sampled entries.
+        // (Issue #666: first/last keys in Summary.db must span the whole SSTable
+        //  so Cassandra's range queries cover all partitions.)
+        self.summary_writer.note_partition(&key);
+
         // Sample for Summary.db (every Nth entry, where N = summary_sample_interval)
         // CRITICAL: Use the actual index_offset from entry_info, not an estimate
         if self.summary_sample_counter % self.summary_sample_interval == 0 {

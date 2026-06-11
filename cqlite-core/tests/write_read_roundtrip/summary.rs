@@ -35,8 +35,9 @@ async fn test_summary_roundtrip_single_entry() {
     // Create summary writer with default sampling interval
     let mut writer = SummaryWriter::new(128);
 
-    // Add a single entry
+    // Add a single entry (note_partition must be called for every partition)
     let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x01]);
+    writer.note_partition(&key);
     writer.add_entry(&key, 0).expect("add_entry should succeed");
 
     // Finalize to bytes
@@ -96,6 +97,7 @@ async fn test_summary_roundtrip_multiple_entries() {
 
     for (token, key_bytes, position) in &entries_data {
         let key = DecoratedKey::new(*token, key_bytes.clone());
+        writer.note_partition(&key);
         writer
             .add_entry(&key, *position)
             .expect("add_entry should succeed");
@@ -225,9 +227,10 @@ async fn test_summary_header_parameters() {
     let min_index_interval = 64u32;
     let mut writer = SummaryWriter::new(min_index_interval);
 
-    // Add entries
+    // Add entries (note_partition required before add_entry for first_key/last_key tracking)
     for i in 0..10 {
         let key = DecoratedKey::new(i as i64 * 100, vec![0x00, 0x00, 0x00, i as u8]);
+        writer.note_partition(&key);
         writer
             .add_entry(&key, i as u64 * 256)
             .expect("add_entry should succeed");
@@ -290,6 +293,7 @@ async fn test_summary_large_positions() {
 
     for (token, key_bytes, position) in &entries_data {
         let key = DecoratedKey::new(*token, key_bytes.clone());
+        writer.note_partition(&key);
         writer
             .add_entry(&key, *position)
             .expect("add_entry should succeed");
@@ -359,6 +363,7 @@ async fn test_summary_entry_lookup() {
 
     for (token, key_bytes, position) in &entries_data {
         let key = DecoratedKey::new(*token, key_bytes.clone());
+        writer.note_partition(&key);
         writer
             .add_entry(&key, *position)
             .expect("add_entry should succeed");
@@ -443,6 +448,9 @@ async fn test_summary_offset_tracking_with_index() {
         let entry_info = index_writer
             .add_partition(&key, data_offset)
             .expect("add_partition should succeed");
+
+        // note_partition must be called for EVERY partition (tracks first_key/last_key)
+        summary_writer.note_partition(&key);
 
         // Sample every 128th entry for Summary.db
         if i % 128 == 0 {
