@@ -164,33 +164,6 @@ impl SummaryWriter {
         }
     }
 
-    /// Add a sampled entry to the summary
-    ///
-    /// The caller is responsible for sampling at the correct interval. This method
-    /// does NOT enforce sampling - it adds every entry provided.
-    ///
-    /// # Arguments
-    ///
-    /// * `key` - Decorated partition key (token + raw bytes)
-    /// * `index_offset` - Byte offset in Index.db where this partition's entry starts
-    ///
-    /// # Important
-    ///
-    /// Entries MUST be added in token order (same as Index.db order).
-    /// First and last keys are tracked automatically.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use cqlite_core::storage::sstable::writer::SummaryWriter;
-    /// use cqlite_core::storage::write_engine::mutation::DecoratedKey;
-    ///
-    /// let mut writer = SummaryWriter::new(128);
-    ///
-    /// let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
-    /// writer.add_entry(&key, 0).unwrap();
-    /// assert_eq!(writer.entry_count(), 1);
-    /// ```
     /// Record that a partition was seen (called for EVERY partition, not just sampled ones).
     ///
     /// This method tracks:
