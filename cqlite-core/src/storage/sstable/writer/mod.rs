@@ -384,12 +384,15 @@ impl SSTableWriter {
         // This ensures delta encoding uses the correct baselines
         self.data_writer.update_stats(self.stats.clone());
 
-        // Extract partition tombstone and range tombstones from mutations
-        // For now, we assume no partition or range tombstones (M5.2 basic support)
-        // TODO(Issue #387): Extract from mutations if present
+        // Extract partition tombstone and range tombstones from mutations.
+        // The tombstone can arrive on ANY mutation of the partition (a DELETE
+        // typically follows earlier INSERTs), so scan all of them and keep the
+        // newest deletion (Issue #716: taking only the first mutation dropped
+        // the tombstone and left the partition header LIVE).
         let partition_tombstone = mutations
-            .first()
-            .and_then(|m| m.partition_tombstone.as_ref());
+            .iter()
+            .filter_map(|m| m.partition_tombstone.as_ref())
+            .max_by_key(|pt| pt.deletion_time);
 
         // Collect all range tombstones from mutations
         let range_tombstones: Vec<_> = mutations
