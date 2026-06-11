@@ -139,6 +139,52 @@ pub(crate) fn extract_table_name(sstable_path: &Path) -> Option<String> {
     Some(dir_name.to_string())
 }
 
+/// Extract the fully-qualified table key (`"keyspace.table"`) from an SSTable path.
+///
+/// Cassandra on-disk layout is: `<data_dir>/<keyspace>/<table>-<uuid>/<sstable_files>`
+///
+/// This function walks up two directory levels from the SSTable file to identify both the
+/// table directory (`parent`) and keyspace directory (`grandparent`), producing a
+/// `"keyspace.table"` key that uniquely identifies a table across keyspaces.
+///
+/// When datasets-v3 added `test_oa.simple_table` alongside the existing
+/// `test_basic.simple_table`, using the unqualified name `"simple_table"` as the
+/// `table_readers` key caused both tables' SSTables to be registered under the same
+/// entry, returning combined rows for any query.  This function is the authoritative
+/// source of table identity for `SSTableManager` (Issue #680).
+///
+/// # Returns
+///
+/// `Some((keyspace, table_name))` when both directory levels can be extracted;
+/// `None` if the path does not contain enough components (e.g., a flat test directory).
+///
+/// # Examples
+///
+/// ```text
+/// ".../sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db"
+///   → Some(("test_basic", "simple_table"))
+///
+/// ".../sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Data.db"
+///   → Some(("test_oa", "simple_table"))
+///
+/// "nb-1-big-Data.db"   (flat, no parent dirs)
+///   → None
+/// ```
+pub fn extract_keyspace_and_table_name(sstable_path: &Path) -> Option<(String, String)> {
+    let table_name = extract_table_name(sstable_path)?;
+
+    // The keyspace directory is the grandparent of the SSTable file:
+    //   <keyspace>/<table-uuid>/<sstable_file>
+    let keyspace = sstable_path
+        .parent() // table-uuid dir
+        .and_then(|p| p.parent()) // keyspace dir
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        .map(|s| s.to_string())?;
+
+    Some((keyspace, table_name))
+}
+
 /// Return `true` if the filename is a macOS AppleDouble resource-fork sidecar.
 ///
 /// macOS creates `._<name>` companion files when copying to non-Apple filesystems
@@ -376,10 +422,29 @@ impl SSTableManager {
                                 // Store by SSTableId (existing)
                                 readers.insert(sstable_id, reader_arc.clone());
 
-                                // NEW: Extract table name and store by table name
-                                if let Some(table_name) = extract_table_name(&path) {
+                                // Extract fully-qualified "keyspace.table" key so that
+                                // same-named tables in different keyspaces (e.g.
+                                // test_basic.simple_table vs test_oa.simple_table) are
+                                // stored under distinct entries (Issue #680).
+                                if let Some((keyspace, table_name)) =
+                                    extract_keyspace_and_table_name(&path)
+                                {
+                                    let qualified_key = format!("{}.{}", keyspace, table_name);
                                     log::debug!(
                                         "SSTableManager mapping table '{}' to SSTable '{}'",
+                                        qualified_key,
+                                        path.display()
+                                    );
+
+                                    table_readers
+                                        .entry(qualified_key)
+                                        .or_insert_with(Vec::new)
+                                        .push(reader_arc);
+                                } else if let Some(table_name) = extract_table_name(&path) {
+                                    // Fallback for flat/non-Cassandra directory layouts that
+                                    // lack a keyspace parent: use unqualified name.
+                                    log::debug!(
+                                        "SSTableManager mapping table '{}' (no keyspace) to SSTable '{}'",
                                         table_name,
                                         path.display()
                                     );
@@ -480,34 +545,48 @@ impl SSTableManager {
                     // Store by SSTableId
                     readers.insert(sstable_id, reader_arc.clone());
 
-                    // Extract table name from directory path and store by table name.
-                    // Falls back to the reader's header table_name for flat directories
-                    // where extract_table_name returns the raw directory name.
-                    let table_name = extract_table_name(&path)
-                        .filter(|name| {
-                            // Heuristic: if the extracted name matches the base_path dir name,
-                            // it's not a real table name — fall back to header
-                            name.as_str() != base_dir_name
-                        })
-                        .or_else(|| {
-                            // Fallback: use table name from SSTable header (populated from
-                            // Statistics.db or path during reader::open)
-                            let header_table = reader_arc.header().table_name.clone();
-                            if header_table != "test_table" && !header_table.is_empty() {
-                                Some(header_table)
-                            } else {
-                                None
-                            }
-                        });
+                    // Build a fully-qualified "keyspace.table" key so that same-named
+                    // tables in different keyspaces (e.g. test_basic.simple_table vs
+                    // test_oa.simple_table) are stored under distinct entries (Issue #680).
+                    //
+                    // Priority:
+                    //   1. keyspace + table extracted from the filesystem path
+                    //   2. Unqualified table name (flat layout without a keyspace parent)
+                    //   3. Table name from the SSTable header (last resort)
+                    let table_key: Option<String> = if let Some((keyspace, table_name)) =
+                        extract_keyspace_and_table_name(&path)
+                    {
+                        // Only use if the table name is meaningful (not just the base_dir)
+                        if table_name.as_str() != base_dir_name {
+                            Some(format!("{}.{}", keyspace, table_name))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                    .or_else(|| {
+                        extract_table_name(&path).filter(|name| name.as_str() != base_dir_name)
+                    })
+                    .or_else(|| {
+                        // Fallback: use table name from SSTable header (populated from
+                        // Statistics.db or path during reader::open)
+                        let header_table = reader_arc.header().table_name.clone();
+                        if header_table != "test_table" && !header_table.is_empty() {
+                            Some(header_table)
+                        } else {
+                            None
+                        }
+                    });
 
-                    if let Some(table_name) = table_name {
+                    if let Some(key) = table_key {
                         log::debug!(
                             "SSTableManager mapping table '{}' to SSTable '{}'",
-                            table_name,
+                            key,
                             path.display()
                         );
                         table_readers
-                            .entry(table_name)
+                            .entry(key)
                             .or_insert_with(Vec::new)
                             .push(reader_arc);
                     } else {
@@ -625,26 +704,34 @@ impl SSTableManager {
 
     /// Get a value by key from all SSTables (simple version without tombstone merging)
     ///
-    /// Uses `table_readers` (keyed by unqualified table name) so that only the
-    /// SSTables for the requested table are searched.  The legacy `readers` map
-    /// (keyed by SSTableId / filename) cannot be used because all SSTables share
-    /// the same base filename (`nb-1-big-Data.db`) and the HashMap therefore only
-    /// retains the last-inserted reader.
+    /// Uses `table_readers` (keyed by fully-qualified `"keyspace.table"`) so that only the
+    /// SSTables for the requested table are searched (Issue #680).  Same-named tables in
+    /// different keyspaces (e.g. `test_basic.simple_table` and `test_oa.simple_table`) are
+    /// now correctly distinguished.
+    ///
+    /// Lookup order:
+    ///   1. Exact match on the full `table_id` string (e.g. `"test_basic.simple_table"`)
+    ///   2. Unqualified table name (e.g. `"simple_table"`) — for backward compatibility
+    ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
     #[cfg(not(feature = "tombstones"))]
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         let table_readers = self.table_readers.read().await;
 
-        // Resolve unqualified table name for the lookup (mirrors SSTableManager::scan logic)
         let table_name = table_id.name();
-        let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
-            &table_name[dot_pos + 1..]
-        } else {
-            table_name
-        };
 
-        let reader_list = match table_readers.get(unqualified_name) {
-            Some(list) => list,
-            None => return Ok(None),
+        // Try exact (qualified) lookup first, then fall back to unqualified name.
+        let reader_list = if let Some(list) = table_readers.get(table_name) {
+            list
+        } else {
+            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
+                &table_name[dot_pos + 1..]
+            } else {
+                table_name
+            };
+            match table_readers.get(unqualified_name) {
+                Some(list) => list,
+                None => return Ok(None),
+            }
         };
 
         // Return the first value found across all SSTables for this table
@@ -736,6 +823,11 @@ impl SSTableManager {
     /// * `schema` - Optional table schema for schema-aware parsing. When provided,
     ///   enables accurate type detection and avoids heuristic-based parsing.
     ///   Strongly recommended for Cassandra 5.0+ formats.
+    ///
+    /// Lookup order (Issue #680):
+    ///   1. Exact match on the full `table_id` string (e.g. `"test_basic.simple_table"`)
+    ///   2. Unqualified table name (e.g. `"simple_table"`) — for backward compatibility
+    ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan(
         &self,
@@ -749,22 +841,29 @@ impl SSTableManager {
 
         log::debug!("SSTableManager::scan - Scanning table_id='{}'", table_id);
 
-        // Extract unqualified table name from potentially qualified table_id
-        // Supports both "keyspace.table" and "table" formats
         let table_name = table_id.name();
-        let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
-            &table_name[dot_pos + 1..]
+
+        // Try exact (qualified) lookup first, then fall back to unqualified name.
+        // This ensures that same-named tables in different keyspaces are correctly
+        // distinguished (Issue #680).
+        let readers = if table_readers.contains_key(table_name) {
+            log::debug!(
+                "SSTableManager::scan - Found readers via qualified name '{}'",
+                table_name
+            );
+            table_readers.get(table_name)
         } else {
-            table_name
+            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
+                &table_name[dot_pos + 1..]
+            } else {
+                table_name
+            };
+            log::debug!(
+                "SSTableManager::scan - Falling back to unqualified name '{}'",
+                unqualified_name
+            );
+            table_readers.get(unqualified_name)
         };
-
-        log::debug!(
-            "SSTableManager::scan - Looking up table by unqualified name: '{}'",
-            unqualified_name
-        );
-
-        // Look up readers by unqualified table name
-        let readers = table_readers.get(unqualified_name);
 
         if let Some(reader_list) = readers {
             log::debug!(
