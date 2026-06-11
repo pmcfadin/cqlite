@@ -343,3 +343,132 @@ async fn test_sstable_manager_isolates_collection_tables_across_keyspaces() {
         oa_rows.len()
     );
 }
+
+/// Regression test for Issue #680 / Issue #548 interaction:
+/// `WHERE pk = <value>` point-lookup on a qualified table name must return rows.
+///
+/// Before the #680 follow-up fix, `QueryParser::parse_select` stripped the keyspace
+/// from "test_basic.simple_table" → "simple_table", causing the point-lookup path
+/// in SSTableManager::get to miss the "test_basic.simple_table" registry key and
+/// return 0 rows.
+#[cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+#[tokio::test]
+async fn test_qualified_point_lookup_returns_one_row() {
+    use cqlite_core::ingestion::{ingest, IngestionConfig};
+    use cqlite_core::types::Value;
+    use std::path::Path;
+
+    let datasets = match datasets_root() {
+        Some(d) => d,
+        None => {
+            eprintln!("SKIP: CQLITE_DATASETS_ROOT not set");
+            return;
+        }
+    };
+
+    // Check that Data.db files exist for test_basic
+    let sstables_dir = datasets.join("sstables").join("test_basic");
+    let has_data = std::fs::read_dir(&sstables_dir)
+        .ok()
+        .map(|rd| {
+            rd.flatten().any(|e| {
+                e.path().is_dir()
+                    && std::fs::read_dir(e.path())
+                        .ok()
+                        .map(|inner| {
+                            inner
+                                .flatten()
+                                .any(|f| f.file_name().to_string_lossy().ends_with("-Data.db"))
+                        })
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false);
+
+    if !has_data {
+        eprintln!("SKIP: test_basic Data.db files not present — run fetch-datasets.sh");
+        return;
+    }
+
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let schema_path = manifest_dir
+        .parent()
+        .unwrap()
+        .join("test-data")
+        .join("schemas")
+        .join("basic-types.cql");
+    if !schema_path.exists() {
+        eprintln!("SKIP: basic-types.cql not found at {:?}", schema_path);
+        return;
+    }
+
+    let ingestion_config = IngestionConfig {
+        schema_paths: vec![schema_path],
+        data_dir: datasets.join("sstables"),
+        version_hint: None,
+        core_config: cqlite_core::Config::default(),
+        table_directory_filter: Some("/test_basic/".to_string()),
+    };
+
+    let db = match ingest(ingestion_config).await {
+        Ok(r) => r.database,
+        Err(e) => {
+            eprintln!("SKIP: ingestion failed: {}", e);
+            return;
+        }
+    };
+
+    // Step 1: scan to get a real UUID partition key
+    let scan = db
+        .execute("SELECT id FROM test_basic.simple_table LIMIT 5")
+        .await
+        .expect("scan should succeed");
+
+    if scan.rows.is_empty() {
+        eprintln!("SKIP: scan returned 0 rows");
+        return;
+    }
+
+    let uuid_str = scan.rows.iter().find_map(|row| {
+        if let Some(Value::Uuid(bytes)) = row.values.get("id") {
+            Some(format!(
+                "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
+                bytes[0], bytes[1], bytes[2], bytes[3],
+                bytes[4], bytes[5],
+                bytes[6], bytes[7],
+                bytes[8], bytes[9],
+                bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+            ))
+        } else {
+            None
+        }
+    });
+
+    let uuid_str = match uuid_str {
+        Some(s) => s,
+        None => {
+            eprintln!("SKIP: no UUID values in scanned rows");
+            return;
+        }
+    };
+
+    // Step 2: point-lookup via WHERE — must return exactly 1 row
+    let point_query = format!(
+        "SELECT * FROM test_basic.simple_table WHERE id = {}",
+        uuid_str
+    );
+    let point_result = db
+        .execute(&point_query)
+        .await
+        .expect("point-lookup should succeed");
+
+    assert_eq!(
+        point_result.rows.len(),
+        1,
+        "Issue #680 regression: qualified point-lookup \
+         'SELECT * FROM test_basic.simple_table WHERE id = {}' must return 1 row \
+         (the parser must preserve the full qualified table name). Got {} rows.",
+        uuid_str,
+        point_result.rows.len(),
+    );
+}
