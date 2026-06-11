@@ -66,7 +66,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
@@ -74,7 +74,7 @@ jobs:
           toolchain: stable
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -183,7 +183,7 @@ jobs:
 
       - name: Upload Test Artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: sstableloader-test-results
           path: |
@@ -195,7 +195,7 @@ jobs:
 
       - name: Comment on PR (Success)
         if: success() && github.event_name == 'pull_request'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8
         with:
           script: |
             const summary = `## ✅ sstableloader Integration Tests PASSED
@@ -216,7 +216,7 @@ jobs:
 
       - name: Comment on PR (Failure)
         if: failure() && github.event_name == 'pull_request'
-        uses: actions/github-script@v6
+        uses: actions/github-script@v8
         with:
           script: |
             const summary = `## ❌ sstableloader Integration Tests FAILED

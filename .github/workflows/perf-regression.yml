@@ -55,7 +55,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout (full history so we can also build main)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -69,7 +69,7 @@ jobs:
       # cached target/ would carry incremental-compilation state across that
       # switch. Rebuilding from clean deps is the robust choice for a gate.
       - name: Cache Cargo registry
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -80,7 +80,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Cache canonical datasets
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: test-data/datasets/
           key: ${{ runner.os }}-datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}

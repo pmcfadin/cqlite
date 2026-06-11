@@ -24,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -34,7 +34,7 @@ jobs:
           toolchain: stable
 
       - name: Cache Rust dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -45,7 +45,7 @@ jobs:
             ${{ runner.os }}-cargo-
 
       - name: Cache canonical full datasets
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: test-data/datasets/
           key: ${{ runner.os }}-datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
@@ -81,7 +81,7 @@ jobs:
           test "${statistics_count}" -gt 0
 
       - name: Setup Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -159,7 +159,7 @@ jobs:
 
       - name: Upload parity artifacts
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: parity-test-results
           path: |
@@ -170,7 +170,7 @@ jobs:
 
       - name: Comment on PR (Success)
         if: always() && github.event_name == 'pull_request' && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success'
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const summary = `## ✅ SSTableDump Parity Validation PASSED
@@ -193,7 +193,7 @@ jobs:
 
       - name: Comment on PR (Failure)
         if: always() && github.event_name == 'pull_request' && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success')
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const summary = `## ❌ SSTableDump Parity Validation FAILED

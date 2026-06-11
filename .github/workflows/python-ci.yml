@@ -45,7 +45,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -81,7 +81,7 @@ jobs:
           manylinux: ${{ matrix.manylinux || 'auto' }}
 
       - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: wheel-${{ matrix.target }}
           path: bindings/python/dist/*.whl
@@ -112,15 +112,15 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python }}
 
       - name: Download wheel
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: wheel-${{ matrix.target }}
           path: dist
@@ -151,7 +151,7 @@ jobs:
 
       - name: Restore dataset cache
         id: dataset-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: test-data/datasets
           key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
@@ -202,7 +202,7 @@ jobs:
 
       - name: Upload test results on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: pytest-results-${{ matrix.os }}
           path: |
@@ -233,7 +233,7 @@ jobs:
           fi
 
       - name: Download all wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: wheel-*
           path: wheels
@@ -255,7 +255,7 @@ jobs:
           fi
 
       - name: Upload merged wheel artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cqlite-wheels
           path: wheels/*.whl

@@ -34,7 +34,7 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
 
@@ -53,7 +53,7 @@ jobs:
 
     # Dataset cache and download for integration tests
     - name: Restore datasets-v3 cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: |
           test-data/datasets/
@@ -252,7 +252,7 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
 
@@ -271,7 +271,7 @@ jobs:
 
     # Dataset cache and download for parity validation
     - name: Restore datasets-v3 cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: |
           test-data/datasets/
@@ -612,7 +612,7 @@ jobs:
     
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         fetch-depth: 0
 
@@ -742,7 +742,7 @@ jobs:
 
     - name: 📤 Archive coverage results
       if: steps.coverage.outputs.coverage_failed != 'true'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: m1-coverage-report
         path: |

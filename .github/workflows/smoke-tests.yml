@@ -38,13 +38,13 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo dependencies
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -54,7 +54,7 @@ jobs:
 
       - name: Restore dataset cache
         id: dataset-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: test-data/datasets
           key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
@@ -138,7 +138,7 @@ jobs:
 
       - name: Upload smoke test results
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: smoke-test-results
           path: |
@@ -149,7 +149,7 @@ jobs:
 
       - name: Upload validation matrix
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: validation-matrix
           path: test-data/validation-matrix.md
