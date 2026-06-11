@@ -161,6 +161,13 @@ mod da_directory_discovery {
     use cqlite_core::storage::sstable::directory::{SSTableComponent, SSTableDirectory};
 
     /// Helper: return the path to the da simple_table fixture, or None if not available.
+    ///
+    /// Returns `None` when:
+    /// - `CQLITE_DATASETS_ROOT` is not set, or
+    /// - the `test_da/simple_table-*` directory does not exist, or
+    /// - the directory contains only git-tracked JSONL/metadata files (CI with
+    ///   datasets-v2 which has no da binary SSTables).  We detect the binary
+    ///   presence by looking for at least one `da-*-bti-Partitions.db` file.
     fn da_simple_table_path() -> Option<std::path::PathBuf> {
         let datasets_root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
         let base = std::path::Path::new(&datasets_root)
@@ -168,11 +175,31 @@ mod da_directory_discovery {
             .join("test_da");
 
         // Find the simple_table directory (includes UUID suffix)
-        std::fs::read_dir(&base)
+        let table_dir = std::fs::read_dir(&base)
             .ok()?
             .flatten()
             .find(|e| e.file_name().to_string_lossy().starts_with("simple_table-"))
-            .map(|e| e.path())
+            .map(|e| e.path())?;
+
+        // Guard: require at least one binary Partitions.db sentinel file.
+        // Without it the directory contains only git-tracked JSONL goldens and
+        // SSTableDirectory::scan will fail — causing a spurious test failure on
+        // CI environments that use datasets-v2 (no da binaries).
+        let has_binary_partitions = std::fs::read_dir(&table_dir).ok()?.flatten().any(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.starts_with("da-") && s.ends_with("-bti-Partitions.db")
+        });
+
+        if !has_binary_partitions {
+            eprintln!(
+                "SKIP: test_da binaries not present (CI uses datasets-v2; goldens-only checkout). \
+                 Run `bash test-data/scripts/fetch-datasets.sh` to download binary SSTables."
+            );
+            return None;
+        }
+
+        Some(table_dir)
     }
 
     /// Directory scan of the da `simple_table` fixture must succeed — classifying
