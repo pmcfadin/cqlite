@@ -1,14 +1,5 @@
 name: "CI: Cassandra sstableloader Validation"
 
-# Pin location: CASSANDRA_IMAGE is the single source of truth for the Cassandra
-# version used in this workflow. To bump: update CASSANDRA_IMAGE here.
-# The same version must also be set in:
-#   - .github/workflows/m1-ci.yml  (env.CASSANDRA_IMAGE)
-#   - test-data/docker/docker-compose-cassandra5.yml  (services.cassandra-5-0.image)
-# Issue #669 unified all three locations to cassandra:5.0.2.
-env:
-  CASSANDRA_IMAGE: cassandra:5.0.2
-
 on:
   pull_request:
     branches: [main, develop]
@@ -32,6 +23,17 @@ on:
         type: boolean
         default: false
 
+# Pin location: CASSANDRA_IMAGE is the single source of truth for the Cassandra
+# version used in this workflow. To bump: update CASSANDRA_IMAGE here.
+# The same version must also be set in:
+#   - .github/workflows/m1-ci.yml  (env.CASSANDRA_IMAGE)
+#   - test-data/docker/docker-compose-cassandra5.yml  (services.cassandra-5-0.image)
+# Issue #669 unified all three locations to cassandra:5.0.2.
+# NOTE: env context is NOT available at jobs.<job>.services.<svc>.image per GitHub's
+# context-availability rules. The literal image tag is set directly there instead.
+env:
+  CASSANDRA_IMAGE: cassandra:5.0.2
+
 permissions:
   contents: read
   pull-requests: write
@@ -48,7 +50,9 @@ jobs:
 
     services:
       cassandra:
-        image: ${{ env.CASSANDRA_IMAGE }}
+        # Pin: cassandra:5.0.2 — env context is unavailable at service image keys.
+        # To bump the version: update this literal AND env.CASSANDRA_IMAGE above.
+        image: cassandra:5.0.2
         env:
           MAX_HEAP_SIZE: 1G
           HEAP_NEWSIZE: 256m
