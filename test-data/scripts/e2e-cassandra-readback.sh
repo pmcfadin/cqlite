@@ -1614,52 +1614,20 @@ process_table() {
   fi
 }
 
-# ----- Known-failing labels (Issue #667) ---------------------------------
+# ----- Known-failing labels ----------------------------------------------
 #
-# These labels exist in the matrix and exercise tombstone write paths.
-# They FAIL against Cassandra 5.0.2 due to engine bugs in cqlite's SSTable
-# writer; they are listed here so the matrix gate can skip them while the
-# bugs are tracked separately.
+# Labels listed here are skipped by the matrix gate (the SSTable is still
+# generated to catch write-path crashes) while the corresponding engine bug
+# is tracked in a GitHub issue. Document the failure evidence and the issue
+# number next to each entry.
 #
-# Bug 1 (cell-delete, partition-tombstone):
-#   Affects: test_basic.simple_table (Snappy-compressed, no clustering)
-#   Symptom: CorruptSSTableException "chunk length 4096, data length N,
-#             EOFException: EOF after 0 bytes out of 4" when Cassandra reads
-#             the exported Data.db.
-#   Root cause: The Snappy compression chunk header is incomplete or
-#               missing in the exported Data.db when the mutations include
-#               CellOperation::Delete or a partition_tombstone field.
-#               CQLite writes 179 bytes (cell-delete) / 174 bytes (partition-
-#               tombstone) but Cassandra expects the first 4 bytes to be a
-#               valid Snappy chunk-length prefix; the file appears truncated.
-#   Evidence:   data length 179 == cell-delete nb-2-big-Data.db size
-#               data length 174 == partition-tombstone nb-2-big-Data.db size
-#   Track:      Issue #716
-#
-# Bug 2 (row-delete, range-tombstone):
-#   Affects: test_basic.static_columns_table (Snappy-compressed, 1 clustering col)
-#   Symptom: IOException "Invalid Columns subset bytes; too many bits set:1001"
-#   Root cause: The column presence bitmask for a row carrying a DeleteRow
-#               operation is incorrectly encoded: bit pattern 0x1001 has more
-#               bits set than the table has non-PK columns, which is invalid
-#               per the OA SSTable format spec.  The same defect affects the
-#               range-tombstone path since the rows written before the range
-#               tombstone also contain this bitmask error.
-#   Evidence:   data length 157 == row-delete nb-2-big-Data.db size
-#               data length 243 == range-tombstone nb-2-big-Data.db size
-#   Track:      Issue #717
-#
-# To re-enable a label once the engine bug is fixed, remove it from this list.
-declare -a KNOWN_FAILING=(
-  "cell-delete"
-  "row-delete"
-  "range-tombstone"
-  "partition-tombstone"
-)
+# Currently empty: the four tombstone labels (cell-delete, row-delete,
+# range-tombstone, partition-tombstone) were fixed by Issues #716/#717.
+declare -a KNOWN_FAILING=()
 
 is_known_failing() {
   local label="$1"
-  for kf in "${KNOWN_FAILING[@]}"; do
+  for kf in ${KNOWN_FAILING[@]+"${KNOWN_FAILING[@]}"}; do
     [[ "$kf" == "$label" ]] && return 0
   done
   return 1
@@ -1673,8 +1641,7 @@ declare -a TEST_MATRIX=(
   "udt|test_collections|collections_with_udts|collections.cql|user_id"
   "static-columns|test_basic|static_columns_table|basic-types.cql|partition_key"
   "ttl|test_basic|ttl_test_table|basic-types.cql|id"
-  # Tombstone / delete coverage (Issue #667)
-  # NOTE: all four are currently KNOWN_FAILING due to engine bugs (see above).
+  # Tombstone / delete coverage (Issue #667; writer bugs fixed in #716/#717)
   "cell-delete|test_basic|simple_table|basic-types.cql|id"
   "row-delete|test_basic|static_columns_table|basic-types.cql|partition_key"
   "range-tombstone|test_basic|static_columns_table|basic-types.cql|partition_key"
@@ -1708,11 +1675,9 @@ done
 phase "Summary"
 log "Passed:  ${#PASSED_LIST[@]} (${PASSED_LIST[*]:-})"
 if (( ${#SKIPPED_KNOWN_FAILING[@]} > 0 )); then
-  warn "Skipped (known engine bugs, Issue #667): ${#SKIPPED_KNOWN_FAILING[@]} (${SKIPPED_KNOWN_FAILING[*]})"
-  warn "  Bug 1 (cell-delete, partition-tombstone): CorruptSSTableException — Snappy chunk header incomplete in Data.db (Issue #716)"
-  warn "  Bug 2 (row-delete, range-tombstone): IOException 'Invalid Columns subset bytes; too many bits set:1001' (Issue #717)"
+  warn "Skipped (known engine bugs): ${#SKIPPED_KNOWN_FAILING[@]} (${SKIPPED_KNOWN_FAILING[*]})"
   warn "  SSTable generation confirmed working (write path does not crash)."
-  warn "  Fix tracked in Issue #716 (Bug 1) and Issue #717 (Bug 2)."
+  warn "  See the KNOWN_FAILING list in this script for tracking issues."
 fi
 if (( ${#FAILED_LIST[@]} > 0 )); then
   warn "Failed:  ${#FAILED_LIST[@]} (${FAILED_LIST[*]})"
