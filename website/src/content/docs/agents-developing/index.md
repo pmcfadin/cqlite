@@ -1,6 +1,9 @@
 ---
 title: "For Agents: Developing CQLite"
 description: Contributor doctrine, gate contracts, and development workflows for AI agents working on CQLite itself.
+sidebar:
+  label: Overview
+  order: 0
 ---
 
 # For Agents: Developing CQLite

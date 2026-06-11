@@ -1,6 +1,9 @@
 ---
 title: User Docs
 description: Installation, quick start, CLI reference, query guide, Python and Node.js bindings for CQLite.
+sidebar:
+  label: Overview
+  order: 0
 ---
 
 # User Docs

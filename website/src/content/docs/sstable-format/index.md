@@ -1,6 +1,9 @@
 ---
 title: SSTable Format Guide
 description: 22-chapter deep dive into the Cassandra 5.0 SSTable binary format.
+sidebar:
+  label: Overview
+  order: 0
 ---
 
 # SSTable Format Guide

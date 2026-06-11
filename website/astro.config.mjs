@@ -35,27 +35,19 @@ export default defineConfig({
       sidebar: [
         {
           label: 'User Docs',
-          items: [
-            { label: 'Overview', slug: 'user-docs' },
-          ],
+          autogenerate: { directory: 'user-docs' },
         },
         {
           label: 'SSTable Format Guide',
-          items: [
-            { label: 'Overview', slug: 'sstable-format' },
-          ],
+          autogenerate: { directory: 'sstable-format' },
         },
         {
           label: 'For Agents: Using CQLite',
-          items: [
-            { label: 'Overview', slug: 'agents-using' },
-          ],
+          autogenerate: { directory: 'agents-using' },
         },
         {
           label: 'For Agents: Developing CQLite',
-          items: [
-            { label: 'Overview', slug: 'agents-developing' },
-          ],
+          autogenerate: { directory: 'agents-developing' },
         },
       ],
     }),

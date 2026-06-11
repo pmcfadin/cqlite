@@ -1,6 +1,9 @@
 ---
 title: "For Agents: Using CQLite"
 description: Task-oriented recipes for AI agents integrating with or automating CQLite.
+sidebar:
+  label: Overview
+  order: 0
 ---
 
 # For Agents: Using CQLite
