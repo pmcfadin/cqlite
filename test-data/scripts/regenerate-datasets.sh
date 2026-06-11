@@ -123,214 +123,440 @@ apply_schema() {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: wait_driver_connect — retry Cluster.connect() inside python.
+# Returns a connected session or raises after max_attempts.
+# This is embedded in each Python heredoc via the WAIT_CONNECT_SNIPPET var.
+# ---------------------------------------------------------------------------
+# (snippet injected inline into each heredoc below)
+
+# ---------------------------------------------------------------------------
 # Helper: insert rows — uses inline Python via docker exec (no external image)
 # ---------------------------------------------------------------------------
 insert_nb_rows() {
   local keyspace="$1"
   local rows="$2"
   log "Inserting ~$rows rows per table into keyspace $keyspace (nb format)..."
-  run $ENGINE exec "$CONTAINER_NAME" python3 - <<PYEOF
-import uuid, random, time, datetime
+  # NOTE: -i is REQUIRED so docker/podman exec attaches stdin to the container
+  # process. Without -i, python3 - reads EOF immediately, runs nothing, and
+  # exits 0 silently — the silent insert failure we are fixing.
+  run $ENGINE exec -i "$CONTAINER_NAME" python3 - <<PYEOF
+import sys, traceback, uuid, random, time, datetime
 from cassandra.cluster import Cluster
 from cassandra.query import SimpleStatement
+from cassandra.util import Duration
 
-cluster = Cluster(['127.0.0.1'])
-session = cluster.connect('$keyspace')
+def connect_with_retry(keyspace, attempts=10, delay=6):
+    """Retry Cluster.connect() — Cassandra may still be warming up after restart."""
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            cluster = Cluster(['127.0.0.1'])
+            session = cluster.connect(keyspace)
+            print(f"[connect] Connected to {keyspace} on attempt {attempt}", flush=True)
+            return cluster, session
+        except Exception as exc:
+            last_exc = exc
+            print(f"[connect] Attempt {attempt}/{attempts} failed: {exc}", flush=True)
+            time.sleep(delay)
+    raise RuntimeError(f"Could not connect to Cassandra after {attempts} attempts: {last_exc}")
 
-tables_rs = session.execute(
-    "SELECT table_name FROM system_schema.tables WHERE keyspace_name='$keyspace';"
-)
-tables = [r.table_name for r in tables_rs]
+try:
+    cluster, session = connect_with_retry('$keyspace')
 
-for tbl in tables:
-    cols_rs = session.execute(
-        f"SELECT column_name, kind, type FROM system_schema.columns "
-        f"WHERE keyspace_name='$keyspace' AND table_name='{tbl}' ALLOW FILTERING;"
+    tables_rs = session.execute(
+        "SELECT table_name FROM system_schema.tables WHERE keyspace_name='$keyspace';"
     )
-    cols = {r.column_name: (r.kind, r.type) for r in cols_rs}
+    tables = [r.table_name for r in tables_rs]
 
-    pk_cols = [c for c, (k, t) in cols.items() if k == 'partition_key']
-    ck_cols = [c for c, (k, t) in cols.items() if k == 'clustering']
-    reg_cols = [c for c, (k, t) in cols.items() if k == 'regular']
+    if not tables:
+        print(f"[ERROR] No tables found in keyspace '$keyspace' — schema may not have been applied!", flush=True)
+        sys.exit(1)
 
-    if not pk_cols:
-        print(f"  [skip] {tbl}: no partition key found")
-        continue
+    # ---- Helper functions defined once, before the per-table loop ----
+
+    KNOWN_PRIMITIVES = frozenset({
+        'uuid', 'timeuuid', 'text', 'varchar', 'ascii', 'int', 'integer',
+        'bigint', 'smallint', 'tinyint', 'varint', 'float', 'double',
+        'decimal', 'boolean', 'timestamp', 'date', 'time', 'blob', 'inet',
+        'duration', 'counter', 'empty',
+    })
+    KNOWN_COLLECTION_PREFIXES = ('frozen<', 'list<', 'set<', 'map<', 'tuple<')
+
+    def parse_type_args(type_str):
+        """Extract comma-separated top-level type args from e.g. 'map<text, bigint>'."""
+        start = type_str.find('<')
+        if start == -1:
+            return []
+        inner = type_str[start+1:-1]
+        args, depth, buf = [], 0, ''
+        for ch in inner:
+            if ch == '<': depth += 1; buf += ch
+            elif ch == '>': depth -= 1; buf += ch
+            elif ch == ',' and depth == 0:
+                args.append(buf.strip()); buf = ''
+            else:
+                buf += ch
+        if buf.strip():
+            args.append(buf.strip())
+        return args
+
+    def has_udt_type(type_str):
+        """Return True if type_str contains a UDT (non-primitive, non-collection) type."""
+        t = type_str.strip().lower()
+        if t in KNOWN_PRIMITIVES:
+            return False
+        for prefix in KNOWN_COLLECTION_PREFIXES:
+            if t.startswith(prefix):
+                inner_args = parse_type_args(t)
+                return any(has_udt_type(a) for a in inner_args) if inner_args else False
+        return True  # Unrecognized type = UDT
 
     def sample_val(ctype):
-        ctype = ctype.lower()
-        if 'uuid' in ctype or 'timeuuid' in ctype:
+        """Generate a value for any CQL type, including nested collections."""
+        ct = ctype.strip().lower()
+        # Strip frozen<> wrapper — value generation is the same for frozen and non-frozen
+        bare = ct[7:-1].strip() if ct.startswith('frozen<') else ct
+        # Collections
+        if bare.startswith('list<'):
+            args = parse_type_args(bare)
+            elem_type = args[0] if args else 'text'
+            return [sample_val(elem_type) for _ in range(3)]
+        if bare.startswith('set<'):
+            args = parse_type_args(bare)
+            elem_type = args[0] if args else 'text'
+            elems = [sample_val(elem_type) for _ in range(3)]
+            try:
+                return set(elems)
+            except TypeError:
+                return set(str(e) for e in elems)
+        if bare.startswith('map<'):
+            args = parse_type_args(bare)
+            k_type = args[0] if len(args) > 0 else 'text'
+            v_type = args[1] if len(args) > 1 else 'text'
+            result = {}
+            for i in range(3):
+                k = sample_val(k_type)
+                try:
+                    result[k] = sample_val(v_type)
+                except TypeError:
+                    result[f"k{i}"] = sample_val(v_type)
+            return result
+        # Scalar primitives
+        if bare == 'timeuuid':
+            return uuid.uuid1()
+        if bare == 'uuid':
             return uuid.uuid4()
-        if 'bigint' in ctype or 'counter' in ctype:
+        if bare in ('bigint', 'counter'):
             return random.randint(1, 10**9)
-        if 'int' in ctype or 'smallint' in ctype or 'tinyint' in ctype or 'varint' in ctype:
+        if bare == 'tinyint':
+            return random.randint(-128, 127)
+        if bare == 'smallint':
+            return random.randint(-32768, 32767)
+        if bare in ('int', 'integer', 'varint'):
             return random.randint(1, 10000)
-        if 'float' in ctype or 'double' in ctype or 'decimal' in ctype:
+        if bare in ('float', 'double', 'decimal'):
             return round(random.uniform(1.0, 1000.0), 4)
-        if 'boolean' in ctype:
+        if bare == 'boolean':
             return random.choice([True, False])
-        if 'timestamp' in ctype:
+        if bare == 'timestamp':
             return datetime.datetime.utcnow() - datetime.timedelta(seconds=random.randint(0, 86400*30))
-        if 'date' in ctype:
+        if bare == 'date':
             return datetime.date.today() - datetime.timedelta(days=random.randint(0, 365))
-        if 'time' in ctype:
+        if bare == 'time':
             return random.randint(0, 86399999999999)
-        if 'blob' in ctype or 'binary' in ctype:
+        if bare in ('blob', 'binary'):
             return bytes(random.getrandbits(8) for _ in range(16))
-        if 'inet' in ctype:
+        if bare == 'inet':
             return f"{random.randint(1,254)}.{random.randint(0,255)}.{random.randint(0,255)}.{random.randint(1,254)}"
-        if 'list<' in ctype:
-            return [random.randint(1, 1000) for _ in range(3)]
-        if 'set<' in ctype:
-            return {f"tag{random.randint(1,100)}" for _ in range(3)}
-        if 'map<' in ctype:
-            return {f"k{i}": f"v{random.randint(1,100)}" for i in range(3)}
-        # text, varchar, ascii, duration, etc.
+        if bare == 'duration':
+            return Duration(months=random.randint(0, 12), days=random.randint(0, 30),
+                            nanoseconds=random.randint(0, 10**9))
+        # text, varchar, ascii, and anything unrecognized
         return f"val_{random.randint(1,10000)}"
 
-    n_inserted = 0
-    for _ in range($rows):
-        all_cols = pk_cols + ck_cols + reg_cols
-        vals = [sample_val(cols[c][1]) for c in all_cols]
-        placeholders = ", ".join(["?"] * len(all_cols))
-        col_list = ", ".join(all_cols)
-        try:
-            stmt = session.prepare(
-                f"INSERT INTO {tbl} ({col_list}) VALUES ({placeholders})"
-            )
-            session.execute(stmt, vals)
-            n_inserted += 1
-        except Exception as e:
-            pass  # Skip problematic rows (counters, duration, etc.)
+    # ---- Per-table loop ----
+    total_inserted = 0
+    for tbl in tables:
+        cols_rs = session.execute(
+            "SELECT column_name, kind, type FROM system_schema.columns "
+            "WHERE keyspace_name='$keyspace' AND table_name=%s ALLOW FILTERING;",
+            (tbl,)
+        )
+        cols = {r.column_name: (r.kind, r.type) for r in cols_rs}
 
-    print(f"  {tbl}: {n_inserted} rows inserted")
+        pk_cols = [c for c, (k, t) in cols.items() if k == 'partition_key']
+        ck_cols = [c for c, (k, t) in cols.items() if k == 'clustering']
+        reg_cols = [c for c, (k, t) in cols.items() if k == 'regular']
 
-cluster.shutdown()
+        if not pk_cols:
+            print(f"  [skip] {tbl}: no partition key found", flush=True)
+            continue
+
+        # Skip tables with UDT columns (require table-specific insertion code)
+        all_types_list = [t for _, (_, t) in cols.items()]
+        if any(has_udt_type(t) for t in all_types_list):
+            print(f"  [skip] {tbl}: UDT columns require table-specific insertion code", flush=True)
+            continue
+
+        # Counter tables require UPDATE, not INSERT. Detect by checking if all
+        # regular columns are of type 'counter'.
+        is_counter_table = (
+            len(reg_cols) > 0 and
+            all(cols[c][1].lower() == 'counter' for c in reg_cols)
+        )
+
+        n_inserted = 0
+        n_skipped = 0
+
+        if is_counter_table:
+            # Counter tables use UPDATE ... SET col = col + N WHERE pk_col = ?
+            for _ in range($rows):
+                pk_vals = [sample_val(cols[c][1]) for c in pk_cols]
+                ck_vals = [sample_val(cols[c][1]) for c in ck_cols]
+                set_clause = ", ".join(f"{c} = {c} + ?" for c in reg_cols)
+                where_clause = " AND ".join(f"{c} = ?" for c in pk_cols + ck_cols)
+                counter_increments = [random.randint(1, 100) for _ in reg_cols]
+                try:
+                    stmt = session.prepare(
+                        f"UPDATE {tbl} SET {set_clause} WHERE {where_clause}"
+                    )
+                    session.execute(stmt, counter_increments + pk_vals + ck_vals)
+                    n_inserted += 1
+                except Exception as e:
+                    n_skipped += 1
+                    if n_skipped <= 3:
+                        print(f"  [row-skip] {tbl}: {type(e).__name__}: {e}", flush=True)
+        else:
+            for _ in range($rows):
+                all_cols = pk_cols + ck_cols + reg_cols
+                vals = [sample_val(cols[c][1]) for c in all_cols]
+                placeholders = ", ".join(["?"] * len(all_cols))
+                col_list = ", ".join(all_cols)
+                try:
+                    stmt = session.prepare(
+                        f"INSERT INTO {tbl} ({col_list}) VALUES ({placeholders})"
+                    )
+                    session.execute(stmt, vals)
+                    n_inserted += 1
+                except Exception as e:
+                    # Only skip type-incompatible individual rows (e.g. duration literals).
+                    # Print every skip so failures are visible.
+                    n_skipped += 1
+                    if n_skipped <= 3:
+                        print(f"  [row-skip] {tbl}: {type(e).__name__}: {e}", flush=True)
+
+        if n_inserted == 0:
+            print(f"[ERROR] 0 rows inserted into {tbl} ({n_skipped} skipped) — aborting!", flush=True)
+            sys.exit(1)
+        print(f"  {tbl}: {n_inserted} rows inserted ({n_skipped} skipped)", flush=True)
+        total_inserted += n_inserted
+
+    if total_inserted == 0:
+        print(f"[ERROR] Keyspace '$keyspace': 0 total rows inserted — all tables skipped or failed!", flush=True)
+        sys.exit(1)
+    print(f"[OK] Keyspace '$keyspace': {total_inserted} total rows inserted across {len(tables)} tables", flush=True)
+    cluster.shutdown()
+
+except SystemExit:
+    raise
+except Exception:
+    print("[FATAL] Unhandled exception during nb row insertion:", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 PYEOF
 }
 
 insert_oa_rows() {
   log "Inserting rows into test_oa (oa format)..."
-  run $ENGINE exec "$CONTAINER_NAME" python3 - <<PYEOF
-import uuid, random, datetime
+  run $ENGINE exec -i "$CONTAINER_NAME" python3 - <<PYEOF
+import sys, traceback, uuid, random, datetime, time
 from cassandra.cluster import Cluster
 
-cluster = Cluster(['127.0.0.1'])
-session = cluster.connect('test_oa')
+def connect_with_retry(keyspace, attempts=10, delay=6):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            cluster = Cluster(['127.0.0.1'])
+            session = cluster.connect(keyspace)
+            print(f"[connect] Connected to {keyspace} on attempt {attempt}", flush=True)
+            return cluster, session
+        except Exception as exc:
+            last_exc = exc
+            print(f"[connect] Attempt {attempt}/{attempts} failed: {exc}", flush=True)
+            time.sleep(delay)
+    raise RuntimeError(f"Could not connect after {attempts} attempts: {last_exc}")
 
-now = datetime.datetime.utcnow()
+try:
+    cluster, session = connect_with_retry('test_oa')
+    now = datetime.datetime.utcnow()
 
-# simple_table
-for _ in range(20):
-    session.execute(
-        "INSERT INTO simple_table (id, name, age, salary, height, weight, active, created) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-        (uuid.uuid4(), f"user_{random.randint(1,1000)}", random.randint(18, 80),
-         random.randint(30000, 200000), round(random.uniform(1.5, 2.1), 2),
-         round(random.uniform(50.0, 120.0), 2), random.choice([True, False]),
-         now - datetime.timedelta(days=random.randint(0, 365))))
-
-# collection_table
-for _ in range(20):
-    session.execute(
-        "INSERT INTO collection_table (id, tags, scores, properties) VALUES (%s,%s,%s,%s)",
-        (uuid.uuid4(),
-         {f"tag{i}" for i in range(random.randint(1, 5))},
-         [random.randint(1, 100) for _ in range(random.randint(1, 5))],
-         {f"k{i}": f"v{i}" for i in range(random.randint(1, 4))}))
-
-# udt_table — address UDT (large_field > 128 bytes exercises oa code path)
-from cassandra.util import OrderedMapSerializedKey
-addr_type = cluster.metadata.keyspaces['test_oa'].user_types['address_type']
-for _ in range(10):
-    addr = addr_type(
-        street=f"{random.randint(1,9999)} Main St",
-        city=random.choice(["Springfield", "Shelbyville", "Portland"]),
-        country="US",
-        postal_code=f"{random.randint(10000,99999)}"
-    )
-    session.execute(
-        "INSERT INTO udt_table (id, name, address, large_field) VALUES (%s,%s,%s,%s)",
-        (uuid.uuid4(), f"person_{random.randint(1,100)}", addr, "x" * 200))
-
-# ttl_table (schema has default_time_to_live=86400)
-for _ in range(15):
-    session.execute(
-        "INSERT INTO ttl_table (id, data, expiring_value) VALUES (%s,%s,%s)",
-        (uuid.uuid4(), f"data_{random.randint(1,10000)}", random.randint(1, 9999)))
-
-# static_table
-for pk_i in range(5):
-    pk = uuid.uuid4()
-    for ck_i in range(4):
+    # simple_table
+    for _ in range(20):
         session.execute(
-            "INSERT INTO static_table (partition_key, clustering_key, static_col, row_data) VALUES (%s,%s,%s,%s)",
-            (pk, ck_i, f"static_{pk_i}", f"row_{ck_i}"))
+            "INSERT INTO simple_table (id, name, age, salary, height, weight, active, created) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+            (uuid.uuid4(), f"user_{random.randint(1,1000)}", random.randint(18, 80),
+             random.randint(30000, 200000), round(random.uniform(1.5, 2.1), 2),
+             round(random.uniform(50.0, 120.0), 2), random.choice([True, False]),
+             now - datetime.timedelta(days=random.randint(0, 365))))
 
-# tombstone_table — insert then delete to create tombstones
-pk = uuid.uuid4()
-ts_base = now
-for i in range(8):
-    session.execute(
-        "INSERT INTO tombstone_table (id, ts, value, extra) VALUES (%s,%s,%s,%s)",
-        (pk, ts_base + datetime.timedelta(seconds=i), f"v{i}", f"e{i}"))
-# Create row tombstone
-session.execute("DELETE FROM tombstone_table WHERE id=%s AND ts=%s",
-                (pk, ts_base + datetime.timedelta(seconds=3)))
-# Create cell tombstone
-session.execute("UPDATE tombstone_table SET extra=null WHERE id=%s AND ts=%s",
-                (pk, ts_base + datetime.timedelta(seconds=2)))
-# Range tombstone
-pk2 = uuid.uuid4()
-for i in range(5):
-    session.execute(
-        "INSERT INTO tombstone_table (id, ts, value, extra) VALUES (%s,%s,%s,%s)",
-        (pk2, ts_base + datetime.timedelta(seconds=i*10), f"vr{i}", f"er{i}"))
-session.execute(
-    "DELETE FROM tombstone_table WHERE id=%s AND ts >= %s AND ts <= %s",
-    (pk2, ts_base, ts_base + datetime.timedelta(seconds=20)))
+    # collection_table
+    for _ in range(20):
+        session.execute(
+            "INSERT INTO collection_table (id, tags, scores, properties) VALUES (%s,%s,%s,%s)",
+            (uuid.uuid4(),
+             {f"tag{i}" for i in range(random.randint(1, 5))},
+             [random.randint(1, 100) for _ in range(random.randint(1, 5))],
+             {f"k{i}": f"v{i}" for i in range(random.randint(1, 4))}))
 
-print("test_oa: rows inserted")
-cluster.shutdown()
+    # udt_table — address UDT (large_field > 128 bytes exercises oa code path)
+    # Cassandra-driver 3.x+ represents UDTs as namedtuple-like objects.
+    # Register the type first so the driver can serialize it correctly.
+    cluster.register_user_type('test_oa', 'address_type',
+                               dict)  # Use dict for generic UDT mapping
+    for _ in range(10):
+        addr = {
+            'street': f"{random.randint(1,9999)} Main St",
+            'city': random.choice(["Springfield", "Shelbyville", "Portland"]),
+            'country': "US",
+            'postal_code': f"{random.randint(10000,99999)}"
+        }
+        session.execute(
+            "INSERT INTO udt_table (id, name, address, large_field) VALUES (%s,%s,%s,%s)",
+            (uuid.uuid4(), f"person_{random.randint(1,100)}", addr, "x" * 200))
+
+    # ttl_table (schema has default_time_to_live=86400)
+    for _ in range(15):
+        session.execute(
+            "INSERT INTO ttl_table (id, data, expiring_value) VALUES (%s,%s,%s)",
+            (uuid.uuid4(), f"data_{random.randint(1,10000)}", random.randint(1, 9999)))
+
+    # static_table
+    for pk_i in range(5):
+        pk = uuid.uuid4()
+        for ck_i in range(4):
+            session.execute(
+                "INSERT INTO static_table (partition_key, clustering_key, static_col, row_data) VALUES (%s,%s,%s,%s)",
+                (pk, ck_i, f"static_{pk_i}", f"row_{ck_i}"))
+
+    # tombstone_table — insert then delete to create tombstones
+    pk = uuid.uuid4()
+    ts_base = now
+    for i in range(8):
+        session.execute(
+            "INSERT INTO tombstone_table (id, ts, value, extra) VALUES (%s,%s,%s,%s)",
+            (pk, ts_base + datetime.timedelta(seconds=i), f"v{i}", f"e{i}"))
+    # Create row tombstone
+    session.execute("DELETE FROM tombstone_table WHERE id=%s AND ts=%s",
+                    (pk, ts_base + datetime.timedelta(seconds=3)))
+    # Create cell tombstone
+    session.execute("UPDATE tombstone_table SET extra=null WHERE id=%s AND ts=%s",
+                    (pk, ts_base + datetime.timedelta(seconds=2)))
+    # Range tombstone
+    pk2 = uuid.uuid4()
+    for i in range(5):
+        session.execute(
+            "INSERT INTO tombstone_table (id, ts, value, extra) VALUES (%s,%s,%s,%s)",
+            (pk2, ts_base + datetime.timedelta(seconds=i*10), f"vr{i}", f"er{i}"))
+    session.execute(
+        "DELETE FROM tombstone_table WHERE id=%s AND ts >= %s AND ts <= %s",
+        (pk2, ts_base, ts_base + datetime.timedelta(seconds=20)))
+
+    print("[OK] test_oa: rows inserted", flush=True)
+    cluster.shutdown()
+
+except SystemExit:
+    raise
+except Exception:
+    print("[FATAL] Unhandled exception during oa row insertion:", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 PYEOF
 }
 
 insert_da_rows() {
   log "Inserting rows into test_da (da/BTI format)..."
-  run $ENGINE exec "$CONTAINER_NAME" python3 - <<PYEOF
-import uuid, random, datetime
+  run $ENGINE exec -i "$CONTAINER_NAME" python3 - <<PYEOF
+import sys, traceback, uuid, random, datetime, time
 from cassandra.cluster import Cluster
 
-cluster = Cluster(['127.0.0.1'])
-session = cluster.connect('test_da')
+def connect_with_retry(keyspace, attempts=10, delay=6):
+    last_exc = None
+    for attempt in range(1, attempts + 1):
+        try:
+            cluster = Cluster(['127.0.0.1'])
+            session = cluster.connect(keyspace)
+            print(f"[connect] Connected to {keyspace} on attempt {attempt}", flush=True)
+            return cluster, session
+        except Exception as exc:
+            last_exc = exc
+            print(f"[connect] Attempt {attempt}/{attempts} failed: {exc}", flush=True)
+            time.sleep(delay)
+    raise RuntimeError(f"Could not connect after {attempts} attempts: {last_exc}")
 
-now = datetime.datetime.utcnow()
+try:
+    cluster, session = connect_with_retry('test_da')
+    now = datetime.datetime.utcnow()
 
-# simple_table
-for _ in range(15):
-    session.execute(
-        "INSERT INTO simple_table (id, name, age, salary, active, created) VALUES (%s,%s,%s,%s,%s,%s)",
-        (uuid.uuid4(), f"user_{random.randint(1,1000)}", random.randint(18, 80),
-         random.randint(30000, 200000), random.choice([True, False]),
-         now - datetime.timedelta(days=random.randint(0, 365))))
+    # simple_table
+    for _ in range(15):
+        session.execute(
+            "INSERT INTO simple_table (id, name, age, salary, active, created) VALUES (%s,%s,%s,%s,%s,%s)",
+            (uuid.uuid4(), f"user_{random.randint(1,1000)}", random.randint(18, 80),
+             random.randint(30000, 200000), random.choice([True, False]),
+             now - datetime.timedelta(days=random.randint(0, 365))))
 
-# collection_table
-for _ in range(15):
-    session.execute(
-        "INSERT INTO collection_table (id, tags, scores, properties) VALUES (%s,%s,%s,%s)",
-        (uuid.uuid4(),
-         {f"tag{i}" for i in range(random.randint(1, 4))},
-         [random.randint(1, 100) for _ in range(random.randint(1, 4))],
-         {f"k{i}": f"v{i}" for i in range(random.randint(1, 3))}))
+    # collection_table
+    for _ in range(15):
+        session.execute(
+            "INSERT INTO collection_table (id, tags, scores, properties) VALUES (%s,%s,%s,%s)",
+            (uuid.uuid4(),
+             {f"tag{i}" for i in range(random.randint(1, 4))},
+             [random.randint(1, 100) for _ in range(random.randint(1, 4))],
+             {f"k{i}": f"v{i}" for i in range(random.randint(1, 3))}))
 
-# ttl_table (schema has default_time_to_live=86400)
-for _ in range(15):
-    session.execute(
-        "INSERT INTO ttl_table (id, data, expiring_value) VALUES (%s,%s,%s)",
-        (uuid.uuid4(), f"data_{random.randint(1,10000)}", random.randint(1, 9999)))
+    # ttl_table (schema has default_time_to_live=86400)
+    for _ in range(15):
+        session.execute(
+            "INSERT INTO ttl_table (id, data, expiring_value) VALUES (%s,%s,%s)",
+            (uuid.uuid4(), f"data_{random.randint(1,10000)}", random.randint(1, 9999)))
 
-print("test_da: rows inserted")
-cluster.shutdown()
+    print("[OK] test_da: rows inserted", flush=True)
+    cluster.shutdown()
+
+except SystemExit:
+    raise
+except Exception:
+    print("[FATAL] Unhandled exception during da row insertion:", flush=True)
+    traceback.print_exc()
+    sys.exit(1)
 PYEOF
+}
+
+# ---------------------------------------------------------------------------
+# Helper: verify_user_keyspaces — hard check that user data actually exists
+# Must be called after export. Fails loudly if any user keyspace is empty.
+# ---------------------------------------------------------------------------
+verify_user_keyspaces() {
+  local sstables_dir="$1"
+  log "=== Verifying user keyspace Data.db files ==="
+  local all_ok=1
+
+  for ks in test_basic test_collections test_timeseries test_wide_rows test_oa test_da; do
+    # Search both flat and nested paths (e.g. data/test_basic/... or test_basic/...)
+    local count
+    count=$(find "$sstables_dir" -type f -name "*-Data.db" | grep -c "/$ks/" 2>/dev/null || true)
+    if [[ "$count" -eq 0 ]]; then
+      log "  [FAIL] $ks: 0 Data.db files found — inserts produced no SSTables!"
+      all_ok=0
+    else
+      log "  [OK]   $ks: $count Data.db file(s) found"
+    fi
+  done
+
+  if [[ "$all_ok" -eq 0 ]]; then
+    fail "One or more user keyspaces have empty SSTable directories. Dataset is invalid — aborting."
+  fi
+  log "All user keyspaces verified with non-empty SSTable data."
 }
 
 generate_sstabledump_jsonl() {
@@ -403,7 +629,7 @@ fi
 # Install cassandra-driver inside container (needed for row insertion)
 # python3-pip is not present in the cassandra:5.0.2 image; install it first.
 log "Installing python3-pip in container..."
-run $ENGINE exec "$CONTAINER_NAME" bash -c "apt-get update && apt-get install -y python3-pip"
+run $ENGINE exec "$CONTAINER_NAME" bash -c "apt-get update -qq && apt-get install -y -q python3-pip"
 
 log "Installing cassandra-driver in container..."
 run $ENGINE exec "$CONTAINER_NAME" pip3 install --quiet cassandra-driver
@@ -501,6 +727,9 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   else
     fail "tar export from container failed."
   fi
+
+  # Hard check: every user keyspace must have at least one Data.db
+  verify_user_keyspaces "$SSTABLES_DIR"
 
   # Generate JSONL golden files
   generate_sstabledump_jsonl "$SSTABLES_DIR"
