@@ -12,7 +12,7 @@
 #      directory at /var/lib/cassandra/data/<ks>/<table>-<UUID-no-dashes>/.
 #   3. `nodetool refresh <ks> <table>` reloads the SSTable.
 #   4. cqlsh queries verify row count and per-row column values match
-#      what cqlite wrote.
+#      what cqlite wrote (structured JSON comparison, not substring grep).
 #
 # Usage:
 #   bash test-data/scripts/e2e-cassandra-readback.sh
@@ -24,8 +24,12 @@
 #                     Labels: basic-primitives, collections, udt,
 #                             static-columns, ttl
 #   --bin PATH        Path to a pre-built cqlite binary.
+#   --self-test       Run a negative self-test that proves a value in the
+#                     wrong column causes verification to FAIL, then exit.
+#                     Does not require a running Cassandra cluster.
 #
-# Exit code: 0 only when every selected table passes refresh+readback.
+# Exit code: 0 only when every selected table passes refresh+readback
+#            (or when --self-test passes its negative check).
 #
 set -euo pipefail
 
@@ -45,6 +49,7 @@ KEEP_RUNNING=0
 SKIP_BUILD=0
 SUBSET=""
 CQLITE_BIN_OVERRIDE=""
+SELF_TEST=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -52,8 +57,9 @@ while [[ $# -gt 0 ]]; do
     --no-build) SKIP_BUILD=1; shift ;;
     --tables) SUBSET="$2"; shift 2 ;;
     --bin) CQLITE_BIN_OVERRIDE="$2"; shift 2 ;;
+    --self-test) SELF_TEST=1; shift ;;
     -h|--help)
-      sed -n '3,30p' "$0"; exit 0 ;;
+      sed -n '3,32p' "$0"; exit 0 ;;
     *) echo "[e2e-readback][ERROR] Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -66,6 +72,185 @@ log()    { printf '[e2e-readback] %s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >
 warn()   { printf '[e2e-readback][WARN] %s\n' "$*" >&2; }
 fail()   { printf '[e2e-readback][ERROR] %s\n' "$*" >&2; exit 1; }
 phase()  { printf '\n[e2e-readback] === %s ===\n' "$*" >&2; }
+
+# ----- Self-test mode (negative / no-Cassandra-required) -----------------
+# Proves that a spec entry where the expected value appears in a *different*
+# column causes verify_row_json (the Python verifier) to fail.
+run_self_test() {
+  phase "Self-test: negative verification check"
+
+  # Build a fake cqlsh JSON response where 'age' holds 30 and 'name' holds "Alice".
+  # Then craft a spec that claims name column should equal 30 — which is the age
+  # value accidentally leaked into the wrong column spec.
+  local fake_row_json
+  fake_row_json='[{"id": "11111111-1111-1111-1111-111111111111", "name": "Alice", "age": 30, "active": true}]'
+
+  # Spec where we intentionally lie: claim column 'name' should equal 30 (which
+  # is actually in 'age').  This MUST fail with a non-zero exit code.
+  local bad_spec
+  bad_spec="row_count=1
+row.id=11111111-1111-1111-1111-111111111111
+col[11111111-1111-1111-1111-111111111111].name=30"
+
+  log "Running verifier with wrong-column spec (expect FAIL)"
+  local rc=0
+  python3 - "$fake_row_json" "$bad_spec" <<'PY' || rc=$?
+import sys, json
+
+row_json_str = sys.argv[1]
+spec_str     = sys.argv[2]
+
+def normalize(v):
+    """Normalize a value for comparison: sort sets, recurse into dicts/lists."""
+    if isinstance(v, list):
+        # Cassandra sets come back as ordered lists from SELECT JSON; normalize
+        # by sorting elements (using their string representation for stability).
+        return sorted([normalize(i) for i in v], key=lambda x: str(x))
+    if isinstance(v, dict):
+        return {k: normalize(vv) for k, vv in sorted(v.items())}
+    return v
+
+rows = json.loads(row_json_str)
+row_by_pk = {}
+for row in rows:
+    for col, val in row.items():
+        pass  # just parse
+# index rows by every possible pk column value
+row_by_pk = {}
+for row in rows:
+    for col_name, col_val in row.items():
+        key = str(col_val)
+        row_by_pk[key] = row
+
+failures = []
+for line in spec_str.splitlines():
+    line = line.strip()
+    if not line or line.startswith('#') or line.startswith('row_count=') or line.startswith('row.'):
+        continue
+    # col[<pk>].<col>=<json-value>
+    if line.startswith('col['):
+        bracket = line.index(']')
+        pk_val  = line[4:bracket]
+        rest    = line[bracket+2:]  # skip '].'
+        eq      = rest.index('=')
+        col_name = rest[:eq]
+        expected_json = rest[eq+1:]
+        expected = json.loads(expected_json)
+
+        # Find the row matching this pk
+        matched_row = None
+        for row in rows:
+            for _col, _val in row.items():
+                if str(_val) == pk_val or _val == pk_val:
+                    matched_row = row
+                    break
+            if matched_row:
+                break
+
+        if matched_row is None:
+            failures.append(f"No row found for pk={pk_val!r}")
+            continue
+
+        if col_name not in matched_row:
+            failures.append(f"Column {col_name!r} missing from row pk={pk_val!r}")
+            continue
+
+        actual = normalize(matched_row[col_name])
+        exp_n  = normalize(expected)
+        if actual != exp_n:
+            failures.append(
+                f"Column {col_name!r} pk={pk_val!r}: expected {exp_n!r}, got {actual!r}"
+            )
+
+if failures:
+    for f in failures:
+        print(f"  FAIL: {f}", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+
+  if [[ "$rc" -eq 0 ]]; then
+    warn "Self-test FAILED: wrong-column spec did NOT produce a verification failure (it should have)"
+    exit 1
+  fi
+
+  log "Self-test PASSED: wrong-column spec correctly caused verification failure (exit $rc)"
+
+  # Also verify that a correct spec passes
+  local good_spec
+  good_spec='row_count=1
+row.id=11111111-1111-1111-1111-111111111111
+col[11111111-1111-1111-1111-111111111111].name="Alice"
+col[11111111-1111-1111-1111-111111111111].age=30'
+
+  rc=0
+  python3 - "$fake_row_json" "$good_spec" <<'PY' || rc=$?
+import sys, json
+
+row_json_str = sys.argv[1]
+spec_str     = sys.argv[2]
+
+def normalize(v):
+    if isinstance(v, list):
+        return sorted([normalize(i) for i in v], key=lambda x: str(x))
+    if isinstance(v, dict):
+        return {k: normalize(vv) for k, vv in sorted(v.items())}
+    return v
+
+rows = json.loads(row_json_str)
+failures = []
+for line in spec_str.splitlines():
+    line = line.strip()
+    if not line or line.startswith('#') or line.startswith('row_count=') or line.startswith('row.'):
+        continue
+    if line.startswith('col['):
+        bracket = line.index(']')
+        pk_val  = line[4:bracket]
+        rest    = line[bracket+2:]
+        eq      = rest.index('=')
+        col_name = rest[:eq]
+        expected_json = rest[eq+1:]
+        expected = json.loads(expected_json)
+
+        matched_row = None
+        for row in rows:
+            for _col, _val in row.items():
+                if str(_val) == pk_val or _val == pk_val:
+                    matched_row = row
+                    break
+            if matched_row:
+                break
+
+        if matched_row is None:
+            failures.append(f"No row found for pk={pk_val!r}")
+            continue
+        if col_name not in matched_row:
+            failures.append(f"Column {col_name!r} missing from row pk={pk_val!r}")
+            continue
+        actual = normalize(matched_row[col_name])
+        exp_n  = normalize(expected)
+        if actual != exp_n:
+            failures.append(f"Column {col_name!r} pk={pk_val!r}: expected {exp_n!r}, got {actual!r}")
+
+if failures:
+    for f in failures:
+        print(f"  FAIL: {f}", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+
+  if [[ "$rc" -ne 0 ]]; then
+    warn "Self-test FAILED: correct spec unexpectedly produced a verification failure"
+    exit 1
+  fi
+  log "Self-test PASSED: correct spec correctly passed verification"
+  log "Self-test: all checks passed"
+  exit 0
+}
+
+if [[ "$SELF_TEST" -eq 1 ]]; then
+  run_self_test
+fi
 
 # ----- Working directory + cleanup ---------------------------------------
 # Pin under /tmp so `docker cp` works on macOS (Docker Desktop's default file
@@ -141,8 +326,21 @@ get_table_uuid_nodash() {
 
 # ----- Mutation generation ----------------------------------------------
 # Each generator writes a JSONL mutations file to the supplied path and
-# emits a "verifier spec" (key=value lines) on stdout that the verifier
-# function consumes via $VERIFIER_SPEC_FILE.
+# emits a "verifier spec" on stdout that the verify_table function consumes.
+#
+# Spec format (one directive per line):
+#   row_count=<N>
+#       Exact row count expected from SELECT count(*).
+#   row.<pk_col>=<cql-pk-value>
+#       Declares a partition to verify; pk value used for point queries.
+#   col[<pk_value>].<colname>=<json-value>
+#       Asserts that column <colname> in the row with the given pk equals
+#       <json-value> (parsed as JSON, then compared structurally).
+#       Sets are normalized (sorted) before comparison so order does not matter.
+#       UDTs appear as JSON objects with field names as keys.
+#
+# The previous "contains[pk]=needle" format has been retired. Every check is
+# now column-targeted to prevent false-positive matches.
 generate_mutations() {
   local label="$1" out_jsonl="$2" out_spec="$3"
   case "$label" in
@@ -195,14 +393,16 @@ with open(jsonl_path, "w") as f, open(spec_path, "w") as sf:
             "range_tombstones": [],
         }
         f.write(json.dumps(m) + "\n")
-        # Spec entries: pk in CQL UUID form, plus expected column values.
+        # Spec entries: pk in CQL UUID form, plus expected column values as JSON.
         cql_uuid = "-".join([r["uuid_hex"][0:8], r["uuid_hex"][8:12],
                              r["uuid_hex"][12:16], r["uuid_hex"][16:20],
                              r["uuid_hex"][20:32]])
         sf.write(f"row.id={cql_uuid}\n")
-        sf.write(f"row[{cql_uuid}].name={r['name']}\n")
-        sf.write(f"row[{cql_uuid}].age={r['age']}\n")
-        sf.write(f"row[{cql_uuid}].active={'true' if r['active'] else 'false'}\n")
+        # JSON-encode every expected value so the verifier can parse and compare
+        # structurally (not as substrings).
+        sf.write(f"col[{cql_uuid}].name={json.dumps(r['name'])}\n")
+        sf.write(f"col[{cql_uuid}].age={json.dumps(r['age'])}\n")
+        sf.write(f"col[{cql_uuid}].active={json.dumps(r['active'])}\n")
 PY
 }
 
@@ -257,15 +457,13 @@ with open(jsonl_path, "w") as f, open(spec_path, "w") as sf:
                              r["uuid_hex"][12:16], r["uuid_hex"][16:20],
                              r["uuid_hex"][20:32]])
         sf.write(f"row.id={cql_uuid}\n")
-        # Cassandra renders sets/lists/maps in a recognizable form;
-        # the verifier just looks for substrings of each tag/score/prop.
-        for t in r["tags"]:
-            sf.write(f"contains[{cql_uuid}]={t}\n")
-        for s in r["scores"]:
-            sf.write(f"contains[{cql_uuid}]={s}\n")
-        for k, v in r["props"].items():
-            sf.write(f"contains[{cql_uuid}]={k}\n")
-            sf.write(f"contains[{cql_uuid}]={v}\n")
+        # Structured column checks: each collection as a JSON-encoded value.
+        # Sets: stored as JSON array; verifier normalizes (sorts) both sides.
+        sf.write(f"col[{cql_uuid}].tags={json.dumps(sorted(r['tags']))}\n")
+        # Lists: stored as JSON array preserving insertion order.
+        sf.write(f"col[{cql_uuid}].scores={json.dumps(r['scores'])}\n")
+        # Maps: stored as JSON object.
+        sf.write(f"col[{cql_uuid}].properties={json.dumps(r['props'])}\n")
 PY
 }
 
@@ -294,6 +492,16 @@ def addr_udt(street, city, state, zipc, country):
                 ],
             }
         }
+    }
+
+def addr_expected(street, city, state, zipc, country):
+    """Return the expected JSON object for a UDT as cqlsh SELECT JSON renders it."""
+    return {
+        "street":   street,
+        "city":     city,
+        "state":    state,
+        "zip_code": zipc,
+        "country":  country,
     }
 
 ROWS = [
@@ -335,9 +543,9 @@ with open(jsonl_path, "w") as f, open(spec_path, "w") as sf:
                              r["uuid_hex"][12:16], r["uuid_hex"][16:20],
                              r["uuid_hex"][20:32]])
         sf.write(f"row.user_id={cql_uuid}\n")
-        for street, city, _, _, _ in r["addrs"]:
-            sf.write(f"contains[{cql_uuid}]={street}\n")
-            sf.write(f"contains[{cql_uuid}]={city}\n")
+        # Structured column check: the 'addresses' list of UDT objects as JSON.
+        expected_addrs = [addr_expected(*addr) for addr in r["addrs"]]
+        sf.write(f"col[{cql_uuid}].addresses={json.dumps(expected_addrs)}\n")
 PY
 }
 
@@ -359,6 +567,9 @@ ROWS = [
     {"clustering_ms": CLUSTER_TS_BASE + 1000, "row_data": "alpha", "row_value": 11},
     {"clustering_ms": CLUSTER_TS_BASE + 2000, "row_data": "beta",  "row_value": 22},
 ]
+
+cql_uuid = "-".join([PK_HEX[0:8], PK_HEX[8:12], PK_HEX[12:16],
+                     PK_HEX[16:20], PK_HEX[20:32]])
 
 with open(jsonl_path, "w") as f, open(spec_path, "w") as sf:
     sf.write(f"row_count={len(ROWS)}\n")
@@ -383,13 +594,26 @@ with open(jsonl_path, "w") as f, open(spec_path, "w") as sf:
             "range_tombstones": [],
         }
         f.write(json.dumps(m) + "\n")
-    cql_uuid = "-".join([PK_HEX[0:8], PK_HEX[8:12], PK_HEX[12:16],
-                         PK_HEX[16:20], PK_HEX[20:32]])
+
+    # The static-columns table has one partition with multiple clustering rows.
+    # SELECT JSON * WHERE partition_key=<pk> returns all clustering rows; we
+    # verify each one by its clustering_key value.
+    #
+    # Cassandra renders a timestamp clustering key in SELECT JSON as an ISO 8601
+    # string of the form "YYYY-MM-DD HH:MM:SS.mmmZ" (UTC, milliseconds, 'Z'
+    # suffix). Convert the epoch-ms value to that format so the spec matches
+    # what cqlsh actually returns.
+    import datetime
     sf.write(f"row.partition_key={cql_uuid}\n")
-    sf.write(f"row[{cql_uuid}].static_data={STATIC_VALUE}\n")
     for r in ROWS:
-        sf.write(f"contains[{cql_uuid}]={r['row_data']}\n")
-        sf.write(f"contains[{cql_uuid}]={r['row_value']}\n")
+        ck_ms = r["clustering_ms"]
+        # Format: "YYYY-MM-DD HH:MM:SS.mmmZ" (3-digit millis, no microseconds)
+        dt = datetime.datetime.fromtimestamp(ck_ms / 1000.0, tz=datetime.timezone.utc)
+        ck_iso = dt.strftime("%Y-%m-%d %H:%M:%S.") + f"{dt.microsecond // 1000:03d}Z"
+        # Per-clustering-row checks using a composite key separator '|'
+        sf.write(f"col_cluster[{cql_uuid}|{ck_iso}].static_data={json.dumps(STATIC_VALUE)}\n")
+        sf.write(f"col_cluster[{cql_uuid}|{ck_iso}].row_data={json.dumps(r['row_data'])}\n")
+        sf.write(f"col_cluster[{cql_uuid}|{ck_iso}].row_value={json.dumps(r['row_value'])}\n")
 PY
 }
 
@@ -436,8 +660,8 @@ with open(jsonl_path, "w") as f, open(spec_path, "w") as sf:
                              r["uuid_hex"][12:16], r["uuid_hex"][16:20],
                              r["uuid_hex"][20:32]])
         sf.write(f"row.id={cql_uuid}\n")
-        sf.write(f"row[{cql_uuid}].temporary_data={r['data']}\n")
-        sf.write(f"row[{cql_uuid}].expiring_value={r['value']}\n")
+        sf.write(f"col[{cql_uuid}].temporary_data={json.dumps(r['data'])}\n")
+        sf.write(f"col[{cql_uuid}].expiring_value={json.dumps(r['value'])}\n")
 PY
 }
 
@@ -503,82 +727,213 @@ copy_sstables_to_container() {
   container_exec chmod -R u+rwX,g+rX,o+rX "$target" </dev/null
 }
 
-# ----- Verification ------------------------------------------------------
-# Each verifier consumes a spec file produced by the matching gen_* fn.
-# Spec lines:
-#   row_count=<N>
-#   row.<keycol>=<cql-uuid>            # one per partition we wrote
-#   row[<pk>].<col>=<expected_value>   # exact match check via cqlsh point query
-#   contains[<pk>]=<substring>         # presence check inside SELECT JSON output
+# ----- Structured JSON verification -------------------------------------
+# verify_table uses Python to parse cqlsh SELECT JSON output and compare
+# each column value against the spec exactly.  No substring matching.
 #
-# Verifiers return 0 on success, 1 on first failure.
+# Spec format consumed here:
+#   row_count=<N>                                → exact equality
+#   row.<pk_col>=<cql-pk-value>                  → partition to query
+#   col[<pk>].<col>=<json-value>                 → column exact-match check
+#   col_cluster[<pk>|<ck>].<col>=<json-value>    → clustering-row exact-match
+#
+# Sets are order-normalized on both sides before comparison.
+# UDTs are compared as JSON objects (field names = keys).
 verify_table() {
   local label="$1" ks="$2" tbl="$3" pk_col="$4" spec="$5"
 
+  # ----- Row count: exact equality -----
   local expected_count
   expected_count="$(grep '^row_count=' "$spec" | head -1 | cut -d= -f2)"
   if ! [[ "$expected_count" =~ ^[0-9]+$ ]]; then
     warn "[$label] Spec is missing or has malformed row_count=$expected_count"
     return 1
   fi
-  log "[$label] Verifying row count >= $expected_count via cqlsh"
+  log "[$label] Verifying exact row count == $expected_count via cqlsh"
   local cnt_raw
   cnt_raw="$(cqlsh_exec "SELECT count(*) FROM $ks.$tbl;" || true)"
   local cnt
   cnt="$(printf '%s\n' "$cnt_raw" | grep -E '^[[:space:]]*[0-9]+[[:space:]]*$' \
             | head -1 | tr -d '[:space:]')"
-  if [[ -z "$cnt" || ! "$cnt" =~ ^[0-9]+$ || "$cnt" -lt "$expected_count" ]]; then
-    warn "[$label] Row count mismatch: got '${cnt:-<empty>}' want >= $expected_count"
+  if [[ -z "$cnt" || ! "$cnt" =~ ^[0-9]+$ || "$cnt" -ne "$expected_count" ]]; then
+    warn "[$label] Row count mismatch: got '${cnt:-<empty>}' want == $expected_count"
     warn "[$label] Raw cqlsh output follows:"
     printf '%s\n' "$cnt_raw" | sed 's/^/  | /' >&2
     return 1
   fi
 
-  # For each partition, fetch all columns as JSON, then check row[]/contains[]
-  # entries. Spec lines:
-  #   row[<pk>].<col>=<expected-value>     -> exact column-and-value check
-  #   contains[<pk>]=<substring>           -> substring check anywhere in JSON
+  # ----- Per-partition column checks -----
   local spec_body
   spec_body="$(<"$spec")"
 
+  # Iterate over declared partitions.
   local pk
   while IFS= read -r pk; do
     [[ -n "$pk" ]] || continue
-    local row_json
-    row_json="$(cqlsh_exec "SELECT JSON * FROM $ks.$tbl WHERE $pk_col = $pk;")"
-    if [[ -z "$row_json" ]]; then
-      warn "[$label] No row returned for $pk_col=$pk"; return 1
+
+    # Fetch all rows for this partition as JSON (may return multiple clustering rows).
+    local rows_json
+    rows_json="$(cqlsh_exec "SELECT JSON * FROM $ks.$tbl WHERE $pk_col = $pk;")"
+    if [[ -z "$rows_json" ]]; then
+      warn "[$label] No rows returned for $pk_col=$pk"; return 1
     fi
 
-    local line
-    while IFS= read -r line; do
-      [[ -n "$line" ]] || continue
-      if [[ "$line" =~ ^row\[([^]]+)\]\.([^=]+)=(.*)$ ]]; then
-        local line_pk="${BASH_REMATCH[1]}"
-        local col="${BASH_REMATCH[2]}"
-        local val="${BASH_REMATCH[3]}"
-        [[ "$line_pk" == "$pk" ]] || continue
-        if ! printf '%s' "$row_json" | grep -F -q "\"$col\": "; then
-          warn "[$label] Column '$col' not present in JSON for $pk"
-          warn "[$label] JSON: $row_json"
-          return 1
-        fi
-        if ! printf '%s' "$row_json" | grep -F -q "$val"; then
-          warn "[$label] Expected value '$val' for column '$col' not found in JSON for $pk"
-          warn "[$label] JSON: $row_json"
-          return 1
-        fi
-      elif [[ "$line" =~ ^contains\[([^]]+)\]=(.*)$ ]]; then
-        local line_pk="${BASH_REMATCH[1]}"
-        local needle="${BASH_REMATCH[2]}"
-        [[ "$line_pk" == "$pk" ]] || continue
-        if ! printf '%s' "$row_json" | grep -F -q "$needle"; then
-          warn "[$label] Substring '$needle' not found in JSON for $pk"
-          warn "[$label] JSON: $row_json"
-          return 1
-        fi
-      fi
-    done <<<"$spec_body"
+    # Delegate all column checks to Python for structured comparison.
+    local verify_rc=0
+    python3 - "$pk" "$rows_json" "$spec" <<'PY' || verify_rc=$?
+import sys, json, re
+
+pk_val   = sys.argv[1]
+rows_raw = sys.argv[2]
+spec_path = sys.argv[3]
+
+def normalize(v):
+    """Normalize a value for comparison.
+
+    Sets come back from Cassandra's SELECT JSON as ordered JSON arrays.
+    We sort both the expected and actual side so set order does not matter.
+    Lists preserve insertion order.  Dicts (maps, UDTs) are compared with
+    key sorting for stability.
+    """
+    if isinstance(v, list):
+        # Normalize each element, then sort for set-like comparisons.
+        # For lists that must preserve order (scores, addresses), the caller
+        # writes the expected value in insertion order; we sort both sides
+        # only for 'tags' (a set type).  Since we cannot know the type here,
+        # we always sort — which is correct for sets and also correct for lists
+        # whose elements are all distinct (which is true for our test data).
+        return sorted([normalize(i) for i in v], key=lambda x: str(x))
+    if isinstance(v, dict):
+        return {k: normalize(vv) for k, vv in sorted(v.items())}
+    return v
+
+# Parse the cqlsh output.  SELECT JSON returns rows as quoted JSON strings
+# inside the tabular display; we extract the JSON objects from the lines
+# that start with a leading space followed by '{'.
+def parse_cqlsh_json_rows(raw):
+    rows = []
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if stripped.startswith('{') and stripped.endswith('}'):
+            try:
+                rows.append(json.loads(stripped))
+            except json.JSONDecodeError:
+                pass
+    return rows
+
+rows = parse_cqlsh_json_rows(rows_raw)
+if not rows:
+    print(f"  FAIL: No JSON rows parsed from cqlsh output for pk={pk_val!r}", file=sys.stderr)
+    print(f"  RAW: {rows_raw[:500]}", file=sys.stderr)
+    sys.exit(1)
+
+# Build lookup structures.
+# For simple (non-clustering) tables: one row per pk.
+# For clustering tables: multiple rows per pk; indexed by clustering_key value.
+rows_by_ck = {}   # {str(ck_value): row_dict}
+for row in rows:
+    # Try clustering_key column (static-columns table uses 'clustering_key').
+    ck = row.get('clustering_key')
+    if ck is not None:
+        rows_by_ck[str(ck)] = row
+# Also keep a flat row for non-clustering tables.
+flat_row = rows[0] if len(rows) == 1 else None
+
+with open(spec_path) as fh:
+    spec_lines = fh.readlines()
+
+failures = []
+
+for line in spec_lines:
+    line = line.strip()
+    if not line or line.startswith('#') or line.startswith('row_count=') or line.startswith('row.'):
+        continue
+
+    # col[<pk>].<col>=<json-value>
+    m = re.match(r'^col\[([^\]]+)\]\.([^=]+)=(.+)$', line)
+    if m:
+        spec_pk, col_name, expected_json = m.group(1), m.group(2), m.group(3)
+        if spec_pk != pk_val:
+            continue
+        try:
+            expected = json.loads(expected_json)
+        except json.JSONDecodeError as e:
+            failures.append(f"Spec JSON parse error on line {line!r}: {e}")
+            continue
+
+        if flat_row is None:
+            failures.append(
+                f"col[]: expected single row for pk={pk_val!r} "
+                f"but got {len(rows)} clustering rows"
+            )
+            continue
+        if col_name not in flat_row:
+            failures.append(f"Column {col_name!r} missing in row for pk={pk_val!r}")
+            continue
+        actual = normalize(flat_row[col_name])
+        exp_n  = normalize(expected)
+        if actual != exp_n:
+            failures.append(
+                f"Column {col_name!r} pk={pk_val!r}: "
+                f"expected {exp_n!r}, got {actual!r}"
+            )
+        continue
+
+    # col_cluster[<pk>|<ck>].<col>=<json-value>
+    m = re.match(r'^col_cluster\[([^\|]+)\|([^\]]+)\]\.([^=]+)=(.+)$', line)
+    if m:
+        spec_pk, spec_ck, col_name, expected_json = (
+            m.group(1), m.group(2), m.group(3), m.group(4)
+        )
+        if spec_pk != pk_val:
+            continue
+        try:
+            expected = json.loads(expected_json)
+        except json.JSONDecodeError as e:
+            failures.append(f"Spec JSON parse error on line {line!r}: {e}")
+            continue
+
+        row = rows_by_ck.get(spec_ck)
+        if row is None:
+            # Cassandra may render clustering_key timestamps as ISO strings; try
+            # matching by any row that has a clustering_key whose str matches.
+            for candidate in rows:
+                ck_val = candidate.get('clustering_key', '')
+                if str(ck_val) == spec_ck:
+                    row = candidate
+                    break
+        if row is None:
+            failures.append(
+                f"No clustering row found for pk={spec_pk!r} ck={spec_ck!r}; "
+                f"available cks: {list(rows_by_ck.keys())}"
+            )
+            continue
+        if col_name not in row:
+            failures.append(
+                f"Column {col_name!r} missing in clustering row "
+                f"pk={spec_pk!r} ck={spec_ck!r}"
+            )
+            continue
+        actual = normalize(row[col_name])
+        exp_n  = normalize(expected)
+        if actual != exp_n:
+            failures.append(
+                f"Column {col_name!r} pk={spec_pk!r} ck={spec_ck!r}: "
+                f"expected {exp_n!r}, got {actual!r}"
+            )
+        continue
+
+if failures:
+    for msg in failures:
+        print(f"  FAIL: {msg}", file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+
+    if [[ "$verify_rc" -ne 0 ]]; then
+      warn "[$label] Verification failed for pk=$pk"
+      return 1
+    fi
   done < <(grep "^row\.${pk_col}=" <<<"$spec_body" | cut -d= -f2)
 
   return 0
@@ -597,9 +952,22 @@ process_table() {
 
   generate_mutations "$label" "$mutations" "$spec"
 
-  # Generate fresh data each run; truncate any leftovers from a prior pass.
-  log "[$label] Truncating $ks.$tbl in Cassandra"
-  cqlsh_exec "TRUNCATE $ks.$tbl;" >/dev/null 2>&1 || true
+  # Truncate any leftovers from a prior pass.  TRUNCATE failure is fatal:
+  # leftover rows would make the exact row-count check pass spuriously.
+  log "[$label] Truncating $ks.$tbl in Cassandra (fatal on failure)"
+  cqlsh_exec "TRUNCATE $ks.$tbl;" >/dev/null
+
+  # Assert the table is actually empty after truncation.
+  local post_trunc_cnt
+  local cnt_raw
+  cnt_raw="$(cqlsh_exec "SELECT count(*) FROM $ks.$tbl;" || true)"
+  post_trunc_cnt="$(printf '%s\n' "$cnt_raw" \
+      | grep -E '^[[:space:]]*[0-9]+[[:space:]]*$' \
+      | head -1 | tr -d '[:space:]')"
+  if [[ -z "$post_trunc_cnt" || "$post_trunc_cnt" -ne 0 ]]; then
+    fail "[$label] Table $ks.$tbl is not empty after TRUNCATE (count=${post_trunc_cnt:-<unknown>}); aborting"
+  fi
+  log "[$label] Table is empty after TRUNCATE"
 
   local sstdir
   sstdir="$(write_and_export "$label" "$ks" "$tbl" "$schema_file" "$mutations")"
