@@ -44,10 +44,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'
@@ -98,7 +98,7 @@ jobs:
           fi
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: bindings-${{ matrix.target }}
           path: bindings/node/${{ env.APP_NAME }}.*.node
@@ -127,17 +127,17 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v5
         with:
           node-version: '20'
           cache: 'npm'
           cache-dependency-path: bindings/node/package-lock.json
 
       - name: Download artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           name: bindings-${{ matrix.target }}
           path: bindings/node
@@ -148,7 +148,7 @@ jobs:
 
       - name: Restore dataset cache
         id: dataset-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: test-data/datasets
           key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
@@ -191,7 +191,7 @@ jobs:
 
       - name: Upload test results on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: test-results-${{ matrix.os }}
           path: bindings/node/__test__/
@@ -221,7 +221,7 @@ jobs:
           fi
 
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: bindings-*
           path: artifacts
@@ -242,7 +242,7 @@ jobs:
           fi
 
       - name: Upload merged artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: cqlite-node-binaries
           path: artifacts/*.node

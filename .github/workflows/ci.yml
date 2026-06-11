@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       # This job compiles core+integration+write-support+CLI test deps into one
       # debug target/ and sits at the standard runner's disk ceiling — 2 of the
@@ -33,7 +33,7 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache cargo
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -43,7 +43,7 @@ jobs:
 
       - name: Restore dataset cache
         id: dataset-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: test-data/datasets
           key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
@@ -161,7 +161,7 @@ jobs:
 
       - name: Upload smoke test artifacts on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: smoke-test-results
           path: test-data/scripts/smoke-test-results/
@@ -174,7 +174,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
