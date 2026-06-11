@@ -107,7 +107,13 @@ run_component write-tests bash -c '
   cargo test --package cqlite-core --features write-support --test compaction_integration'
 run_component cli-tests cargo test --package cqlite-cli --test unit_tests
 run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
-run_component smoke bash test-data/scripts/smoke-test-all-tables.sh
+# Pin smoke to a binary built from THIS tree. Left to its own devices the
+# smoke script prefers any existing target/release/cqlite, however stale —
+# the first full gate run caught a May binary failing all test_oa tables
+# that current code reads fine.
+run_component smoke bash -c '
+  cargo build --package cqlite-cli --bin cqlite &&
+  CQLITE_CLI="$PWD/target/debug/cqlite" bash test-data/scripts/smoke-test-all-tables.sh'
 
 echo
 echo "==== AGENT-GATE SUMMARY ===="
