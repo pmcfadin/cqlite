@@ -492,6 +492,15 @@ fn find_jsonl_golden(data_db: &Path) -> Option<PathBuf> {
 }
 
 /// Helper: resolve an oa table path given keyspace and table name.
+///
+/// Returns `Some(dir)` only when the directory exists **and** contains at least
+/// one binary SSTable component matching `oa-*-big-Data.db`.  When the
+/// repository has only git-tracked JSONL golden files (e.g. CI with
+/// datasets-v2), the directory will be present but the binary will be absent;
+/// in that case this function returns `None` so callers can skip gracefully.
+///
+/// See: CI datasets-v2 does not include test_oa binaries — promotion happens
+/// in Issue #656 (VG4) together with a CI datasets-v3 bump.
 fn resolve_oa_table_path(keyspace: &str, table_prefix: &str) -> Option<PathBuf> {
     let datasets_root = std::env::var("CQLITE_DATASETS_ROOT").ok()?;
     let sstables_dir = PathBuf::from(datasets_root).join("sstables");
@@ -502,7 +511,27 @@ fn resolve_oa_table_path(keyspace: &str, table_prefix: &str) -> Option<PathBuf> 
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if name_str.starts_with(table_prefix) {
-                return Some(entry.path());
+                let table_dir = entry.path();
+                // Guard: require at least one binary Data.db file in the dir.
+                // Golden-only checkouts (CI datasets-v2) have .jsonl/.txt/.crc32
+                // files but NO oa-*-big-Data.db binary.  Without this check
+                // read_oa_table() would attempt to open a non-existent binary
+                // and fail the test rather than skipping it.
+                let has_binary = fs::read_dir(&table_dir)
+                    .map(|dir_entries| {
+                        dir_entries.flatten().any(|e| {
+                            let n = e.file_name();
+                            let s = n.to_string_lossy();
+                            s.ends_with("-Data.db") && !s.starts_with("._")
+                        })
+                    })
+                    .unwrap_or(false);
+                if has_binary {
+                    return Some(table_dir);
+                } else {
+                    // Directory exists but binaries are absent (goldens-only).
+                    return None;
+                }
             }
         }
     }
@@ -550,7 +579,7 @@ async fn test_oa_simple_table_parity() {
     let dir = match resolve_oa_table_path("test_oa", "simple_table") {
         Some(d) => d,
         None => {
-            eprintln!("SKIP: test_oa/simple_table not found (set CQLITE_DATASETS_ROOT)");
+            eprintln!("SKIP: test_oa/simple_table binaries not present (CI uses datasets-v2; goldens-only checkout)");
             return;
         }
     };
@@ -576,7 +605,7 @@ async fn test_oa_collection_table_parity() {
     let dir = match resolve_oa_table_path("test_oa", "collection_table") {
         Some(d) => d,
         None => {
-            eprintln!("SKIP: test_oa/collection_table not found");
+            eprintln!("SKIP: test_oa/collection_table binaries not present (CI uses datasets-v2; goldens-only checkout)");
             return;
         }
     };
@@ -606,7 +635,7 @@ async fn test_oa_ttl_table_parity() {
     let dir = match resolve_oa_table_path("test_oa", "ttl_table") {
         Some(d) => d,
         None => {
-            eprintln!("SKIP: test_oa/ttl_table not found");
+            eprintln!("SKIP: test_oa/ttl_table binaries not present (CI uses datasets-v2; goldens-only checkout)");
             return;
         }
     };
@@ -631,7 +660,7 @@ async fn test_oa_static_table_parity() {
     let dir = match resolve_oa_table_path("test_oa", "static_table") {
         Some(d) => d,
         None => {
-            eprintln!("SKIP: test_oa/static_table not found");
+            eprintln!("SKIP: test_oa/static_table binaries not present (CI uses datasets-v2; goldens-only checkout)");
             return;
         }
     };
@@ -657,7 +686,7 @@ async fn test_oa_tombstone_table_parity() {
     let dir = match resolve_oa_table_path("test_oa", "tombstone_table") {
         Some(d) => d,
         None => {
-            eprintln!("SKIP: test_oa/tombstone_table not found");
+            eprintln!("SKIP: test_oa/tombstone_table binaries not present (CI uses datasets-v2; goldens-only checkout)");
             return;
         }
     };
@@ -686,7 +715,7 @@ async fn test_oa_udt_table_parity() {
     let dir = match resolve_oa_table_path("test_oa", "udt_table") {
         Some(d) => d,
         None => {
-            eprintln!("SKIP: test_oa/udt_table not found");
+            eprintln!("SKIP: test_oa/udt_table binaries not present (CI uses datasets-v2; goldens-only checkout)");
             return;
         }
     };
@@ -725,13 +754,30 @@ async fn test_oa_all_tables_pass_parity() {
         return;
     }
 
+    // Bail early if oa binaries are absent (goldens-only checkout — CI with datasets-v2).
+    // resolve_oa_table_path() returns None when the table dir exists but has no
+    // oa-*-big-Data.db binary.  Promotion to CI happens in Issue #656 (VG4)
+    // together with the CI datasets-v3 bump.
+    if resolve_oa_table_path("test_oa", tables[0]).is_none() {
+        eprintln!(
+            "SKIP: test_oa binaries not present (CI uses datasets-v2; goldens-only checkout)"
+        );
+        return;
+    }
+
     let mut results: HashMap<&str, Result<(usize, usize), String>> = HashMap::new();
 
     for table in &tables {
         let dir = match resolve_oa_table_path("test_oa", table) {
             Some(d) => d,
             None => {
-                results.insert(table, Err(format!("directory not found for {}", table)));
+                results.insert(
+                    table,
+                    Err(format!(
+                        "directory not found or binaries absent for {}",
+                        table
+                    )),
+                );
                 continue;
             }
         };
@@ -783,7 +829,7 @@ async fn debug_oa_ttl_table_entries() {
     let dir = match resolve_oa_table_path("test_oa", "ttl_table") {
         Some(d) => d,
         None => {
-            eprintln!("SKIP: test_oa/ttl_table not found");
+            eprintln!("SKIP: test_oa/ttl_table binaries not present (CI uses datasets-v2; goldens-only checkout)");
             return;
         }
     };
