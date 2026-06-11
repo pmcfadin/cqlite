@@ -4,6 +4,10 @@
 services:
   # Cassandra 5.0 - Latest version with new features (Enhanced for Issue #30)
   # Pinned to 5.0.2 (Issue #482) so e2e readback tests use a stable build.
+  # Version bump procedure (Issue #669): update this image tag AND the matching
+  # CASSANDRA_IMAGE env var in both CI workflow files:
+  #   - .github/workflows/cassandra-validation.yml
+  #   - .github/workflows/m1-ci.yml
   cassandra-5-0:
     image: cassandra:5.0.2
     container_name: cqlite-cassandra-5-0

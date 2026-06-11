@@ -6,8 +6,14 @@ on:
     paths:
       - 'cqlite-core/src/storage/write_engine/**'
       - 'cqlite-core/src/storage/sstable/writer/**'
+      - 'cqlite-core/src/parser/**'
+      - 'cqlite-core/src/schema/**'
       - 'cqlite-core/tests/sstableloader_integration.rs'
       - '.github/workflows/cassandra-validation.yml'
+      # Note: cqlite-core/src/parser/** and schema/** are included here to gate
+      # serialization-adjacent code changes. Issue #664 adds e2e-readback.yml which
+      # also triggers on these paths; both workflows serve different validation roles
+      # (sstableloader vs readback), so some overlap is intentional.
   push:
     branches: [main]
   workflow_dispatch:
@@ -16,6 +22,17 @@ on:
         description: 'Run stress tests (10K partitions, wide partitions)'
         type: boolean
         default: false
+
+# Pin location: CASSANDRA_IMAGE is the single source of truth for the Cassandra
+# version used in this workflow. To bump: update CASSANDRA_IMAGE here.
+# The same version must also be set in:
+#   - .github/workflows/m1-ci.yml  (env.CASSANDRA_IMAGE)
+#   - test-data/docker/docker-compose-cassandra5.yml  (services.cassandra-5-0.image)
+# Issue #669 unified all three locations to cassandra:5.0.2.
+# NOTE: env context is NOT available at jobs.<job>.services.<svc>.image per GitHub's
+# context-availability rules. The literal image tag is set directly there instead.
+env:
+  CASSANDRA_IMAGE: cassandra:5.0.2
 
 permissions:
   contents: read
@@ -33,7 +50,9 @@ jobs:
 
     services:
       cassandra:
-        image: cassandra:5.0
+        # Pin: cassandra:5.0.2 — env context is unavailable at service image keys.
+        # To bump the version: update this literal AND env.CASSANDRA_IMAGE above.
+        image: cassandra:5.0.2
         env:
           MAX_HEAP_SIZE: 1G
           HEAP_NEWSIZE: 256m

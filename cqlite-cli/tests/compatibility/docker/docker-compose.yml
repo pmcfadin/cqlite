@@ -47,9 +47,10 @@ services:
     networks:
       - cassandra-compat
 
-  # Cassandra 5.0
+  # Cassandra 5.0 — pinned to 5.0.2 (Issue #669); other version entries are
+  # intentionally floating for broad compatibility coverage.
   cassandra-5-0:
-    image: cassandra:5.0
+    image: cassandra:5.0.2
     container_name: cassandra-5-0
     ports:
       - "9044:9042"
