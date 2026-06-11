@@ -8,12 +8,25 @@ Welcome to the CQLite documentation hub. This directory contains all technical d
 
 ---
 
+## 📖 Primary Reference
+
+- **[The SSTable Definitive Guide](sstables-definitive-guide/README.md)** - Single source of truth for the Cassandra 5.0 SSTable format: Data.db row layout, Index.db/Summary.db lookups, BTI trie indexes, encoding cheat sheets, and known limitations.
+
+---
+
 ## 🗂️ Documentation Structure
 
 ### 👥 User Documentation
 - **[Installation Guide](user-guides/installation.md)** - Complete setup instructions for all platforms
-- **[Quick Start Guide](user-guides/quick-start.md)** - Get started with CQLite in minutes  
+- **[Quick Start Guide](user-guides/quick-start.md)** - Get started with CQLite in minutes
+- **[CLI Guide](user-guides/cli.md)** - Command-line interface usage
 - **[Troubleshooting Guide](user-guides/troubleshooting.md)** - Comprehensive problem resolution
+- **[Using cqlite-core as a Dependency](using-cqlite-core-as-a-dependency.md)** - Embedding the library in your own Rust project
+
+### ✍️ Write Support (M5)
+- **[Write Support Overview](write-support.md)** - Mutations, memtable, WAL, and flush
+- **[Write Engine API](write-engine-api.md)** - Programmatic write API reference
+- **[Write Support Limitations](write-support-limitations.md)** - What write support does not cover yet
 
 ### 🎯 Complex Types Documentation
 - **[Complex Types API Reference](complex_types_api_reference.md)** - Complete API for complex types
@@ -21,52 +34,29 @@ Welcome to the CQLite documentation hub. This directory contains all technical d
 - **[Complex Types Examples](complex_types_examples.md)** - Implementation examples and patterns
 - **[Complex Types Performance Guide](complex_types_performance_guide.md)** - Performance optimization strategies
 - **[Complex Types Troubleshooting](complex_types_troubleshooting.md)** - Common issues and solutions
-- **[Cassandra 5 Format Specification](cassandra-5-format-spec.md)** - Cassandra 5.0 format compatibility
 
 ### 🔧 Technical Documentation
 - **[Architecture Overview](technical/architecture.md)** - System design and architecture
 - **[API Specification](technical/api-specification.md)** - Complete API reference
-- **[Cassandra Compatibility](technical/cassandra-compatibility.md)** - Format compatibility matrix
-- **[Binary Format Analysis](technical/BINARY_FORMAT_ANALYSIS.md)** - SSTable binary format specifications
+- **[Cassandra 5.0 Compatibility Matrix](technical/CASSANDRA_5_0_COMPATIBILITY_MATRIX.md)** - Format compatibility matrix
+- **[Cassandra Compatibility Guide](technical/CASSANDRA_COMPATIBILITY_GUIDE.md)** - Compatibility details and caveats
 - **[BTI Format Specification](technical/BTI_FORMAT_SPECIFICATION.md)** - BTI index format details
-- **[Cassandra Complex Types Format](technical/CASSANDRA_COMPLEX_TYPES_FORMAT_SPEC.md)** - Complex type format specifications
-- **[CQLSH Format Specification](technical/CQLSH_FORMAT_SPECIFICATION.md)** - CQLSH compatibility formats
 - **[UDT Format Specification](technical/UDT_FORMAT_SPEC.md)** - User-defined type format details
+- **[Parser Overview](architecture/parser-overview.md)** - How the SSTable parsers fit together
+
+### ⚡ Performance & Profiling
+- **[Performance Methodology](performance.md)** - Benchmark reproducibility and the CI perf gate
+- **[Profiling Guide](profiling.md)** - Flamegraphs, heap profiling, and the `scripts/profile.sh` improvement loop
 
 ### 💻 Development Documentation
 - **[Contributing Guide](development/contributing.md)** - How to contribute to CQLite
-- **[Testing Guide](development/testing-guide.md)** - Testing framework and procedures
-- **[Development Roadmap](development/roadmap.md)** - Project milestones and future plans
+- **[Development Guide](development/DEVELOPMENT.md)** - Local development workflow
+- **[Rust Developer Guide](development/rust_developer_guide.md)** - Project Rust conventions and patterns
+- **[Releasing](development/RELEASING.md)** - Release process and checklist
 
 ### 📊 Project Reports
-
-#### Milestone Reports
-- **[M2 Completion Report](reports/milestone-reports/M2_COMPLETION_REPORT.md)** - Phase 2 completion status
-- **[M3 Cassandra SSTable Acquisition](reports/milestone-reports/M3_CASSANDRA_SSTABLE_ACQUISITION.md)** - SSTable acquisition milestone
-- **[M3 Completion Update](reports/milestone-reports/M3_COMPLETION_UPDATE.md)** - Phase 3 completion status
-- **[M3 Complex Types Coordination](reports/milestone-reports/M3_COMPLEX_TYPES_COORDINATION.md)** - Complex types implementation
-- **[M3 Complex Type Validation Report](reports/milestone-reports/M3_COMPLEX_TYPE_VALIDATION_REPORT.md)** - Validation results
-- **[M3 Coordination Plan](reports/milestone-reports/M3_COORDINATION_PLAN.md)** - Project coordination strategy
-- **[M3 Performance Optimization Summary](reports/milestone-reports/M3_PERFORMANCE_OPTIMIZATION_SUMMARY.md)** - Performance improvements
-- **[M3 Validation Report](reports/milestone-reports/M3_VALIDATION_REPORT.md)** - Overall validation results
-
-#### Validation Reports
-- **[Integration Test Results](reports/validation-reports/INTEGRATION_TEST_RESULTS.md)** - Integration testing outcomes
-- **[Integration Test Summary](reports/validation-reports/INTEGRATION_TEST_SUMMARY.md)** - Test summary overview
-- **[Integration Validation Final Report](reports/validation-reports/INTEGRATION_VALIDATION_FINAL_REPORT.md)** - Final validation results
-- **[Performance Analysis Report](reports/validation-reports/PERFORMANCE_ANALYSIS_REPORT.md)** - Performance testing analysis
-- **[QA Validation Report](reports/validation-reports/QA_VALIDATION_REPORT.md)** - Quality assurance results
-- **[Real Data Validation Report](reports/validation-reports/REAL_DATA_VALIDATION_REPORT.md)** - Real-world data testing
-- **[Real SSTable Compatibility Report](reports/validation-reports/REAL_SSTABLE_COMPATIBILITY_REPORT.md)** - SSTable compatibility testing
-
-#### Archived Reports
-- **[Achievement Summary](reports/archived/ACHIEVEMENT_SUMMARY.md)** - Project achievements overview
-- **[Breakthrough Success](reports/archived/BREAKTHROUGH_SUCCESS.md)** - Major breakthrough documentation
-- **[Integration Complete](reports/archived/INTEGRATION_COMPLETE.md)** - Integration completion status
-- **[Pagination Features](reports/archived/PAGINATION_FEATURES.md)** - Pagination implementation details
-- **[Parser Abstraction Test Report](reports/archived/PARSER_ABSTRACTION_TEST_REPORT.md)** - Parser testing results
-- **[Real Data Demo](reports/archived/REAL_DATA_DEMO.md)** - Real data demonstration
-- **[Testing Framework Complete](reports/archived/TESTING_FRAMEWORK_COMPLETE.md)** - Testing framework status
+- **[Reports Index](reports/README.md)** - Project reports organized by category
+- **[Historical Issue Investigations](archive/issues/INDEX.md)** - Archived deep-dives from past format debugging
 
 ---
 
@@ -80,32 +70,33 @@ Welcome to the CQLite documentation hub. This directory contains all technical d
 ### For Developers
 1. Read [Architecture Overview](technical/architecture.md)
 2. Check [Contributing Guide](development/contributing.md)
-3. Review [Testing Guide](development/testing-guide.md)
+3. Study [The SSTable Definitive Guide](sstables-definitive-guide/README.md) before touching format code
 
-### For Operations
-1. Study [Performance Analysis](technical/performance-analysis.md)
-2. Keep [Troubleshooting Guide](user-guides/troubleshooting.md) handy
-3. Monitor [Compatibility Matrix](technical/cassandra-compatibility.md)
+### For Performance Work
+1. Read [Performance Methodology](performance.md) for what the CI gate enforces
+2. Use the [Profiling Guide](profiling.md) to find and fix bottlenecks
+3. Keep the [Troubleshooting Guide](user-guides/troubleshooting.md) handy
 
 ---
 
 ## 📈 Project Status
 
-- **Current Version**: 0.3.0 (M4 Complete - Production Ready)
+- **Current Version**: 0.10.0
 - **Cassandra Compatibility**: 5.0+ with BTI format support
-- **Milestones Complete**: M1 (Core), M2 (CLI), M3 (Output Writers), M4 (Language Bindings)
-- **Next**: M5 (Write Support)
+- **Milestones Complete**: M1 (Core Reading), M2 (CLI), M3 (Output Writers), M4 (Python Bindings), M5.1 (Write Support); Node.js bindings shipped
+- **In Progress**: M5.2 (Compaction & Export)
+- **Next**: M6 (WebAssembly Bindings)
+- **Test Pass Rate**: 100% (33/33 tables vs sstabledump, see `test-data/validation-matrix.md`)
 
 ---
 
 ## 🔄 Document Maintenance
 
 ### Last Updated
+- Documentation hub: 2026-06-10
+- Performance & profiling docs: 2026-06-10
 - Architecture docs: 2026-01-27
 - User guides: 2026-01-27
-- Technical specs: 2026-01-27
-- Project reports: 2026-01-27
-- Documentation organization: 2026-01-27
 
 ### Contributing to Documentation
 - Follow the [Documentation Standards](development/contributing.md#documentation-standards)

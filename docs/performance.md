@@ -4,6 +4,11 @@ This page explains what the in-repo performance gate enforces, why CI absolute
 numbers are not authoritative, how to reproduce benchmark results locally, and
 why ~282 ops/sec is the expected single-writer throughput when durability is on.
 
+For the operational side — *finding and fixing* the bottlenecks the gate
+measures (pprof flamegraphs, dhat heap profiling against the 128 MiB budget,
+and the `scripts/profile.sh` improvement loop) — see
+[profiling.md](profiling.md).
+
 ---
 
 ## 1. What the gate enforces vs. what it tracks
