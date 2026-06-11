@@ -73,22 +73,6 @@ services:
     networks:
       - cqlite-test-network
 
-  # Data generator container for issuing type-correct inserts
-  data-generator:
-    build:
-      context: ..
-      dockerfile: docker/Dockerfile.data-generator
-    container_name: cqlite-data-generator
-    depends_on:
-      - cassandra-5-0
-    environment:
-      - PYTHONUNBUFFERED=1
-    volumes:
-      - ../scripts:/scripts:ro
-      - ../schemas:/schemas:ro
-      - ../logs:/logs
-    networks:
-      - cqlite-test-network
 
 networks:
   cqlite-test-network:

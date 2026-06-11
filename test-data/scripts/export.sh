@@ -19,48 +19,28 @@ mkdir -p "$DATASETS_DIR"
 # Flush to SSTables
 compose_exec_nontty cassandra-5-0 nodetool flush
 
-# Produce metadata.yml with counts and columns using generator container (has pyyaml + cassandra-driver)
-# Write YAML to stdout and redirect to host file
-compose_run_nontty data-generator python3 - <<'PY' > "$META"
-import yaml
-from cassandra.cluster import Cluster
-from cassandra.query import SimpleStatement
-
-cluster = Cluster(["cassandra-5-0"], port=9042)
-session = cluster.connect()
-
-keyspaces = ["test_basic","test_collections","test_timeseries","test_wide_rows"]
-info = {"keyspaces": []}
-
-for ks in keyspaces:
-    try:
-        ks_meta = session.cluster.metadata.keyspaces.get(ks)
-        if not ks_meta:
-            continue
-        rows = session.execute(SimpleStatement(
-            f"SELECT table_name FROM system_schema.tables WHERE keyspace_name='{ks}' ALLOW FILTERING;"
-        ))
-        tables = [r.table_name for r in rows]
-        ks_rec = {"name": ks, "tables": []}
-        for t in tables:
-            cols_rows = session.execute(SimpleStatement(
-                f"SELECT column_name, kind, type FROM system_schema.columns WHERE keyspace_name='{ks}' AND table_name='{t}' ALLOW FILTERING;"
-            ))
-            columns = [{"column_name": r.column_name, "kind": r.kind, "type": r.type} for r in cols_rows]
-            try:
-                cnt_row = session.execute(SimpleStatement(
-                    f"SELECT count(*) AS c FROM {ks}.{t} ALLOW FILTERING;"
-                )).one()
-                count_val = int(cnt_row.c) if cnt_row and cnt_row.c is not None else 0
-            except Exception:
-                count_val = 0
-            ks_rec["tables"].append({"name": t, "row_count": count_val, "columns": columns})
-        info["keyspaces"].append(ks_rec)
-    except Exception:
-        continue
-
-print(yaml.safe_dump(info, sort_keys=False))
-PY
+# Produce metadata.yml with counts and columns using cqlsh directly in the
+# Cassandra container — no external generator container required.
+{
+  echo "keyspaces:"
+  for ks in test_basic test_collections test_timeseries test_wide_rows; do
+    echo "  - name: $ks"
+    echo "    tables:"
+    # List tables for keyspace
+    tables_output=$(compose_exec_nontty cassandra-5-0 \
+      cqlsh -e "SELECT table_name FROM system_schema.tables WHERE keyspace_name='${ks}';" \
+      2>/dev/null | grep -v '^$' | grep -v 'table_name' | grep -v '^-' | sed 's/[[:space:]]//g' | grep -v '^$') || true
+    while IFS= read -r tbl; do
+      [ -z "$tbl" ] && continue
+      cnt=$(compose_exec_nontty cassandra-5-0 \
+        cqlsh -e "SELECT count(*) FROM ${ks}.${tbl};" 2>/dev/null \
+        | grep -E '^\s+[0-9]+' | sed 's/[[:space:]]//g' || echo "0")
+      echo "      - name: $tbl"
+      echo "        row_count: $cnt"
+    done <<< "$tables_output"
+  done
+} > "$META"
+echo "[export] Wrote $META"
 
 # Destructive export of data directory tree via tar stream (more reliable than container cp)
 rm -rf "$DATASETS_DIR/sstables" "$DATASETS_DIR/data"
