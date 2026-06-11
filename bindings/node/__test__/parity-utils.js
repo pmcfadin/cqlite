@@ -65,6 +65,42 @@ function findJsonlFile(keyspace, table) {
   return null;
 }
 
+/**
+ * Find the JSONL reference file for an oa-format table (Issue #656 VG4).
+ * oa tables use oa-N-big-Data.db.jsonl naming instead of nb-1-big-Data.db.jsonl.
+ *
+ * @param {string} keyspace - Keyspace name (e.g., "test_oa")
+ * @param {string} table - Table name (e.g., "simple_table")
+ * @returns {string|null} - Path to JSONL file or null if not found
+ */
+function findOaJsonlFile(keyspace, table) {
+  const keyspaceDir = path.join(global.testPaths.SSTABLES_DIR, keyspace);
+
+  if (!fs.existsSync(keyspaceDir)) {
+    return null;
+  }
+
+  const entries = fs.readdirSync(keyspaceDir, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (entry.isDirectory() && entry.name.startsWith(`${table}-`)) {
+      const tableDir = path.join(keyspaceDir, entry.name);
+      // oa tables use oa-N-big-Data.db.jsonl naming
+      const dirEntries = fs.readdirSync(tableDir);
+      for (const fname of dirEntries) {
+        if (/^oa-\d+-big-Data\.db\.jsonl$/.test(fname)) {
+          const jsonlFile = path.join(tableDir, fname);
+          if (fs.existsSync(jsonlFile)) {
+            return jsonlFile;
+          }
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
 // =============================================================================
 // JSONL Parsing
 // =============================================================================
@@ -628,6 +664,18 @@ const ALL_TABLES = {
 };
 
 /**
+ * All 6 oa-format test tables (Issue #656 VG4 — oa parity enforcement).
+ */
+const OA_TABLES = [
+  'simple_table',
+  'collection_table',
+  'udt_table',
+  'ttl_table',
+  'static_table',
+  'tombstone_table',
+];
+
+/**
  * Known issues from Python parity tests that may also affect Node.js.
  * These tables have core library issues (not binding issues).
  */
@@ -655,6 +703,7 @@ function getKnownIssue(keyspace, table) {
 module.exports = {
   // JSONL utilities
   findJsonlFile,
+  findOaJsonlFile,
   countRowsInJsonl,
   loadJsonlPartitions,
   extractRowsFromPartitions,
@@ -677,6 +726,7 @@ module.exports = {
 
   // Test tables
   ALL_TABLES,
+  OA_TABLES,
   KNOWN_ISSUES,
   getKnownIssue,
 };

@@ -30,6 +30,8 @@ const SCHEMA_BASIC_TYPES = path.join(SCHEMAS_DIR, 'basic-types.cql');
 const SCHEMA_COLLECTIONS = path.join(SCHEMAS_DIR, 'collections.cql');
 const SCHEMA_TIME_SERIES = path.join(SCHEMAS_DIR, 'time-series.cql');
 const SCHEMA_WIDE_ROWS = path.join(SCHEMAS_DIR, 'wide-rows.cql');
+// Issue #656 (VG4): oa test schema for test_oa keyspace
+const SCHEMA_OA_TEST = path.join(SCHEMAS_DIR, 'oa-test.cql');
 
 // =============================================================================
 // Dataset Availability Detection
@@ -57,6 +59,7 @@ global.testPaths = {
   SCHEMA_COLLECTIONS,
   SCHEMA_TIME_SERIES,
   SCHEMA_WIDE_ROWS,
+  SCHEMA_OA_TEST,
 };
 
 global.DATASETS_AVAILABLE = DATASETS_AVAILABLE;

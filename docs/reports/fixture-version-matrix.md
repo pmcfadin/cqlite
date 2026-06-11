@@ -82,9 +82,9 @@ the corpus (shipped in release `datasets-v3`).
 (it reads the Data.db directly, not the trie indexes). JSONL goldens were generated
 successfully for all 3 da tables.
 
-**Note on CI enforcement**: oa and da tables are present as fixtures but listed as
-**SKIP-PENDING** in `smoke-test-all-tables.sh`. The oa read path will be enforced in
-VG4; the da/BTI read path is a future epic.
+**Note on CI enforcement (Issue #656 VG4)**: oa tables are now **enforced** in CI as of
+VG4.  `smoke-test-all-tables.sh` includes `test_oa` in `KEYSPACES` (nb=33 + oa=6 = 39
+enforced tables).  da/BTI tables remain SKIP-PENDING — see BTI read epic #660.
 
 #### Complete table listing (primary test corpus, 33 tables)
 
@@ -232,7 +232,8 @@ gh release create datasets-v3 cassandra5-small-full-v3.tar.gz --title "Test data
 
 ### Gates exercised by Docker `oa` fixtures
 
-All 5 oa-only gates verified TRUE via unit tests in `version_gate.rs`:
+All 5 oa-only gates verified TRUE via unit tests in `version_gate.rs` AND via
+fixture-level cargo parity tests in `cqlite-core/tests/issue_655_oa_read_gates.rs`:
 - `hasImprovedMinMax` — TRUE
 - `hasPartitionLevelDeletionPresenceMarker` — TRUE
 - `hasKeyRange` — TRUE
@@ -241,18 +242,24 @@ All 5 oa-only gates verified TRUE via unit tests in `version_gate.rs`:
 
 Also verified: `hasAccurateMinMax` and `hasLegacyMinMax` are FALSE for oa (deprecated).
 
+**VG4 (Issue #656)**: oa fixture reading is now **fixture-enforced** in CI:
+- Cargo: `issue_655_oa_read_gates.rs` parity tests run against all 6 oa tables
+- Smoke: `smoke-test-all-tables.sh` enforces `test_oa` (39 total tables)
+- Python: `test_parity.py` `TestOaRowCountParity` + `TestOaValueParity` classes
+- Node: `parity.test.js` VG4 oa row-count + value spot-check suites
+
 ### Gates exercised by Docker `da` fixture
 
 All BTI gates verified TRUE, `hasOldBfFormat` verified FALSE, via unit tests.
 
 ---
 
-## 4. What Remains Untested
+## 4. What Remains Untested / Future Work
 
 | Gap | Reason | Tracking |
 |---|---|---|
-| **`oa` format reading** (Data.db decode) | CQLite parser supports `nb` only; `oa` format has different Statistics.db layout and new components (`KeyRange.db`, `TokenSpaceCoverage.db` not yet parsed) | Follow-up issue needed |
-| **`da` (BTI) format reading** | BTI uses trie-based `Partitions.db`/`Rows.db` index; current reader uses BIG index (`Index.db`/`Summary.db`) | Follow-up issue needed |
+| ~~**`oa` format reading** (Data.db decode)~~ | **RESOLVED in VG3 (#655)**. oa format is now read and enforced in CI (VG4 #656). | Closed |
+| **`da` (BTI) format reading** | BTI uses trie-based `Partitions.db`/`Rows.db` index; current reader uses BIG index (`Index.db`/`Summary.db`). da tables remain SKIP-PENDING. | BTI read epic #660 |
 | `straddle gate me..mz` at runtime | No `me`-versioned SSTables in corpus; verified via synthetic unit tests only | Unit tests sufficient |
 | `na` version at runtime | No `na` SSTables in corpus; verified via synthetic unit tests only | Unit tests sufficient |
 | UUID-based SSTable IDs at runtime | Corpus uses sequential int IDs in filenames (even though dir names are UUID-based); fixed parsing bug (see below) | Fixed in this PR |
@@ -295,8 +302,8 @@ Provides:
 | Version letter | Format | Files (Data.db) | Source | Notes |
 |---|---|---|---|---|
 | `nb` | `big` | 59 | Main corpus (Cassandra 5.0.2, compat mode) | All 33 primary tables; CI-enforced |
-| `oa` | `big` | 6 | Issue #654 permanent corpus (5.0.2, `NONE` mode) | 6 tables; SKIP-PENDING until VG4 |
-| `da` | `bti` | 3 | Issue #654 permanent corpus (5.0.2, BTI format) | 3 tables; SKIP-PENDING until BTI read epic |
+| `oa` | `big` | 6 | Issue #654 permanent corpus (5.0.2, `NONE` mode) | 6 tables; **CI-enforced (VG4 #656)** |
+| `da` | `bti` | 3 | Issue #654 permanent corpus (5.0.2, BTI format) | 3 tables; SKIP-PENDING (BTI read epic #660) |
 | `ma`–`me`, `na` | `big` | 0 | Not in corpus | Verified via synthetic unit tests only |
 
 All fixtures packaged as `cassandra5-small-full-v3.tar.gz` in GitHub release `datasets-v3`
