@@ -6,46 +6,37 @@ sidebar:
   order: 0
 ---
 
-# For Agents: Developing CQLite
-
 This section documents the contributor doctrine, gate contracts, and development
 workflows for AI agents (and humans) working on CQLite itself.
 
-> **Content arriving in W7.** This placeholder marks the section structure.
-> Full pages distilled from `CLAUDE.md`, `.claude/skills/`, and the orchestration
-> doctrine (issue #719) will be published as part of issue W7 in epic #733.
-> Once W7 lands, `CLAUDE.md` will slim to pointers at these pages.
+Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 
-## What you'll find here (W7 onwards)
+## Pages in this section
 
-- **Gate contract** — what `scripts/agent-gate.sh` checks and what "passing" means
-- **No-heuristics mandate** — authoritative metadata only, no guessing (issue #28)
-- **Test data fetching** — how to get real SSTable binaries for integration tests
-- **Key source paths** — where to find parsers, writers, query engine, bindings
-- **sstabledump validation playbook** — how to run and interpret parity checks
-- **Orchestration doctrine** — spawn-preflight, inline review, stop-gate patterns
-- **Feature flags** — what each flag enables and when to use it
-- **Commit and PR conventions** — branch naming, commit message format, PR body
+| Page | What it covers |
+|------|----------------|
+| [Gate contract](/cqlite/agents-developing/gate-contract/) | `scripts/agent-gate.sh` — the only run that counts; summary-block format |
+| [No-heuristics mandate](/cqlite/agents-developing/no-heuristics/) | Authoritative metadata only; legacy fallbacks behind flags (issue #28) |
+| [Test data](/cqlite/agents-developing/test-data/) | Fetching datasets, dataset pins, CQLITE_DATASETS_ROOT, missing-data behaviour |
+| [Key source paths](/cqlite/agents-developing/source-map/) | Where parsers, writers, query engine, and bindings live |
+| [sstabledump validation playbook](/cqlite/agents-developing/validation-playbook/) | JSONL golden files, parity tests, smoke-test-all-tables |
+| [Format debugging workflow](/cqlite/agents-developing/format-debugging/) | Hex dumps, definitive-guide chapters, appendix F known limitations |
 
-## The gate contract (preview)
+## Non-negotiable rules
 
-Every agent-submitted change must pass `scripts/agent-gate.sh` before opening a PR.
-The gate runs:
+1. Run `scripts/agent-gate.sh` before opening any PR. Paste its summary block verbatim. Ad-hoc `cargo test` runs do not count.
+2. Use authoritative metadata only — no type guessing, no heuristics (see [no-heuristics mandate](/cqlite/agents-developing/no-heuristics/)).
+3. Integration tests use real SSTable data. Fetch it before running: `bash test-data/scripts/fetch-datasets.sh`.
+4. `RUSTFLAGS="-D warnings"` must pass — zero clippy warnings allowed.
 
-1. `cargo fmt` — formatting check
-2. `cargo clippy -D warnings` — lint check (must be zero warnings)
-3. Core tests with `cli-helpers` feature
-4. Integration tests
-5. Write-support tests
-6. CLI tests
-7. Minimal-features build (no query engine)
-8. Smoke tests
+## Quick-start for a new agent
 
-The gate emits a machine-checkable summary block. Paste that block verbatim in
-your PR report — "all tests pass" prose does not count.
+```bash
+# 1. Fetch test data
+bash test-data/scripts/fetch-datasets.sh
 
-## Source
+# 2. Run the gate
+scripts/agent-gate.sh
 
-This section is built from `CLAUDE.md` and `.claude/skills/` in the
-[CQLite repository](https://github.com/pmcfadin/cqlite). The source files are
-the authoritative reference until W7 publishes these pages.
+# 3. Paste the AGENT-GATE SUMMARY block in your PR report
+```
