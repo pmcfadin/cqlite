@@ -1249,13 +1249,13 @@ copy_sstables_to_container() {
   # `compose_exec_nontty` (which has a no-`-T` fallback) because that
   # fallback would re-allocate a TTY and break the pipe.
   #
-  # Summary.db is intentionally excluded: CQLite's current Summary.db writer
-  # produces values that trip an AssertionError in Cassandra 5's
-  # IndexSummary deserializer (tracked separately). Cassandra reconstructs
-  # Summary.db from Index.db on first refresh, so the readback test still
-  # exercises the full Data/Index/Statistics/Filter/TOC/Digest path.
-  log "[$label] streaming SSTable components (excluding Summary.db) via tar -> $CONTAINER_NAME:$target/"
-  ( cd "$sstdir" && tar -cf - --exclude='*Summary.db' . ) \
+  # Summary.db is now included: Issue #666 fixed the CQLite Summary.db writer
+  # so that entry offsets are absolute (biased by offset_table_size) rather
+  # than zero-based. Cassandra 5's IndexSummary.deserialize requires absolute
+  # offsets and was previously throwing an AssertionError on CQLite-written
+  # Summary.db files. The tar --exclude='*Summary.db' carve-out is removed.
+  log "[$label] streaming SSTable components (including Summary.db) via tar -> $CONTAINER_NAME:$target/"
+  ( cd "$sstdir" && tar -cf - . ) \
     | $COMPOSE_CMD -f "$COMPOSE_FILE" exec -T "$SERVICE_NAME" \
         tar -C "$target" -xf -
 

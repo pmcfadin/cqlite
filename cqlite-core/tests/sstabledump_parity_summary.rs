@@ -308,9 +308,12 @@ async fn test_summary_header_roundtrip() -> CqliteResult<()> {
     let min_index_interval = 64u32;
     let mut writer = SummaryWriter::new(min_index_interval);
 
-    // Add entries
+    // Add entries (note_partition must be called for every partition so that
+    // first_key and last_key are tracked; add_entry is only called at sampling
+    // boundaries but note_partition covers all partitions).
     for i in 0..10 {
         let key = DecoratedKey::new(i as i64 * 100, vec![0x00, 0x00, 0x00, i as u8]);
+        writer.note_partition(&key);
         writer.add_entry(&key, i as u64 * 256)?;
     }
 
@@ -346,10 +349,11 @@ async fn test_summary_offset_table_encoding() -> CqliteResult<()> {
 
     let mut writer = SummaryWriter::new(128);
 
-    // Add entries with known positions
+    // Add entries with known positions (note_partition required before add_entry)
     let positions = [0u64, 1024u64, 4096u64, 16384u64];
     for (i, &pos) in positions.iter().enumerate() {
         let key = DecoratedKey::new(i as i64 * 1000, vec![i as u8]);
+        writer.note_partition(&key);
         writer.add_entry(&key, pos)?;
     }
 
@@ -392,15 +396,19 @@ async fn test_summary_key_boundaries() -> CqliteResult<()> {
 
     let mut writer = SummaryWriter::new(128);
 
-    // First and last keys with distinctive values
+    // First and last keys with distinctive values (note_partition required for
+    // all partitions so first_key/last_key cover the full range)
     let first_key = DecoratedKey::new(-1000, vec![0xAA, 0xBB, 0xCC, 0xDD]);
     let last_key = DecoratedKey::new(9000, vec![0x11, 0x22, 0x33, 0x44]);
 
+    writer.note_partition(&first_key);
     writer.add_entry(&first_key, 0)?;
     for i in 1..9 {
         let key = DecoratedKey::new(i * 1000, vec![i as u8; 4]);
+        writer.note_partition(&key);
         writer.add_entry(&key, i as u64 * 100)?;
     }
+    writer.note_partition(&last_key);
     writer.add_entry(&last_key, 900)?;
 
     // Write to file
@@ -433,7 +441,7 @@ async fn test_summary_large_positions() -> CqliteResult<()> {
 
     let mut writer = SummaryWriter::new(128);
 
-    // Large positions requiring 8-byte encoding
+    // Large positions requiring 8-byte encoding (note_partition required)
     let large_positions = [
         0u64,
         1_000_000_000u64,   // 1 GB
@@ -443,6 +451,7 @@ async fn test_summary_large_positions() -> CqliteResult<()> {
 
     for (i, &pos) in large_positions.iter().enumerate() {
         let key = DecoratedKey::new(i as i64 * 100, vec![i as u8]);
+        writer.note_partition(&key);
         writer.add_entry(&key, pos)?;
     }
 
