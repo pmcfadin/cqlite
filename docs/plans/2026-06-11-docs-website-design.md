@@ -48,6 +48,13 @@ preferred over a sync step to avoid drift — final call in W1 implementation).
 1. **User Docs** — install, quick start, CLI reference, query guide, output
    formats (JSON/CSV/Parquet), Python bindings, Node bindings, write support,
    troubleshooting. Consolidates `docs/user-guides/` and scattered API docs.
+   Includes a **Use Cases** group (added 2026-06-11): narrative why/when pages —
+   the Cassandra Sidecar lakehouse-projection pattern (adapted from
+   `docs/architecture/cassandra-sidecar-parquet-projections.md`, honest about
+   delta semantics and what epics #673/#682/#696 will unlock), Python for data
+   science/ETL on snapshots and backups, Node.js for services and tooling, and
+   operational scenarios (migration, testing, backup inspection) from the
+   README vision.
 2. **SSTable Format Guide** — the 22 chapters + appendices, near-verbatim;
    work is frontmatter, link rewriting, and SVG diagram embedding.
 3. **For Agents: Using CQLite** — ~10 recipe pages, one task each: exact
@@ -106,10 +113,11 @@ CI checks (agent-gate pattern).
 | W5 | Bindings pages (Python, Node) | S | W1 |
 | W6 | Agent track "Using CQLite" recipes + example smoke script | L | W4 |
 | W7 | Agent track "Developing CQLite" + CLAUDE.md slimming | M | W1 |
-| W8 | Agent plumbing: llms.txt, llms-full.txt, raw endpoints, validation | S | W2, W3, W6, W7 |
+| W8 | Agent plumbing: llms.txt, llms-full.txt, raw endpoints, validation | S | W2, W3, W6, W7, W9 |
+| W9 | Use-case pages: sidecar/lakehouse, Python, Node.js, operational | M | W1 |
 
-W2–W5 and W7 are mutually independent; up to five builders can run concurrently
-after W1 lands.
+W2–W5, W7, and W9 are mutually independent; up to six builders can run
+concurrently after W1 lands.
 
 **Ship gate for v0.11.0**: site live with all four sections, CI checks green,
 README pointing at the site.
