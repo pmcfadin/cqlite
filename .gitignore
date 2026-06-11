@@ -77,6 +77,11 @@ tarpaulin-report.html
 node_modules/
 package-lock.json
 !bindings/node/package-lock.json
+!website/package-lock.json
+
+# Website build output
+website/dist/
+website/.astro/
 
 # Python bindings
 *.pyc

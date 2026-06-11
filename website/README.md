@@ -1,0 +1,97 @@
+# CQLite Documentation Site
+
+This is the Astro Starlight documentation site for [CQLite](https://github.com/pmcfadin/cqlite),
+deployed to [pmcfadin.github.io/cqlite](https://pmcfadin.github.io/cqlite/).
+
+## Development
+
+```bash
+npm install
+npm run dev      # Start dev server at http://localhost:4321
+npm run build    # Production build (includes link validation)
+npm run preview  # Preview production build locally
+```
+
+The build runs `starlight-links-validator` as part of `npm run build`. Internal link
+or anchor breakage fails the build. Excluded paths: `/cqlite/api/**` (rustdoc, separate
+gh-pages subtree — see below).
+
+## Content sourcing decision: no symlinks
+
+**Decision**: Content is authored directly in `website/src/content/docs/`, not sourced
+via symlinks from `docs/`.
+
+**Rationale**: The design doc (W1 issue) mentioned symlinks as the preferred approach
+to avoid drift. However, symlinks introduce reliability problems in this deployment:
+
+1. **GitHub Actions `actions/checkout`** does not follow symlinks by default. The
+   checkout action dereferences symlinks only when the `submodules` option is set and
+   only for submodule paths — not for arbitrary in-repo symlinks. Astro's content
+   collection loader (`@astrojs/starlight/loaders`) uses Node.js `fs.readdir` with
+   follow-symlinks behavior that varies across Node versions, and the Vite bundler
+   does not guarantee symlink traversal in all environments.
+
+2. **Cross-platform portability**: Windows runners (used in some CI matrix builds)
+   require `core.symlinks=true` in git config to preserve symlinks on checkout. This
+   adds fragile per-runner configuration.
+
+3. **W2–W9 content migration scope**: Issues W2–W9 each own migrating specific
+   content from `docs/` into the site. Each migration step will involve frontmatter
+   changes, link rewriting, and section reorganization — work that needs to happen in
+   `website/src/content/docs/` regardless of the source. Symlinks to `docs/` would
+   require those workers to modify files in two locations or break the symlink.
+
+**Consequence**: `docs/` remains the authoritative reference for content until each
+W-issue migrates it. The placeholder pages in `website/src/content/docs/` point back
+to `docs/` as the source. Content in `docs/` and the site may diverge during W2–W9;
+that divergence is intentional and resolved by each W-issue landing.
+
+A sync script is **not** used for W1 because the placeholder pages contain no
+content to sync — they are stubs explaining what W2–W9 will deliver. W2 (Format
+Guide) will make the call for its section; the same applies to W3–W9.
+
+## Structure
+
+```
+website/
+├── astro.config.mjs          # Astro + Starlight configuration
+├── src/
+│   ├── content.config.ts     # Content collection definition
+│   └── content/docs/
+│       ├── index.mdx         # Landing page (splash template)
+│       ├── user-docs/        # Section 1: User Docs (W3, W4, W5, W9)
+│       ├── sstable-format/   # Section 2: SSTable Format Guide (W2)
+│       ├── agents-using/     # Section 3: For Agents: Using CQLite (W6)
+│       └── agents-developing/ # Section 4: For Agents: Developing CQLite (W7)
+├── dist/                     # Built site (gitignored)
+└── node_modules/             # Dependencies (gitignored)
+```
+
+## Deployment
+
+The site is deployed by `.github/workflows/docs-site.yml`:
+
+- **On push to main** (touching `website/**` or `docs/**`): builds and deploys to
+  the `gh-pages` branch root with `keep_files: true`. This coexists with the rustdoc
+  trees under `api/` published by `api-docs.yml`.
+- **On pull_request** (touching the same paths): build only, no deploy.
+- **workflow_dispatch**: manual deploy trigger.
+
+## API Reference (Rustdoc)
+
+Rustdoc for `cqlite-core` is published by `.github/workflows/api-docs.yml` to:
+
+- `/api/<version>/` — per-release docs (e.g. `/api/v0.10.0/`)
+- `/api/latest/` — always points to the latest release
+
+The Starlight site links to `/cqlite/api/latest/` from the landing page. These paths
+are excluded from the internal link validator (`/cqlite/api/**` in `astro.config.mjs`)
+because they are not part of the Astro build — they live in a separate gh-pages subtree.
+
+## Pinned versions
+
+| Package | Version |
+|---------|---------|
+| `astro` | 5.18.2 |
+| `@astrojs/starlight` | 0.34.3 |
+| `starlight-links-validator` | 0.15.1 |
