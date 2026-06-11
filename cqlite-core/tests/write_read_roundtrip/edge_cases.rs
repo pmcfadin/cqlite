@@ -852,17 +852,18 @@ async fn test_edge_range_tombstone_full_partition() {
         0x02,
         "Should have IS_MARKER flag for Bottom/Top range tombstone"
     );
-    // Bound kind for Bottom = START_BOUNDARY (4)
+    // Bottom serializes as INCL_START_BOUND (ClusteringPrefix.Kind ordinal 1)
+    // with a zero u16 clustering-value count (Issue #717: the writer previously
+    // used a private kind numbering no Cassandra reader understands).
     assert_eq!(
         data[after_header + 1],
-        4, // START_BOUNDARY
-        "Bottom bound should use START_BOUNDARY kind"
+        1, // INCL_START_BOUND
+        "Bottom bound should use INCL_START_BOUND kind"
     );
-    // Empty clustering prefix for Bottom (header = 0)
     assert_eq!(
-        data[after_header + 2],
-        0x00,
-        "Bottom should have empty clustering prefix"
+        u16::from_be_bytes([data[after_header + 2], data[after_header + 3]]),
+        0,
+        "Bottom bound carries no clustering values"
     );
 }
 

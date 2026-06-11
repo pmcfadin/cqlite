@@ -62,8 +62,8 @@ use crate::storage::serialization::types::TypeSerializer;
 use crate::storage::serialization::vint::{encode_signed, encode_unsigned, unsigned_len};
 use crate::storage::sstable::writer::stats_writer::StatisticsMetadata;
 use crate::storage::write_engine::mutation::{
-    ClusteringBound, DecoratedKey, Mutation, PartitionKey, PartitionTombstone, RangeTombstone,
-    TableId,
+    ClusteringBound, ClusteringKey, DecoratedKey, Mutation, PartitionKey, PartitionTombstone,
+    RangeTombstone, TableId,
 };
 use crate::types::{ComparatorType, UdtTypeDef, Value};
 use std::io::Write;
@@ -92,19 +92,21 @@ const CELL_USE_ROW_TTL: u8 = 0x10;
 // Range tombstone marker constants
 const IS_MARKER: u8 = 0x02;
 
-// Range tombstone bound kinds
-#[allow(dead_code)]
-const INCL_START_BOUND: u8 = 0; // Inclusive start bound
-#[allow(dead_code)]
-const EXCL_START_BOUND: u8 = 1; // Exclusive start bound
-#[allow(dead_code)]
-const INCL_END_BOUND: u8 = 2; // Inclusive end bound
-#[allow(dead_code)]
-const EXCL_END_BOUND: u8 = 3; // Exclusive end bound
-#[allow(dead_code)]
-const START_BOUNDARY: u8 = 4; // Bottom (start of partition)
-#[allow(dead_code)]
-const END_BOUNDARY: u8 = 5; // Top (end of partition)
+// Range tombstone bound kinds.
+//
+// These are the ordinals of Cassandra's `ClusteringPrefix.Kind` enum
+// (ClusteringPrefix.java) — the byte written on disk by
+// `ClusteringBoundOrBoundary.Serializer.serialize()`:
+//   0 = EXCL_END_BOUND, 1 = INCL_START_BOUND,
+//   2 = EXCL_END_INCL_START_BOUNDARY, 3 = STATIC_CLUSTERING,
+//   4 = CLUSTERING, 5 = INCL_END_EXCL_START_BOUNDARY,
+//   6 = INCL_END_BOUND, 7 = EXCL_START_BOUND.
+// (Issue #717: the writer previously used a private 0..5 numbering that no
+// Cassandra reader understands.)
+const EXCL_END_BOUND: u8 = 0;
+const INCL_START_BOUND: u8 = 1;
+const INCL_END_BOUND: u8 = 6;
+const EXCL_START_BOUND: u8 = 7;
 
 // Partition/row markers
 const END_OF_PARTITION: u8 = 0x01;
@@ -281,10 +283,15 @@ impl DataWriter {
         self.write_partition_header(key, partition_tombstone)?;
         let mut prev_unfiltered_size = (self.buffer.len() - header_start) as u64;
 
-        // Write range tombstones before rows
-        for rt in range_tombstones {
-            prev_unfiltered_size = self.write_range_tombstone_with_size(rt, schema)? as u64;
-        }
+        // SSTables must be internally reconciled: Cassandra's read path and
+        // compaction only reconcile rows against deletions from OTHER sources
+        // (memtables / other sstables) — a row shadowed by a partition or
+        // range tombstone in the SAME sstable is served live. Cassandra's own
+        // flush drops shadowed data, and so must we (Issue #716/#717).
+        // `partition_floor` is the shadow timestamp from the partition
+        // tombstone; per-row floors additionally account for covering range
+        // tombstones.
+        let partition_floor = partition_tombstone.map(|pt| pt.deletion_time);
 
         // Cassandra's SerializationHeader.hasStatic() returns true whenever the schema
         // declares any static column — and both the writer and reader unconditionally
@@ -295,7 +302,15 @@ impl DataWriter {
             // Collect static-column operations from ALL mutations in this partition,
             // regardless of whether the mutation also carries a clustering key.
             // Last-write-wins by timestamp_micros when the same column appears twice.
-            let merged = collect_static_operations(mutations, schema);
+            // Static cells shadowed by the partition tombstone are dropped.
+            let merged = collect_static_operations(mutations, schema, partition_floor);
+
+            // Mutations shadowed by the partition tombstone cannot contribute
+            // the static row's liveness timestamp or TTL either.
+            let unshadowed_static = |m: &&Mutation| {
+                partition_floor.is_none_or(|floor| m.timestamp_micros > floor)
+                    && has_static_operation(m, schema)
+            };
 
             if merged.is_empty() {
                 // Schema declares statics but this partition writes none.
@@ -306,10 +321,10 @@ impl DataWriter {
                 // Build a synthetic Mutation carrying the merged static ops.
                 // Use the latest timestamp seen across contributing mutations.
                 // `!merged.is_empty()` implies at least one mutation contributed
-                // a static op, so the inner `.max()` is guaranteed `Some`.
+                // an unshadowed static op, so the inner `.max()` is guaranteed `Some`.
                 let latest_ts = mutations
                     .iter()
-                    .filter(|m| has_static_operation(m, schema))
+                    .filter(unshadowed_static)
                     .map(|m| m.timestamp_micros)
                     .max()
                     .unwrap_or(mutations.first().map(|m| m.timestamp_micros).unwrap_or(0));
@@ -318,7 +333,7 @@ impl DataWriter {
                 // contributed a static op (mirrors Cassandra's last-write-wins).
                 let ttl = mutations
                     .iter()
-                    .filter(|m| has_static_operation(m, schema))
+                    .filter(unshadowed_static)
                     .max_by_key(|m| m.timestamp_micros)
                     .and_then(|m| m.ttl_seconds);
 
@@ -350,49 +365,97 @@ impl DataWriter {
             }
         }
 
-        // Write all clustering rows for this partition.
-        // Strip any static-column operations so they don't appear inside
-        // clustering row bodies (static cells belong in the static-row prelude).
-        for mutation in mutations.iter() {
-            // Skip pure-static mutations (no clustering key AND only static ops):
-            // they contributed to the prelude above and have no clustering row.
-            if is_static_row_mutation(mutation, schema) {
-                continue;
+        // Merge all mutations sharing a clustering key into a single row each
+        // (Issue #716/#717: writing one row per mutation produced duplicate
+        // rows with equal clustering — e.g. an INSERT row plus a phantom
+        // tombstone-carrier row — which is invalid in the OA format). Rows
+        // shadowed by the partition tombstone or a covering range tombstone
+        // are dropped during the merge.
+        let rows = self.merge_clustering_rows(
+            mutations,
+            schema,
+            schema_has_static,
+            partition_floor,
+            range_tombstones,
+        );
+
+        // Interleave merged rows with range tombstone bound markers in
+        // clustering order. Cassandra requires every unfiltered (row or
+        // marker) of a partition to appear in clustering order; with equal
+        // clustering values, inclusive-start/exclusive-end bounds sort before
+        // the row and inclusive-end/exclusive-start bounds sort after it
+        // (ClusteringPrefix.Kind.comparedToClustering).
+        enum PartitionItem<'a> {
+            Row(RowWrite<'a>),
+            Marker {
+                bound: &'a ClusteringBound,
+                is_open: bool,
+                deletion_time: i64,
+                local_deletion_time: i32,
+            },
+        }
+
+        let mut items: Vec<PartitionItem> = rows.into_iter().map(PartitionItem::Row).collect();
+        for rt in range_tombstones {
+            items.push(PartitionItem::Marker {
+                bound: &rt.start,
+                is_open: true,
+                deletion_time: rt.deletion_time,
+                local_deletion_time: rt.local_deletion_time,
+            });
+            items.push(PartitionItem::Marker {
+                bound: &rt.end,
+                is_open: false,
+                deletion_time: rt.deletion_time,
+                local_deletion_time: rt.local_deletion_time,
+            });
+        }
+
+        // Sort key: (partition position class, clustering values, bound weight).
+        // class: -1 = before all rows (Bottom), 0 = positioned by clustering
+        // values, 1 = after all rows (Top).
+        fn sort_class<'a, 'b>(item: &'b PartitionItem<'a>) -> (i8, Option<&'b ClusteringKey>, i8) {
+            match item {
+                PartitionItem::Row(row) => (0, row.clustering_key, 0),
+                PartitionItem::Marker { bound, is_open, .. } => match bound {
+                    ClusteringBound::Inclusive(ck) => (0, Some(ck), if *is_open { -1 } else { 1 }),
+                    ClusteringBound::Exclusive(ck) => (0, Some(ck), if *is_open { 1 } else { -1 }),
+                    ClusteringBound::Bottom => (-1, None, 0),
+                    ClusteringBound::Top => (1, None, 0),
+                },
             }
+        }
+        items.sort_by(|a, b| {
+            let (class_a, ck_a, weight_a) = sort_class(a);
+            let (class_b, ck_b, weight_b) = sort_class(b);
+            class_a
+                .cmp(&class_b)
+                .then_with(|| match (ck_a, ck_b) {
+                    (Some(x), Some(y)) => x.compare(y, schema).unwrap_or_else(|_| x.cmp(y)),
+                    _ => std::cmp::Ordering::Equal,
+                })
+                .then(weight_a.cmp(&weight_b))
+        });
 
-            if schema_has_static {
-                // Strip static ops from mutations that also write regular columns.
-                let regular_ops: Vec<_> = mutation
-                    .operations
-                    .iter()
-                    .filter(|op| !is_static_operation(op, schema))
-                    .cloned()
-                    .collect();
-
-                if regular_ops.is_empty() {
-                    // Either the mutation had only static ops (already in the
-                    // prelude) or it carried no ops at all — either way there
-                    // is no clustering row to emit.
-                    continue;
+        for item in items {
+            prev_unfiltered_size = match item {
+                PartitionItem::Row(row) => {
+                    self.write_merged_row_with_prev_size(&row, schema, prev_unfiltered_size)? as u64
                 }
-
-                let stripped = Mutation {
-                    table: mutation.table.clone(),
-                    partition_key: mutation.partition_key.clone(),
-                    clustering_key: mutation.clustering_key.clone(),
-                    operations: regular_ops,
-                    timestamp_micros: mutation.timestamp_micros,
-                    ttl_seconds: mutation.ttl_seconds,
-                    partition_tombstone: None,
-                    range_tombstones: Vec::new(),
-                };
-
-                prev_unfiltered_size =
-                    self.write_row_with_prev_size(&stripped, schema, prev_unfiltered_size)? as u64;
-            } else {
-                prev_unfiltered_size =
-                    self.write_row_with_prev_size(mutation, schema, prev_unfiltered_size)? as u64;
-            }
+                PartitionItem::Marker {
+                    bound,
+                    is_open,
+                    deletion_time,
+                    local_deletion_time,
+                } => self.write_range_bound(
+                    bound,
+                    is_open,
+                    deletion_time,
+                    local_deletion_time,
+                    schema,
+                    prev_unfiltered_size,
+                )? as u64,
+            };
         }
 
         // Write end-of-partition marker
@@ -546,104 +609,278 @@ impl DataWriter {
         Ok(())
     }
 
+    /// Write a single mutation as one row. Thin adapter over the merged-row
+    /// path so legacy callers (and unit tests) keep working.
     fn write_row_with_prev_size(
         &mut self,
         mutation: &Mutation,
         schema: &TableSchema,
         prev_size: u64,
     ) -> Result<usize> {
+        match Self::merge_row_group(&[mutation], schema, false, None) {
+            Some(row) => self.write_merged_row_with_prev_size(&row, schema, prev_size),
+            // Nothing to write (e.g. a tombstone-carrier mutation with no ops)
+            None => Ok(0),
+        }
+    }
+
+    /// Group same-clustering mutations of a partition and merge each group
+    /// into a single [`RowWrite`].
+    ///
+    /// Mutations must already be sorted by clustering key (the caller —
+    /// `SSTableWriter::write_partition` — sorts them); grouping is by
+    /// adjacency. Pure-static mutations are excluded (their cells live in the
+    /// static-row prelude), and groups that merge to nothing (e.g. mutations
+    /// that exist only to carry partition/range tombstones) produce no row.
+    fn merge_clustering_rows<'a>(
+        &self,
+        mutations: &'a [Mutation],
+        schema: &TableSchema,
+        skip_static_ops: bool,
+        partition_floor: Option<i64>,
+        range_tombstones: &[RangeTombstone],
+    ) -> Vec<RowWrite<'a>> {
+        let row_mutations: Vec<&'a Mutation> = mutations
+            .iter()
+            .filter(|m| !is_static_row_mutation(m, schema))
+            .collect();
+
+        let mut rows = Vec::new();
+        let mut start = 0;
+        while start < row_mutations.len() {
+            let mut end = start + 1;
+            while end < row_mutations.len()
+                && row_mutations[end].clustering_key == row_mutations[start].clustering_key
+            {
+                end += 1;
+            }
+
+            // Shadow floor for this row: partition tombstone plus any range
+            // tombstone covering the group's clustering key.
+            let clustering_key = row_mutations[start].clustering_key.as_ref();
+            let mut shadow_floor = partition_floor;
+            for rt in range_tombstones {
+                if range_tombstone_covers(rt, clustering_key, schema) {
+                    shadow_floor =
+                        Some(shadow_floor.map_or(rt.deletion_time, |f| f.max(rt.deletion_time)));
+                }
+            }
+
+            if let Some(row) = Self::merge_row_group(
+                &row_mutations[start..end],
+                schema,
+                skip_static_ops,
+                shadow_floor,
+            ) {
+                rows.push(row);
+            }
+            start = end;
+        }
+        rows
+    }
+
+    /// Merge a group of mutations sharing one clustering key into a single
+    /// row, applying Cassandra reconciliation semantics at write time:
+    ///
+    /// - Row deletion: the newest `DeleteRow` wins; mutations at or before
+    ///   the deletion timestamp are shadowed (`DeletionTime.deletes` uses
+    ///   `timestamp <= markedForDeleteAt`).
+    /// - Cells: last-write-wins per column by timestamp; a tombstone wins a
+    ///   timestamp tie (Cassandra cell reconciliation).
+    /// - Liveness: from the newest surviving mutation that writes cells, or
+    ///   a pure primary-key insert (no ops and no tombstone payload). Pure
+    ///   row tombstones carry NO liveness, matching Cassandra's serializer.
+    ///
+    /// Returns `None` when the group produces no row at all (e.g. a mutation
+    /// that exists only to carry a partition or range tombstone, or a row
+    /// fully shadowed by the partition/range tombstone `shadow_floor`).
+    fn merge_row_group<'a>(
+        group: &[&'a Mutation],
+        schema: &TableSchema,
+        skip_static_ops: bool,
+        shadow_floor: Option<i64>,
+    ) -> Option<RowWrite<'a>> {
+        use crate::storage::write_engine::mutation::CellOperation;
+
+        // Newest row deletion in the group (if any). A row deletion at or
+        // before the shadow floor is redundant (the partition/range tombstone
+        // already covers it) and is dropped.
+        let mut row_deletion: Option<(i64, i32)> = None;
+        for m in group {
+            let has_delete_row = m
+                .operations
+                .iter()
+                .any(|op| matches!(op, CellOperation::DeleteRow));
+            if has_delete_row
+                && shadow_floor.is_none_or(|floor| m.timestamp_micros > floor)
+                && row_deletion.is_none_or(|(ts, _)| m.timestamp_micros >= ts)
+            {
+                row_deletion = Some((m.timestamp_micros, (m.timestamp_micros / 1_000_000) as i32));
+            }
+        }
+        // Cells and liveness are shadowed by the strongest covering deletion:
+        // the row deletion or the partition/range tombstone floor.
+        let deletion_ts = match (row_deletion.map(|(ts, _)| ts), shadow_floor) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        };
+
+        // Per-column last-write-wins; tombstones win timestamp ties.
+        let mut cells: std::collections::HashMap<&'a str, MergedOp<'a>> =
+            std::collections::HashMap::new();
+        // Liveness: (timestamp, row-level TTL) of the newest contributing mutation
+        let mut liveness: Option<(i64, Option<u32>)> = None;
+
+        for m in group {
+            // Shadowed entirely by the row deletion
+            if deletion_ts.is_some_and(|dts| m.timestamp_micros <= dts) {
+                continue;
+            }
+
+            let mut contributes_liveness = false;
+            for op in &m.operations {
+                let column = match op {
+                    CellOperation::Write { column, .. }
+                    | CellOperation::WriteWithTtl { column, .. }
+                    | CellOperation::Delete { column } => column.as_str(),
+                    CellOperation::DeleteRow => continue,
+                };
+                if skip_static_ops && is_static_operation(op, schema) {
+                    continue;
+                }
+                if matches!(
+                    op,
+                    CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
+                ) {
+                    contributes_liveness = true;
+                }
+
+                let candidate = MergedOp {
+                    op,
+                    timestamp_micros: m.timestamp_micros,
+                    row_ttl_seconds: m.ttl_seconds,
+                };
+                match cells.entry(column) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(candidate);
+                    }
+                    std::collections::hash_map::Entry::Occupied(mut entry) => {
+                        let existing = entry.get();
+                        let candidate_is_tombstone =
+                            matches!(candidate.op, CellOperation::Delete { .. });
+                        let wins = candidate.timestamp_micros > existing.timestamp_micros
+                            || (candidate.timestamp_micros == existing.timestamp_micros
+                                && (candidate_is_tombstone
+                                    || !matches!(existing.op, CellOperation::Delete { .. })));
+                        if wins {
+                            entry.insert(candidate);
+                        }
+                    }
+                }
+            }
+
+            // A mutation with no ops and no tombstone payload is a pure
+            // primary-key insert: it creates row liveness but no cells.
+            let pure_pk_insert = m.operations.is_empty()
+                && m.partition_tombstone.is_none()
+                && m.range_tombstones.is_empty();
+            if (contributes_liveness || pure_pk_insert)
+                && liveness.is_none_or(|(ts, _)| m.timestamp_micros >= ts)
+            {
+                liveness = Some((m.timestamp_micros, m.ttl_seconds));
+            }
+        }
+
+        let ops: Vec<MergedOp<'a>> = cells.into_values().collect();
+        if ops.is_empty() && row_deletion.is_none() && liveness.is_none() {
+            return None;
+        }
+
+        Some(RowWrite {
+            clustering_key: group[0].clustering_key.as_ref(),
+            liveness_ts: liveness.map(|(ts, _)| ts),
+            ttl_seconds: liveness.and_then(|(_, ttl)| ttl),
+            row_deletion,
+            ops,
+        })
+    }
+
+    /// Write one merged row (flags + clustering prefix + sizes + body).
+    fn write_merged_row_with_prev_size(
+        &mut self,
+        row: &RowWrite<'_>,
+        schema: &TableSchema,
+        prev_size: u64,
+    ) -> Result<usize> {
+        use crate::storage::write_engine::mutation::CellOperation;
+
         let start_len = self.buffer.len();
 
         // Build row header flags
         let mut flags = 0u8;
 
-        // Check if this is a row tombstone
-        let is_row_tombstone = mutation.operations.iter().any(|op| {
-            matches!(
-                op,
-                crate::storage::write_engine::mutation::CellOperation::DeleteRow
-            )
-        });
-
-        if is_row_tombstone {
+        if row.row_deletion.is_some() {
             flags |= ROW_HAS_DELETION; // 0x10
         }
-
-        // Timestamp is always present for writes and row tombstones
-        flags |= ROW_HAS_TIMESTAMP;
-
-        // TTL if present (not applicable to row tombstones)
-        if !is_row_tombstone && mutation.ttl_seconds.is_some() {
-            flags |= ROW_HAS_TTL;
+        if row.liveness_ts.is_some() {
+            flags |= ROW_HAS_TIMESTAMP;
+            if row.ttl_seconds.is_some() {
+                flags |= ROW_HAS_TTL;
+            }
         }
 
-        // All columns present if all operations are writes (no deletes) AND no NULLs
-        if !is_row_tombstone {
-            let all_writes = mutation.operations.iter().all(|op| {
+        // All columns present if there is no deletion, all surviving ops are
+        // non-NULL writes, and they cover every regular column.
+        if row.row_deletion.is_none() {
+            let all_writes = row.ops.iter().all(|mop| {
                 matches!(
-                    op,
-                    crate::storage::write_engine::mutation::CellOperation::Write { .. }
-                        | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
+                    mop.op,
+                    CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
                 )
             });
-            let has_nulls = mutation.operations.iter().any(|op| match op {
-                crate::storage::write_engine::mutation::CellOperation::Write { value, .. }
-                | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                    value,
-                    ..
-                } => {
+            let has_nulls = row.ops.iter().any(|mop| match mop.op {
+                CellOperation::Write { value, .. } | CellOperation::WriteWithTtl { value, .. } => {
                     matches!(value, Value::Null)
                 }
                 _ => false,
             });
-            // Count regular columns only (exclude PK, CK, and static)
             let regular_column_count = self.regular_columns(schema).len();
-
-            if all_writes && !has_nulls && mutation.operations.len() == regular_column_count {
+            if all_writes && !has_nulls && row.ops.len() == regular_column_count {
                 flags |= ROW_HAS_ALL_COLUMNS;
             }
+        }
 
-            // Check if any operation targets a complex column (non-frozen collection)
-            let has_complex = mutation.operations.iter().any(|op| {
-                let col_name = match op {
-                    crate::storage::write_engine::mutation::CellOperation::Write {
-                        column, ..
-                    }
-                    | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                        column,
-                        ..
-                    }
-                    | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                        Some(column.as_str())
-                    }
-                    _ => None,
-                };
-                if let Some(name) = col_name {
-                    schema
-                        .columns
-                        .iter()
-                        .find(|c| c.name == name)
-                        .map(|c| is_complex_column(&c.data_type))
-                        .unwrap_or(false)
-                } else {
-                    false
-                }
-            });
-            if has_complex {
-                flags |= ROW_HAS_COMPLEX_DELETION;
-            }
+        // Check if any operation targets a complex column (non-frozen collection)
+        let has_complex = row.ops.iter().any(|mop| {
+            let col_name = match mop.op {
+                CellOperation::Write { column, .. }
+                | CellOperation::WriteWithTtl { column, .. }
+                | CellOperation::Delete { column } => Some(column.as_str()),
+                _ => None,
+            };
+            col_name.is_some_and(|name| {
+                schema
+                    .columns
+                    .iter()
+                    .find(|c| c.name == name)
+                    .map(|c| is_complex_column(&c.data_type))
+                    .unwrap_or(false)
+            })
+        });
+        if has_complex {
+            flags |= ROW_HAS_COMPLEX_DELETION;
         }
 
         // Write row flags
         self.buffer.push(flags);
 
         // Write clustering prefix if present (before row_size)
-        if let Some(ref clustering_key) = mutation.clustering_key {
+        if let Some(clustering_key) = row.clustering_key {
             self.write_clustering_prefix(clustering_key, schema)?;
         }
 
         // Calculate row body size (everything after row_size VInt)
-        let row_body = self.build_row_body(mutation, schema, flags)?;
+        let row_body = self.build_merged_row_body(row, schema, flags)?;
 
         let prev_size_vint_len = unsigned_len(prev_size);
 
@@ -837,7 +1074,19 @@ impl DataWriter {
                 local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
             encode_unsigned(ldt_delta as u64, &mut body);
 
-            // No cells written for row tombstones - return early
+            // Issue #717: the columns subset is NOT optional for tombstone rows.
+            // Cassandra's UnfilteredSerializer always reads it after the deletion
+            // times whenever HAS_ALL_COLUMNS is unset; omitting it makes the
+            // reader consume the next row's bytes as a subset bitmask
+            // ("Invalid Columns subset bytes; too many bits set").
+            if (flags & ROW_HAS_ALL_COLUMNS) == 0 {
+                let static_columns = self.static_columns(schema);
+                let empty_present: std::collections::HashSet<&str> =
+                    std::collections::HashSet::new();
+                self.write_column_subset(&mut body, &static_columns, &empty_present)?;
+            }
+
+            // No cells written for row tombstones
             return Ok(body);
         }
 
@@ -900,7 +1149,7 @@ impl DataWriter {
             .map(|c| &c.name)
             .collect();
 
-        for op in self.sorted_operations(mutation, schema, ColumnScope::StaticOnly) {
+        for op in self.sorted_operations(mutation, &self.static_columns(schema)) {
             match op {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
                     // Only write if it's a static column
@@ -948,9 +1197,35 @@ impl DataWriter {
     /// Build row body (everything after row_size VInt)
     ///
     /// Returns the bytes for: timestamp, TTL, deletion, column bitmap, and cells.
+    /// Build a row body from a single mutation (legacy/test entry point).
+    /// Routes through the merged-row body builder.
+    #[cfg(test)]
     fn build_row_body(
         &self,
         mutation: &Mutation,
+        schema: &TableSchema,
+        flags: u8,
+    ) -> Result<Vec<u8>> {
+        let row = Self::merge_row_group(&[mutation], schema, false, None).unwrap_or(RowWrite {
+            clustering_key: mutation.clustering_key.as_ref(),
+            liveness_ts: Some(mutation.timestamp_micros),
+            ttl_seconds: mutation.ttl_seconds,
+            row_deletion: None,
+            ops: Vec::new(),
+        });
+        self.build_merged_row_body(&row, schema, flags)
+    }
+
+    /// Build a merged row body (everything after the row_size VInt, excluding
+    /// the prev_unfiltered_size VInt written by the caller).
+    ///
+    /// Field order per Cassandra's `UnfilteredSerializer.serializeRowBody`:
+    /// liveness timestamp, TTL + expiration LDT, row deletion, columns
+    /// subset, then cells. Issue #717: the columns subset is written for
+    /// EVERY row lacking HAS_ALL_COLUMNS — including row tombstones.
+    fn build_merged_row_body(
+        &self,
+        row: &RowWrite<'_>,
         schema: &TableSchema,
         flags: u8,
     ) -> Result<Vec<u8>> {
@@ -961,7 +1236,12 @@ impl DataWriter {
         // Fix #644 (S6): Cassandra writes UNSIGNED VInt for all temporal deltas.
         // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp)
         if (flags & ROW_HAS_TIMESTAMP) != 0 {
-            let timestamp_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
+            let liveness_ts = row.liveness_ts.ok_or_else(|| {
+                Error::InvalidInput(
+                    "ROW_HAS_TIMESTAMP set but row has no liveness timestamp".to_string(),
+                )
+            })?;
+            let timestamp_delta = (liveness_ts - self.stats.min_timestamp) as u64;
             encode_unsigned(timestamp_delta, &mut body);
         }
 
@@ -971,7 +1251,7 @@ impl DataWriter {
         // SerializationHeader.java:177: out.writeUnsignedVInt32(ttl - stats.minTTL)
         // SerializationHeader.java:172: out.writeUnsignedVInt32(ldt - stats.minLocalDeletionTime)
         if (flags & ROW_HAS_TTL) != 0 {
-            if let Some(ttl) = mutation.ttl_seconds {
+            if let Some(ttl) = row.ttl_seconds {
                 let ttl_delta = ttl as i64 - self.stats.min_ttl as i64;
                 if ttl_delta < 0 {
                     return Err(Error::InvalidInput(format!(
@@ -999,25 +1279,26 @@ impl DataWriter {
             // Row tombstone: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
             // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
             // Fix #644 (S6): both are UNSIGNED VInt.
-            let ts_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
+            let (deletion_ts, local_deletion_time) = row.row_deletion.ok_or_else(|| {
+                Error::InvalidInput("ROW_HAS_DELETION set but row has no deletion time".to_string())
+            })?;
+            let ts_delta = (deletion_ts - self.stats.min_timestamp) as u64;
             encode_unsigned(ts_delta, &mut body);
 
-            let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
             let ldt_delta =
                 local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
             encode_unsigned(ldt_delta as u64, &mut body);
-
-            // No cells written for row tombstones - return early
-            return Ok(body);
         }
 
-        // Write column bitmap (if NOT HAS_ALL_COLUMNS)
+        // Write column bitmap (if NOT HAS_ALL_COLUMNS).
+        // Issue #717: this is written even for row tombstones — Cassandra's
+        // deserializer reads the subset right after the deletion times.
         if (flags & ROW_HAS_ALL_COLUMNS) == 0 {
-            self.write_column_bitmap(&mut body, mutation, schema)?;
+            self.write_merged_column_bitmap(&mut body, &row.ops, schema)?;
         }
 
-        // Write cell data
-        self.write_cells(&mut body, mutation, schema)?;
+        // Write cell data (none survive for pure row tombstones)
+        self.write_merged_cells(&mut body, row, schema)?;
 
         Ok(body)
     }
@@ -1086,6 +1367,7 @@ impl DataWriter {
     ///
     /// Only regular columns participate in the bitmap — partition key and
     /// clustering key columns are serialized elsewhere.
+    #[cfg(test)]
     fn write_column_bitmap(
         &self,
         buf: &mut Vec<u8>,
@@ -1108,6 +1390,36 @@ impl DataWriter {
                 crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
                     Some(column.as_str())
                 }
+                _ => None,
+            })
+            .collect();
+
+        let regular_columns = self.regular_columns(schema);
+        self.write_column_subset(buf, &regular_columns, &present_columns)
+    }
+
+    /// Write the columns subset for a merged row's surviving operations.
+    ///
+    /// Same encoding as [`Self::write_column_bitmap`]; for a pure row
+    /// tombstone the ops list is empty, producing the all-missing bitmask.
+    fn write_merged_column_bitmap(
+        &self,
+        buf: &mut Vec<u8>,
+        ops: &[MergedOp<'_>],
+        schema: &TableSchema,
+    ) -> Result<()> {
+        use crate::storage::write_engine::mutation::CellOperation;
+
+        let present_columns: std::collections::HashSet<&str> = ops
+            .iter()
+            .filter_map(|mop| match mop.op {
+                CellOperation::Write { column, value }
+                | CellOperation::WriteWithTtl { column, value, .. }
+                    if !matches!(value, Value::Null) =>
+                {
+                    Some(column.as_str())
+                }
+                CellOperation::Delete { column } => Some(column.as_str()),
                 _ => None,
             })
             .collect();
@@ -1139,100 +1451,117 @@ impl DataWriter {
     ///
     /// Cells are written in alphabetical column name order to match Cassandra's
     /// `Columns` sorting (regular columns are sorted by name).
-    fn write_cells(
+    /// Write the surviving cells of a merged row, in regular-column order.
+    ///
+    /// Cells whose timestamp matches the row liveness timestamp use
+    /// USE_ROW_TIMESTAMP; cells merged in from other mutations (e.g. a later
+    /// single-cell DELETE) carry an explicit timestamp delta.
+    fn write_merged_cells(
         &self,
         buf: &mut Vec<u8>,
-        mutation: &Mutation,
+        row: &RowWrite<'_>,
         schema: &TableSchema,
     ) -> Result<()> {
-        for op in self.sorted_operations(mutation, schema, ColumnScope::RegularOnly) {
-            match op {
-                crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
+        use crate::storage::write_engine::mutation::CellOperation;
+
+        for mop in self.sorted_merged_ops(&row.ops, schema) {
+            match mop.op {
+                CellOperation::Write { column, value } => {
                     // Skip NULL values - they are represented by absence in the bitmap
-                    if !matches!(value, Value::Null) {
-                        // Check if this column is a complex column (non-frozen collection)
-                        let is_complex = schema
+                    if matches!(value, Value::Null) {
+                        continue;
+                    }
+                    // Check if this column is a complex column (non-frozen collection)
+                    let is_complex = schema
+                        .columns
+                        .iter()
+                        .find(|c| c.name == *column)
+                        .map(|c| is_complex_column(&c.data_type))
+                        .unwrap_or(false);
+
+                    if is_complex {
+                        let col = schema
                             .columns
                             .iter()
                             .find(|c| c.name == *column)
-                            .map(|c| is_complex_column(&c.data_type))
-                            .unwrap_or(false);
-
-                        if is_complex {
-                            let col = schema
-                                .columns
-                                .iter()
-                                .find(|c| c.name == *column)
-                                .ok_or_else(|| {
-                                    Error::Schema(format!(
-                                        "Complex column '{}' not found in schema",
-                                        column
-                                    ))
-                                })?;
-                            self.write_complex_column(
-                                buf,
-                                col,
-                                value,
-                                mutation.timestamp_micros,
-                                None,
-                            )?;
-                        } else if let Some(ttl_seconds) = mutation.ttl_seconds {
+                            .ok_or_else(|| {
+                                Error::Schema(format!(
+                                    "Complex column '{}' not found in schema",
+                                    column
+                                ))
+                            })?;
+                        self.write_complex_column(buf, col, value, mop.timestamp_micros, None)?;
+                    } else if let Some(ttl_seconds) = mop.row_ttl_seconds {
+                        if row.ttl_seconds == Some(ttl_seconds)
+                            && row.liveness_ts == Some(mop.timestamp_micros)
+                        {
                             self.write_cell_with_row_ttl(
                                 buf,
                                 column,
                                 value,
-                                mutation.timestamp_micros,
+                                mop.timestamp_micros,
                                 ttl_seconds,
-                            )?;
-                        } else {
-                            self.write_cell(buf, column, value, mutation.timestamp_micros)?;
-                        }
-                    }
-                }
-                crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                    column,
-                    value,
-                    ttl_seconds,
-                } => {
-                    // Skip NULL values - they are represented by absence in the bitmap
-                    if !matches!(value, Value::Null) {
-                        let is_complex = schema
-                            .columns
-                            .iter()
-                            .find(|c| c.name == *column)
-                            .map(|c| is_complex_column(&c.data_type))
-                            .unwrap_or(false);
-
-                        if is_complex {
-                            let col = schema
-                                .columns
-                                .iter()
-                                .find(|c| c.name == *column)
-                                .ok_or_else(|| {
-                                    Error::Schema(format!(
-                                        "Complex column '{}' not found in schema",
-                                        column
-                                    ))
-                                })?;
-                            self.write_complex_column(
-                                buf,
-                                col,
-                                value,
-                                mutation.timestamp_micros,
-                                Some(*ttl_seconds),
                             )?;
                         } else {
                             self.write_cell_with_ttl(
                                 buf,
                                 column,
                                 value,
-                                mutation.timestamp_micros,
-                                *ttl_seconds,
+                                mop.timestamp_micros,
+                                ttl_seconds,
                             )?;
                         }
+                    } else if row.liveness_ts == Some(mop.timestamp_micros) {
+                        self.write_cell(buf, column, value, mop.timestamp_micros)?;
+                    } else {
+                        self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
                     }
                 }
-                crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                CellOperation::WriteWithTtl {
+                    column,
+                    value,
+                    ttl_seconds,
+                } => {
+                    // Skip NULL values - they are represented by absence in the bitmap
+                    if matches!(value, Value::Null) {
+                        continue;
+                    }
+                    let is_complex = schema
+                        .columns
+                        .iter()
+                        .find(|c| c.name == *column)
+                        .map(|c| is_complex_column(&c.data_type))
+                        .unwrap_or(false);
+
+                    if is_complex {
+                        let col = schema
+                            .columns
+                            .iter()
+                            .find(|c| c.name == *column)
+                            .ok_or_else(|| {
+                                Error::Schema(format!(
+                                    "Complex column '{}' not found in schema",
+                                    column
+                                ))
+                            })?;
+                        self.write_complex_column(
+                            buf,
+                            col,
+                            value,
+                            mop.timestamp_micros,
+                            Some(*ttl_seconds),
+                        )?;
+                    } else {
+                        self.write_cell_with_ttl(
+                            buf,
+                            column,
+                            value,
+                            mop.timestamp_micros,
+                            *ttl_seconds,
+                        )?;
+                    }
+                }
+                CellOperation::Delete { column } => {
                     let is_complex = schema
                         .columns
                         .iter()
@@ -1243,18 +1572,18 @@ impl DataWriter {
                     if is_complex {
                         // Complex column deletion: write empty complex column
                         // with active deletion time (not LIVE)
-                        self.write_complex_column_deletion(buf, mutation.timestamp_micros)?;
+                        self.write_complex_column_deletion(buf, mop.timestamp_micros)?;
                     } else {
-                        let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+                        let local_deletion_time = (mop.timestamp_micros / 1_000_000) as i32;
                         self.write_tombstone_cell(
                             buf,
                             column,
-                            mutation.timestamp_micros,
+                            mop.timestamp_micros,
                             local_deletion_time,
                         )?;
                     }
                 }
-                crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
+                CellOperation::DeleteRow => {
                     // Row deletion handled at row level with HAS_DELETION flag
                 }
             }
@@ -1646,6 +1975,64 @@ impl DataWriter {
         Ok(())
     }
 
+    /// Write a live cell that carries its own timestamp (no USE_ROW_TIMESTAMP).
+    ///
+    /// Used for cells merged into a row from a different mutation than the
+    /// one providing the row's liveness timestamp.
+    ///
+    /// Format:
+    /// ```text
+    /// [flags: u8]                ← 0x00 (or HAS_EMPTY_VALUE for empty text)
+    /// [timestamp_delta: VUInt]   ← delta from min_timestamp
+    /// [value_length: VInt]       ← variable-length types only
+    /// [value_bytes]
+    /// ```
+    fn write_cell_explicit_ts(
+        &self,
+        buf: &mut Vec<u8>,
+        column: &str,
+        value: &Value,
+        timestamp: i64,
+    ) -> Result<()> {
+        if matches!(value, Value::Null) {
+            return Err(Error::InvalidInput(format!(
+                "NULL values should not be written as cells (column: {}). They are represented by absence in the bitmap.",
+                column
+            )));
+        }
+
+        let mut flags = 0u8;
+        if matches!(value, Value::Text(s) if s.is_empty()) {
+            flags |= CELL_HAS_EMPTY_VALUE;
+        }
+        buf.push(flags);
+
+        // Timestamp delta (UNSIGNED VInt)
+        let timestamp_delta = (timestamp - self.stats.min_timestamp) as u64;
+        encode_unsigned(timestamp_delta, buf);
+
+        if (flags & CELL_HAS_EMPTY_VALUE) != 0 {
+            return Ok(());
+        }
+
+        let value_bytes = serialize_value(value)?;
+        if value_bytes.len() > i64::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "Value too large for column '{}': {} bytes (max {})",
+                column,
+                value_bytes.len(),
+                i64::MAX
+            )));
+        }
+
+        if cell_value_uses_length_prefix(value) {
+            encode_unsigned(value_bytes.len() as u64, buf);
+        }
+
+        buf.extend_from_slice(&value_bytes);
+        Ok(())
+    }
+
     /// Write a cell with TTL (expiring cell)
     ///
     /// Format:
@@ -1805,7 +2192,12 @@ impl DataWriter {
     ) -> Result<()> {
         // Cell flags for tombstone
         // CRITICAL: Do NOT set USE_ROW_TIMESTAMP - tombstones need their own timestamp
-        let flags = CELL_IS_DELETED;
+        //
+        // Issue #716: HAS_EMPTY_VALUE MUST be set. Cassandra's Cell.Serializer
+        // derives `hasValue = (flags & HAS_EMPTY_VALUE_MASK) == 0`, so a deleted
+        // cell without this flag makes Cassandra read a value that was never
+        // written, desyncing the row stream (EOFException on readback).
+        let flags = CELL_IS_DELETED | CELL_HAS_EMPTY_VALUE;
         buf.push(flags);
 
         // Timestamp delta (VInt) - required for tombstones
@@ -1830,53 +2222,28 @@ impl DataWriter {
         Ok(())
     }
 
-    /// Write a range tombstone marker
+    /// Write a single range tombstone bound marker.
     ///
-    /// Range tombstones are written as markers within the partition data:
+    /// On-disk layout (must mirror the reader's `skip_range_tombstone_marker`
+    /// and Cassandra's `UnfilteredSerializer.serialize(RangeTombstoneMarker)`):
     /// ```text
-    /// [marker_flags: u8]           ← IS_MARKER (0x02) set
-    /// [bound_kind: u8]             ← Open/Close/Boundary type
-    /// [clustering_prefix: variable] ← Clustering key bound
-    /// [deletion_time: VInt]        ← Delta from min_timestamp
-    /// [local_deletion_time: VInt]  ← Delta from min_local_deletion_time
+    /// [flags: u8]                      ← IS_MARKER (0x02)
+    /// [bound_kind: u8]                 ← ClusteringPrefix.Kind ordinal
+    /// [cluster_count: u16 BE]          ← bound.size()
+    /// [cluster_header: VUInt]          ← only when cluster_count > 0
+    /// [cluster_values: ...]
+    /// [marker_body_size: VUInt]        ← size of (prev_size + deletion times)
+    /// [prev_unfiltered_size: VUInt]
+    /// [marked_for_delete_at: VUInt]    ← delta from min_timestamp (µs)
+    /// [local_deletion_time: VUInt]     ← delta from min_local_deletion_time (s)
     /// ```
-    #[allow(dead_code)]
-    fn write_range_tombstone(
-        &mut self,
-        range: &RangeTombstone,
-        schema: &TableSchema,
-    ) -> Result<()> {
-        self.write_range_tombstone_with_size(range, schema)?;
-        Ok(())
-    }
-
-    fn write_range_tombstone_with_size(
-        &mut self,
-        range: &RangeTombstone,
-        schema: &TableSchema,
-    ) -> Result<usize> {
-        // Write opening bound
-        self.write_range_bound(
-            &range.start,
-            true,
-            range.deletion_time,
-            range.local_deletion_time,
-            schema,
-        )?;
-
-        // Write closing bound
-        let closing_size = self.write_range_bound(
-            &range.end,
-            false,
-            range.deletion_time,
-            range.local_deletion_time,
-            schema,
-        )?;
-
-        Ok(closing_size)
-    }
-
-    /// Write a single range tombstone bound
+    ///
+    /// Issue #717: the previous writer emitted private bound-kind ordinals,
+    /// no u16 cluster count, and no marker_body_size/prev_size VInts — bytes
+    /// no Cassandra (or CQLite) reader could parse.
+    ///
+    /// Returns the total serialized marker size (for prev_unfiltered_size
+    /// threading).
     fn write_range_bound(
         &mut self,
         bound: &ClusteringBound,
@@ -1884,45 +2251,58 @@ impl DataWriter {
         deletion_time: i64,
         local_deletion_time: i32,
         schema: &TableSchema,
+        prev_size: u64,
     ) -> Result<usize> {
         let start_len = self.buffer.len();
 
         // Marker flag
         self.buffer.push(IS_MARKER);
 
-        // Determine bound kind
-        let bound_kind = match (is_open, bound) {
-            (true, ClusteringBound::Inclusive(_)) => INCL_START_BOUND,
-            (true, ClusteringBound::Exclusive(_)) => EXCL_START_BOUND,
-            (false, ClusteringBound::Inclusive(_)) => INCL_END_BOUND,
-            (false, ClusteringBound::Exclusive(_)) => EXCL_END_BOUND,
-            (_, ClusteringBound::Bottom) => START_BOUNDARY,
-            (_, ClusteringBound::Top) => END_BOUNDARY,
+        // Bound kind (ClusteringPrefix.Kind ordinal) + clustering values.
+        // Bottom/Top are the full-partition bounds: an inclusive bound with
+        // zero clustering values.
+        let (bound_kind, clustering) = match (is_open, bound) {
+            (true, ClusteringBound::Inclusive(ck)) => (INCL_START_BOUND, Some(ck)),
+            (true, ClusteringBound::Exclusive(ck)) => (EXCL_START_BOUND, Some(ck)),
+            (false, ClusteringBound::Inclusive(ck)) => (INCL_END_BOUND, Some(ck)),
+            (false, ClusteringBound::Exclusive(ck)) => (EXCL_END_BOUND, Some(ck)),
+            (true, ClusteringBound::Bottom | ClusteringBound::Top) => (INCL_START_BOUND, None),
+            (false, ClusteringBound::Bottom | ClusteringBound::Top) => (INCL_END_BOUND, None),
         };
         self.buffer.push(bound_kind);
 
-        // Write clustering prefix if present
-        match bound {
-            ClusteringBound::Inclusive(ck) | ClusteringBound::Exclusive(ck) => {
-                self.write_clustering_prefix(ck, schema)?;
-            }
-            ClusteringBound::Bottom | ClusteringBound::Top => {
-                // Empty clustering prefix (header = 0)
-                encode_unsigned(0, &mut self.buffer);
-            }
+        // Cluster count (u16 BE) — ClusteringBoundOrBoundary.Serializer
+        // writes `out.writeShort(bound.size())` before the values.
+        let cluster_count = clustering.map_or(0, |ck| ck.columns.len());
+        if cluster_count > u16::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "Range tombstone bound has too many clustering values: {}",
+                cluster_count
+            )));
+        }
+        self.buffer
+            .write_all(&(cluster_count as u16).to_be_bytes())?;
+
+        // Clustering header + values (only when the bound carries values).
+        if let Some(ck) = clustering {
+            self.write_clustering_prefix(ck, schema)?;
         }
 
-        // Deletion time delta
-        // Fix #644 (S6): range tombstone bound deltas are UNSIGNED VInt per Cassandra.
-        // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp)
+        // Deletion time: Cassandra canonical order (markedForDeleteAt first,
+        // then localDeletionTime), both UNSIGNED VInt deltas.
+        let mut deletion = Vec::new();
         let ts_delta = (deletion_time - self.stats.min_timestamp) as u64;
-        encode_unsigned(ts_delta, &mut self.buffer);
-
-        // Local deletion time delta (UNSIGNED VInt)
-        // SerializationHeader.java:172: out.writeUnsignedVInt32(ldt - stats.minLocalDeletionTime)
+        encode_unsigned(ts_delta, &mut deletion);
         let ldt_delta =
             (local_deletion_time as i64 - self.stats.min_local_deletion_time as i64) as u64;
-        encode_unsigned(ldt_delta, &mut self.buffer);
+        encode_unsigned(ldt_delta, &mut deletion);
+
+        // marker_body_size covers the prev_size VInt + deletion times (same
+        // convention as row_size for rows).
+        let body_size = unsigned_len(prev_size) as u64 + deletion.len() as u64;
+        encode_unsigned(body_size, &mut self.buffer);
+        encode_unsigned(prev_size, &mut self.buffer);
+        self.buffer.extend_from_slice(&deletion);
 
         Ok(self.buffer.len() - start_len)
     }
@@ -1968,14 +2348,8 @@ impl DataWriter {
     fn sorted_operations<'a>(
         &self,
         mutation: &'a Mutation,
-        schema: &TableSchema,
-        scope: ColumnScope,
+        columns: &[&Column],
     ) -> Vec<&'a crate::storage::write_engine::mutation::CellOperation> {
-        let columns = match scope {
-            ColumnScope::RegularOnly => self.regular_columns(schema),
-            ColumnScope::StaticOnly => self.static_columns(schema),
-        };
-
         let column_order: std::collections::HashMap<&str, usize> = columns
             .iter()
             .enumerate()
@@ -1997,6 +2371,37 @@ impl DataWriter {
             crate::storage::write_engine::mutation::CellOperation::DeleteRow => usize::MAX,
         });
         operations
+    }
+
+    /// Sort merged ops into regular-column serialization order
+    /// (simple columns before complex, then by name).
+    fn sorted_merged_ops<'a, 'b>(
+        &self,
+        ops: &'b [MergedOp<'a>],
+        schema: &TableSchema,
+    ) -> Vec<&'b MergedOp<'a>> {
+        let columns = self.regular_columns(schema);
+        let column_order: std::collections::HashMap<&str, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(idx, column)| (column.name.as_str(), idx))
+            .collect();
+
+        let mut sorted: Vec<&'b MergedOp<'a>> = ops.iter().collect();
+        sorted.sort_by_key(|mop| match mop.op {
+            crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
+            | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                column, ..
+            }
+            | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                column_order
+                    .get(column.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX - 1)
+            }
+            crate::storage::write_engine::mutation::CellOperation::DeleteRow => usize::MAX,
+        });
+        sorted
     }
 
     fn write_column_subset(
@@ -2075,10 +2480,30 @@ fn is_complex_column(data_type: &str) -> bool {
     false
 }
 
-#[derive(Clone, Copy)]
-enum ColumnScope {
-    RegularOnly,
-    StaticOnly,
+/// A surviving cell operation in a merged row, tagged with the timestamp and
+/// row-level TTL of the mutation it came from.
+struct MergedOp<'a> {
+    op: &'a crate::storage::write_engine::mutation::CellOperation,
+    timestamp_micros: i64,
+    /// Row-level TTL (`Mutation::ttl_seconds`) of the originating mutation.
+    /// Per-cell TTL lives inside `CellOperation::WriteWithTtl` itself.
+    row_ttl_seconds: Option<u32>,
+}
+
+/// One Data.db row assembled by merging every mutation of a partition that
+/// shares the same clustering key (Issues #716/#717: a partition must never
+/// contain two rows with equal clustering).
+struct RowWrite<'a> {
+    clustering_key: Option<&'a crate::storage::write_engine::mutation::ClusteringKey>,
+    /// Primary-key liveness timestamp. `None` for pure row tombstones —
+    /// Cassandra serializes those without HAS_TIMESTAMP.
+    liveness_ts: Option<i64>,
+    /// Row-level TTL from the liveness-providing mutation.
+    ttl_seconds: Option<u32>,
+    /// Row deletion as (marked_for_delete_at µs, local_deletion_time s).
+    row_deletion: Option<(i64, i32)>,
+    /// Surviving cell operations (already reconciled, unsorted).
+    ops: Vec<MergedOp<'a>>,
 }
 
 fn column_order_key(column: &Column) -> (bool, &str) {
@@ -2390,11 +2815,16 @@ fn has_static_operation(mutation: &Mutation, schema: &TableSchema) -> bool {
 /// collects operations that target static columns.  Last-write-wins by
 /// `timestamp_micros` when the same column is written more than once.
 ///
+/// Mutations at or before `shadow_floor` (the partition tombstone's deletion
+/// timestamp) are skipped: their static cells are shadowed and an sstable
+/// must be internally reconciled (see `DataWriter::write_partition`).
+///
 /// Returns the merged operations in an unspecified order (the writer will
 /// sort them by schema column order when building the row body).
 fn collect_static_operations(
     mutations: &[Mutation],
     schema: &TableSchema,
+    shadow_floor: Option<i64>,
 ) -> Vec<crate::storage::write_engine::mutation::CellOperation> {
     use std::collections::HashMap;
 
@@ -2403,6 +2833,9 @@ fn collect_static_operations(
         HashMap::new();
 
     for mutation in mutations {
+        if shadow_floor.is_some_and(|floor| mutation.timestamp_micros <= floor) {
+            continue;
+        }
         for op in &mutation.operations {
             if !is_static_operation(op, schema) {
                 continue;
@@ -2426,6 +2859,34 @@ fn collect_static_operations(
     }
 
     best.into_values().map(|(_, op)| op).collect()
+}
+
+/// Whether a range tombstone's clustering range covers the given clustering key.
+fn range_tombstone_covers(
+    rt: &RangeTombstone,
+    clustering_key: Option<&ClusteringKey>,
+    schema: &TableSchema,
+) -> bool {
+    use std::cmp::Ordering;
+
+    let Some(ck) = clustering_key else {
+        return false;
+    };
+    let cmp = |bound: &ClusteringKey| ck.compare(bound, schema).unwrap_or_else(|_| ck.cmp(bound));
+
+    let after_start = match &rt.start {
+        ClusteringBound::Inclusive(b) => cmp(b) != Ordering::Less,
+        ClusteringBound::Exclusive(b) => cmp(b) == Ordering::Greater,
+        ClusteringBound::Bottom => true,
+        ClusteringBound::Top => false,
+    };
+    let before_end = match &rt.end {
+        ClusteringBound::Inclusive(b) => cmp(b) != Ordering::Greater,
+        ClusteringBound::Exclusive(b) => cmp(b) == Ordering::Less,
+        ClusteringBound::Top => true,
+        ClusteringBound::Bottom => false,
+    };
+    after_start && before_end
 }
 
 /// Serialize value for clustering key (type-specific encoding)
@@ -3408,10 +3869,37 @@ mod tests {
             ROW_HAS_DELETION,
             "Should have HAS_DELETION flag"
         );
+        // Issue #717: a pure row tombstone carries no primary-key liveness —
+        // Cassandra serializes DELETE-d rows without HAS_TIMESTAMP.
         assert_eq!(
             flags & ROW_HAS_TIMESTAMP,
-            ROW_HAS_TIMESTAMP,
-            "Should have HAS_TIMESTAMP flag"
+            0,
+            "Pure row tombstone must not have HAS_TIMESTAMP"
+        );
+        assert_eq!(
+            flags & ROW_HAS_ALL_COLUMNS,
+            0,
+            "Row tombstone must not claim all columns"
+        );
+
+        // Issue #717: the columns subset must follow the deletion times.
+        // Layout: [flags][row_size][prev_size=0][deletion mfda][deletion ldt][subset]
+        // With create_test_stats baselines both deletion deltas and the
+        // all-missing subset are single-byte VInts.
+        let row_size = bytes[1] as usize;
+        // Body = prev_size(1) + mfda(vint) + ldt(vint) + subset(vint ≥ 1 byte)
+        assert!(
+            row_size >= 4,
+            "Row tombstone body must include the columns subset (got row_size={})",
+            row_size
+        );
+        // The final body byte is the all-missing subset bitmask: 2 regular
+        // columns (name, value) in create_test_schema → 0b11.
+        let body_end = 2 + row_size; // flags + row_size byte + body
+        assert_eq!(
+            bytes[body_end - 1],
+            0b11,
+            "Columns subset must mark every regular column missing"
         );
     }
 
@@ -3483,20 +3971,50 @@ mod tests {
             local_deletion_time: 1700000010,
         };
 
-        writer.write_range_tombstone(&range, &schema).unwrap();
+        let open_size = writer
+            .write_range_bound(
+                &range.start,
+                true,
+                range.deletion_time,
+                range.local_deletion_time,
+                &schema,
+                0,
+            )
+            .unwrap();
+        writer
+            .write_range_bound(
+                &range.end,
+                false,
+                range.deletion_time,
+                range.local_deletion_time,
+                &schema,
+                open_size as u64,
+            )
+            .unwrap();
 
         let bytes = writer.finish().unwrap();
         assert!(!bytes.is_empty());
 
-        // Verify opening bound
+        // Verify opening bound: Cassandra ClusteringPrefix.Kind ordinals
         assert_eq!(bytes[0], IS_MARKER, "Should have IS_MARKER flag");
         assert_eq!(
             bytes[1], INCL_START_BOUND,
-            "Should have INCL_START_BOUND kind"
+            "Should have INCL_START_BOUND kind (ordinal 1)"
+        );
+        // u16 BE cluster count follows the kind byte
+        assert_eq!(
+            u16::from_be_bytes([bytes[2], bytes[3]]),
+            1,
+            "Bound carries one clustering value"
         );
 
-        // Second marker should also be present (closing bound)
-        // Note: Position will vary based on VInt encoding of clustering prefix
+        // Closing bound starts right after the opening marker
+        assert_eq!(bytes[open_size], IS_MARKER);
+        assert_eq!(
+            bytes[open_size + 1],
+            INCL_END_BOUND,
+            "Should have INCL_END_BOUND kind (ordinal 6)"
+        );
     }
 
     #[test]
@@ -3521,16 +4039,40 @@ mod tests {
             local_deletion_time: 1700000010,
         };
 
-        writer.write_range_tombstone(&range, &schema).unwrap();
+        let open_size = writer
+            .write_range_bound(
+                &range.start,
+                true,
+                range.deletion_time,
+                range.local_deletion_time,
+                &schema,
+                0,
+            )
+            .unwrap();
+        writer
+            .write_range_bound(
+                &range.end,
+                false,
+                range.deletion_time,
+                range.local_deletion_time,
+                &schema,
+                open_size as u64,
+            )
+            .unwrap();
 
         let bytes = writer.finish().unwrap();
         assert!(!bytes.is_empty());
 
-        // Verify opening bound
+        // Verify opening bound: Cassandra ClusteringPrefix.Kind ordinals
         assert_eq!(bytes[0], IS_MARKER, "Should have IS_MARKER flag");
         assert_eq!(
             bytes[1], EXCL_START_BOUND,
-            "Should have EXCL_START_BOUND kind"
+            "Should have EXCL_START_BOUND kind (ordinal 7)"
+        );
+        assert_eq!(
+            bytes[open_size + 1],
+            EXCL_END_BOUND,
+            "Should have EXCL_END_BOUND kind (ordinal 0)"
         );
     }
 
@@ -3557,16 +4099,44 @@ mod tests {
             local_deletion_time: 1700000010,
         };
 
-        writer.write_range_tombstone(&range, &schema).unwrap();
+        let open_size = writer
+            .write_range_bound(
+                &range.start,
+                true,
+                range.deletion_time,
+                range.local_deletion_time,
+                &schema,
+                0,
+            )
+            .unwrap();
+        writer
+            .write_range_bound(
+                &range.end,
+                false,
+                range.deletion_time,
+                range.local_deletion_time,
+                &schema,
+                open_size as u64,
+            )
+            .unwrap();
 
         let bytes = writer.finish().unwrap();
         assert!(!bytes.is_empty());
 
-        // Verify opening bound (Bottom)
+        // Bottom serializes as an inclusive start bound with zero clustering
+        // values (u16 count = 0, no clustering header byte).
         assert_eq!(bytes[0], IS_MARKER, "Should have IS_MARKER flag");
-        assert_eq!(bytes[1], START_BOUNDARY, "Should have START_BOUNDARY kind");
-        // Empty clustering prefix for Bottom: header = 0 (single byte VInt)
-        assert_eq!(bytes[2], 0x00, "Bottom should have empty clustering prefix");
+        assert_eq!(
+            bytes[1], INCL_START_BOUND,
+            "Bottom should serialize as INCL_START_BOUND"
+        );
+        assert_eq!(
+            u16::from_be_bytes([bytes[2], bytes[3]]),
+            0,
+            "Bottom carries no clustering values"
+        );
+        // Top serializes as an inclusive end bound with zero values
+        assert_eq!(bytes[open_size + 1], INCL_END_BOUND);
     }
 
     #[test]
