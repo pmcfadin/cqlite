@@ -3,7 +3,10 @@ name: API Docs
 # Publishes per-tag rustdoc for cqlite-core to GitHub Pages so downstream
 # consumers (who pin by git tag, since CQLite is not on crates.io) can evaluate a
 # version's API without checking out the repo. Each tag is published under
-# /<tag>/ and the newest also under /latest/; history is preserved (keep_files).
+# /api/<tag>/ and the newest also under /api/latest/; history is preserved (keep_files).
+#
+# Old per-tag URLs (/<tag>/) have redirect stubs pointing to the new /api/<tag>/ paths
+# so links in past release notes keep working. See the "Publish redirect stubs" step.
 #
 # Requires GitHub Pages to be enabled for the repo with the "gh-pages branch"
 # source (Settings → Pages). Enabling Pages is a one-time maintainer action.
@@ -55,18 +58,60 @@ jobs:
         run: |
           echo '<meta http-equiv="refresh" content="0; url=cqlite_core/index.html">' > target/doc/index.html
 
-      - name: Publish to /<version>/ on gh-pages
+      - name: Publish to /api/<version>/ on gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./target/doc
-          destination_dir: ${{ steps.ver.outputs.version }}
+          destination_dir: api/${{ steps.ver.outputs.version }}
           keep_files: true
 
-      - name: Publish to /latest/ on gh-pages
+      - name: Publish to /api/latest/ on gh-pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_dir: ./target/doc
-          destination_dir: latest
+          destination_dir: api/latest
+          keep_files: true
+
+      - name: Publish redirect stubs for old per-tag URLs
+        # Old rustdoc was published under /<tag>/ (e.g. /v0.9.2/, /v0.10.0/, /latest/).
+        # These stubs redirect those URLs to the new /api/<tag>/ locations so
+        # links in past release notes and external references keep working.
+        # Tags with confirmed old-style directories on gh-pages: v0.9.2, v0.10.0, latest.
+        run: |
+          python3 - <<'PYEOF'
+          import os, textwrap
+          # Tags confirmed to have old-style /<tag>/ directories on gh-pages.
+          # Redirect path: from /<tag>/index.html to /api/<tag>/ is ../api/<tag>/
+          tags = ["v0.9.2", "v0.10.0", "latest"]
+          for tag in tags:
+              out_dir = f"/tmp/redirects/{tag}"
+              os.makedirs(out_dir, exist_ok=True)
+              html = textwrap.dedent(f"""\
+                  <!DOCTYPE html>
+                  <html lang="en">
+                  <head>
+                    <meta charset="utf-8">
+                    <title>Redirecting to /api/{tag}/</title>
+                    <meta http-equiv="refresh" content="0; url=../api/{tag}/">
+                    <link rel="canonical" href="../api/{tag}/">
+                  </head>
+                  <body>
+                    <p>This page has moved.
+                       <a href="../api/{tag}/">Click here if you are not redirected.</a></p>
+                  </body>
+                  </html>
+              """)
+              with open(f"{out_dir}/index.html", "w") as f:
+                  f.write(html)
+              print(f"Created redirect stub for {tag}")
+          PYEOF
+
+      - name: Publish redirect stubs to gh-pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: /tmp/redirects
+          destination_dir: .
           keep_files: true
