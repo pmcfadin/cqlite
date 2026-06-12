@@ -4380,3 +4380,446 @@ fn test_udt_legacy_path_no_cql_type() {
     // Legacy path: Utf8 (stringified)
     assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Utf8);
 }
+
+// ============================================================================
+// Issue #679: Streaming writer parity test
+//
+// Verifies that StreamingParquetWriter and the batch ParquetWriter produce
+// identical Arrow schemas and equal column values for a fixture that covers:
+//   - Scalar high-fidelity types: date, time, decimal, uuid/timeuuid, duration
+//   - inet, counter, text
+//   - List<int>, Set<text>, Map<text, int>
+//   - Tuple<int, text>, UDT
+// ============================================================================
+
+/// Build a QueryResult fixture covering all upgraded type families for parity
+/// testing.  The fixture uses `cql_type` on every column so that both batch
+/// and streaming writers exercise the high-fidelity typed code paths.
+fn make_parity_fixture() -> QueryResult {
+    use cqlite_core::schema::CqlType;
+
+    // ── column metadata ──────────────────────────────────────────────────────
+    let cols: Vec<ColumnInfo> = vec![
+        // date → Date32
+        ColumnInfo {
+            name: "d".to_string(),
+            data_type: DataType::Integer,
+            nullable: true,
+            position: 0,
+            table_name: None,
+            cql_type: Some(CqlType::Date),
+        },
+        // time → Time64(ns)
+        ColumnInfo {
+            name: "t".to_string(),
+            data_type: DataType::BigInt,
+            nullable: true,
+            position: 1,
+            table_name: None,
+            cql_type: Some(CqlType::Time),
+        },
+        // decimal → Decimal128(38, 9)
+        ColumnInfo {
+            name: "dec".to_string(),
+            data_type: DataType::Text,
+            nullable: true,
+            position: 2,
+            table_name: None,
+            cql_type: Some(CqlType::Decimal),
+        },
+        // uuid → FixedSizeBinary(16) + UUID extension
+        ColumnInfo {
+            name: "uid".to_string(),
+            data_type: DataType::Uuid,
+            nullable: true,
+            position: 3,
+            table_name: None,
+            cql_type: Some(CqlType::Uuid),
+        },
+        // duration → Utf8 (MonthDayNano parquet v53 NYI)
+        ColumnInfo {
+            name: "dur".to_string(),
+            data_type: DataType::Text,
+            nullable: true,
+            position: 4,
+            table_name: None,
+            cql_type: Some(CqlType::Duration),
+        },
+        // inet → Utf8
+        ColumnInfo {
+            name: "ip".to_string(),
+            data_type: DataType::Text,
+            nullable: true,
+            position: 5,
+            table_name: None,
+            cql_type: Some(CqlType::Inet),
+        },
+        // counter → Int64
+        ColumnInfo {
+            name: "cnt".to_string(),
+            data_type: DataType::BigInt,
+            nullable: true,
+            position: 6,
+            table_name: None,
+            cql_type: Some(CqlType::Counter),
+        },
+        // text (scalar)
+        ColumnInfo {
+            name: "txt".to_string(),
+            data_type: DataType::Text,
+            nullable: true,
+            position: 7,
+            table_name: None,
+            cql_type: Some(CqlType::Text),
+        },
+        // list<int> → List<Int32>
+        ColumnInfo {
+            name: "li".to_string(),
+            data_type: DataType::List,
+            nullable: true,
+            position: 8,
+            table_name: None,
+            cql_type: Some(CqlType::List(Box::new(CqlType::Int))),
+        },
+        // set<text> → List<Utf8>
+        ColumnInfo {
+            name: "se".to_string(),
+            data_type: DataType::Set,
+            nullable: true,
+            position: 9,
+            table_name: None,
+            cql_type: Some(CqlType::Set(Box::new(CqlType::Text))),
+        },
+        // map<text, int> → Map<Utf8, Int32>
+        ColumnInfo {
+            name: "mp".to_string(),
+            data_type: DataType::Map,
+            nullable: true,
+            position: 10,
+            table_name: None,
+            cql_type: Some(CqlType::Map(
+                Box::new(CqlType::Text),
+                Box::new(CqlType::Int),
+            )),
+        },
+        // tuple<int, text> → Struct(field_0: Int32, field_1: Utf8)
+        ColumnInfo {
+            name: "tup".to_string(),
+            data_type: DataType::Tuple,
+            nullable: true,
+            position: 11,
+            table_name: None,
+            cql_type: Some(CqlType::Tuple(vec![CqlType::Int, CqlType::Text])),
+        },
+        // udt → Struct(x: Int32, y: Utf8)
+        ColumnInfo {
+            name: "udt_col".to_string(),
+            data_type: DataType::Udt,
+            nullable: true,
+            position: 12,
+            table_name: None,
+            cql_type: Some(CqlType::Udt(
+                "point".to_string(),
+                vec![
+                    ("x".to_string(), CqlType::Int),
+                    ("y".to_string(), CqlType::Text),
+                ],
+            )),
+        },
+    ];
+
+    // ── row values ───────────────────────────────────────────────────────────
+    let uuid_bytes: [u8; 16] = [
+        0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80, 0x90, 0xa0, 0xb0, 0xc0, 0xd0, 0xe0, 0xf0,
+        0x00,
+    ];
+    let mut values = HashMap::new();
+    values.insert("d".to_string(), Value::Date(19358)); // 2023-01-01
+    values.insert("t".to_string(), Value::Time(36_000_000_000_000_i64)); // 10:00:00
+    values.insert(
+        "dec".to_string(),
+        Value::Decimal {
+            scale: 2,
+            unscaled: vec![0x04, 0xD2], // 1234 → 12.34
+        },
+    );
+    values.insert("uid".to_string(), Value::Uuid(uuid_bytes));
+    values.insert(
+        "dur".to_string(),
+        Value::Duration {
+            months: 1,
+            days: 2,
+            nanos: 3_000_000,
+        },
+    );
+    // inet: 4-byte IPv4 127.0.0.1
+    values.insert("ip".to_string(), Value::Inet(vec![127, 0, 0, 1]));
+    values.insert("cnt".to_string(), Value::Counter(42));
+    values.insert("txt".to_string(), Value::Text("hello".to_string()));
+    values.insert(
+        "li".to_string(),
+        Value::List(vec![
+            Value::Integer(1),
+            Value::Integer(2),
+            Value::Integer(3),
+        ]),
+    );
+    values.insert(
+        "se".to_string(),
+        Value::Set(vec![
+            Value::Text("a".to_string()),
+            Value::Text("b".to_string()),
+        ]),
+    );
+    values.insert(
+        "mp".to_string(),
+        Value::Map(vec![
+            (Value::Text("k1".to_string()), Value::Integer(10)),
+            (Value::Text("k2".to_string()), Value::Integer(20)),
+        ]),
+    );
+    values.insert(
+        "tup".to_string(),
+        Value::Tuple(vec![Value::Integer(99), Value::Text("t".to_string())]),
+    );
+    values.insert(
+        "udt_col".to_string(),
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "point".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "x".to_string(),
+                    value: Some(Value::Integer(7)),
+                },
+                UdtField {
+                    name: "y".to_string(),
+                    value: Some(Value::Text("north".to_string())),
+                },
+            ],
+        }),
+    );
+
+    let row = QueryRow {
+        values,
+        key: RowKey::new(vec![1]),
+        metadata: Default::default(),
+    };
+
+    QueryResult {
+        rows: vec![row],
+        rows_affected: 0,
+        execution_time_ms: 0,
+        metadata: cqlite_core::query::QueryMetadata {
+            columns: cols,
+            ..Default::default()
+        },
+    }
+}
+
+/// Read all row-groups from a Parquet byte slice and concatenate into a single
+/// RecordBatch.  The streaming writer may produce multiple row groups.
+fn read_all_parquet_batches(bytes: &[u8]) -> Result<RecordBatch, Box<dyn StdError>> {
+    use arrow::compute::concat_batches;
+    let b = Bytes::copy_from_slice(bytes);
+    let builder = ParquetRecordBatchReaderBuilder::try_new(b)?;
+    let schema = builder.schema().clone();
+    let reader = builder.build()?;
+    let batches: Result<Vec<RecordBatch>, _> = reader.collect();
+    let batches = batches?;
+    if batches.is_empty() {
+        return Ok(RecordBatch::new_empty(schema));
+    }
+    concat_batches(&schema, &batches).map_err(|e| Box::new(e) as Box<dyn StdError>)
+}
+
+/// Write a QueryResult via the streaming writer, capturing output in a
+/// temporary file and returning the bytes.
+fn write_via_streaming(result: &QueryResult) -> Result<Vec<u8>, Box<dyn StdError>> {
+    use cqlite_cli::output::create_streaming_parquet_writer_from_writer;
+    use cqlite_cli::output::StreamingWriter;
+    use std::fs::File;
+
+    let tmp = tempfile::NamedTempFile::new().map_err(|e| Box::new(e) as Box<dyn StdError>)?;
+    let file = File::create(tmp.path()).map_err(|e| Box::new(e) as Box<dyn StdError>)?;
+
+    let mut writer = create_streaming_parquet_writer_from_writer(file, &result.metadata, 10_000)
+        .map_err(|e| Box::new(e) as Box<dyn StdError>)?;
+
+    writer
+        .write_chunk(&result.rows)
+        .map_err(|e| Box::new(e) as Box<dyn StdError>)?;
+    writer
+        .finalize()
+        .map_err(|e| Box::new(e) as Box<dyn StdError>)?;
+
+    std::fs::read(tmp.path()).map_err(|e| Box::new(e) as Box<dyn StdError>)
+}
+
+#[test]
+fn test_streaming_batch_parity_schema_identical() {
+    // Both batch and streaming writers must produce the same Arrow schema for
+    // the parity fixture (scalars + list + set + map + tuple + UDT).
+    use arrow::datatypes::DataType as AD;
+    use arrow::datatypes::{Field, Fields, TimeUnit};
+    use std::sync::Arc;
+
+    let result = make_parity_fixture();
+
+    // ── batch path ──
+    let batch_bytes = ParquetWriter::write(&result, &default_config()).expect("batch write failed");
+    let batch_record = read_parquet_back(&batch_bytes).expect("batch read back failed");
+    let batch_schema = batch_record.schema();
+
+    // ── streaming path ──
+    let stream_bytes = write_via_streaming(&result).expect("streaming write failed");
+    let stream_record =
+        read_all_parquet_batches(&stream_bytes).expect("streaming read back failed");
+    let stream_schema = stream_record.schema();
+
+    // Schemas must be identical (field names, types, metadata).
+    assert_eq!(
+        batch_schema.fields().len(),
+        stream_schema.fields().len(),
+        "field count mismatch"
+    );
+    for (i, (bf, sf)) in batch_schema
+        .fields()
+        .iter()
+        .zip(stream_schema.fields().iter())
+        .enumerate()
+    {
+        assert_eq!(
+            bf.name(),
+            sf.name(),
+            "field[{i}] name mismatch: batch={}, streaming={}",
+            bf.name(),
+            sf.name()
+        );
+        assert_eq!(
+            bf.data_type(),
+            sf.data_type(),
+            "field[{i}] '{}' type mismatch: batch={:?}, streaming={:?}",
+            bf.name(),
+            bf.data_type(),
+            sf.data_type()
+        );
+    }
+
+    // ── spot-check expected Arrow types ─────────────────────────────────────
+    // date → Date32
+    assert_eq!(batch_schema.field(0).data_type(), &AD::Date32, "date field");
+    // time → Time64(ns)
+    assert_eq!(
+        batch_schema.field(1).data_type(),
+        &AD::Time64(TimeUnit::Nanosecond),
+        "time field"
+    );
+    // decimal → Decimal128(38, 9)
+    assert_eq!(
+        batch_schema.field(2).data_type(),
+        &AD::Decimal128(38, 9),
+        "decimal field"
+    );
+    // uuid → FixedSizeBinary(16)
+    assert_eq!(
+        batch_schema.field(3).data_type(),
+        &AD::FixedSizeBinary(16),
+        "uuid field"
+    );
+    // uuid field must carry the Arrow UUID extension metadata
+    let uuid_meta = batch_schema.field(3).metadata();
+    assert_eq!(
+        uuid_meta.get("ARROW:extension:name").map(|s| s.as_str()),
+        Some("arrow.uuid"),
+        "uuid field missing Arrow UUID extension metadata"
+    );
+    // duration → Utf8 (parquet v53 MonthDayNano NYI)
+    assert_eq!(
+        batch_schema.field(4).data_type(),
+        &AD::Utf8,
+        "duration field"
+    );
+    // inet → Utf8
+    assert_eq!(batch_schema.field(5).data_type(), &AD::Utf8, "inet field");
+    // counter → Int64
+    assert_eq!(
+        batch_schema.field(6).data_type(),
+        &AD::Int64,
+        "counter field"
+    );
+    // list<int> → List<Int32>
+    let expected_list = AD::List(Arc::new(Field::new("item", AD::Int32, true)));
+    assert_eq!(
+        batch_schema.field(8).data_type(),
+        &expected_list,
+        "list<int> field"
+    );
+    // set<text> → List<Utf8>
+    let expected_set = AD::List(Arc::new(Field::new("item", AD::Utf8, true)));
+    assert_eq!(
+        batch_schema.field(9).data_type(),
+        &expected_set,
+        "set<text> field"
+    );
+    // tuple<int, text> → Struct(field_0: Int32, field_1: Utf8)
+    let expected_tuple = AD::Struct(Fields::from(vec![
+        Field::new("field_0", AD::Int32, true),
+        Field::new("field_1", AD::Utf8, true),
+    ]));
+    assert_eq!(
+        batch_schema.field(11).data_type(),
+        &expected_tuple,
+        "tuple field"
+    );
+    // udt → Struct(x: Int32, y: Utf8)
+    let expected_udt = AD::Struct(Fields::from(vec![
+        Field::new("x", AD::Int32, true),
+        Field::new("y", AD::Utf8, true),
+    ]));
+    assert_eq!(
+        batch_schema.field(12).data_type(),
+        &expected_udt,
+        "udt field"
+    );
+}
+
+#[test]
+fn test_streaming_batch_parity_values_equal() {
+    // Batch and streaming writers must produce equal column values for every
+    // column in the parity fixture.
+
+    let result = make_parity_fixture();
+
+    let batch_bytes = ParquetWriter::write(&result, &default_config()).expect("batch write failed");
+    let batch_record = read_parquet_back(&batch_bytes).expect("batch read back failed");
+
+    let stream_bytes = write_via_streaming(&result).expect("streaming write failed");
+    let stream_record =
+        read_all_parquet_batches(&stream_bytes).expect("streaming read back failed");
+
+    assert_eq!(
+        batch_record.num_rows(),
+        stream_record.num_rows(),
+        "row count mismatch"
+    );
+    assert_eq!(
+        batch_record.num_columns(),
+        stream_record.num_columns(),
+        "column count mismatch"
+    );
+
+    // Compare each column's Arrow array.  Arrow arrays implement PartialEq
+    // so assert_eq! performs a value-wise comparison.
+    let batch_schema = batch_record.schema();
+    for col_idx in 0..batch_record.num_columns() {
+        let b_col = batch_record.column(col_idx);
+        let s_col = stream_record.column(col_idx);
+        let field_name = batch_schema.field(col_idx).name();
+        assert_eq!(
+            b_col.as_ref(),
+            s_col.as_ref(),
+            "column[{col_idx}] '{field_name}' values differ between batch and streaming",
+        );
+    }
+}

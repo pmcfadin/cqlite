@@ -2146,7 +2146,24 @@ pub fn create_streaming_parquet_writer(
     metadata: &QueryMetadata,
     row_group_size: usize,
 ) -> Result<StreamingParquetWriter<File>, OutputError> {
-    // Build Arrow schema
+    create_streaming_parquet_writer_from_writer(file, metadata, row_group_size)
+}
+
+/// Create a StreamingParquetWriter that writes to any `W: Write + Send`.
+///
+/// This is the generic constructor shared by both the file-oriented
+/// [`create_streaming_parquet_writer`] convenience function and tests that
+/// write to an in-memory buffer (e.g. `std::io::Cursor<Vec<u8>>`).
+///
+/// Both constructors use the same [`ParquetWriter::build_schema`] call, so the
+/// schema produced by the streaming path is always identical to the schema
+/// produced by the batch `ParquetWriter`.
+pub fn create_streaming_parquet_writer_from_writer<W: Write + Send>(
+    output: W,
+    metadata: &QueryMetadata,
+    row_group_size: usize,
+) -> Result<StreamingParquetWriter<W>, OutputError> {
+    // Build Arrow schema — same helper used by the batch ParquetWriter.
     let schema = ParquetWriter::build_schema(&metadata.columns).map_err(|e| {
         OutputError::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -2162,7 +2179,7 @@ pub fn create_streaming_parquet_writer(
 
     // Create ArrowWriter
     let arrow_writer =
-        ArrowWriter::try_new(file, Arc::clone(&schema), Some(props)).map_err(|e| {
+        ArrowWriter::try_new(output, Arc::clone(&schema), Some(props)).map_err(|e| {
             OutputError::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 e.to_string(),

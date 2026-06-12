@@ -29,7 +29,10 @@ pub use csv::{CSVWriter, StreamingCSVWriter};
 #[cfg(feature = "state_machine")]
 pub use json::{JSONWriter, StreamingJSONWriter};
 #[cfg(feature = "state_machine")]
-pub use parquet::{create_streaming_parquet_writer, ParquetWriter};
+#[allow(unused_imports)]
+pub use parquet::{
+    create_streaming_parquet_writer, create_streaming_parquet_writer_from_writer, ParquetWriter,
+};
 #[cfg(feature = "state_machine")]
 #[allow(unused_imports)]
 pub use table::TableWriter;

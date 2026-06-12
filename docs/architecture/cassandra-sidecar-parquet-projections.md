@@ -20,9 +20,11 @@ Our position:
    *delta*, not a table snapshot. Correct projections require carrying cell
    write-timestamps and representing deletes/tombstones — Cassandra's storage
    model does not give these to us for free.
-3. **The type mapping is faithful for scalars but lossy for collections,
-   UDTs, and `decimal`/`varint`.** This is fixable and is the highest-value
-   engineering investment if we pursue this use case.
+3. **The type mapping is now analytics-grade for schema-aware queries** (Issues
+   #675–#678): `Date32`, `Time64`, `Decimal128`, UUID extension metadata,
+   `List<T>`, `Map<K,V>`, `Struct` for UDTs/tuples, and `frozen` transparency
+   are all implemented.  The only remaining deviation is `duration` → `Utf8`
+   (blocked on `parquet` crate v53 lacking `IntervalMonthDayNano` write support).
 4. **This is fundamentally a bolt-on CDC pattern.** Compared to TiDB's TiFlash
    (a native, Raft-replicated columnar replica), our approach trades
    consistency and freshness for openness and zero-cluster-dependency.
@@ -136,30 +138,51 @@ real friction is semantic, not type-level.**
 
 ### Type mapping (as implemented in `parquet.rs`)
 
-| CQL type | Arrow/Parquet | Fidelity |
+When `ColumnInfo.cql_type` is populated from the schema (the default for
+schema-aware queries), the following high-fidelity mappings are applied.  When
+`cql_type` is `None`, the legacy `data_type` path is used (last column).
+
+| CQL type | Arrow/Parquet type | Notes |
 |---|---|---|
-| boolean, tinyint…bigint, float, double | Boolean, Int8/16/32/64, Float32/64 | Clean |
-| text/varchar/ascii | Utf8 | Clean |
-| blob | Binary | Clean |
-| timestamp | Timestamp(ms, UTC) | Clean |
-| counter | Int64 | Clean (label lost) |
-| uuid/timeuuid | FixedSizeBinary(16) | Raw bytes, not a logical UUID type |
-| date | Int32 | Days-since-epoch as plain int, **not** Arrow `Date32` |
-| time | Int64 | Nanos as plain int, **not** Arrow `Time64` |
-| list / set | `List<Utf8>` | **Elements stringified** |
-| map | `Map<Utf8, Utf8>` | **Keys and values stringified** |
-| tuple / UDT / frozen | Utf8 | **Whole value serialized to one string** |
-| varint, decimal, inet, duration | string fallback | Lossy |
+| `boolean` | `Boolean` | Clean |
+| `tinyint` / `smallint` / `int` / `bigint` | `Int8` / `Int16` / `Int32` / `Int64` | Clean |
+| `float` / `double` | `Float32` / `Float64` | Clean |
+| `text` / `varchar` / `ascii` | `Utf8` | Clean |
+| `blob` | `Binary` | Clean |
+| `timestamp` | `Timestamp(ms, UTC)` | Clean |
+| `date` | `Date32` | Signed days since 1970-01-01 (Issue #675) |
+| `time` | `Time64(Nanosecond)` | Nanos since midnight (Issue #675) |
+| `decimal` | `Decimal128(38, 9)` | Fixed scale = 9; checked rescale; overflow → error (Issue #675) |
+| `varint` | `Decimal128(38, 0)` | Integer domain; values > 38 digits → error (Issue #675) |
+| `duration` | `Utf8` (CQL text form, e.g. `"1mo2d3ns"`) | `parquet` crate v53 cannot write `IntervalMonthDayNano`; Utf8 fallback until upstream support lands (Issue #675) |
+| `uuid` / `timeuuid` | `FixedSizeBinary(16)` + `ARROW:extension:name=arrow.uuid` metadata | Arrow UUID logical type via extension metadata (Issue #675) |
+| `inet` | `Utf8` (canonical text, e.g. `"192.168.1.1"`) | No standard Arrow InetAddress type; text is most portable for downstream tools (Issue #675) |
+| `counter` | `Int64` | Label lost; value intact (Issue #675) |
+| `list<X>` | `List<mapped(X)>` | Element type mapped recursively through this table (Issue #676) |
+| `set<X>` | `List<mapped(X)>` | Arrow has no dedicated Set type; uses `List` (Issue #676) |
+| `map<K,V>` | `Map<Struct(key:mapped(K) non-null, value:mapped(V) nullable)>` | Entries struct named `"entries"` per Arrow convention; keys/values typed recursively (Issue #677) |
+| `tuple<A,B,…>` | `Struct(field_0:mapped(A), field_1:mapped(B), …)` | Positional field names; per-position types mapped recursively (Issue #678) |
+| `udt<name>` | `Struct(f1:T1, f2:T2, …)` | Field names from schema; all fields nullable; zero-field UDT falls back to `Utf8` (Issue #678) |
+| `frozen<T>` | Same as `T` | `Frozen` is transparent in both schema and value mapping |
+| `custom` | `Utf8` | Serialized via `ValueFormatter` |
+
+**Fallback path** (when `cql_type = None`): collections → `List<Utf8>` /
+`Map<Utf8,Utf8>`, UDT/tuple → `Utf8`, date/time → plain `Int32`/`Int64`.
+
+**Batch and streaming writer parity**: both `ParquetWriter` (batch) and
+`StreamingParquetWriter` (streaming) share the same `build_schema` and
+`convert_to_arrays` code paths, producing identical Arrow schemas and values
+for all types above (verified by `test_streaming_batch_parity_*` in
+`cqlite-cli/tests/parquet_writer_tests.rs`).
 
 A table of scalars (IDs, metrics, timestamps, text — the common analytics case)
-projects faithfully. The moment collections, UDTs, or `decimal`/`varint` appear,
-nested structure and element typing collapse to strings, which defeats columnar
-predicate pushdown on those fields downstream.
+projects faithfully with full Arrow logical type annotations. Collections and
+structured types (UDT, tuple, map) are now fully typed when schema information
+is available.  The remaining non-ideal cases are:
 
-Every one of these is **representable in Arrow** (`List<Int32>`, `Struct` for
-UDTs, `Decimal128`, `Date32`, `Time64`); the current code simply took the string
-shortcut. Upgrading `data_type_to_arrow` and the array builders is the
-single highest-value change if we pursue this use case.
+- **`duration`** serializes as `Utf8` rather than `Interval(MonthDayNano)` because the `parquet` crate v53 does not support writing `IntervalMonthDayNano` (NYI upstream).
+- **`varint`** larger than 38 decimal digits fails rather than silently truncating.
+- **`inet`** uses canonical text rather than raw bytes (intentional — no Arrow InetAddress type).
 
 ### The deeper mismatch: a flushed SSTable is a *delta*, not a snapshot
 
@@ -260,9 +283,11 @@ we are hand-rolling the consistency guarantees TiDB derives from Raft.
    cells).
 4. **Prefer commitlog CDC over raw flush events** when correctness matters;
    flush/SSTable watching is fine for cheap periodic bulk snapshots.
-5. **Upgrade the Arrow type mapping** to preserve nested types
-   (`List<T>`, `Struct` for UDTs, `Decimal128`, `Date32`, `Time64`) before
-   calling the pipeline analytics-grade.
+5. **Arrow type mapping is now analytics-grade** for schema-aware queries:
+   `List<T>`, `Map<K,V>`, `Struct` for UDTs and tuples, `Decimal128`, `Date32`,
+   `Time64`, and `FixedSizeBinary(16)+arrow.uuid` are all implemented (Issues
+   #675–#678).  The remaining deviation (`duration` → `Utf8`) is blocked on the
+   `parquet` crate v53 upstream; no action needed until that crate is upgraded.
 6. **Lift the Parquet writer into `cqlite-core`** behind a `parquet` feature
    flag if we want embeddable (non-CLI) projection.
 7. **Set expectations honestly.** This cannot match TiFlash on freshness or
