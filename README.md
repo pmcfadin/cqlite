@@ -10,6 +10,17 @@
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
+## Documentation
+
+Full documentation is at **[https://pmcfadin.github.io/cqlite/](https://pmcfadin.github.io/cqlite/)**:
+
+| Section | URL |
+|---------|-----|
+| User Docs — install, quick start, CLI, Python, Node.js | [/cqlite/user-docs/](https://pmcfadin.github.io/cqlite/user-docs/) |
+| SSTable Format Guide — binary format deep-dive | [/cqlite/sstable-format/](https://pmcfadin.github.io/cqlite/sstable-format/) |
+| For Agents: Using CQLite — LLM/agent integration | [/cqlite/agents-using/](https://pmcfadin.github.io/cqlite/agents-using/) |
+| For Agents: Developing CQLite — contributor doctrine, gate contract | [/cqlite/agents-developing/](https://pmcfadin.github.io/cqlite/agents-developing/) |
+
 ## Vision
 
 CQLite aims to become the standard tool for Cassandra SSTable manipulation outside of the main Apache Cassandra project, enabling new workflows for data analytics, migration, testing, and edge computing.
@@ -342,9 +353,9 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
 ## Resources
 
+- **Documentation site**: [https://pmcfadin.github.io/cqlite/](https://pmcfadin.github.io/cqlite/) — user docs, SSTable format guide, agent integration docs
 - **API docs (rustdoc)**: [latest tag](https://pmcfadin.github.io/cqlite/latest/) · published per release tag at `https://pmcfadin.github.io/cqlite/<tag>/`
 - **Changelog**: [CHANGELOG.md](CHANGELOG.md) — what each tagged release contains
-- **Documentation**: [Complete project docs](docs/)
 - **Performance**: [Methodology, local repro, and CI gate policy](docs/performance.md)
 - **CQL Grammar**: [Patrick's Antlr4 CQL Grammar](https://github.com/pmcfadin/cassandra-antlr4-grammar)
 - **Issues**: [GitHub Issues](https://github.com/pmcfadin/cqlite/issues)
