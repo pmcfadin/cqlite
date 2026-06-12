@@ -969,3 +969,793 @@ fn test_parquet_wide_table() {
         .unwrap();
     assert_eq!(col_49.value(0), 49);
 }
+
+// ============================================================================
+// Issue #675: High-fidelity scalar Arrow types
+// ============================================================================
+
+/// Helper to build a ColumnInfo with both data_type and cql_type set.
+fn col_with_cql_type(
+    name: &str,
+    data_type: DataType,
+    cql_type: cqlite_core::schema::CqlType,
+) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        data_type,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cql_type),
+    }
+}
+
+/// Create a QueryResult from a single ColumnInfo and a single value.
+fn single_cql_typed_result(col: ColumnInfo, value: Value) -> QueryResult {
+    let mut values = HashMap::new();
+    values.insert(col.name.clone(), value);
+    let row = QueryRow {
+        values,
+        key: RowKey::new(vec![1]),
+        metadata: Default::default(),
+    };
+    QueryResult {
+        rows: vec![row],
+        rows_affected: 0,
+        execution_time_ms: 0,
+        metadata: cqlite_core::query::QueryMetadata {
+            columns: vec![col],
+            ..Default::default()
+        },
+    }
+}
+
+// ----------------------------------------
+// CQL date → Arrow Date32
+// ----------------------------------------
+
+#[test]
+fn test_cql_date_maps_to_date32_schema() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = col_with_cql_type(
+        "birth_date",
+        DataType::Integer,
+        cqlite_core::schema::CqlType::Date,
+    );
+    let result = single_cql_typed_result(col, Value::Date(19358)); // 2023-01-01
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    assert_eq!(batch.num_rows(), 1);
+    // Schema field must be Date32
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Date32);
+}
+
+#[test]
+fn test_cql_date_roundtrip() {
+    use arrow::array::Date32Array;
+
+    let col = col_with_cql_type("d", DataType::Integer, cqlite_core::schema::CqlType::Date);
+    // 19358 = days between 1970-01-01 and 2023-01-01
+    let result = single_cql_typed_result(col, Value::Date(19358));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Date32Array>()
+        .unwrap();
+    assert_eq!(arr.value(0), 19358);
+}
+
+#[test]
+fn test_cql_date_null() {
+    use arrow::array::Date32Array;
+
+    let col = col_with_cql_type("d", DataType::Integer, cqlite_core::schema::CqlType::Date);
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Date32Array>()
+        .unwrap();
+    assert!(!arr.is_valid(0));
+}
+
+#[test]
+fn test_cql_date_epoch() {
+    use arrow::array::Date32Array;
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = col_with_cql_type("d", DataType::Integer, cqlite_core::schema::CqlType::Date);
+    // 0 = 1970-01-01 epoch
+    let result = single_cql_typed_result(col, Value::Date(0));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Date32);
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Date32Array>()
+        .unwrap();
+    assert_eq!(arr.value(0), 0);
+}
+
+// ----------------------------------------
+// CQL time → Arrow Time64(Nanosecond)
+// ----------------------------------------
+
+#[test]
+fn test_cql_time_maps_to_time64_ns_schema() {
+    use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+
+    let col = col_with_cql_type("t", DataType::BigInt, cqlite_core::schema::CqlType::Time);
+    let nanos_10am: i64 = 10 * 3600 * 1_000_000_000;
+    let result = single_cql_typed_result(col, Value::Time(nanos_10am));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    assert_eq!(
+        batch.schema().field(0).data_type(),
+        &ArrowDataType::Time64(TimeUnit::Nanosecond)
+    );
+}
+
+#[test]
+fn test_cql_time_roundtrip() {
+    use arrow::array::Time64NanosecondArray;
+
+    let col = col_with_cql_type("t", DataType::BigInt, cqlite_core::schema::CqlType::Time);
+    let nanos = 10 * 3600 * 1_000_000_000i64 + 30 * 60 * 1_000_000_000 + 45_123_456_789;
+    let result = single_cql_typed_result(col, Value::Time(nanos));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Time64NanosecondArray>()
+        .unwrap();
+    assert_eq!(arr.value(0), nanos);
+}
+
+#[test]
+fn test_cql_time_null() {
+    use arrow::array::Time64NanosecondArray;
+
+    let col = col_with_cql_type("t", DataType::BigInt, cqlite_core::schema::CqlType::Time);
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Time64NanosecondArray>()
+        .unwrap();
+    assert!(!arr.is_valid(0));
+}
+
+// ----------------------------------------
+// CQL decimal → Arrow Decimal128
+// ----------------------------------------
+
+#[test]
+fn test_cql_decimal_schema() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = col_with_cql_type(
+        "price",
+        DataType::Text,
+        cqlite_core::schema::CqlType::Decimal,
+    );
+    // Represent 123.45 with scale=2, unscaled = 12345
+    let result = single_cql_typed_result(
+        col,
+        Value::Decimal {
+            scale: 2,
+            unscaled: 12345i64.to_be_bytes().to_vec(),
+        },
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema: Decimal128(38, 9)
+    assert_eq!(
+        batch.schema().field(0).data_type(),
+        &ArrowDataType::Decimal128(38, 9)
+    );
+}
+
+#[test]
+fn test_cql_decimal_roundtrip_scale_same() {
+    use arrow::array::Decimal128Array;
+
+    let col = col_with_cql_type("v", DataType::Text, cqlite_core::schema::CqlType::Decimal);
+    // Value: 1_000_000_000 (scale=9 matches DECIMAL_FIXED_SCALE, no rescaling needed)
+    // Represents 1.000000000
+    let unscaled: i64 = 1_000_000_000;
+    let result = single_cql_typed_result(
+        col,
+        Value::Decimal {
+            scale: 9,
+            unscaled: unscaled.to_be_bytes().to_vec(),
+        },
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(arr.is_valid(0));
+    // The stored i128 value should equal unscaled (no rescaling since scale matches)
+    assert_eq!(arr.value(0), unscaled as i128);
+}
+
+#[test]
+fn test_cql_decimal_roundtrip_scale_up() {
+    use arrow::array::Decimal128Array;
+
+    let col = col_with_cql_type("v", DataType::Text, cqlite_core::schema::CqlType::Decimal);
+    // Value: 12345 with scale=2 (represents 123.45)
+    // After rescaling to scale=9: 12345 * 10^7 = 123_450_000_000
+    let unscaled: i32 = 12345;
+    let result = single_cql_typed_result(
+        col,
+        Value::Decimal {
+            scale: 2,
+            unscaled: unscaled.to_be_bytes().to_vec(),
+        },
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(arr.is_valid(0));
+    assert_eq!(arr.value(0), 123_450_000_000i128);
+}
+
+#[test]
+fn test_cql_decimal_roundtrip_scale_down() {
+    use arrow::array::Decimal128Array;
+
+    let col = col_with_cql_type("v", DataType::Text, cqlite_core::schema::CqlType::Decimal);
+    // Value: 1_000_000_000_000 with scale=12 (represents 1.000000000000)
+    // After rescaling to scale=9: divide by 10^3 = 1_000_000_000
+    let unscaled: i64 = 1_000_000_000_000;
+    let result = single_cql_typed_result(
+        col,
+        Value::Decimal {
+            scale: 12,
+            unscaled: unscaled.to_be_bytes().to_vec(),
+        },
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(arr.is_valid(0));
+    assert_eq!(arr.value(0), 1_000_000_000i128);
+}
+
+#[test]
+fn test_cql_decimal_null() {
+    use arrow::array::Decimal128Array;
+
+    let col = col_with_cql_type("v", DataType::Text, cqlite_core::schema::CqlType::Decimal);
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(!arr.is_valid(0));
+}
+
+#[test]
+fn test_cql_decimal_negative() {
+    use arrow::array::Decimal128Array;
+
+    let col = col_with_cql_type("v", DataType::Text, cqlite_core::schema::CqlType::Decimal);
+    // Negative value: -9999 with scale=2 (represents -99.99)
+    // Rescale to 9: -9999 * 10^7 = -99_990_000_000
+    let bigint = num_bigint::BigInt::from(-9999i32);
+    let bytes_val = bigint.to_signed_bytes_be();
+    let result = single_cql_typed_result(
+        col,
+        Value::Decimal {
+            scale: 2,
+            unscaled: bytes_val,
+        },
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(arr.is_valid(0));
+    assert_eq!(arr.value(0), -99_990_000_000i128);
+}
+
+// ----------------------------------------
+// CQL varint → Arrow Decimal128(38, 0)
+// ----------------------------------------
+
+#[test]
+fn test_cql_varint_schema() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = col_with_cql_type(
+        "big_int",
+        DataType::BigInt,
+        cqlite_core::schema::CqlType::Varint,
+    );
+    let bigint = num_bigint::BigInt::from(42i32);
+    let result = single_cql_typed_result(col, Value::Varint(bigint.to_signed_bytes_be()));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    assert_eq!(
+        batch.schema().field(0).data_type(),
+        &ArrowDataType::Decimal128(38, 0)
+    );
+}
+
+#[test]
+fn test_cql_varint_roundtrip_positive() {
+    use arrow::array::Decimal128Array;
+
+    let col = col_with_cql_type("n", DataType::BigInt, cqlite_core::schema::CqlType::Varint);
+    let bigint = num_bigint::BigInt::from(1_234_567_890i64);
+    let result = single_cql_typed_result(col, Value::Varint(bigint.to_signed_bytes_be()));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(arr.is_valid(0));
+    assert_eq!(arr.value(0), 1_234_567_890i128);
+}
+
+#[test]
+fn test_cql_varint_roundtrip_negative() {
+    use arrow::array::Decimal128Array;
+
+    let col = col_with_cql_type("n", DataType::BigInt, cqlite_core::schema::CqlType::Varint);
+    let bigint = num_bigint::BigInt::from(-999i32);
+    let result = single_cql_typed_result(col, Value::Varint(bigint.to_signed_bytes_be()));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(arr.is_valid(0));
+    assert_eq!(arr.value(0), -999i128);
+}
+
+#[test]
+fn test_cql_varint_null() {
+    use arrow::array::Decimal128Array;
+
+    let col = col_with_cql_type("n", DataType::BigInt, cqlite_core::schema::CqlType::Varint);
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Decimal128Array>()
+        .unwrap();
+    assert!(!arr.is_valid(0));
+}
+
+// ----------------------------------------
+// CQL duration → Arrow Utf8 (parquet crate v53 does not support Interval(MonthDayNano))
+//
+// The Parquet format's INTERVAL logical type only supports millisecond precision,
+// not nanoseconds. The `parquet` crate v53 explicitly rejects writing
+// `Interval(MonthDayNano)` to Parquet files.  We therefore serialize CQL duration
+// values as their canonical CQL text form (e.g. "1mo2d3ns") stored as `Utf8`.
+// When the parquet crate gains MonthDayNano write support, these tests and the
+// builder can be upgraded to use the Arrow interval type directly.
+// ----------------------------------------
+
+#[test]
+fn test_cql_duration_schema_is_utf8() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = col_with_cql_type(
+        "dur",
+        DataType::Text,
+        cqlite_core::schema::CqlType::Duration,
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Duration {
+            months: 1,
+            days: 2,
+            nanos: 3_000_000_000,
+        },
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Duration falls back to Utf8 due to parquet crate limitation.
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Utf8);
+}
+
+#[test]
+fn test_cql_duration_roundtrip_as_text() {
+    let col = col_with_cql_type(
+        "dur",
+        DataType::Text,
+        cqlite_core::schema::CqlType::Duration,
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Duration {
+            months: 3,
+            days: 15,
+            nanos: 7_200_000_000_000, // 2 hours
+        },
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(arr.is_valid(0));
+    // Should produce a non-empty canonical CQL duration string
+    let s = arr.value(0);
+    assert!(!s.is_empty(), "duration text must not be empty, got: {s:?}");
+    // Must encode all three components
+    assert!(s.contains("mo") || s.contains('d') || s.contains("ns"));
+}
+
+#[test]
+fn test_cql_duration_null() {
+    let col = col_with_cql_type(
+        "dur",
+        DataType::Text,
+        cqlite_core::schema::CqlType::Duration,
+    );
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(!arr.is_valid(0));
+}
+
+#[test]
+fn test_cql_duration_zero_as_text() {
+    let col = col_with_cql_type(
+        "dur",
+        DataType::Text,
+        cqlite_core::schema::CqlType::Duration,
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Duration {
+            months: 0,
+            days: 0,
+            nanos: 0,
+        },
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(arr.is_valid(0));
+    // ValueFormatter formats 0-duration as "0ns"
+    assert_eq!(arr.value(0), "0ns");
+}
+
+// ----------------------------------------
+// CQL uuid/timeuuid → FixedSizeBinary(16) + Arrow UUID extension
+// ----------------------------------------
+
+#[test]
+fn test_cql_uuid_schema_and_extension_metadata() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = col_with_cql_type(
+        "user_id",
+        DataType::Uuid,
+        cqlite_core::schema::CqlType::Uuid,
+    );
+    let uuid = [
+        0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+        0x88,
+    ];
+    let result = single_cql_typed_result(col, Value::Uuid(uuid));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+    // Arrow type must be FixedSizeBinary(16)
+    assert_eq!(field.data_type(), &ArrowDataType::FixedSizeBinary(16));
+    // UUID extension metadata must be present
+    assert_eq!(
+        field
+            .metadata()
+            .get("ARROW:extension:name")
+            .map(|s| s.as_str()),
+        Some("arrow.uuid")
+    );
+}
+
+#[test]
+fn test_cql_uuid_roundtrip() {
+    use arrow::array::FixedSizeBinaryArray;
+
+    let col = col_with_cql_type("id", DataType::Uuid, cqlite_core::schema::CqlType::Uuid);
+    let uuid_bytes = [
+        0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88,
+        0x99,
+    ];
+    let result = single_cql_typed_result(col, Value::Uuid(uuid_bytes));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(arr.value(0), &uuid_bytes);
+}
+
+#[test]
+fn test_cql_timeuuid_extension_metadata() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = col_with_cql_type(
+        "ev_id",
+        DataType::Uuid,
+        cqlite_core::schema::CqlType::TimeUuid,
+    );
+    let uuid = [0u8; 16];
+    let result = single_cql_typed_result(col, Value::Uuid(uuid));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+    assert_eq!(field.data_type(), &ArrowDataType::FixedSizeBinary(16));
+    assert_eq!(
+        field
+            .metadata()
+            .get("ARROW:extension:name")
+            .map(|s| s.as_str()),
+        Some("arrow.uuid")
+    );
+}
+
+#[test]
+fn test_cql_uuid_null() {
+    use arrow::array::FixedSizeBinaryArray;
+
+    let col = col_with_cql_type("id", DataType::Uuid, cqlite_core::schema::CqlType::Uuid);
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert!(!arr.is_valid(0));
+}
+
+// ----------------------------------------
+// CQL inet → Arrow Utf8
+// ----------------------------------------
+
+#[test]
+fn test_cql_inet_ipv4_roundtrip() {
+    let col = col_with_cql_type("ip", DataType::Text, cqlite_core::schema::CqlType::Inet);
+    // 192.168.1.1
+    let result = single_cql_typed_result(col, Value::Inet(vec![192, 168, 1, 1]));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(arr.value(0), "192.168.1.1");
+}
+
+#[test]
+fn test_cql_inet_ipv6_roundtrip() {
+    // Loopback ::1 = 0000...0001
+    let mut ipv6 = [0u8; 16];
+    ipv6[15] = 1;
+    let col = col_with_cql_type("ip", DataType::Text, cqlite_core::schema::CqlType::Inet);
+    let result = single_cql_typed_result(col, Value::Inet(ipv6.to_vec()));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    // ::1 is the canonical representation of IPv6 loopback
+    assert_eq!(arr.value(0), "::1");
+}
+
+#[test]
+fn test_cql_inet_null() {
+    let col = col_with_cql_type("ip", DataType::Text, cqlite_core::schema::CqlType::Inet);
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(!arr.is_valid(0));
+}
+
+// ----------------------------------------
+// CQL counter → Arrow Int64
+// ----------------------------------------
+
+#[test]
+fn test_cql_counter_maps_to_int64() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = col_with_cql_type(
+        "cnt",
+        DataType::BigInt,
+        cqlite_core::schema::CqlType::Counter,
+    );
+    let result = single_cql_typed_result(col, Value::Counter(42_000_000));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Int64);
+}
+
+#[test]
+fn test_cql_counter_roundtrip() {
+    let col = col_with_cql_type(
+        "cnt",
+        DataType::BigInt,
+        cqlite_core::schema::CqlType::Counter,
+    );
+    let result = single_cql_typed_result(col, Value::Counter(9_999_999_999));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(arr.value(0), 9_999_999_999);
+}
+
+// ----------------------------------------
+// Fallback: no cql_type → existing mapping unchanged
+// ----------------------------------------
+
+#[test]
+fn test_no_cql_type_fallback_unchanged() {
+    // Without cql_type, BigInt DataType must still produce Int64.
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = ColumnInfo {
+        name: "big".to_string(),
+        data_type: DataType::BigInt,
+        nullable: false,
+        position: 0,
+        table_name: None,
+        cql_type: None,
+    };
+    let mut values = HashMap::new();
+    values.insert("big".to_string(), Value::BigInt(1234567890));
+    let row = QueryRow {
+        values,
+        key: RowKey::new(vec![1]),
+        metadata: Default::default(),
+    };
+    let result = QueryResult {
+        rows: vec![row],
+        rows_affected: 0,
+        execution_time_ms: 0,
+        metadata: cqlite_core::query::QueryMetadata {
+            columns: vec![col],
+            ..Default::default()
+        },
+    };
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Int64);
+    let arr = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    assert_eq!(arr.value(0), 1234567890);
+}

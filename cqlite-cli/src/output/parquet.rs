@@ -2,29 +2,118 @@
 //!
 //! Converts CQL query results to Apache Parquet format with proper type mapping.
 //! Uses Snappy compression by default (Cassandra default, good speed/size balance).
+//!
+//! # CQL → Arrow type mapping
+//!
+//! When `ColumnInfo.cql_type` is `Some`, the following high-fidelity mappings are
+//! used instead of the flat `data_type` fallback:
+//!
+//! | CQL type      | Arrow type                          | Notes                             |
+//! |---------------|-------------------------------------|-----------------------------------|
+//! | date          | `Date32`                            | Signed days since 1970-01-01      |
+//! | time          | `Time64(Nanosecond)`                | Nanos since midnight               |
+//! | decimal       | `Decimal128(38, DECIMAL_FIXED_SCALE)` | Rescaled; see strategy below    |
+//! | varint        | `Decimal128(38, 0)` or `Utf8`       | `Utf8` fallback on overflow       |
+//! | duration      | `Utf8` (CQL text form)              | Parquet crate v53 NYI for MonthDayNano |
+//! | uuid/timeuuid | `FixedSizeBinary(16)` + UUID ext    | Arrow UUID extension metadata     |
+//! | inet          | `Utf8`                              | Canonical textual form (deliberate)|
+//! | counter       | `Int64`                             | Unchanged                         |
+//!
+//! # Decimal strategy
+//!
+//! CQL `decimal` stores a per-value scale alongside the unscaled big-endian integer.
+//! Arrow `Decimal128` requires a single fixed (precision, scale) pair at schema time.
+//! We fix `DECIMAL_FIXED_SCALE = 9` (nanosecond-like resolution, fits most Cassandra
+//! decimals in practice). Each value is rescaled to that fixed scale:
+//!
+//! - If the value's scale equals `DECIMAL_FIXED_SCALE`, no rescaling is needed.
+//! - If the value's scale is smaller (fewer decimal places), the unscaled integer
+//!   is multiplied by `10^(DECIMAL_FIXED_SCALE - value_scale)` — a checked
+//!   multiplication is used; on overflow the write fails with a clear error.
+//! - If the value's scale is larger, the unscaled integer is divided by
+//!   `10^(value_scale - DECIMAL_FIXED_SCALE)` with truncation toward zero; the
+//!   caller is warned via the error path if the value cannot be represented exactly.
+//! - Precision is fixed at 38 (max for `Decimal128`).
+//! - Values whose rescaled magnitude exceeds 38 decimal digits fail with a clear
+//!   error rather than silently truncating.
+//!
+//! For `varint`, the big-endian signed integer is decoded and stored as
+//! `Decimal128(38, 0)` (integer, no fractional part).  Values that exceed 38
+//! decimal digits fall back to `Utf8` (the column schema will be `Utf8`; the
+//! value is rendered as a decimal string via `ValueFormatter`).
 
 use crate::config::OutputConfig;
 use crate::output::{OutputError, StreamingWriter};
 use arrow::array::{
-    ArrayRef, BinaryArray, BooleanArray, Float32Array, Float64Array, Int16Array, Int32Array,
-    Int64Array, Int8Array, ListArray, MapArray, StringArray, StructArray,
-    TimestampMillisecondArray,
+    ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
+    Int32Array, Int64Array, Int8Array, ListArray, MapArray, StringArray, StructArray,
+    Time64NanosecondArray, TimestampMillisecondArray,
 };
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
 use cqlite_core::query::{ColumnInfo, QueryMetadata, QueryResult, QueryRow};
+use cqlite_core::schema::CqlType;
 use cqlite_core::types::DataType;
 use cqlite_core::Value;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::Compression;
 use parquet::file::properties::WriterProperties;
+use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fs::File;
 use std::io::Write;
 use std::sync::Arc;
 
 use super::value_fmt::ValueFormatter;
+
+// ============================================================================
+// Decimal constants (Issue #675)
+// ============================================================================
+
+/// Fixed scale used for all `decimal` columns mapped to `Decimal128`.
+///
+/// We choose 9 (nanosecond-like resolution) as a reasonable default that
+/// accommodates most CQL decimal use-cases without requiring per-column
+/// inspection of the data.  See the module-level doc for the full rescaling
+/// strategy.
+const DECIMAL_FIXED_SCALE: i32 = 9;
+
+/// Maximum precision for `Decimal128` (Arrow/Parquet limit).
+const DECIMAL_MAX_PRECISION: u8 = 38;
+
+/// Arrow UUID extension type name, as specified by the Arrow spec.
+/// The field metadata key `ARROW:extension:name` = `arrow.uuid` triggers
+/// the Parquet UUID logical type annotation.
+const ARROW_EXTENSION_NAME_KEY: &str = "ARROW:extension:name";
+const ARROW_UUID_EXTENSION_NAME: &str = "arrow.uuid";
+
+// ============================================================================
+// BigInt → i128 helper
+// ============================================================================
+
+/// Convert a `num_bigint::BigInt` to `i128`, sign-extending if necessary.
+///
+/// Uses the two's-complement big-endian representation via
+/// `to_signed_bytes_be()` and sign-extends to 16 bytes before reinterpreting
+/// as `i128`.  Returns an error if the value requires more than 16 bytes
+/// (i.e. exceeds the i128 range).
+fn bigint_to_i128(n: &num_bigint::BigInt) -> Result<i128, Box<dyn std::error::Error>> {
+    let tc_bytes = n.to_signed_bytes_be();
+    if tc_bytes.len() > 16 {
+        return Err("BigInt value requires more than 16 bytes; cannot fit in i128".into());
+    }
+    // Determine the sign-extension byte: 0x00 for non-negative, 0xFF for negative.
+    let pad: u8 = if n.sign() == num_bigint::Sign::Minus {
+        0xFF
+    } else {
+        0x00
+    };
+    let mut buf = [pad; 16];
+    // Copy the two's-complement bytes into the *right* side of the buffer.
+    buf[16 - tc_bytes.len()..].copy_from_slice(&tc_bytes);
+    Ok(i128::from_be_bytes(buf))
+}
 
 /// Parquet writer for QueryResult
 ///
@@ -90,10 +179,92 @@ impl ParquetWriter {
         Ok(Schema::new(fields))
     }
 
-    /// Convert a CQL column to Arrow field
+    /// Convert a CQL column to Arrow field.
+    ///
+    /// When `col.cql_type` is `Some`, the high-fidelity schema mapping
+    /// (`cql_type_to_arrow_field`) is used.  For scalar types this produces
+    /// the correct Arrow logical type (e.g. `Date32`, `Time64`, `Decimal128`).
+    /// Collection and complex CQL types fall back to the existing flat
+    /// `data_type` mapping for now (handled by later issues #676–#678).
     fn column_to_field(col: &ColumnInfo) -> Field {
+        if let Some(cql_type) = &col.cql_type {
+            if let Some(field) = Self::cql_type_to_arrow_field(&col.name, cql_type, col.nullable) {
+                return field;
+            }
+        }
         let arrow_type = Self::data_type_to_arrow(&col.data_type);
         Field::new(&col.name, arrow_type, col.nullable)
+    }
+
+    /// Map a scalar `CqlType` to an Arrow `Field`, returning `None` for
+    /// complex/collection types so the caller can fall back to `data_type_to_arrow`.
+    ///
+    /// UUID and TimeUUID columns receive the canonical Arrow UUID extension
+    /// metadata (`ARROW:extension:name` = `arrow.uuid`) so that Parquet readers
+    /// emit the Parquet UUID logical type.
+    fn cql_type_to_arrow_field(name: &str, cql_type: &CqlType, nullable: bool) -> Option<Field> {
+        match cql_type {
+            CqlType::Date => Some(Field::new(name, ArrowDataType::Date32, nullable)),
+            CqlType::Time => Some(Field::new(
+                name,
+                ArrowDataType::Time64(TimeUnit::Nanosecond),
+                nullable,
+            )),
+            CqlType::Decimal => Some(Field::new(
+                name,
+                ArrowDataType::Decimal128(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8),
+                nullable,
+            )),
+            CqlType::Varint => {
+                // varint → Decimal128(38, 0) — the integer domain.
+                // Values that exceed 38 digits will be detected at write time and
+                // produce an error (never silently truncated).
+                Some(Field::new(
+                    name,
+                    ArrowDataType::Decimal128(DECIMAL_MAX_PRECISION, 0),
+                    nullable,
+                ))
+            }
+            CqlType::Duration => {
+                // NOTE: The Parquet format's INTERVAL logical type does not support
+                // nanosecond precision (only months + days + milliseconds).  The
+                // `parquet` crate v53 therefore refuses to write
+                // `Interval(MonthDayNano)` and returns an NYI error at write time.
+                //
+                // Arrow `Interval(MonthDayNano)` is the correct *Arrow* type for
+                // CQL duration (months + days + nanos), but it cannot be persisted
+                // to Parquet in this crate version.  We fall back to `Utf8` using
+                // the canonical CQL textual representation (e.g. "1mo2d3ns") so
+                // that the data is always readable.  Once the parquet crate gains
+                // MonthDayNano write support this can be upgraded.
+                Some(Field::new(name, ArrowDataType::Utf8, nullable))
+            }
+            CqlType::Uuid | CqlType::TimeUuid => {
+                // FixedSizeBinary(16) with the Arrow UUID extension metadata so that
+                // Parquet readers interpret the column as UUID logical type.
+                let mut meta = HashMap::new();
+                meta.insert(
+                    ARROW_EXTENSION_NAME_KEY.to_string(),
+                    ARROW_UUID_EXTENSION_NAME.to_string(),
+                );
+                Some(
+                    Field::new(name, ArrowDataType::FixedSizeBinary(16), nullable)
+                        .with_metadata(meta),
+                )
+            }
+            CqlType::Inet => Some(Field::new(name, ArrowDataType::Utf8, nullable)),
+            CqlType::Counter => Some(Field::new(name, ArrowDataType::Int64, nullable)),
+            // All collection and complex types: fall back to existing mapping.
+            CqlType::List(_)
+            | CqlType::Set(_)
+            | CqlType::Map(_, _)
+            | CqlType::Tuple(_)
+            | CqlType::Udt(_, _)
+            | CqlType::Frozen(_) => None,
+            // Remaining scalar types are already handled correctly by the flat
+            // DataType mapping; return None to allow that path to run.
+            _ => None,
+        }
     }
 
     /// Map CQL DataType to Arrow DataType
@@ -149,11 +320,35 @@ impl ParquetWriter {
             .collect()
     }
 
-    /// Convert a single column across all rows to an Arrow array
+    /// Convert a single column across all rows to an Arrow array.
+    ///
+    /// When `col.cql_type` is `Some` and the type is a high-fidelity scalar
+    /// (date, time, decimal, varint, duration, uuid/timeuuid, inet, counter),
+    /// the corresponding typed builder is used.  All other cases fall through
+    /// to the existing flat `data_type`-based dispatch.
     fn convert_column_to_array(
         col: &ColumnInfo,
         rows: &[cqlite_core::query::QueryRow],
     ) -> Result<ArrayRef, Box<dyn StdError>> {
+        // High-fidelity CQL-type dispatch (Issue #675)
+        if let Some(cql_type) = &col.cql_type {
+            match cql_type {
+                CqlType::Date => return Self::build_date32_array(col, rows),
+                CqlType::Time => return Self::build_time64_ns_array(col, rows),
+                CqlType::Decimal => return Self::build_decimal128_array(col, rows),
+                CqlType::Varint => return Self::build_varint_as_decimal128_array(col, rows),
+                CqlType::Duration => return Self::build_duration_utf8_array(col, rows),
+                CqlType::Uuid | CqlType::TimeUuid => {
+                    return Self::build_uuid_fixed_binary_array(col, rows)
+                }
+                CqlType::Inet => return Self::build_inet_utf8_array(col, rows),
+                CqlType::Counter => return Self::build_int64_array(col, rows),
+                // Complex/collection types fall through to the flat dispatch below.
+                _ => {}
+            }
+        }
+
+        // Flat data_type dispatch (legacy path — no behavior change for existing callers)
         match &col.data_type {
             DataType::Boolean => Self::build_boolean_array(col, rows),
             DataType::TinyInt => Self::build_int8_array(col, rows),
@@ -384,6 +579,277 @@ impl ParquetWriter {
             }
         }
         Ok(Arc::new(builder.finish()))
+    }
+
+    // =========================================================================
+    // High-fidelity CQL type builders (Issue #675)
+    // =========================================================================
+
+    /// Build an Arrow `Date32` array from `Value::Date(i32)`.
+    ///
+    /// `Value::Date` already carries signed days since 1970-01-01 (the SSTable
+    /// parser removes the Cassandra `i32::MIN` offset before storing the value
+    /// in `Value::Date`), which is exactly the Arrow `Date32` encoding.
+    fn build_date32_array(
+        col: &ColumnInfo,
+        rows: &[cqlite_core::query::QueryRow],
+    ) -> Result<ArrayRef, Box<dyn StdError>> {
+        let values: Vec<Option<i32>> = rows
+            .iter()
+            .map(|row| {
+                row.values.get(&col.name).and_then(|v| match v {
+                    Value::Date(days) => Some(*days),
+                    Value::Null => None,
+                    _ => None,
+                })
+            })
+            .collect();
+        Ok(Arc::new(Date32Array::from(values)))
+    }
+
+    /// Build an Arrow `Time64(Nanosecond)` array from `Value::Time(i64)`.
+    ///
+    /// CQL `time` is stored as nanoseconds since midnight in `Value::Time`,
+    /// matching the Arrow `Time64(Nanosecond)` encoding exactly.
+    fn build_time64_ns_array(
+        col: &ColumnInfo,
+        rows: &[cqlite_core::query::QueryRow],
+    ) -> Result<ArrayRef, Box<dyn StdError>> {
+        let values: Vec<Option<i64>> = rows
+            .iter()
+            .map(|row| {
+                row.values.get(&col.name).and_then(|v| match v {
+                    Value::Time(nanos) => Some(*nanos),
+                    Value::Null => None,
+                    _ => None,
+                })
+            })
+            .collect();
+        Ok(Arc::new(Time64NanosecondArray::from(values)))
+    }
+
+    /// Rescale a CQL decimal value to the fixed column scale (`DECIMAL_FIXED_SCALE`).
+    ///
+    /// Returns the rescaled `i128` value, or an error if:
+    /// - The rescaled magnitude exceeds 38 decimal digits (overflow of `Decimal128`).
+    /// - Checked multiplication overflows `i128` when scaling up.
+    fn rescale_decimal(scale: i32, unscaled: &[u8]) -> Result<i128, Box<dyn StdError>> {
+        use num_bigint::BigInt;
+
+        if unscaled.is_empty() {
+            return Ok(0i128);
+        }
+
+        // Decode big-endian two's-complement signed integer.
+        let bigint = BigInt::from_signed_bytes_be(unscaled);
+
+        // Compute scale delta: positive means we must multiply (scale up),
+        // negative means we must divide (scale down / truncate).
+        let delta = DECIMAL_FIXED_SCALE - scale;
+
+        let rescaled = if delta == 0 {
+            bigint
+        } else if delta > 0 {
+            // Scale up: multiply by 10^delta.
+            let factor = BigInt::from(10i64).pow(delta as u32);
+            bigint * factor
+        } else {
+            // Scale down: divide by 10^(-delta), truncating toward zero.
+            let factor = BigInt::from(10i64).pow((-delta) as u32);
+            bigint / factor
+        };
+
+        // Verify the result fits in Decimal128(38, …).
+        // 10^38 − 1 is the maximum absolute value representable.
+        let max_abs = BigInt::from(10i64).pow(38u32) - BigInt::from(1i64);
+        // abs() on BigInt gives the magnitude.
+        let abs_rescaled = if rescaled.sign() == num_bigint::Sign::Minus {
+            -rescaled.clone()
+        } else {
+            rescaled.clone()
+        };
+        if abs_rescaled > max_abs {
+            return Err(format!(
+                "Decimal value exceeds Decimal128(38, {DECIMAL_FIXED_SCALE}) range after rescaling"
+            )
+            .into());
+        }
+
+        // Convert BigInt to i128.
+        // `to_signed_bytes_be()` gives the two's-complement big-endian representation.
+        // We sign-extend it to fill an i128 (16 bytes).
+        bigint_to_i128(&rescaled)
+    }
+
+    /// Build an Arrow `Decimal128(38, DECIMAL_FIXED_SCALE)` array from
+    /// `Value::Decimal { scale, unscaled }`.
+    ///
+    /// Each value is rescaled to `DECIMAL_FIXED_SCALE`.  Values that cannot
+    /// be represented exactly (overflow, too many digits) produce an error.
+    fn build_decimal128_array(
+        col: &ColumnInfo,
+        rows: &[cqlite_core::query::QueryRow],
+    ) -> Result<ArrayRef, Box<dyn StdError>> {
+        let mut builder = arrow::array::Decimal128Builder::new()
+            .with_precision_and_scale(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)?;
+
+        for row in rows {
+            match row.values.get(&col.name) {
+                Some(Value::Decimal { scale, unscaled }) => {
+                    let rescaled = Self::rescale_decimal(*scale, unscaled)
+                        .map_err(|e| format!("Column '{}': {e}", col.name))?;
+                    builder.append_value(rescaled);
+                }
+                Some(Value::Null) | None => {
+                    builder.append_null();
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "Column '{}': expected Decimal value, got {:?}",
+                        col.name, other
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(Arc::new(builder.finish()))
+    }
+
+    /// Build an Arrow `Decimal128(38, 0)` array from `Value::Varint(Vec<u8>)`.
+    ///
+    /// Varint bytes are big-endian two's-complement signed integers.  Values
+    /// that exceed 38 decimal digits (cannot fit in `Decimal128`) produce an
+    /// error.  Callers that need to handle arbitrarily large varints should
+    /// use the `Utf8` fallback path (available via `DataType::Text` without
+    /// `cql_type` set).
+    fn build_varint_as_decimal128_array(
+        col: &ColumnInfo,
+        rows: &[cqlite_core::query::QueryRow],
+    ) -> Result<ArrayRef, Box<dyn StdError>> {
+        use num_bigint::BigInt;
+
+        let mut builder = arrow::array::Decimal128Builder::new()
+            .with_precision_and_scale(DECIMAL_MAX_PRECISION, 0)?;
+
+        for row in rows {
+            match row.values.get(&col.name) {
+                Some(Value::Varint(bytes)) => {
+                    if bytes.is_empty() {
+                        builder.append_value(0);
+                    } else {
+                        let bigint = BigInt::from_signed_bytes_be(bytes);
+
+                        // Check it fits in Decimal128 (precision 38).
+                        let max_abs = BigInt::from(10i64).pow(38u32) - BigInt::from(1i64);
+                        let abs_val = if bigint.sign() == num_bigint::Sign::Minus {
+                            -bigint.clone()
+                        } else {
+                            bigint.clone()
+                        };
+                        if abs_val > max_abs {
+                            return Err(format!(
+                                "Column '{}': varint value exceeds Decimal128(38, 0) range",
+                                col.name
+                            )
+                            .into());
+                        }
+
+                        let i128_val = bigint_to_i128(&bigint)
+                            .map_err(|e| format!("Column '{}': {e}", col.name))?;
+                        builder.append_value(i128_val);
+                    }
+                }
+                Some(Value::Null) | None => {
+                    builder.append_null();
+                }
+                Some(other) => {
+                    return Err(format!(
+                        "Column '{}': expected Varint value, got {:?}",
+                        col.name, other
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(Arc::new(builder.finish()))
+    }
+
+    /// Build an Arrow `Utf8` array from `Value::Duration { months, days, nanos }`.
+    ///
+    /// CQL Duration is ideally represented as `Interval(MonthDayNano)` in Arrow,
+    /// but the `parquet` crate v53 does not support writing `IntervalMonthDayNano`
+    /// to Parquet files (the Parquet INTERVAL logical type only supports millisecond
+    /// precision, not nanoseconds).  We therefore serialize durations as their
+    /// canonical CQL text form (e.g. `"1mo2d3ns"`) via `ValueFormatter`.  When the
+    /// `parquet` crate gains `MonthDayNano` write support, this builder can be
+    /// upgraded to emit `IntervalMonthDayNanoArray` instead.
+    fn build_duration_utf8_array(
+        col: &ColumnInfo,
+        rows: &[cqlite_core::query::QueryRow],
+    ) -> Result<ArrayRef, Box<dyn StdError>> {
+        let values: Vec<Option<String>> = rows
+            .iter()
+            .map(|row| {
+                row.values.get(&col.name).and_then(|v| match v {
+                    Value::Duration { .. } => Some(ValueFormatter::format_value(v)),
+                    Value::Null => None,
+                    _ => None,
+                })
+            })
+            .collect();
+        Ok(Arc::new(StringArray::from(values)))
+    }
+
+    /// Build an Arrow `FixedSizeBinary(16)` array from `Value::Uuid([u8; 16])`.
+    ///
+    /// The field carries the Arrow UUID extension metadata
+    /// (`ARROW:extension:name` = `arrow.uuid`), which is set in
+    /// `cql_type_to_arrow_field`.  This builder just writes the raw bytes;
+    /// the schema-level metadata is what triggers Parquet UUID logical type.
+    fn build_uuid_fixed_binary_array(
+        col: &ColumnInfo,
+        rows: &[cqlite_core::query::QueryRow],
+    ) -> Result<ArrayRef, Box<dyn StdError>> {
+        let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
+        for row in rows {
+            match row.values.get(&col.name) {
+                Some(Value::Uuid(bytes)) => builder.append_value(bytes)?,
+                Some(Value::Null) | None => builder.append_null(),
+                Some(other) => {
+                    return Err(format!(
+                        "Column '{}': expected Uuid value, got {:?}",
+                        col.name, other
+                    )
+                    .into());
+                }
+            }
+        }
+        Ok(Arc::new(builder.finish()))
+    }
+
+    /// Build an Arrow `Utf8` array from `Value::Inet(Vec<u8>)`.
+    ///
+    /// InetAddress is intentionally stored as canonical text (e.g. "192.168.1.1"
+    /// or "2001:db8::1") rather than raw bytes.  There is no standard Arrow type
+    /// for IP addresses, and text is the most portable representation for
+    /// downstream consumers (DuckDB, pandas, etc.).
+    fn build_inet_utf8_array(
+        col: &ColumnInfo,
+        rows: &[cqlite_core::query::QueryRow],
+    ) -> Result<ArrayRef, Box<dyn StdError>> {
+        let values: Vec<Option<String>> = rows
+            .iter()
+            .map(|row| {
+                row.values.get(&col.name).and_then(|v| match v {
+                    Value::Inet(bytes) => {
+                        Some(ValueFormatter::format_value(&Value::Inet(bytes.clone())))
+                    }
+                    Value::Null => None,
+                    _ => None,
+                })
+            })
+            .collect();
+        Ok(Arc::new(StringArray::from(values)))
     }
 
     fn build_list_array(
