@@ -232,9 +232,8 @@ df["event_type"].value_counts().plot(kind="bar")
   yet exposed in the Python bindings. Tracked in the write support roadmap.
 - **Export Parquet directly from Python.** Use the CLI `--out parquet` flag for now.
   [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*.
-- **Collection type fidelity in Parquet export.** Lists and maps are currently stringified
-  in Parquet output. [Epic #673](https://github.com/pmcfadin/cqlite/issues/673) tracks
-  this *(in progress)*.
+  The CLI's Parquet output preserves nested and high-precision types — typed lists,
+  maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Further reading
 
