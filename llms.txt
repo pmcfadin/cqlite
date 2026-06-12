@@ -1,0 +1,13 @@
+# CQLite
+
+> Local Apache Cassandra SSTable access without cluster dependencies. Reads Cassandra 5.0 SSTables directly from disk — no cluster, no JVM required.
+
+## Documentation Sets
+
+- [Abridged documentation](https://pmcfadin.github.io/cqlite/llms-small.txt): a compact version of the documentation for CQLite, with non-essential content removed
+- [Complete documentation](https://pmcfadin.github.io/cqlite/llms-full.txt): the full documentation for CQLite
+
+## Notes
+
+- The complete documentation includes all content from the official documentation
+- The content is automatically generated from the same source as the official documentation
