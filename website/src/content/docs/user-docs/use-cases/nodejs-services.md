@@ -270,8 +270,8 @@ for (const col of result.columns as ColumnInfo[]) {
   yet exposed in the Node.js bindings.
 - **Export Parquet directly from Node.js.** Use the CLI `--out parquet` flag for now.
   [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*.
-- **Collection type fidelity in Parquet export.** Lists and maps are stringified.
-  [Epic #673](https://github.com/pmcfadin/cqlite/issues/673) tracks this *(in progress)*.
+  The CLI's Parquet output preserves nested and high-precision types — typed lists,
+  maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Further reading
 

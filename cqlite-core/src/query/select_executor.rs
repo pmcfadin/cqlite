@@ -12,13 +12,15 @@
 
 use super::{
     result::{
-        ColumnInfo, QueryMetadata, QueryResult, QueryResultIterator, QueryRow, StreamingConfig,
+        cql_type_to_data_type, ColumnInfo, QueryMetadata, QueryResult, QueryResultIterator,
+        QueryRow, StreamingConfig,
     },
     select_ast::*,
     select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
 };
 use crate::{
-    schema::SchemaManager,
+    parser::complex_types::ComplexTypeParser,
+    schema::{CqlType, SchemaManager},
     storage::StorageEngine,
     types::{RowKey, Value},
     Error, Result, TableId,
@@ -522,6 +524,19 @@ fn like_pattern_to_regex(pattern: &str) -> String {
     out
 }
 
+/// Parse a CQL type string (e.g. `"list<int>"`, `"text"`) into a [`CqlType`].
+///
+/// Returns `None` when the type string cannot be parsed (unknown or malformed
+/// types). Used to populate `ColumnInfo::cql_type` from the schema's string
+/// representation, satisfying the no-heuristics mandate (Issue #28).
+fn parse_cql_type_str(type_str: &str) -> Option<CqlType> {
+    let parser = ComplexTypeParser::new();
+    parser
+        .parse_type(type_str)
+        .ok()
+        .map(|parsed| parsed.cql_type)
+}
+
 impl SelectExecutor {
     /// Create a new SELECT executor
     pub fn new(schema: Arc<SchemaManager>, storage: Arc<StorageEngine>) -> Self {
@@ -609,24 +624,60 @@ impl SelectExecutor {
         let total_rows = intermediate_results.len() as u64;
 
         // CRITICAL FIX (Issue #129/#140): Populate metadata.columns for SELECT *
-        // When SELECT * is used, context.columns is empty (see line 1172-1175).
-        // We must infer columns from the first row's HashMap keys.
+        // When SELECT * is used and no schema was found, context.columns is empty.
+        // Fall back to inferring column names from the first row's HashMap keys.
         // IMPORTANT: Must be sorted alphabetically for deterministic JSON output (Issue #129)!
         let mut columns = context.columns;
         if columns.is_empty() && !intermediate_results.is_empty() {
-            // Infer columns from first row
+            // Try to resolve schema to get proper CQL types (Issue #674).
+            let schema_opt = if let Some(ref from_clause) = plan.statement.from_clause {
+                if let Ok(table_id) = self.extract_table_id(from_clause) {
+                    let (keyspace, table_name) = parse_table_id(&table_id);
+                    self._schema
+                        .find_schema_by_table(&keyspace, &table_name)
+                        .await
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
             let first_row = &intermediate_results[0];
             let mut col_names: Vec<_> = first_row.values.keys().collect();
             col_names.sort(); // Sort alphabetically for deterministic ordering (Issue #129)
 
+            let table_name_for_meta = schema_opt
+                .as_ref()
+                .map(|s| format!("{}.{}", s.keyspace, s.table));
+
             for (idx, col_name) in col_names.iter().enumerate() {
-                columns.push(ColumnInfo {
+                // Look up CQL type from schema; derive flat DataType from it (Issue #674).
+                let cql_type_opt = schema_opt.as_ref().and_then(|schema| {
+                    schema
+                        .columns
+                        .iter()
+                        .find(|c| c.name.as_str() == col_name.as_str())
+                        .and_then(|c| parse_cql_type_str(&c.data_type))
+                });
+
+                let data_type = cql_type_opt
+                    .as_ref()
+                    .map(cql_type_to_data_type)
+                    .unwrap_or(crate::types::DataType::Text);
+
+                let mut col_info = ColumnInfo {
                     name: (*col_name).clone(),
-                    data_type: crate::types::DataType::Text, // TODO: Infer proper type
+                    data_type,
                     nullable: true,
                     position: idx,
-                    table_name: None,
-                });
+                    table_name: table_name_for_meta.clone(),
+                    cql_type: None,
+                };
+                if let Some(cql_type) = cql_type_opt {
+                    col_info = col_info.with_cql_type(cql_type);
+                }
+                columns.push(col_info);
             }
         }
 
@@ -1307,10 +1358,11 @@ impl SelectExecutor {
                     values.insert(key.clone(), value);
                     columns.push(ColumnInfo {
                         name: key,
-                        data_type: crate::types::DataType::Text, // Simplified for now
+                        data_type: crate::types::DataType::Text, // Constant expressions have no schema type
                         nullable: true,
                         position: i,
                         table_name: None, // No table for constant expressions
+                        cql_type: None,
                     });
                 }
             }
@@ -1376,8 +1428,8 @@ impl SelectExecutor {
 
         match &statement.select_clause {
             SelectClause::All => {
-                // For SELECT *, look up the schema to get column names
-                // This is needed for streaming mode where we can't wait for first row
+                // For SELECT *, look up the schema to get column names and CQL types.
+                // This is needed for streaming mode where we can't wait for the first row.
                 if let Some(ref from_clause) = statement.from_clause {
                     let table_id = self.extract_table_id(from_clause)?;
                     let (keyspace_opt, table_name) = parse_table_id(&table_id);
@@ -1388,20 +1440,35 @@ impl SelectExecutor {
                         .find_schema_by_table(&keyspace_opt, &table_name)
                         .await
                     {
-                        // Collect all column names from schema (sorted alphabetically for determinism)
-                        let mut col_names: Vec<&str> =
-                            schema.columns.iter().map(|c| c.name.as_str()).collect();
-                        col_names.sort();
+                        // Collect all schema columns (sorted alphabetically for determinism)
+                        let mut schema_cols: Vec<&crate::schema::Column> =
+                            schema.columns.iter().collect();
+                        schema_cols.sort_by_key(|c| c.name.as_str());
 
                         let keyspace_str = keyspace_opt.as_deref().unwrap_or("");
-                        for (idx, col_name) in col_names.iter().enumerate() {
-                            columns.push(ColumnInfo {
-                                name: col_name.to_string(),
-                                data_type: crate::types::DataType::Text, // TODO: Infer proper type
+                        let table_name_str = format!("{}.{}", keyspace_str, table_name);
+
+                        for (idx, schema_col) in schema_cols.iter().enumerate() {
+                            // Parse the CQL type string into a structured CqlType (Issue #674).
+                            let cql_type_opt = parse_cql_type_str(&schema_col.data_type);
+                            // Derive the flat DataType from the CqlType; avoids hardcoded Text.
+                            let data_type = cql_type_opt
+                                .as_ref()
+                                .map(cql_type_to_data_type)
+                                .unwrap_or(crate::types::DataType::Text);
+
+                            let mut col_info = ColumnInfo {
+                                name: schema_col.name.clone(),
+                                data_type,
                                 nullable: true,
                                 position: idx,
-                                table_name: Some(format!("{}.{}", keyspace_str, table_name)),
-                            });
+                                table_name: Some(table_name_str.clone()),
+                                cql_type: None,
+                            };
+                            if let Some(cql_type) = cql_type_opt {
+                                col_info = col_info.with_cql_type(cql_type);
+                            }
+                            columns.push(col_info);
                         }
 
                         log::debug!(
@@ -1415,6 +1482,21 @@ impl SelectExecutor {
                 }
             }
             SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) => {
+                // Try to resolve a schema for the FROM table (if present) so we can
+                // attach authoritative CQL types to explicitly projected columns (Issue #674).
+                let schema_opt = if let Some(ref from_clause) = statement.from_clause {
+                    if let Ok(table_id) = self.extract_table_id(from_clause) {
+                        let (keyspace_opt, table_name) = parse_table_id(&table_id);
+                        self._schema
+                            .find_schema_by_table(&keyspace_opt, &table_name)
+                            .await
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
                 for (i, expr) in exprs.iter().enumerate() {
                     let column_name = match expr {
                         SelectExpression::Column(col_ref) => col_ref.column.clone(),
@@ -1422,13 +1504,31 @@ impl SelectExecutor {
                         _ => format!("col_{i}"),
                     };
 
-                    columns.push(ColumnInfo {
+                    // Look up CQL type for this column in the schema (Issue #674).
+                    let cql_type_opt = schema_opt.as_ref().and_then(|schema| {
+                        schema
+                            .columns
+                            .iter()
+                            .find(|c| c.name == column_name)
+                            .and_then(|c| parse_cql_type_str(&c.data_type))
+                    });
+                    let data_type = cql_type_opt
+                        .as_ref()
+                        .map(cql_type_to_data_type)
+                        .unwrap_or(crate::types::DataType::Text);
+
+                    let mut col_info = ColumnInfo {
                         name: column_name,
-                        data_type: crate::types::DataType::Text, // TODO: Infer proper type
+                        data_type,
                         nullable: true,
                         position: i,
                         table_name: None,
-                    });
+                        cql_type: None,
+                    };
+                    if let Some(cql_type) = cql_type_opt {
+                        col_info = col_info.with_cql_type(cql_type);
+                    }
+                    columns.push(col_info);
                 }
             }
         }

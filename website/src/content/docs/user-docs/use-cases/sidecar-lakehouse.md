@@ -119,9 +119,12 @@ merge. Idempotent; matches the immutable-SSTable grain.
 `open_with_discovered_sstables()` at *all* live SSTables for the table so CQLite's read
 path performs the LWW merge, then export. Correct, but re-reads everything on each flush.
 
-## Type mapping fidelity (current state)
+## Type mapping fidelity
 
-Scalars map cleanly to Parquet. Collection and complex types are **currently lossy**:
+The type mapping is **analytics-grade for schema-aware queries**
+([epic #673](https://github.com/pmcfadin/cqlite/issues/673)): query results carry the
+authoritative schema `CqlType`, and the Parquet writer maps it recursively to a
+faithful Arrow schema.
 
 | CQL type | Arrow/Parquet | Fidelity |
 |----------|---------------|----------|
@@ -129,32 +132,26 @@ Scalars map cleanly to Parquet. Collection and complex types are **currently los
 | text / varchar / ascii | Utf8 | Clean |
 | blob | Binary | Clean |
 | timestamp | Timestamp(ms, UTC) | Clean |
-| uuid / timeuuid | FixedSizeBinary(16) | Raw bytes (no logical UUID annotation) |
-| date | Int32 | Days-since-epoch as plain int, not Arrow `Date32` |
-| time | Int64 | Nanos as plain int, not Arrow `Time64` |
-| list / set | `List<Utf8>` | **Elements stringified** |
-| map | `Map<Utf8, Utf8>` | **Keys and values stringified** |
-| tuple / UDT / frozen | Utf8 | **Whole value serialized to one string** |
-| varint, decimal, inet, duration | string fallback | Lossy |
+| uuid / timeuuid | FixedSizeBinary(16) + `arrow.uuid` extension | Clean (UUID logical annotation) |
+| date | `Date32` | Clean |
+| time | `Time64(Nanosecond)` | Clean |
+| decimal | `Decimal128(38, 9)` | Fixed column scale 9; checked rescale, overflow errors deterministically |
+| varint | `Decimal128(38, 0)` | Values > 38 digits error deterministically |
+| list&lt;T&gt; / set&lt;T&gt; | `List<T>` | Typed elements, recursive (sets export as List — Arrow has no set type) |
+| map&lt;K,V&gt; | `Map<K, V>` | Typed keys (non-null) and values, recursive |
+| tuple / UDT | `Struct` | Positional `field_N` / schema field names |
+| frozen&lt;T&gt; | Same as T | Transparent at every nesting level |
+| inet | Utf8 (canonical text) | Deliberate: no standard Arrow inet type |
+| duration | Utf8 (CQL text form) | `parquet` crate v53 cannot write `Interval(MonthDayNano)` |
 
-Tables of scalars (IDs, metrics, timestamps, text) project faithfully. The moment
-collections, UDTs, or `decimal`/`varint` appear, nested structure and element typing
-collapse to strings, which defeats columnar predicate pushdown in downstream consumers.
+Collections, UDTs, and high-precision scalars all support columnar predicate pushdown
+in downstream consumers (Trino, Spark, DuckDB). The batch and streaming writers produce
+identical schemas and values. See
+[Output Formats](/cqlite/user-docs/output-formats/) for the full table and notes.
 
-This is the single highest-value engineering investment for the lakehouse use case.
+## What epics #682 and #696 unlock
 
-## What epics #673, #682, and #696 unlock
-
-These three in-progress epics complete the lakehouse story:
-
-**[Epic #673: Parquet/Arrow type-mapping fidelity](https://github.com/pmcfadin/cqlite/issues/673)**
-*(in progress)*
-
-Upgrades `ColumnInfo` to carry the authoritative schema `CqlType`, maps `list<T>` /
-`set<T>` as `List<T>` with typed elements, `map<K,V>` as Arrow `Map<K,V>`, and UDTs /
-tuples as Arrow `Struct`. Scalar types gain `Date32`, `Time64(ns)`, `Decimal128`, and
-UUID annotations. Without this epic, collection columns cannot support predicate
-pushdown in Trino, Spark, or DuckDB.
+These in-progress epics complete the lakehouse story:
 
 **[Epic #682: Lift Parquet writer into cqlite-core](https://github.com/pmcfadin/cqlite/issues/682)**
 *(in progress)*
@@ -191,8 +188,9 @@ events and commit timestamps.
 Our approach's distinct value is **open, lake-native columnar output from Cassandra with
 no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered
 committed log — its source of truth is independently-flushed, LWW-merged SSTables — so
-any columnar projection is inherently a delta-reconciliation problem. Epics #673, #682,
-and #696 each address one part of that problem.
+any columnar projection is inherently a delta-reconciliation problem. Epic #673
+(delivered) addressed type fidelity; epics #682 and #696 each address one remaining
+part of that problem.
 
 ## Recommendations
 
@@ -204,9 +202,7 @@ and #696 each address one part of that problem.
    columns) so projections are reconcilable. Without this, a union of per-flush Parquet
    is silently wrong.
 4. **Prefer commitlog CDC over raw flush events** when correctness matters.
-5. **Upgrade the Arrow type mapping** (epic #673) before calling the pipeline
-   analytics-grade.
-6. **Lift the Parquet writer into `cqlite-core`** (epic #682) if you want embeddable
+5. **Lift the Parquet writer into `cqlite-core`** (epic #682) if you want embeddable
    non-CLI projection.
 
 <!-- TODO(W4): link to CLI reference when merged -->

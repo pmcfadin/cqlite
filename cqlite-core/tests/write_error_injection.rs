@@ -475,6 +475,15 @@ async fn test_readonly_data_dir_flush_fails() -> cqlite_core::error::Result<()> 
     // Making data_dir itself read-only is sufficient to block directory creation.
     std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o444)).unwrap();
 
+    // Privileged users (e.g. uid 0 in containerized CI) bypass directory
+    // permissions, so the read-only precondition cannot be created.
+    let probe = data_dir.join(".permission-probe");
+    if std::fs::create_dir(&probe).is_ok() {
+        let _ = std::fs::remove_dir(&probe);
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        return Ok(());
+    }
+
     let flush_result = engine.flush().await;
 
     // Restore permissions so TempDir cleanup can succeed
