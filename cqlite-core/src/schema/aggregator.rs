@@ -1429,6 +1429,12 @@ mod tests {
         perms.set_mode(0o000);
         fs::set_permissions(&path, perms).unwrap();
 
+        // Privileged users (e.g. uid 0 in containerized CI) bypass file
+        // permissions, so the read-error precondition cannot be created.
+        if fs::File::open(&path).is_ok() {
+            return;
+        }
+
         let result = aggregator
             .load_from_paths(std::slice::from_ref(&path))
             .await
