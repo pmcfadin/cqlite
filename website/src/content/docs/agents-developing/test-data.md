@@ -146,6 +146,5 @@ bash test-data/scripts/package_datasets.sh
 bash test-data/scripts/publish_datasets.sh
 ```
 
-<!-- TODO(W8): link to full dataset-generation reference once site page exists -->
 See `.claude/skills/test-data-management/dataset-generation.md` in the repo for the
 full workflow including the compose-stack interactive path.

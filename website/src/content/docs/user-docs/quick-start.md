@@ -165,5 +165,8 @@ For a full list, see [Limitations](/cqlite/user-docs/limitations/).
 ## Next steps
 
 - [Installation](/cqlite/user-docs/installation/) — prebuilt binaries, cargo, pip, npm
+- [CLI Reference](/cqlite/user-docs/cli-reference/) — all flags, subcommands, and modes
+- [Output Formats](/cqlite/user-docs/output-formats/) — JSON, CSV, Parquet
+- [Python Bindings](/cqlite/user-docs/python/) — `cqlite-py` API
+- [Node.js Bindings](/cqlite/user-docs/nodejs/) — `@cqlite/node` API
 - [Troubleshooting](/cqlite/user-docs/troubleshooting/) — common issues and fixes
-<!-- TODO(W8): link CLI reference, Output Formats, Python, Node.js when merged -->

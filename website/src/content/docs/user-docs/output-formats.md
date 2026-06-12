@@ -246,6 +246,5 @@ parquet-tools show results.parquet
 | Analytics / Spark / DuckDB | `parquet` (with awareness of caveats above) |
 | Lakehouse / columnar predicates on complex types | Wait for epic #673 or cast in the consumer |
 
-<!-- TODO(W8): link to agent recipes when merged -->
-
 **See also**: [CLI Reference](/cqlite/user-docs/cli-reference/) for `--out`, `--format`, and `CQLITE_OUT` flag details.
+For agent recipes that use these formats, see [For Agents: Using CQLite](/cqlite/agents-using/).

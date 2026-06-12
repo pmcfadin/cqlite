@@ -57,8 +57,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build site (includes internal link validation)
+      - name: Build site (includes internal link validation + raw markdown emit)
         run: npm run build
+
+      - name: Validate agent plumbing (llms.txt coverage + raw .md endpoints)
+        run: node scripts/validate-agent-plumbing.mjs
 
       - name: Upload build artifact
         if: github.event_name != 'pull_request'

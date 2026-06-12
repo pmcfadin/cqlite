@@ -340,4 +340,4 @@ Full TypeScript definitions are in
 - [GitHub Repository](https://github.com/pmcfadin/cqlite)
 - [npm Package](https://www.npmjs.com/package/@cqlite/node)
 - [TypeScript Definitions](https://github.com/pmcfadin/cqlite/blob/main/bindings/node/lib/index.d.ts)
-<!-- TODO(W8): link when merged -->
+- [Query from Node.js recipe](/cqlite/agents-using/query-nodejs/) — copy-pasteable agent recipe with expected output shapes

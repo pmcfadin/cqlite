@@ -22,26 +22,17 @@ daemon required.
 
 ### Reference
 
-<!-- TODO(W8): link CLI Reference when merged (W4 issue) -->
-**CLI Reference** — all flags, subcommands, and one-shot / REPL / TUI modes *(arriving in W4)*
-
-<!-- TODO(W8): link Output Formats when merged (W4 issue) -->
-**Output Formats** — JSON, CSV, Parquet *(arriving in W4)*
-
-<!-- TODO(W8): link Python Bindings when merged (W5 issue) -->
-**Python Bindings** — `cqlite-py` API reference *(arriving in W5)*
-
-<!-- TODO(W8): link Node.js Bindings when merged (W5 issue) -->
-**Node.js Bindings** — `@cqlite/node` API reference *(arriving in W5)*
+- [CLI Reference](/cqlite/user-docs/cli-reference/) — all flags, subcommands, and one-shot / REPL / TUI modes
+- [Output Formats](/cqlite/user-docs/output-formats/) — JSON, CSV, Parquet
+- [Python Bindings](/cqlite/user-docs/python/) — `cqlite-py` API reference
+- [Node.js Bindings](/cqlite/user-docs/nodejs/) — `@cqlite/node` API reference
 
 ### Topics
 
 - [Write Support](/cqlite/user-docs/write-support/) — offline SSTable writing, flush, compaction (M5)
 - [Limitations](/cqlite/user-docs/limitations/) — what CQLite can and cannot read (format matrix, known gaps)
 - [Troubleshooting](/cqlite/user-docs/troubleshooting/) — common problems and fixes
-
-<!-- TODO(W8): link Use Cases when merged (W9 issue) -->
-**Use Cases** — Cassandra sidecar, data science, services, operational scenarios *(arriving in W9)*
+- [Use Cases](/cqlite/user-docs/use-cases/) — Cassandra sidecar, data science, services, operational scenarios
 
 ## Quick links
 

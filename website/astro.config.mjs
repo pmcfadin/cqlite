@@ -2,6 +2,7 @@
 import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightLinksValidator from 'starlight-links-validator';
+import starlightLlmsTxt from 'starlight-llms-txt';
 
 // https://astro.build/config
 export default defineConfig({
@@ -30,6 +31,14 @@ export default defineConfig({
           // api-docs.yml to a separate subtree of gh-pages and are not part of
           // the Starlight site build.
           exclude: ['/cqlite/api/**'],
+        }),
+        starlightLlmsTxt({
+          // Generate llms.txt (section map + one-line descriptions) and
+          // llms-full.txt (full content of every page) at the site root.
+          // Plugin version: 0.6.1 (pinned in package.json).
+          // URLs in the generated files use the site + base from astro.config.mjs,
+          // so absolute URLs are: https://pmcfadin.github.io/cqlite/<page-slug>/
+          description: 'Local Apache Cassandra SSTable access without cluster dependencies. Reads Cassandra 5.0 SSTables directly from disk — no cluster, no JVM required.',
         }),
       ],
       sidebar: [
