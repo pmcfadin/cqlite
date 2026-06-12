@@ -65,6 +65,7 @@ fn create_result_with_column_order(
             nullable: true,
             position: pos,
             table_name: None,
+            cql_type: None,
         })
         .collect();
 

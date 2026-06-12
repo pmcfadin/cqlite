@@ -3,7 +3,7 @@
 //! This module provides result types and utilities for query execution results.
 //! It includes result set management, row iteration, and result metadata.
 
-use crate::{RowKey, Value};
+use crate::{schema::CqlType, RowKey, Value};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -65,7 +65,7 @@ pub struct QueryMetadata {
 pub struct ColumnInfo {
     /// Column name
     pub name: String,
-    /// Column data type
+    /// Column data type (flat, kept for backward compatibility)
     pub data_type: crate::types::DataType,
     /// Whether column can be null
     pub nullable: bool,
@@ -73,6 +73,16 @@ pub struct ColumnInfo {
     pub position: usize,
     /// Original table name (for joined queries)
     pub table_name: Option<String>,
+    /// Full schema-sourced CQL type (populated when a schema is available).
+    ///
+    /// This field expresses element types for collections (`list<int>`,
+    /// `map<text, bigint>`), and carries variants absent from the flat
+    /// `DataType` enum (`date`, `time`, `decimal`, `varint`, `counter`,
+    /// `duration`, `inet`). Downstream writers MUST use this over
+    /// `data_type` when it is `Some` — the no-heuristics mandate (Issue #28)
+    /// requires authoritative-schema metadata rather than runtime inference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cql_type: Option<CqlType>,
 }
 
 /// Row metadata
@@ -575,6 +585,7 @@ impl ColumnInfo {
             nullable,
             position,
             table_name: None,
+            cql_type: None,
         }
     }
 
@@ -584,7 +595,22 @@ impl ColumnInfo {
         self
     }
 
+    /// Attach a schema-sourced [`CqlType`] to this column.
+    ///
+    /// The `data_type` field is left unchanged so existing consumers remain
+    /// unaffected; downstream writers that need full type fidelity (e.g. the
+    /// Parquet/Arrow writer) should prefer `cql_type` when it is `Some`.
+    pub fn with_cql_type(mut self, cql_type: CqlType) -> Self {
+        self.cql_type = Some(cql_type);
+        self
+    }
+
     /// Convert to JSON representation
+    ///
+    /// The `data_type` and all pre-existing keys are preserved unchanged for
+    /// backward compatibility. The new `cql_type` key is only emitted when
+    /// the field is `Some` (it is marked `skip_serializing_if` in the struct
+    /// derive, but we also reflect it here for the hand-rolled JSON path).
     pub fn to_json(&self) -> serde_json::Value {
         let mut map = serde_json::Map::new();
         map.insert("name".to_string(), json!(self.name));
@@ -597,7 +623,80 @@ impl ColumnInfo {
         if let Some(table_name) = &self.table_name {
             map.insert("table_name".to_string(), json!(table_name));
         }
+        // New additive key: only present when schema CqlType is known.
+        if let Some(cql_type) = &self.cql_type {
+            map.insert("cql_type".to_string(), json!(format_cql_type(cql_type)));
+        }
         serde_json::Value::Object(map)
+    }
+}
+
+/// Map a schema-level [`CqlType`] to the flat [`crate::types::DataType`] enum.
+///
+/// This is used in the `SELECT *` path and explicit projection paths to derive
+/// a backward-compatible `data_type` from authoritative schema metadata rather
+/// than hard-coding `DataType::Text` (Issue #674 / no-heuristics mandate #28).
+pub fn cql_type_to_data_type(cql_type: &CqlType) -> crate::types::DataType {
+    use crate::types::DataType;
+    match cql_type {
+        CqlType::Boolean => DataType::Boolean,
+        CqlType::TinyInt => DataType::TinyInt,
+        CqlType::SmallInt => DataType::SmallInt,
+        CqlType::Int => DataType::Integer,
+        CqlType::BigInt | CqlType::Varint | CqlType::Counter => DataType::BigInt,
+        CqlType::Float => DataType::Float32,
+        CqlType::Double | CqlType::Decimal => DataType::Float,
+        CqlType::Text | CqlType::Varchar | CqlType::Ascii => DataType::Text,
+        CqlType::Blob => DataType::Blob,
+        CqlType::Timestamp => DataType::Timestamp,
+        CqlType::Date | CqlType::Time | CqlType::Duration | CqlType::Inet => DataType::BigInt,
+        CqlType::Uuid | CqlType::TimeUuid => DataType::Uuid,
+        CqlType::List(_) => DataType::List,
+        CqlType::Set(_) => DataType::Set,
+        CqlType::Map(_, _) => DataType::Map,
+        CqlType::Tuple(_) => DataType::Tuple,
+        CqlType::Udt(_, _) => DataType::Udt,
+        CqlType::Frozen(inner) => cql_type_to_data_type(inner),
+        CqlType::Custom(_) => DataType::Blob,
+    }
+}
+
+/// Format a [`CqlType`] as a human-readable CQL type string.
+///
+/// Used for the `cql_type` field in `ColumnInfo::to_json`.
+fn format_cql_type(cql_type: &CqlType) -> String {
+    match cql_type {
+        CqlType::Boolean => "boolean".to_string(),
+        CqlType::TinyInt => "tinyint".to_string(),
+        CqlType::SmallInt => "smallint".to_string(),
+        CqlType::Int => "int".to_string(),
+        CqlType::BigInt => "bigint".to_string(),
+        CqlType::Counter => "counter".to_string(),
+        CqlType::Float => "float".to_string(),
+        CqlType::Double => "double".to_string(),
+        CqlType::Decimal => "decimal".to_string(),
+        CqlType::Text => "text".to_string(),
+        CqlType::Varchar => "varchar".to_string(),
+        CqlType::Ascii => "ascii".to_string(),
+        CqlType::Blob => "blob".to_string(),
+        CqlType::Timestamp => "timestamp".to_string(),
+        CqlType::Date => "date".to_string(),
+        CqlType::Time => "time".to_string(),
+        CqlType::Uuid => "uuid".to_string(),
+        CqlType::TimeUuid => "timeuuid".to_string(),
+        CqlType::Inet => "inet".to_string(),
+        CqlType::Duration => "duration".to_string(),
+        CqlType::Varint => "varint".to_string(),
+        CqlType::List(inner) => format!("list<{}>", format_cql_type(inner)),
+        CqlType::Set(inner) => format!("set<{}>", format_cql_type(inner)),
+        CqlType::Map(k, v) => format!("map<{}, {}>", format_cql_type(k), format_cql_type(v)),
+        CqlType::Tuple(types) => {
+            let inner: Vec<_> = types.iter().map(format_cql_type).collect();
+            format!("tuple<{}>", inner.join(", "))
+        }
+        CqlType::Udt(name, _) => name.clone(),
+        CqlType::Frozen(inner) => format!("frozen<{}>", format_cql_type(inner)),
+        CqlType::Custom(name) => name.clone(),
     }
 }
 
@@ -948,6 +1047,136 @@ mod tests {
         assert!(!column.nullable);
         assert_eq!(column.position, 0);
         assert_eq!(column.table_name, Some("users".to_string()));
+        assert!(column.cql_type.is_none());
+    }
+
+    #[test]
+    fn test_column_info_with_cql_type_scalar() {
+        use crate::schema::CqlType;
+        let column = ColumnInfo::new("ts".to_string(), crate::types::DataType::Timestamp, true, 1)
+            .with_cql_type(CqlType::Timestamp);
+
+        assert_eq!(column.name, "ts");
+        assert_eq!(column.cql_type, Some(CqlType::Timestamp));
+        // data_type is unaffected
+        assert_eq!(column.data_type, crate::types::DataType::Timestamp);
+    }
+
+    #[test]
+    fn test_column_info_with_cql_type_list() {
+        use crate::schema::CqlType;
+        let list_type = CqlType::List(Box::new(CqlType::Int));
+        let column = ColumnInfo::new("items".to_string(), crate::types::DataType::List, true, 2)
+            .with_cql_type(list_type.clone());
+
+        assert_eq!(column.cql_type, Some(list_type));
+    }
+
+    #[test]
+    fn test_column_info_with_cql_type_map() {
+        use crate::schema::CqlType;
+        let map_type = CqlType::Map(Box::new(CqlType::Text), Box::new(CqlType::BigInt));
+        let column = ColumnInfo::new("props".to_string(), crate::types::DataType::Map, true, 3)
+            .with_cql_type(map_type.clone());
+
+        assert_eq!(column.cql_type, Some(map_type));
+    }
+
+    #[test]
+    fn test_column_info_with_cql_type_udt() {
+        use crate::schema::CqlType;
+        let udt_type = CqlType::Udt("address".to_string(), vec![]);
+        let column = ColumnInfo::new("addr".to_string(), crate::types::DataType::Udt, true, 4)
+            .with_cql_type(udt_type.clone());
+
+        assert_eq!(column.cql_type, Some(udt_type));
+    }
+
+    #[test]
+    fn test_cql_type_to_data_type_scalars() {
+        use super::cql_type_to_data_type;
+        use crate::schema::CqlType;
+        use crate::types::DataType;
+
+        assert_eq!(cql_type_to_data_type(&CqlType::Boolean), DataType::Boolean);
+        assert_eq!(cql_type_to_data_type(&CqlType::Int), DataType::Integer);
+        assert_eq!(cql_type_to_data_type(&CqlType::BigInt), DataType::BigInt);
+        assert_eq!(cql_type_to_data_type(&CqlType::Text), DataType::Text);
+        assert_eq!(cql_type_to_data_type(&CqlType::Blob), DataType::Blob);
+        assert_eq!(cql_type_to_data_type(&CqlType::Uuid), DataType::Uuid);
+        assert_eq!(
+            cql_type_to_data_type(&CqlType::Timestamp),
+            DataType::Timestamp
+        );
+    }
+
+    #[test]
+    fn test_cql_type_to_data_type_collections() {
+        use super::cql_type_to_data_type;
+        use crate::schema::CqlType;
+        use crate::types::DataType;
+
+        assert_eq!(
+            cql_type_to_data_type(&CqlType::List(Box::new(CqlType::Int))),
+            DataType::List
+        );
+        assert_eq!(
+            cql_type_to_data_type(&CqlType::Set(Box::new(CqlType::Text))),
+            DataType::Set
+        );
+        assert_eq!(
+            cql_type_to_data_type(&CqlType::Map(
+                Box::new(CqlType::Text),
+                Box::new(CqlType::BigInt)
+            )),
+            DataType::Map
+        );
+    }
+
+    #[test]
+    fn test_cql_type_to_data_type_frozen() {
+        use super::cql_type_to_data_type;
+        use crate::schema::CqlType;
+        use crate::types::DataType;
+
+        // frozen<list<int>> should unwrap to DataType::List
+        assert_eq!(
+            cql_type_to_data_type(&CqlType::Frozen(Box::new(CqlType::List(Box::new(
+                CqlType::Int
+            ))))),
+            DataType::List
+        );
+    }
+
+    #[test]
+    fn test_column_info_to_json_includes_cql_type() {
+        use crate::schema::CqlType;
+        let column = ColumnInfo::new("items".to_string(), crate::types::DataType::List, true, 0)
+            .with_cql_type(CqlType::List(Box::new(CqlType::Int)));
+
+        let json = column.to_json();
+        let obj = json.as_object().unwrap();
+
+        // Existing keys unchanged
+        assert_eq!(obj["name"], "items");
+        assert!(obj.contains_key("data_type"));
+        assert!(obj.contains_key("nullable"));
+        assert!(obj.contains_key("position"));
+
+        // New key present
+        assert!(obj.contains_key("cql_type"));
+        assert_eq!(obj["cql_type"], "list<int>");
+    }
+
+    #[test]
+    fn test_column_info_to_json_no_cql_type() {
+        // Without cql_type, the JSON must not include the key
+        let column = ColumnInfo::new("id".to_string(), crate::types::DataType::Integer, false, 0);
+
+        let json = column.to_json();
+        let obj = json.as_object().unwrap();
+
+        assert!(!obj.contains_key("cql_type"));
     }
 
     #[test]

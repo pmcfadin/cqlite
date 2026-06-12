@@ -239,6 +239,7 @@ mod tests {
                 nullable: true,
                 position: pos,
                 table_name: None,
+                cql_type: None,
             })
             .collect();
 

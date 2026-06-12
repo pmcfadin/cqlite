@@ -50,8 +50,8 @@ pub use prepared::{
     ExecutionHints, ParameterMetadata, PreparedQuery, PreparedQueryBuilder, PreparedQueryStats,
 };
 pub use result::{
-    ColumnInfo, PerformanceMetrics, QueryMetadata, QueryResult, QueryResultIterator, QueryRow,
-    RowMetadata, StreamingConfig,
+    cql_type_to_data_type, ColumnInfo, PerformanceMetrics, QueryMetadata, QueryResult,
+    QueryResultIterator, QueryRow, RowMetadata, StreamingConfig,
 };
 
 // Re-export advanced SELECT components.

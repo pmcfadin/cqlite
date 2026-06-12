@@ -40,6 +40,7 @@ fn create_single_value_result(col_name: &str, value: Value, data_type: DataType)
         nullable: true,
         position: 0,
         table_name: None,
+        cql_type: None,
     }];
 
     let metadata = QueryMetadata {
@@ -77,6 +78,7 @@ fn create_result_with_columns(
             nullable: true,
             position: pos,
             table_name: None,
+            cql_type: None,
         })
         .collect();
 
@@ -548,6 +550,7 @@ fn test_missing_column_treated_as_null() {
         nullable: true,
         position: 0,
         table_name: None,
+        cql_type: None,
     }];
 
     let metadata = QueryMetadata {

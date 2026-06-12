@@ -2107,6 +2107,7 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
+            cql_type: None,
         });
         position += 1;
     }
@@ -2120,6 +2121,7 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
+            cql_type: None,
         });
         position += 1;
     }
@@ -2132,6 +2134,7 @@ fn build_query_metadata_from_schema(schema: &TableSchema) -> cqlite_core::query:
             nullable: true,
             position,
             table_name: Some(format!("{}.{}", schema.keyspace, schema.table)),
+            cql_type: None,
         });
         position += 1;
     }

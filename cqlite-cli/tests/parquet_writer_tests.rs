@@ -57,6 +57,7 @@ fn create_query_result(
             nullable: true,
             position: pos,
             table_name: None,
+            cql_type: None,
         })
         .collect();
 
@@ -919,6 +920,7 @@ fn test_parquet_wide_table() {
             nullable: true,
             position: pos,
             table_name: None,
+            cql_type: None,
         })
         .collect();
 
