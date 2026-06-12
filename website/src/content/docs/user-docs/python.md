@@ -286,4 +286,4 @@ Full type stubs are in
 - [GitHub Repository](https://github.com/pmcfadin/cqlite)
 - [PyPI Package](https://pypi.org/project/cqlite-py/)
 - [Type Stubs](https://github.com/pmcfadin/cqlite/blob/main/bindings/python/python/cqlite/__init__.pyi)
-<!-- TODO(W8): link when merged -->
+- [Query from Python recipe](/cqlite/agents-using/query-python/) — copy-pasteable agent recipe with expected output shapes

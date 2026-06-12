@@ -12,9 +12,7 @@ CQLite is production-ready for the common case: reading Cassandra 5.0 BIG-format
 SSTables with standard data types. This page is honest about what it cannot do yet,
 so you know before you depend on it.
 
-For the exhaustive engineering detail, see the source document in the repository:
-`docs/sstables-definitive-guide/chapters/appendix-f-known-limitations.md`
-<!-- TODO(W8): replace with site link when the SSTable Format Guide section is merged -->
+For the exhaustive engineering detail, see [Appendix F: Known Limitations](/cqlite/sstable-format/appendix-f/) in the SSTable Format Guide.
 
 ## Format support
 

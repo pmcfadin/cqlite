@@ -597,6 +597,4 @@ cqlite --quiet \
   --out json
 ```
 
-<!-- TODO(W8): link output-formats page when merged -->
-
 **See also**: [Output Formats](/cqlite/user-docs/output-formats/) for JSON, CSV, and Parquet format details.

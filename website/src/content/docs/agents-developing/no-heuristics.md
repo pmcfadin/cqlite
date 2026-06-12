@@ -91,5 +91,4 @@ the library must not invent values.
 | `experimental` | Yes — explicitly opt-in |
 
 See [Key source paths](/cqlite/agents-developing/source-map/) for where type decoding lives in the codebase.
-The full feature-flags table is in `CLAUDE.md` (repo root).
-<!-- TODO(W8): add site link to feature-flags page once it exists -->
+The full feature-flags table and feature-gated test notes are in [Gate Contract](/cqlite/agents-developing/gate-contract/).
