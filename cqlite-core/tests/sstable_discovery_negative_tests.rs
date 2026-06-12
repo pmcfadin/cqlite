@@ -152,6 +152,12 @@ async fn test_permission_denied_handling() {
     perms.set_mode(0o000); // No permissions
     fs::set_permissions(&file_path, perms).await.unwrap();
 
+    // Privileged users (e.g. uid 0 in containerized CI) bypass file
+    // permissions, so the permission-denied precondition cannot be created.
+    if std::fs::File::open(&file_path).is_ok() {
+        return;
+    }
+
     let config = Config::default();
     let platform = Arc::new(Platform::new(&config).await.unwrap());
 
