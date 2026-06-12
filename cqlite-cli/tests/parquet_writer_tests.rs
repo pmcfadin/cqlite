@@ -21,8 +21,9 @@
 #![cfg(feature = "state_machine")]
 
 use arrow::array::{
-    Array, BinaryArray, BooleanArray, FixedSizeBinaryArray, Float32Array, Float64Array, Int16Array,
-    Int32Array, Int64Array, Int8Array, ListArray, MapArray, StringArray, TimestampMillisecondArray,
+    Array, BinaryArray, BooleanArray, Date32Array, FixedSizeBinaryArray, Float32Array,
+    Float64Array, Int16Array, Int32Array, Int64Array, Int8Array, ListArray, MapArray, StringArray,
+    TimestampMillisecondArray,
 };
 use arrow::record_batch::RecordBatch;
 use bytes::Bytes;
@@ -1758,4 +1759,819 @@ fn test_no_cql_type_fallback_unchanged() {
         .downcast_ref::<Int64Array>()
         .unwrap();
     assert_eq!(arr.value(0), 1234567890);
+}
+
+// ============================================================================
+// Issue #676: Typed List/Set arrays via recursive element builder
+//
+// list<X> and set<X> must export with typed (non-stringified) Arrow element
+// arrays.  CqlType::Frozen(inner) is transparent in both schema and value
+// recursion.  Null elements and null/empty collections must be preserved.
+// ============================================================================
+
+/// Build a ColumnInfo with `cql_type = Some(List(inner))` or `Some(Set(inner))`.
+fn list_col_with_cql_type(name: &str, cql_type: cqlite_core::schema::CqlType) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        data_type: cqlite_core::types::DataType::List,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cql_type),
+    }
+}
+
+fn set_col_with_cql_type(name: &str, cql_type: cqlite_core::schema::CqlType) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        data_type: cqlite_core::types::DataType::Set,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cql_type),
+    }
+}
+
+fn single_col_multi_row_result(col: ColumnInfo, values: Vec<Value>) -> QueryResult {
+    let rows: Vec<QueryRow> = values
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| {
+            let mut map = HashMap::new();
+            map.insert(col.name.clone(), v);
+            QueryRow {
+                values: map,
+                key: RowKey::new(vec![i as u8]),
+                metadata: Default::default(),
+            }
+        })
+        .collect();
+    QueryResult {
+        rows,
+        rows_affected: 0,
+        execution_time_ms: 0,
+        metadata: cqlite_core::query::QueryMetadata {
+            columns: vec![col],
+            ..Default::default()
+        },
+    }
+}
+
+// ----------------------------------------
+// list<int> → List<Int32>
+// ----------------------------------------
+
+#[test]
+fn test_list_int_schema_is_list_int32() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = list_col_with_cql_type(
+        "nums",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int)),
+    );
+    let result =
+        single_cql_typed_result(col, Value::List(vec![Value::Integer(1), Value::Integer(2)]));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+    assert_eq!(
+        field.data_type(),
+        &ArrowDataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
+            "item",
+            ArrowDataType::Int32,
+            true
+        )))
+    );
+}
+
+#[test]
+fn test_list_int_roundtrip() {
+    let col = list_col_with_cql_type(
+        "nums",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int)),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![
+            Value::Integer(10),
+            Value::Integer(20),
+            Value::Integer(30),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(!list_col.is_null(0));
+    let elements = list_col.value(0);
+    let int_arr = elements.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(int_arr.len(), 3);
+    assert_eq!(int_arr.value(0), 10);
+    assert_eq!(int_arr.value(1), 20);
+    assert_eq!(int_arr.value(2), 30);
+}
+
+// ----------------------------------------
+// list<text> → List<Utf8>
+// ----------------------------------------
+
+#[test]
+fn test_list_text_roundtrip() {
+    let col = list_col_with_cql_type(
+        "words",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Text)),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![
+            Value::Text("hello".to_string()),
+            Value::Text("world".to_string()),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(!list_col.is_null(0));
+    let elements = list_col.value(0);
+    let str_arr = elements.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(str_arr.len(), 2);
+    assert_eq!(str_arr.value(0), "hello");
+    assert_eq!(str_arr.value(1), "world");
+}
+
+#[test]
+fn test_list_text_element_is_utf8_not_stringified() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    // Verify the element type is Utf8, not some other representation.
+    let col = list_col_with_cql_type(
+        "words",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Text)),
+    );
+    let result = single_cql_typed_result(col, Value::List(vec![Value::Text("abc".to_string())]));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    match schema.field(0).data_type() {
+        ArrowDataType::List(item_field) => {
+            assert_eq!(item_field.data_type(), &ArrowDataType::Utf8);
+        }
+        other => panic!("Expected List, got {other:?}"),
+    }
+}
+
+// ----------------------------------------
+// list<timestamp> → List<Timestamp(ms, UTC)>
+// ----------------------------------------
+
+#[test]
+fn test_list_timestamp_roundtrip() {
+    use arrow::array::TimestampMillisecondArray;
+    use arrow::datatypes::{DataType as ArrowDataType, TimeUnit};
+
+    let col = list_col_with_cql_type(
+        "ts_list",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Timestamp)),
+    );
+    let ts1: i64 = 1_673_778_645_000;
+    let ts2: i64 = 1_673_778_700_000;
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![Value::Timestamp(ts1), Value::Timestamp(ts2)]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Verify schema: List<Timestamp(ms, UTC)>
+    let schema = batch.schema();
+    match schema.field(0).data_type() {
+        ArrowDataType::List(item_field) => {
+            assert_eq!(
+                item_field.data_type(),
+                &ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
+            );
+        }
+        other => panic!("Expected List, got {other:?}"),
+    }
+
+    // Verify values
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let elements = list_col.value(0);
+    let ts_arr = elements
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    assert_eq!(ts_arr.value(0), ts1);
+    assert_eq!(ts_arr.value(1), ts2);
+}
+
+// ----------------------------------------
+// set<int> → List<Int32>  (Arrow has no Set type)
+// ----------------------------------------
+
+#[test]
+fn test_set_int_schema_is_list_int32() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = set_col_with_cql_type(
+        "ids",
+        cqlite_core::schema::CqlType::Set(Box::new(cqlite_core::schema::CqlType::Int)),
+    );
+    let result =
+        single_cql_typed_result(col, Value::Set(vec![Value::Integer(1), Value::Integer(2)]));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+    assert_eq!(
+        field.data_type(),
+        &ArrowDataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
+            "item",
+            ArrowDataType::Int32,
+            true
+        )))
+    );
+}
+
+#[test]
+fn test_set_int_roundtrip() {
+    let col = set_col_with_cql_type(
+        "ids",
+        cqlite_core::schema::CqlType::Set(Box::new(cqlite_core::schema::CqlType::Int)),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Set(vec![Value::Integer(100), Value::Integer(200)]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(!list_col.is_null(0));
+    let elements = list_col.value(0);
+    let int_arr = elements.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(int_arr.len(), 2);
+    assert_eq!(int_arr.value(0), 100);
+    assert_eq!(int_arr.value(1), 200);
+}
+
+// ----------------------------------------
+// set<uuid> → List<FixedSizeBinary(16)>
+// ----------------------------------------
+
+#[test]
+fn test_set_uuid_schema_is_list_fixedsizebinary16() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = set_col_with_cql_type(
+        "uuids",
+        cqlite_core::schema::CqlType::Set(Box::new(cqlite_core::schema::CqlType::Uuid)),
+    );
+    let uuid1 = [0x01u8; 16];
+    let result = single_cql_typed_result(col, Value::Set(vec![Value::Uuid(uuid1)]));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+    assert_eq!(
+        field.data_type(),
+        &ArrowDataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
+            "item",
+            ArrowDataType::FixedSizeBinary(16),
+            true
+        )))
+    );
+}
+
+#[test]
+fn test_set_uuid_roundtrip() {
+    let col = set_col_with_cql_type(
+        "uuids",
+        cqlite_core::schema::CqlType::Set(Box::new(cqlite_core::schema::CqlType::Uuid)),
+    );
+    let uuid1 = [0xAAu8; 16];
+    let uuid2 = [0xBBu8; 16];
+    let result = single_cql_typed_result(
+        col,
+        Value::Set(vec![Value::Uuid(uuid1), Value::Uuid(uuid2)]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(!list_col.is_null(0));
+    let elements = list_col.value(0);
+    let fsb_arr = elements
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(fsb_arr.len(), 2);
+    assert_eq!(fsb_arr.value(0), &uuid1);
+    assert_eq!(fsb_arr.value(1), &uuid2);
+}
+
+// ----------------------------------------
+// Null list, empty list, and null elements
+// ----------------------------------------
+
+#[test]
+fn test_list_int_null_list_roundtrip() {
+    // A null list (Value::Null) is distinct from an empty list (Value::List(vec![])).
+    let col = list_col_with_cql_type(
+        "nums",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int)),
+    );
+    let result = single_col_multi_row_result(
+        col,
+        vec![
+            Value::List(vec![Value::Integer(1)]), // row 0: non-null list
+            Value::Null,                          // row 1: null list
+            Value::List(vec![]),                  // row 2: empty (non-null) list
+        ],
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert_eq!(list_col.len(), 3);
+
+    // Row 0: non-null, has one element.
+    assert!(!list_col.is_null(0));
+    let row0 = list_col.value(0);
+    let row0_arr = row0.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(row0_arr.len(), 1);
+    assert_eq!(row0_arr.value(0), 1);
+
+    // Row 1: null list.
+    assert!(list_col.is_null(1));
+
+    // Row 2: non-null empty list.
+    assert!(!list_col.is_null(2));
+    let row2 = list_col.value(2);
+    let row2_arr = row2.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(row2_arr.len(), 0);
+}
+
+// ----------------------------------------
+// Nested: list<frozen<list<int>>> → List<List<Int32>>
+// ----------------------------------------
+
+#[test]
+fn test_list_frozen_list_int_schema() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    // list<frozen<list<int>>>
+    let inner_list_type =
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int));
+    let frozen_inner = cqlite_core::schema::CqlType::Frozen(Box::new(inner_list_type));
+    let outer_type = cqlite_core::schema::CqlType::List(Box::new(frozen_inner));
+
+    let col = list_col_with_cql_type("nested", outer_type);
+
+    // Value: [[1, 2], [3]]
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![
+            Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+            Value::List(vec![Value::Integer(3)]),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema should be List<List<Int32>>
+    let schema = batch.schema();
+    let field = schema.field(0);
+    match field.data_type() {
+        ArrowDataType::List(outer_item) => match outer_item.data_type() {
+            ArrowDataType::List(inner_item) => {
+                assert_eq!(inner_item.data_type(), &ArrowDataType::Int32);
+            }
+            other => panic!("Expected inner List, got {other:?}"),
+        },
+        other => panic!("Expected outer List, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_list_frozen_list_int_roundtrip() {
+    // list<frozen<list<int>>>: values [[10, 20], [30]] — full roundtrip.
+    let inner_list_type =
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int));
+    let frozen_inner = cqlite_core::schema::CqlType::Frozen(Box::new(inner_list_type));
+    let outer_type = cqlite_core::schema::CqlType::List(Box::new(frozen_inner));
+
+    let col = list_col_with_cql_type("nested", outer_type);
+
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![
+            Value::List(vec![Value::Integer(10), Value::Integer(20)]),
+            Value::List(vec![Value::Integer(30)]),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Outer list for row 0
+    let outer = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(!outer.is_null(0));
+    let outer_row = outer.value(0); // the two inner lists
+
+    let inner_lists = outer_row.as_any().downcast_ref::<ListArray>().unwrap();
+    assert_eq!(inner_lists.len(), 2);
+
+    // First inner list: [10, 20]
+    let first_inner = inner_lists.value(0);
+    let first_arr = first_inner.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(first_arr.len(), 2);
+    assert_eq!(first_arr.value(0), 10);
+    assert_eq!(first_arr.value(1), 20);
+
+    // Second inner list: [30]
+    let second_inner = inner_lists.value(1);
+    let second_arr = second_inner.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(second_arr.len(), 1);
+    assert_eq!(second_arr.value(0), 30);
+}
+
+#[test]
+fn test_list_frozen_list_int_with_frozen_value() {
+    // Runtime Value::Frozen must be unwrapped transparently.
+    // list<frozen<list<int>>>: values [[1], frozen([2, 3])]
+    let inner_list_type =
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int));
+    let frozen_inner = cqlite_core::schema::CqlType::Frozen(Box::new(inner_list_type));
+    let outer_type = cqlite_core::schema::CqlType::List(Box::new(frozen_inner));
+
+    let col = list_col_with_cql_type("nested", outer_type);
+
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![
+            Value::List(vec![Value::Integer(1)]),
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Integer(2),
+                Value::Integer(3),
+            ]))),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let outer = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let outer_row = outer.value(0);
+    let inner_lists = outer_row.as_any().downcast_ref::<ListArray>().unwrap();
+    assert_eq!(inner_lists.len(), 2);
+
+    // First inner list: [1]
+    let first = inner_lists.value(0);
+    let first_arr = first.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(first_arr.value(0), 1);
+
+    // Second inner list (was Frozen-wrapped): [2, 3]
+    let second = inner_lists.value(1);
+    let second_arr = second.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(second_arr.len(), 2);
+    assert_eq!(second_arr.value(0), 2);
+    assert_eq!(second_arr.value(1), 3);
+}
+
+// ----------------------------------------
+// list<date> → List<Date32>  (high-fidelity scalar)
+// ----------------------------------------
+
+#[test]
+fn test_list_date_roundtrip() {
+    let col = list_col_with_cql_type(
+        "dates",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Date)),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![Value::Date(19000), Value::Date(19001)]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let elements = list_col.value(0);
+    let date_arr = elements.as_any().downcast_ref::<Date32Array>().unwrap();
+    assert_eq!(date_arr.len(), 2);
+    assert_eq!(date_arr.value(0), 19000);
+    assert_eq!(date_arr.value(1), 19001);
+}
+
+// ----------------------------------------
+// set<text> → List<Utf8>  (set uses Value::Set)
+// ----------------------------------------
+
+#[test]
+fn test_set_text_roundtrip() {
+    let col = set_col_with_cql_type(
+        "tags",
+        cqlite_core::schema::CqlType::Set(Box::new(cqlite_core::schema::CqlType::Text)),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Set(vec![
+            Value::Text("alpha".to_string()),
+            Value::Text("beta".to_string()),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(!list_col.is_null(0));
+    let elements = list_col.value(0);
+    let str_arr = elements.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(str_arr.len(), 2);
+    assert_eq!(str_arr.value(0), "alpha");
+    assert_eq!(str_arr.value(1), "beta");
+}
+
+// ----------------------------------------
+// Multiple rows with mixed null/empty lists
+// ----------------------------------------
+
+#[test]
+fn test_list_int_multi_row_null_and_values() {
+    let col = list_col_with_cql_type(
+        "nums",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int)),
+    );
+    let result = single_col_multi_row_result(
+        col,
+        vec![
+            Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+            Value::Null,
+            Value::List(vec![Value::Integer(99)]),
+        ],
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert_eq!(list_col.len(), 3);
+
+    // Row 0: [1, 2]
+    assert!(!list_col.is_null(0));
+    let r0 = list_col.value(0);
+    let r0_arr = r0.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(r0_arr.len(), 2);
+    assert_eq!(r0_arr.value(0), 1);
+    assert_eq!(r0_arr.value(1), 2);
+
+    // Row 1: null
+    assert!(list_col.is_null(1));
+
+    // Row 2: [99]
+    assert!(!list_col.is_null(2));
+    let r2 = list_col.value(2);
+    let r2_arr = r2.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(r2_arr.len(), 1);
+    assert_eq!(r2_arr.value(0), 99);
+}
+
+// ----------------------------------------
+// Frozen top-level column (Frozen<list<int>>)
+// ----------------------------------------
+
+#[test]
+fn test_frozen_list_int_schema_and_roundtrip() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    // Column type is Frozen<list<int>> — should be transparent, same as list<int>
+    let col = ColumnInfo {
+        name: "frozen_nums".to_string(),
+        data_type: cqlite_core::types::DataType::Frozen,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cqlite_core::schema::CqlType::Frozen(Box::new(
+            cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int)),
+        ))),
+    };
+
+    // Value can be either List or Frozen(List) at runtime.
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![
+            Value::Integer(7),
+            Value::Integer(8),
+            Value::Integer(9),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema should be List<Int32> (Frozen is transparent)
+    let schema = batch.schema();
+    let field = schema.field(0);
+    assert_eq!(
+        field.data_type(),
+        &ArrowDataType::List(std::sync::Arc::new(arrow::datatypes::Field::new(
+            "item",
+            ArrowDataType::Int32,
+            true
+        )))
+    );
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let elements = list_col.value(0);
+    let int_arr = elements.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(int_arr.len(), 3);
+    assert_eq!(int_arr.value(0), 7);
+    assert_eq!(int_arr.value(1), 8);
+    assert_eq!(int_arr.value(2), 9);
+}
+
+// ----------------------------------------
+// list<bigint> — verify BigInt elements are correctly typed
+// ----------------------------------------
+
+#[test]
+fn test_list_bigint_roundtrip() {
+    let col = list_col_with_cql_type(
+        "big_nums",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::BigInt)),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![
+            Value::BigInt(i64::MAX),
+            Value::BigInt(i64::MIN),
+            Value::BigInt(0),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let elements = list_col.value(0);
+    let int64_arr = elements.as_any().downcast_ref::<Int64Array>().unwrap();
+    assert_eq!(int64_arr.len(), 3);
+    assert_eq!(int64_arr.value(0), i64::MAX);
+    assert_eq!(int64_arr.value(1), i64::MIN);
+    assert_eq!(int64_arr.value(2), 0);
+}
+
+// ----------------------------------------
+// list<set<frozen<set<text>>>> — verify set<frozen<set<text>>> works
+// ----------------------------------------
+
+#[test]
+fn test_set_frozen_set_text_roundtrip() {
+    // set<frozen<set<text>>>: value = {{"a", "b"}, {"c"}}
+    let inner_set = cqlite_core::schema::CqlType::Set(Box::new(cqlite_core::schema::CqlType::Text));
+    let frozen_inner = cqlite_core::schema::CqlType::Frozen(Box::new(inner_set));
+    let outer_type = cqlite_core::schema::CqlType::Set(Box::new(frozen_inner));
+
+    let col = set_col_with_cql_type("nested_sets", outer_type);
+
+    let result = single_cql_typed_result(
+        col,
+        Value::Set(vec![
+            Value::Set(vec![
+                Value::Text("a".to_string()),
+                Value::Text("b".to_string()),
+            ]),
+            Value::Set(vec![Value::Text("c".to_string())]),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let outer = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    let outer_row = outer.value(0);
+    let inner_lists = outer_row.as_any().downcast_ref::<ListArray>().unwrap();
+    assert_eq!(inner_lists.len(), 2);
+
+    let first_inner = inner_lists.value(0);
+    let first_arr = first_inner.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(first_arr.len(), 2);
+    assert_eq!(first_arr.value(0), "a");
+    assert_eq!(first_arr.value(1), "b");
+
+    let second_inner = inner_lists.value(1);
+    let second_arr = second_inner.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(second_arr.len(), 1);
+    assert_eq!(second_arr.value(0), "c");
+}
+
+// ----------------------------------------
+// Elements that are Value::Null within a non-null list
+// ----------------------------------------
+
+#[test]
+fn test_list_int_with_null_element() {
+    // list<int> = [1, NULL, 3] — null elements within the list
+    let col = list_col_with_cql_type(
+        "nums",
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int)),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::List(vec![Value::Integer(1), Value::Null, Value::Integer(3)]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let list_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(!list_col.is_null(0)); // The list itself is not null
+    let elements = list_col.value(0);
+    let int_arr = elements.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(int_arr.len(), 3);
+    assert!(int_arr.is_valid(0));
+    assert_eq!(int_arr.value(0), 1);
+    assert!(!int_arr.is_valid(1)); // null element
+    assert!(int_arr.is_valid(2));
+    assert_eq!(int_arr.value(2), 3);
 }

@@ -8,17 +8,41 @@
 //! When `ColumnInfo.cql_type` is `Some`, the following high-fidelity mappings are
 //! used instead of the flat `data_type` fallback:
 //!
-//! | CQL type      | Arrow type                          | Notes                             |
-//! |---------------|-------------------------------------|-----------------------------------|
-//! | date          | `Date32`                            | Signed days since 1970-01-01      |
-//! | time          | `Time64(Nanosecond)`                | Nanos since midnight               |
-//! | decimal       | `Decimal128(38, DECIMAL_FIXED_SCALE)` | Rescaled; see strategy below    |
-//! | varint        | `Decimal128(38, 0)` or `Utf8`       | `Utf8` fallback on overflow       |
-//! | duration      | `Utf8` (CQL text form)              | Parquet crate v53 NYI for MonthDayNano |
-//! | uuid/timeuuid | `FixedSizeBinary(16)` + UUID ext    | Arrow UUID extension metadata     |
-//! | inet          | `Utf8`                              | Canonical textual form (deliberate)|
-//! | counter       | `Int64`                             | Unchanged                         |
+//! | CQL type          | Arrow type                            | Notes                             |
+//! |-------------------|---------------------------------------|-----------------------------------|
+//! | date              | `Date32`                              | Signed days since 1970-01-01      |
+//! | time              | `Time64(Nanosecond)`                  | Nanos since midnight              |
+//! | decimal           | `Decimal128(38, DECIMAL_FIXED_SCALE)` | Rescaled; see strategy below      |
+//! | varint            | `Decimal128(38, 0)` or `Utf8`         | `Utf8` fallback on overflow       |
+//! | duration          | `Utf8` (CQL text form)                | Parquet crate v53 NYI MonthDayNano|
+//! | uuid/timeuuid     | `FixedSizeBinary(16)` + UUID ext      | Arrow UUID extension metadata     |
+//! | inet              | `Utf8`                                | Canonical textual form (deliberate)|
+//! | counter           | `Int64`                               | Unchanged                         |
+//! | list\<X\>         | `List<mapped(X)>`                     | Recursive element mapping         |
+//! | set\<X\>          | `List<mapped(X)>`                     | Arrow has no Set type; uses List  |
 //!
+//! # List and Set mapping
+//!
+//! CQL `list<X>` and `set<X>` both map to Arrow `List` (Arrow has no dedicated Set
+//! type).  Element types are mapped recursively through the same scalar mapping
+//! table above, so `list<uuid>` produces `List<FixedSizeBinary(16)>`,
+//! `list<timestamp>` produces `List<Timestamp(ms,UTC)>`, etc.
+//!
+//! `CqlType::Frozen(inner)` is transparent in the recursion: it unwraps and
+//! recurses into `inner`.  Runtime `Value::Frozen(inner)` values are also unwrapped
+//! before element dispatch.
+//!
+//! For nested collections (`list<frozen<list<int>>>`), the recursion produces
+//! `List<List<Int32>>` and handles element unwrapping at all levels.  Map, Tuple,
+//! and UDT element types currently fall back to a stringified `Utf8` representation
+//! (handled by issues #677 and #678 respectively).
+//!
+//! # Recursive builder design
+//!
+//! `build_typed_value_array(cql_type, values)` is the shared recursive entry point
+//! used by both top-level column dispatch and nested element building.  Adding
+//! support for Map/Tuple/UDT elements (#677/#678) requires only new match arms in
+//! `cql_type_to_arrow_data_type` and `build_typed_value_array`.
 //! # Decimal strategy
 //!
 //! CQL `decimal` stores a per-value scale alongside the unscaled big-endian integer.
@@ -202,6 +226,10 @@ impl ParquetWriter {
     /// UUID and TimeUUID columns receive the canonical Arrow UUID extension
     /// metadata (`ARROW:extension:name` = `arrow.uuid`) so that Parquet readers
     /// emit the Parquet UUID logical type.
+    ///
+    /// `CqlType::List` and `CqlType::Set` are now handled here via
+    /// `cql_type_to_arrow_data_type` which maps element types recursively.
+    /// `CqlType::Frozen(inner)` transparently unwraps to `inner`.
     fn cql_type_to_arrow_field(name: &str, cql_type: &CqlType, nullable: bool) -> Option<Field> {
         match cql_type {
             CqlType::Date => Some(Field::new(name, ArrowDataType::Date32, nullable)),
@@ -254,16 +282,515 @@ impl ParquetWriter {
             }
             CqlType::Inet => Some(Field::new(name, ArrowDataType::Utf8, nullable)),
             CqlType::Counter => Some(Field::new(name, ArrowDataType::Int64, nullable)),
-            // All collection and complex types: fall back to existing mapping.
-            CqlType::List(_)
-            | CqlType::Set(_)
-            | CqlType::Map(_, _)
-            | CqlType::Tuple(_)
-            | CqlType::Udt(_, _)
-            | CqlType::Frozen(_) => None,
+            // List and Set: map to Arrow List with recursively mapped element type.
+            // Arrow has no dedicated Set type; Set is represented as List.
+            CqlType::List(inner) | CqlType::Set(inner) => {
+                let item_type = Self::cql_type_to_arrow_data_type(inner);
+                let item_field = Arc::new(Field::new("item", item_type, true));
+                Some(Field::new(name, ArrowDataType::List(item_field), nullable))
+            }
+            // Frozen<T> is transparent: same Arrow type as T.
+            CqlType::Frozen(inner) => Self::cql_type_to_arrow_field(name, inner, nullable),
+            // Map, Tuple, UDT: fall back to existing string mapping (#677/#678).
+            CqlType::Map(_, _) | CqlType::Tuple(_) | CqlType::Udt(_, _) => None,
             // Remaining scalar types are already handled correctly by the flat
             // DataType mapping; return None to allow that path to run.
             _ => None,
+        }
+    }
+
+    // =========================================================================
+    // Recursive CQL type → Arrow DataType mapping (Issue #676)
+    // =========================================================================
+
+    /// Recursively map a `CqlType` to an Arrow `DataType`.
+    ///
+    /// This function is the single source of truth for element-type mapping used
+    /// by both the schema-building path (`cql_type_to_arrow_field`) and the
+    /// value-building path (`build_typed_value_array`).  It handles all scalar
+    /// types and recursively handles `List`, `Set`, and `Frozen`.
+    ///
+    /// `CqlType::Frozen(inner)` is transparent: the same Arrow type as `inner`.
+    ///
+    /// `Map`, `Tuple`, and `UDT` currently fall back to `Utf8` — those are
+    /// addressed by issues #677 and #678 respectively.  When those issues add
+    /// new match arms here, the corresponding arms in `build_typed_value_array`
+    /// must also be added.
+    fn cql_type_to_arrow_data_type(cql_type: &CqlType) -> ArrowDataType {
+        match cql_type {
+            // Scalar types
+            CqlType::Boolean => ArrowDataType::Boolean,
+            CqlType::TinyInt => ArrowDataType::Int8,
+            CqlType::SmallInt => ArrowDataType::Int16,
+            CqlType::Int => ArrowDataType::Int32,
+            CqlType::BigInt => ArrowDataType::Int64,
+            CqlType::Counter => ArrowDataType::Int64,
+            CqlType::Float => ArrowDataType::Float32,
+            CqlType::Double => ArrowDataType::Float64,
+            CqlType::Text | CqlType::Ascii | CqlType::Varchar => ArrowDataType::Utf8,
+            CqlType::Blob => ArrowDataType::Binary,
+            CqlType::Timestamp => {
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
+            }
+            CqlType::Date => ArrowDataType::Date32,
+            CqlType::Time => ArrowDataType::Time64(TimeUnit::Nanosecond),
+            CqlType::Decimal => {
+                ArrowDataType::Decimal128(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)
+            }
+            CqlType::Varint => ArrowDataType::Decimal128(DECIMAL_MAX_PRECISION, 0),
+            // Duration: Utf8 fallback (parquet crate v53 MonthDayNano NYI)
+            CqlType::Duration => ArrowDataType::Utf8,
+            CqlType::Uuid | CqlType::TimeUuid => ArrowDataType::FixedSizeBinary(16),
+            // Inet: canonical text form
+            CqlType::Inet => ArrowDataType::Utf8,
+            // List/Set → Arrow List with recursively mapped element type.
+            // Arrow has no dedicated Set type; both map to List.
+            CqlType::List(inner) | CqlType::Set(inner) => {
+                let item_type = Self::cql_type_to_arrow_data_type(inner);
+                ArrowDataType::List(Arc::new(Field::new("item", item_type, true)))
+            }
+            // Frozen<T> is transparent in type mapping.
+            CqlType::Frozen(inner) => Self::cql_type_to_arrow_data_type(inner),
+            // Map, Tuple, UDT: fall back to Utf8 until #677/#678 add proper support.
+            CqlType::Map(_, _) | CqlType::Tuple(_) | CqlType::Udt(_, _) => ArrowDataType::Utf8,
+            // Custom/unknown types: Utf8
+            CqlType::Custom(_) => ArrowDataType::Utf8,
+        }
+    }
+
+    // =========================================================================
+    // Recursive value → ArrayRef builder (Issue #676)
+    // =========================================================================
+
+    /// Recursively build an Arrow `ArrayRef` from a slice of optional `Value`
+    /// references, guided by a `CqlType` for element dispatch.
+    ///
+    /// This is the shared recursive entry point used by both top-level column
+    /// dispatch and nested element building (list-of-list, list-of-set, etc.).
+    ///
+    /// `CqlType::Frozen(inner)` is transparent: `Value::Frozen(inner)` runtime
+    /// values are also unwrapped before dispatch.
+    ///
+    /// `Map`, `Tuple`, and `UDT` currently fall back to `Utf8` via
+    /// `ValueFormatter` — new match arms in this function (plus corresponding
+    /// arms in `cql_type_to_arrow_data_type`) are sufficient to add typed support
+    /// in issues #677 and #678.
+    fn build_typed_value_array(
+        cql_type: &CqlType,
+        values: &[Option<&Value>],
+    ) -> Result<ArrayRef, Box<dyn StdError>> {
+        // Unwrap Frozen at the type level — transparent for both schema and values.
+        let effective_type = Self::unwrap_frozen_type(cql_type);
+
+        match effective_type {
+            // ----------------------------------------------------------------
+            // Scalar types
+            // ----------------------------------------------------------------
+            CqlType::Boolean => {
+                let arr: Vec<Option<bool>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Boolean(b) => Some(*b),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(BooleanArray::from(arr)))
+            }
+            CqlType::TinyInt => {
+                let arr: Vec<Option<i8>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::TinyInt(i) => Some(*i),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Int8Array::from(arr)))
+            }
+            CqlType::SmallInt => {
+                let arr: Vec<Option<i16>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::SmallInt(i) => Some(*i),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Int16Array::from(arr)))
+            }
+            CqlType::Int => {
+                let arr: Vec<Option<i32>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Integer(i) => Some(*i),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Int32Array::from(arr)))
+            }
+            CqlType::BigInt => {
+                let arr: Vec<Option<i64>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::BigInt(i) => Some(*i),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Int64Array::from(arr)))
+            }
+            CqlType::Counter => {
+                let arr: Vec<Option<i64>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Counter(c) => Some(*c),
+                            Value::BigInt(i) => Some(*i),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Int64Array::from(arr)))
+            }
+            CqlType::Float => {
+                let arr: Vec<Option<f32>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Float32(f) => Some(*f),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Float32Array::from(arr)))
+            }
+            CqlType::Double => {
+                let arr: Vec<Option<f64>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Float(f) => Some(*f),
+                            Value::Float32(f) => Some(*f as f64),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Float64Array::from(arr)))
+            }
+            CqlType::Text | CqlType::Ascii | CqlType::Varchar => {
+                let arr: Vec<Option<String>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Text(s) => Some(s.clone()),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(StringArray::from(arr)))
+            }
+            CqlType::Blob => {
+                let byte_slices: Vec<Option<Vec<u8>>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Blob(b) => Some(b.clone()),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                let refs: Vec<Option<&[u8]>> = byte_slices.iter().map(|o| o.as_deref()).collect();
+                Ok(Arc::new(BinaryArray::from(refs)))
+            }
+            CqlType::Timestamp => {
+                let arr: Vec<Option<i64>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Timestamp(ts) => Some(*ts),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(
+                    TimestampMillisecondArray::from(arr).with_timezone("UTC"),
+                ))
+            }
+            CqlType::Date => {
+                let arr: Vec<Option<i32>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Date(d) => Some(*d),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Date32Array::from(arr)))
+            }
+            CqlType::Time => {
+                let arr: Vec<Option<i64>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Time(t) => Some(*t),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(Time64NanosecondArray::from(arr)))
+            }
+            CqlType::Decimal => {
+                let mut builder = arrow::array::Decimal128Builder::new()
+                    .with_precision_and_scale(DECIMAL_MAX_PRECISION, DECIMAL_FIXED_SCALE as i8)?;
+                for opt in values {
+                    let v = Self::unwrap_frozen_value(*opt);
+                    match v {
+                        Some(Value::Decimal { scale, unscaled }) => {
+                            let rescaled = Self::rescale_decimal(*scale, unscaled)?;
+                            builder.append_value(rescaled);
+                        }
+                        Some(Value::Null) | None => builder.append_null(),
+                        Some(other) => {
+                            return Err(format!(
+                                "expected Decimal value in element, got {:?}",
+                                other
+                            )
+                            .into());
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            CqlType::Varint => {
+                use num_bigint::BigInt;
+                let mut builder = arrow::array::Decimal128Builder::new()
+                    .with_precision_and_scale(DECIMAL_MAX_PRECISION, 0)?;
+                for opt in values {
+                    let v = Self::unwrap_frozen_value(*opt);
+                    match v {
+                        Some(Value::Varint(bytes)) => {
+                            if bytes.is_empty() {
+                                builder.append_value(0);
+                            } else {
+                                let bigint = BigInt::from_signed_bytes_be(bytes);
+                                let max_abs = BigInt::from(10i64).pow(38u32) - BigInt::from(1i64);
+                                let abs_val = if bigint.sign() == num_bigint::Sign::Minus {
+                                    -bigint.clone()
+                                } else {
+                                    bigint.clone()
+                                };
+                                if abs_val > max_abs {
+                                    return Err(
+                                        "varint element exceeds Decimal128(38, 0) range".into()
+                                    );
+                                }
+                                let i128_val = bigint_to_i128(&bigint)?;
+                                builder.append_value(i128_val);
+                            }
+                        }
+                        Some(Value::Null) | None => builder.append_null(),
+                        Some(other) => {
+                            return Err(format!(
+                                "expected Varint value in element, got {:?}",
+                                other
+                            )
+                            .into());
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            CqlType::Duration => {
+                // Serialise as Utf8 text (parquet crate v53 MonthDayNano NYI).
+                let arr: Vec<Option<String>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Duration { .. } => Some(ValueFormatter::format_value(v)),
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(StringArray::from(arr)))
+            }
+            CqlType::Uuid | CqlType::TimeUuid => {
+                let mut builder = arrow::array::FixedSizeBinaryBuilder::new(16);
+                for opt in values {
+                    let v = Self::unwrap_frozen_value(*opt);
+                    match v {
+                        Some(Value::Uuid(bytes)) => builder.append_value(bytes)?,
+                        Some(Value::Null) | None => builder.append_null(),
+                        Some(other) => {
+                            return Err(
+                                format!("expected Uuid value in element, got {:?}", other).into()
+                            );
+                        }
+                    }
+                }
+                Ok(Arc::new(builder.finish()))
+            }
+            CqlType::Inet => {
+                let arr: Vec<Option<String>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = Self::unwrap_frozen_value(*opt)?;
+                        Some(match v {
+                            Value::Inet(bytes) => {
+                                Some(ValueFormatter::format_value(&Value::Inet(bytes.clone())))
+                            }
+                            Value::Null => None,
+                            _ => None,
+                        })
+                    })
+                    .flatten()
+                    .collect();
+                Ok(Arc::new(StringArray::from(arr)))
+            }
+            // ----------------------------------------------------------------
+            // List and Set (recursive): element type dispatches back here.
+            // Arrow has no dedicated Set type; Set maps to List.
+            // ----------------------------------------------------------------
+            CqlType::List(inner) | CqlType::Set(inner) => {
+                let element_type = Self::cql_type_to_arrow_data_type(inner);
+                let item_field = Arc::new(Field::new("item", element_type, true));
+
+                // Collect flat elements for all list/set values,
+                // recording offsets so we can reconstruct the list structure.
+                let mut offsets: Vec<i32> = vec![0];
+                let mut flat_elements: Vec<Option<&Value>> = Vec::new();
+                let mut null_bitmap: Vec<bool> = Vec::new();
+
+                for opt in values {
+                    let v = Self::unwrap_frozen_value(*opt);
+                    match v {
+                        Some(Value::List(items)) | Some(Value::Set(items)) => {
+                            null_bitmap.push(true);
+                            for item in items {
+                                flat_elements.push(Some(item));
+                            }
+                            offsets.push(flat_elements.len() as i32);
+                        }
+                        Some(Value::Null) | None => {
+                            null_bitmap.push(false);
+                            offsets.push(flat_elements.len() as i32);
+                        }
+                        Some(other) => {
+                            // Unexpected value type — serialize as empty list to
+                            // avoid hard failure (defensive; shouldn't happen with
+                            // correct schema).
+                            null_bitmap.push(false);
+                            offsets.push(flat_elements.len() as i32);
+                            let _ = other; // suppress unused warning
+                        }
+                    }
+                }
+
+                // Recursively build the flat element array using the inner type.
+                let elements_array = Self::build_typed_value_array(inner, &flat_elements)?;
+
+                let offset_buffer = OffsetBuffer::new(offsets.into());
+                let null_buffer = NullBuffer::from(null_bitmap);
+
+                Ok(Arc::new(ListArray::new(
+                    item_field,
+                    offset_buffer,
+                    elements_array,
+                    Some(null_buffer),
+                )))
+            }
+            // Frozen is unwrapped above in `unwrap_frozen_type`; this arm is
+            // unreachable but required for exhaustiveness.
+            CqlType::Frozen(inner) => Self::build_typed_value_array(inner, values),
+            // Map, Tuple, UDT: fall back to Utf8 until #677/#678 add typed support.
+            CqlType::Map(_, _) | CqlType::Tuple(_) | CqlType::Udt(_, _) | CqlType::Custom(_) => {
+                let arr: Vec<Option<String>> = values
+                    .iter()
+                    .map(|opt| {
+                        let v = *opt;
+                        match v {
+                            Some(Value::Null) | None => None,
+                            Some(v) => Some(ValueFormatter::format_value(v)),
+                        }
+                    })
+                    .collect();
+                Ok(Arc::new(StringArray::from(arr)))
+            }
+        }
+    }
+
+    /// Unwrap nested `CqlType::Frozen` wrappers to reach the effective type.
+    ///
+    /// `Frozen(Frozen(T))` → `T`. This handles the rare but valid case of
+    /// double-frozen types in schema definitions.
+    fn unwrap_frozen_type(cql_type: &CqlType) -> &CqlType {
+        let mut t = cql_type;
+        while let CqlType::Frozen(inner) = t {
+            t = inner.as_ref();
+        }
+        t
+    }
+
+    /// Unwrap a `Value::Frozen(inner)` reference to its inner value.
+    ///
+    /// Returns the inner value reference if `v` is `Frozen`, or the original
+    /// reference otherwise.  `None` (absent column value) is passed through.
+    ///
+    /// This is a shallow unwrap; for deeply nested Frozen values the caller
+    /// should loop or use the recursive builder which handles Frozen at each level.
+    fn unwrap_frozen_value<'a>(v: Option<&'a Value>) -> Option<&'a Value> {
+        match v {
+            Some(Value::Frozen(inner)) => Some(inner.as_ref()),
+            other => other,
         }
     }
 
@@ -324,15 +851,22 @@ impl ParquetWriter {
     ///
     /// When `col.cql_type` is `Some` and the type is a high-fidelity scalar
     /// (date, time, decimal, varint, duration, uuid/timeuuid, inet, counter),
-    /// the corresponding typed builder is used.  All other cases fall through
-    /// to the existing flat `data_type`-based dispatch.
+    /// the corresponding typed builder is used.
+    ///
+    /// For `List`, `Set`, and `Frozen(List|Set)` with a `cql_type`, the
+    /// recursive `build_typed_value_array` path is used (Issue #676), which
+    /// maps element types through the same scalar mapping above.
+    ///
+    /// All other cases fall through to the existing flat `data_type`-based dispatch.
     fn convert_column_to_array(
         col: &ColumnInfo,
         rows: &[cqlite_core::query::QueryRow],
     ) -> Result<ArrayRef, Box<dyn StdError>> {
-        // High-fidelity CQL-type dispatch (Issue #675)
+        // High-fidelity CQL-type dispatch (Issues #675, #676)
         if let Some(cql_type) = &col.cql_type {
-            match cql_type {
+            // Check if the (possibly Frozen-wrapped) type is a List or Set.
+            let effective = Self::unwrap_frozen_type(cql_type);
+            match effective {
                 CqlType::Date => return Self::build_date32_array(col, rows),
                 CqlType::Time => return Self::build_time64_ns_array(col, rows),
                 CqlType::Decimal => return Self::build_decimal128_array(col, rows),
@@ -343,7 +877,13 @@ impl ParquetWriter {
                 }
                 CqlType::Inet => return Self::build_inet_utf8_array(col, rows),
                 CqlType::Counter => return Self::build_int64_array(col, rows),
-                // Complex/collection types fall through to the flat dispatch below.
+                // List and Set: use the recursive typed builder (Issue #676).
+                CqlType::List(_) | CqlType::Set(_) => {
+                    let column_values: Vec<Option<&Value>> =
+                        rows.iter().map(|row| row.values.get(&col.name)).collect();
+                    return Self::build_typed_value_array(cql_type, &column_values);
+                }
+                // All other complex/collection types fall through to the flat dispatch.
                 _ => {}
             }
         }
