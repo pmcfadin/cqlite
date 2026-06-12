@@ -2575,3 +2575,699 @@ fn test_list_int_with_null_element() {
     assert!(int_arr.is_valid(2));
     assert_eq!(int_arr.value(2), 3);
 }
+
+// ============================================================================
+// Issue #677: Typed Map arrays via recursive element builder
+//
+// map<K,V> must export with typed (non-stringified) Arrow key and value arrays.
+// Arrow Map = Map<Struct("entries") { key: K (non-nullable), value: V (nullable) }>.
+// CqlType::Frozen(inner) is transparent in both schema and value recursion.
+// Null map vs empty map must be preserved distinctly; keys are non-nullable.
+// ============================================================================
+
+/// Build a ColumnInfo with `cql_type = Some(Map(key, val))`.
+fn map_col_with_cql_type(name: &str, cql_type: cqlite_core::schema::CqlType) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        data_type: cqlite_core::types::DataType::Map,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cql_type),
+    }
+}
+
+// ----------------------------------------
+// map<text,int> schema: Arrow Map<Struct(key:Utf8,value:Int32)>
+// ----------------------------------------
+
+#[test]
+fn test_map_text_int_schema() {
+    use arrow::datatypes::DataType as ArrowDataType;
+    use arrow::datatypes::Fields;
+    use std::sync::Arc;
+
+    let col = map_col_with_cql_type(
+        "m",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Text),
+            Box::new(cqlite_core::schema::CqlType::Int),
+        ),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![
+            (Value::Text("a".to_string()), Value::Integer(1)),
+            (Value::Text("b".to_string()), Value::Integer(2)),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+
+    let expected_entries = Arc::new(arrow::datatypes::Field::new(
+        "entries",
+        ArrowDataType::Struct(Fields::from(vec![
+            arrow::datatypes::Field::new("key", ArrowDataType::Utf8, false),
+            arrow::datatypes::Field::new("value", ArrowDataType::Int32, true),
+        ])),
+        false,
+    ));
+    assert_eq!(
+        field.data_type(),
+        &ArrowDataType::Map(expected_entries, false)
+    );
+}
+
+#[test]
+fn test_map_text_int_roundtrip() {
+    use arrow::array::StructArray;
+
+    let col = map_col_with_cql_type(
+        "scores",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Text),
+            Box::new(cqlite_core::schema::CqlType::Int),
+        ),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![
+            (Value::Text("alice".to_string()), Value::Integer(100)),
+            (Value::Text("bob".to_string()), Value::Integer(200)),
+            (Value::Text("carol".to_string()), Value::Integer(300)),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(!map_col.is_null(0));
+
+    // The entries for row 0.
+    let entries = map_col.value(0);
+    let struct_arr = entries.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(struct_arr.len(), 3);
+
+    let keys = struct_arr
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(keys.value(0), "alice");
+    assert_eq!(keys.value(1), "bob");
+    assert_eq!(keys.value(2), "carol");
+
+    let values = struct_arr
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(values.value(0), 100);
+    assert_eq!(values.value(1), 200);
+    assert_eq!(values.value(2), 300);
+}
+
+// ----------------------------------------
+// map<int,text>
+// ----------------------------------------
+
+#[test]
+fn test_map_int_text_roundtrip() {
+    use arrow::array::StructArray;
+
+    let col = map_col_with_cql_type(
+        "labels",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Int),
+            Box::new(cqlite_core::schema::CqlType::Text),
+        ),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![
+            (Value::Integer(1), Value::Text("one".to_string())),
+            (Value::Integer(2), Value::Text("two".to_string())),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(!map_col.is_null(0));
+
+    let entries = map_col.value(0);
+    let struct_arr = entries.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(struct_arr.len(), 2);
+
+    let keys = struct_arr
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(keys.value(0), 1);
+    assert_eq!(keys.value(1), 2);
+
+    let vals = struct_arr
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(vals.value(0), "one");
+    assert_eq!(vals.value(1), "two");
+}
+
+// ----------------------------------------
+// map<uuid,timestamp>
+// ----------------------------------------
+
+#[test]
+fn test_map_uuid_timestamp_schema() {
+    use arrow::datatypes::{DataType as ArrowDataType, Fields, TimeUnit};
+    use std::sync::Arc;
+
+    let col = map_col_with_cql_type(
+        "events",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Uuid),
+            Box::new(cqlite_core::schema::CqlType::Timestamp),
+        ),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![(
+            Value::Uuid([0xABu8; 16]),
+            Value::Timestamp(1_000_000_000),
+        )]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+
+    let expected_entries = Arc::new(arrow::datatypes::Field::new(
+        "entries",
+        ArrowDataType::Struct(Fields::from(vec![
+            arrow::datatypes::Field::new("key", ArrowDataType::FixedSizeBinary(16), false),
+            arrow::datatypes::Field::new(
+                "value",
+                ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
+                true,
+            ),
+        ])),
+        false,
+    ));
+    assert_eq!(
+        field.data_type(),
+        &ArrowDataType::Map(expected_entries, false)
+    );
+}
+
+#[test]
+fn test_map_uuid_timestamp_roundtrip() {
+    use arrow::array::{FixedSizeBinaryArray, StructArray, TimestampMillisecondArray};
+
+    let col = map_col_with_cql_type(
+        "events",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Uuid),
+            Box::new(cqlite_core::schema::CqlType::Timestamp),
+        ),
+    );
+    let uuid1 = [0x11u8; 16];
+    let uuid2 = [0x22u8; 16];
+    let ts1: i64 = 1_673_778_645_000;
+    let ts2: i64 = 1_673_778_700_000;
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![
+            (Value::Uuid(uuid1), Value::Timestamp(ts1)),
+            (Value::Uuid(uuid2), Value::Timestamp(ts2)),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(!map_col.is_null(0));
+
+    let entries = map_col.value(0);
+    let struct_arr = entries.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(struct_arr.len(), 2);
+
+    let keys = struct_arr
+        .column(0)
+        .as_any()
+        .downcast_ref::<FixedSizeBinaryArray>()
+        .unwrap();
+    assert_eq!(keys.value(0), &uuid1);
+    assert_eq!(keys.value(1), &uuid2);
+
+    let vals = struct_arr
+        .column(1)
+        .as_any()
+        .downcast_ref::<TimestampMillisecondArray>()
+        .unwrap();
+    assert_eq!(vals.value(0), ts1);
+    assert_eq!(vals.value(1), ts2);
+}
+
+// ----------------------------------------
+// Null map vs empty map preserved distinctly
+// ----------------------------------------
+
+#[test]
+fn test_map_null_vs_empty_preserved_distinctly() {
+    let col = map_col_with_cql_type(
+        "m",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Text),
+            Box::new(cqlite_core::schema::CqlType::Int),
+        ),
+    );
+    let result = single_col_multi_row_result(
+        col,
+        vec![
+            // Row 0: non-null, non-empty map
+            Value::Map(vec![(Value::Text("k".to_string()), Value::Integer(1))]),
+            // Row 1: null map (Value::Null)
+            Value::Null,
+            // Row 2: non-null empty map (Value::Map(vec![]))
+            Value::Map(vec![]),
+        ],
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert_eq!(map_col.len(), 3);
+
+    // Row 0: non-null, 1 entry
+    assert!(!map_col.is_null(0));
+    assert_eq!(map_col.value_length(0), 1);
+
+    // Row 1: null
+    assert!(map_col.is_null(1));
+
+    // Row 2: non-null, 0 entries (empty map distinct from null)
+    assert!(!map_col.is_null(2));
+    assert_eq!(map_col.value_length(2), 0);
+}
+
+// ----------------------------------------
+// map<text, frozen<list<int>>>: nested value type round-trip
+// ----------------------------------------
+
+#[test]
+fn test_map_text_frozen_list_int_schema() {
+    use arrow::datatypes::{DataType as ArrowDataType, Fields};
+    use std::sync::Arc;
+
+    // map<text, frozen<list<int>>>
+    let inner_list =
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int));
+    let frozen_list = cqlite_core::schema::CqlType::Frozen(Box::new(inner_list));
+    let col = map_col_with_cql_type(
+        "nested_map",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Text),
+            Box::new(frozen_list),
+        ),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![(
+            Value::Text("k".to_string()),
+            Value::List(vec![Value::Integer(1), Value::Integer(2)]),
+        )]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema: Map<Struct(key:Utf8, value:List<Int32>)>
+    let schema = batch.schema();
+    let field = schema.field(0);
+
+    let expected_entries = Arc::new(arrow::datatypes::Field::new(
+        "entries",
+        ArrowDataType::Struct(Fields::from(vec![
+            arrow::datatypes::Field::new("key", ArrowDataType::Utf8, false),
+            arrow::datatypes::Field::new(
+                "value",
+                ArrowDataType::List(Arc::new(arrow::datatypes::Field::new(
+                    "item",
+                    ArrowDataType::Int32,
+                    true,
+                ))),
+                true,
+            ),
+        ])),
+        false,
+    ));
+    assert_eq!(
+        field.data_type(),
+        &ArrowDataType::Map(expected_entries, false)
+    );
+}
+
+#[test]
+fn test_map_text_frozen_list_int_roundtrip() {
+    use arrow::array::StructArray;
+
+    // map<text, frozen<list<int>>>
+    let inner_list =
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Int));
+    let frozen_list = cqlite_core::schema::CqlType::Frozen(Box::new(inner_list));
+    let col = map_col_with_cql_type(
+        "nested_map",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Text),
+            Box::new(frozen_list),
+        ),
+    );
+
+    // {"alpha": [10, 20], "beta": [30]}
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![
+            (
+                Value::Text("alpha".to_string()),
+                Value::List(vec![Value::Integer(10), Value::Integer(20)]),
+            ),
+            (
+                Value::Text("beta".to_string()),
+                Value::List(vec![Value::Integer(30)]),
+            ),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(!map_col.is_null(0));
+
+    let entries = map_col.value(0);
+    let struct_arr = entries.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(struct_arr.len(), 2);
+
+    // Keys
+    let keys = struct_arr
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(keys.value(0), "alpha");
+    assert_eq!(keys.value(1), "beta");
+
+    // Values are List<Int32>
+    let val_lists = struct_arr
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+
+    // "alpha" → [10, 20]
+    let alpha_elems = val_lists.value(0);
+    let alpha_ints = alpha_elems.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(alpha_ints.len(), 2);
+    assert_eq!(alpha_ints.value(0), 10);
+    assert_eq!(alpha_ints.value(1), 20);
+
+    // "beta" → [30]
+    let beta_elems = val_lists.value(1);
+    let beta_ints = beta_elems.as_any().downcast_ref::<Int32Array>().unwrap();
+    assert_eq!(beta_ints.len(), 1);
+    assert_eq!(beta_ints.value(0), 30);
+}
+
+// ----------------------------------------
+// map<text, frozen<list<int>>>: null value in a map entry
+// ----------------------------------------
+
+#[test]
+fn test_map_text_int_nullable_value() {
+    use arrow::array::StructArray;
+
+    // map<text, int> where one value is null (but key is non-nullable)
+    let col = map_col_with_cql_type(
+        "m",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Text),
+            Box::new(cqlite_core::schema::CqlType::Int),
+        ),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![
+            (Value::Text("present".to_string()), Value::Integer(42)),
+            (Value::Text("absent".to_string()), Value::Null),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(!map_col.is_null(0));
+
+    let entries = map_col.value(0);
+    let struct_arr = entries.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(struct_arr.len(), 2);
+
+    // Keys are non-nullable: both must be valid
+    let keys = struct_arr
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(keys.is_valid(0));
+    assert!(keys.is_valid(1));
+    assert_eq!(keys.value(0), "present");
+    assert_eq!(keys.value(1), "absent");
+
+    // Values: first is valid, second is null
+    let vals = struct_arr
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert!(vals.is_valid(0));
+    assert_eq!(vals.value(0), 42);
+    assert!(!vals.is_valid(1));
+}
+
+// ----------------------------------------
+// map<text,int> multi-row
+// ----------------------------------------
+
+#[test]
+fn test_map_text_int_multi_row() {
+    use arrow::array::StructArray;
+
+    let col = map_col_with_cql_type(
+        "m",
+        cqlite_core::schema::CqlType::Map(
+            Box::new(cqlite_core::schema::CqlType::Text),
+            Box::new(cqlite_core::schema::CqlType::Int),
+        ),
+    );
+    let result = single_col_multi_row_result(
+        col,
+        vec![
+            Value::Map(vec![
+                (Value::Text("x".to_string()), Value::Integer(1)),
+                (Value::Text("y".to_string()), Value::Integer(2)),
+            ]),
+            Value::Null,
+            Value::Map(vec![(Value::Text("z".to_string()), Value::Integer(99))]),
+        ],
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert_eq!(map_col.len(), 3);
+
+    // Row 0: 2 entries
+    assert!(!map_col.is_null(0));
+    let r0 = map_col.value(0);
+    let r0_struct = r0.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(r0_struct.len(), 2);
+
+    let r0_keys = r0_struct
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(r0_keys.value(0), "x");
+    assert_eq!(r0_keys.value(1), "y");
+
+    let r0_vals = r0_struct
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(r0_vals.value(0), 1);
+    assert_eq!(r0_vals.value(1), 2);
+
+    // Row 1: null
+    assert!(map_col.is_null(1));
+
+    // Row 2: 1 entry
+    assert!(!map_col.is_null(2));
+    let r2 = map_col.value(2);
+    let r2_struct = r2.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(r2_struct.len(), 1);
+
+    let r2_keys = r2_struct
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(r2_keys.value(0), "z");
+
+    let r2_vals = r2_struct
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(r2_vals.value(0), 99);
+}
+
+// ----------------------------------------
+// frozen<map<text,int>> — Frozen wrapper is transparent
+// ----------------------------------------
+
+#[test]
+fn test_frozen_map_text_int_roundtrip() {
+    use arrow::array::StructArray;
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    // Column declared as frozen<map<text, int>>
+    let col = ColumnInfo {
+        name: "fm".to_string(),
+        data_type: cqlite_core::types::DataType::Frozen,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cqlite_core::schema::CqlType::Frozen(Box::new(
+            cqlite_core::schema::CqlType::Map(
+                Box::new(cqlite_core::schema::CqlType::Text),
+                Box::new(cqlite_core::schema::CqlType::Int),
+            ),
+        ))),
+    };
+
+    let result = single_cql_typed_result(
+        col,
+        Value::Map(vec![(Value::Text("key".to_string()), Value::Integer(7))]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema should be Map (Frozen is transparent)
+    let schema = batch.schema();
+    let field = schema.field(0);
+    assert!(
+        matches!(field.data_type(), ArrowDataType::Map(_, _)),
+        "Expected Map type, got {:?}",
+        field.data_type()
+    );
+
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(!map_col.is_null(0));
+
+    let entries = map_col.value(0);
+    let struct_arr = entries.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(struct_arr.len(), 1);
+
+    let keys = struct_arr
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(keys.value(0), "key");
+
+    let vals = struct_arr
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(vals.value(0), 7);
+}
+
+// ----------------------------------------
+// Legacy path (cql_type = None) still uses build_map_array (Utf8 keys/values)
+// ----------------------------------------
+
+#[test]
+fn test_map_legacy_path_no_cql_type() {
+    // When cql_type is None, the map must use the legacy build_map_array
+    // which produces Map<Struct(key:Utf8, value:Utf8)>.
+    use arrow::array::StructArray;
+
+    let col = ColumnInfo {
+        name: "m".to_string(),
+        data_type: cqlite_core::types::DataType::Map,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: None,
+    };
+
+    let mut values = HashMap::new();
+    values.insert(
+        "m".to_string(),
+        Value::Map(vec![
+            (Value::Text("a".to_string()), Value::Integer(1)),
+            (Value::Text("b".to_string()), Value::Integer(2)),
+        ]),
+    );
+    let row = QueryRow {
+        values,
+        key: RowKey::new(vec![1]),
+        metadata: Default::default(),
+    };
+    let result = QueryResult {
+        rows: vec![row],
+        rows_affected: 0,
+        execution_time_ms: 0,
+        metadata: cqlite_core::query::QueryMetadata {
+            columns: vec![col],
+            ..Default::default()
+        },
+    };
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Legacy path: key and value are both Utf8 (stringified)
+    let map_col = batch.column(0).as_any().downcast_ref::<MapArray>().unwrap();
+    assert!(!map_col.is_null(0));
+
+    let entries = map_col.value(0);
+    let struct_arr = entries.as_any().downcast_ref::<StructArray>().unwrap();
+    assert_eq!(struct_arr.len(), 2);
+
+    // Keys are stringified text
+    let keys = struct_arr
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(keys.value(0), "a");
+    assert_eq!(keys.value(1), "b");
+}

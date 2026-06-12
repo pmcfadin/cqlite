@@ -20,28 +20,35 @@
 //! | counter           | `Int64`                               | Unchanged                         |
 //! | list\<X\>         | `List<mapped(X)>`                     | Recursive element mapping         |
 //! | set\<X\>          | `List<mapped(X)>`                     | Arrow has no Set type; uses List  |
+//! | map\<K,V\>        | `Map<Struct(key:K,value:V)>`          | Typed keys/values; nested OK      |
 //!
-//! # List and Set mapping
+//! # List, Set, and Map mapping
 //!
 //! CQL `list<X>` and `set<X>` both map to Arrow `List` (Arrow has no dedicated Set
 //! type).  Element types are mapped recursively through the same scalar mapping
 //! table above, so `list<uuid>` produces `List<FixedSizeBinary(16)>`,
 //! `list<timestamp>` produces `List<Timestamp(ms,UTC)>`, etc.
 //!
+//! CQL `map<K,V>` maps to Arrow `Map` with a non-nullable struct entries field
+//! containing children `"key"` (non-nullable) and `"value"` (nullable), matching
+//! the naming convention used by the legacy string-map path (`build_map_array`).
+//! Both key and value types are mapped recursively, enabling nested value types
+//! such as `map<text, frozen<list<int>>>`.
+//!
 //! `CqlType::Frozen(inner)` is transparent in the recursion: it unwraps and
 //! recurses into `inner`.  Runtime `Value::Frozen(inner)` values are also unwrapped
 //! before element dispatch.
 //!
 //! For nested collections (`list<frozen<list<int>>>`), the recursion produces
-//! `List<List<Int32>>` and handles element unwrapping at all levels.  Map, Tuple,
+//! `List<List<Int32>>` and handles element unwrapping at all levels.  Tuple
 //! and UDT element types currently fall back to a stringified `Utf8` representation
-//! (handled by issues #677 and #678 respectively).
+//! (handled by issue #678).
 //!
 //! # Recursive builder design
 //!
 //! `build_typed_value_array(cql_type, values)` is the shared recursive entry point
 //! used by both top-level column dispatch and nested element building.  Adding
-//! support for Map/Tuple/UDT elements (#677/#678) requires only new match arms in
+//! support for Tuple/UDT elements (#678) requires only new match arms in
 //! `cql_type_to_arrow_data_type` and `build_typed_value_array`.
 //! # Decimal strategy
 //!
@@ -291,8 +298,29 @@ impl ParquetWriter {
             }
             // Frozen<T> is transparent: same Arrow type as T.
             CqlType::Frozen(inner) => Self::cql_type_to_arrow_field(name, inner, nullable),
-            // Map, Tuple, UDT: fall back to existing string mapping (#677/#678).
-            CqlType::Map(_, _) | CqlType::Tuple(_) | CqlType::Udt(_, _) => None,
+            // Map: emit typed Arrow Map with non-nullable keys and nullable values.
+            // The entries struct is conventionally named "entries" with children
+            // "key" (non-nullable) and "value" (nullable), matching the legacy
+            // `build_map_array` schema so that the two paths are interchangeable.
+            CqlType::Map(key_type, val_type) => {
+                let key_arrow = Self::cql_type_to_arrow_data_type(key_type);
+                let val_arrow = Self::cql_type_to_arrow_data_type(val_type);
+                let entries_field = Arc::new(Field::new(
+                    "entries",
+                    ArrowDataType::Struct(Fields::from(vec![
+                        Field::new("key", key_arrow, false),
+                        Field::new("value", val_arrow, true),
+                    ])),
+                    false,
+                ));
+                Some(Field::new(
+                    name,
+                    ArrowDataType::Map(entries_field, false),
+                    nullable,
+                ))
+            }
+            // Tuple, UDT: fall back to existing string mapping (#678).
+            CqlType::Tuple(_) | CqlType::Udt(_, _) => None,
             // Remaining scalar types are already handled correctly by the flat
             // DataType mapping; return None to allow that path to run.
             _ => None,
@@ -351,8 +379,27 @@ impl ParquetWriter {
             }
             // Frozen<T> is transparent in type mapping.
             CqlType::Frozen(inner) => Self::cql_type_to_arrow_data_type(inner),
-            // Map, Tuple, UDT: fall back to Utf8 until #677/#678 add proper support.
-            CqlType::Map(_, _) | CqlType::Tuple(_) | CqlType::Udt(_, _) => ArrowDataType::Utf8,
+            // Map: Arrow Map type with typed key (non-nullable) and value (nullable).
+            // The entries struct field is named "entries" with children "key" and
+            // "value", matching the legacy `data_type_to_arrow` and `build_map_array`
+            // field naming so that schema and array representations are consistent.
+            CqlType::Map(key_type, val_type) => {
+                let key_arrow = Self::cql_type_to_arrow_data_type(key_type);
+                let val_arrow = Self::cql_type_to_arrow_data_type(val_type);
+                ArrowDataType::Map(
+                    Arc::new(Field::new(
+                        "entries",
+                        ArrowDataType::Struct(Fields::from(vec![
+                            Field::new("key", key_arrow, false),
+                            Field::new("value", val_arrow, true),
+                        ])),
+                        false,
+                    )),
+                    false,
+                )
+            }
+            // Tuple, UDT: fall back to Utf8 until #678 adds proper support.
+            CqlType::Tuple(_) | CqlType::Udt(_, _) => ArrowDataType::Utf8,
             // Custom/unknown types: Utf8
             CqlType::Custom(_) => ArrowDataType::Utf8,
         }
@@ -751,8 +798,90 @@ impl ParquetWriter {
             // Frozen is unwrapped above in `unwrap_frozen_type`; this arm is
             // unreachable but required for exhaustiveness.
             CqlType::Frozen(inner) => Self::build_typed_value_array(inner, values),
-            // Map, Tuple, UDT: fall back to Utf8 until #677/#678 add typed support.
-            CqlType::Map(_, _) | CqlType::Tuple(_) | CqlType::Udt(_, _) | CqlType::Custom(_) => {
+            // ----------------------------------------------------------------
+            // Map: recursively typed keys and values (Issue #677).
+            //
+            // Arrow Map is represented as:
+            //   Map<Struct("entries") { key: K (non-nullable), value: V (nullable) }>
+            //
+            // We collect flat (key, value) pairs from all rows, track per-row
+            // offsets, recursively build the key and value arrays via the same
+            // recursive builder, then assemble a MapArray.
+            //
+            // Null key policy: a Value::Null in the key position is an error
+            // (Arrow MapArray requires non-nullable keys).  We return an error
+            // clearly rather than silently skip the entry.
+            // ----------------------------------------------------------------
+            CqlType::Map(key_type, val_type) => {
+                let key_arrow = Self::cql_type_to_arrow_data_type(key_type);
+                let val_arrow = Self::cql_type_to_arrow_data_type(val_type);
+
+                let mut offsets: Vec<i32> = vec![0];
+                let mut flat_keys: Vec<Option<&Value>> = Vec::new();
+                let mut flat_vals: Vec<Option<&Value>> = Vec::new();
+                let mut null_bitmap: Vec<bool> = Vec::new();
+
+                for opt in values {
+                    let v = Self::unwrap_frozen_value(*opt);
+                    match v {
+                        Some(Value::Map(pairs)) => {
+                            null_bitmap.push(true);
+                            for (k, val) in pairs {
+                                // Keys must be non-nullable in Arrow MapArray.
+                                if matches!(k, Value::Null) {
+                                    return Err(
+                                        "null key in map is not allowed in Arrow MapArray".into()
+                                    );
+                                }
+                                flat_keys.push(Some(k));
+                                flat_vals.push(Some(val));
+                            }
+                            offsets.push(flat_keys.len() as i32);
+                        }
+                        Some(Value::Null) | None => {
+                            null_bitmap.push(false);
+                            offsets.push(flat_keys.len() as i32);
+                        }
+                        Some(other) => {
+                            // Unexpected value type — treat as null map entry
+                            // (defensive; shouldn't happen with correct schema).
+                            null_bitmap.push(false);
+                            offsets.push(flat_keys.len() as i32);
+                            let _ = other;
+                        }
+                    }
+                }
+
+                // Recursively build the flat key and value arrays.
+                let key_array = Self::build_typed_value_array(key_type, &flat_keys)?;
+                let val_array = Self::build_typed_value_array(val_type, &flat_vals)?;
+
+                // Build the entries StructArray (no validity buffer: all non-null).
+                let struct_fields = Fields::from(vec![
+                    Field::new("key", key_arrow, false),
+                    Field::new("value", val_arrow, true),
+                ]);
+                let entries_array =
+                    StructArray::new(struct_fields.clone(), vec![key_array, val_array], None);
+
+                let map_field = Arc::new(Field::new(
+                    "entries",
+                    ArrowDataType::Struct(struct_fields),
+                    false,
+                ));
+                let offset_buffer = OffsetBuffer::new(offsets.into());
+                let null_buffer = NullBuffer::from(null_bitmap);
+
+                Ok(Arc::new(MapArray::new(
+                    map_field,
+                    offset_buffer,
+                    entries_array,
+                    Some(null_buffer),
+                    false,
+                )))
+            }
+            // Tuple, UDT: fall back to Utf8 until #678 adds typed support.
+            CqlType::Tuple(_) | CqlType::Udt(_, _) | CqlType::Custom(_) => {
                 let arr: Vec<Option<String>> = values
                     .iter()
                     .map(|opt| {
@@ -877,8 +1006,8 @@ impl ParquetWriter {
                 }
                 CqlType::Inet => return Self::build_inet_utf8_array(col, rows),
                 CqlType::Counter => return Self::build_int64_array(col, rows),
-                // List and Set: use the recursive typed builder (Issue #676).
-                CqlType::List(_) | CqlType::Set(_) => {
+                // List, Set, and Map: use the recursive typed builder (Issues #676, #677).
+                CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) => {
                     let column_values: Vec<Option<&Value>> =
                         rows.iter().map(|row| row.values.get(&col.name)).collect();
                     return Self::build_typed_value_array(cql_type, &column_values);
