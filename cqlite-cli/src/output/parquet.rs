@@ -21,6 +21,8 @@
 //! | list\<X\>         | `List<mapped(X)>`                     | Recursive element mapping         |
 //! | set\<X\>          | `List<mapped(X)>`                     | Arrow has no Set type; uses List  |
 //! | map\<K,V\>        | `Map<Struct(key:K,value:V)>`          | Typed keys/values; nested OK      |
+//! | tuple\<A,B,…\>    | `Struct(field_0:A, field_1:B, …)`     | Positional names; per-position types|
+//! | udt\<name\>       | `Struct(f1:T1, f2:T2, …)`             | Field names from schema; null OK  |
 //!
 //! # List, Set, and Map mapping
 //!
@@ -40,9 +42,20 @@
 //! before element dispatch.
 //!
 //! For nested collections (`list<frozen<list<int>>>`), the recursion produces
-//! `List<List<Int32>>` and handles element unwrapping at all levels.  Tuple
-//! and UDT element types currently fall back to a stringified `Utf8` representation
-//! (handled by issue #678).
+//! `List<List<Int32>>` and handles element unwrapping at all levels.
+//!
+//! # UDT and Tuple mapping (Issue #678)
+//!
+//! CQL `tuple<A,B,…>` maps to Arrow `Struct` with positional field names
+//! (`field_0`, `field_1`, …) and per-position Arrow types mapped recursively.
+//! CQL UDTs map to Arrow `Struct` with the UDT's schema field names and
+//! recursively mapped field types.  Unset (None) UDT fields and missing
+//! tuple positions become null children in the output StructArray.
+//!
+//! If a UDT or Tuple has zero fields (degenerate case), the column falls back
+//! to `Utf8` and a note is logged in the field name to avoid an Arrow error
+//! (`StructArray` must have at least one child or an explicit validity bitmap,
+//! but zero-field structs are not representable in Parquet).
 //!
 //! # Recursive builder design
 //!
@@ -319,8 +332,24 @@ impl ParquetWriter {
                     nullable,
                 ))
             }
-            // Tuple, UDT: fall back to existing string mapping (#678).
-            CqlType::Tuple(_) | CqlType::Udt(_, _) => None,
+            // Tuple<A,B,…> → Arrow Struct with positional field names.
+            // Zero-field tuples fall back to Utf8 (Arrow Struct requires ≥1 field).
+            CqlType::Tuple(element_types) => {
+                if element_types.is_empty() {
+                    return Some(Field::new(name, ArrowDataType::Utf8, nullable));
+                }
+                let struct_type = Self::cql_type_to_arrow_data_type(cql_type);
+                Some(Field::new(name, struct_type, nullable))
+            }
+            // UDT → Arrow Struct with the UDT's field names.
+            // Zero-field UDTs fall back to Utf8 (Arrow Struct requires ≥1 field).
+            CqlType::Udt(_udt_name, udt_fields) => {
+                if udt_fields.is_empty() {
+                    return Some(Field::new(name, ArrowDataType::Utf8, nullable));
+                }
+                let struct_type = Self::cql_type_to_arrow_data_type(cql_type);
+                Some(Field::new(name, struct_type, nullable))
+            }
             // Remaining scalar types are already handled correctly by the flat
             // DataType mapping; return None to allow that path to run.
             _ => None,
@@ -336,14 +365,12 @@ impl ParquetWriter {
     /// This function is the single source of truth for element-type mapping used
     /// by both the schema-building path (`cql_type_to_arrow_field`) and the
     /// value-building path (`build_typed_value_array`).  It handles all scalar
-    /// types and recursively handles `List`, `Set`, and `Frozen`.
+    /// types and recursively handles `List`, `Set`, `Frozen`, `Map`, `Tuple`, and `Udt`.
     ///
     /// `CqlType::Frozen(inner)` is transparent: the same Arrow type as `inner`.
     ///
-    /// `Map`, `Tuple`, and `UDT` currently fall back to `Utf8` — those are
-    /// addressed by issues #677 and #678 respectively.  When those issues add
-    /// new match arms here, the corresponding arms in `build_typed_value_array`
-    /// must also be added.
+    /// Zero-field `Tuple` and `Udt` fall back to `Utf8` because Arrow `Struct` with
+    /// zero fields cannot be represented in Parquet.
     fn cql_type_to_arrow_data_type(cql_type: &CqlType) -> ArrowDataType {
         match cql_type {
             // Scalar types
@@ -398,8 +425,43 @@ impl ParquetWriter {
                     false,
                 )
             }
-            // Tuple, UDT: fall back to Utf8 until #678 adds proper support.
-            CqlType::Tuple(_) | CqlType::Udt(_, _) => ArrowDataType::Utf8,
+            // Tuple<A, B, …> → Struct(field_0: A, field_1: B, …).
+            // Zero-field tuples fall back to Utf8 (Arrow Struct requires ≥1 field).
+            CqlType::Tuple(element_types) => {
+                if element_types.is_empty() {
+                    return ArrowDataType::Utf8;
+                }
+                let struct_fields: Vec<Field> = element_types
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| {
+                        Field::new(
+                            format!("field_{i}"),
+                            Self::cql_type_to_arrow_data_type(t),
+                            true, // tuple positions are always nullable
+                        )
+                    })
+                    .collect();
+                ArrowDataType::Struct(Fields::from(struct_fields))
+            }
+            // UDT → Struct with the UDT's schema field names and recursively mapped types.
+            // Zero-field UDTs fall back to Utf8 (Arrow Struct requires ≥1 field).
+            CqlType::Udt(_udt_name, udt_fields) => {
+                if udt_fields.is_empty() {
+                    return ArrowDataType::Utf8;
+                }
+                let struct_fields: Vec<Field> = udt_fields
+                    .iter()
+                    .map(|(field_name, field_type)| {
+                        Field::new(
+                            field_name.as_str(),
+                            Self::cql_type_to_arrow_data_type(field_type),
+                            true, // UDT fields are always nullable (can be unset)
+                        )
+                    })
+                    .collect();
+                ArrowDataType::Struct(Fields::from(struct_fields))
+            }
             // Custom/unknown types: Utf8
             CqlType::Custom(_) => ArrowDataType::Utf8,
         }
@@ -880,8 +942,190 @@ impl ParquetWriter {
                     false,
                 )))
             }
-            // Tuple, UDT: fall back to Utf8 until #678 adds typed support.
-            CqlType::Tuple(_) | CqlType::Udt(_, _) | CqlType::Custom(_) => {
+            // ----------------------------------------------------------------
+            // Tuple<A, B, …>: Arrow Struct with positional field names.
+            //
+            // For each field position i, we collect per-row child values by
+            // indexing into the `Value::Tuple` element vector.  Rows whose
+            // tuple is shorter than the schema position, or whose top-level
+            // value is Null/absent, contribute None for that child position.
+            //
+            // Zero-field tuples (degenerate) fall back to Utf8.
+            // ----------------------------------------------------------------
+            CqlType::Tuple(element_types) => {
+                if element_types.is_empty() {
+                    // Degenerate case: no fields → Utf8 fallback.
+                    let arr: Vec<Option<String>> = values
+                        .iter()
+                        .map(|opt| match opt {
+                            Some(Value::Null) | None => None,
+                            Some(v) => Some(ValueFormatter::format_value(v)),
+                        })
+                        .collect();
+                    return Ok(Arc::new(StringArray::from(arr)));
+                }
+
+                let n_rows = values.len();
+                let n_fields = element_types.len();
+
+                // Unwrap Frozen at the value level before inspecting tuples.
+                let unwrapped: Vec<Option<&Value>> = values
+                    .iter()
+                    .map(|opt| Self::unwrap_frozen_value(*opt))
+                    .collect();
+
+                // Build a null bitmap: true = row is non-null (valid struct).
+                let null_bitmap: Vec<bool> = unwrapped
+                    .iter()
+                    .map(|v| !matches!(v, Some(Value::Null) | None))
+                    .collect();
+
+                // For each schema field position, build a Vec<Option<&Value>>
+                // by pulling out the element at that position.
+                //
+                // IMPORTANT: absent/null positions must contribute `Some(&Value::Null)`
+                // rather than `None`.  The scalar type builders use `?` on
+                // `unwrap_frozen_value` which silently drops `None` entries via
+                // `flatten()`, producing a shorter child array than the struct
+                // expects.  Arrow's StructArray::new() panics on length mismatch.
+                // Using `Some(&Value::Null)` keeps every row represented while
+                // the builder treats it as a null element.
+                let null_sentinel = Value::Null;
+                let mut child_arrays: Vec<ArrayRef> = Vec::with_capacity(n_fields);
+                for field_idx in 0..n_fields {
+                    let child_values: Vec<Option<&Value>> = (0..n_rows)
+                        .map(|row_idx| {
+                            match unwrapped[row_idx] {
+                                Some(Value::Tuple(items)) => {
+                                    // Missing trailing positions → null sentinel.
+                                    Some(
+                                        items
+                                            .get(field_idx)
+                                            .map(|v| v as &Value)
+                                            .unwrap_or(&null_sentinel),
+                                    )
+                                }
+                                // Null row or wrong type → null sentinel.
+                                _ => Some(&null_sentinel),
+                            }
+                        })
+                        .collect();
+                    let child_arr =
+                        Self::build_typed_value_array(&element_types[field_idx], &child_values)?;
+                    child_arrays.push(child_arr);
+                }
+
+                let struct_fields: Fields = Fields::from(
+                    element_types
+                        .iter()
+                        .enumerate()
+                        .map(|(i, t)| {
+                            Field::new(
+                                format!("field_{i}"),
+                                Self::cql_type_to_arrow_data_type(t),
+                                true,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                );
+
+                let null_buffer = NullBuffer::from(null_bitmap);
+                Ok(Arc::new(StructArray::new(
+                    struct_fields,
+                    child_arrays,
+                    Some(null_buffer),
+                )))
+            }
+            // ----------------------------------------------------------------
+            // Udt: Arrow Struct with the UDT's schema field names.
+            //
+            // The CQL type carries the schema field order and types.  For each
+            // schema field, we look up the matching UdtField by name in each
+            // row's Value::Udt.  Missing fields and fields whose value is None
+            // (unset) become null in the child array.
+            //
+            // Zero-field UDTs fall back to Utf8.
+            // ----------------------------------------------------------------
+            CqlType::Udt(_udt_name, udt_fields) => {
+                if udt_fields.is_empty() {
+                    // Degenerate case: no fields → Utf8 fallback.
+                    let arr: Vec<Option<String>> = values
+                        .iter()
+                        .map(|opt| match opt {
+                            Some(Value::Null) | None => None,
+                            Some(v) => Some(ValueFormatter::format_value(v)),
+                        })
+                        .collect();
+                    return Ok(Arc::new(StringArray::from(arr)));
+                }
+
+                let n_rows = values.len();
+
+                // Unwrap Frozen at the value level before inspecting UDTs.
+                let unwrapped: Vec<Option<&Value>> = values
+                    .iter()
+                    .map(|opt| Self::unwrap_frozen_value(*opt))
+                    .collect();
+
+                // Build a null bitmap: true = row is non-null (valid struct).
+                let null_bitmap: Vec<bool> = unwrapped
+                    .iter()
+                    .map(|v| !matches!(v, Some(Value::Null) | None))
+                    .collect();
+
+                // For each schema field, build a child array by looking up the
+                // field by name in each row's UdtValue.
+                //
+                // IMPORTANT: absent/null positions must contribute `Some(&Value::Null)`
+                // rather than `None`.  See the Tuple arm above for the explanation:
+                // scalar type builders drop `None` via `flatten()`, which would
+                // produce a shorter child array than the struct expects, causing
+                // Arrow's StructArray::new() to panic.
+                let null_sentinel = Value::Null;
+                let mut child_arrays: Vec<ArrayRef> = Vec::with_capacity(udt_fields.len());
+                for (field_name, field_type) in udt_fields.iter() {
+                    let child_values: Vec<Option<&Value>> = (0..n_rows)
+                        .map(|row_idx| match unwrapped[row_idx] {
+                            Some(Value::Udt(udt_val)) => {
+                                // Look up by field name; null sentinel if absent or unset.
+                                Some(
+                                    udt_val
+                                        .fields
+                                        .iter()
+                                        .find(|f| &f.name == field_name)
+                                        .and_then(|f| f.value.as_ref().map(|v| v as &Value))
+                                        .unwrap_or(&null_sentinel),
+                                )
+                            }
+                            // Null row or wrong type → null sentinel.
+                            _ => Some(&null_sentinel),
+                        })
+                        .collect();
+                    let child_arr = Self::build_typed_value_array(field_type, &child_values)?;
+                    child_arrays.push(child_arr);
+                }
+
+                let struct_fields: Fields = Fields::from(
+                    udt_fields
+                        .iter()
+                        .map(|(field_name, field_type)| {
+                            Field::new(
+                                field_name.as_str(),
+                                Self::cql_type_to_arrow_data_type(field_type),
+                                true,
+                            )
+                        })
+                        .collect::<Vec<_>>(),
+                );
+
+                let null_buffer = NullBuffer::from(null_bitmap);
+                Ok(Arc::new(StructArray::new(
+                    struct_fields,
+                    child_arrays,
+                    Some(null_buffer),
+                )))
+            }
+            CqlType::Custom(_) => {
                 let arr: Vec<Option<String>> = values
                     .iter()
                     .map(|opt| {
@@ -1006,8 +1250,13 @@ impl ParquetWriter {
                 }
                 CqlType::Inet => return Self::build_inet_utf8_array(col, rows),
                 CqlType::Counter => return Self::build_int64_array(col, rows),
-                // List, Set, and Map: use the recursive typed builder (Issues #676, #677).
-                CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) => {
+                // List, Set, Map, Tuple, and Udt: use the recursive typed builder
+                // (Issues #676, #677, #678).
+                CqlType::List(_)
+                | CqlType::Set(_)
+                | CqlType::Map(_, _)
+                | CqlType::Tuple(_)
+                | CqlType::Udt(_, _) => {
                     let column_values: Vec<Option<&Value>> =
                         rows.iter().map(|row| row.values.get(&col.name)).collect();
                     return Self::build_typed_value_array(cql_type, &column_values);

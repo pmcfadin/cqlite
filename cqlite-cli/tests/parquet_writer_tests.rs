@@ -3271,3 +3271,1112 @@ fn test_map_legacy_path_no_cql_type() {
     assert_eq!(keys.value(0), "a");
     assert_eq!(keys.value(1), "b");
 }
+
+// ============================================================================
+// Issue #678: Tuple and UDT as Arrow Struct
+//
+// tuple<A,B,...> → Arrow Struct(field_0:A, field_1:B, ...)
+// UDT            → Arrow Struct with the UDT's schema field names and types
+// frozen<tuple>  → transparent (same as non-frozen)
+// frozen<udt>    → transparent (same as non-frozen)
+// Missing/unset UDT fields → null in the child array
+// Zero-field tuple/UDT     → Utf8 fallback (Arrow Struct requires ≥1 field)
+// ============================================================================
+
+/// Build a ColumnInfo with `cql_type = Some(Tuple(...))`.
+fn tuple_col_with_cql_type(name: &str, cql_type: cqlite_core::schema::CqlType) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        data_type: cqlite_core::types::DataType::Tuple,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cql_type),
+    }
+}
+
+/// Build a ColumnInfo with `cql_type = Some(Udt(...))`.
+fn udt_col_with_cql_type(name: &str, cql_type: cqlite_core::schema::CqlType) -> ColumnInfo {
+    ColumnInfo {
+        name: name.to_string(),
+        data_type: cqlite_core::types::DataType::Udt,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cql_type),
+    }
+}
+
+// ----------------------------------------
+// tuple<int, text> schema: Arrow Struct(field_0:Int32, field_1:Utf8)
+// ----------------------------------------
+
+#[test]
+fn test_tuple_int_text_schema() {
+    use arrow::datatypes::{DataType as ArrowDataType, Fields};
+    use std::sync::Arc;
+
+    let col = tuple_col_with_cql_type(
+        "t",
+        cqlite_core::schema::CqlType::Tuple(vec![
+            cqlite_core::schema::CqlType::Int,
+            cqlite_core::schema::CqlType::Text,
+        ]),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Tuple(vec![Value::Integer(42), Value::Text("hello".to_string())]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+    let expected = ArrowDataType::Struct(Fields::from(vec![
+        Arc::new(arrow::datatypes::Field::new(
+            "field_0",
+            ArrowDataType::Int32,
+            true,
+        )),
+        Arc::new(arrow::datatypes::Field::new(
+            "field_1",
+            ArrowDataType::Utf8,
+            true,
+        )),
+    ]));
+    assert_eq!(field.data_type(), &expected);
+}
+
+// ----------------------------------------
+// tuple<int, text> roundtrip
+// ----------------------------------------
+
+#[test]
+fn test_tuple_int_text_roundtrip() {
+    use arrow::array::StructArray;
+
+    let col = tuple_col_with_cql_type(
+        "t",
+        cqlite_core::schema::CqlType::Tuple(vec![
+            cqlite_core::schema::CqlType::Int,
+            cqlite_core::schema::CqlType::Text,
+        ]),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Tuple(vec![Value::Integer(99), Value::Text("world".to_string())]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0));
+
+    // field_0: Int32
+    let f0 = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(f0.value(0), 99);
+
+    // field_1: Utf8
+    let f1 = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(f1.value(0), "world");
+}
+
+// ----------------------------------------
+// tuple<int, text, boolean> — three-element positional
+// ----------------------------------------
+
+#[test]
+fn test_tuple_three_field_roundtrip() {
+    use arrow::array::{BooleanArray, StructArray};
+
+    let col = tuple_col_with_cql_type(
+        "t3",
+        cqlite_core::schema::CqlType::Tuple(vec![
+            cqlite_core::schema::CqlType::Int,
+            cqlite_core::schema::CqlType::Text,
+            cqlite_core::schema::CqlType::Boolean,
+        ]),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Tuple(vec![
+            Value::Integer(7),
+            Value::Text("foo".to_string()),
+            Value::Boolean(true),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0));
+
+    let f0 = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(f0.value(0), 7);
+
+    let f1 = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(f1.value(0), "foo");
+
+    let f2 = struct_col
+        .column(2)
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap();
+    assert!(f2.value(0));
+}
+
+// ----------------------------------------
+// tuple null row
+// ----------------------------------------
+
+#[test]
+fn test_tuple_null_row() {
+    use arrow::array::StructArray;
+
+    let col = tuple_col_with_cql_type(
+        "t",
+        cqlite_core::schema::CqlType::Tuple(vec![
+            cqlite_core::schema::CqlType::Int,
+            cqlite_core::schema::CqlType::Text,
+        ]),
+    );
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(struct_col.is_null(0));
+}
+
+// ----------------------------------------
+// tuple multi-row with mixed null/value rows
+// ----------------------------------------
+
+#[test]
+fn test_tuple_multi_row_null_and_value() {
+    use arrow::array::StructArray;
+
+    let col = tuple_col_with_cql_type(
+        "t",
+        cqlite_core::schema::CqlType::Tuple(vec![
+            cqlite_core::schema::CqlType::Int,
+            cqlite_core::schema::CqlType::Text,
+        ]),
+    );
+    let result = single_col_multi_row_result(
+        col,
+        vec![
+            Value::Tuple(vec![Value::Integer(1), Value::Text("a".to_string())]),
+            Value::Null,
+            Value::Tuple(vec![Value::Integer(3), Value::Text("c".to_string())]),
+        ],
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert_eq!(struct_col.len(), 3);
+
+    // Row 0: valid
+    assert!(!struct_col.is_null(0));
+    let f0 = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(f0.value(0), 1);
+
+    // Row 1: null
+    assert!(struct_col.is_null(1));
+
+    // Row 2: valid
+    assert!(!struct_col.is_null(2));
+    let f1 = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(f1.value(2), "c");
+}
+
+// ----------------------------------------
+// tuple with shorter-than-schema value (trailing fields → null)
+// ----------------------------------------
+
+#[test]
+fn test_tuple_short_value_trailing_null() {
+    use arrow::array::StructArray;
+
+    // Schema: tuple<int, text, boolean>
+    // Value only has 2 elements — third position should be null.
+    let col = tuple_col_with_cql_type(
+        "t",
+        cqlite_core::schema::CqlType::Tuple(vec![
+            cqlite_core::schema::CqlType::Int,
+            cqlite_core::schema::CqlType::Text,
+            cqlite_core::schema::CqlType::Boolean,
+        ]),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Tuple(vec![Value::Integer(10), Value::Text("ok".to_string())]),
+        // No third element
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0));
+
+    // field_2 should be null (element missing from value)
+    let f2 = struct_col
+        .column(2)
+        .as_any()
+        .downcast_ref::<arrow::array::BooleanArray>()
+        .unwrap();
+    assert!(!f2.is_valid(0));
+}
+
+// ----------------------------------------
+// frozen<tuple<int, text>> — Frozen is transparent
+// ----------------------------------------
+
+#[test]
+fn test_frozen_tuple_schema_and_roundtrip() {
+    use arrow::array::StructArray;
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    // Column declared as frozen<tuple<int, text>>
+    let col = ColumnInfo {
+        name: "ft".to_string(),
+        data_type: cqlite_core::types::DataType::Frozen,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cqlite_core::schema::CqlType::Frozen(Box::new(
+            cqlite_core::schema::CqlType::Tuple(vec![
+                cqlite_core::schema::CqlType::Int,
+                cqlite_core::schema::CqlType::Text,
+            ]),
+        ))),
+    };
+
+    let result = single_cql_typed_result(
+        col,
+        Value::Tuple(vec![
+            Value::Integer(5),
+            Value::Text("frozen_ok".to_string()),
+        ]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema should be Struct (Frozen is transparent)
+    let schema = batch.schema();
+    let field = schema.field(0);
+    assert!(
+        matches!(field.data_type(), ArrowDataType::Struct(_)),
+        "Expected Struct for frozen<tuple>, got {:?}",
+        field.data_type()
+    );
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0));
+
+    let f0 = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(f0.value(0), 5);
+
+    let f1 = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(f1.value(0), "frozen_ok");
+}
+
+// ----------------------------------------
+// zero-field tuple → Utf8 fallback
+// ----------------------------------------
+
+#[test]
+fn test_tuple_zero_fields_fallback_to_utf8() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = tuple_col_with_cql_type("empty_tuple", cqlite_core::schema::CqlType::Tuple(vec![]));
+    let result = single_cql_typed_result(col, Value::Tuple(vec![]));
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema must be Utf8 (Arrow Struct requires ≥1 field)
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Utf8);
+}
+
+// ----------------------------------------
+// UDT schema: Arrow Struct with named fields
+// ----------------------------------------
+
+#[test]
+fn test_udt_schema_has_named_fields() {
+    use arrow::datatypes::{DataType as ArrowDataType, Fields};
+    use std::sync::Arc;
+
+    let col = udt_col_with_cql_type(
+        "addr",
+        cqlite_core::schema::CqlType::Udt(
+            "address".to_string(),
+            vec![
+                ("street".to_string(), cqlite_core::schema::CqlType::Text),
+                ("zip".to_string(), cqlite_core::schema::CqlType::Int),
+            ],
+        ),
+    );
+
+    let result = single_cql_typed_result(
+        col,
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "address".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "street".to_string(),
+                    value: Some(Value::Text("123 Main St".to_string())),
+                },
+                UdtField {
+                    name: "zip".to_string(),
+                    value: Some(Value::Integer(90210)),
+                },
+            ],
+        }),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let schema = batch.schema();
+    let field = schema.field(0);
+    let expected = ArrowDataType::Struct(Fields::from(vec![
+        Arc::new(arrow::datatypes::Field::new(
+            "street",
+            ArrowDataType::Utf8,
+            true,
+        )),
+        Arc::new(arrow::datatypes::Field::new(
+            "zip",
+            ArrowDataType::Int32,
+            true,
+        )),
+    ]));
+    assert_eq!(field.data_type(), &expected);
+}
+
+// ----------------------------------------
+// UDT roundtrip: field values correctly extracted
+// ----------------------------------------
+
+#[test]
+fn test_udt_roundtrip_named_fields() {
+    use arrow::array::StructArray;
+
+    let col = udt_col_with_cql_type(
+        "addr",
+        cqlite_core::schema::CqlType::Udt(
+            "address".to_string(),
+            vec![
+                ("street".to_string(), cqlite_core::schema::CqlType::Text),
+                ("zip".to_string(), cqlite_core::schema::CqlType::Int),
+            ],
+        ),
+    );
+
+    let result = single_cql_typed_result(
+        col,
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "address".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "street".to_string(),
+                    value: Some(Value::Text("456 Elm Ave".to_string())),
+                },
+                UdtField {
+                    name: "zip".to_string(),
+                    value: Some(Value::Integer(12345)),
+                },
+            ],
+        }),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0));
+
+    // "street" field
+    let street = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(street.value(0), "456 Elm Ave");
+
+    // "zip" field
+    let zip = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(zip.value(0), 12345);
+}
+
+// ----------------------------------------
+// UDT null row
+// ----------------------------------------
+
+#[test]
+fn test_udt_null_row() {
+    use arrow::array::StructArray;
+
+    let col = udt_col_with_cql_type(
+        "u",
+        cqlite_core::schema::CqlType::Udt(
+            "point".to_string(),
+            vec![
+                ("x".to_string(), cqlite_core::schema::CqlType::Int),
+                ("y".to_string(), cqlite_core::schema::CqlType::Int),
+            ],
+        ),
+    );
+    let result = single_cql_typed_result(col, Value::Null);
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(struct_col.is_null(0));
+}
+
+// ----------------------------------------
+// UDT unset (None) field → null in child array
+// ----------------------------------------
+
+#[test]
+fn test_udt_unset_field_is_null() {
+    use arrow::array::StructArray;
+
+    let col = udt_col_with_cql_type(
+        "u",
+        cqlite_core::schema::CqlType::Udt(
+            "person".to_string(),
+            vec![
+                ("name".to_string(), cqlite_core::schema::CqlType::Text),
+                ("age".to_string(), cqlite_core::schema::CqlType::Int),
+            ],
+        ),
+    );
+
+    // "age" field is unset (None value)
+    let result = single_cql_typed_result(
+        col,
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "person".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "name".to_string(),
+                    value: Some(Value::Text("Alice".to_string())),
+                },
+                UdtField {
+                    name: "age".to_string(),
+                    value: None, // unset
+                },
+            ],
+        }),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0)); // row itself is not null
+
+    // "name" is valid
+    let name_col = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert!(name_col.is_valid(0));
+    assert_eq!(name_col.value(0), "Alice");
+
+    // "age" is null (unset)
+    let age_col = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert!(!age_col.is_valid(0));
+}
+
+// ----------------------------------------
+// UDT missing field (field in schema not present in UdtValue.fields) → null
+// ----------------------------------------
+
+#[test]
+fn test_udt_missing_field_is_null() {
+    use arrow::array::StructArray;
+
+    // Schema defines "x" and "y", but value only provides "x"
+    let col = udt_col_with_cql_type(
+        "pt",
+        cqlite_core::schema::CqlType::Udt(
+            "point".to_string(),
+            vec![
+                ("x".to_string(), cqlite_core::schema::CqlType::Int),
+                ("y".to_string(), cqlite_core::schema::CqlType::Int),
+            ],
+        ),
+    );
+
+    let result = single_cql_typed_result(
+        col,
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "point".to_string(),
+            fields: vec![UdtField {
+                name: "x".to_string(),
+                value: Some(Value::Integer(10)),
+                // "y" field is entirely absent from the UdtValue
+            }],
+        }),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0));
+
+    // "x" is present
+    let x_col = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert!(x_col.is_valid(0));
+    assert_eq!(x_col.value(0), 10);
+
+    // "y" is absent from the UdtValue → null
+    let y_col = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert!(!y_col.is_valid(0));
+}
+
+// ----------------------------------------
+// UDT multi-row with mixed null/value rows
+// ----------------------------------------
+
+#[test]
+fn test_udt_multi_row_null_and_value() {
+    use arrow::array::StructArray;
+
+    let col = udt_col_with_cql_type(
+        "u",
+        cqlite_core::schema::CqlType::Udt(
+            "point".to_string(),
+            vec![
+                ("x".to_string(), cqlite_core::schema::CqlType::Int),
+                ("y".to_string(), cqlite_core::schema::CqlType::Int),
+            ],
+        ),
+    );
+    let result = single_col_multi_row_result(
+        col,
+        vec![
+            Value::Udt(UdtValue {
+                keyspace: "ks".to_string(),
+                type_name: "point".to_string(),
+                fields: vec![
+                    UdtField {
+                        name: "x".to_string(),
+                        value: Some(Value::Integer(1)),
+                    },
+                    UdtField {
+                        name: "y".to_string(),
+                        value: Some(Value::Integer(2)),
+                    },
+                ],
+            }),
+            Value::Null,
+            Value::Udt(UdtValue {
+                keyspace: "ks".to_string(),
+                type_name: "point".to_string(),
+                fields: vec![
+                    UdtField {
+                        name: "x".to_string(),
+                        value: Some(Value::Integer(10)),
+                    },
+                    UdtField {
+                        name: "y".to_string(),
+                        value: Some(Value::Integer(20)),
+                    },
+                ],
+            }),
+        ],
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert_eq!(struct_col.len(), 3);
+
+    // Row 0: valid
+    assert!(!struct_col.is_null(0));
+    let x_col = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(x_col.value(0), 1);
+    let y_col = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(y_col.value(0), 2);
+
+    // Row 1: null
+    assert!(struct_col.is_null(1));
+
+    // Row 2: valid
+    assert!(!struct_col.is_null(2));
+    assert_eq!(x_col.value(2), 10);
+    assert_eq!(y_col.value(2), 20);
+}
+
+// ----------------------------------------
+// frozen<udt> — Frozen wrapper is transparent
+// ----------------------------------------
+
+#[test]
+fn test_frozen_udt_schema_and_roundtrip() {
+    use arrow::array::StructArray;
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    // Column declared as frozen<udt<point>>
+    let col = ColumnInfo {
+        name: "fpt".to_string(),
+        data_type: cqlite_core::types::DataType::Frozen,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: Some(cqlite_core::schema::CqlType::Frozen(Box::new(
+            cqlite_core::schema::CqlType::Udt(
+                "point".to_string(),
+                vec![
+                    ("x".to_string(), cqlite_core::schema::CqlType::Int),
+                    ("y".to_string(), cqlite_core::schema::CqlType::Int),
+                ],
+            ),
+        ))),
+    };
+
+    let result = single_cql_typed_result(
+        col,
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "point".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "x".to_string(),
+                    value: Some(Value::Integer(3)),
+                },
+                UdtField {
+                    name: "y".to_string(),
+                    value: Some(Value::Integer(4)),
+                },
+            ],
+        }),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema should be Struct (Frozen is transparent)
+    let schema = batch.schema();
+    let field = schema.field(0);
+    assert!(
+        matches!(field.data_type(), ArrowDataType::Struct(_)),
+        "Expected Struct for frozen<udt>, got {:?}",
+        field.data_type()
+    );
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0));
+
+    let x_col = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(x_col.value(0), 3);
+
+    let y_col = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap();
+    assert_eq!(y_col.value(0), 4);
+}
+
+// ----------------------------------------
+// UDT with a collection field (list inside UDT)
+// ----------------------------------------
+
+#[test]
+fn test_udt_with_list_field_roundtrip() {
+    use arrow::array::StructArray;
+
+    // UDT schema: { name: text, tags: list<text> }
+    let inner_list =
+        cqlite_core::schema::CqlType::List(Box::new(cqlite_core::schema::CqlType::Text));
+    let col = udt_col_with_cql_type(
+        "user_info",
+        cqlite_core::schema::CqlType::Udt(
+            "user_info".to_string(),
+            vec![
+                ("name".to_string(), cqlite_core::schema::CqlType::Text),
+                ("tags".to_string(), inner_list),
+            ],
+        ),
+    );
+
+    let result = single_cql_typed_result(
+        col,
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "user_info".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "name".to_string(),
+                    value: Some(Value::Text("Bob".to_string())),
+                },
+                UdtField {
+                    name: "tags".to_string(),
+                    value: Some(Value::List(vec![
+                        Value::Text("admin".to_string()),
+                        Value::Text("editor".to_string()),
+                    ])),
+                },
+            ],
+        }),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    let struct_col = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<StructArray>()
+        .unwrap();
+    assert!(!struct_col.is_null(0));
+
+    // "name" field
+    let name_col = struct_col
+        .column(0)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+    assert_eq!(name_col.value(0), "Bob");
+
+    // "tags" field is a List<Utf8>
+    let tags_col = struct_col
+        .column(1)
+        .as_any()
+        .downcast_ref::<ListArray>()
+        .unwrap();
+    assert!(!tags_col.is_null(0));
+    let tags_elems = tags_col.value(0);
+    let tags_str = tags_elems.as_any().downcast_ref::<StringArray>().unwrap();
+    assert_eq!(tags_str.len(), 2);
+    assert_eq!(tags_str.value(0), "admin");
+    assert_eq!(tags_str.value(1), "editor");
+}
+
+// ----------------------------------------
+// zero-field UDT → Utf8 fallback
+// ----------------------------------------
+
+#[test]
+fn test_udt_zero_fields_fallback_to_utf8() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = udt_col_with_cql_type(
+        "empty_udt",
+        cqlite_core::schema::CqlType::Udt("empty".to_string(), vec![]),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "empty".to_string(),
+            fields: vec![],
+        }),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Schema must be Utf8 (Arrow Struct requires ≥1 field)
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Utf8);
+}
+
+// ----------------------------------------
+// tuple is not JSON-stringified when cql_type is present
+// ----------------------------------------
+
+#[test]
+fn test_tuple_is_not_stringified_with_cql_type() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    // Verify that when cql_type is Some(Tuple), the column is Struct not Utf8.
+    let col = tuple_col_with_cql_type(
+        "t",
+        cqlite_core::schema::CqlType::Tuple(vec![
+            cqlite_core::schema::CqlType::Int,
+            cqlite_core::schema::CqlType::Text,
+        ]),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Tuple(vec![Value::Integer(1), Value::Text("x".to_string())]),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Must be Struct, not Utf8 (no JSON stringification)
+    assert!(
+        matches!(
+            batch.schema().field(0).data_type(),
+            ArrowDataType::Struct(_)
+        ),
+        "Expected Struct, not Utf8: {:?}",
+        batch.schema().field(0).data_type()
+    );
+}
+
+// ----------------------------------------
+// UDT is not JSON-stringified when cql_type is present
+// ----------------------------------------
+
+#[test]
+fn test_udt_is_not_stringified_with_cql_type() {
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = udt_col_with_cql_type(
+        "u",
+        cqlite_core::schema::CqlType::Udt(
+            "point".to_string(),
+            vec![("x".to_string(), cqlite_core::schema::CqlType::Int)],
+        ),
+    );
+    let result = single_cql_typed_result(
+        col,
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "point".to_string(),
+            fields: vec![UdtField {
+                name: "x".to_string(),
+                value: Some(Value::Integer(42)),
+            }],
+        }),
+    );
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Must be Struct, not Utf8 (no JSON stringification)
+    assert!(
+        matches!(
+            batch.schema().field(0).data_type(),
+            ArrowDataType::Struct(_)
+        ),
+        "Expected Struct, not Utf8: {:?}",
+        batch.schema().field(0).data_type()
+    );
+}
+
+// ----------------------------------------
+// Legacy path (cql_type = None): tuple/UDT still stringify via build_string_array
+// ----------------------------------------
+
+#[test]
+fn test_tuple_legacy_path_no_cql_type() {
+    // Without cql_type, DataType::Tuple must still produce Utf8 (legacy fallback).
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = ColumnInfo {
+        name: "t".to_string(),
+        data_type: cqlite_core::types::DataType::Tuple,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: None, // No cql_type → legacy path
+    };
+
+    let mut values = HashMap::new();
+    values.insert(
+        "t".to_string(),
+        Value::Tuple(vec![Value::Integer(1), Value::Text("a".to_string())]),
+    );
+    let row = QueryRow {
+        values,
+        key: RowKey::new(vec![1]),
+        metadata: Default::default(),
+    };
+    let result = QueryResult {
+        rows: vec![row],
+        rows_affected: 0,
+        execution_time_ms: 0,
+        metadata: cqlite_core::query::QueryMetadata {
+            columns: vec![col],
+            ..Default::default()
+        },
+    };
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Legacy path: Utf8 (stringified)
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Utf8);
+}
+
+#[test]
+fn test_udt_legacy_path_no_cql_type() {
+    // Without cql_type, DataType::Udt must still produce Utf8 (legacy fallback).
+    use arrow::datatypes::DataType as ArrowDataType;
+
+    let col = ColumnInfo {
+        name: "u".to_string(),
+        data_type: cqlite_core::types::DataType::Udt,
+        nullable: true,
+        position: 0,
+        table_name: None,
+        cql_type: None, // No cql_type → legacy path
+    };
+
+    let mut values = HashMap::new();
+    values.insert(
+        "u".to_string(),
+        Value::Udt(UdtValue {
+            keyspace: "ks".to_string(),
+            type_name: "point".to_string(),
+            fields: vec![UdtField {
+                name: "x".to_string(),
+                value: Some(Value::Integer(7)),
+            }],
+        }),
+    );
+    let row = QueryRow {
+        values,
+        key: RowKey::new(vec![1]),
+        metadata: Default::default(),
+    };
+    let result = QueryResult {
+        rows: vec![row],
+        rows_affected: 0,
+        execution_time_ms: 0,
+        metadata: cqlite_core::query::QueryMetadata {
+            columns: vec![col],
+            ..Default::default()
+        },
+    };
+
+    let bytes = ParquetWriter::write(&result, &default_config()).unwrap();
+    let batch = read_parquet_back(&bytes).unwrap();
+
+    // Legacy path: Utf8 (stringified)
+    assert_eq!(batch.schema().field(0).data_type(), &ArrowDataType::Utf8);
+}
