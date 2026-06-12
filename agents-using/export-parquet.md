@@ -60,20 +60,29 @@ cqlite \
 
 ## Type fidelity
 
-| CQL type | Parquet logical type |
-|----------|---------------------|
-| `text`, `varchar`, `ascii` | `STRING` |
-| `int`, `smallint`, `tinyint` | `INT32` / `INT16` / `INT8` |
-| `bigint`, `counter` | `INT64` |
-| `float` | `FLOAT` |
-| `double` | `DOUBLE` |
-| `boolean` | `BOOLEAN` |
-| `uuid`, `timeuuid` | `STRING` (UUID format) |
-| `timestamp` | `INT64` (microseconds since epoch) |
-| `date` | `INT32` (days since epoch) |
-| `blob` | `BYTE_ARRAY` |
-| `list<T>`, `set<T>` | `LIST` group |
-| `map<K,V>` | `MAP` group |
+When the query runs against a schema (the normal case), columns export with high-fidelity Arrow/Parquet types, recursively for nested types (epic #673):
+
+| CQL type | Arrow/Parquet type |
+|----------|--------------------|
+| `text`, `varchar`, `ascii` | `Utf8` (`STRING`) |
+| `int`, `smallint`, `tinyint` | `Int32` / `Int16` / `Int8` |
+| `bigint`, `counter` | `Int64` |
+| `float` / `double` | `Float32` / `Float64` |
+| `boolean` | `Boolean` |
+| `uuid`, `timeuuid` | `FixedSizeBinary(16)` with the `arrow.uuid` extension annotation |
+| `timestamp` | `Timestamp(Millisecond, UTC)` |
+| `date` | `Date32` |
+| `time` | `Time64(Nanosecond)` |
+| `decimal` | `Decimal128(38, 9)` (checked rescale; overflow is an error) |
+| `varint` | `Decimal128(38, 0)` |
+| `duration` | `Utf8` (CQL text form; Parquet cannot encode `Interval(MonthDayNano)`) |
+| `inet` | `Utf8` (canonical text) |
+| `blob` | `Binary` (`BYTE_ARRAY`) |
+| `list<T>`, `set<T>` | `List<T>` with typed elements |
+| `map<K,V>` | `Map<K, V>` with typed keys and values |
+| `tuple<...>` | `Struct` with positional `field_N` children |
+| UDT | `Struct` with the UDT's field names |
+| `frozen<T>` | Same as `T` (transparent) |
 
 See [Output Formats](/cqlite/user-docs/output-formats/) for the full type map and precision notes.
 

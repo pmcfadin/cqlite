@@ -16,7 +16,7 @@ about what is still in progress.
 
 | Page | What it covers |
 |------|----------------|
-| [Lakehouse projections with the Cassandra Sidecar](/cqlite/user-docs/use-cases/sidecar-lakehouse/) | SSTable-to-Parquet pipeline architecture, the delta-semantics caveat, and what epics #673/#682/#696 unlock |
+| [Lakehouse projections with the Cassandra Sidecar](/cqlite/user-docs/use-cases/sidecar-lakehouse/) | SSTable-to-Parquet pipeline architecture, the delta-semantics caveat, the high-fidelity type mapping, and what epics #682/#696 unlock |
 | [Python: data science and ETL](/cqlite/user-docs/use-cases/python-data-science/) | Offline analytics on snapshots and backups without a cluster; pandas and notebook workflows |
 | [Node.js: services and tooling](/cqlite/user-docs/use-cases/nodejs-services/) | Data inspection services, ops dashboards, `executeNative` + streaming patterns |
 | [Operational scenarios](/cqlite/user-docs/use-cases/operational/) | Migration validation, test fixtures from production data, backup and snapshot inspection |

@@ -1447,20 +1447,29 @@ cqlite \
 
 [Section titled “Type fidelity”](#type-fidelity)
 
-| CQL type                     | Parquet logical type               |
-| ---------------------------- | ---------------------------------- |
-| `text`, `varchar`, `ascii`   | `STRING`                           |
-| `int`, `smallint`, `tinyint` | `INT32` / `INT16` / `INT8`         |
-| `bigint`, `counter`          | `INT64`                            |
-| `float`                      | `FLOAT`                            |
-| `double`                     | `DOUBLE`                           |
-| `boolean`                    | `BOOLEAN`                          |
-| `uuid`, `timeuuid`           | `STRING` (UUID format)             |
-| `timestamp`                  | `INT64` (microseconds since epoch) |
-| `date`                       | `INT32` (days since epoch)         |
-| `blob`                       | `BYTE_ARRAY`                       |
-| `list<T>`, `set<T>`          | `LIST` group                       |
-| `map<K,V>`                   | `MAP` group                        |
+When the query runs against a schema (the normal case), columns export with high-fidelity Arrow/Parquet types, recursively for nested types (epic #673):
+
+| CQL type                     | Arrow/Parquet type                                                     |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `text`, `varchar`, `ascii`   | `Utf8` (`STRING`)                                                      |
+| `int`, `smallint`, `tinyint` | `Int32` / `Int16` / `Int8`                                             |
+| `bigint`, `counter`          | `Int64`                                                                |
+| `float` / `double`           | `Float32` / `Float64`                                                  |
+| `boolean`                    | `Boolean`                                                              |
+| `uuid`, `timeuuid`           | `FixedSizeBinary(16)` with the `arrow.uuid` extension annotation       |
+| `timestamp`                  | `Timestamp(Millisecond, UTC)`                                          |
+| `date`                       | `Date32`                                                               |
+| `time`                       | `Time64(Nanosecond)`                                                   |
+| `decimal`                    | `Decimal128(38, 9)` (checked rescale; overflow is an error)            |
+| `varint`                     | `Decimal128(38, 0)`                                                    |
+| `duration`                   | `Utf8` (CQL text form; Parquet cannot encode `Interval(MonthDayNano)`) |
+| `inet`                       | `Utf8` (canonical text)                                                |
+| `blob`                       | `Binary` (`BYTE_ARRAY`)                                                |
+| `list<T>`, `set<T>`          | `List<T>` with typed elements                                          |
+| `map<K,V>`                   | `Map<K, V>` with typed keys and values                                 |
+| `tuple<...>`                 | `Struct` with positional `field_N` children                            |
+| UDT                          | `Struct` with the UDT’s field names                                    |
+| `frozen<T>`                  | Same as `T` (transparent)                                              |
 
 See [Output Formats](/cqlite/user-docs/output-formats/) for the full type map and precision notes.
 
@@ -12297,34 +12306,40 @@ cqlite \
 
 If you specify `--out parquet` without `--output`, CQLite exits with an error.
 
-### Current type-fidelity caveats
+### Type mapping
 
-[Section titled “Current type-fidelity caveats”](#current-type-fidelity-caveats)
+[Section titled “Type mapping”](#type-mapping)
 
-**CQLite’s Parquet output has known type-mapping limitations tracked in [epic #673](https://github.com/pmcfadin/cqlite/issues/673).** The issues affect complex and high-precision types:
+**CQLite’s Parquet output preserves nested and high-precision CQL types** ([epic #673](https://github.com/pmcfadin/cqlite/issues/673)). When a schema is provided (the normal case — CQLite requires one to decode SSTables), query results carry the authoritative schema `CqlType` and the writer builds a faithful Arrow schema, recursively:
 
-| CQL type            | Current Parquet representation         | Planned (epic #673)                     |
-| ------------------- | -------------------------------------- | --------------------------------------- |
-| `list<T>`, `set<T>` | `List<Utf8>` (string elements)         | `List<T>` with typed elements           |
-| `map<K,V>`          | `Map<Utf8, Utf8>` (string keys/values) | `Map<K, V>` with typed keys/values      |
-| `tuple<...>`        | Single JSON string column              | Arrow `Struct` with positional fields   |
-| UDT                 | Single JSON string column              | Arrow `Struct` with named fields        |
-| `frozen<...>`       | Same as non-frozen                     | Transparent (no change needed)          |
-| `date`              | `Utf8` string                          | `Date32`                                |
-| `time`              | `Utf8` string                          | `Time64(Nanosecond)`                    |
-| `decimal`           | `Utf8` string                          | `Decimal128`                            |
-| `varint`            | `Utf8` string                          | `LargeBinary` or `Decimal128`           |
-| `duration`          | `Utf8` string                          | `Interval(MonthDayNano)`                |
-| `inet`              | `Utf8` string                          | `Utf8` (no change planned)              |
-| `uuid`              | `Utf8` string                          | `FixedSizeBinary(16)` + UUID annotation |
-| `timestamp`         | `Utf8` string                          | `Timestamp(Microsecond, UTC)`           |
-| `blob`              | `Utf8` hex string                      | `LargeBinary`                           |
+| CQL type                                  | Arrow/Parquet type                                        | Notes                                                                                                                                              |
+| ----------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `boolean`                                 | `Boolean`                                                 |                                                                                                                                                    |
+| `tinyint` / `smallint` / `int` / `bigint` | `Int8` / `Int16` / `Int32` / `Int64`                      |                                                                                                                                                    |
+| `float` / `double`                        | `Float32` / `Float64`                                     |                                                                                                                                                    |
+| `text` / `varchar` / `ascii`              | `Utf8`                                                    |                                                                                                                                                    |
+| `blob`                                    | `Binary`                                                  |                                                                                                                                                    |
+| `timestamp`                               | `Timestamp(Millisecond, UTC)`                             |                                                                                                                                                    |
+| `date`                                    | `Date32`                                                  | Signed days since 1970-01-01                                                                                                                       |
+| `time`                                    | `Time64(Nanosecond)`                                      | Nanoseconds since midnight                                                                                                                         |
+| `decimal`                                 | `Decimal128(38, 9)`                                       | Fixed column scale of 9; values are rescaled with checked arithmetic; overflow or precision > 38 is a deterministic error, never silent truncation |
+| `varint`                                  | `Decimal128(38, 0)`                                       | Values longer than 38 digits are a deterministic error                                                                                             |
+| `duration`                                | `Utf8` (CQL text form, e.g. `"1mo2d3ns"`)                 | The `parquet` crate (v53) cannot write Arrow `Interval(MonthDayNano)`; text fallback until upstream support lands                                  |
+| `uuid` / `timeuuid`                       | `FixedSizeBinary(16)` + `ARROW:extension:name=arrow.uuid` | Carries the canonical Arrow UUID extension annotation                                                                                              |
+| `inet`                                    | `Utf8` (canonical text, e.g. `"192.168.1.1"`)             | Deliberate: no standard Arrow inet type; text is most portable                                                                                     |
+| `counter`                                 | `Int64`                                                   |                                                                                                                                                    |
+| `list<T>`                                 | `List<T>`                                                 | Element type mapped recursively                                                                                                                    |
+| `set<T>`                                  | `List<T>`                                                 | Arrow has no set type; exported as `List`                                                                                                          |
+| `map<K,V>`                                | `Map<K, V>`                                               | Typed keys (non-nullable) and values (nullable), mapped recursively                                                                                |
+| `tuple<A,B,…>`                            | `Struct(field_0, field_1, …)`                             | Positional field names, per-position types                                                                                                         |
+| UDT                                       | `Struct` with the UDT’s field names                       | Missing/unset fields become null                                                                                                                   |
+| `frozen<T>`                               | Same as `T`                                               | Fully transparent at every nesting level                                                                                                           |
 
-**Scalar scalars that currently work correctly:** `int`, `smallint`, `tinyint` → `Int32`/`Int16`/`Int8`; `bigint`, `counter` → `Int64`; `float` → `Float32`; `double` → `Float64`; `boolean` → `Boolean`; `text`, `varchar`, `ascii` → `Utf8`.
+Nesting composes: `list<frozen<list<int>>>` exports as `List<List<Int32>>`, `map<text, frozen<list<int>>>` as `Map<Utf8, List<Int32>>`, and a UDT containing a collection field exports as a `Struct` with a typed `List` child.
 
-**Consequence for downstream consumers:** Predicate pushdown on date/time/decimal columns, or columnar processing of list/map/UDT columns, requires either the improvements from epic #673 or a post-read cast in the consuming tool (e.g., DuckDB `CAST`).
+Null and empty collections are preserved distinctly, as are null elements inside collections. The streaming Parquet writer produces the same schema and values as the batch writer.
 
-**Root cause (per epic #673):** `ColumnInfo.data_type` carries an unparameterized flat enum. The fully-parameterized `CqlType` from the schema layer is not yet threaded through to query results, so the Parquet writer cannot construct the proper Arrow schema for parameterized types. Epic #673 tracks the full fix.
+**Legacy fallback:** if a column has no schema-sourced `CqlType` (no schema available), the writer falls back to the older flat mapping, where collections and UDTs are stringified.
 
 ### Reading Parquet output
 
@@ -12355,13 +12370,13 @@ parquet-tools show results.parquet
 
 [Section titled “Choosing a format”](#choosing-a-format)
 
-| Use case                                         | Recommended format                          |
-| ------------------------------------------------ | ------------------------------------------- |
-| Human inspection                                 | `table` (default)                           |
-| Scripting / API integration                      | `json`                                      |
-| Spreadsheet / pandas import                      | `csv`                                       |
-| Analytics / Spark / DuckDB                       | `parquet` (with awareness of caveats above) |
-| Lakehouse / columnar predicates on complex types | Wait for epic #673 or cast in the consumer  |
+| Use case                                         | Recommended format                                           |
+| ------------------------------------------------ | ------------------------------------------------------------ |
+| Human inspection                                 | `table` (default)                                            |
+| Scripting / API integration                      | `json`                                                       |
+| Spreadsheet / pandas import                      | `csv`                                                        |
+| Analytics / Spark / DuckDB                       | `parquet`                                                    |
+| Lakehouse / columnar predicates on complex types | `parquet` (typed lists, maps, and structs — see table above) |
 
 **See also**: [CLI Reference](/cqlite/user-docs/cli-reference/) for `--out`, `--format`, and `CQLITE_OUT` flag details. For agent recipes that use these formats, see [For Agents: Using CQLite](/cqlite/agents-using/).
 
@@ -13139,12 +13154,12 @@ These pages explain *when* and *why* to reach for CQLite, not just *how* to use 
 
 [Section titled “Pages in this section”](#pages-in-this-section)
 
-| Page                                                                                               | What it covers                                                                                             |
-| -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| [Lakehouse projections with the Cassandra Sidecar](/cqlite/user-docs/use-cases/sidecar-lakehouse/) | SSTable-to-Parquet pipeline architecture, the delta-semantics caveat, and what epics #673/#682/#696 unlock |
-| [Python: data science and ETL](/cqlite/user-docs/use-cases/python-data-science/)                   | Offline analytics on snapshots and backups without a cluster; pandas and notebook workflows                |
-| [Node.js: services and tooling](/cqlite/user-docs/use-cases/nodejs-services/)                      | Data inspection services, ops dashboards, `executeNative` + streaming patterns                             |
-| [Operational scenarios](/cqlite/user-docs/use-cases/operational/)                                  | Migration validation, test fixtures from production data, backup and snapshot inspection                   |
+| Page                                                                                               | What it covers                                                                                                                        |
+| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| [Lakehouse projections with the Cassandra Sidecar](/cqlite/user-docs/use-cases/sidecar-lakehouse/) | SSTable-to-Parquet pipeline architecture, the delta-semantics caveat, the high-fidelity type mapping, and what epics #682/#696 unlock |
+| [Python: data science and ETL](/cqlite/user-docs/use-cases/python-data-science/)                   | Offline analytics on snapshots and backups without a cluster; pandas and notebook workflows                                           |
+| [Node.js: services and tooling](/cqlite/user-docs/use-cases/nodejs-services/)                      | Data inspection services, ops dashboards, `executeNative` + streaming patterns                                                        |
+| [Operational scenarios](/cqlite/user-docs/use-cases/operational/)                                  | Migration validation, test fixtures from production data, backup and snapshot inspection                                              |
 
 ## Common thread
 
@@ -13466,8 +13481,7 @@ for (const col of result.columns as ColumnInfo[]) {
 [Section titled “What you cannot do (yet)”](#what-you-cannot-do-yet)
 
 * **Write back to SSTables from Node.js.** The write API is in the core library but not yet exposed in the Node.js bindings.
-* **Export Parquet directly from Node.js.** Use the CLI `--out parquet` flag for now. [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*.
-* **Collection type fidelity in Parquet export.** Lists and maps are stringified. [Epic #673](https://github.com/pmcfadin/cqlite/issues/673) tracks this *(in progress)*.
+* **Export Parquet directly from Node.js.** Use the CLI `--out parquet` flag for now. [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*. The CLI’s Parquet output preserves nested and high-precision types — typed lists, maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Further reading
 
@@ -14029,8 +14043,7 @@ df["event_type"].value_counts().plot(kind="bar")
 [Section titled “What you cannot do (yet)”](#what-you-cannot-do-yet)
 
 * **Write back to SSTables from Python.** The write API is in the core library but not yet exposed in the Python bindings. Tracked in the write support roadmap.
-* **Export Parquet directly from Python.** Use the CLI `--out parquet` flag for now. [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*.
-* **Collection type fidelity in Parquet export.** Lists and maps are currently stringified in Parquet output. [Epic #673](https://github.com/pmcfadin/cqlite/issues/673) tracks this *(in progress)*.
+* **Export Parquet directly from Python.** Use the CLI `--out parquet` flag for now. [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*. The CLI’s Parquet output preserves nested and high-precision types — typed lists, maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Further reading
 
@@ -14145,39 +14158,37 @@ This is inherent to Cassandra’s storage model — not a CQLite defect. Four pr
 
 **Current-snapshot projection.** To reflect current table state, point `open_with_discovered_sstables()` at *all* live SSTables for the table so CQLite’s read path performs the LWW merge, then export. Correct, but re-reads everything on each flush.
 
-## Type mapping fidelity (current state)
+## Type mapping fidelity
 
-[Section titled “Type mapping fidelity (current state)”](#type-mapping-fidelity-current-state)
+[Section titled “Type mapping fidelity”](#type-mapping-fidelity)
 
-Scalars map cleanly to Parquet. Collection and complex types are **currently lossy**:
+The type mapping is **analytics-grade for schema-aware queries** ([epic #673](https://github.com/pmcfadin/cqlite/issues/673)): query results carry the authoritative schema `CqlType`, and the Parquet writer maps it recursively to a faithful Arrow schema.
 
-| CQL type                                 | Arrow/Parquet                      | Fidelity                                          |
-| ---------------------------------------- | ---------------------------------- | ------------------------------------------------- |
-| boolean, tinyint … bigint, float, double | Boolean, Int8/16/32/64, Float32/64 | Clean                                             |
-| text / varchar / ascii                   | Utf8                               | Clean                                             |
-| blob                                     | Binary                             | Clean                                             |
-| timestamp                                | Timestamp(ms, UTC)                 | Clean                                             |
-| uuid / timeuuid                          | FixedSizeBinary(16)                | Raw bytes (no logical UUID annotation)            |
-| date                                     | Int32                              | Days-since-epoch as plain int, not Arrow `Date32` |
-| time                                     | Int64                              | Nanos as plain int, not Arrow `Time64`            |
-| list / set                               | `List<Utf8>`                       | **Elements stringified**                          |
-| map                                      | `Map<Utf8, Utf8>`                  | **Keys and values stringified**                   |
-| tuple / UDT / frozen                     | Utf8                               | **Whole value serialized to one string**          |
-| varint, decimal, inet, duration          | string fallback                    | Lossy                                             |
+| CQL type                                 | Arrow/Parquet                                | Fidelity                                                                 |
+| ---------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------ |
+| boolean, tinyint … bigint, float, double | Boolean, Int8/16/32/64, Float32/64           | Clean                                                                    |
+| text / varchar / ascii                   | Utf8                                         | Clean                                                                    |
+| blob                                     | Binary                                       | Clean                                                                    |
+| timestamp                                | Timestamp(ms, UTC)                           | Clean                                                                    |
+| uuid / timeuuid                          | FixedSizeBinary(16) + `arrow.uuid` extension | Clean (UUID logical annotation)                                          |
+| date                                     | `Date32`                                     | Clean                                                                    |
+| time                                     | `Time64(Nanosecond)`                         | Clean                                                                    |
+| decimal                                  | `Decimal128(38, 9)`                          | Fixed column scale 9; checked rescale, overflow errors deterministically |
+| varint                                   | `Decimal128(38, 0)`                          | Values > 38 digits error deterministically                               |
+| list\<T> / set\<T>                       | `List<T>`                                    | Typed elements, recursive (sets export as List — Arrow has no set type)  |
+| map\<K,V>                                | `Map<K, V>`                                  | Typed keys (non-null) and values, recursive                              |
+| tuple / UDT                              | `Struct`                                     | Positional `field_N` / schema field names                                |
+| frozen\<T>                               | Same as T                                    | Transparent at every nesting level                                       |
+| inet                                     | Utf8 (canonical text)                        | Deliberate: no standard Arrow inet type                                  |
+| duration                                 | Utf8 (CQL text form)                         | `parquet` crate v53 cannot write `Interval(MonthDayNano)`                |
 
-Tables of scalars (IDs, metrics, timestamps, text) project faithfully. The moment collections, UDTs, or `decimal`/`varint` appear, nested structure and element typing collapse to strings, which defeats columnar predicate pushdown in downstream consumers.
+Collections, UDTs, and high-precision scalars all support columnar predicate pushdown in downstream consumers (Trino, Spark, DuckDB). The batch and streaming writers produce identical schemas and values. See [Output Formats](/cqlite/user-docs/output-formats/) for the full table and notes.
 
-This is the single highest-value engineering investment for the lakehouse use case.
+## What epics #682 and #696 unlock
 
-## What epics #673, #682, and #696 unlock
+[Section titled “What epics #682 and #696 unlock”](#what-epics-682-and-696-unlock)
 
-[Section titled “What epics #673, #682, and #696 unlock”](#what-epics-673-682-and-696-unlock)
-
-These three in-progress epics complete the lakehouse story:
-
-**[Epic #673: Parquet/Arrow type-mapping fidelity](https://github.com/pmcfadin/cqlite/issues/673)** *(in progress)*
-
-Upgrades `ColumnInfo` to carry the authoritative schema `CqlType`, maps `list<T>` / `set<T>` as `List<T>` with typed elements, `map<K,V>` as Arrow `Map<K,V>`, and UDTs / tuples as Arrow `Struct`. Scalar types gain `Date32`, `Time64(ns)`, `Decimal128`, and UUID annotations. Without this epic, collection columns cannot support predicate pushdown in Trino, Spark, or DuckDB.
+These in-progress epics complete the lakehouse story:
 
 **[Epic #682: Lift Parquet writer into cqlite-core](https://github.com/pmcfadin/cqlite/issues/682)** *(in progress)*
 
@@ -14199,7 +14210,7 @@ CQLite requires the CQL schema to decode an SSTable (no-heuristics mandate, issu
 
 TiDB’s TiFlash is instructive: it is a Raft learner that receives every committed write in real-time, providing a strongly consistent, transactionally-consistent columnar replica. TiCDC (the structural analog to this pipeline) tails the ordered row-change log and emits Kafka or cloud-storage changefeeds with explicit insert/update/delete events and commit timestamps.
 
-Our approach’s distinct value is **open, lake-native columnar output from Cassandra with no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered committed log — its source of truth is independently-flushed, LWW-merged SSTables — so any columnar projection is inherently a delta-reconciliation problem. Epics #673, #682, and #696 each address one part of that problem.
+Our approach’s distinct value is **open, lake-native columnar output from Cassandra with no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered committed log — its source of truth is independently-flushed, LWW-merged SSTables — so any columnar projection is inherently a delta-reconciliation problem. Epic #673 (delivered) addressed type fidelity; epics #682 and #696 each address one remaining part of that problem.
 
 ## Recommendations
 
@@ -14209,8 +14220,7 @@ Our approach’s distinct value is **open, lake-native columnar output from Cass
 2. **Land in a table format (Iceberg or Delta), not bare Parquet files.** Those provide snapshot isolation, compaction, and merge-on-read that otherwise you must build by hand.
 3. **Preserve `writetime` and represent tombstones** (`__writetime` / `__deleted` columns) so projections are reconcilable. Without this, a union of per-flush Parquet is silently wrong.
 4. **Prefer commitlog CDC over raw flush events** when correctness matters.
-5. **Upgrade the Arrow type mapping** (epic #673) before calling the pipeline analytics-grade.
-6. **Lift the Parquet writer into `cqlite-core`** (epic #682) if you want embeddable non-CLI projection.
+5. **Lift the Parquet writer into `cqlite-core`** (epic #682) if you want embeddable non-CLI projection.
 
 <!-- TODO(W4): link to CLI reference when merged -->
 

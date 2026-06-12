@@ -219,10 +219,9 @@ from multiple threads (each with its own iterator).</p>
 <li><strong>Write back to SSTables from Python.</strong> The write API is in the core library but not
 yet exposed in the Python bindings. Tracked in the write support roadmap.</li>
 <li><strong>Export Parquet directly from Python.</strong> Use the CLI <code dir="auto">--out parquet</code> flag for now.
-<a href="https://github.com/pmcfadin/cqlite/issues/682">Epic #682</a> tracks this <em>(in progress)</em>.</li>
-<li><strong>Collection type fidelity in Parquet export.</strong> Lists and maps are currently stringified
-in Parquet output. <a href="https://github.com/pmcfadin/cqlite/issues/673">Epic #673</a> tracks
-this <em>(in progress)</em>.</li>
+<a href="https://github.com/pmcfadin/cqlite/issues/682">Epic #682</a> tracks this <em>(in progress)</em>.
+The CLI’s Parquet output preserves nested and high-precision types — typed lists,
+maps, and structs — see <a href="/cqlite/user-docs/output-formats/">Output Formats</a>.</li>
 </ul>
 <div class="sl-heading-wrapper level-h2"><h2 id="further-reading">Further reading</h2><a class="sl-anchor-link" href="#further-reading"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Further reading”</span></a></div>
 <ul>
