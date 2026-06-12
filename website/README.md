@@ -102,6 +102,77 @@ website/
 └── node_modules/             # Dependencies (gitignored)
 ```
 
+## Recipe smoke tests (SMOKE marker convention)
+
+CLI commands in the `agents-using/` section are extracted and executed by
+`scripts/docs-examples-smoke.sh`. This mirrors the sstabledump parity philosophy:
+a documented example that drifts from real behavior fails the CI build.
+
+### Marking a command for smoke testing
+
+Wrap any CLI `bash` code block with HTML comment markers:
+
+```markdown
+<!-- SMOKE:CLI -->
+```bash
+cqlite \
+  --schema test-data/schemas/basic-types.cql \
+  --data-dir test-data/datasets/sstables \
+  --query "SELECT id, name FROM test_basic.simple_table LIMIT 3" \
+  --out json
+```
+<!-- /SMOKE:CLI -->
+```
+
+### Available markers
+
+| Marker | Meaning |
+|--------|---------|
+| `<!-- SMOKE:CLI -->` | CLI command; expected exit 0 |
+| `<!-- SMOKE:CLI:exit=N -->` | CLI command; expected exit N (e.g. `exit=3` for schema errors) |
+| `<!-- SMOKE:CLI:write -->` | CLI command requiring write-support binary; expected exit 0 |
+| `<!-- SMOKE:PYTHON -->` | Python snippet; skipped in CI unless `--with-bindings` |
+| `<!-- SMOKE:NODE -->` | Node.js snippet; skipped in CI unless `--with-bindings` |
+| `<!-- /SMOKE:CLI -->` | End of any SMOKE block |
+
+### Path substitution
+
+The smoke script substitutes these paths automatically:
+
+| In recipe | Replaced with |
+|-----------|---------------|
+| `test-data/schemas/` | Absolute path to `test-data/schemas/` |
+| `test-data/datasets/sstables` | `$CQLITE_DATASETS_ROOT/sstables` |
+| `/tmp/cqlite-write` | Temporary write directory |
+| `/tmp/cqlite-export` | Temporary export directory |
+
+### Running locally
+
+```bash
+# CLI recipes only (fast)
+bash scripts/docs-examples-smoke.sh
+
+# Single recipe
+bash scripts/docs-examples-smoke.sh --recipe sstable-to-json.md
+
+# Include Python + Node.js (requires bindings built)
+bash scripts/docs-examples-smoke.sh --with-bindings
+
+# Via docs-site-check.sh (also runs site build + link check)
+bash scripts/docs-site-check.sh --with-smoke
+```
+
+### CI integration
+
+The smoke job in `.github/workflows/docs-site.yml` runs on every PR or push that
+touches `website/**`, `docs/**`, or the smoke scripts. The deploy job depends on
+both `build` and `smoke` passing.
+
+**Python and Node.js recipes are NOT run in CI** by default — the bindings require
+a separate multi-platform build step that is out of scope for the docs workflow.
+The SMOKE:PYTHON and SMOKE:NODE markers are preserved for local use with `--with-bindings`.
+This is a documented deviation from full parity; see the smoke coverage table in the PR.
+
 ## Deployment
 
 The site is deployed by `.github/workflows/docs-site.yml`:
