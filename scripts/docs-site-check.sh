@@ -3,8 +3,10 @@
 #
 # Runs:
 #   1. npm ci (install pinned deps)
-#   2. npm run build (Astro build + starlight-links-validator internal link check)
-#   3. [optional] docs-examples-smoke.sh (CLI recipe smoke tests)
+#   2. npm run build (Astro build + starlight-links-validator internal link check
+#                    + emit-raw-markdown.mjs postbuild)
+#   3. Agent-plumbing validation (llms.txt coverage + raw .md endpoint coverage)
+#   4. [optional] docs-examples-smoke.sh (CLI recipe smoke tests)
 #
 # Emits a machine-checkable PASS/FAIL summary block at the end (modelled on
 # scripts/agent-gate.sh). Exit code 0 = all checks passed; non-zero = failure.
@@ -103,14 +105,20 @@ banner "Step 1: Install dependencies"
     fi
 )
 
-banner "Step 2: Build site (includes internal link validation)"
+banner "Step 2: Build site (includes internal link validation + raw markdown emit)"
 (
     cd "$WEBSITE_DIR"
     run_check "npm run build" npm run build
 )
 
+banner "Step 3: Agent-plumbing validation (llms.txt + raw .md endpoints)"
+(
+    cd "$WEBSITE_DIR"
+    run_check "validate-agent-plumbing" node scripts/validate-agent-plumbing.mjs
+)
+
 if [[ "$WITH_SMOKE" == "1" ]]; then
-    banner "Step 3: Example smoke tests (CLI recipes)"
+    banner "Step 4: Example smoke tests (CLI recipes)"
     run_check "docs-examples-smoke" bash "$SCRIPT_DIR/docs-examples-smoke.sh"
 fi
 
