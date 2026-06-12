@@ -1,6 +1,6 @@
 ---
 title: "For Agents: Using CQLite"
-description: Task-oriented recipes for AI agents integrating with or automating CQLite.
+description: Task-oriented recipes for AI agents integrating with or automating CQLite. Every command was run against the real cassandra5-small-full-v3.1 test datasets.
 sidebar:
   label: Overview
   order: 0
@@ -8,50 +8,92 @@ sidebar:
 
 # For Agents: Using CQLite
 
-This section provides terse, copy-pasteable, machine-verifiable recipes for AI
-agents that integrate with CQLite — as a CLI tool, Rust library, Python package,
-or Node.js module.
+Terse, copy-pasteable, machine-verifiable recipes for agents that integrate with CQLite as a CLI tool, Python package, or Node.js module.
 
-> **Content arriving in W6.** This placeholder marks the section structure.
-> Full recipe pages — each covering one task with exact commands, expected output
-> shapes, exit codes, and failure modes — will be published as part of issue W6
-> in epic #733.
+**All commands on these pages were run against the real `cassandra5-small-full-v3.1` test datasets.** Expected outputs are trimmed but structurally accurate.
 
-## What you'll find here (W6 onwards)
+## Recipes
 
-Each page covers exactly one task:
+| Page | Task | Interface |
+|------|------|-----------|
+| [SSTable to JSON one-liner](/cqlite/agents-using/sstable-to-json/) | Dump a table as a JSON array | CLI |
+| [Query from Python](/cqlite/agents-using/query-python/) | Open a database and run SELECT from Python | Python |
+| [Query from Node.js](/cqlite/agents-using/query-nodejs/) | Open a database and run SELECT from Node.js | Node.js |
+| [Export to Parquet](/cqlite/agents-using/export-parquet/) | Write query results to a Parquet file | CLI |
+| [Export to CSV](/cqlite/agents-using/export-csv/) | Write query results to a CSV file | CLI |
+| [Inspect schema](/cqlite/agents-using/inspect-schema/) | Discover which tables and columns are available | CLI |
+| [Count rows](/cqlite/agents-using/count-rows/) | Count rows in a table with and without filters | CLI |
+| [Read collections](/cqlite/agents-using/read-collections/) | Query LIST, SET, and MAP columns | CLI + Python |
+| [Handle missing-schema errors](/cqlite/agents-using/missing-schema/) | Diagnose and fix schema-not-found failures | CLI |
+| [Write a mutation and flush](/cqlite/agents-using/write-mutation/) | Insert a row and flush the memtable to SSTable | CLI |
+| [Export SSTable for Cassandra import](/cqlite/agents-using/export-sstable/) | Re-export SSTables in Cassandra-compatible format | CLI |
 
-- **Open a database and run a SELECT** — CLI and all binding APIs
-- **Filter with WHERE clauses** — supported predicates and operators
-- **Export to JSON/CSV/Parquet** — `--out` flag usage and output shapes
-- **Read collections** — lists, sets, maps in all bindings
-- **Read UDTs** — user-defined types
-- **Streaming large result sets** — Node.js and Python streaming APIs
-- **Write mutations** — INSERT/UPDATE via write support
-- **Error codes and recovery** — all error codes, categories, and retry patterns
-- **Verify output against sstabledump** — parity validation workflow
-- **Troubleshooting** — common failures and fixes
+## Setup
+
+Every recipe assumes:
+
+```bash
+export CQLITE_DATASETS_ROOT=/path/to/test-data/datasets
+```
+
+Schemas are in `test-data/schemas/`. The write-support recipes require the CLI built with `--features write-support`:
+
+```bash
+cargo build --package cqlite-cli --features write-support
+```
 
 ## Design principles
 
-Every recipe in this section is:
+1. **Real output** — every example was executed; no invented data.
+2. **Exit codes documented** — 0 = success; non-zero = failure.
+3. **Failure modes explicit** — each recipe lists the exact error text for the most common failures.
+4. **Terse** — code first.
 
-1. **Verifiable** — commands run against the real test datasets
-2. **Complete** — includes setup, execution, expected output, and teardown
-3. **Terse** — no prose that agents must skip over; code first
-4. **Honest about limitations** — documents what doesn't work and why
+## Error codes
 
-## Error code reference
+Error codes used by the CLI (exit code 0 = success; all errors print to stderr) and thrown as JavaScript/Python exceptions by the bindings.
 
-The following error codes are thrown by CQLite bindings (full table in W6):
+| Code | Category | Description | Typical cause |
+|------|----------|-------------|---------------|
+| `IO` | System | I/O errors — file read/write, file not found | Missing Data.db, wrong path |
+| `SCHEMA` | Schema | Schema or table lookup failure | `--schema` not provided, or table name typo |
+| `QUERY` | Query | Query execution or CQL syntax error | Unsupported CQL, bad column name |
+| `PARSE` | Data | Binary format parsing or type conversion error | Corrupt SSTable, unsupported format |
+| `CONFIG` | Configuration | Configuration validation error | Missing required option, bad flag combination |
+| `STORAGE` | Storage | Storage engine error | WriteEngine misconfiguration |
+| `NOT_FOUND` | NotFound | Resource does not exist | Table has no SSTables on disk |
+| `INVALID_INPUT` | Logic | Invalid operation or state | Type mismatch in mutation, bad JSON mutation format |
 
-| Code | Category | Description |
-|------|----------|-------------|
-| `IO` | System | I/O errors |
-| `SCHEMA` | Schema | Schema/table errors |
-| `QUERY` | Query | Query execution errors |
-| `PARSE` | Data | Binary format parsing errors |
-| `CONFIG` | Configuration | Configuration errors |
-| `STORAGE` | Storage | Storage engine errors |
-| `NOT_FOUND` | NotFound | Resource not found |
-| `INVALID_INPUT` | Logic | Invalid operation or state |
+### CLI exit codes
+
+| Exit code | Meaning |
+|-----------|---------|
+| `0` | Success |
+| `1` | Unhandled / internal error |
+| `2` | Invalid CLI arguments |
+| `3` | Schema or query error (SCHEMA / QUERY category) |
+| `5` | Parse error (PARSE category) |
+| `6` | File already exists (use `--overwrite` to force) |
+
+### Node.js error properties
+
+```javascript
+try {
+  await db.executeNative('SELECT * FROM unknown.table');
+} catch (err) {
+  console.log(err.code);          // e.g. "SCHEMA"
+  console.log(err.category);      // e.g. "Schema"
+  console.log(err.isRecoverable); // false for most schema/config errors
+}
+```
+
+### Python exception type
+
+```python
+import cqlite
+try:
+    with cqlite.open('/no/such/path', schema='schema.cql') as db:
+        pass
+except cqlite.CqliteError as e:
+    print(e)  # human-readable message
+```

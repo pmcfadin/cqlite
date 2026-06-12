@@ -4,12 +4,19 @@
 # Runs:
 #   1. npm ci (install pinned deps)
 #   2. npm run build (Astro build + starlight-links-validator internal link check)
+#   3. [optional] docs-examples-smoke.sh (CLI recipe smoke tests)
 #
 # Emits a machine-checkable PASS/FAIL summary block at the end (modelled on
 # scripts/agent-gate.sh). Exit code 0 = all checks passed; non-zero = failure.
 #
-# Usage: bash scripts/docs-site-check.sh
-#        (or ./scripts/docs-site-check.sh after chmod +x)
+# Usage:
+#   bash scripts/docs-site-check.sh              # fast: site build + link check only
+#   bash scripts/docs-site-check.sh --with-smoke # also run CLI recipe smoke tests
+#   WITH_SMOKE=1 bash scripts/docs-site-check.sh # same, via env var
+#
+# The smoke step requires:
+#   - CQLITE_DATASETS_ROOT set to the test dataset root (or test-data/datasets)
+#   - The cqlite CLI binary built (cargo build --package cqlite-cli --features write-support)
 
 set -euo pipefail
 
@@ -17,7 +24,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 WEBSITE_DIR="$REPO_ROOT/website"
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Argument parsing ──────────────────────────────────────────────────────────
+
+WITH_SMOKE="${WITH_SMOKE:-0}"
+
+for arg in "$@"; do
+  case "$arg" in
+    --with-smoke) WITH_SMOKE=1 ;;
+    *) echo "Unknown argument: $arg"; exit 2 ;;
+  esac
+done
+
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -67,6 +85,12 @@ if [[ ! -d "$WEBSITE_DIR" ]]; then
     exit 1
 fi
 
+if [[ "$WITH_SMOKE" == "1" ]]; then
+    info "Smoke tests: ENABLED (--with-smoke)"
+else
+    info "Smoke tests: DISABLED (pass --with-smoke to enable)"
+fi
+
 # ── Checks ────────────────────────────────────────────────────────────────────
 
 banner "Step 1: Install dependencies"
@@ -84,6 +108,11 @@ banner "Step 2: Build site (includes internal link validation)"
     cd "$WEBSITE_DIR"
     run_check "npm run build" npm run build
 )
+
+if [[ "$WITH_SMOKE" == "1" ]]; then
+    banner "Step 3: Example smoke tests (CLI recipes)"
+    run_check "docs-examples-smoke" bash "$SCRIPT_DIR/docs-examples-smoke.sh"
+fi
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 

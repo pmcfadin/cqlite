@@ -19,14 +19,23 @@ on:
     paths:
       - 'website/**'
       - 'docs/**'
+      - 'scripts/docs-examples-smoke.sh'
+      - 'scripts/docs-site-check.sh'
   pull_request:
     paths:
       - 'website/**'
       - 'docs/**'
+      - 'scripts/docs-examples-smoke.sh'
+      - 'scripts/docs-site-check.sh'
   workflow_dispatch:
 
 permissions:
   contents: write
+
+env:
+  DATASET_TAG: datasets-v3
+  DATASET_ASSET: cassandra5-small-full-v3.1.tar.gz
+  DATASET_SHA256: f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb
 
 jobs:
   build:
@@ -59,10 +68,52 @@ jobs:
           path: website/dist/
           retention-days: 1
 
+  smoke:
+    name: Recipe smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo registry and build output
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-smoke-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-docs-smoke-
+
+      - name: Build CLI with write-support
+        run: cargo build --package cqlite-cli --features write-support
+
+      - name: Cache test datasets
+        id: dataset-cache
+        uses: actions/cache@v4
+        with:
+          path: test-data/datasets
+          # Cache key MUST include SHA256 — never tag alone (see dataset release gotchas)
+          key: datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch datasets if cache miss
+        if: steps.dataset-cache.outputs.cache-hit != 'true'
+        run: |
+          bash test-data/scripts/fetch-datasets.sh
+
+      - name: Run recipe smoke tests
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+          CQLITE_CLI: ${{ github.workspace }}/target/debug/cqlite
+        run: bash scripts/docs-examples-smoke.sh
+
   deploy:
     name: Deploy to GitHub Pages
     runs-on: ubuntu-latest
-    needs: build
+    needs: [build, smoke]
     # Only deploy on push to main (not on PRs or forks)
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     steps:
