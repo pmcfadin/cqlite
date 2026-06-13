@@ -58,6 +58,15 @@ base64 = "0.21"
 # Hashing for Cassandra compatibility
 murmur3 = "0.5"
 
+# Arbitrary-precision integers for varint/decimal formatting (util::value_fmt)
+# and the Parquet export writer's Decimal128 rescaling
+num-bigint = "0.4"
+
+# Columnar export (feature = "parquet") - optional, NOT in defaults so the
+# default build's dependency surface is unchanged (Epic #682)
+arrow = { workspace = true, optional = true }
+parquet = { workspace = true, optional = true }
+
 # Features defined at end of file to avoid duplicates
 
 # Additional dependencies
@@ -94,7 +103,6 @@ insta = { version = "1.34", features = ["json"] }
 # cqlite-validation = { path = "../cqlite-validation" }
 fastrand = "2.0"
 libc = { workspace = true }
-num-bigint = "0.4"  # For varint/decimal validation in tests
 num-traits = "0.2"  # Required for BigInt conversion methods
 
 # In-process sampling CPU profiler for the criterion benches (signal-based, so
@@ -142,6 +150,11 @@ all-compression = ["lz4", "snappy", "deflate", "zstd"]
 # CLI-specific helpers (Issue #249) - NOT in defaults for pure library mode
 # Requires state_machine for query engine and discovery dependencies
 cli-helpers = ["state_machine"]
+
+# Embeddable Parquet export (Epic #682) - NOT in defaults so that
+# `cargo build --package cqlite-core` does not compile arrow/parquet.
+# Requires state_machine because the writer consumes query::QueryResult.
+parquet = ["state_machine", "dep:arrow", "dep:parquet"]
 
 # Other features
 metrics = []

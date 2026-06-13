@@ -53,9 +53,6 @@ csv = "1.3"
 # Hex encoding for blob display
 hex = "0.4"
 
-# Big integer support for varint/decimal
-num-bigint = "0.4"
-
 # Configuration parsing
 toml = { workspace = true }
 serde_yaml = { workspace = true }
@@ -70,10 +67,6 @@ regex = "1.10"
 # Base64 encoding for binary data display
 base64 = "0.21"
 
-# Arrow and Parquet support (M3 output writers)
-arrow = { workspace = true }
-parquet = { workspace = true }
-
 # System memory monitoring (cross-platform)
 sysinfo = "0.30"
 
@@ -82,6 +75,11 @@ rustyline = "14.0"
 
 # Development dependencies
 [dev-dependencies]
+# Arrow/Parquet readers for Parquet output validation tests (the writer itself
+# lives in cqlite-core behind its `parquet` feature, Epic #682)
+arrow = { workspace = true }
+parquet = { workspace = true }
+num-bigint = "0.4"
 bytes = { workspace = true }
 tempfile = { workspace = true }
 proptest = { workspace = true }
@@ -129,7 +127,9 @@ tui = ["ratatui", "crossterm"]
 benchmarks = []
 ci_zero_tolerance = []
 integration-tests = []
-state_machine = ["cqlite-core/state_machine"]
+# state_machine also enables cqlite-core/parquet: the CLI's Parquet output
+# (gated on state_machine) consumes the core export writer (Epic #682)
+state_machine = ["cqlite-core/state_machine", "cqlite-core/parquet"]
 experimental = ["cqlite-core/experimental"]
 # Issue #249: CLI-specific helpers (enables state_machine locally + cqlite-core/cli-helpers)
 cli-helpers = ["state_machine", "cqlite-core/cli-helpers"]
