@@ -91,6 +91,10 @@
 //! decimal digits fall back to `Utf8` (the column schema will be `Utf8`; the
 //! value is rendered as a decimal string via `ValueFormatter`).
 
+use crate::query::{ColumnInfo, QueryMetadata, QueryResult, QueryRow};
+use crate::schema::CqlType;
+use crate::types::{DataType, Value};
+use crate::util::value_fmt::ValueFormatter;
 use arrow::array::{
     ArrayRef, BinaryArray, BooleanArray, Date32Array, Float32Array, Float64Array, Int16Array,
     Int32Array, Int64Array, Int8Array, ListArray, MapArray, StringArray, StructArray,
@@ -99,10 +103,6 @@ use arrow::array::{
 use arrow::buffer::{NullBuffer, OffsetBuffer};
 use arrow::datatypes::{DataType as ArrowDataType, Field, Fields, Schema, TimeUnit};
 use arrow::record_batch::RecordBatch;
-use crate::query::{ColumnInfo, QueryMetadata, QueryResult, QueryRow};
-use crate::schema::CqlType;
-use crate::types::{DataType, Value};
-use crate::util::value_fmt::ValueFormatter;
 use parquet::arrow::ArrowWriter;
 use parquet::basic::{Compression, ZstdLevel};
 use parquet::file::properties::WriterProperties;
@@ -224,7 +224,9 @@ const ARROW_UUID_EXTENSION_NAME: &str = "arrow.uuid";
 fn bigint_to_i128(n: &num_bigint::BigInt) -> Result<i128, ParquetExportError> {
     let tc_bytes = n.to_signed_bytes_be();
     if tc_bytes.len() > 16 {
-        return Err(ParquetExportError::InvalidValue("BigInt value requires more than 16 bytes; cannot fit in i128".to_string()));
+        return Err(ParquetExportError::InvalidValue(
+            "BigInt value requires more than 16 bytes; cannot fit in i128".to_string(),
+        ));
     }
     // Determine the sign-extension byte: 0x00 for non-negative, 0xFF for negative.
     let pad: u8 = if n.sign() == num_bigint::Sign::Minus {
@@ -293,10 +295,7 @@ impl ParquetWriter {
 
     /// Build Arrow schema from CQL column metadata
     fn build_schema(columns: &[ColumnInfo]) -> Result<Schema, ParquetExportError> {
-        let fields: Vec<Field> = columns
-            .iter()
-            .map(Self::column_to_field)
-            .collect();
+        let fields: Vec<Field> = columns.iter().map(Self::column_to_field).collect();
         Ok(Schema::new(fields))
     }
 
@@ -799,7 +798,10 @@ impl ParquetWriter {
                                     bigint.clone()
                                 };
                                 if abs_val > max_abs {
-                                    return Err(ParquetExportError::InvalidValue("varint element exceeds Decimal128(38, 0) range".to_string()));
+                                    return Err(ParquetExportError::InvalidValue(
+                                        "varint element exceeds Decimal128(38, 0) range"
+                                            .to_string(),
+                                    ));
                                 }
                                 let i128_val = bigint_to_i128(&bigint)?;
                                 builder.append_value(i128_val);
@@ -839,7 +841,10 @@ impl ParquetWriter {
                         Some(Value::Uuid(bytes)) => builder.append_value(bytes)?,
                         Some(Value::Null) | None => builder.append_null(),
                         Some(other) => {
-                            return Err(ParquetExportError::InvalidValue(format!("expected Uuid value in element, got {:?}", other)));
+                            return Err(ParquetExportError::InvalidValue(format!(
+                                "expected Uuid value in element, got {:?}",
+                                other
+                            )));
                         }
                     }
                 }
@@ -947,7 +952,10 @@ impl ParquetWriter {
                             for (k, val) in pairs {
                                 // Keys must be non-nullable in Arrow MapArray.
                                 if matches!(k, Value::Null) {
-                                    return Err(ParquetExportError::InvalidValue("null key in map is not allowed in Arrow MapArray".to_string()));
+                                    return Err(ParquetExportError::InvalidValue(
+                                        "null key in map is not allowed in Arrow MapArray"
+                                            .to_string(),
+                                    ));
                                 }
                                 flat_keys.push(Some(k));
                                 flat_vals.push(Some(val));
@@ -1663,8 +1671,9 @@ impl ParquetWriter {
         for row in rows {
             match row.values.get(&col.name) {
                 Some(Value::Decimal { scale, unscaled }) => {
-                    let rescaled = Self::rescale_decimal(*scale, unscaled)
-                        .map_err(|e| ParquetExportError::InvalidValue(format!("Column '{}': {e}", col.name)))?;
+                    let rescaled = Self::rescale_decimal(*scale, unscaled).map_err(|e| {
+                        ParquetExportError::InvalidValue(format!("Column '{}': {e}", col.name))
+                    })?;
                     builder.append_value(rescaled);
                 }
                 Some(Value::Null) | None => {
@@ -1719,8 +1728,9 @@ impl ParquetWriter {
                             )));
                         }
 
-                        let i128_val = bigint_to_i128(&bigint)
-                            .map_err(|e| ParquetExportError::InvalidValue(format!("Column '{}': {e}", col.name)))?;
+                        let i128_val = bigint_to_i128(&bigint).map_err(|e| {
+                            ParquetExportError::InvalidValue(format!("Column '{}': {e}", col.name))
+                        })?;
                         builder.append_value(i128_val);
                     }
                 }

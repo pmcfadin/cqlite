@@ -187,8 +187,7 @@ fn test_parquet_output_matches_golden_file() {
     });
 
     assert_eq!(
-        bytes,
-        golden,
+        bytes, golden,
         "CLI Parquet output bytes changed; if this is an intentional \
          arrow/parquet upgrade or format change, regenerate with \
          UPDATE_PARQUET_GOLDEN=1 and review the parsed assertions above"

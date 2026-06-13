@@ -404,10 +404,7 @@ impl Database {
                     .map_err(to_py_err)?;
 
                 let file = std::fs::File::create(&path_owned).map_err(|e| {
-                    PyIOError::new_err(format!(
-                        "failed to create {}: {e}",
-                        path_owned.display()
-                    ))
+                    PyIOError::new_err(format!("failed to create {}: {e}", path_owned.display()))
                 })?;
 
                 let mut writer = StreamingParquetWriter::new(file, &iter.metadata, &options)

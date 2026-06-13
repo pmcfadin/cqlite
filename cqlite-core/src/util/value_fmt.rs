@@ -273,15 +273,13 @@ impl ValueFormatter {
 
     /// Format list as [a, b, c]
     fn format_list(elements: &[Value]) -> String {
-        let formatted_elements: Vec<String> =
-            elements.iter().map(Self::format_value).collect();
+        let formatted_elements: Vec<String> = elements.iter().map(Self::format_value).collect();
         format!("[{}]", formatted_elements.join(", "))
     }
 
     /// Format set as {a, b, c}
     fn format_set(elements: &[Value]) -> String {
-        let formatted_elements: Vec<String> =
-            elements.iter().map(Self::format_value).collect();
+        let formatted_elements: Vec<String> = elements.iter().map(Self::format_value).collect();
         format!("{{{}}}", formatted_elements.join(", "))
     }
 
@@ -379,10 +377,7 @@ mod tests {
     #[test]
     fn test_floats() {
         assert_eq!(ValueFormatter::format_value(&Value::Float32(3.25)), "3.25");
-        assert_eq!(
-            ValueFormatter::format_value(&Value::Float(2.75)),
-            "2.75"
-        );
+        assert_eq!(ValueFormatter::format_value(&Value::Float(2.75)), "2.75");
 
         // Special values
         assert_eq!(
