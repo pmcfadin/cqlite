@@ -264,14 +264,29 @@ for (const col of result.columns as ColumnInfo[]) {
 }
 ```
 
+## Export Parquet directly from Node.js
+
+The bindings expose the core Parquet writer
+([epic #682](https://github.com/pmcfadin/cqlite/issues/682)) — no CLI
+subprocess needed. The query streams, so large tables export within bounded
+memory, and the export runs off the JavaScript main thread:
+
+```typescript
+const rows = await db.exportParquet(
+  "SELECT * FROM my_ks.my_table",
+  "/tmp/my_table.parquet",
+  { rowGroupSize: 10000, compression: "snappy" } // or "zstd" / "none"
+);
+console.log(`Exported ${rows} rows`);
+```
+
+The output preserves nested and high-precision types — typed lists, maps,
+and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
+
 ## What you cannot do (yet)
 
 - **Write back to SSTables from Node.js.** The write API is in the core library but not
   yet exposed in the Node.js bindings.
-- **Export Parquet directly from Node.js.** Use the CLI `--out parquet` flag for now.
-  [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*.
-  The CLI's Parquet output preserves nested and high-precision types — typed lists,
-  maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Further reading
 

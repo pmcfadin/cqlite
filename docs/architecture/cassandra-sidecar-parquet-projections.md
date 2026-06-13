@@ -3,7 +3,7 @@
 **Status:** Position document (not a committed roadmap)
 **Audience:** CQLite maintainers, integrators evaluating CQLite for lakehouse pipelines
 **Date:** 2026-06-10
-**Related:** [Apache Cassandra Sidecar](https://github.com/apache/cassandra-sidecar), `cqlite-cli/src/output/parquet.rs`, `cqlite-core/src/lib.rs`
+**Related:** [Apache Cassandra Sidecar](https://github.com/apache/cassandra-sidecar), `cqlite-core/src/export/parquet.rs`, `cqlite-core/src/lib.rs`
 
 ## Summary
 
@@ -64,10 +64,11 @@ pub async fn execute_streaming(
 
 ### Writing Parquet
 
-`cqlite-cli/src/output/parquet.rs` implements both a batch `ParquetWriter` and a
+`cqlite-core/src/export/parquet.rs` implements both a batch `ParquetWriter` and a
 `StreamingParquetWriter<W>` (default 10,000-row row groups, Snappy compression
-to match Cassandra defaults), exposed via the CLI as `--out parquet`. A minimal
-per-SSTable projection is therefore already expressible as a one-shot CLI call:
+to match Cassandra defaults) behind cqlite-core's optional `parquet` feature,
+exposed via the CLI as `--out parquet`. A minimal per-SSTable projection is
+therefore already expressible as a one-shot CLI call:
 
 ```bash
 cqlite --schema users.cql \
@@ -76,10 +77,11 @@ cqlite --schema users.cql \
        --out parquet -o /projections/users/nb-<gen>.parquet
 ```
 
-> **Note:** The Parquet writer currently lives in `cqlite-cli`, not
-> `cqlite-core`. Embedding projection in a long-running service means either
-> shelling out to the CLI or lifting the writer into the core crate behind a
-> `parquet` feature flag.
+> **Note (resolved 2026-06, Epic #682):** The Parquet writer now lives in
+> `cqlite-core` behind an off-by-default `parquet` cargo feature (#683, #684,
+> #685). Long-running services can embed the writer directly, and the Python
+> (`db.export_parquet(...)`, #686) and Node (`db.exportParquet(...)`, #687)
+> bindings expose it without shelling out to the CLI.
 
 ## Architecture
 
@@ -173,7 +175,7 @@ schema-aware queries), the following high-fidelity mappings are applied.  When
 `StreamingParquetWriter` (streaming) share the same `build_schema` and
 `convert_to_arrays` code paths, producing identical Arrow schemas and values
 for all types above (verified by `test_streaming_batch_parity_*` in
-`cqlite-cli/tests/parquet_writer_tests.rs`).
+`cqlite-cli/tests/parquet_writer_tests.rs`; the writer itself now lives in `cqlite-core/src/export/parquet.rs`, Epic #682).
 
 A table of scalars (IDs, metrics, timestamps, text — the common analytics case)
 projects faithfully with full Arrow logical type annotations. Collections and
@@ -290,6 +292,9 @@ we are hand-rolling the consistency guarantees TiDB derives from Raft.
    `parquet` crate v53 upstream; no action needed until that crate is upgraded.
 6. **Lift the Parquet writer into `cqlite-core`** behind a `parquet` feature
    flag if we want embeddable (non-CLI) projection.
+   **Done (Epic #682):** writer lifted into `cqlite-core/src/export/parquet.rs`
+   behind the `parquet` feature (#683–#685), with Parquet export exposed in the
+   Python (#686) and Node (#687) bindings.
 7. **Set expectations honestly.** This cannot match TiFlash on freshness or
    consistency — those come from being inside the transactional system. Its
    distinct value is **open, lake-native columnar output from Cassandra with no

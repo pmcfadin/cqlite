@@ -1,6 +1,6 @@
 ---
 title: Export to Parquet
-description: Write CQLite query results to a Parquet file using the --out parquet flag.
+description: Write CQLite query results to a Parquet file from the CLI, Python, Node.js, or embedded Rust.
 sidebar:
   label: Export to Parquet
   order: 4
@@ -85,6 +85,72 @@ When the query runs against a schema (the normal case), columns export with high
 | `frozen<T>` | Same as `T` (transparent) |
 
 See [Output Formats](/cqlite/user-docs/output-formats/) for the full type map and precision notes.
+
+## Export from Python (no CLI)
+
+The Python bindings expose the same writer directly (Epic #682) — no
+subprocess needed:
+
+```python
+import cqlite
+
+with cqlite.open('test-data/datasets/sstables',
+                 schema='test-data/schemas/basic-types.cql') as db:
+    rows = db.export_parquet(
+        'SELECT * FROM test_basic.simple_table',
+        '/tmp/simple_table.parquet',
+        row_group_size=10000,      # rows per Parquet row group
+        compression='snappy',      # 'snappy' (default), 'zstd', or 'none'
+    )
+    print(f'Exported {rows} rows')
+```
+
+The query streams, so large tables export within bounded memory, and the
+GIL is released for the duration of the export.
+
+## Export from Node.js (no CLI)
+
+```javascript
+const { Database } = require('@cqlite/node');
+
+const db = await Database.open('test-data/datasets/sstables', {
+  schema: 'test-data/schemas/basic-types.cql',
+});
+const rows = await db.exportParquet(
+  'SELECT * FROM test_basic.simple_table',
+  '/tmp/simple_table.parquet',
+  { rowGroupSize: 10000, compression: 'snappy' }
+);
+console.log(`Exported ${rows} rows`);
+await db.close();
+```
+
+The export runs as an async task off the JavaScript main thread.
+
+## Export from Rust (library embedders)
+
+The writer lives in `cqlite-core` behind the off-by-default `parquet`
+cargo feature:
+
+```toml
+[dependencies]
+cqlite-core = { version = "*", features = ["parquet"] }
+```
+
+```rust
+use cqlite_core::export::parquet::{ParquetExportOptions, StreamingParquetWriter};
+
+let mut iter = db.execute_streaming(query, Default::default()).await?;
+let file = std::fs::File::create("/tmp/out.parquet")?;
+let mut writer = StreamingParquetWriter::new(file, &iter.metadata, &ParquetExportOptions::default())?;
+while let Some(row) = iter.next_async().await {
+    writer.write_chunk(&[row?])?;
+}
+writer.finalize()?;
+```
+
+CQLite produces Parquet **files** only; committing them to Iceberg/Delta
+table formats is an external committer's job.
 
 ## Read the Parquet file (Python)
 

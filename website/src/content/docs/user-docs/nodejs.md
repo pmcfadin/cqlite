@@ -192,6 +192,30 @@ for await (const row of db.executeStreaming('SELECT * FROM huge_table')) {
 The `StreamingResult` object also exposes `rowsReceived` and `columns` for
 progress tracking after the first row is yielded.
 
+## Exporting to Parquet
+
+`db.exportParquet()` writes query results straight to a Parquet file using
+the embeddable core writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)).
+The query streams, so arbitrarily large result sets export within bounded
+memory, and the export runs as an async task off the JavaScript main thread.
+
+```javascript
+const rows = await db.exportParquet(
+  'SELECT * FROM test_basic.simple_table',
+  '/tmp/simple_table.parquet',
+  { rowGroupSize: 10000, compression: 'snappy' } // or 'zstd' / 'none'
+);
+console.log(`Exported ${rows} rows`);
+```
+
+The output uses the high-fidelity Arrow type mapping — typed lists, maps,
+structs for UDTs/tuples, `Decimal128`, `Date32`, `Time64`, UUID extension —
+see [Output Formats](/cqlite/user-docs/output-formats/) for the full table.
+
+Errors carry the standard `code` / `category` / `isRecoverable` properties:
+invalid options surface as `CONFIG`, file and encoding failures as `IO`, and
+query failures through the usual `QUERY` / `PARSE` codes.
+
 ## Error handling
 
 All CQLite errors include structured metadata for programmatic handling:
@@ -324,6 +348,7 @@ async function query(): Promise<void> {
 | `db.execute(query)` | `Promise<QueryResult>` | Execute query; hex-encoded varint/decimal |
 | `db.executeNative(query)` | `Promise<NativeQueryResult>` | Execute query with native JS types (recommended) |
 | `db.executeStreaming(query, config?)` | `StreamingResult` | Memory-bounded async iteration |
+| `db.exportParquet(query, path, options?)` | `Promise<number>` | Stream query results to a Parquet file |
 | `db.getStats()` | `Promise<DatabaseStats>` | Storage and memory metrics |
 | `db.prepare(query)` | `Promise<PreparedStatement>` | Parse and plan a query |
 | `db.flushRun()` | `Promise<string>` | Flush memtable; returns Data.db path |

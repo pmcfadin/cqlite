@@ -198,10 +198,26 @@ with cqlite.open(DATASETS, schema=SCHEMA) as db:
 print(f"Exported {len(result.rows)} rows to {OUTPUT}")
 ```
 
-For Parquet output, use the CLI with `--out parquet`
-<!-- TODO(W4): link to output formats page when merged -->.
-Native Parquet export from the Python bindings is planned in
-[epic #682](https://github.com/pmcfadin/cqlite/issues/682) *(in progress)*.
+For Parquet, export directly from the bindings
+([epic #682](https://github.com/pmcfadin/cqlite/issues/682)) — the query
+streams, so large tables export within bounded memory:
+
+```python
+import cqlite
+
+with cqlite.open(DATASETS, schema=SCHEMA) as db:
+    rows = db.export_parquet(
+        "SELECT * FROM my_keyspace.my_table",
+        "/tmp/my_table_export.parquet",
+        row_group_size=10000,    # rows per Parquet row group
+        compression="snappy",    # "snappy" (default), "zstd", or "none"
+    )
+
+print(f"Exported {rows} rows")
+```
+
+The output preserves nested and high-precision types — typed lists, maps,
+and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Notebook workflow
 
@@ -230,10 +246,6 @@ df["event_type"].value_counts().plot(kind="bar")
 
 - **Write back to SSTables from Python.** The write API is in the core library but not
   yet exposed in the Python bindings. Tracked in the write support roadmap.
-- **Export Parquet directly from Python.** Use the CLI `--out parquet` flag for now.
-  [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*.
-  The CLI's Parquet output preserves nested and high-precision types — typed lists,
-  maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Further reading
 

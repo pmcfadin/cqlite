@@ -37,6 +37,25 @@ jobs:
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
 
+      - name: Build and test with parquet export feature (Epic #682)
+        run: |
+          # The optional parquet feature must compile and its writer unit
+          # tests must pass (no test-data dependency for the lib tests).
+          cargo build --features=parquet
+          cargo test --features=parquet --quiet --lib export::parquet
+
+      - name: Verify default build does not compile arrow/parquet (Epic #682)
+        run: |
+          # The parquet feature is opt-in: the default dependency surface
+          # must not include the arrow/parquet crates.
+          if cargo tree -e normal | grep -qE "(^|[ ])(arrow|parquet) v[0-9]"; then
+            echo "ERROR: arrow/parquet found in default cqlite-core dependency tree"
+            cargo tree -e normal | grep -E "(arrow|parquet) v"
+            exit 1
+          else
+            echo "OK: default build excludes arrow/parquet"
+          fi
+
   feature-gate-validation:
     name: Feature Gate Validation
     runs-on: ubuntu-latest
@@ -63,6 +82,16 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Verify 'parquet' feature is NOT in default features (Epic #682)
+        run: |
+          if grep -q 'default = \[.*"parquet".*\]' cqlite-core/Cargo.toml; then
+            echo "ERROR: 'parquet' feature found in default features"
+            echo "The Parquet export writer must remain opt-in (Epic #682)"
+            exit 1
+          else
+            echo "OK: 'parquet' feature is correctly NOT in default features"
+          fi
 
       - name: Verify 'benchmarks' feature is NOT in default features
         run: |
