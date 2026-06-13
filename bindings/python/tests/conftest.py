@@ -33,10 +33,19 @@ BINDINGS_DIR = TESTS_DIR.parent
 PROJECT_ROOT = BINDINGS_DIR.parent.parent
 TEST_DATA = PROJECT_ROOT / "test-data"
 
-# Support CQLITE_DATASETS_ROOT environment variable override
+# Support CQLITE_DATASETS_ROOT environment variable override.
+#
+# Convention (matches CLAUDE.md and CI): CQLITE_DATASETS_ROOT points to the
+# *datasets root* directory (test-data/datasets), not the sstables sub-directory.
+# The actual SSTable files live under datasets/sstables/, so we append that suffix
+# unless the caller has already included it (i.e. the path already ends in "sstables").
 _ENV_DATASETS_ROOT = os.environ.get("CQLITE_DATASETS_ROOT")
 if _ENV_DATASETS_ROOT:
-    DATASETS = Path(_ENV_DATASETS_ROOT)
+    _env_path = Path(_ENV_DATASETS_ROOT)
+    if _env_path.name == "sstables":
+        DATASETS = _env_path
+    else:
+        DATASETS = _env_path / "sstables"
 else:
     DATASETS = TEST_DATA / "datasets" / "sstables"
 
