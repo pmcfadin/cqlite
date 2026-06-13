@@ -2015,8 +2015,13 @@ impl<W: Write + Send> StreamingParquetWriter<W> {
         // Build Arrow schema - same helper used by the batch ParquetWriter.
         let schema = Arc::new(ParquetWriter::build_schema(&metadata.columns)?);
 
+        // set_max_row_group_size makes `row_group_size` authoritative: without
+        // it, ArrowWriter coalesces written batches into ~1M-row groups, which
+        // both ignored the documented "row group per chunk" behavior and let
+        // memory grow unbounded on large streaming exports.
         let props = WriterProperties::builder()
             .set_compression(options.compression.to_parquet())
+            .set_max_row_group_size(options.row_group_size)
             .build();
 
         let arrow_writer = ArrowWriter::try_new(output, Arc::clone(&schema), Some(props))?;
