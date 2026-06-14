@@ -179,6 +179,31 @@ db = cqlite.open("data/sstables", schema="schema.cql", config="memory_optimized"
 db = cqlite.open("data/sstables", schema="schema.cql", config="performance_optimized")
 ```
 
+## Exporting to Parquet
+
+`db.export_parquet()` writes query results straight to a Parquet file using
+the embeddable core writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)).
+The query streams, so arbitrarily large result sets export within bounded
+memory, and the GIL is released for the duration of the export.
+
+```python
+with cqlite.open("data/sstables", schema="schema.cql") as db:
+    rows = db.export_parquet(
+        "SELECT * FROM test_basic.simple_table",
+        "/tmp/simple_table.parquet",
+        row_group_size=10000,    # rows per Parquet row group (default)
+        compression="snappy",    # "snappy" (default), "zstd", or "none"
+    )
+    print(f"Exported {rows} rows")
+```
+
+The output uses the high-fidelity Arrow type mapping — typed lists, maps,
+structs for UDTs/tuples, `Decimal128`, `Date32`, `Time64`, UUID extension —
+see [Output Formats](/cqlite/user-docs/output-formats/) for the full table.
+
+Invalid options raise `ValueError`; file and encoding failures raise
+`IOError`; query failures raise the usual `QueryError`/`ParseError`.
+
 ## Error handling
 
 ```python
@@ -270,6 +295,7 @@ Do not share a single iterator across threads.
 | `cqlite.open(path, ...)` | Open a database; returns `Database` |
 | `db.execute(query)` | Run a CQL query; returns `QueryResult` |
 | `db.execute_streaming(query, config?)` | Memory-bounded row iteration; returns `StreamingIterator` |
+| `db.export_parquet(query, path, *, row_group_size?, compression?)` | Stream query results to a Parquet file; returns row count |
 | `db.prepare(query)` | Parse and plan a query; returns `PreparedStatement` |
 | `db.stats()` | Storage and memory metrics; returns `DatabaseStats` |
 | `db.flush_run()` | Flush memtable to SSTable; returns Data.db path |

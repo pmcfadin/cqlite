@@ -122,6 +122,15 @@ with cqlite.open('test-data/datasets/sstables', schema='test-data/schemas/basic-
         print(row.to_dict())
 "
 
+# Python Parquet export (Epic #682)
+python3 -c "
+import cqlite
+with cqlite.open('test-data/datasets/sstables', schema='test-data/schemas/basic-types.cql') as db:
+    rows = db.export_parquet('SELECT * FROM test_basic.simple_table', '/tmp/out.parquet',
+                             row_group_size=10000, compression='snappy')
+    print(f'Exported {rows} rows')
+"
+
 # Node.js bindings build and test (Issue #290, #296, #306)
 cd bindings/node && npm install && npm run build  # Build native module
 cd bindings/node && npm test                       # Run all tests (Jest)
@@ -140,6 +149,21 @@ const { Database } = require('@cqlite/node');
   for (const row of result.rows) {
     console.log(row.name);
   }
+  await db.close();
+})();
+"
+
+# Node.js Parquet export (Epic #682)
+node -e "
+const { Database } = require('@cqlite/node');
+(async () => {
+  const db = await Database.open('test-data/datasets/sstables', {
+    schema: 'test-data/schemas/basic-types.cql'
+  });
+  const rows = await db.exportParquet(
+    'SELECT * FROM test_basic.simple_table', '/tmp/out.parquet',
+    { rowGroupSize: 10000, compression: 'snappy' });
+  console.log('Exported', rows, 'rows');
   await db.close();
 })();
 "
@@ -344,6 +368,7 @@ Default (cqlite-core): `all-compression`, `state_machine`
 | `all-compression` | LZ4, Snappy, Deflate, Zstd support | Yes |
 | `state_machine` | Query engine and discovery | Yes |
 | `cli-helpers` | CLI-specific ingestion/REPL API (Issue #249) | No |
+| `parquet` | Embeddable Parquet export writer (Epic #682) | No |
 | `metrics` | Performance metrics collection | No |
 | `experimental` | Experimental features | No |
 
@@ -353,6 +378,10 @@ cargo build --package cqlite-core --no-default-features --features all-compressi
 
 # Build with CLI helpers for integration testing
 cargo build --package cqlite-core --features cli-helpers
+
+# Build/test core with the embeddable Parquet writer (Epic #682)
+cargo build --package cqlite-core --features parquet
+cargo test --package cqlite-core --features parquet
 ```
 
 ## Troubleshooting

@@ -352,6 +352,36 @@ function createWrappedDatabase(NativeDatabase, wrapPreparedStatement) {
     }
 
     /**
+     * Export the results of a CQL query to a Parquet file.
+     *
+     * The query runs with streaming, so large result sets are written
+     * within bounded memory. The export runs off the JavaScript main
+     * thread.
+     *
+     * @param {string} query - CQL SELECT statement to execute
+     * @param {string} path - Destination file path (created or truncated)
+     * @param {Object} [options] - Optional export options
+     * @param {number} [options.rowGroupSize=10000] - Rows per Parquet row group
+     * @param {string} [options.compression='snappy'] - 'snappy', 'zstd', or 'none'
+     * @returns {Promise<number>} Number of rows written
+     * @throws {CqliteError} If the query fails or the file cannot be written
+     *
+     * @example
+     * const rows = await db.exportParquet(
+     *   'SELECT * FROM my_ks.my_table',
+     *   '/tmp/out.parquet',
+     *   { rowGroupSize: 5000, compression: 'zstd' }
+     * );
+     */
+    async exportParquet(query, path, options) {
+      try {
+        return await this._native.exportParquet(query, path, options);
+      } catch (error) {
+        throw enhanceError(error);
+      }
+    }
+
+    /**
      * Prepare a CQL query for analysis.
      *
      * Returns a PreparedStatement that can be inspected for query plan

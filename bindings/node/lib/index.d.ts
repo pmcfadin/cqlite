@@ -504,6 +504,30 @@ export interface StreamingConfig {
 }
 
 /**
+ * Options for `Database.exportParquet()`.
+ *
+ * @example
+ * ```typescript
+ * await db.exportParquet(query, '/tmp/out.parquet', {
+ *   rowGroupSize: 5000,
+ *   compression: 'zstd',
+ * });
+ * ```
+ */
+export interface ParquetExportOptions {
+  /**
+   * Rows per Parquet row group.
+   * Smaller groups reduce memory at some I/O cost. Default: 10000.
+   */
+  rowGroupSize?: number;
+
+  /**
+   * Compression codec: 'snappy' (default), 'zstd', or 'none'.
+   */
+  compression?: 'snappy' | 'zstd' | 'none';
+}
+
+/**
  * Streaming query result for memory-efficient processing.
  *
  * Implements `AsyncIterable<Row>` for use with `for await...of` loops.
@@ -955,6 +979,43 @@ export declare class Database {
    * ```
    */
   executeStreaming(query: string, config?: StreamingConfig): StreamingResult;
+
+  /**
+   * Export the results of a CQL query to a Parquet file.
+   *
+   * The query runs with streaming, so arbitrarily large result sets are
+   * written within bounded memory (rows are flushed to Parquet row groups
+   * as they arrive). The export runs as an async task off the JavaScript
+   * main thread.
+   *
+   * Types use the high-fidelity schema-driven Arrow mapping: date -> Date32,
+   * time -> Time64(ns), decimal/varint -> Decimal128, uuid ->
+   * FixedSizeBinary(16) with the Arrow UUID extension, list/set -> List,
+   * map -> Map, UDT/tuple -> Struct. CQLite produces Parquet files only;
+   * committing files to Iceberg/Delta table formats is out of scope.
+   *
+   * @param query - CQL SELECT statement to execute
+   * @param path - Destination file path (created or truncated)
+   * @param options - Optional row group size and compression
+   * @returns Promise resolving to the number of rows written
+   * @throws {CqliteError} code "CONFIG" for invalid options, "IO" for
+   *         file/encoding failures, "QUERY"/"PARSE" for query failures
+   *
+   * @example
+   * ```typescript
+   * const rows = await db.exportParquet(
+   *   'SELECT * FROM my_ks.my_table',
+   *   '/tmp/out.parquet',
+   *   { rowGroupSize: 5000, compression: 'zstd' }
+   * );
+   * console.log(`Exported ${rows} row(s)`);
+   * ```
+   */
+  exportParquet(
+    query: string,
+    path: string,
+    options?: ParquetExportOptions
+  ): Promise<number>;
 
   /**
    * Prepare a CQL query for analysis.

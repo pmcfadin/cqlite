@@ -249,6 +249,64 @@ impl StreamingConfig {
     }
 }
 
+/// Options for `exportParquet()`.
+///
+/// ## Example
+///
+/// ```javascript
+/// await db.exportParquet(query, '/tmp/out.parquet', {
+///   rowGroupSize: 5000,
+///   compression: 'zstd',
+/// });
+/// ```
+#[napi(object)]
+#[derive(Default)]
+pub struct ParquetExportOptions {
+    /// Rows per Parquet row group. Default: 10000.
+    #[napi(js_name = "rowGroupSize")]
+    pub row_group_size: Option<u32>,
+
+    /// Compression codec: "snappy" (default), "zstd", or "none".
+    pub compression: Option<String>,
+}
+
+impl ParquetExportOptions {
+    /// Convert to core export options with validation.
+    ///
+    /// Validation failures map to CONFIG-coded errors (ValueError prefix)
+    /// via the standard error metadata channel.
+    fn to_core(&self) -> napi::Result<cqlite_core::export::parquet::ParquetExportOptions> {
+        use cqlite_core::export::parquet::ParquetCompression;
+
+        let row_group_size = self.row_group_size.unwrap_or(10_000);
+        if row_group_size == 0 {
+            return Err(to_napi_error(cqlite_core::Error::Configuration(
+                "rowGroupSize must be greater than 0".to_string(),
+            )));
+        }
+
+        let compression = match self.compression.as_deref() {
+            None => ParquetCompression::Snappy,
+            Some(c) => match c.to_ascii_lowercase().as_str() {
+                "snappy" => ParquetCompression::Snappy,
+                "zstd" => ParquetCompression::Zstd,
+                "none" | "uncompressed" => ParquetCompression::Uncompressed,
+                other => {
+                    return Err(to_napi_error(cqlite_core::Error::Configuration(format!(
+                        "unknown compression '{other}'; expected 'snappy', 'zstd', or 'none'"
+                    ))))
+                }
+            },
+        };
+
+        Ok(cqlite_core::export::parquet::ParquetExportOptions {
+            row_limit: None,
+            row_group_size: row_group_size as usize,
+            compression,
+        })
+    }
+}
+
 /// A CQLite database handle.
 ///
 /// Use `Database.open()` to create a Database instance.
@@ -789,6 +847,86 @@ impl Database {
 
         // Create StreamingResult with shared runtime
         crate::streaming::StreamingResult::new(iter)
+    }
+
+    /// Export the results of a CQL query to a Parquet file.
+    ///
+    /// The query runs with streaming, so arbitrarily large result sets are
+    /// written within bounded memory (rows are flushed to Parquet row groups
+    /// as they arrive). The export runs as an async task off the JavaScript
+    /// main thread.
+    ///
+    /// Types use the high-fidelity schema-driven mapping (Date32, Time64,
+    /// Decimal128, FixedSizeBinary(16) + UUID extension, typed List/Map,
+    /// Struct for UDTs/tuples). CQLite produces Parquet files only;
+    /// committing files to Iceberg/Delta is an external committer's job.
+    ///
+    /// @param query - CQL SELECT statement to execute
+    /// @param path - Destination file path (created or truncated)
+    /// @param options - Optional rowGroupSize (default 10000) and
+    ///                  compression ("snappy" | "zstd" | "none")
+    /// @returns Promise resolving to the number of rows written
+    ///
+    /// @example
+    /// ```javascript
+    /// const rows = await db.exportParquet(
+    ///   'SELECT * FROM my_ks.my_table',
+    ///   '/tmp/out.parquet',
+    ///   { rowGroupSize: 5000, compression: 'zstd' }
+    /// );
+    /// console.log(`Exported ${rows} row(s)`);
+    /// ```
+    #[napi(js_name = "exportParquet")]
+    pub async fn export_parquet(
+        &self,
+        query: String,
+        path: String,
+        options: Option<ParquetExportOptions>,
+    ) -> napi::Result<i64> {
+        use cqlite_core::export::parquet::StreamingParquetWriter;
+
+        self.ensure_open()?;
+
+        let core_options = options.unwrap_or_default().to_core()?;
+        let row_group_size = core_options.row_group_size;
+
+        let mut iter = self
+            .inner
+            .execute_streaming(
+                &query,
+                cqlite_core::query::result::StreamingConfig::default(),
+            )
+            .await
+            .map_err(to_napi_error)?;
+
+        // Writer failures map through cqlite_core::Error::Io so they carry
+        // the standard code/category/isRecoverable metadata (code = "IO"),
+        // matching the CLI's historical mapping of Parquet errors.
+        let map_writer_err = |e: cqlite_core::export::parquet::ParquetExportError| {
+            to_napi_error(cqlite_core::Error::Io(std::io::Error::other(e.to_string())))
+        };
+
+        let file =
+            std::fs::File::create(&path).map_err(|e| to_napi_error(cqlite_core::Error::Io(e)))?;
+
+        let mut writer = StreamingParquetWriter::new(file, &iter.metadata, &core_options)
+            .map_err(map_writer_err)?;
+
+        let mut chunk: Vec<cqlite_core::query::QueryRow> =
+            Vec::with_capacity(row_group_size.min(10_000));
+        while let Some(row) = iter.next_async().await {
+            chunk.push(row.map_err(to_napi_error)?);
+            if chunk.len() >= row_group_size {
+                writer.write_chunk(&chunk).map_err(map_writer_err)?;
+                chunk.clear();
+            }
+        }
+        if !chunk.is_empty() {
+            writer.write_chunk(&chunk).map_err(map_writer_err)?;
+        }
+        writer.finalize().map_err(map_writer_err)?;
+
+        Ok(writer.rows_written() as i64)
     }
 
     /// Execute a CQL query or write statement and return results with native JavaScript types.

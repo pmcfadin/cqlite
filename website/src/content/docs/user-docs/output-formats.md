@@ -173,6 +173,8 @@ id,name,age
 
 Parquet is a columnar binary format for analytics workloads. CQLite writes valid Parquet files (magic bytes `PAR1`) compatible with Apache Arrow, DuckDB, Spark, and other readers.
 
+The writer is embeddable ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)): it lives in `cqlite-core` behind the off-by-default `parquet` cargo feature, and is exposed without the CLI via `db.export_parquet(...)` in the [Python bindings](/cqlite/user-docs/python/) and `db.exportParquet(...)` in the [Node.js bindings](/cqlite/user-docs/nodejs/).
+
 **Parquet requires a file destination** — it cannot be written to stdout:
 
 ```bash

@@ -308,6 +308,135 @@ impl Database {
         Ok(StreamingIterator::new(core_iter))
     }
 
+    /// Export the results of a CQL query to a Parquet file.
+    ///
+    /// The query is executed with streaming, so arbitrarily large result
+    /// sets are written within bounded memory (rows are flushed to Parquet
+    /// row groups as they arrive). The GIL is released for the duration of
+    /// the export.
+    ///
+    /// Types are mapped using the high-fidelity schema-driven mapping
+    /// (Date32, Time64, Decimal128, FixedSizeBinary(16) + UUID extension,
+    /// typed List/Map, Struct for UDTs/tuples). CQLite produces Parquet
+    /// files only; committing files to Iceberg/Delta is out of scope.
+    ///
+    /// # Arguments
+    ///
+    /// * `query` - CQL SELECT statement to execute
+    /// * `path` - Destination file path (created or truncated)
+    /// * `row_group_size` - Rows per Parquet row group (default: 10000)
+    /// * `compression` - "snappy" (default), "zstd", or "none"
+    ///
+    /// # Returns
+    ///
+    /// The number of rows written.
+    ///
+    /// # Raises
+    ///
+    /// * `ValueError` - If compression/row_group_size is invalid
+    /// * `IOError` - If the file cannot be created or written
+    /// * `QueryError` - If query execution fails
+    /// * `RuntimeError` - If database is closed
+    ///
+    /// # Example
+    ///
+    /// ```python
+    /// rows = db.export_parquet(
+    ///     "SELECT * FROM my_ks.my_table",
+    ///     "/tmp/out.parquet",
+    ///     row_group_size=5000,
+    ///     compression="zstd",
+    /// )
+    /// print(f"Exported {rows} row(s)")
+    /// ```
+    #[pyo3(signature = (query, path, *, row_group_size=10000, compression="snappy"))]
+    pub fn export_parquet(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        path: &str,
+        row_group_size: usize,
+        compression: &str,
+    ) -> PyResult<u64> {
+        use cqlite_core::export::parquet::{
+            ParquetCompression, ParquetExportOptions, StreamingParquetWriter,
+        };
+        use pyo3::exceptions::PyIOError;
+
+        self.ensure_open()?;
+
+        let parquet_compression = match compression.to_ascii_lowercase().as_str() {
+            "snappy" => ParquetCompression::Snappy,
+            "zstd" => ParquetCompression::Zstd,
+            "none" | "uncompressed" => ParquetCompression::Uncompressed,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "unknown compression '{other}'; expected 'snappy', 'zstd', or 'none'"
+                )))
+            }
+        };
+        if row_group_size == 0 {
+            return Err(PyValueError::new_err(
+                "row_group_size must be greater than 0",
+            ));
+        }
+        let options = ParquetExportOptions {
+            row_limit: None,
+            row_group_size,
+            compression: parquet_compression,
+        };
+
+        let db = self.inner();
+        let query_owned = query.to_string();
+        let path_owned = PathBuf::from(path);
+
+        // Release the GIL for the whole export (query + file writing).
+        // Errors are split so each maps to the right Python exception:
+        // core errors via to_py_err, writer/file errors to IOError.
+        let result: Result<u64, PyErr> = py.allow_threads(|| {
+            block_on(async {
+                let mut iter = db
+                    .execute_streaming(
+                        &query_owned,
+                        cqlite_core::query::result::StreamingConfig::default(),
+                    )
+                    .await
+                    .map_err(to_py_err)?;
+
+                let file = std::fs::File::create(&path_owned).map_err(|e| {
+                    PyIOError::new_err(format!("failed to create {}: {e}", path_owned.display()))
+                })?;
+
+                let mut writer = StreamingParquetWriter::new(file, &iter.metadata, &options)
+                    .map_err(|e| PyIOError::new_err(e.to_string()))?;
+
+                let mut chunk: Vec<cqlite_core::query::QueryRow> =
+                    Vec::with_capacity(row_group_size.min(10_000));
+                while let Some(row) = iter.next_async().await {
+                    chunk.push(row.map_err(to_py_err)?);
+                    if chunk.len() >= row_group_size {
+                        writer
+                            .write_chunk(&chunk)
+                            .map_err(|e| PyIOError::new_err(e.to_string()))?;
+                        chunk.clear();
+                    }
+                }
+                if !chunk.is_empty() {
+                    writer
+                        .write_chunk(&chunk)
+                        .map_err(|e| PyIOError::new_err(e.to_string()))?;
+                }
+                writer
+                    .finalize()
+                    .map_err(|e| PyIOError::new_err(e.to_string()))?;
+
+                Ok(writer.rows_written())
+            })
+        });
+
+        result
+    }
+
     /// Prepare a CQL statement for repeated execution.
     ///
     /// Prepares and caches a query plan for the given CQL statement.

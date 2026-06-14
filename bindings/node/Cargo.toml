@@ -16,7 +16,7 @@ default = []
 write-support = ["cqlite-core/write-support"]
 
 [dependencies]
-cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression", "cli-helpers"] }
+cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression", "cli-helpers", "parquet"] }
 napi = { workspace = true, features = ["async", "napi9", "tokio_rt", "serde-json"] }
 napi-derive = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "sync"] }

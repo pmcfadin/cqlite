@@ -22,6 +22,10 @@ pub mod query;
 pub mod schema;
 pub mod storage;
 
+// Embeddable export writers (Epic #682). The module is always present; the
+// Parquet writer inside it is gated behind the optional `parquet` feature.
+pub mod export;
+
 // M5: Write engine and serialization modules (Issue #359)
 // Re-exported at crate level for convenience when write-support is enabled
 #[cfg(feature = "write-support")]

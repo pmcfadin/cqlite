@@ -61,6 +61,20 @@ cqlite-core/src/storage/write_engine/
 └── export.rs           # SSTable export (M5.2)
 ```
 
+### Export writers
+
+```
+cqlite-core/src/export/
+├── mod.rs       # Export module (feature-gated submodules)
+└── parquet.rs   # Batch + streaming Parquet writers (feature = "parquet", Epic #682)
+```
+
+The Parquet writer is behind the off-by-default `parquet` cargo feature so the
+default build does not compile arrow/parquet. The CLI (`--out parquet`) and the
+Python/Node bindings consume this writer; `cqlite-cli/src/output/parquet.rs` is
+only a thin adapter. Shared cqlsh-compatible value formatting lives in
+`cqlite-core/src/util/value_fmt.rs`.
+
 ### Query and schema
 
 ```

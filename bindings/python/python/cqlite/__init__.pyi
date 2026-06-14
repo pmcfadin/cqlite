@@ -189,6 +189,42 @@ class Database:
         """
         ...
 
+    def export_parquet(
+        self,
+        query: str,
+        path: str,
+        *,
+        row_group_size: int = 10000,
+        compression: str = "snappy",
+    ) -> int:
+        """Export the results of a CQL query to a Parquet file.
+
+        The query is executed with streaming, so large result sets are
+        written within bounded memory. The GIL is released during export.
+
+        Args:
+            query: CQL SELECT query string
+            path: Destination file path (created or truncated)
+            row_group_size: Rows per Parquet row group (default: 10000)
+            compression: "snappy" (default), "zstd", or "none"
+
+        Returns:
+            Number of rows written
+
+        Raises:
+            ValueError: If compression or row_group_size is invalid
+            IOError: If the file cannot be created or written
+            QueryError: If query execution fails
+            RuntimeError: If database is closed
+
+        Example:
+            >>> rows = db.export_parquet(
+            ...     "SELECT * FROM my_ks.my_table", "/tmp/out.parquet"
+            ... )
+            >>> print(f"Exported {rows} row(s)")
+        """
+        ...
+
     def prepare(self, query: str) -> "PreparedStatement":
         """Prepare a query for analysis.
 
