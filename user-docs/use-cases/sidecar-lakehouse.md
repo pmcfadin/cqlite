@@ -24,7 +24,10 @@ The read-to-Parquet pipeline is largely in place:
    the integration hook for "the Sidecar told me where a new SSTable is, read it."
 2. **Memory-bounded streaming reads** via `execute_streaming()` keep peak memory
    predictable on large tables.
-3. **Parquet output** is available via `--out parquet` in the CLI.
+3. **Parquet output** is available via `--out parquet` in the CLI, via
+   `db.export_parquet(...)` / `db.exportParquet(...)` in the Python and Node
+   bindings, and as an embeddable writer in `cqlite-core` behind the `parquet`
+   cargo feature (epic #682, delivered).
 
 A minimal per-SSTable projection is already expressible as a one-shot CLI call:
 
@@ -151,15 +154,15 @@ identical schemas and values. See
 
 ## What epics #682 and #696 unlock
 
-These in-progress epics complete the lakehouse story:
-
 **[Epic #682: Lift Parquet writer into cqlite-core](https://github.com/pmcfadin/cqlite/issues/682)**
-*(in progress)*
+*(delivered)*
 
-Moves the Parquet writer from `cqlite-cli` into `cqlite-core` behind a `parquet`
-feature flag. Today, embedding projection in a long-running service requires shelling
-out to the CLI. After this epic, a projection service can call the writer directly as a
-library without a subprocess, and the Python and Node bindings can export Parquet.
+The Parquet writer now lives in `cqlite-core/src/export/parquet.rs` behind an
+off-by-default `parquet` feature flag. A projection service can call the writer
+directly as a library without a subprocess, and the Python
+(`db.export_parquet(...)`) and Node (`db.exportParquet(...)`) bindings export
+Parquet natively. CQLite produces Parquet files only; committing them to
+Iceberg/Delta remains the external committer's job.
 
 **[Epic #696: Delta-scan envelope for CDC-style projections](https://github.com/pmcfadin/cqlite/issues/696)**
 *(in progress)*
@@ -188,9 +191,9 @@ events and commit timestamps.
 Our approach's distinct value is **open, lake-native columnar output from Cassandra with
 no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered
 committed log — its source of truth is independently-flushed, LWW-merged SSTables — so
-any columnar projection is inherently a delta-reconciliation problem. Epic #673
-(delivered) addressed type fidelity; epics #682 and #696 each address one remaining
-part of that problem.
+any columnar projection is inherently a delta-reconciliation problem. Epics #673
+and #682 (delivered) addressed type fidelity and embeddability; epic #696
+addresses the remaining part of that problem.
 
 ## Recommendations
 
@@ -202,8 +205,9 @@ part of that problem.
    columns) so projections are reconcilable. Without this, a union of per-flush Parquet
    is silently wrong.
 4. **Prefer commitlog CDC over raw flush events** when correctness matters.
-5. **Lift the Parquet writer into `cqlite-core`** (epic #682) if you want embeddable
-   non-CLI projection.
+5. **Embed the writer rather than shelling out** — the Parquet writer lives in
+   `cqlite-core` behind the `parquet` feature (epic #682, delivered), and the
+   Python/Node bindings expose it directly.
 
 <!-- TODO(W4): link to CLI reference when merged -->
 <!-- TODO(W5): link to Python and Node bindings pages when merged -->

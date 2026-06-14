@@ -594,6 +594,18 @@ cqlite-core/src/storage/write_engine/
 └── export.rs           # SSTable export (M5.2)
 ```
 
+### Export writers
+
+[Section titled “Export writers”](#export-writers)
+
+```plaintext
+cqlite-core/src/export/
+├── mod.rs       # Export module (feature-gated submodules)
+└── parquet.rs   # Batch + streaming Parquet writers (feature = "parquet", Epic #682)
+```
+
+The Parquet writer is behind the off-by-default `parquet` cargo feature so the default build does not compile arrow/parquet. The CLI (`--out parquet`) and the Python/Node bindings consume this writer; `cqlite-cli/src/output/parquet.rs` is only a thin adapter. Shared cqlsh-compatible value formatting lives in `cqlite-core/src/util/value_fmt.rs`.
+
 ### Query and schema
 
 [Section titled “Query and schema”](#query-and-schema)
@@ -1379,7 +1391,7 @@ sensor_id,timestamp,temperature,humidity
 
 # Export to Parquet
 
-> Write CQLite query results to a Parquet file using the --out parquet flag.
+> Write CQLite query results to a Parquet file from the CLI, Python, Node.js, or embedded Rust.
 
 # Export to Parquet
 
@@ -1472,6 +1484,77 @@ When the query runs against a schema (the normal case), columns export with high
 | `frozen<T>`                  | Same as `T` (transparent)                                              |
 
 See [Output Formats](/cqlite/user-docs/output-formats/) for the full type map and precision notes.
+
+## Export from Python (no CLI)
+
+[Section titled “Export from Python (no CLI)”](#export-from-python-no-cli)
+
+The Python bindings expose the same writer directly (Epic #682) — no subprocess needed:
+
+```python
+import cqlite
+
+
+with cqlite.open('test-data/datasets/sstables',
+                 schema='test-data/schemas/basic-types.cql') as db:
+    rows = db.export_parquet(
+        'SELECT * FROM test_basic.simple_table',
+        '/tmp/simple_table.parquet',
+        row_group_size=10000,      # rows per Parquet row group
+        compression='snappy',      # 'snappy' (default), 'zstd', or 'none'
+    )
+    print(f'Exported {rows} rows')
+```
+
+The query streams, so large tables export within bounded memory, and the GIL is released for the duration of the export.
+
+## Export from Node.js (no CLI)
+
+[Section titled “Export from Node.js (no CLI)”](#export-from-nodejs-no-cli)
+
+```javascript
+const { Database } = require('@cqlite/node');
+
+
+const db = await Database.open('test-data/datasets/sstables', {
+  schema: 'test-data/schemas/basic-types.cql',
+});
+const rows = await db.exportParquet(
+  'SELECT * FROM test_basic.simple_table',
+  '/tmp/simple_table.parquet',
+  { rowGroupSize: 10000, compression: 'snappy' }
+);
+console.log(`Exported ${rows} rows`);
+await db.close();
+```
+
+The export runs as an async task off the JavaScript main thread.
+
+## Export from Rust (library embedders)
+
+[Section titled “Export from Rust (library embedders)”](#export-from-rust-library-embedders)
+
+The writer lives in `cqlite-core` behind the off-by-default `parquet` cargo feature:
+
+```toml
+[dependencies]
+cqlite-core = { version = "*", features = ["parquet"] }
+```
+
+```rust
+use cqlite_core::export::parquet::{ParquetExportOptions, StreamingParquetWriter};
+
+
+let mut iter = db.execute_streaming(query, Default::default()).await?;
+let file = std::fs::File::create("/tmp/out.parquet")?;
+let mut writer = StreamingParquetWriter::new(file, &iter.metadata, &ParquetExportOptions::default())?;
+while let Some(row) = iter.next_async().await {
+    writer.write_chunk(&[row?])?;
+}
+writer.finalize()?;
+```
+
+CQLite produces Parquet **files** only; committing them to Iceberg/Delta table formats is an external committer’s job.
 
 ## Read the Parquet file (Python)
 
@@ -11931,6 +12014,25 @@ for await (const row of db.executeStreaming('SELECT * FROM huge_table')) {
 
 The `StreamingResult` object also exposes `rowsReceived` and `columns` for progress tracking after the first row is yielded.
 
+## Exporting to Parquet
+
+[Section titled “Exporting to Parquet”](#exporting-to-parquet)
+
+`db.exportParquet()` writes query results straight to a Parquet file using the embeddable core writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)). The query streams, so arbitrarily large result sets export within bounded memory, and the export runs as an async task off the JavaScript main thread.
+
+```javascript
+const rows = await db.exportParquet(
+  'SELECT * FROM test_basic.simple_table',
+  '/tmp/simple_table.parquet',
+  { rowGroupSize: 10000, compression: 'snappy' } // or 'zstd' / 'none'
+);
+console.log(`Exported ${rows} rows`);
+```
+
+The output uses the high-fidelity Arrow type mapping — typed lists, maps, structs for UDTs/tuples, `Decimal128`, `Date32`, `Time64`, UUID extension — see [Output Formats](/cqlite/user-docs/output-formats/) for the full table.
+
+Errors carry the standard `code` / `category` / `isRecoverable` properties: invalid options surface as `CONFIG`, file and encoding failures as `IO`, and query failures through the usual `QUERY` / `PARSE` codes.
+
 ## Error handling
 
 [Section titled “Error handling”](#error-handling)
@@ -12080,19 +12182,20 @@ async function query(): Promise<void> {
 
 [Section titled “API reference summary”](#api-reference-summary)
 
-| Method / property                     | Returns                      | Description                                      |
-| ------------------------------------- | ---------------------------- | ------------------------------------------------ |
-| `Database.open(dir, options?)`        | `Promise<Database>`          | Open a database                                  |
-| `db.execute(query)`                   | `Promise<QueryResult>`       | Execute query; hex-encoded varint/decimal        |
-| `db.executeNative(query)`             | `Promise<NativeQueryResult>` | Execute query with native JS types (recommended) |
-| `db.executeStreaming(query, config?)` | `StreamingResult`            | Memory-bounded async iteration                   |
-| `db.getStats()`                       | `Promise<DatabaseStats>`     | Storage and memory metrics                       |
-| `db.prepare(query)`                   | `Promise<PreparedStatement>` | Parse and plan a query                           |
-| `db.flushRun()`                       | `Promise<string>`            | Flush memtable; returns Data.db path             |
-| `db.maintenanceStep(options?)`        | `Promise<MaintenanceReport>` | Incremental compaction                           |
-| `db.writeStats`                       | `WriteStats`                 | Synchronous write engine snapshot                |
-| `db.close()`                          | `Promise<void>`              | Release resources (idempotent)                   |
-| `db.isClosed`                         | `boolean`                    | True if the connection is closed                 |
+| Method / property                         | Returns                      | Description                                      |
+| ----------------------------------------- | ---------------------------- | ------------------------------------------------ |
+| `Database.open(dir, options?)`            | `Promise<Database>`          | Open a database                                  |
+| `db.execute(query)`                       | `Promise<QueryResult>`       | Execute query; hex-encoded varint/decimal        |
+| `db.executeNative(query)`                 | `Promise<NativeQueryResult>` | Execute query with native JS types (recommended) |
+| `db.executeStreaming(query, config?)`     | `StreamingResult`            | Memory-bounded async iteration                   |
+| `db.exportParquet(query, path, options?)` | `Promise<number>`            | Stream query results to a Parquet file           |
+| `db.getStats()`                           | `Promise<DatabaseStats>`     | Storage and memory metrics                       |
+| `db.prepare(query)`                       | `Promise<PreparedStatement>` | Parse and plan a query                           |
+| `db.flushRun()`                           | `Promise<string>`            | Flush memtable; returns Data.db path             |
+| `db.maintenanceStep(options?)`            | `Promise<MaintenanceReport>` | Incremental compaction                           |
+| `db.writeStats`                           | `WriteStats`                 | Synchronous write engine snapshot                |
+| `db.close()`                              | `Promise<void>`              | Release resources (idempotent)                   |
+| `db.isClosed`                             | `boolean`                    | True if the connection is closed                 |
 
 Full TypeScript definitions are in [`bindings/node/lib/index.d.ts`](https://github.com/pmcfadin/cqlite/blob/main/bindings/node/lib/index.d.ts).
 
@@ -12292,6 +12395,8 @@ id,name,age
 [Section titled “parquet — Apache Parquet binary format”](#parquet--apache-parquet-binary-format)
 
 Parquet is a columnar binary format for analytics workloads. CQLite writes valid Parquet files (magic bytes `PAR1`) compatible with Apache Arrow, DuckDB, Spark, and other readers.
+
+The writer is embeddable ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)): it lives in `cqlite-core` behind the off-by-default `parquet` cargo feature, and is exposed without the CLI via `db.export_parquet(...)` in the [Python bindings](/cqlite/user-docs/python/) and `db.exportParquet(...)` in the [Node.js bindings](/cqlite/user-docs/nodejs/).
 
 **Parquet requires a file destination** — it cannot be written to stdout:
 
@@ -12575,6 +12680,27 @@ db = cqlite.open("data/sstables", schema="schema.cql", config="memory_optimized"
 db = cqlite.open("data/sstables", schema="schema.cql", config="performance_optimized")
 ```
 
+## Exporting to Parquet
+
+[Section titled “Exporting to Parquet”](#exporting-to-parquet)
+
+`db.export_parquet()` writes query results straight to a Parquet file using the embeddable core writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)). The query streams, so arbitrarily large result sets export within bounded memory, and the GIL is released for the duration of the export.
+
+```python
+with cqlite.open("data/sstables", schema="schema.cql") as db:
+    rows = db.export_parquet(
+        "SELECT * FROM test_basic.simple_table",
+        "/tmp/simple_table.parquet",
+        row_group_size=10000,    # rows per Parquet row group (default)
+        compression="snappy",    # "snappy" (default), "zstd", or "none"
+    )
+    print(f"Exported {rows} rows")
+```
+
+The output uses the high-fidelity Arrow type mapping — typed lists, maps, structs for UDTs/tuples, `Decimal128`, `Date32`, `Time64`, UUID extension — see [Output Formats](/cqlite/user-docs/output-formats/) for the full table.
+
+Invalid options raise `ValueError`; file and encoding failures raise `IOError`; query failures raise the usual `QueryError`/`ParseError`.
+
 ## Error handling
 
 [Section titled “Error handling”](#error-handling)
@@ -12671,18 +12797,19 @@ Each thread should create its own `StreamingIterator` via `execute_streaming()`.
 
 [Section titled “API reference summary”](#api-reference-summary)
 
-| Method / property                      | Description                                               |
-| -------------------------------------- | --------------------------------------------------------- |
-| `cqlite.open(path, ...)`               | Open a database; returns `Database`                       |
-| `db.execute(query)`                    | Run a CQL query; returns `QueryResult`                    |
-| `db.execute_streaming(query, config?)` | Memory-bounded row iteration; returns `StreamingIterator` |
-| `db.prepare(query)`                    | Parse and plan a query; returns `PreparedStatement`       |
-| `db.stats()`                           | Storage and memory metrics; returns `DatabaseStats`       |
-| `db.flush_run()`                       | Flush memtable to SSTable; returns Data.db path           |
-| `db.maintenance_step(budget_ms)`       | Incremental compaction; returns `MaintenanceReport`       |
-| `db.write_stats`                       | Write engine snapshot; returns `WriteStats`               |
-| `db.close()`                           | Release resources (idempotent)                            |
-| `db.is_closed`                         | `True` if the connection is closed                        |
+| Method / property                                                  | Description                                               |
+| ------------------------------------------------------------------ | --------------------------------------------------------- |
+| `cqlite.open(path, ...)`                                           | Open a database; returns `Database`                       |
+| `db.execute(query)`                                                | Run a CQL query; returns `QueryResult`                    |
+| `db.execute_streaming(query, config?)`                             | Memory-bounded row iteration; returns `StreamingIterator` |
+| `db.export_parquet(query, path, *, row_group_size?, compression?)` | Stream query results to a Parquet file; returns row count |
+| `db.prepare(query)`                                                | Parse and plan a query; returns `PreparedStatement`       |
+| `db.stats()`                                                       | Storage and memory metrics; returns `DatabaseStats`       |
+| `db.flush_run()`                                                   | Flush memtable to SSTable; returns Data.db path           |
+| `db.maintenance_step(budget_ms)`                                   | Incremental compaction; returns `MaintenanceReport`       |
+| `db.write_stats`                                                   | Write engine snapshot; returns `WriteStats`               |
+| `db.close()`                                                       | Release resources (idempotent)                            |
+| `db.is_closed`                                                     | `True` if the connection is closed                        |
 
 Full type stubs are in [`bindings/python/python/cqlite/__init__.pyi`](https://github.com/pmcfadin/cqlite/blob/main/bindings/python/python/cqlite/__init__.pyi).
 
@@ -13476,12 +13603,28 @@ for (const col of result.columns as ColumnInfo[]) {
 }
 ```
 
+## Export Parquet directly from Node.js
+
+[Section titled “Export Parquet directly from Node.js”](#export-parquet-directly-from-nodejs)
+
+The bindings expose the core Parquet writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)) — no CLI subprocess needed. The query streams, so large tables export within bounded memory, and the export runs off the JavaScript main thread:
+
+```typescript
+const rows = await db.exportParquet(
+  "SELECT * FROM my_ks.my_table",
+  "/tmp/my_table.parquet",
+  { rowGroupSize: 10000, compression: "snappy" } // or "zstd" / "none"
+);
+console.log(`Exported ${rows} rows`);
+```
+
+The output preserves nested and high-precision types — typed lists, maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
+
 ## What you cannot do (yet)
 
 [Section titled “What you cannot do (yet)”](#what-you-cannot-do-yet)
 
 * **Write back to SSTables from Node.js.** The write API is in the core library but not yet exposed in the Node.js bindings.
-* **Export Parquet directly from Node.js.** Use the CLI `--out parquet` flag for now. [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*. The CLI’s Parquet output preserves nested and high-precision types — typed lists, maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Further reading
 
@@ -14002,13 +14145,25 @@ with cqlite.open(DATASETS, schema=SCHEMA) as db:
 print(f"Exported {len(result.rows)} rows to {OUTPUT}")
 ```
 
-For Parquet output, use the CLI with `--out parquet`
+For Parquet, export directly from the bindings ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)) — the query streams, so large tables export within bounded memory:
 
-<!-- TODO(W4): link to output formats page when merged -->
+```python
+import cqlite
 
-.
 
-Native Parquet export from the Python bindings is planned in [epic #682](https://github.com/pmcfadin/cqlite/issues/682) *(in progress)*.
+with cqlite.open(DATASETS, schema=SCHEMA) as db:
+    rows = db.export_parquet(
+        "SELECT * FROM my_keyspace.my_table",
+        "/tmp/my_table_export.parquet",
+        row_group_size=10000,    # rows per Parquet row group
+        compression="snappy",    # "snappy" (default), "zstd", or "none"
+    )
+
+
+print(f"Exported {rows} rows")
+```
+
+The output preserves nested and high-precision types — typed lists, maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Notebook workflow
 
@@ -14043,7 +14198,6 @@ df["event_type"].value_counts().plot(kind="bar")
 [Section titled “What you cannot do (yet)”](#what-you-cannot-do-yet)
 
 * **Write back to SSTables from Python.** The write API is in the core library but not yet exposed in the Python bindings. Tracked in the write support roadmap.
-* **Export Parquet directly from Python.** Use the CLI `--out parquet` flag for now. [Epic #682](https://github.com/pmcfadin/cqlite/issues/682) tracks this *(in progress)*. The CLI’s Parquet output preserves nested and high-precision types — typed lists, maps, and structs — see [Output Formats](/cqlite/user-docs/output-formats/).
 
 ## Further reading
 
@@ -14074,7 +14228,7 @@ The read-to-Parquet pipeline is largely in place:
 
 1. **CQLite reads externally-discovered SSTables** via `open_with_discovered_sstables()` — the integration hook for “the Sidecar told me where a new SSTable is, read it.”
 2. **Memory-bounded streaming reads** via `execute_streaming()` keep peak memory predictable on large tables.
-3. **Parquet output** is available via `--out parquet` in the CLI.
+3. **Parquet output** is available via `--out parquet` in the CLI, via `db.export_parquet(...)` / `db.exportParquet(...)` in the Python and Node bindings, and as an embeddable writer in `cqlite-core` behind the `parquet` cargo feature (epic #682, delivered).
 
 A minimal per-SSTable projection is already expressible as a one-shot CLI call:
 
@@ -14188,11 +14342,9 @@ Collections, UDTs, and high-precision scalars all support columnar predicate pus
 
 [Section titled “What epics #682 and #696 unlock”](#what-epics-682-and-696-unlock)
 
-These in-progress epics complete the lakehouse story:
+**[Epic #682: Lift Parquet writer into cqlite-core](https://github.com/pmcfadin/cqlite/issues/682)** *(delivered)*
 
-**[Epic #682: Lift Parquet writer into cqlite-core](https://github.com/pmcfadin/cqlite/issues/682)** *(in progress)*
-
-Moves the Parquet writer from `cqlite-cli` into `cqlite-core` behind a `parquet` feature flag. Today, embedding projection in a long-running service requires shelling out to the CLI. After this epic, a projection service can call the writer directly as a library without a subprocess, and the Python and Node bindings can export Parquet.
+The Parquet writer now lives in `cqlite-core/src/export/parquet.rs` behind an off-by-default `parquet` feature flag. A projection service can call the writer directly as a library without a subprocess, and the Python (`db.export_parquet(...)`) and Node (`db.exportParquet(...)`) bindings export Parquet natively. CQLite produces Parquet files only; committing them to Iceberg/Delta remains the external committer’s job.
 
 **[Epic #696: Delta-scan envelope for CDC-style projections](https://github.com/pmcfadin/cqlite/issues/696)** *(in progress)*
 
@@ -14210,7 +14362,7 @@ CQLite requires the CQL schema to decode an SSTable (no-heuristics mandate, issu
 
 TiDB’s TiFlash is instructive: it is a Raft learner that receives every committed write in real-time, providing a strongly consistent, transactionally-consistent columnar replica. TiCDC (the structural analog to this pipeline) tails the ordered row-change log and emits Kafka or cloud-storage changefeeds with explicit insert/update/delete events and commit timestamps.
 
-Our approach’s distinct value is **open, lake-native columnar output from Cassandra with no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered committed log — its source of truth is independently-flushed, LWW-merged SSTables — so any columnar projection is inherently a delta-reconciliation problem. Epic #673 (delivered) addressed type fidelity; epics #682 and #696 each address one remaining part of that problem.
+Our approach’s distinct value is **open, lake-native columnar output from Cassandra with no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered committed log — its source of truth is independently-flushed, LWW-merged SSTables — so any columnar projection is inherently a delta-reconciliation problem. Epics #673 and #682 (delivered) addressed type fidelity and embeddability; epic #696 addresses the remaining part of that problem.
 
 ## Recommendations
 
@@ -14220,7 +14372,7 @@ Our approach’s distinct value is **open, lake-native columnar output from Cass
 2. **Land in a table format (Iceberg or Delta), not bare Parquet files.** Those provide snapshot isolation, compaction, and merge-on-read that otherwise you must build by hand.
 3. **Preserve `writetime` and represent tombstones** (`__writetime` / `__deleted` columns) so projections are reconcilable. Without this, a union of per-flush Parquet is silently wrong.
 4. **Prefer commitlog CDC over raw flush events** when correctness matters.
-5. **Lift the Parquet writer into `cqlite-core`** (epic #682) if you want embeddable non-CLI projection.
+5. **Embed the writer rather than shelling out** — the Parquet writer lives in `cqlite-core` behind the `parquet` feature (epic #682, delivered), and the Python/Node bindings expose it directly.
 
 <!-- TODO(W4): link to CLI reference when merged -->
 

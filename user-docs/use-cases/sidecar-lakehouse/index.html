@@ -92,7 +92,10 @@ user-facing distillation.</p>
 the integration hook for “the Sidecar told me where a new SSTable is, read it.”</li>
 <li><strong>Memory-bounded streaming reads</strong> via <code dir="auto">execute_streaming()</code> keep peak memory
 predictable on large tables.</li>
-<li><strong>Parquet output</strong> is available via <code dir="auto">--out parquet</code> in the CLI.</li>
+<li><strong>Parquet output</strong> is available via <code dir="auto">--out parquet</code> in the CLI, via
+<code dir="auto">db.export_parquet(...)</code> / <code dir="auto">db.exportParquet(...)</code> in the Python and Node
+bindings, and as an embeddable writer in <code dir="auto">cqlite-core</code> behind the <code dir="auto">parquet</code>
+cargo feature (epic #682, delivered).</li>
 </ol>
 <p>A minimal per-SSTable projection is already expressible as a one-shot CLI call:</p>
 <div class="expressive-code"><link rel="stylesheet" href="/cqlite/_astro/ec.v4551.css"><script type="module" src="/cqlite/_astro/ec.0vx5m.js"></script><figure class="frame is-terminal not-content"><figcaption class="header"><span class="title"></span><span class="sr-only">Terminal window</span></figcaption><pre data-language="bash"><code><div class="ec-line"><div class="code"><span style="--0:#82AAFF;--1:#3B61B0">cqlite</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">--schema</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">users.cql</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">       </span><span style="--0:#82AAFF;--1:#3B61B0">--data-dir</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/var/lib/cassandra/data/my_ks/users-&#x3C;uuid>/</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">       </span><span style="--0:#82AAFF;--1:#3B61B0">--query</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#ECC48D;--1:#984E4D">SELECT * FROM my_ks.users</span><span style="--0:#D9F5DD;--1:#111111">"</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#F78C6C;--1:#AA0982">\</span></div></div><div class="ec-line"><div class="code"><span class="indent">       </span><span style="--0:#82AAFF;--1:#3B61B0">--out</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">parquet</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#82AAFF;--1:#3B61B0">-o</span><span style="--0:#D6DEEB;--1:#403F53"> </span><span style="--0:#ECC48D;--1:#3B61B0">/projections/users/nb-&#x3C;gen>.parquet</span></div></div></code></pre><div class="copy"><div aria-live="polite"></div><button title="Copy to clipboard" data-copied="Copied!" data-code="cqlite --schema users.cql \       --data-dir /var/lib/cassandra/data/my_ks/users-<uuid>/ \       --query &#x22;SELECT * FROM my_ks.users&#x22; \       --out parquet -o /projections/users/nb-<gen>.parquet"><div></div></button></div></figure></div>
@@ -268,13 +271,14 @@ in downstream consumers (Trino, Spark, DuckDB). The batch and streaming writers 
 identical schemas and values. See
 <a href="/cqlite/user-docs/output-formats/">Output Formats</a> for the full table and notes.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="what-epics-682-and-696-unlock">What epics #682 and #696 unlock</h2><a class="sl-anchor-link" href="#what-epics-682-and-696-unlock"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “What epics #682 and #696 unlock”</span></a></div>
-<p>These in-progress epics complete the lakehouse story:</p>
 <p><strong><a href="https://github.com/pmcfadin/cqlite/issues/682">Epic #682: Lift Parquet writer into cqlite-core</a></strong>
-<em>(in progress)</em></p>
-<p>Moves the Parquet writer from <code dir="auto">cqlite-cli</code> into <code dir="auto">cqlite-core</code> behind a <code dir="auto">parquet</code>
-feature flag. Today, embedding projection in a long-running service requires shelling
-out to the CLI. After this epic, a projection service can call the writer directly as a
-library without a subprocess, and the Python and Node bindings can export Parquet.</p>
+<em>(delivered)</em></p>
+<p>The Parquet writer now lives in <code dir="auto">cqlite-core/src/export/parquet.rs</code> behind an
+off-by-default <code dir="auto">parquet</code> feature flag. A projection service can call the writer
+directly as a library without a subprocess, and the Python
+(<code dir="auto">db.export_parquet(...)</code>) and Node (<code dir="auto">db.exportParquet(...)</code>) bindings export
+Parquet natively. CQLite produces Parquet files only; committing them to
+Iceberg/Delta remains the external committer’s job.</p>
 <p><strong><a href="https://github.com/pmcfadin/cqlite/issues/696">Epic #696: Delta-scan envelope for CDC-style projections</a></strong>
 <em>(in progress)</em></p>
 <p>Implements a <code dir="auto">scan_delta</code> streaming API that emits <code dir="auto">DeltaRecord</code>s with per-cell
@@ -296,9 +300,9 @@ events and commit timestamps.</p>
 <p>Our approach’s distinct value is <strong>open, lake-native columnar output from Cassandra with
 no cluster dependency in the read path</strong>. The trade-off is that Cassandra has no ordered
 committed log — its source of truth is independently-flushed, LWW-merged SSTables — so
-any columnar projection is inherently a delta-reconciliation problem. Epic #673
-(delivered) addressed type fidelity; epics #682 and #696 each address one remaining
-part of that problem.</p>
+any columnar projection is inherently a delta-reconciliation problem. Epics #673
+and #682 (delivered) addressed type fidelity and embeddability; epic #696
+addresses the remaining part of that problem.</p>
 <div class="sl-heading-wrapper level-h2"><h2 id="recommendations">Recommendations</h2><a class="sl-anchor-link" href="#recommendations"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Recommendations”</span></a></div>
 <ol>
 <li><strong>Model it as CDC/append-log, not snapshot.</strong> It matches the immutable-SSTable grain
@@ -309,8 +313,9 @@ snapshot isolation, compaction, and merge-on-read that otherwise you must build 
 columns) so projections are reconcilable. Without this, a union of per-flush Parquet
 is silently wrong.</li>
 <li><strong>Prefer commitlog CDC over raw flush events</strong> when correctness matters.</li>
-<li><strong>Lift the Parquet writer into <code dir="auto">cqlite-core</code></strong> (epic #682) if you want embeddable
-non-CLI projection.</li>
+<li><strong>Embed the writer rather than shelling out</strong> — the Parquet writer lives in
+<code dir="auto">cqlite-core</code> behind the <code dir="auto">parquet</code> feature (epic #682, delivered), and the
+Python/Node bindings expose it directly.</li>
 </ol>
 <!-- TODO(W4): link to CLI reference when merged -->
 <!-- TODO(W5): link to Python and Node bindings pages when merged --> </div> <footer class="sl-flex astro-3yyafb3n"> <div class="meta sl-flex astro-3yyafb3n"> <a href="https://github.com/pmcfadin/cqlite/edit/main/website/src/content/docs/user-docs/use-cases/sidecar-lakehouse.md" class="sl-flex print:hidden astro-eez2twj6"><svg aria-hidden="true" class="astro-eez2twj6 astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.2em;"><path d="M22 7.24a1 1 0 0 0-.29-.71l-4.24-4.24a1 1 0 0 0-1.1-.22 1 1 0 0 0-.32.22l-2.83 2.83L2.29 16.05a1 1 0 0 0-.29.71V21a1 1 0 0 0 1 1h4.24a1 1 0 0 0 .76-.29l10.87-10.93L21.71 8c.1-.1.17-.2.22-.33a1 1 0 0 0 0-.24v-.14l.07-.05ZM6.83 20H4v-2.83l9.93-9.93 2.83 2.83L6.83 20ZM18.17 8.66l-2.83-2.83 1.42-1.41 2.82 2.82-1.41 1.42Z"/></svg>Edit page</a>  </div> <div class="pagination-links print:hidden astro-u2l5gyhi" dir="ltr"> <a href="/cqlite/user-docs/use-cases/" rel="prev" class="astro-u2l5gyhi"> <svg aria-hidden="true" class="astro-u2l5gyhi astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17 11H9.41l3.3-3.29a1.004 1.004 0 1 0-1.42-1.42l-5 5a1 1 0 0 0-.21.33 1 1 0 0 0 0 .76 1 1 0 0 0 .21.33l5 5a1.002 1.002 0 0 0 1.639-.325 1 1 0 0 0-.219-1.095L9.41 13H17a1 1 0 0 0 0-2Z"/></svg> <span class="astro-u2l5gyhi"> Previous <br class="astro-u2l5gyhi"> <span class="link-title astro-u2l5gyhi">Overview</span> </span> </a> <a href="/cqlite/user-docs/use-cases/python-data-science/" rel="next" class="astro-u2l5gyhi"> <svg aria-hidden="true" class="astro-u2l5gyhi astro-c6vsoqas" width="16" height="16" viewBox="0 0 24 24" fill="currentColor" style="--sl-icon-size: 1.5rem;"><path d="M17.92 11.62a1.001 1.001 0 0 0-.21-.33l-5-5a1.003 1.003 0 1 0-1.42 1.42l3.3 3.29H7a1 1 0 0 0 0 2h7.59l-3.3 3.29a1.002 1.002 0 0 0 .325 1.639 1 1 0 0 0 1.095-.219l5-5a1 1 0 0 0 .21-.33 1 1 0 0 0 0-.76Z"/></svg> <span class="astro-u2l5gyhi"> Next <br class="astro-u2l5gyhi"> <span class="link-title astro-u2l5gyhi">Python / Data Science</span> </span> </a> </div>   </footer>  </div> </div>   </main> </div> </div>  </div> </div>  </body></html>
