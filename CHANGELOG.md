@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.10.1] - 2026-06-13
+
+Patch release bundling everything merged since v0.10.0. Correctness:
+TEXT/composite partition-key reconstruction on the scan path (#586), a safe
+compaction async-to-sync bridge (#587), writer temporal-delta and tombstone
+serialization fixes (#645, #723), Summary.db offset-table encoding (#718), and
+removal of the last parser heuristic (#650). New read coverage: version-gated
+read behavior for the Cassandra 5.0 `oa` format and graceful handling of the
+`da` (BTI) format (VG1/VG3/VG5/VG6/VG7), real BTI node-type dispatch (#651),
+schema-typed query result columns (#770), and higher-fidelity Parquet/Arrow
+type mapping (#771). Plus opt-in memory-mapped reads (#589, **off by default**)
+with their follow-up hardening (#591), a bounded uncompressed-read allocation
+(#592), removal of three dead mmap readers (#590), and a new documentation site.
+
+### Added
+
+- **Version-gated read support for the Cassandra 5.0 `oa` format** (Issues
+  #653, #655, #672) — `VersionGate`s are threaded through the read path (VG1)
+  so format-specific behavior is selected from the SSTable version rather than
+  guessed. The `oa` (5.0 BIG) read behavior lives behind five `oa`-only gates
+  (VG3) and the query path is gated end-to-end (VG6, including a range-tombstone
+  marker-skip fix); all six `oa` fixture tables pass `sstabledump` parity. The
+  `da` (BTI) format has a routing foundation that returns a graceful
+  *unsupported* error instead of misreading (VG5). Table identity in discovery
+  is now keyed by `(keyspace, table)` (VG7, #680). New `oa`/`da` fixtures and
+  goldens ship in the `datasets-v3` test set (#654).
+
+- **Real BTI node-type dispatch in `RowsParser`** (Issue #647) — `parse_node_data`
+  was a stub that always returned `PayloadOnly`, mislabeling Single/Sparse/Dense
+  nodes as leaves and returning wrong results for any multi-node trie. A shared
+  `parse_bti_node` now dispatches all 16 `TrieNode` ordinals (including the
+  packed 12-bit pointer variants), used by both `PartitionsParser` and
+  `RowsParser`.
+
+- **Schema `CqlType` threaded into query-result `ColumnInfo`** (Issue #674) —
+  result columns now carry their declared CQL type from the schema rather than
+  an inferred one, enabling type-correct downstream conversions in bindings and
+  exporters.
+
+- **Higher-fidelity Parquet/Arrow type mapping** (Epic #673) — nested and
+  high-precision CQL types are preserved on export instead of being flattened:
+  collections map to Arrow `List`/`Map`, and high-precision types keep their
+  precision rather than degrading to strings.
+
+- **Opt-in memory-mapped I/O on the SSTable read path** (Issue #589) — the
+  reader now sits on a `BlockSource` abstraction with two interchangeable
+  backends: a portable `BufReader<File>` (default) and a read-only `memmap2`
+  mapping. When enabled, files at or above `mmap_min_size_bytes` (4096) are
+  served from the OS page cache with no per-block read syscall, mirroring
+  Cassandra's `disk_access_mode: mmap`. **Opt-in and off by default**
+  (`use_mmap: false`); buffered I/O remains the portable, safe default. Map
+  failures degrade gracefully to buffered I/O. Enable only for immutable local
+  SSTables — external mutation/truncation of a mapped file or some network
+  filesystems can `SIGBUS`; the write-while-mapped guard and Windows
+  delete/replace policy from #591 make this safe for the supported use case.
+
 ### Removed
 
 - **Removed three dead mmap-based SSTable readers** (Issue #590) — deleted
@@ -99,6 +155,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PartitionKey::from_bytes` uses (single source of truth for both paths). A failed
   reconstruction is now logged via `log::warn!` instead of being swallowed, so this
   class of bug cannot ship invisibly again.
+
+- **Writer temporal deltas now use unsigned VInt, not ZigZag** (Issue #644) —
+  per Cassandra's `SerializationHeader`, every row-header temporal delta
+  (timestamp, TTL, local-deletion-time) is written with unsigned VInt. The
+  writer previously ZigZag-encoded these fields while the reader (fixed in #629)
+  expected unsigned VInt, so every positive timestamp delta read back as roughly
+  2× its real value. Corrected across all `data_writer.rs` row/cell/complex/range
+  paths.
+
+- **Correct tombstone serialization in the Data.db writer** (Issues #716, #717) —
+  fixes four tombstone shapes that Cassandra 5.0.2 rejected or misread on
+  `nodetool refresh` readback. Tombstone cells now set `HAS_EMPTY_VALUE` (without
+  it the reader consumed a phantom value and desynced the row stream), and row
+  tombstones now write the columns subset after the deletion times as
+  `UnfilteredSerializer` requires (omitting it made Cassandra read the next row's
+  flags byte as the subset bitmask). Pure row tombstones no longer carry
+  primary-key liveness, matching Cassandra's serializer.
+
+- **Correct Summary.db offset-table encoding and first/last key tracking**
+  (Issue #666) — offset-table entries are now biased by the offset-table size so
+  `offset[0]` equals the table size (absolute layout Cassandra's
+  `IndexSummary.deserialize` asserts), and first/last key plus partition count
+  are tracked for every partition via a new `note_partition()` rather than only
+  at sampling boundaries — so tables with fewer than `min_index_interval`
+  partitions no longer collapse the range filter to a single key.
+
+- **Removed the last parser heuristic from `parse_cql_value`** (Issue #648) — the
+  Ascii/Varchar arm carried three heuristic fallbacks (4-byte length prefix,
+  null-terminated, raw UTF-8) "for test compatibility," violating the
+  no-heuristics mandate (#28). The caller already extracts exactly the value
+  bytes, so the entire slice is the text; the default path now treats it as UTF-8
+  and errors on invalid input instead of silently accepting garbled data. The old
+  paths remain behind the opt-in `legacy-heuristics` feature flag.
+
+### Documentation
+
+- **New documentation site** — a Starlight-based site (with rustdoc published to
+  `/api/`) consolidates the user, CLI, bindings, use-case, and agent-developer
+  docs, replacing the scattered in-repo guides as the source of truth.
+
+- **SSTable definitive guide audited against Cassandra 5.0.8** — the Data.db,
+  Index/Summary, Statistics.db, compression, bloom-filter/checksum, BTI, SAI,
+  and version-matrix chapters were verified field-by-field against the
+  cassandra-5.0.8 source and corrected.
 
 ## [v0.10.0] - 2026-06-02
 

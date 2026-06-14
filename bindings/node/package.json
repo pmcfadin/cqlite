@@ -1,6 +1,6 @@
 {
   "name": "@cqlite/node",
-  "version": "0.10.0",
+  "version": "0.10.1",
   "description": "Node.js bindings for CQLite - read Apache Cassandra 5.0 SSTables without cluster dependencies",
   "main": "lib/index.js",
   "types": "lib/index.d.ts",
