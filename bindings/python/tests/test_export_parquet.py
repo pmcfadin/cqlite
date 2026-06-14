@@ -10,10 +10,13 @@ optional dependency.
 Tests skip when datasets are absent (see conftest.require_test_data).
 """
 
+import os
+from pathlib import Path
+
+import cqlite
 import pytest
 
 from conftest import (
-    DATASETS,
     SCHEMA_BASIC_TYPES,
     SCHEMA_COLLECTIONS,
     require_test_data,
@@ -25,6 +28,48 @@ try:
     HAVE_PYARROW = True
 except ImportError:
     HAVE_PYARROW = False
+
+
+# ---------------------------------------------------------------------------
+# Parquet-local data-path resolution (issue #773 / #772)
+#
+# The global conftest DATASETS is intentionally left in its original form
+# (CQLITE_DATASETS_ROOT used verbatim, pointing at test-data/datasets).
+# The Parquet tests assert rows > 0, so they need the real sstables sub-dir.
+# We resolve that here without touching the shared conftest.
+# ---------------------------------------------------------------------------
+
+
+def _parquet_datasets():
+    root = os.environ.get("CQLITE_DATASETS_ROOT")
+    if root:
+        p = Path(root)
+        return p if p.name == "sstables" else p / "sstables"
+    return Path(__file__).resolve().parents[3] / "test-data" / "datasets" / "sstables"
+
+
+_PARQUET_DATASETS = _parquet_datasets()
+
+# Keep DATASETS as an alias so the test_closed_database_raises_runtime_error
+# helper (which imports DATASETS from conftest directly) still works via the
+# module-local override below.
+DATASETS = _PARQUET_DATASETS
+
+
+@pytest.fixture
+def db():
+    if not _PARQUET_DATASETS.exists():
+        pytest.skip(f"Test data not found: {_PARQUET_DATASETS}")
+    with cqlite.open(_PARQUET_DATASETS, schema=SCHEMA_BASIC_TYPES) as database:
+        yield database
+
+
+@pytest.fixture
+def db_collections():
+    if not _PARQUET_DATASETS.exists():
+        pytest.skip(f"Test data not found: {_PARQUET_DATASETS}")
+    with cqlite.open(_PARQUET_DATASETS, schema=SCHEMA_COLLECTIONS) as database:
+        yield database
 
 
 def _assert_parquet_magic(path):
