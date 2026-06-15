@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["StatementType"],"fn":["classify_statement","cql_type_to_type_id","extract_table_name","parse_cql_schema","parse_cql_schema_with_visitor","parse_create_table","parse_create_type","split_cql_statements","table_name_matches"]};

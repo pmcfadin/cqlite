@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DataType","TombstoneType","Value"],"mod":["comparator"],"struct":["ColumnId","RowKey","TableId","TombstoneInfo","TupleValue","UdtField","UdtFieldDef","UdtTypeDef","UdtValue"]};
