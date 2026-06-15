@@ -182,7 +182,7 @@ db = cqlite.open("data/sstables", schema="schema.cql", config="performance_optim
 ## Exporting to Parquet
 
 `db.export_parquet()` writes query results straight to a Parquet file using
-the embeddable core writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)).
+the embeddable core writer.
 The query streams, so arbitrarily large result sets export within bounded
 memory, and the GIL is released for the duration of the export.
 

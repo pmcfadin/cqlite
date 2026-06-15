@@ -198,8 +198,7 @@ with cqlite.open(DATASETS, schema=SCHEMA) as db:
 print(f"Exported {len(result.rows)} rows to {OUTPUT}")
 ```
 
-For Parquet, export directly from the bindings
-([epic #682](https://github.com/pmcfadin/cqlite/issues/682)) — the query
+For Parquet, export directly from the bindings — the query
 streams, so large tables export within bounded memory:
 
 ```python

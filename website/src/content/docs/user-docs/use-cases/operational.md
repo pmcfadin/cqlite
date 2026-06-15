@@ -252,8 +252,8 @@ schema can produce incorrect values or errors.
 - **Schema-free inspection.** CQLite always requires a schema file. If you have lost
   the schema, use `DESCRIBE TABLE` from `cqlsh` on a running cluster, or extract it
   from `system_schema.tables` in an older backup.
-- **Real-time CDC / streaming from commitlog.** [Epic #696](https://github.com/pmcfadin/cqlite/issues/696)
-  tracks delta-scan and CDC-style projections *(in progress)*.
+- **Real-time CDC / streaming from commitlog.** Delta-scan and CDC-style projections
+  are not yet available; CQLite reads per-SSTable snapshots, not a change stream.
 
 ## Further reading
 
