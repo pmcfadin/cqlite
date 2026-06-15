@@ -266,8 +266,7 @@ for (const col of result.columns as ColumnInfo[]) {
 
 ## Export Parquet directly from Node.js
 
-The bindings expose the core Parquet writer
-([epic #682](https://github.com/pmcfadin/cqlite/issues/682)) — no CLI
+The bindings expose the core Parquet writer — no CLI
 subprocess needed. The query streams, so large tables export within bounded
 memory, and the export runs off the JavaScript main thread:
 
