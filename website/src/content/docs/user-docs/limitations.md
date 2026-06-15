@@ -19,10 +19,11 @@ For the exhaustive engineering detail, see [Appendix F: Known Limitations](/cqli
 | SSTable format | Cassandra versions | CQLite support |
 |----------------|-------------------|----------------|
 | `nb-*-big-*` (BIG format) | Cassandra 5.0+ | **Full** — all 33 test tables pass |
+| `oa-*-big-*` (BIG format) | Cassandra 5.0 | **Full** — 6 `oa` fixture tables pass `sstabledump` parity |
 | `md-*` | Cassandra 4.0–4.1 | **Not supported** |
 | `mc-*` | Cassandra 3.11 | **Not supported** |
 | `la-*`, `ma-*` | Cassandra 3.x | **Not supported** |
-| BTI format (Partitions.db / Rows.db) | Cassandra 5.0 opt-in | **Partial** — see below |
+| `da-*-bti-*` / BTI format (Partitions.db / Rows.db) | Cassandra 5.0 opt-in | **Not supported** — detected and rejected with a clear error; see below |
 
 CQLite targets Cassandra 5.0 exclusively. If you need older formats, export your
 data with Cassandra's `sstabledump` tool first.
@@ -35,23 +36,31 @@ The default Cassandra 5.0 index format (`nb-*-big-Index.db` / `nb-*-big-Summary.
 is fully supported. All 33 test tables in the CQLite test corpus use this format and
 pass validation against `sstabledump` output.
 
-### BTI format — partial support
+### BTI format (`da`) — not yet supported, fails cleanly
 
-BTI (trie-based index) is an opt-in, experimental feature in Cassandra 5.0, requiring
-`selected_format: bti` in `cassandra.yaml`. It produces `Partitions.db` and `Rows.db`
-files instead of the standard `Index.db`.
+BTI (trie-based index) is an opt-in feature in Cassandra 5.0, enabled with
+`selected_format: bti` in `cassandra.yaml`. It produces `da-*-bti-*` SSTables with
+`Partitions.db` and `Rows.db` trie indexes instead of the standard
+`Index.db` / `Summary.db`.
 
-Current BTI status:
+As of v0.11.0, CQLite **detects `da`-format SSTables and rejects them with a clear,
+graceful error** instead of misreading them:
 
-- Format detection works (magic number `0x6461`)
-- Byte-comparable encoding (CEP-25) is implemented
-- Trie node structure parsing is partially implemented
-- Range queries and full partition iteration are **not implemented**
-- No BTI test data exists in the test corpus (BTI requires explicit opt-in at the cluster level)
+```
+Unsupported format: BTI (da) read support not yet implemented. da-format SSTables
+use Partitions.db/Rows.db trie indexes instead of Index.db/Summary.db and require a
+dedicated BTI read path.
+```
 
-**In practice**: because BTI requires explicit opt-in, it is rarely used in production.
-If you use BTI, CQLite will fall back to a sequential scan of `Data.db` which is
-functionally correct but O(n) instead of O(log n) for partition lookups.
+The version-gate work (VG5) routes `da` through this graceful-unsupported path today,
+and `da` fixtures plus `sstabledump` goldens ship in the `datasets-v3` test set so a
+real BTI read path can be validated when it lands. That dedicated reader is planned but
+not yet implemented.
+
+**In practice**: because BTI requires explicit cluster opt-in, it is rarely used in
+production. If your SSTables are `da`-format, convert them with Cassandra's
+`sstabledump` first, or use the default BIG format (`nb` / `oa`), which CQLite reads
+fully.
 
 ## Data type support
 

@@ -187,7 +187,7 @@ The site is deployed by `.github/workflows/docs-site.yml`:
 
 Rustdoc for `cqlite-core` is published by `.github/workflows/api-docs.yml` to:
 
-- `/api/<version>/` — per-release docs (e.g. `/api/v0.10.0/`)
+- `/api/<version>/` — per-release docs (e.g. `/api/v0.11.0/`)
 - `/api/latest/` — always points to the latest release
 
 The Starlight site links to `/cqlite/api/latest/` from the landing page. These paths

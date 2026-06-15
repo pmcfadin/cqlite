@@ -8,7 +8,7 @@ sidebar:
 
 # CLI Reference
 
-This page is built from the actual `cqlite --help` output (binary version 0.10.0, built with `--features write-support`). Every example on this page was run against the real test datasets (`cassandra5-small-full-v3.1`).
+This page is built from the actual `cqlite --help` output (binary version 0.11.0, built with `--features write-support`). Every example on this page was run against the real test datasets (`cassandra5-small-full-v3.1`).
 
 ## Synopsis
 
