@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.11.0] - 2026-06-15
+
+Reader support for the `oa`/`da` SSTable format families behind explicit version
+gates, schema `CqlType` threaded into query results, opt-in memory-mapped I/O,
+and profiling infrastructure — plus a batch of writer/parser/format correctness
+fixes (several regressions shipped in v0.10.0).
+
+### Added
+
+- **Version-gated read path for the `oa` / `da` SSTable format families**
+  (Issues #653, #655, #656, #657, #672, #680, #647) — the read path now threads a
+  `VersionGates` set (VG1, #659) so format-specific behavior is selected from the
+  authoritative SSTable version rather than guessed. `oa` tables read behind five
+  `oa`-only gates (VG3, #662) with the query path fixed for the range-tombstone
+  marker skip so all six `oa` fixtures pass parity (VG6, #714); `da` is routed
+  with a graceful "unsupported" error and BTI scoping rather than a panic (VG5,
+  #661); table identity is keyed by `(keyspace, table)` in discovery (VG7, #681);
+  and the BTI `RowsParser` dispatches by node type (#651). `oa` parity is enforced
+  in CI against the datasets-v3 pins, including Python/Node spot checks (VG4,
+  #671).
+
+- **Schema `CqlType` threaded into query result `ColumnInfo`** (Issue #674) — query
+  results now carry the schema-declared `CqlType` for each column, so callers and
+  bindings can render values with full type fidelity instead of inferring from the
+  serialized form.
+
+- **Opt-in memory-mapped I/O on the SSTable read path** (Issue #589) — a new
+  `StorageConfig::use_mmap` flag (default OFF) maps Data.db blocks via
+  `BlockSource::Mapped` instead of buffered reads. See the mmap safety hardening
+  under Fixed (#591) for the compaction/delete invariants this introduced.
+
+- **Profiling infrastructure** (Issue #695) — pprof CPU flamegraphs (works in
+  containers), dhat heap profiling against the <128MB budget, and an
+  improvement-loop tooling/ledger (`scripts/profile.sh`, see `docs/profiling.md`).
+
 ### Removed
 
 - **Removed three dead mmap-based SSTable readers** (Issue #590) — deleted
@@ -99,6 +134,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `PartitionKey::from_bytes` uses (single source of truth for both paths). A failed
   reconstruction is now logged via `log::warn!` instead of being swallowed, so this
   class of bug cannot ship invisibly again.
+
+- **Summary.db offset table encoding + first/last key tracking** (Issue #666) —
+  corrected the Summary.db offset table encoding and the first/last partition key
+  tracking written by the writer, so generated summaries match Cassandra's layout
+  and partition lookups resolve correctly.
+
+- **Tombstone serialization in the Data.db writer** (Issues #716, #717) — fixed
+  tombstone (delete) serialization on the write path so deletes round-trip and
+  read back correctly.
+
+- **Temporal deltas use unsigned VInt, not ZigZag** (Issue #644) — `date`/`time`
+  and related temporal delta encodings in the writer now use unsigned VInt framing
+  to match the Cassandra format; ZigZag framing produced wrong values.
+
+- **Removed heuristic Ascii/Varchar fallback in value parsing** (Issue #648) —
+  `parse_cql_value` no longer falls back to a heuristic Ascii/Varchar guess,
+  honoring the no-heuristics mandate; types are resolved from authoritative
+  metadata only.
+
+- **Decimal, duration, and tuple/UDT field-length decoding** (Issue #624) — fixed
+  `decimal`/`duration` decoding and the field-length framing for `tuple` and UDT
+  types so nested and high-precision values decode correctly.
+
+- **`sampling_level` decoding in Statistics/Index verification** (Issue #625) —
+  corrected a `sampling_level` parsing bug surfaced by Index.db/Summary.db/BTI
+  verification.
 
 ## [v0.10.0] - 2026-06-02
 
