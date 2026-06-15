@@ -195,7 +195,7 @@ progress tracking after the first row is yielded.
 ## Exporting to Parquet
 
 `db.exportParquet()` writes query results straight to a Parquet file using
-the embeddable core writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)).
+the embeddable core writer.
 The query streams, so arbitrarily large result sets export within bounded
 memory, and the export runs as an async task off the JavaScript main thread.
 

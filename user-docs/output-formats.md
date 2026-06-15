@@ -173,7 +173,7 @@ id,name,age
 
 Parquet is a columnar binary format for analytics workloads. CQLite writes valid Parquet files (magic bytes `PAR1`) compatible with Apache Arrow, DuckDB, Spark, and other readers.
 
-The writer is embeddable ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)): it lives in `cqlite-core` behind the off-by-default `parquet` cargo feature, and is exposed without the CLI via `db.export_parquet(...)` in the [Python bindings](/cqlite/user-docs/python/) and `db.exportParquet(...)` in the [Node.js bindings](/cqlite/user-docs/nodejs/).
+The writer is embeddable: it lives in `cqlite-core` behind the off-by-default `parquet` cargo feature, and is exposed without the CLI via `db.export_parquet(...)` in the [Python bindings](/cqlite/user-docs/python/) and `db.exportParquet(...)` in the [Node.js bindings](/cqlite/user-docs/nodejs/).
 
 **Parquet requires a file destination** — it cannot be written to stdout:
 
@@ -190,7 +190,7 @@ If you specify `--out parquet` without `--output`, CQLite exits with an error.
 
 ### Type mapping
 
-**CQLite's Parquet output preserves nested and high-precision CQL types** ([epic #673](https://github.com/pmcfadin/cqlite/issues/673)). When a schema is provided (the normal case — CQLite requires one to decode SSTables), query results carry the authoritative schema `CqlType` and the writer builds a faithful Arrow schema, recursively:
+**CQLite's Parquet output preserves nested and high-precision CQL types.** When a schema is provided (the normal case — CQLite requires one to decode SSTables), query results carry the authoritative schema `CqlType` and the writer builds a faithful Arrow schema, recursively:
 
 | CQL type | Arrow/Parquet type | Notes |
 |----------|--------------------|-------|

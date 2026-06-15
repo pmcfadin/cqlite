@@ -12021,7 +12021,7 @@ The `StreamingResult` object also exposes `rowsReceived` and `columns` for progr
 
 [Section titled “Exporting to Parquet”](#exporting-to-parquet)
 
-`db.exportParquet()` writes query results straight to a Parquet file using the embeddable core writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)). The query streams, so arbitrarily large result sets export within bounded memory, and the export runs as an async task off the JavaScript main thread.
+`db.exportParquet()` writes query results straight to a Parquet file using the embeddable core writer. The query streams, so arbitrarily large result sets export within bounded memory, and the export runs as an async task off the JavaScript main thread.
 
 ```javascript
 const rows = await db.exportParquet(
@@ -12399,7 +12399,7 @@ id,name,age
 
 Parquet is a columnar binary format for analytics workloads. CQLite writes valid Parquet files (magic bytes `PAR1`) compatible with Apache Arrow, DuckDB, Spark, and other readers.
 
-The writer is embeddable ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)): it lives in `cqlite-core` behind the off-by-default `parquet` cargo feature, and is exposed without the CLI via `db.export_parquet(...)` in the [Python bindings](/cqlite/user-docs/python/) and `db.exportParquet(...)` in the [Node.js bindings](/cqlite/user-docs/nodejs/).
+The writer is embeddable: it lives in `cqlite-core` behind the off-by-default `parquet` cargo feature, and is exposed without the CLI via `db.export_parquet(...)` in the [Python bindings](/cqlite/user-docs/python/) and `db.exportParquet(...)` in the [Node.js bindings](/cqlite/user-docs/nodejs/).
 
 **Parquet requires a file destination** — it cannot be written to stdout:
 
@@ -12418,7 +12418,7 @@ If you specify `--out parquet` without `--output`, CQLite exits with an error.
 
 [Section titled “Type mapping”](#type-mapping)
 
-**CQLite’s Parquet output preserves nested and high-precision CQL types** ([epic #673](https://github.com/pmcfadin/cqlite/issues/673)). When a schema is provided (the normal case — CQLite requires one to decode SSTables), query results carry the authoritative schema `CqlType` and the writer builds a faithful Arrow schema, recursively:
+**CQLite’s Parquet output preserves nested and high-precision CQL types.** When a schema is provided (the normal case — CQLite requires one to decode SSTables), query results carry the authoritative schema `CqlType` and the writer builds a faithful Arrow schema, recursively:
 
 | CQL type                                  | Arrow/Parquet type                                        | Notes                                                                                                                                              |
 | ----------------------------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -12687,7 +12687,7 @@ db = cqlite.open("data/sstables", schema="schema.cql", config="performance_optim
 
 [Section titled “Exporting to Parquet”](#exporting-to-parquet)
 
-`db.export_parquet()` writes query results straight to a Parquet file using the embeddable core writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)). The query streams, so arbitrarily large result sets export within bounded memory, and the GIL is released for the duration of the export.
+`db.export_parquet()` writes query results straight to a Parquet file using the embeddable core writer. The query streams, so arbitrarily large result sets export within bounded memory, and the GIL is released for the duration of the export.
 
 ```python
 with cqlite.open("data/sstables", schema="schema.cql") as db:
@@ -13284,12 +13284,12 @@ These pages explain *when* and *why* to reach for CQLite, not just *how* to use 
 
 [Section titled “Pages in this section”](#pages-in-this-section)
 
-| Page                                                                                               | What it covers                                                                                                                        |
-| -------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| [Lakehouse projections with the Cassandra Sidecar](/cqlite/user-docs/use-cases/sidecar-lakehouse/) | SSTable-to-Parquet pipeline architecture, the delta-semantics caveat, the high-fidelity type mapping, and what epics #682/#696 unlock |
-| [Python: data science and ETL](/cqlite/user-docs/use-cases/python-data-science/)                   | Offline analytics on snapshots and backups without a cluster; pandas and notebook workflows                                           |
-| [Node.js: services and tooling](/cqlite/user-docs/use-cases/nodejs-services/)                      | Data inspection services, ops dashboards, `executeNative` + streaming patterns                                                        |
-| [Operational scenarios](/cqlite/user-docs/use-cases/operational/)                                  | Migration validation, test fixtures from production data, backup and snapshot inspection                                              |
+| Page                                                                                               | What it covers                                                                                                                         |
+| -------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| [Lakehouse projections with the Cassandra Sidecar](/cqlite/user-docs/use-cases/sidecar-lakehouse/) | SSTable-to-Parquet pipeline architecture, the delta-semantics caveat, the high-fidelity type mapping, and embedding the Parquet writer |
+| [Python: data science and ETL](/cqlite/user-docs/use-cases/python-data-science/)                   | Offline analytics on snapshots and backups without a cluster; pandas and notebook workflows                                            |
+| [Node.js: services and tooling](/cqlite/user-docs/use-cases/nodejs-services/)                      | Data inspection services, ops dashboards, `executeNative` + streaming patterns                                                         |
+| [Operational scenarios](/cqlite/user-docs/use-cases/operational/)                                  | Migration validation, test fixtures from production data, backup and snapshot inspection                                               |
 
 ## Common thread
 
@@ -13610,7 +13610,7 @@ for (const col of result.columns as ColumnInfo[]) {
 
 [Section titled “Export Parquet directly from Node.js”](#export-parquet-directly-from-nodejs)
 
-The bindings expose the core Parquet writer ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)) — no CLI subprocess needed. The query streams, so large tables export within bounded memory, and the export runs off the JavaScript main thread:
+The bindings expose the core Parquet writer — no CLI subprocess needed. The query streams, so large tables export within bounded memory, and the export runs off the JavaScript main thread:
 
 ```typescript
 const rows = await db.exportParquet(
@@ -13916,7 +13916,7 @@ CQLite requires a schema file to decode SSTables (no-heuristics mandate). If the
 
 * **Full compaction merge across all SSTables in a keyspace.** CQLite reads the SSTables you point it at. If those span multiple non-merged generations, duplicate partition keys appear as separate rows. For a fully merged view, point at the full table directory or run `nodetool compact` before exporting.
 * **Schema-free inspection.** CQLite always requires a schema file. If you have lost the schema, use `DESCRIBE TABLE` from `cqlsh` on a running cluster, or extract it from `system_schema.tables` in an older backup.
-* **Real-time CDC / streaming from commitlog.** [Epic #696](https://github.com/pmcfadin/cqlite/issues/696) tracks delta-scan and CDC-style projections *(in progress)*.
+* **Real-time CDC / streaming from commitlog.** Delta-scan and CDC-style projections are not yet available; CQLite reads per-SSTable snapshots, not a change stream.
 
 ## Further reading
 
@@ -14148,7 +14148,7 @@ with cqlite.open(DATASETS, schema=SCHEMA) as db:
 print(f"Exported {len(result.rows)} rows to {OUTPUT}")
 ```
 
-For Parquet, export directly from the bindings ([epic #682](https://github.com/pmcfadin/cqlite/issues/682)) — the query streams, so large tables export within bounded memory:
+For Parquet, export directly from the bindings — the query streams, so large tables export within bounded memory:
 
 ```python
 import cqlite
@@ -14231,7 +14231,7 @@ The read-to-Parquet pipeline is largely in place:
 
 1. **CQLite reads externally-discovered SSTables** via `open_with_discovered_sstables()` — the integration hook for “the Sidecar told me where a new SSTable is, read it.”
 2. **Memory-bounded streaming reads** via `execute_streaming()` keep peak memory predictable on large tables.
-3. **Parquet output** is available via `--out parquet` in the CLI, via `db.export_parquet(...)` / `db.exportParquet(...)` in the Python and Node bindings, and as an embeddable writer in `cqlite-core` behind the `parquet` cargo feature (epic #682, delivered).
+3. **Parquet output** is available via `--out parquet` in the CLI, via `db.export_parquet(...)` / `db.exportParquet(...)` in the Python and Node bindings, and as an embeddable writer in `cqlite-core` behind the `parquet` cargo feature.
 
 A minimal per-SSTable projection is already expressible as a one-shot CLI call:
 
@@ -14319,7 +14319,7 @@ This is inherent to Cassandra’s storage model — not a CQLite defect. Four pr
 
 [Section titled “Type mapping fidelity”](#type-mapping-fidelity)
 
-The type mapping is **analytics-grade for schema-aware queries** ([epic #673](https://github.com/pmcfadin/cqlite/issues/673)): query results carry the authoritative schema `CqlType`, and the Parquet writer maps it recursively to a faithful Arrow schema.
+The type mapping is **analytics-grade for schema-aware queries**: query results carry the authoritative schema `CqlType`, and the Parquet writer maps it recursively to a faithful Arrow schema.
 
 | CQL type                                 | Arrow/Parquet                                | Fidelity                                                                 |
 | ---------------------------------------- | -------------------------------------------- | ------------------------------------------------------------------------ |
@@ -14341,23 +14341,23 @@ The type mapping is **analytics-grade for schema-aware queries** ([epic #673](ht
 
 Collections, UDTs, and high-precision scalars all support columnar predicate pushdown in downstream consumers (Trino, Spark, DuckDB). The batch and streaming writers produce identical schemas and values. See [Output Formats](/cqlite/user-docs/output-formats/) for the full table and notes.
 
-## What epics #682 and #696 unlock
+## Embedding the Parquet writer
 
-[Section titled “What epics #682 and #696 unlock”](#what-epics-682-and-696-unlock)
+[Section titled “Embedding the Parquet writer”](#embedding-the-parquet-writer)
 
-**[Epic #682: Lift Parquet writer into cqlite-core](https://github.com/pmcfadin/cqlite/issues/682)** *(delivered)*
+The Parquet writer lives in `cqlite-core/src/export/parquet.rs` behind an off-by-default `parquet` feature flag. A projection service can call the writer directly as a library without a subprocess, and the Python (`db.export_parquet(...)`) and Node (`db.exportParquet(...)`) bindings export Parquet natively. CQLite produces Parquet files only; committing them to Iceberg/Delta remains the external committer’s job.
 
-The Parquet writer now lives in `cqlite-core/src/export/parquet.rs` behind an off-by-default `parquet` feature flag. A projection service can call the writer directly as a library without a subprocess, and the Python (`db.export_parquet(...)`) and Node (`db.exportParquet(...)`) bindings export Parquet natively. CQLite produces Parquet files only; committing them to Iceberg/Delta remains the external committer’s job.
+## Roadmap: delta-aware projections
 
-**[Epic #696: Delta-scan envelope for CDC-style projections](https://github.com/pmcfadin/cqlite/issues/696)** *(in progress)*
+[Section titled “Roadmap: delta-aware projections”](#roadmap-delta-aware-projections)
 
-Implements a `scan_delta` streaming API that emits `DeltaRecord`s with per-cell `writetime`, `expires_at`, and an `__op` discriminator covering all five Cassandra delete shapes (`upsert`, `static_upsert`, `row_delete`, `range_delete`, `partition_delete`). Paired with a `DeltaParquetWriter` and a `cqlite delta-export` CLI subcommand. This is what makes CDC-mode projections reconcilable downstream.
+Fully reconcilable CDC-mode projections need a delta-scan API that streams per-cell `writetime`, TTL/expiry, and an operation discriminator covering all five Cassandra delete shapes (upsert, static upsert, row delete, range delete, partition delete), paired with a delta-aware Parquet writer and an export subcommand. **This is not yet available.** Until it lands, preserve `writetime` and represent tombstones yourself (see [Recommendations](#recommendations)) so a union of per-flush Parquet is reconcilable rather than silently wrong.
 
 ## Schema sourcing
 
 [Section titled “Schema sourcing”](#schema-sourcing)
 
-CQLite requires the CQL schema to decode an SSTable (no-heuristics mandate, issue #28). The projection service must source and cache the schema — flush events do not carry it. The practical approach is to pull it from `DESCRIBE TABLE` output and keep it in sync with schema changes.
+CQLite requires the CQL schema to decode an SSTable — it does not guess types. The projection service must source and cache the schema — flush events do not carry it. The practical approach is to pull it from `DESCRIBE TABLE` output and keep it in sync with schema changes.
 
 ## Comparison with TiDB’s approach
 
@@ -14365,7 +14365,7 @@ CQLite requires the CQL schema to decode an SSTable (no-heuristics mandate, issu
 
 TiDB’s TiFlash is instructive: it is a Raft learner that receives every committed write in real-time, providing a strongly consistent, transactionally-consistent columnar replica. TiCDC (the structural analog to this pipeline) tails the ordered row-change log and emits Kafka or cloud-storage changefeeds with explicit insert/update/delete events and commit timestamps.
 
-Our approach’s distinct value is **open, lake-native columnar output from Cassandra with no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered committed log — its source of truth is independently-flushed, LWW-merged SSTables — so any columnar projection is inherently a delta-reconciliation problem. Epics #673 and #682 (delivered) addressed type fidelity and embeddability; epic #696 addresses the remaining part of that problem.
+Our approach’s distinct value is **open, lake-native columnar output from Cassandra with no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered committed log — its source of truth is independently-flushed, LWW-merged SSTables — so any columnar projection is inherently a delta-reconciliation problem. CQLite already provides the type fidelity and the embeddable writer that projection needs; full delta-aware scanning (above) is the remaining piece.
 
 ## Recommendations
 
@@ -14375,7 +14375,7 @@ Our approach’s distinct value is **open, lake-native columnar output from Cass
 2. **Land in a table format (Iceberg or Delta), not bare Parquet files.** Those provide snapshot isolation, compaction, and merge-on-read that otherwise you must build by hand.
 3. **Preserve `writetime` and represent tombstones** (`__writetime` / `__deleted` columns) so projections are reconcilable. Without this, a union of per-flush Parquet is silently wrong.
 4. **Prefer commitlog CDC over raw flush events** when correctness matters.
-5. **Embed the writer rather than shelling out** — the Parquet writer lives in `cqlite-core` behind the `parquet` feature (epic #682, delivered), and the Python/Node bindings expose it directly.
+5. **Embed the writer rather than shelling out** — the Parquet writer lives in `cqlite-core` behind the `parquet` feature, and the Python/Node bindings expose it directly.
 
 <!-- TODO(W4): link to CLI reference when merged -->
 

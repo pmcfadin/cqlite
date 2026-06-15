@@ -27,7 +27,7 @@ The read-to-Parquet pipeline is largely in place:
 3. **Parquet output** is available via `--out parquet` in the CLI, via
    `db.export_parquet(...)` / `db.exportParquet(...)` in the Python and Node
    bindings, and as an embeddable writer in `cqlite-core` behind the `parquet`
-   cargo feature (epic #682, delivered).
+   cargo feature.
 
 A minimal per-SSTable projection is already expressible as a one-shot CLI call:
 
@@ -124,9 +124,8 @@ path performs the LWW merge, then export. Correct, but re-reads everything on ea
 
 ## Type mapping fidelity
 
-The type mapping is **analytics-grade for schema-aware queries**
-([epic #673](https://github.com/pmcfadin/cqlite/issues/673)): query results carry the
-authoritative schema `CqlType`, and the Parquet writer maps it recursively to a
+The type mapping is **analytics-grade for schema-aware queries**: query results carry
+the authoritative schema `CqlType`, and the Parquet writer maps it recursively to a
 faithful Arrow schema.
 
 | CQL type | Arrow/Parquet | Fidelity |
@@ -152,30 +151,28 @@ in downstream consumers (Trino, Spark, DuckDB). The batch and streaming writers 
 identical schemas and values. See
 [Output Formats](/cqlite/user-docs/output-formats/) for the full table and notes.
 
-## What epics #682 and #696 unlock
+## Embedding the Parquet writer
 
-**[Epic #682: Lift Parquet writer into cqlite-core](https://github.com/pmcfadin/cqlite/issues/682)**
-*(delivered)*
-
-The Parquet writer now lives in `cqlite-core/src/export/parquet.rs` behind an
+The Parquet writer lives in `cqlite-core/src/export/parquet.rs` behind an
 off-by-default `parquet` feature flag. A projection service can call the writer
 directly as a library without a subprocess, and the Python
 (`db.export_parquet(...)`) and Node (`db.exportParquet(...)`) bindings export
 Parquet natively. CQLite produces Parquet files only; committing them to
 Iceberg/Delta remains the external committer's job.
 
-**[Epic #696: Delta-scan envelope for CDC-style projections](https://github.com/pmcfadin/cqlite/issues/696)**
-*(in progress)*
+## Roadmap: delta-aware projections
 
-Implements a `scan_delta` streaming API that emits `DeltaRecord`s with per-cell
-`writetime`, `expires_at`, and an `__op` discriminator covering all five Cassandra
-delete shapes (`upsert`, `static_upsert`, `row_delete`, `range_delete`,
-`partition_delete`). Paired with a `DeltaParquetWriter` and a `cqlite delta-export`
-CLI subcommand. This is what makes CDC-mode projections reconcilable downstream.
+Fully reconcilable CDC-mode projections need a delta-scan API that streams per-cell
+`writetime`, TTL/expiry, and an operation discriminator covering all five Cassandra
+delete shapes (upsert, static upsert, row delete, range delete, partition delete),
+paired with a delta-aware Parquet writer and an export subcommand. **This is not yet
+available.** Until it lands, preserve `writetime` and represent tombstones yourself
+(see [Recommendations](#recommendations)) so a union of per-flush Parquet is
+reconcilable rather than silently wrong.
 
 ## Schema sourcing
 
-CQLite requires the CQL schema to decode an SSTable (no-heuristics mandate, issue #28).
+CQLite requires the CQL schema to decode an SSTable — it does not guess types.
 The projection service must source and cache the schema — flush events do not carry it.
 The practical approach is to pull it from `DESCRIBE TABLE` output and keep it in sync
 with schema changes.
@@ -191,9 +188,9 @@ events and commit timestamps.
 Our approach's distinct value is **open, lake-native columnar output from Cassandra with
 no cluster dependency in the read path**. The trade-off is that Cassandra has no ordered
 committed log — its source of truth is independently-flushed, LWW-merged SSTables — so
-any columnar projection is inherently a delta-reconciliation problem. Epics #673
-and #682 (delivered) addressed type fidelity and embeddability; epic #696
-addresses the remaining part of that problem.
+any columnar projection is inherently a delta-reconciliation problem. CQLite already
+provides the type fidelity and the embeddable writer that projection needs; full
+delta-aware scanning (above) is the remaining piece.
 
 ## Recommendations
 
@@ -206,7 +203,7 @@ addresses the remaining part of that problem.
    is silently wrong.
 4. **Prefer commitlog CDC over raw flush events** when correctness matters.
 5. **Embed the writer rather than shelling out** — the Parquet writer lives in
-   `cqlite-core` behind the `parquet` feature (epic #682, delivered), and the
+   `cqlite-core` behind the `parquet` feature, and the
    Python/Node bindings expose it directly.
 
 <!-- TODO(W4): link to CLI reference when merged -->
