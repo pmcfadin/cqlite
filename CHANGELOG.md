@@ -7,21 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [v0.10.1] - 2026-06-13
+## [v0.11.0] - 2026-06-15
 
-Patch release bundling everything merged since v0.10.0. Correctness:
+Minor release bundling everything merged since v0.10.0. New capability: a
+first-class Parquet writer lifted into `cqlite-core` behind a `parquet` feature,
+with `export_parquet` methods on the Python and Node bindings (Epic #682).
+New read coverage: version-gated read behavior for the Cassandra 5.0 `oa` format
+and graceful handling of the `da` (BTI) format (VG1/VG3/VG5/VG6/VG7), real BTI
+node-type dispatch (#651), schema-typed query result columns (#770), and
+higher-fidelity Parquet/Arrow type mapping (#771). Plus opt-in memory-mapped
+reads (#589, **off by default**) with their follow-up hardening (#591) and a
+bounded uncompressed-read allocation (#592). Correctness:
 TEXT/composite partition-key reconstruction on the scan path (#586), a safe
 compaction async-to-sync bridge (#587), writer temporal-delta and tombstone
 serialization fixes (#645, #723), Summary.db offset-table encoding (#718), and
-removal of the last parser heuristic (#650). New read coverage: version-gated
-read behavior for the Cassandra 5.0 `oa` format and graceful handling of the
-`da` (BTI) format (VG1/VG3/VG5/VG6/VG7), real BTI node-type dispatch (#651),
-schema-typed query result columns (#770), and higher-fidelity Parquet/Arrow
-type mapping (#771). Plus opt-in memory-mapped reads (#589, **off by default**)
-with their follow-up hardening (#591), a bounded uncompressed-read allocation
-(#592), removal of three dead mmap readers (#590), and a new documentation site.
+removal of the last parser heuristic (#650). Plus removal of three dead mmap
+readers (#590) and a new documentation site.
+
+(The `0.10.1` version that briefly appeared in the manifests was never tagged or
+published; its prepared notes are folded into this release.)
 
 ### Added
+
+- **Parquet writer lifted into `cqlite-core` behind a `parquet` feature**
+  (Epic #682) — the Parquet/Arrow export engine now lives in
+  `cqlite-core/src/export/parquet.rs` behind an optional `parquet` cargo feature,
+  with the CLI's `cqlite-cli/src/output/parquet.rs` reduced to a thin wrapper over
+  it (#685). The Python and Node bindings gain `export_parquet` /
+  `exportParquet(query, path, { rowGroupSize, compression })` methods so callers
+  can stream query results straight to a Parquet file. Golden-file coverage lives
+  in `cqlite-cli/tests/parquet_golden_tests.rs`.
 
 - **Version-gated read support for the Cassandra 5.0 `oa` format** (Issues
   #653, #655, #672) — `VersionGate`s are threaded through the read path (VG1)
