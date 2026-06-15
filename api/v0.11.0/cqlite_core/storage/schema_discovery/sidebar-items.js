@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["DiscoveryMethod","ValidationStatus"],"struct":["ColumnStatistics","DiscoveredSchema","SchemaDiscovery","SchemaDiscoveryConfig","SchemaMetadata"]};

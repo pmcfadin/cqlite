@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Query Statement Parser"><title>cqlite_core::query::parser - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module parser</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module parser</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#query-statement-parser" title="Query Statement Parser">Query Statement Parser</a><ul><li><a href="#purpose" title="Purpose">Purpose</a></li><li><a href="#architecture-context" title="Architecture Context">Architecture Context</a></li><li><a href="#key-components" title="Key Components">Key Components</a></li><li><a href="#supported-statements" title="Supported Statements">Supported Statements</a></li><li><a href="#example" title="Example">Example</a></li><li><a href="#m2-limitations" title="M2 Limitations">M2 Limitations</a></li></ul></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>query</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">query</a></div><h1>Module <span>parser</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/query/parser.rs.html#1-660">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><h2 id="query-statement-parser"><a class="doc-anchor" href="#query-statement-parser">§</a>Query Statement Parser</h2>
+<p>Lightweight keyword-based parser for CQL DML statements in the query engine.</p>
+<h3 id="purpose"><a class="doc-anchor" href="#purpose">§</a>Purpose</h3>
+<p>This module parses SELECT, INSERT, UPDATE, and DELETE statements for execution
+by the M2+ query engine. It uses keyword extraction rather than full AST parsing
+to provide fast, lightweight query handling.</p>
+<h3 id="architecture-context"><a class="doc-anchor" href="#architecture-context">§</a>Architecture Context</h3>
+<p>This is one of four parsing subsystems in cqlite-core:</p>
+<div><table><thead><tr><th>Module</th><th>Purpose</th></tr></thead><tbody>
+<tr><td><code>cql/</code></td><td>Full CQL text → AST parsing</td></tr>
+<tr><td><code>parser/</code></td><td>SSTable binary format parsing</td></tr>
+<tr><td><code>schema/cql_parser.rs</code></td><td>CREATE TABLE → TableSchema</td></tr>
+<tr><td><strong><code>query/parser.rs</code></strong></td><td>DML → ParsedQuery (this module)</td></tr>
+</tbody></table>
+</div>
+<p>See <code>docs/architecture/parser-overview.md</code> for the complete architecture overview.</p>
+<h3 id="key-components"><a class="doc-anchor" href="#key-components">§</a>Key Components</h3>
+<ul>
+<li><a href="struct.QueryParser.html" title="struct cqlite_core::query::parser::QueryParser"><code>QueryParser</code></a> - Main parser struct with <code>parse()</code> method</li>
+<li><a href="../m2_select_validator/struct.M2SelectValidator.html" title="struct cqlite_core::query::m2_select_validator::M2SelectValidator"><code>M2SelectValidator</code></a> - Validates
+SELECT queries against M2 supported subset</li>
+<li><a href="../struct.ParsedQuery.html" title="struct cqlite_core::query::ParsedQuery"><code>ParsedQuery</code></a> - Structured query representation</li>
+</ul>
+<h3 id="supported-statements"><a class="doc-anchor" href="#supported-statements">§</a>Supported Statements</h3>
+<ul>
+<li><strong>SELECT</strong> - With WHERE (equality only for M2), ORDER BY, LIMIT</li>
+<li><strong>INSERT</strong> - Explicit or implicit column syntax</li>
+<li><strong>UPDATE</strong> - SET clause with WHERE</li>
+<li><strong>DELETE</strong> - FROM with WHERE</li>
+<li><strong>CREATE TABLE</strong> / <strong>DROP TABLE</strong> - Table name extraction</li>
+<li><strong>DESCRIBE</strong> / <strong>USE</strong> - Basic keyword parsing</li>
+</ul>
+<h3 id="example"><a class="doc-anchor" href="#example">§</a>Example</h3>
+<div class="example-wrap ignore"><a href="#" class="tooltip" title="This example is not tested">ⓘ</a><pre class="rust rust-example-rendered"><code><span class="kw">use </span>cqlite_core::query::QueryParser;
+
+<span class="kw">let </span>parser = QueryParser::new(<span class="kw-2">&amp;</span>config);
+<span class="kw">let </span>query = parser.parse(<span class="string">"SELECT * FROM users WHERE id = 1 LIMIT 10"</span>)<span class="question-mark">?</span>;
+<span class="macro">assert_eq!</span>(query.query_type, QueryType::Select);</code></pre></div><h3 id="m2-limitations"><a class="doc-anchor" href="#m2-limitations">§</a>M2 Limitations</h3>
+<p>The M2 milestone supports a subset of CQL SELECT:</p>
+<ul>
+<li>Partition key equality filters only (<code>=</code>)</li>
+<li>No range operators (<code>&gt;</code>, <code>&lt;</code>, <code>&gt;=</code>, <code>&lt;=</code>)</li>
+<li>No aggregates (COUNT, SUM, etc.)</li>
+<li>No ALLOW FILTERING</li>
+</ul>
+<p>For advanced CQL parsing with full AST support, use the <a href="../../cql/index.html" title="mod cqlite_core::cql"><code>crate::cql</code></a> module.</p>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.QueryParser.html" title="struct cqlite_core::query::parser::QueryParser">Query<wbr>Parser</a></dt><dd>CQL query parser</dd></dl></section></div></main></body></html>
