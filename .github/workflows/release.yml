@@ -269,3 +269,51 @@ jobs:
           sleep 15
         done
         publish cqlite-cli
+
+  # Refresh the Homebrew tap (pmcfadin/homebrew-cqlite) so `brew install
+  # pmcfadin/cqlite/cqlite` tracks the just-released version. Runs after
+  # build-cli so the per-platform tarballs + .sha256 sidecars exist to hash.
+  # Skipped for prerelease tags (e.g. v1.2.3-rc1) so the tap only follows
+  # stable releases. Requires the HOMEBREW_TAP_TOKEN secret — a PAT with
+  # contents:write on pmcfadin/homebrew-cqlite (the default GITHUB_TOKEN
+  # cannot push to a second repository).
+  update-homebrew-tap:
+    name: Update Homebrew tap
+    needs: build-cli
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') && !contains(github.ref_name, '-')
+    steps:
+    - name: Check out cqlite (for the formula generator)
+      uses: actions/checkout@v5
+
+    - name: Check out the Homebrew tap
+      uses: actions/checkout@v5
+      with:
+        repository: pmcfadin/homebrew-cqlite
+        token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        path: homebrew-cqlite
+
+    - name: Regenerate the formula for this release
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+        VERSION="${TAG#v}"
+        bash scripts/gen-homebrew-formula.sh "$VERSION" \
+          homebrew-cqlite/Formula/cqlite.rb
+
+    - name: Commit and push the updated formula
+      working-directory: homebrew-cqlite
+      env:
+        TAG: ${{ github.ref_name }}
+      run: |
+        set -euo pipefail
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+        if git diff --quiet -- Formula/cqlite.rb; then
+          echo "formula already current for ${TAG}; nothing to commit"
+          exit 0
+        fi
+        git add Formula/cqlite.rb
+        git commit -m "cqlite ${TAG}"
+        git push
