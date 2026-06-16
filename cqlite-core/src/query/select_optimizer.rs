@@ -61,6 +61,12 @@ pub struct SSTablePredicate {
 pub enum SSTableFilterOp {
     Equal,
     Range,
+    /// Single-bound clustering inequalities (`>`, `>=`, `<`, `<=`). Each carries
+    /// one bound value in `SSTablePredicate::values`. Issue #788.
+    Gt,
+    Gte,
+    Lt,
+    Lte,
     In,
     Prefix,
     BloomFilter,
@@ -220,6 +226,37 @@ fn comparison_to_sstable_predicate(comp: &ComparisonExpression) -> Option<SSTabl
                 values: vec![start, end],
             })
         }
+        // Single-bound clustering inequalities. Without these arms the operators
+        // fall through to `None` and the restriction is silently dropped, so the
+        // whole partition is returned instead of the requested slice (Issue #788).
+        (ComparisonOperator::GreaterThan, ComparisonRightSide::Value(value_expr)) => {
+            Some(SSTablePredicate {
+                column,
+                operation: SSTableFilterOp::Gt,
+                values: vec![literal_value(value_expr)?],
+            })
+        }
+        (ComparisonOperator::GreaterThanOrEqual, ComparisonRightSide::Value(value_expr)) => {
+            Some(SSTablePredicate {
+                column,
+                operation: SSTableFilterOp::Gte,
+                values: vec![literal_value(value_expr)?],
+            })
+        }
+        (ComparisonOperator::LessThan, ComparisonRightSide::Value(value_expr)) => {
+            Some(SSTablePredicate {
+                column,
+                operation: SSTableFilterOp::Lt,
+                values: vec![literal_value(value_expr)?],
+            })
+        }
+        (ComparisonOperator::LessThanOrEqual, ComparisonRightSide::Value(value_expr)) => {
+            Some(SSTablePredicate {
+                column,
+                operation: SSTableFilterOp::Lte,
+                values: vec![literal_value(value_expr)?],
+            })
+        }
         _ => None,
     }
 }
@@ -324,5 +361,86 @@ mod tests {
         let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
         let optimizer = SelectOptimizer { schema, storage };
         assert!(std::mem::size_of_val(&optimizer) > 0);
+    }
+
+    /// Build `<column> <op> <literal>` for predicate-conversion tests.
+    fn cmp(op: ComparisonOperator, column: &str, value: Value) -> ComparisonExpression {
+        ComparisonExpression {
+            left: SelectExpression::Column(ColumnRef {
+                table: None,
+                column: column.to_string(),
+            }),
+            operator: op,
+            right: ComparisonRightSide::Value(SelectExpression::Literal(value)),
+        }
+    }
+
+    /// Issue #788: clustering-key inequalities must convert to single-bound
+    /// SSTable predicates so they are evaluated post-scan instead of dropped.
+    #[test]
+    fn inequality_operators_convert_to_single_bound_predicates() {
+        let cases = [
+            (ComparisonOperator::GreaterThan, SSTableFilterOp::Gt),
+            (ComparisonOperator::GreaterThanOrEqual, SSTableFilterOp::Gte),
+            (ComparisonOperator::LessThan, SSTableFilterOp::Lt),
+            (ComparisonOperator::LessThanOrEqual, SSTableFilterOp::Lte),
+        ];
+        for (op, expected_op) in cases {
+            let comp = cmp(op.clone(), "ck", Value::Integer(200));
+            let predicate = comparison_to_sstable_predicate(&comp)
+                .unwrap_or_else(|| panic!("operator {op:?} must convert to a predicate"));
+            assert_eq!(predicate.column, "ck");
+            assert!(
+                std::mem::discriminant(&predicate.operation)
+                    == std::mem::discriminant(&expected_op),
+                "operator {op:?} produced {:?}, expected {expected_op:?}",
+                predicate.operation
+            );
+            assert_eq!(predicate.values, vec![Value::Integer(200)]);
+        }
+    }
+
+    /// Issue #788, end-to-end through the real parser: the exact query from the
+    /// bug report must produce a plan that carries BOTH clustering inequalities
+    /// alongside the partition equality. Before the fix only the `pk` equality
+    /// survived `collect_sstable_predicates`, so the whole partition leaked.
+    #[test]
+    fn query_plan_carries_clustering_inequality_bounds() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select(
+            "SELECT * FROM perf.wide_rows WHERE pk = 'p0000' AND ck >= 0 AND ck < 200",
+        )
+        .expect("issue #788 query must parse");
+        let where_clause = statement
+            .where_clause
+            .expect("WHERE clause must be present");
+
+        let predicates = collect_sstable_predicates(&where_clause);
+
+        let has = |col: &str, want: &SSTableFilterOp| {
+            predicates.iter().any(|p| {
+                p.column == col
+                    && std::mem::discriminant(&p.operation) == std::mem::discriminant(want)
+            })
+        };
+
+        assert!(
+            has("pk", &SSTableFilterOp::Equal),
+            "partition equality must be pushed; got {predicates:?}"
+        );
+        assert!(
+            has("ck", &SSTableFilterOp::Gte),
+            "Issue #788: `ck >= 0` must be pushed as Gte (was dropped); got {predicates:?}"
+        );
+        assert!(
+            has("ck", &SSTableFilterOp::Lt),
+            "Issue #788: `ck < 200` must be pushed as Lt (was dropped); got {predicates:?}"
+        );
+        assert_eq!(
+            predicates.len(),
+            3,
+            "all three restrictions must be captured; got {predicates:?}"
+        );
     }
 }
