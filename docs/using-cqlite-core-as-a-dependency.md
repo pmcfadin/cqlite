@@ -5,32 +5,29 @@ their own project — reading and/or writing Cassandra 5.0 SSTables without a
 cluster. It covers the dependency line, the feature flags you need, and a
 **compiling** end-to-end write example.
 
-`cqlite-core` is not published on crates.io, so downstream projects pin it by git
-tag.
+`cqlite-core` is published on [crates.io](https://crates.io/crates/cqlite-core),
+with API docs on [docs.rs](https://docs.rs/cqlite-core).
 
 ## 1. Add the dependency
 
-Pin a released tag (see the [CHANGELOG](../CHANGELOG.md) for what each tag contains):
-
 ```toml
-# Cargo.toml — read + query path (default features)
+# Cargo.toml — read + query + write path (all default features)
 [dependencies]
-cqlite-core = { git = "https://github.com/pmcfadin/cqlite.git", tag = "v0.9.2" }
+cqlite-core = "0.11"
 ```
 
-The write path (`WriteEngine`, `Mutation`) is gated behind the `write-support`
-feature. On **v0.9.2** it is opt-in, so enable it explicitly:
+Or run `cargo add cqlite-core`. The read/query path, compression, and the write
+path (`WriteEngine`, `Mutation`) are all **on by default** — `write-support` gates
+only first-party code and pulls in no extra dependencies, so it is free for
+read-only consumers.
+
+To track an unreleased commit instead of a published version, you can still pin a
+git tag:
 
 ```toml
-# Cargo.toml — read + write path on v0.9.2
 [dependencies]
-cqlite-core = { git = "https://github.com/pmcfadin/cqlite.git", tag = "v0.9.2", features = ["write-support"] }
+cqlite-core = { git = "https://github.com/pmcfadin/cqlite.git", tag = "v0.11.0" }
 ```
-
-> As of [#558](https://github.com/pmcfadin/cqlite/issues/558) (next release),
-> `write-support` is a **default** feature, so the explicit `features` line is no
-> longer needed for the write path. It gates only first-party code and pulls in no
-> extra dependencies, so keeping it on is free for read-only consumers.
 
 ## 2. Feature → API map
 

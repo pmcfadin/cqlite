@@ -8,7 +8,13 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 rust-version.workspace = true
-description = "Core database engine for CQLite"
+description = "Core engine for CQLite — read Apache Cassandra 5.0 SSTables locally without a cluster"
+readme = "../README.md"
+
+# docs.rs build: document the commonly used features. Deliberately excludes
+# `wasm` (wasm32-only deps would fail the default x86_64 docs.rs target).
+[package.metadata.docs.rs]
+features = ["all-compression", "state_machine", "write-support", "parquet", "cli-helpers"]
 
 [dependencies]
 # Async runtime
