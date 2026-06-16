@@ -41,6 +41,16 @@ CQLite is designed by **Patrick McFadin**, Apache Cassandra PMC member with 13 y
 
 ## Install
 
+### CLI (Homebrew — macOS + Linux)
+
+The quickest path on macOS (Apple Silicon or Intel) and Linux (x86_64 or arm64).
+The formula verifies the release checksum before installing:
+
+```bash
+brew install pmcfadin/cqlite/cqlite
+cqlite --help
+```
+
 ### CLI (from crates.io — requires Rust 1.85+)
 
 ```bash
