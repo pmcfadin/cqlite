@@ -1,8 +1,8 @@
 # Position: Parquet Projections from Cassandra Memtable Flush Events
 
-**Status:** Position document (not a committed roadmap)
+**Status:** Position document — open questions resolved (see [Decisions](#decisions)); type-mapping work tracked in epic [#673](https://github.com/pmcfadin/cqlite/issues/673)
 **Audience:** CQLite maintainers, integrators evaluating CQLite for lakehouse pipelines
-**Date:** 2026-06-10
+**Date:** 2026-06-10 (decisions recorded 2026-06-10)
 **Related:** [Apache Cassandra Sidecar](https://github.com/apache/cassandra-sidecar), `cqlite-core/src/export/parquet.rs`, `cqlite-core/src/lib.rs`
 
 ## Summary
@@ -311,11 +311,32 @@ we are hand-rolling the consistency guarantees TiDB derives from Raft.
 - **Not a query engine for the lake.** Downstream compute (Trino/Spark/DuckDB)
   is the consumer; CQLite produces files, it does not serve analytical queries.
 
-## Open questions
+## Decisions
 
-- Should the writetime/tombstone-aware projection schema be standardized (a
-  Debezium-compatible envelope vs. a CQLite-native one)?
-- Is direct Iceberg/Delta writing in scope for CQLite, or is bare Parquet +
-  an external committer the right boundary?
-- Is there appetite for a first-party "projection service" in this repo, or
-  should CQLite remain a library/CLI that such a service consumes?
+The open questions in the original draft were resolved on 2026-06-10:
+
+1. **Projection envelope: CQLite-native, not Debezium-compatible.** The generic
+   Debezium envelope assumes before/after row images, which Cassandra flushes
+   fundamentally cannot provide (no read-before-write). Even Debezium's own
+   Cassandra connector is a special case that emits partial rows with per-cell
+   markers. CQLite will define a documented native envelope — `__writetime`,
+   `__deleted`, `__ttl`, plus a record-type discriminator so range tombstones
+   (which are not rows) can be represented with explicit range-bound columns —
+   with a mapping note for Debezium consumers. The envelope design must also
+   address per-cell vs. per-row write timestamps before implementation; this
+   starts as a design doc, not issues.
+2. **Iceberg/Delta writing: out of scope.** Committing to a table format
+   correctly (manifests, snapshots, concurrent committers) is its own project,
+   and iceberg-rust is still maturing. The boundary is: CQLite produces Parquet
+   files plus enough metadata for an external committer; Spark/Trino/an Iceberg
+   sink owns the merge. This keeps the library dependency-light.
+3. **No first-party projection service.** CQLite remains a library/CLI that
+   such a service consumes. A daemon brings inotify handling, schema caching,
+   retries, and deployment concerns — a different product with a different ops
+   surface. A reference implementation may live in `examples/` or a sibling
+   repo, without committing this repo to maintaining a service.
+
+Implied sequencing: epic [#673](https://github.com/pmcfadin/cqlite/issues/673)
+(Arrow type-mapping fidelity) → lift the Parquet writer into `cqlite-core`
+behind a `parquet` feature flag → `WRITETIME`/`TTL` support in SELECT →
+envelope design doc for the tombstone-aware delta scan → implementation.
