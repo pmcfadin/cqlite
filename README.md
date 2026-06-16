@@ -6,6 +6,8 @@
 
 <p align="center">
   <a href="https://github.com/pmcfadin/cqlite/actions/workflows/ci.yml"><img src="https://github.com/pmcfadin/cqlite/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://crates.io/crates/cqlite-cli"><img src="https://img.shields.io/crates/v/cqlite-cli.svg?label=crates.io%20cqlite-cli" alt="crates.io"></a>
+  <a href="https://docs.rs/cqlite-core"><img src="https://img.shields.io/docsrs/cqlite-core.svg?label=docs.rs" alt="docs.rs"></a>
   <a href="https://pypi.org/project/cqlite-py/"><img src="https://img.shields.io/pypi/v/cqlite-py.svg?label=pypi%20cqlite-py" alt="PyPI"></a>
   <a href="https://www.npmjs.com/package/@cqlite/node"><img src="https://img.shields.io/npm/v/@cqlite/node.svg?label=npm%20%40cqlite%2Fnode" alt="npm"></a>
   <a href="https://pmcfadin.github.io/cqlite/"><img src="https://img.shields.io/badge/docs-pmcfadin.github.io%2Fcqlite-blue.svg" alt="Docs"></a>
@@ -39,6 +41,13 @@ CQLite is designed by **Patrick McFadin**, Apache Cassandra PMC member with 13 y
 
 ## Install
 
+### CLI (from crates.io — requires Rust 1.85+)
+
+```bash
+cargo install cqlite-cli      # installs the `cqlite` binary
+cqlite --help
+```
+
 ### CLI (prebuilt binaries — no Rust toolchain required)
 
 Each [GitHub release](https://github.com/pmcfadin/cqlite/releases) attaches a
@@ -63,6 +72,14 @@ shasum -a 256 -c cqlite-$TARGET.tar.gz.sha256   # verify (use sha256sum -c on Li
 tar xzf cqlite-$TARGET.tar.gz
 ./cqlite --help
 ```
+
+### Rust library
+
+```bash
+cargo add cqlite-core         # use cqlite-core as a dependency
+```
+
+See [Using cqlite-core as a dependency](docs/using-cqlite-core-as-a-dependency.md) and the [API docs](https://docs.rs/cqlite-core).
 
 ### Language bindings
 

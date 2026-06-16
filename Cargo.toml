@@ -11,9 +11,14 @@ members = [
 resolver = "2"
 
 [package]
+# Workspace-root package: hosts the top-level tests/*.rs integration tests (the
+# issue #514 arrangement). Never published — the `cqlite` name on crates.io
+# belongs to an unrelated project; the CLI publishes as `cqlite-cli` (binary
+# `cqlite`). See issue #782.
 name = "cqlite"
 version = "0.11.0"
 edition = "2021"
+publish = false
 
 [dependencies]
 cqlite-core = { path = "cqlite-core" }

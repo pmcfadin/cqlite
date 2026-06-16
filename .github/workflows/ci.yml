@@ -184,4 +184,32 @@ jobs:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
         run: ./scripts/ci/validate-cleanup.sh
 
+  # Guards crates.io publish-readiness for cqlite-core: catches missing/invalid
+  # metadata, path-only deps, or a dirty package before a release tag tries to
+  # publish (issue #782). The clean checkout also exercises publish's
+  # "no uncommitted/untracked files" requirement. cqlite-core only — the
+  # cqlite-cli dry-run cannot resolve its versioned cqlite-core dep until core is
+  # on the index, so it is verified at publish time, not here.
+  publish-dry-run:
+    name: crates.io publish dry-run (cqlite-core)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-publish-dryrun-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: cargo publish --dry-run (cqlite-core)
+        run: cargo publish --package cqlite-core --dry-run
+
 

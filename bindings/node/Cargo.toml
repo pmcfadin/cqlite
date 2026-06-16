@@ -1,5 +1,6 @@
 [package]
 name = "cqlite-node"
+publish = false  # published to npm via napi-rs, not crates.io
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

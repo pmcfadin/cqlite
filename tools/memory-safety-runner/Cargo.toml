@@ -1,5 +1,6 @@
 [package]
 name = "memory-safety-runner"
+publish = false
 version.workspace = true
 edition.workspace = true
 description = "Memory safety testing tools for CQLite (Miri, Valgrind, AddressSanitizer)"
