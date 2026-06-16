@@ -14,11 +14,34 @@ hero:
       variant: minimal
 ---
 
-import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+import { Card, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
 
 ## What is CQLite?
 
 CQLite is a Rust library for reading Apache Cassandra 5.0 SSTable files directly — no Cassandra cluster required. It provides a CQL query interface over local data files, making it ideal for offline analysis, migrations, testing, and backup inspection.
+
+## Install the CLI
+
+<Tabs>
+  <TabItem label="Homebrew">
+    macOS (Apple Silicon or Intel) and Linux (x86_64 or arm64). Verifies the release checksum before installing:
+
+    ```bash
+    brew install pmcfadin/cqlite/cqlite
+    cqlite --help
+    ```
+  </TabItem>
+  <TabItem label="cargo install">
+    Build from crates.io with a Rust 1.85+ toolchain:
+
+    ```bash
+    cargo install cqlite-cli      # installs the `cqlite` binary
+    cqlite --help
+    ```
+  </TabItem>
+</Tabs>
+
+Prefer a prebuilt download or need another platform? See the [installation guide](/cqlite/user-docs/installation/).
 
 ## Key Features
 
