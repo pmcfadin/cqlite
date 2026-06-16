@@ -11,6 +11,21 @@ sidebar:
 CQLite ships in four forms: a prebuilt CLI binary (the fastest way to start), a
 Rust library crate, a Python package, and a Node.js package.
 
+## Homebrew (macOS + Linux)
+
+On macOS (Apple Silicon or Intel) and Linux (x86_64 or arm64), the quickest way
+to get the CLI is the [Homebrew tap](https://github.com/pmcfadin/homebrew-cqlite).
+The formula downloads the matching release tarball and verifies its `.sha256`
+checksum before installing:
+
+```bash
+brew install pmcfadin/cqlite/cqlite
+cqlite --version
+```
+
+Upgrade to the latest release with `brew upgrade cqlite`. To pin or inspect the
+tap explicitly, run `brew tap pmcfadin/cqlite` first, then `brew install cqlite`.
+
 ## Prebuilt CLI binaries
 
 Each [GitHub release](https://github.com/pmcfadin/cqlite/releases) attaches a
