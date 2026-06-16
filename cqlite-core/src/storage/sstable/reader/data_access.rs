@@ -11,6 +11,7 @@ use crate::{Error, Result, RowKey};
 use log::{debug, warn};
 use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
+use tokio::sync::mpsc;
 
 /// Compare two table IDs, handling both qualified (keyspace.table) and unqualified (table) formats.
 ///
@@ -320,67 +321,85 @@ impl SSTableReader {
         &self,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(TableId, RowKey, Value)>> {
-        log::debug!("stitch_and_parse_all_chunks: Decompressing and stitching all chunks");
+        let stitched_buffer = self.stitch_all_chunks().await?;
+        let parser = self.build_v5_parser();
+
+        // Get schema (use provided schema or reader's schema)
+        let reader_schema;
+        let table_schema = if let Some(s) = schema {
+            Some(s)
+        } else {
+            reader_schema = self.get_table_schema(None);
+            reader_schema.as_ref()
+        };
+
+        // Parse the stitched decompressed buffer
+        let entries = parser.parse_block(&stitched_buffer, table_schema, self)?;
+        log::debug!(
+            "stitch_and_parse_all_chunks: Parsed {} entries from stitched buffer",
+            entries.len()
+        );
+
+        Ok(entries)
+    }
+
+    /// Read, decompress, and concatenate every compressed chunk of the data
+    /// section into a single buffer.
+    ///
+    /// V5CompressedLegacy partitions can span chunk boundaries, so the whole
+    /// data section must be stitched before parsing. The returned buffer is
+    /// bounded by the *uncompressed data-section size* — it scales with on-disk
+    /// bytes, not row count (issue #790).
+    ///
+    /// Precondition: the caller has seeked the file to the start of the data
+    /// section and reset `current_chunk_index` to 0.
+    async fn stitch_all_chunks(&self) -> Result<Vec<u8>> {
+        use crate::storage::sstable::compression::Compression;
 
         // Pre-allocate buffer for ~2.5MB (estimated max size for test data)
         let mut stitched_buffer = Vec::with_capacity(2_500_000);
 
-        // Read, decompress, and concatenate all chunks
         let mut chunk_count = 0;
         while let Some(compressed_chunk) = self.read_next_block().await? {
-            // Decompress this chunk before stitching
-            use crate::storage::sstable::compression::Compression;
             let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
                 match compression.decompress(&compressed_chunk) {
-                    Ok(decompressed) => {
-                        log::debug!(
-                            "stitch_and_parse_all_chunks: Chunk {} decompressed {} bytes to {} bytes",
-                            chunk_count,
-                            compressed_chunk.len(),
-                            decompressed.len()
-                        );
-                        decompressed
-                    }
+                    Ok(decompressed) => decompressed,
                     Err(e) => {
                         return Err(Error::corruption(format!(
-                            "stitch_and_parse_all_chunks: Failed to decompress chunk {}: {}",
+                            "stitch_all_chunks: Failed to decompress chunk {}: {}",
                             chunk_count, e
                         )));
                     }
                 }
             } else {
                 // No compression (should not happen for V5CompressedLegacy)
-                log::warn!(
-                    "stitch_and_parse_all_chunks: No compression reader, using raw chunk data"
-                );
+                log::warn!("stitch_all_chunks: No compression reader, using raw chunk data");
                 compressed_chunk
             };
 
             stitched_buffer.extend_from_slice(&decompressed_chunk);
             chunk_count += 1;
-            log::debug!(
-                "stitch_and_parse_all_chunks: Stitched chunk {}, total buffer size: {} bytes",
-                chunk_count,
-                stitched_buffer.len()
-            );
         }
 
         log::debug!(
-            "stitch_and_parse_all_chunks: Finished stitching {} chunks, total buffer: {} bytes",
+            "stitch_all_chunks: Stitched {} chunks, total buffer: {} bytes",
             chunk_count,
             stitched_buffer.len()
         );
 
-        // Extract keyspace/table from header
+        Ok(stitched_buffer)
+    }
+
+    /// Build a [`V5CompressedLegacyParser`] configured from this reader's header,
+    /// statistics (EncodingStats), version gates, and UDT registry.
+    ///
+    /// [`V5CompressedLegacyParser`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser
+    fn build_v5_parser(
+        &self,
+    ) -> crate::storage::sstable::reader::parsing::V5CompressedLegacyParser {
         let keyspace = self.header.keyspace.clone();
         let table_name = self.header.table_name.clone();
-
-        log::debug!(
-            "stitch_and_parse_all_chunks: Using keyspace='{}', table_name='{}'",
-            keyspace,
-            table_name
-        );
 
         // Extract EncodingStats from statistics_reader (if available)
         let (min_timestamp, min_local_deletion_time, min_ttl) =
@@ -406,13 +425,121 @@ impl SSTableReader {
         // that VG3 can flip gate-sensitive code paths without re-deriving gates.
         .with_version_gates(self.version_gates.clone());
         // Add UDT registry if available for UDT-aware collection parsing (Issue #238)
-        let parser = if let Some(ref registry) = self.udt_registry {
+        if let Some(ref registry) = self.udt_registry {
             parser.with_udt_registry(registry.clone())
         } else {
             parser
-        };
+        }
+    }
 
-        // Get schema (use provided schema or reader's schema)
+    /// Streaming scan (issue #790): yield `(RowKey, Value)` entries lazily
+    /// through a bounded channel instead of materializing the whole result in a
+    /// `Vec`. Live heap is bounded by `buffer_size` rows (plus the stitched
+    /// data-section buffer) rather than growing O(rows).
+    ///
+    /// Entries are yielded in on-disk order — token order for a single SSTable —
+    /// matching the order of the materializing [`scan`](Self::scan) path. The
+    /// bounded channel applies backpressure: parsing pauses when the consumer
+    /// falls behind and stops entirely if the consumer is dropped.
+    pub fn scan_stream(
+        self: std::sync::Arc<Self>,
+        table_id: TableId,
+        start_key: Option<RowKey>,
+        end_key: Option<RowKey>,
+        schema: Option<crate::schema::TableSchema>,
+        buffer_size: usize,
+    ) -> mpsc::Receiver<Result<(RowKey, Value)>> {
+        let (tx, rx) = mpsc::channel(buffer_size.max(1));
+        tokio::spawn(async move {
+            if let Err(e) = self
+                .run_scan_stream(table_id, start_key, end_key, schema, tx.clone())
+                .await
+            {
+                // Surface the error to the consumer as a terminal stream item.
+                let _ = tx.send(Err(e)).await;
+            }
+        });
+        rx
+    }
+
+    async fn run_scan_stream(
+        self: std::sync::Arc<Self>,
+        table_id: TableId,
+        start_key: Option<RowKey>,
+        end_key: Option<RowKey>,
+        schema: Option<crate::schema::TableSchema>,
+        tx: mpsc::Sender<Result<(RowKey, Value)>>,
+    ) -> Result<()> {
+        // Position at the start of the data section (mirrors sequential_scan).
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        self.current_chunk_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        if self.requires_chunk_stitching() {
+            // Stitch the (bounded) data section, then parse on a blocking thread,
+            // emitting one entry at a time. `blocking_send` provides backpressure
+            // so parsed Values are never all live at once.
+            let stitched = self.stitch_all_chunks().await?;
+            let reader = std::sync::Arc::clone(&self);
+            let parse = tokio::task::spawn_blocking(move || {
+                reader.parse_stitched_stream(&stitched, schema.as_ref(), start_key, end_key, &tx)
+            })
+            .await;
+            match parse {
+                Ok(result) => result,
+                Err(join_err) => Err(Error::corruption(format!(
+                    "scan_stream: parse task failed: {join_err}"
+                ))),
+            }
+        } else {
+            // Non-stitching formats already read block-by-block; emit per block so
+            // only one block's entries are live at a time.
+            while let Some(block) = self.read_next_block().await? {
+                let entries = self.parse_block_entries_with_schema(&block, schema.as_ref())?;
+                for (entry_table_id, entry_key, entry_value) in entries {
+                    if !table_ids_match(&entry_table_id, &table_id) {
+                        continue;
+                    }
+                    if let Some(ref start) = start_key {
+                        if &entry_key < start {
+                            continue;
+                        }
+                    }
+                    if let Some(ref end) = end_key {
+                        if &entry_key > end {
+                            continue;
+                        }
+                    }
+                    if !self.filter_tombstone(&entry_value) {
+                        continue;
+                    }
+                    if tx.send(Ok((entry_key, entry_value))).await.is_err() {
+                        return Ok(()); // consumer dropped
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Parse a stitched V5CompressedLegacy buffer, sending each filtered
+    /// `(RowKey, Value)` through `tx` with `blocking_send` for backpressure.
+    ///
+    /// CPU-bound and synchronous: must be invoked via `spawn_blocking`, never on
+    /// an async worker thread (`blocking_send` would otherwise stall the runtime).
+    fn parse_stitched_stream(
+        &self,
+        stitched: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+        start_key: Option<RowKey>,
+        end_key: Option<RowKey>,
+        tx: &mpsc::Sender<Result<(RowKey, Value)>>,
+    ) -> Result<()> {
+        let parser = self.build_v5_parser();
         let reader_schema;
         let table_schema = if let Some(s) = schema {
             Some(s)
@@ -421,14 +548,27 @@ impl SSTableReader {
             reader_schema.as_ref()
         };
 
-        // Parse the stitched decompressed buffer
-        let entries = parser.parse_block(&stitched_buffer, table_schema, self)?;
-        log::debug!(
-            "stitch_and_parse_all_chunks: Parsed {} entries from stitched buffer",
-            entries.len()
-        );
-
-        Ok(entries)
+        parser.parse_block_emit(stitched, table_schema, self, |(_table_id, key, value)| {
+            // Key-range filter (start/end inclusive), mirroring sequential_scan.
+            if let Some(ref start) = start_key {
+                if &key < start {
+                    return Ok(std::ops::ControlFlow::Continue(()));
+                }
+            }
+            if let Some(ref end) = end_key {
+                if &key > end {
+                    return Ok(std::ops::ControlFlow::Continue(()));
+                }
+            }
+            // Suppress row tombstones from user-facing scan output (Issue #505).
+            if !self.filter_tombstone(&value) {
+                return Ok(std::ops::ControlFlow::Continue(()));
+            }
+            match tx.blocking_send(Ok((key, value))) {
+                Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
+                Err(_) => Ok(std::ops::ControlFlow::Break(())), // consumer dropped
+            }
+        })
     }
 
     /// Stitch all compressed chunks and parse with per-row timestamps (for compaction).

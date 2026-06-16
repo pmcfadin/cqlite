@@ -924,6 +924,160 @@ impl SSTableManager {
         }
     }
 
+    /// Resolve the readers serving `table_id`, returning cloned `Arc` handles.
+    ///
+    /// Mirrors the qualified-then-unqualified lookup of [`scan`](Self::scan)
+    /// (Issue #680) but yields owned handles so the caller can hold them past the
+    /// `table_readers` read lock — needed by the streaming scan, which spawns a
+    /// background merge task.
+    #[cfg(not(feature = "tombstones"))]
+    async fn resolve_table_readers(&self, table_id: &TableId) -> Vec<Arc<reader::SSTableReader>> {
+        let table_readers = self.table_readers.read().await;
+        let table_name = table_id.name();
+        let list = if table_readers.contains_key(table_name) {
+            table_readers.get(table_name)
+        } else {
+            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
+                &table_name[dot_pos + 1..]
+            } else {
+                table_name
+            };
+            table_readers.get(unqualified_name)
+        };
+        list.cloned().unwrap_or_default()
+    }
+
+    /// Streaming scan (issue #790): merge per-SSTable streams lazily into a
+    /// bounded output channel, in key (token) order, without materializing the
+    /// whole result.
+    ///
+    /// Each reader yields entries already in token order; a k-way merge over the
+    /// per-reader heads produces globally ordered output while holding only one
+    /// pending entry per SSTable. Live heap is bounded by `buffer_size` plus the
+    /// number of SSTables, independent of total row count — the streaming analog
+    /// of the materializing [`scan`](Self::scan) (concat + stable sort by key).
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_stream(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        schema: Option<&crate::schema::TableSchema>,
+        buffer_size: usize,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> {
+        let readers = self.resolve_table_readers(table_id).await;
+        let (out_tx, out_rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
+
+        // Own everything the background merge task needs.
+        let table_id = table_id.clone();
+        let start_key = start_key.cloned();
+        let end_key = end_key.cloned();
+        let schema = schema.cloned();
+
+        tokio::spawn(async move {
+            // Open one streaming scan per reader.
+            let mut streams: Vec<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> = readers
+                .into_iter()
+                .map(|reader| {
+                    reader.scan_stream(
+                        table_id.clone(),
+                        start_key.clone(),
+                        end_key.clone(),
+                        schema.clone(),
+                        buffer_size,
+                    )
+                })
+                .collect();
+
+            // Prime one head per stream.
+            let mut heads: Vec<Option<(RowKey, Value)>> = Vec::with_capacity(streams.len());
+            for stream in streams.iter_mut() {
+                match stream.recv().await {
+                    Some(Ok(entry)) => heads.push(Some(entry)),
+                    Some(Err(e)) => {
+                        let _ = out_tx.send(Err(e)).await;
+                        return;
+                    }
+                    None => heads.push(None),
+                }
+            }
+
+            // K-way merge: repeatedly emit the smallest-key head, ties broken by
+            // reader index to match the stable concat+sort order of `scan`.
+            loop {
+                let mut min_idx: Option<usize> = None;
+                for (i, head) in heads.iter().enumerate() {
+                    if let Some((ref key, _)) = head {
+                        match min_idx {
+                            None => min_idx = Some(i),
+                            Some(m) => {
+                                if let Some((ref min_key, _)) = heads[m] {
+                                    if key < min_key {
+                                        min_idx = Some(i);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let idx = match min_idx {
+                    Some(idx) => idx,
+                    None => break, // all streams exhausted
+                };
+
+                // Take the winning entry and advance only that stream.
+                let entry = match heads[idx].take() {
+                    Some(entry) => entry,
+                    None => break, // unreachable: min_idx points to a Some head
+                };
+                match streams[idx].recv().await {
+                    Some(Ok(next)) => heads[idx] = Some(next),
+                    Some(Err(e)) => {
+                        let _ = out_tx.send(Err(e)).await;
+                        return;
+                    }
+                    None => {} // stream exhausted; head stays None
+                }
+
+                if out_tx.send(Ok(entry)).await.is_err() {
+                    return; // consumer dropped
+                }
+            }
+        });
+
+        Ok(out_rx)
+    }
+
+    /// Streaming scan under the `tombstones` feature.
+    ///
+    /// Streaming the cross-generation tombstone merge is not yet implemented, so
+    /// this falls back to the materializing [`scan`](Self::scan) and forwards the
+    /// result through a bounded channel. The public API stays uniform across
+    /// feature configs; the O(rows) memory win of issue #790 applies only to the
+    /// default (non-`tombstones`) build.
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_stream(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        schema: Option<&crate::schema::TableSchema>,
+        buffer_size: usize,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> {
+        let results = self
+            .scan(table_id, start_key, end_key, None, schema)
+            .await?;
+        let (tx, rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
+        tokio::spawn(async move {
+            for entry in results {
+                if tx.send(Ok(entry)).await.is_err() {
+                    break; // consumer dropped
+                }
+            }
+        });
+        Ok(rx)
+    }
+
     /// Get list of all SSTable IDs
     pub async fn list_sstables(&self) -> Vec<SSTableId> {
         let readers = self.readers.read().await;

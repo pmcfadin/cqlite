@@ -758,6 +758,7 @@ impl SelectExecutor {
         // Clone what we need for the background task
         let storage = Arc::clone(&self.storage);
         let schema_manager = Arc::clone(&self._schema);
+        let buffer_size = config.buffer_size;
 
         // Spawn background task to stream rows
         tokio::spawn(async move {
@@ -767,6 +768,7 @@ impl SelectExecutor {
                 table_id,
                 execution_steps,
                 tx,
+                buffer_size,
             )
             .await
             {
@@ -833,6 +835,7 @@ impl SelectExecutor {
         _table_id: TableId,
         execution_steps: Vec<ExecutionStep>,
         tx: mpsc::Sender<Result<QueryRow>>,
+        buffer_size: usize,
     ) -> Result<()> {
         // Issue #581: LIMIT/OFFSET must be enforced by the producer in the
         // streaming path. The `ExecutionStep::Limit` arm previously only logged a
@@ -871,11 +874,16 @@ impl SelectExecutor {
                         .find_schema_by_table(&keyspace, &table_name)
                         .await;
 
-                    let scan_results = storage
-                        .scan(table, None, None, None, schema_opt.as_ref())
+                    // Issue #790: pull rows lazily from a bounded streaming scan
+                    // instead of materializing the full result `Vec`. The reader
+                    // parses one entry at a time into this channel, so live heap
+                    // stays bounded by `buffer_size` rather than O(result rows).
+                    let mut scan_stream = storage
+                        .scan_stream(table, None, None, schema_opt.as_ref(), buffer_size)
                         .await?;
 
-                    for (key, value) in scan_results {
+                    while let Some(item) = scan_stream.recv().await {
+                        let (key, value) = item?;
                         let Some(row) =
                             build_row_from_scan(key, value, projection, schema_opt.as_ref())
                         else {
@@ -898,7 +906,9 @@ impl SelectExecutor {
                         }
                         sent += 1;
 
-                        // Apply LIMIT: stop scanning once `count` rows have been sent.
+                        // Apply LIMIT: stop scanning once `count` rows have been
+                        // sent. Dropping `scan_stream` here signals the producer
+                        // (via a closed channel) to stop parsing early.
                         if let Some(count) = limit_count {
                             if sent >= count {
                                 return Ok(());
