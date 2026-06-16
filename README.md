@@ -1,12 +1,20 @@
-# CQLite
+<p align="center">
+  <img src="website/src/assets/cqlite.png" alt="CQLite" width="480">
+</p>
 
-**A high-performance Rust library for local Apache Cassandra SSTable access**
+<p align="center"><strong>A high-performance Rust library for local Apache Cassandra SSTable access</strong></p>
 
-[![Apache License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![Rust](https://img.shields.io/badge/rust-1.85+-red.svg)](https://www.rust-lang.org)
-[![Cassandra](https://img.shields.io/badge/cassandra-5.0+-green.svg)](https://cassandra.apache.org)
+<p align="center">
+  <a href="https://github.com/pmcfadin/cqlite/actions/workflows/ci.yml"><img src="https://github.com/pmcfadin/cqlite/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://pypi.org/project/cqlite-py/"><img src="https://img.shields.io/pypi/v/cqlite-py.svg?label=pypi%20cqlite-py" alt="PyPI"></a>
+  <a href="https://www.npmjs.com/package/@cqlite/node"><img src="https://img.shields.io/npm/v/@cqlite/node.svg?label=npm%20%40cqlite%2Fnode" alt="npm"></a>
+  <a href="https://pmcfadin.github.io/cqlite/"><img src="https://img.shields.io/badge/docs-pmcfadin.github.io%2Fcqlite-blue.svg" alt="Docs"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="Apache License"></a>
+  <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/rust-1.85+-red.svg" alt="Rust"></a>
+  <a href="https://cassandra.apache.org"><img src="https://img.shields.io/badge/cassandra-5.0+-green.svg" alt="Cassandra"></a>
+</p>
 
-> **Status**: M5 Complete (v0.9.0) - Core reading, CLI, Output Writers, Python and Node.js Bindings, and Write Support are production-ready
+> **Status**: v0.11.0 — Core reading, CLI, output writers, Python & Node.js bindings, and write support (with STCS compaction) are production-ready. See [CHANGELOG.md](CHANGELOG.md).
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
@@ -253,18 +261,25 @@ cargo build -p cqlite-core --no-default-features
 - [x] Full type coverage: Inet, Varint, Duration, Tuple, Frozen
 - [x] E2E readback gate: write → flush → Cassandra `nodetool refresh` → verify
 
+### ✅ Since v0.9.0 (v0.10 → v0.11.0, Jun 2026)
+- [x] Embeddable Parquet writer in `cqlite-core` (behind a `parquet` feature) + `export_parquet` in Python/Node
+- [x] Version-gated reads for the Cassandra 5.0 `oa` format; graceful handling of `da` (BTI)
+- [x] Real BTI trie node-type dispatch and schema-typed query result columns
+- [x] Published documentation site at [pmcfadin.github.io/cqlite](https://pmcfadin.github.io/cqlite/)
+- See [CHANGELOG.md](CHANGELOG.md) for the full per-release detail
+
 ### 📋 Roadmap
 - [ ] M6: WASM bindings for browser deployment
 - [ ] M7: Performance validation + v1.0 release
 
 ## Architecture Highlights
 
-**Simplified Design Philosophy:**
-- **Single SSTable per table** - No compaction complexity
-- **CQL parser** - Native CQL support using Antlr4 grammar
-- **Cassandra 5+ focus** - Modern format support only
-- **Memory efficient** - <128MB usage for large files
-- **Zero dependencies** - Self-contained parsing engine
+**Design Philosophy:**
+- **No cluster dependency** - Read and write SSTables directly, with no running Cassandra node
+- **CQL parser** - Native CQL support using an Antlr4 grammar
+- **Cassandra 5+ focus** - Modern 'oa' format with BTI support
+- **Memory efficient** - <128MB usage target for large files
+- **Self-contained engine** - Pure-Rust parsing and writing, including STCS compaction
 
 ## Getting Involved
 
@@ -339,7 +354,7 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 ### Supported Formats
 - **Cassandra 5.0+**: 'oa' format with BTI support
 - **File Types**: Data.db, Index.db, Summary.db, Statistics.db
-- **Compression**: LZ4, Snappy, Deflate
+- **Compression**: LZ4, Snappy, Deflate, Zstd
 
 ### Performance Targets
 - **Parse Speed**: 1GB files in <10 seconds
@@ -363,9 +378,13 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
 ## Community
 
-- **Slack**: `#cqlite` on ASF Slack
-- **Mailing List**: dev@cassandra.apache.org (tag with [CQLite])
-- **Weekly Sync**: Tuesdays 4pm UTC (calendar invite available)
+- **Questions & ideas**: [GitHub Discussions](https://github.com/pmcfadin/cqlite/discussions)
+- **Bugs & feature requests**: [GitHub Issues](https://github.com/pmcfadin/cqlite/issues)
+- **Contributing**: see [CONTRIBUTING.md](CONTRIBUTING.md) and our [Code of Conduct](CODE_OF_CONDUCT.md)
+
+CQLite is an independent open-source project, not an Apache Software Foundation
+project. It is built in the spirit of the Apache Cassandra community, with the
+goal of contributing it upstream as it matures.
 
 ## License
 
@@ -377,4 +396,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: M1 through M5 milestones are complete (v0.9.0). Core SSTable reading, CLI, output writers, Python bindings, Node.js bindings, and write support are production-ready. Next: M6 (WASM bindings) and M7 (performance validation + v1.0).
+**Note**: M1 through M5 milestones are complete and the project is at **v0.11.0**. Core SSTable reading, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction are production-ready. Next: M6 (WASM bindings) and M7 (performance validation + v1.0).

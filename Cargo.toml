@@ -36,8 +36,8 @@ cqlite-integration-tests = { path = "tests" }
 version = "0.11.0"
 edition = "2021"
 authors = ["CQLite Team"]
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/cqlite/cqlite"
+license = "Apache-2.0"
+repository = "https://github.com/pmcfadin/cqlite"
 keywords = ["database", "embedded", "sstable", "wasm"]
 categories = ["database-implementations", "embedded", "wasm"]
 rust-version = "1.85"

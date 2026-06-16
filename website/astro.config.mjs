@@ -14,6 +14,11 @@ export default defineConfig({
     starlight({
       title: 'CQLite',
       description: 'Local Apache Cassandra SSTable access without cluster dependencies',
+      logo: {
+        src: './src/assets/cqlite.png',
+        alt: 'CQLite',
+        replacesTitle: true,
+      },
       social: [
         {
           icon: 'github',

@@ -2,9 +2,7 @@
 
 ## 📚 Complete Project Documentation
 
-Welcome to the CQLite documentation hub. This directory contains all technical documentation, user guides, and project reports organized for easy navigation and maintenance.
-
-> **📋 [Complete Documentation Index](DOCUMENTATION_INDEX.md)** - Comprehensive catalog of all project documentation with organization details and cleanup history.
+Welcome to the CQLite documentation hub. This directory holds technical documentation and user guides. The polished, published docs live at **[pmcfadin.github.io/cqlite](https://pmcfadin.github.io/cqlite/)**.
 
 ---
 
@@ -55,7 +53,6 @@ Welcome to the CQLite documentation hub. This directory contains all technical d
 - **[Releasing](development/RELEASING.md)** - Release process and checklist
 
 ### 📊 Project Reports
-- **[Reports Index](reports/README.md)** - Project reports organized by category
 - **[Historical Issue Investigations](archive/issues/INDEX.md)** - Archived deep-dives from past format debugging
 
 ---
@@ -81,11 +78,10 @@ Welcome to the CQLite documentation hub. This directory contains all technical d
 
 ## 📈 Project Status
 
-- **Current Version**: 0.10.0
+- **Current Version**: 0.11.0
 - **Cassandra Compatibility**: 5.0+ with BTI format support
-- **Milestones Complete**: M1 (Core Reading), M2 (CLI), M3 (Output Writers), M4 (Python Bindings), M5.1 (Write Support); Node.js bindings shipped
-- **In Progress**: M5.2 (Compaction & Export)
-- **Next**: M6 (WebAssembly Bindings)
+- **Milestones Complete**: M1 (Core Reading), M2 (CLI), M3 (Output Writers), M4 (Python & Node.js Bindings), M5 (Write Support + Compaction)
+- **Next**: M6 (WebAssembly Bindings), M7 (Performance validation + v1.0)
 - **Test Pass Rate**: 100% (33/33 tables vs sstabledump, see `test-data/validation-matrix.md`)
 
 ---
