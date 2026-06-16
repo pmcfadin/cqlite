@@ -60,7 +60,10 @@
       "Bash(cargo fmt:*)",
       "Bash(./scripts/validate-cleanup.sh:*)",
       "Bash(rm:*)",
-      "Bash(git branch:*)"
+      "Bash(git branch:*)",
+      "Bash(git fetch *)",
+      "Bash(export WORKTREE=/Users/patrickmcfadin/local_projects/cqlite/.claude/worktrees/agent-af3e1992b9b0c2c48)",
+      "Bash(rg -n \"VG3\" cqlite-core/src/ --include=\"*.rs\")"
     ],
     "deny": [],
     "ask": []
