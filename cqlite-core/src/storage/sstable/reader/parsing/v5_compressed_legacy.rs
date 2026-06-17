@@ -311,8 +311,31 @@ impl V5CompressedLegacyParser {
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
     ) -> Result<Vec<(TableId, RowKey, Value)>> {
+        let mut results = Vec::new();
+        self.parse_block_emit(data, schema, reader, |entry| {
+            results.push(entry);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
+        Ok(results)
+    }
+
+    /// Streaming variant of [`parse_block`]: invokes `emit` for each parsed
+    /// `(TableId, RowKey, Value)` entry instead of collecting them into a `Vec`,
+    /// so callers can forward rows into a bounded channel without materializing
+    /// the whole block at once (issue #790). Returning `ControlFlow::Break` from
+    /// `emit` stops parsing early — used when the streaming consumer is dropped.
+    pub fn parse_block_emit<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut((TableId, RowKey, Value)) -> Result<std::ops::ControlFlow<()>>,
+    {
         if data.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         // V5CompressedLegacy format stores cells WITHOUT column names,
@@ -348,7 +371,7 @@ impl V5CompressedLegacyParser {
             data.len()
         );
 
-        let mut results = Vec::new();
+        let mut emitted: usize = 0;
         let mut offset = 0;
         let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
 
@@ -641,11 +664,15 @@ impl V5CompressedLegacyParser {
                                         Value::Map(map_entries)
                                     };
 
-                                    results.push((
+                                    match emit((
                                         table_id.clone(),
                                         partition_key.clone(),
                                         row_value,
-                                    ));
+                                    ))? {
+                                        std::ops::ControlFlow::Continue(()) => emitted += 1,
+                                        // Consumer dropped (streaming receiver gone): stop parsing.
+                                        std::ops::ControlFlow::Break(()) => return Ok(()),
+                                    }
                                 }
 
                                 // Check if we're at the end of the partition
@@ -722,17 +749,17 @@ impl V5CompressedLegacyParser {
         if skipped_partitions > 0 {
             log::warn!(
                 "V5CompressedLegacy: Successfully parsed {} entries, skipped {} malformed partitions",
-                results.len(),
+                emitted,
                 skipped_partitions
             );
         }
 
         debug!(
             "V5CompressedLegacy: Parsed {} total entries from block",
-            results.len()
+            emitted
         );
 
-        Ok(results)
+        Ok(())
     }
 
     /// Parse all partitions in a decompressed block, returning per-row timestamps.

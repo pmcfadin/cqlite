@@ -216,6 +216,28 @@ impl StorageEngine {
             .await
     }
 
+    /// Streaming scan (issue #790): return a bounded channel that yields
+    /// `(RowKey, Value)` entries lazily in key (token) order, instead of the
+    /// materializing [`scan`](Self::scan) that returns the whole `Vec`.
+    ///
+    /// Live heap is bounded by `buffer_size` rows rather than growing O(rows),
+    /// so streaming a large `SELECT *` no longer holds the entire result set in
+    /// memory at once. Delegates to [`SSTableManager::scan_stream`].
+    ///
+    /// [`SSTableManager::scan_stream`]: sstable::SSTableManager::scan_stream
+    pub async fn scan_stream(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        schema: Option<&crate::schema::TableSchema>,
+        buffer_size: usize,
+    ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> {
+        self.sstables
+            .scan_stream(table_id, start_key, end_key, schema, buffer_size)
+            .await
+    }
+
     /// Flush MemTable to SSTable
     ///
     /// NOTE: Write functionality removed in Issue #175 (WAL/MemTable infrastructure deleted).
