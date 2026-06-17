@@ -221,18 +221,13 @@ class TestDatabaseLifecycle:
 class TestConcurrentAccess:
     """Test thread safety with concurrent access."""
 
-    @pytest.mark.xfail(
-        reason=(
-            "Concurrent query thread safety: multiple threads issuing queries "
-            "simultaneously against the same Database object intermittently fail "
-            "with 'Column not found: id', even after a warm-up sequence. "
-            "Documented limitation in CLAUDE.md: 'concurrent queries on same "
-            "database require a warm-up query first'. The warm-up does not fully "
-            "resolve the race. Product bug — see #805 (concurrent-query column-not-found)."
-        )
-    )
     def test_concurrent_queries_from_threads(self):
-        """Multiple threads should be able to query simultaneously."""
+        """Multiple threads should be able to query simultaneously without a warm-up.
+
+        Fixed in #805: SSTableReader.scan_mutex now serialises concurrent sequential
+        scans on the same reader, preventing interleaving of the shared file-position
+        and current_chunk_index state that previously caused 'Column not found: id'.
+        """
         if not DATASETS.exists():
             pytest.skip("Test data not found")
         schema_file = SCHEMAS / "basic-types.cql"
@@ -256,18 +251,14 @@ class TestConcurrentAccess:
                 with lock:
                     errors.append((thread_id, e))
 
+        # No warm-up required — fix #805 makes concurrent first-access safe.
         with cqlite.open(DATASETS, schema=schema_file) as db:
-            # Warm up: execute multiple queries to ensure schema is fully loaded
-            # and all internal caches are populated before concurrent access
-            for _ in range(3):
-                _ = db.execute("SELECT id, active, age, salary FROM test_basic.simple_table LIMIT 1")
-
             threads = []
             for i in range(10):
                 t = threading.Thread(target=query_thread, args=(db, i))
                 threads.append(t)
 
-            # Start all threads
+            # Start all threads simultaneously to maximise race pressure
             for t in threads:
                 t.start()
 
