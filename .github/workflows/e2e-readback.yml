@@ -75,14 +75,21 @@ jobs:
 
       # The script manages the compose stack itself (start-clean.sh + trap cleanup).
       # We pass --no-build so it uses the binary we just compiled, and --bin to
-      # point at the exact path.  On failure we preserve workdir artifacts via
-      # the upload step below.
+      # point at the exact path.
+      #
+      # E2E_ARTIFACT_DIR is set to /tmp/e2e-artifacts so the script's EXIT trap
+      # copies the per-table mutation JSONL and spec.txt files into that stable
+      # location before deleting the random /tmp/cqlite-e2e-readback.* workdir.
+      # The "Collect failure artifacts" step below then picks them up.  (Issue #725)
       - name: Run e2e Cassandra readback
         id: readback
         shell: bash
         env:
           # Force docker compose (available on ubuntu-latest GitHub runners)
           COMPOSE_CMD: "docker compose"
+          # Stable artifact destination — populated by the script's EXIT trap on
+          # failure so the per-table JSONL/spec files survive artifact collection.
+          E2E_ARTIFACT_DIR: /tmp/e2e-artifacts
         run: |
           EXTRA_ARGS=""
           if [[ -n "${{ github.event.inputs.tables }}" ]]; then
@@ -100,11 +107,12 @@ jobs:
           # tee swallows the exit code; use PIPESTATUS to propagate it
           exit "${PIPESTATUS[0]}"
 
-      # Collect logs and Cassandra container logs as artifacts on failure.
-      # Note: the script's EXIT trap calls rm -rf on its workdir ($WORKDIR under
-      # /tmp/cqlite-e2e-readback.*) so per-table mutation/spec files are gone by
-      # the time this step runs.  The full script stdout+stderr is captured in
-      # /tmp/e2e-readback.log (from the tee above) and is always present.
+      # Collect logs and workdir contents as artifacts on failure.
+      # On a failing exit the script's EXIT trap copies the per-table mutation
+      # JSONL and spec.txt files from $WORKDIR into /tmp/e2e-artifacts/workdir/
+      # (via E2E_ARTIFACT_DIR) before deleting the random workdir path, so
+      # those files are available here.  The full script stdout+stderr is also
+      # in /tmp/e2e-readback.log (captured by tee above).  (Issue #725)
       - name: Collect failure artifacts
         if: failure()
         run: |
@@ -115,8 +123,12 @@ jobs:
             cp /tmp/e2e-readback.log /tmp/e2e-artifacts/
           fi
 
+          # Per-table mutation JSONL and spec.txt files are in
+          # /tmp/e2e-artifacts/workdir/ (copied there by the script's EXIT trap
+          # via E2E_ARTIFACT_DIR before the random workdir was deleted).
           # If the script was abruptly killed (SIGTERM from timeout) the workdir
-          # cleanup trap may not have run yet; capture any remaining files.
+          # cleanup trap may not have run; capture any remaining random-path dirs
+          # as a fallback.
           for d in /tmp/cqlite-e2e-readback.*; do
             [[ -d "$d" ]] && cp -r "$d" /tmp/e2e-artifacts/ || true
           done

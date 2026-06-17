@@ -60,6 +60,14 @@ SUBSET=""
 CQLITE_BIN_OVERRIDE=""
 SELF_TEST=0
 
+# E2E_ARTIFACT_DIR: when set (non-empty), the cleanup() EXIT trap copies the
+# workdir into this stable location on a FAILING exit before deleting it.
+# This lets CI artifact-collection steps find the per-table mutation JSONL
+# and spec.txt files even though the random /tmp/cqlite-e2e-readback.* path
+# is gone.  On a SUCCESS exit the workdir is still deleted without copying.
+# (Issue #725)
+E2E_ARTIFACT_DIR="${E2E_ARTIFACT_DIR:-}"
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --keep-running) KEEP_RUNNING=1; shift ;;
@@ -340,6 +348,17 @@ declare -a FAILED_LIST=()
 cleanup() {
   local rc=$?
   if [[ "$KEEP_RUNNING" -eq 0 ]]; then
+    # On a failing exit, copy the workdir into E2E_ARTIFACT_DIR (if set) so
+    # per-table mutation JSONL and spec.txt files survive for CI artifact
+    # collection.  The copy happens here, inside the EXIT trap, before the
+    # rm -rf — which means the stable location is populated before the
+    # workflow's "Collect failure artifacts" step runs.  (Issue #725)
+    if [[ "$rc" -ne 0 && -n "$E2E_ARTIFACT_DIR" && -d "$WORKDIR" ]]; then
+      log "Copying workdir to $E2E_ARTIFACT_DIR/workdir for failure artifact collection"
+      mkdir -p "$E2E_ARTIFACT_DIR/workdir"
+      cp -r "$WORKDIR/." "$E2E_ARTIFACT_DIR/workdir/" || true
+      log "Workdir contents preserved at $E2E_ARTIFACT_DIR/workdir"
+    fi
     log "Tearing down Cassandra stack"
     bash "$SCRIPTS/shutdown-clean.sh" >/dev/null 2>&1 || true
     rm -rf "$WORKDIR" || true
