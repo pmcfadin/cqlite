@@ -214,8 +214,8 @@ impl PyWriteEngine {
             memtable_size: self.inner.memtable_size(),
             memtable_rows: self.inner.memtable_row_count(),
             wal_size: self.inner.wal_size(),
-            l0_count: 0,
-            total_written: self.inner.memtable_row_count(),
+            l0_count: self.inner.l0_count() as usize,
+            total_written: self.inner.total_written() as usize,
         }
     }
 }

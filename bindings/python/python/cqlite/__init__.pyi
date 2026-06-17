@@ -633,18 +633,19 @@ class WriteStats:
         memtable_size: Current memtable size in bytes.
         memtable_rows: Number of rows currently buffered in the memtable.
         wal_size: Write-ahead log file size in bytes.
-        l0_count: Number of Level-0 (unflushed) SSTables on disk.
-        total_written: Cumulative rows written since the engine was opened.
-
-    Note:
-        ``l0_count`` and ``total_written`` are placeholder fields that will be
-        populated when ``WriteEngine`` exposes runtime stats (planned, see
-        issue #486).  For now they default to ``0`` and may not reflect actual
-        storage state.
+        l0_count: Number of L0 SSTables successfully flushed since the engine
+            was opened.  Incremented once per ``flush_run()`` call that produces
+            a non-empty SSTable.  Resets to zero when the engine is re-opened
+            (in-process counter, issue #486).
+        total_written: Cumulative number of rows written since the engine was
+            opened.  Incremented for every row that enters the memtable and is
+            NOT reset on flush.  Resets to zero when the engine is re-opened
+            (in-process counter, issue #486).
 
     Example:
         >>> stats = db.write_stats
         >>> print(f"Memtable: {stats.memtable_size} bytes, {stats.memtable_rows} rows")
+        >>> print(f"L0 SSTables: {stats.l0_count}, total rows written: {stats.total_written}")
     """
 
     @property
