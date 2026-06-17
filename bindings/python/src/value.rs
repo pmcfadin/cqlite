@@ -58,8 +58,16 @@ pub fn value_to_py(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
 ///
 /// Python dicts require hashable keys. This converts:
 /// - List → tuple (recursively)
-/// - Set → frozenset (already hashable from set_to_py)
-/// - Other types → as-is
+/// - Map → tuple of (key, value) tuples
+/// - Set → frozenset (elements recursively made hashable)
+/// - Frozen → unwrap and recurse
+/// - UDT → frozenset of (field_name, hashable_value) tuples (sorted by name)
+/// - Other types → as-is (already hashable)
+///
+/// Note: `SET<FROZEN<UDT>>` is handled at the `set_to_py` level by
+/// returning a `list` instead of a `frozenset` (see `set_to_py`). This
+/// function is still called for UDTs that appear as MAP keys, which are
+/// unusual but possible in CQL.
 pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject> {
     match value {
         Value::List(items) => {
@@ -81,6 +89,55 @@ pub fn value_to_hashable_key(py: Python<'_>, value: &Value) -> PyResult<PyObject
                 })
                 .collect::<PyResult<Vec<_>>>()?;
             Ok(PyTuple::new(py, converted)?.into_any().unbind())
+        }
+        Value::Frozen(inner) => {
+            // Unwrap Frozen and recurse so that FROZEN<UDT> and FROZEN<collection>
+            // are handled by the appropriate arm rather than falling through to
+            // value_to_py (which would return an unhashable dict for UDTs).
+            value_to_hashable_key(py, inner)
+        }
+        Value::Udt(udt) => {
+            // UDT as a map/set key: represent as a frozenset of (name, value) tuples
+            // sorted by field name for deterministic ordering.
+            // Fields: _type, _keyspace, and all named fields (matching udt_to_py).
+            let mut pairs: Vec<PyObject> = Vec::with_capacity(udt.fields.len() + 2);
+
+            // _type and _keyspace metadata fields
+            let type_key = "_type".into_pyobject(py)?.into_any().unbind();
+            let type_val = udt
+                .type_name
+                .as_str()
+                .into_pyobject(py)?
+                .into_any()
+                .unbind();
+            pairs.push(PyTuple::new(py, [type_key, type_val])?.into_any().unbind());
+
+            let ks_key = "_keyspace".into_pyobject(py)?.into_any().unbind();
+            let ks_val = udt.keyspace.as_str().into_pyobject(py)?.into_any().unbind();
+            pairs.push(PyTuple::new(py, [ks_key, ks_val])?.into_any().unbind());
+
+            // Named fields (in schema order; sort by name for a stable hash)
+            let mut field_tuples: Vec<(&str, PyObject)> = udt
+                .fields
+                .iter()
+                .map(|f| {
+                    let v = match &f.value {
+                        Some(v) => value_to_hashable_key(py, v),
+                        None => Ok(py.None()),
+                    }?;
+                    Ok((f.name.as_str(), v))
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+
+            // Sort by field name so the frozenset hash is order-independent
+            field_tuples.sort_by_key(|(name, _)| *name);
+
+            for (name, val) in field_tuples {
+                let k = name.into_pyobject(py)?.into_any().unbind();
+                pairs.push(PyTuple::new(py, [k, val])?.into_any().unbind());
+            }
+
+            Ok(PyFrozenSet::new(py, &pairs)?.into_any().unbind())
         }
         // Other types are already hashable or handled by value_to_py
         _ => value_to_py(py, value),
@@ -334,13 +391,48 @@ fn list_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
     Ok(PyList::new(py, converted)?.into_any().unbind())
 }
 
-/// Convert CQL set to Python frozenset.
+/// Convert CQL set to Python frozenset (or list when elements contain UDTs).
+///
+/// CQL SET semantics require unique, ordered elements. For scalar types, we
+/// return a Python `frozenset` (immutable, hashable, set-semantic). However,
+/// `dict` objects are unhashable in Python, so `SET<FROZEN<UDT>>` columns
+/// cannot use `frozenset`. In that case we fall back to a `list`, which
+/// matches the CLI JSON output and is consistent with how the CLI renders
+/// SET-of-UDT (see epic #795 and issue #804).
 fn set_to_py(py: Python<'_>, items: &[Value]) -> PyResult<PyObject> {
-    let converted: Vec<PyObject> = items
-        .iter()
-        .map(|v| value_to_hashable_key(py, v))
-        .collect::<PyResult<Vec<_>>>()?;
-    Ok(PyFrozenSet::new(py, &converted)?.into_any().unbind())
+    // Check whether any element is (or wraps) a UDT.
+    // UDT values become Python dicts, which are unhashable and cannot be
+    // placed in a frozenset.
+    let has_udt = items.iter().any(contains_udt);
+
+    if has_udt {
+        // Return a list so that each UDT element stays as a plain Python dict.
+        // This aligns with the CLI JSON representation of SET<FROZEN<UDT>>.
+        let converted: Vec<PyObject> = items
+            .iter()
+            .map(|v| value_to_py(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyList::new(py, converted)?.into_any().unbind())
+    } else {
+        let converted: Vec<PyObject> = items
+            .iter()
+            .map(|v| value_to_hashable_key(py, v))
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok(PyFrozenSet::new(py, &converted)?.into_any().unbind())
+    }
+}
+
+/// Return `true` if `value` is or wraps a UDT value.
+///
+/// Used by `set_to_py` to decide whether a `SET` should be returned as a
+/// `frozenset` (scalars, always hashable) or a `list` (UDT elements, whose
+/// dict representation is unhashable).
+fn contains_udt(value: &Value) -> bool {
+    match value {
+        Value::Udt(_) => true,
+        Value::Frozen(inner) => contains_udt(inner),
+        _ => false,
+    }
 }
 
 /// Convert CQL map to Python dict.

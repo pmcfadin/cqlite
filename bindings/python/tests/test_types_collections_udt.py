@@ -383,6 +383,34 @@ class TestNestedCollections:
         if not found_udt_map:
             pytest.skip("No UDT map found in test data")
 
+    def test_udt_in_set(self, db):
+        """SET<FROZEN<udt>> should return list of dicts (issue #804).
+
+        UDT values are Python dicts which are unhashable and cannot be placed
+        in a frozenset.  The binding therefore returns a list when the set
+        element type is (or wraps) a UDT, matching the CLI JSON output.
+        """
+        result = db.execute(
+            "SELECT contacts FROM test_collections.collections_with_udts LIMIT 10"
+        )
+        found_udt_set = False
+        for row in result.rows:
+            contacts = row.get("contacts")
+            if contacts is not None and len(contacts) > 0:
+                found_udt_set = True
+                # SET<FROZEN<contact_info>> must come back as a list, not frozenset
+                assert isinstance(contacts, list), (
+                    f"Expected list for SET<FROZEN<UDT>>, got {type(contacts).__name__}"
+                )
+                for contact in contacts:
+                    # Each element must be a dict (UDT)
+                    assert isinstance(contact, dict), (
+                        f"Expected dict for FROZEN<UDT> element, got {type(contact).__name__}"
+                    )
+                    assert "_type" in contact, "UDT element should have _type metadata"
+        if not found_udt_set:
+            pytest.skip("No SET<FROZEN<UDT>> values found in test data")
+
 
 class TestFrozenCollections:
     """Test frozen collection handling."""
