@@ -20,6 +20,9 @@
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
+> ⭐ **Find CQLite useful?** [**Star the repo**](https://github.com/pmcfadin/cqlite) — it is the clearest signal that this work matters and directly drives how much time goes into it.
+> 🐛 **Hit a bug or need a feature?** [**Open an issue**](https://github.com/pmcfadin/cqlite/issues/new/choose). For questions and ideas, use [Discussions](https://github.com/pmcfadin/cqlite/discussions). See [Known Issues](#known-issues) and the [Roadmap](#roadmap) before filing.
+
 ## Documentation
 
 Full documentation is at **[https://pmcfadin.github.io/cqlite/](https://pmcfadin.github.io/cqlite/)**:
@@ -296,8 +299,46 @@ cargo build -p cqlite-core --no-default-features
 - See [CHANGELOG.md](CHANGELOG.md) for the full per-release detail
 
 ### 📋 Roadmap
-- [ ] M6: WASM bindings for browser deployment
-- [ ] M7: Performance validation + v1.0 release
+
+See the [**Roadmap**](#roadmap) section below for in-flight epics and milestones.
+
+## Roadmap
+
+CQLite is at **v0.11.0** and production-ready for the use cases above. The path to
+**v1.0** is tracked in the open. Full detail, with milestones, lives at
+[pmcfadin.github.io/cqlite → Roadmap](https://pmcfadin.github.io/cqlite/user-docs/roadmap/).
+
+| Workstream | Epic |
+|------------|------|
+| Query engine completeness — `PER PARTITION LIMIT`, static columns, clustering order, plan metadata | [#756](https://github.com/pmcfadin/cqlite/issues/756) |
+| `WRITETIME()` / `TTL()` in `SELECT` | [#689](https://github.com/pmcfadin/cqlite/issues/689) |
+| Writer format fidelity — `>64`-col headers, deletion-time, `DURATION`, BTI index writing | [#762](https://github.com/pmcfadin/cqlite/issues/762) |
+| Wide-partition & memory performance — promoted index, streamed writers, O(log n) seeks | [#751](https://github.com/pmcfadin/cqlite/issues/751) |
+| BTI (`da`) end-to-end **read** support | [#660](https://github.com/pmcfadin/cqlite/issues/660) |
+| Delta-scan envelope for CDC-style Parquet projections | [#696](https://github.com/pmcfadin/cqlite/issues/696) |
+| M6 — WASM bindings · M7 — performance validation + **v1.0** | _planned_ |
+
+The roadmap follows real-world use. Want something prioritized?
+[Open or 👍 an issue](https://github.com/pmcfadin/cqlite/issues) — and
+[⭐ star the repo](https://github.com/pmcfadin/cqlite).
+
+## Known Issues
+
+CQLite is honest about its sharp edges. The current release (`v0.11.0`) has a few
+known gaps — none of which block the core read/export workflows. Full, dated list:
+[pmcfadin.github.io/cqlite → Known Issues](https://pmcfadin.github.io/cqlite/user-docs/known-issues/).
+
+| Issue | Impact | Tracking |
+|-------|--------|----------|
+| Set element tombstones may hide a row | Narrow correctness edge case | [#493](https://github.com/pmcfadin/cqlite/issues/493) |
+| Wide partitions written by CQLite scan linearly (`promoted_index_length = 0`) | Perf on 10k+ rows/partition | [#751](https://github.com/pmcfadin/cqlite/issues/751), [#752](https://github.com/pmcfadin/cqlite/issues/752) |
+| BTI (`da`) SSTables are rejected, not read | Use BIG format or convert first | [#660](https://github.com/pmcfadin/cqlite/issues/660) |
+| Pre-5.0 formats (`md`/`mc`/`la`/`ma`) unsupported | By design — Cassandra 5.0 only | [Limitations](https://pmcfadin.github.io/cqlite/user-docs/limitations/) |
+
+For what CQLite does **not** do by design (older formats, network access, query
+features), see [Limitations](https://pmcfadin.github.io/cqlite/user-docs/limitations/).
+
+**Found something not listed?** [Open an issue](https://github.com/pmcfadin/cqlite/issues/new/choose) — a good report (Cassandra version, schema, command, output) is the most valuable contribution you can make.
 
 ## Architecture Highlights
 
@@ -405,9 +446,10 @@ See [docs/development/PRD.md](docs/development/PRD.md) for milestone details.
 
 ## Community
 
-- **Questions & ideas**: [GitHub Discussions](https://github.com/pmcfadin/cqlite/discussions)
-- **Bugs & feature requests**: [GitHub Issues](https://github.com/pmcfadin/cqlite/issues)
-- **Contributing**: see [CONTRIBUTING.md](CONTRIBUTING.md) and our [Code of Conduct](CODE_OF_CONDUCT.md)
+- **⭐ Star the project**: [github.com/pmcfadin/cqlite](https://github.com/pmcfadin/cqlite) — the single best way to support it and shape where the time goes
+- **🐛 Bugs & feature requests**: [GitHub Issues](https://github.com/pmcfadin/cqlite/issues/new/choose)
+- **💬 Questions & ideas**: [GitHub Discussions](https://github.com/pmcfadin/cqlite/discussions)
+- **🛠 Contributing**: see [CONTRIBUTING.md](CONTRIBUTING.md), the [Roadmap](#roadmap), and our [Code of Conduct](CODE_OF_CONDUCT.md) — look for `good-first-issue` labels
 
 CQLite is an independent open-source project, not an Apache Software Foundation
 project. It is built in the spirit of the Apache Cassandra community, with the
