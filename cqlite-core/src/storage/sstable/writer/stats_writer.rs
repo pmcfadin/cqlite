@@ -44,8 +44,108 @@
 use crate::error::{Error, Result};
 use crate::parser::vint::encode_vuint;
 use crate::schema::TableSchema;
+use std::collections::BTreeMap;
 use std::io::Write;
 use std::path::PathBuf;
+
+/// Maximum number of bins in the tombstone drop-time histogram.
+///
+/// Mirrors Cassandra's `StreamingTombstoneHistogramBuilder.MAX_BIN_SIZE = 100`.
+const TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE: i32 = 100;
+
+/// Streaming tombstone drop-time histogram.
+///
+/// Mirrors Cassandra's `StreamingTombstoneHistogramBuilder` with a fixed maximum
+/// of 100 bins. Tombstone local-deletion-times are accumulated; when the bin count
+/// exceeds the maximum the two nearest bins are merged, keeping the bin count at or
+/// below `MAX_BIN_SIZE`.
+///
+/// Serialisation uses the **legacy** (nb/mc) format:
+/// ```text
+/// i32 BE  maxBinSize  (100 when non-empty, 0 when empty)
+/// i32 BE  size        (actual number of bins)
+/// for each bin:
+///   f64 BE  point  (local-deletion-time as a double)
+///   i64 BE  value  (count of tombstones in this bin)
+/// ```
+#[derive(Debug, Clone, Default)]
+pub struct TombstoneHistogram {
+    /// Bins keyed by `local_deletion_time as i64` (for stable ordering).
+    /// Each value is the count of tombstones that map to this bin.
+    bins: BTreeMap<i64, i64>,
+}
+
+impl TombstoneHistogram {
+    /// Create an empty histogram.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Record a tombstone with the given local-deletion-time (Unix seconds).
+    ///
+    /// If adding the new point would exceed `MAX_BIN_SIZE` the two closest
+    /// existing bins are merged first, exactly as Cassandra's builder does.
+    pub fn update(&mut self, local_deletion_time: i32) {
+        let key = local_deletion_time as i64;
+        *self.bins.entry(key).or_insert(0) += 1;
+
+        // Merge bins while over capacity
+        while self.bins.len() as i32 > TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE {
+            self.merge_closest_bins();
+        }
+    }
+
+    /// Return `true` if no tombstone deletion times have been recorded.
+    pub fn is_empty(&self) -> bool {
+        self.bins.is_empty()
+    }
+
+    /// Return the number of populated bins.
+    pub fn size(&self) -> i32 {
+        self.bins.len() as i32
+    }
+
+    /// Merge the two bins whose keys are closest together.
+    ///
+    /// The merged bin's key is the weighted average of the two points;
+    /// its value is the sum of both counts.  This matches Cassandra's
+    /// `mergeNearestBins` approach.
+    fn merge_closest_bins(&mut self) {
+        if self.bins.len() < 2 {
+            return;
+        }
+
+        // Find the pair of adjacent keys with the smallest gap.
+        let keys: Vec<i64> = self.bins.keys().copied().collect();
+        let mut min_gap = i64::MAX;
+        let mut merge_idx = 0usize;
+        for i in 0..keys.len() - 1 {
+            let gap = keys[i + 1] - keys[i];
+            if gap < min_gap {
+                min_gap = gap;
+                merge_idx = i;
+            }
+        }
+
+        let k1 = keys[merge_idx];
+        let k2 = keys[merge_idx + 1];
+        let v1 = self.bins.remove(&k1).unwrap_or(0);
+        let v2 = self.bins.remove(&k2).unwrap_or(0);
+        let total = v1 + v2;
+        // Weighted average key (same formula as Cassandra)
+        let merged_key = if total == 0 {
+            (k1 + k2) / 2
+        } else {
+            (k1 * v1 + k2 * v2) / total
+        };
+        *self.bins.entry(merged_key).or_insert(0) += total;
+    }
+
+    /// Iterate over bins in ascending key order as `(point_as_f64, count)` pairs.
+    fn entries(&self) -> impl Iterator<Item = (f64, i64)> + '_ {
+        self.bins.iter().map(|(&k, &v)| (k as f64, v))
+    }
+}
 
 /// Epoch constants for EncodingStats (from Cassandra's EncodingStats.java)
 /// These are used to compute deltas from a baseline for more compact encoding
@@ -89,6 +189,13 @@ pub struct StatisticsMetadata {
     pub column_count: u64,
     /// Total size of all rows in bytes
     pub total_rows_size: u64,
+    /// Histogram of tombstone local-deletion-times for `estimatedTombstoneDropTime`.
+    ///
+    /// Populated by `update_local_deletion_time`; serialised into Statistics.db
+    /// so Cassandra can compute `estimatedDroppableTombstoneRatio` and schedule
+    /// tombstone compaction.  Uses the same streaming builder algorithm as
+    /// Cassandra's `StreamingTombstoneHistogramBuilder` (max 100 bins).
+    pub tombstone_histogram: TombstoneHistogram,
 }
 
 impl Default for StatisticsMetadata {
@@ -104,6 +211,7 @@ impl Default for StatisticsMetadata {
             row_count: 0,
             column_count: 0,
             total_rows_size: 0,
+            tombstone_histogram: TombstoneHistogram::new(),
         }
     }
 }
@@ -120,10 +228,14 @@ impl StatisticsMetadata {
         self.max_timestamp = self.max_timestamp.max(timestamp);
     }
 
-    /// Update local deletion time range (for tombstones)
+    /// Update local deletion time range (for tombstones) and the drop-time histogram.
+    ///
+    /// Call this for every tombstone local-deletion-time encountered while writing:
+    /// cell tombstones, row deletions, range tombstones, and partition tombstones.
     pub fn update_local_deletion_time(&mut self, deletion_time: i32) {
         self.min_local_deletion_time = self.min_local_deletion_time.min(deletion_time);
         self.max_local_deletion_time = self.max_local_deletion_time.max(deletion_time);
+        self.tombstone_histogram.update(deletion_time);
     }
 
     /// Update TTL range
@@ -580,8 +692,11 @@ impl StatisticsWriter {
         // 10. double compressionRatio (use -1.0 for unknown)
         buffer.write_all(&(-1.0f64).to_be_bytes())?;
 
-        // 11. TombstoneHistogram estimatedTombstoneDropTime (empty for nb: size=0)
-        self.write_tombstone_histogram(&mut buffer)?;
+        // 11. TombstoneHistogram estimatedTombstoneDropTime
+        // Populated from tombstone local-deletion-times accumulated during the write path.
+        // Legacy serializer (nb format): maxBinSize (i32), size (i32),
+        // then size × (f64 point, i64 value).
+        self.write_tombstone_histogram(&mut buffer, &metadata.tombstone_histogram)?;
 
         // 12. int sstableLevel
         buffer.write_all(&0i32.to_be_bytes())?;
@@ -649,17 +764,37 @@ impl StatisticsWriter {
         Ok(())
     }
 
-    /// Write a TombstoneHistogram for nb format (LegacyHistogramSerializer)
+    /// Serialise a `TombstoneHistogram` using Cassandra's legacy format (nb/mc).
     ///
-    /// Format:
-    /// - int: maxBinSize (= size)
-    /// - int: size
-    /// - for each entry: double point + long value
+    /// Binary layout (matches `TombstoneHistogram.LegacyHistogramSerializer`):
+    /// ```text
+    /// i32 BE  maxBinSize  — capacity: 100 when non-empty, 0 when empty
+    /// i32 BE  size        — actual number of populated bins
+    /// for each of the `size` bins (ascending point order):
+    ///   f64 BE  point  — local-deletion-time bucket centre (as double)
+    ///   i64 BE  value  — tombstone count for this bucket
+    /// ```
     ///
-    /// Empty histogram: maxBinSize=0, size=0
-    fn write_tombstone_histogram(&self, buffer: &mut Vec<u8>) -> Result<()> {
-        buffer.write_all(&0i32.to_be_bytes())?; // maxBinSize
-        buffer.write_all(&0i32.to_be_bytes())?; // size
+    /// An empty histogram writes 8 bytes (`maxBinSize=0, size=0`), matching
+    /// what Cassandra writes for SSTables with no tombstones.
+    fn write_tombstone_histogram(
+        &self,
+        buffer: &mut Vec<u8>,
+        histogram: &TombstoneHistogram,
+    ) -> Result<()> {
+        if histogram.is_empty() {
+            // Empty: maxBinSize=0, size=0 — no entry pairs follow
+            buffer.write_all(&0i32.to_be_bytes())?; // maxBinSize
+            buffer.write_all(&0i32.to_be_bytes())?; // size
+        } else {
+            // Non-empty: maxBinSize=100 (the capacity constant), then the bins
+            buffer.write_all(&TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE.to_be_bytes())?; // maxBinSize
+            buffer.write_all(&histogram.size().to_be_bytes())?; // size
+            for (point, value) in histogram.entries() {
+                buffer.write_all(&point.to_be_bytes())?; // f64 BE point
+                buffer.write_all(&value.to_be_bytes())?; // i64 BE value
+            }
+        }
         Ok(())
     }
 
@@ -1439,5 +1574,246 @@ mod tests {
             header_str.contains("UUIDType"),
             "CompositeType should contain UUIDType for uuid PK"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // TombstoneHistogram unit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_tombstone_histogram_empty() {
+        let h = TombstoneHistogram::new();
+        assert!(h.is_empty());
+        assert_eq!(h.size(), 0);
+    }
+
+    #[test]
+    fn test_tombstone_histogram_single_entry() {
+        let mut h = TombstoneHistogram::new();
+        h.update(1_700_000_000);
+        assert!(!h.is_empty());
+        assert_eq!(h.size(), 1);
+        let entries: Vec<_> = h.entries().collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, 1_700_000_000.0f64);
+        assert_eq!(entries[0].1, 1);
+    }
+
+    #[test]
+    fn test_tombstone_histogram_multiple_entries() {
+        let mut h = TombstoneHistogram::new();
+        // Three distinct deletion times
+        h.update(1_000);
+        h.update(2_000);
+        h.update(1_000); // duplicate — should increment count
+        assert_eq!(h.size(), 2);
+        let entries: Vec<_> = h.entries().collect();
+        // Entries are sorted by point value ascending
+        assert_eq!(entries[0].0, 1_000.0f64);
+        assert_eq!(entries[0].1, 2); // count = 2
+        assert_eq!(entries[1].0, 2_000.0f64);
+        assert_eq!(entries[1].1, 1);
+    }
+
+    #[test]
+    fn test_tombstone_histogram_bin_merge_at_capacity() {
+        let mut h = TombstoneHistogram::new();
+        // Insert 101 distinct deletion times — should trigger a merge so bins <= 100
+        for i in 0..=100i32 {
+            h.update(1_700_000_000 + i);
+        }
+        assert!(
+            h.size() <= TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE,
+            "bins should not exceed MAX_BIN_SIZE after merge: got {}",
+            h.size()
+        );
+        assert!(!h.is_empty());
+    }
+
+    // -----------------------------------------------------------------------
+    // TombstoneHistogram serialisation tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_write_tombstone_histogram_empty() {
+        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+        let h = TombstoneHistogram::new();
+        let mut buf = Vec::new();
+        writer.write_tombstone_histogram(&mut buf, &h).unwrap();
+
+        // Empty: 4 bytes maxBinSize=0 + 4 bytes size=0 = 8 bytes total
+        assert_eq!(buf.len(), 8);
+        let max_bin_size = i32::from_be_bytes(buf[0..4].try_into().unwrap());
+        let size = i32::from_be_bytes(buf[4..8].try_into().unwrap());
+        assert_eq!(max_bin_size, 0, "empty histogram maxBinSize should be 0");
+        assert_eq!(size, 0, "empty histogram size should be 0");
+    }
+
+    #[test]
+    fn test_write_tombstone_histogram_nonempty() {
+        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+        let mut h = TombstoneHistogram::new();
+        h.update(1_700_000_000);
+        h.update(1_700_000_100);
+        let mut buf = Vec::new();
+        writer.write_tombstone_histogram(&mut buf, &h).unwrap();
+
+        // Non-empty with 2 bins:
+        //   4 bytes maxBinSize=100
+        //   4 bytes size=2
+        //   2 × (8 f64 + 8 i64) = 32 bytes
+        // Total = 40 bytes
+        assert_eq!(buf.len(), 40, "2-bin histogram should be 40 bytes");
+
+        let max_bin_size = i32::from_be_bytes(buf[0..4].try_into().unwrap());
+        let size = i32::from_be_bytes(buf[4..8].try_into().unwrap());
+        assert_eq!(
+            max_bin_size, 100,
+            "non-empty histogram maxBinSize should be 100"
+        );
+        assert_eq!(size, 2, "histogram size should be 2");
+
+        // Verify first bin point (should be 1_700_000_000.0)
+        let point0 = f64::from_be_bytes(buf[8..16].try_into().unwrap());
+        assert_eq!(point0, 1_700_000_000.0f64);
+        let value0 = i64::from_be_bytes(buf[16..24].try_into().unwrap());
+        assert_eq!(value0, 1);
+
+        // Verify second bin point (should be 1_700_000_100.0)
+        let point1 = f64::from_be_bytes(buf[24..32].try_into().unwrap());
+        assert_eq!(point1, 1_700_000_100.0f64);
+        let value1 = i64::from_be_bytes(buf[32..40].try_into().unwrap());
+        assert_eq!(value1, 1);
+    }
+
+    /// Verify that Statistics.db written for a table WITH tombstones produces a
+    /// non-empty `estimatedTombstoneDropTime` histogram in the STATS component.
+    ///
+    /// This is the primary acceptance-criterion test for issue #730.
+    #[test]
+    fn test_statistics_db_tombstone_histogram_nonempty() {
+        let temp_dir = TempDir::new().unwrap();
+        let stats_path = temp_dir.path().join("tombstone-Statistics.db");
+        let writer = StatisticsWriter::new(stats_path.clone());
+
+        // Simulate two tombstone local-deletion-times
+        let ldt1 = 1_700_000_000i32;
+        let ldt2 = 1_700_100_000i32;
+
+        let mut meta = StatisticsMetadata::new();
+        meta.update_timestamp(1_600_000_000_000_000); // some live write
+        meta.update_local_deletion_time(ldt1);
+        meta.update_local_deletion_time(ldt2);
+        meta.partition_count = 1;
+        meta.row_count = 2;
+        meta.column_count = 4;
+
+        writer.write(&meta, None).expect("write should succeed");
+
+        // ---- Parse the resulting Statistics.db and find the histogram ----
+        let file_data = std::fs::read(&stats_path).expect("file should exist");
+
+        // The STATS component offset is stored in the TOC at bytes 28–31
+        // (3rd entry, 4-byte type + 4-byte offset = 8 bytes each, starting at byte 8;
+        //  entries: [8..16] VALIDATION, [16..24] COMPACTION, [24..32] STATS, [32..40] HEADER)
+        let stats_offset =
+            u32::from_be_bytes([file_data[28], file_data[29], file_data[30], file_data[31]])
+                as usize;
+
+        // Within the STATS component, the histogram field starts after:
+        //   2 × EstimatedHistogram  = 2 × 36 = 72 bytes
+        //   CommitLogPosition upper = 12 bytes
+        //   minTimestamp (i64)      =  8 bytes
+        //   maxTimestamp (i64)      =  8 bytes
+        //   minLocalDeletionTime    =  4 bytes
+        //   maxLocalDeletionTime    =  4 bytes
+        //   minTTL                  =  4 bytes
+        //   maxTTL                  =  4 bytes
+        //   compressionRatio (f64)  =  8 bytes
+        // = 72 + 12 + 8 + 8 + 4 + 4 + 4 + 4 + 8 = 124 bytes
+        let histogram_offset = stats_offset + 124;
+
+        // Read maxBinSize and size
+        let max_bin_size = i32::from_be_bytes(
+            file_data[histogram_offset..histogram_offset + 4]
+                .try_into()
+                .expect("histogram maxBinSize bytes"),
+        );
+        let histo_size = i32::from_be_bytes(
+            file_data[histogram_offset + 4..histogram_offset + 8]
+                .try_into()
+                .expect("histogram size bytes"),
+        );
+
+        assert_eq!(
+            max_bin_size,
+            TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE,
+            "estimatedTombstoneDropTime maxBinSize should be {} for a non-empty histogram (issue #730)",
+            TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE
+        );
+        assert_eq!(
+            histo_size, 2,
+            "estimatedTombstoneDropTime should have 2 bins for 2 distinct deletion times (issue #730)"
+        );
+
+        // Verify the first bin's point matches ldt1
+        let point0 = f64::from_be_bytes(
+            file_data[histogram_offset + 8..histogram_offset + 16]
+                .try_into()
+                .expect("bin0 point bytes"),
+        );
+        assert_eq!(
+            point0, ldt1 as f64,
+            "first histogram bin point should match ldt1"
+        );
+
+        // Verify the second bin's point matches ldt2
+        let point1 = f64::from_be_bytes(
+            file_data[histogram_offset + 24..histogram_offset + 32]
+                .try_into()
+                .expect("bin1 point bytes"),
+        );
+        assert_eq!(
+            point1, ldt2 as f64,
+            "second histogram bin point should match ldt2"
+        );
+
+        // Verify both bins have count = 1
+        let value0 = i64::from_be_bytes(
+            file_data[histogram_offset + 16..histogram_offset + 24]
+                .try_into()
+                .expect("bin0 value bytes"),
+        );
+        let value1 = i64::from_be_bytes(
+            file_data[histogram_offset + 32..histogram_offset + 40]
+                .try_into()
+                .expect("bin1 value bytes"),
+        );
+        assert_eq!(value0, 1, "first bin count should be 1");
+        assert_eq!(value1, 1, "second bin count should be 1");
+    }
+
+    /// Verify that `StatisticsMetadata::update_local_deletion_time` feeds the histogram.
+    #[test]
+    fn test_metadata_update_local_deletion_time_populates_histogram() {
+        let mut meta = StatisticsMetadata::new();
+        assert!(meta.tombstone_histogram.is_empty());
+
+        meta.update_local_deletion_time(1_700_000_000);
+        meta.update_local_deletion_time(1_700_100_000);
+        meta.update_local_deletion_time(1_700_000_000); // duplicate
+
+        assert!(!meta.tombstone_histogram.is_empty());
+        assert_eq!(
+            meta.tombstone_histogram.size(),
+            2,
+            "two distinct ldts → 2 bins"
+        );
+
+        // The bin for 1_700_000_000 should have count 2
+        let entries: Vec<_> = meta.tombstone_histogram.entries().collect();
+        let (pt0, v0) = entries[0];
+        assert_eq!(pt0, 1_700_000_000.0f64);
+        assert_eq!(v0, 2);
     }
 }
