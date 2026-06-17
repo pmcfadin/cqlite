@@ -50,10 +50,8 @@ SCHEMAS="$ROOT/schemas"
 COMPOSE_FILE="$ROOT/docker/docker-compose-cassandra5.yml"
 CONTAINER_NAME="cqlite-cassandra-5-0"
 SERVICE_NAME="cassandra-5-0"
-
-# shellcheck source=test-data/scripts/container_env.sh
-. "$SCRIPTS/container_env.sh"
-export COMPOSE_FILE
+# Path to the single shared production verifier (used by verify_table AND --self-test).
+E2E_VERIFY="$SCRIPTS/e2e_verify.py"
 
 # ----- CLI arg parsing ---------------------------------------------------
 KEEP_RUNNING=0
@@ -85,378 +83,250 @@ fail()   { printf '[e2e-readback][ERROR] %s\n' "$*" >&2; exit 1; }
 phase()  { printf '\n[e2e-readback] === %s ===\n' "$*" >&2; }
 
 # ----- Self-test mode (negative / no-Cassandra-required) -----------------
-# Proves that a spec entry where the expected value appears in a *different*
-# column causes verify_row_json (the Python verifier) to fail.
+# Exercises the PRODUCTION verifier (e2e_verify.py) with canned cqlsh-JSON
+# fixtures — both positive (correct spec → PASS) and negative (wrong value
+# or absent-directive violation → FAIL).  No container runtime required.
 run_self_test() {
-  phase "Self-test: negative verification check"
+  phase "Self-test: production verifier exercised with canned fixtures"
 
-  # Build a fake cqlsh JSON response where 'age' holds 30 and 'name' holds "Alice".
-  # Then craft a spec that claims name column should equal 30 — which is the age
-  # value accidentally leaked into the wrong column spec.
+  [[ -f "$E2E_VERIFY" ]] || { warn "Production verifier not found: $E2E_VERIFY"; exit 1; }
+
+  # Helper: write a spec string to a temp file and return its path.
+  local _spec_tmp
+  _spec_tmp="$(mktemp /tmp/e2e-selftest-spec.XXXXXX)"
+  # Register cleanup of temp file on exit from this function.
+  # shellcheck disable=SC2064
+  trap "rm -f '$_spec_tmp'" RETURN
+
+  # -----------------------------------------------------------------------
+  # Case 1: wrong-column spec must FAIL
+  #   Row: id="11111111-…", name="Alice", age=30
+  #   Spec claims name=30  (age value leaked into wrong column) → FAIL
+  # -----------------------------------------------------------------------
   local fake_row_json
-  fake_row_json='[{"id": "11111111-1111-1111-1111-111111111111", "name": "Alice", "age": 30, "active": true}]'
+  fake_row_json='{ "id": "11111111-1111-1111-1111-111111111111", "name": "Alice", "age": 30, "active": true }'
 
-  # Spec where we intentionally lie: claim column 'name' should equal 30 (which
-  # is actually in 'age').  This MUST fail with a non-zero exit code.
-  local bad_spec
-  bad_spec="row_count=1
-row.id=11111111-1111-1111-1111-111111111111
-col[11111111-1111-1111-1111-111111111111].name=30"
+  printf '%s\n' \
+    "row_count=1" \
+    "row.id=11111111-1111-1111-1111-111111111111" \
+    "col[11111111-1111-1111-1111-111111111111].name=30" \
+    > "$_spec_tmp"
 
-  log "Running verifier with wrong-column spec (expect FAIL)"
+  log "Case 1: wrong-column spec (expect FAIL from production verifier)"
   local rc=0
-  python3 - "$fake_row_json" "$bad_spec" <<'PY' || rc=$?
-import sys, json
-
-row_json_str = sys.argv[1]
-spec_str     = sys.argv[2]
-
-def normalize(v):
-    """Normalize a value for comparison: sort sets, recurse into dicts/lists."""
-    if isinstance(v, list):
-        # Cassandra sets come back as ordered lists from SELECT JSON; normalize
-        # by sorting elements (using their string representation for stability).
-        return sorted([normalize(i) for i in v], key=lambda x: str(x))
-    if isinstance(v, dict):
-        return {k: normalize(vv) for k, vv in sorted(v.items())}
-    return v
-
-rows = json.loads(row_json_str)
-row_by_pk = {}
-for row in rows:
-    for col, val in row.items():
-        pass  # just parse
-# index rows by every possible pk column value
-row_by_pk = {}
-for row in rows:
-    for col_name, col_val in row.items():
-        key = str(col_val)
-        row_by_pk[key] = row
-
-failures = []
-for line in spec_str.splitlines():
-    line = line.strip()
-    if not line or line.startswith('#') or line.startswith('row_count=') or line.startswith('row.'):
-        continue
-    # col[<pk>].<col>=<json-value>
-    if line.startswith('col['):
-        bracket = line.index(']')
-        pk_val  = line[4:bracket]
-        rest    = line[bracket+2:]  # skip '].'
-        eq      = rest.index('=')
-        col_name = rest[:eq]
-        expected_json = rest[eq+1:]
-        expected = json.loads(expected_json)
-
-        # Find the row matching this pk
-        matched_row = None
-        for row in rows:
-            for _col, _val in row.items():
-                if str(_val) == pk_val or _val == pk_val:
-                    matched_row = row
-                    break
-            if matched_row:
-                break
-
-        if matched_row is None:
-            failures.append(f"No row found for pk={pk_val!r}")
-            continue
-
-        if col_name not in matched_row:
-            failures.append(f"Column {col_name!r} missing from row pk={pk_val!r}")
-            continue
-
-        actual = normalize(matched_row[col_name])
-        exp_n  = normalize(expected)
-        if actual != exp_n:
-            failures.append(
-                f"Column {col_name!r} pk={pk_val!r}: expected {exp_n!r}, got {actual!r}"
-            )
-
-if failures:
-    for f in failures:
-        print(f"  FAIL: {f}", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-PY
-
+  printf '%s\n' "$fake_row_json" \
+    | python3 "$E2E_VERIFY" "11111111-1111-1111-1111-111111111111" "$_spec_tmp" \
+    || rc=$?
   if [[ "$rc" -eq 0 ]]; then
-    warn "Self-test FAILED: wrong-column spec did NOT produce a verification failure (it should have)"
+    warn "Self-test FAILED: wrong-column spec did NOT produce a verification failure"
     exit 1
   fi
+  log "Case 1 PASSED: wrong-column spec correctly caused verification failure (exit $rc)"
 
-  log "Self-test PASSED: wrong-column spec correctly caused verification failure (exit $rc)"
+  # -----------------------------------------------------------------------
+  # Case 2: correct spec must PASS
+  # -----------------------------------------------------------------------
+  printf '%s\n' \
+    "row_count=1" \
+    "row.id=11111111-1111-1111-1111-111111111111" \
+    'col[11111111-1111-1111-1111-111111111111].name="Alice"' \
+    "col[11111111-1111-1111-1111-111111111111].age=30" \
+    > "$_spec_tmp"
 
-  # Also verify that a correct spec passes
-  local good_spec
-  good_spec='row_count=1
-row.id=11111111-1111-1111-1111-111111111111
-col[11111111-1111-1111-1111-111111111111].name="Alice"
-col[11111111-1111-1111-1111-111111111111].age=30'
-
+  log "Case 2: correct spec (expect PASS from production verifier)"
   rc=0
-  python3 - "$fake_row_json" "$good_spec" <<'PY' || rc=$?
-import sys, json
-
-row_json_str = sys.argv[1]
-spec_str     = sys.argv[2]
-
-def normalize(v):
-    if isinstance(v, list):
-        return sorted([normalize(i) for i in v], key=lambda x: str(x))
-    if isinstance(v, dict):
-        return {k: normalize(vv) for k, vv in sorted(v.items())}
-    return v
-
-rows = json.loads(row_json_str)
-failures = []
-for line in spec_str.splitlines():
-    line = line.strip()
-    if not line or line.startswith('#') or line.startswith('row_count=') or line.startswith('row.'):
-        continue
-    if line.startswith('col['):
-        bracket = line.index(']')
-        pk_val  = line[4:bracket]
-        rest    = line[bracket+2:]
-        eq      = rest.index('=')
-        col_name = rest[:eq]
-        expected_json = rest[eq+1:]
-        expected = json.loads(expected_json)
-
-        matched_row = None
-        for row in rows:
-            for _col, _val in row.items():
-                if str(_val) == pk_val or _val == pk_val:
-                    matched_row = row
-                    break
-            if matched_row:
-                break
-
-        if matched_row is None:
-            failures.append(f"No row found for pk={pk_val!r}")
-            continue
-        if col_name not in matched_row:
-            failures.append(f"Column {col_name!r} missing from row pk={pk_val!r}")
-            continue
-        actual = normalize(matched_row[col_name])
-        exp_n  = normalize(expected)
-        if actual != exp_n:
-            failures.append(f"Column {col_name!r} pk={pk_val!r}: expected {exp_n!r}, got {actual!r}")
-
-if failures:
-    for f in failures:
-        print(f"  FAIL: {f}", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-PY
-
+  printf '%s\n' "$fake_row_json" \
+    | python3 "$E2E_VERIFY" "11111111-1111-1111-1111-111111111111" "$_spec_tmp" \
+    || rc=$?
   if [[ "$rc" -ne 0 ]]; then
     warn "Self-test FAILED: correct spec unexpectedly produced a verification failure"
     exit 1
   fi
-  log "Self-test PASSED: correct spec correctly passed verification"
+  log "Case 2 PASSED: correct spec correctly passed verification"
 
-  # --- Test absent_col: column that IS null must pass ---
+  # -----------------------------------------------------------------------
+  # Case 3: absent_col — column IS null → must PASS
+  # -----------------------------------------------------------------------
   local null_row_json
-  null_row_json='[{"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "name": null, "age": 42}]'
+  null_row_json='{ "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "name": null, "age": 42 }'
 
-  local absent_col_spec
-  absent_col_spec='row_count=1
-row.id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa
-absent_col[aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa].name
-col[aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa].age=42'
+  printf '%s\n' \
+    "row_count=1" \
+    "row.id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" \
+    "absent_col[aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa].name" \
+    "col[aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa].age=42" \
+    > "$_spec_tmp"
 
+  log "Case 3: absent_col for null column (expect PASS)"
   rc=0
-  python3 - "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" "$null_row_json" "$absent_col_spec" <<'PY' || rc=$?
-import sys, json, re
-pk_val   = sys.argv[1]
-rows_raw = sys.argv[2]
-spec_str = sys.argv[3]
-def normalize(v):
-    if isinstance(v, list):
-        return sorted([normalize(i) for i in v], key=lambda x: str(x))
-    if isinstance(v, dict):
-        return {k: normalize(vv) for k, vv in sorted(v.items())}
-    return v
-rows = json.loads(rows_raw)
-flat_row = rows[0] if len(rows) == 1 else None
-failures = []
-for line in spec_str.splitlines():
-    line = line.strip()
-    if not line or line.startswith('#') or line.startswith('row_count=') or line.startswith('row.'):
-        continue
-    m = re.match(r'^absent_col\[([^\]]+)\]\.(.+)$', line)
-    if m:
-        spec_pk, col_name = m.group(1), m.group(2)
-        if spec_pk != pk_val:
-            continue
-        if flat_row is None:
-            failures.append(f"absent_col: expected single row for pk={pk_val!r}")
-            continue
-        actual = flat_row.get(col_name, '__MISSING__')
-        if actual is not None and actual != '__MISSING__':
-            failures.append(f"absent_col: column {col_name!r} pk={pk_val!r} expected null/absent, got {actual!r}")
-        continue
-    m = re.match(r'^col\[([^\]]+)\]\.([^=]+)=(.+)$', line)
-    if m:
-        spec_pk, col_name, expected_json = m.group(1), m.group(2), m.group(3)
-        if spec_pk != pk_val:
-            continue
-        expected = json.loads(expected_json)
-        if flat_row is None:
-            failures.append(f"col[]: expected single row for pk={pk_val!r}")
-            continue
-        actual = normalize(flat_row.get(col_name))
-        if actual != normalize(expected):
-            failures.append(f"col {col_name!r} pk={pk_val!r}: expected {expected!r}, got {actual!r}")
-        continue
-if failures:
-    for f in failures: print(f"  FAIL: {f}", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-PY
+  printf '%s\n' "$null_row_json" \
+    | python3 "$E2E_VERIFY" "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" "$_spec_tmp" \
+    || rc=$?
   if [[ "$rc" -ne 0 ]]; then
     warn "Self-test FAILED: absent_col check for null column failed unexpectedly"
     exit 1
   fi
-  log "Self-test PASSED: absent_col correctly passes for null column"
+  log "Case 3 PASSED: absent_col correctly passes for null column"
 
-  # --- Test absent_col: column that is NOT null must fail ---
+  # -----------------------------------------------------------------------
+  # Case 4: absent_col — column is NOT null → must FAIL
+  # -----------------------------------------------------------------------
   local non_null_row_json
-  non_null_row_json='[{"id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "name": "Alice", "age": 42}]'
+  non_null_row_json='{ "id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "name": "Alice", "age": 42 }'
 
+  # Spec says 'name' must be absent/null, but it's "Alice" → verifier must FAIL.
+  printf '%s\n' \
+    "row_count=1" \
+    "row.id=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" \
+    "absent_col[aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa].name" \
+    > "$_spec_tmp"
+
+  log "Case 4: absent_col for non-null column (expect FAIL)"
   rc=0
-  python3 - "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" "$non_null_row_json" <<'PY' || rc=$?
-import sys, json
-pk_val   = sys.argv[1]
-rows_raw = sys.argv[2]
-rows = json.loads(rows_raw)
-flat_row = rows[0]
-col_name = 'name'
-actual = flat_row.get(col_name, '__MISSING__')
-if actual is not None and actual != '__MISSING__':
-    print(f"  FAIL: absent_col: column {col_name!r} expected null/absent, got {actual!r}", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-PY
+  printf '%s\n' "$non_null_row_json" \
+    | python3 "$E2E_VERIFY" "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" "$_spec_tmp" \
+    || rc=$?
   if [[ "$rc" -eq 0 ]]; then
-    warn "Self-test FAILED: absent_col check for non-null column did NOT fail (it should have)"
+    warn "Self-test FAILED: absent_col check for non-null column did NOT fail"
     exit 1
   fi
-  log "Self-test PASSED: absent_col correctly fails for non-null column (exit $rc)"
+  log "Case 4 PASSED: absent_col correctly fails for non-null column (exit $rc)"
 
-  # --- Test absent_row_cluster: row that does NOT exist must pass ---
+  # -----------------------------------------------------------------------
+  # Case 5: absent_row_cluster — target CK not present → must PASS
+  # -----------------------------------------------------------------------
+  # Two clustering rows exist (ck=01.000Z and ck=03.000Z).
+  # Spec asserts ck=02.000Z is absent → should PASS.
   local multi_row_json
-  multi_row_json='[{"partition_key": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "clustering_key": "2024-01-01 00:00:01.000Z", "row_data": "alpha"}, {"partition_key": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "clustering_key": "2024-01-01 00:00:03.000Z", "row_data": "gamma"}]'
+  multi_row_json='
+{ "partition_key": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "clustering_key": "2024-01-01 00:00:01.000Z", "row_data": "alpha" }
+{ "partition_key": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "clustering_key": "2024-01-01 00:00:03.000Z", "row_data": "gamma" }'
 
-  local absent_row_spec
-  absent_row_spec='row_count=2
-row.partition_key=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb
-absent_row_cluster[bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb|2024-01-01 00:00:02.000Z]'
+  printf '%s\n' \
+    "row_count=2" \
+    "row.partition_key=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" \
+    "absent_row_cluster[bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb|2024-01-01 00:00:02.000Z]" \
+    > "$_spec_tmp"
 
+  log "Case 5: absent_row_cluster for missing CK (expect PASS)"
   rc=0
-  python3 - "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" "$multi_row_json" "$absent_row_spec" <<'PY' || rc=$?
-import sys, json, re
-pk_val   = sys.argv[1]
-rows_raw = sys.argv[2]
-spec_str = sys.argv[3]
-rows = json.loads(rows_raw)
-rows_by_ck = {str(r.get('clustering_key','')): r for r in rows}
-failures = []
-for line in spec_str.splitlines():
-    line = line.strip()
-    if not line or line.startswith('#') or line.startswith('row_count=') or line.startswith('row.'):
-        continue
-    m = re.match(r'^absent_row_cluster\[([^\|]+)\|([^\]]+)\]$', line)
-    if m:
-        spec_pk, spec_ck = m.group(1), m.group(2)
-        if spec_pk != pk_val:
-            continue
-        if spec_ck in rows_by_ck:
-            failures.append(f"absent_row_cluster: row pk={spec_pk!r} ck={spec_ck!r} was expected absent but exists")
-        continue
-if failures:
-    for f in failures: print(f"  FAIL: {f}", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-PY
+  printf '%s\n' "$multi_row_json" \
+    | python3 "$E2E_VERIFY" "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" "$_spec_tmp" \
+    || rc=$?
   if [[ "$rc" -ne 0 ]]; then
     warn "Self-test FAILED: absent_row_cluster for absent row failed unexpectedly"
     exit 1
   fi
-  log "Self-test PASSED: absent_row_cluster correctly passes for missing row"
+  log "Case 5 PASSED: absent_row_cluster correctly passes for missing CK"
 
-  # --- Test absent_row_cluster: row that DOES exist must fail ---
+  # -----------------------------------------------------------------------
+  # Case 6: absent_row_cluster — target CK IS present → must FAIL
+  # -----------------------------------------------------------------------
+  # Same two rows; spec asserts ck=01.000Z is absent — but it exists → FAIL.
+  printf '%s\n' \
+    "row_count=2" \
+    "row.partition_key=bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" \
+    "absent_row_cluster[bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb|2024-01-01 00:00:01.000Z]" \
+    > "$_spec_tmp"
+
+  log "Case 6: absent_row_cluster for existing CK (expect FAIL)"
   rc=0
-  python3 - "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" "$multi_row_json" <<'PY' || rc=$?
-import sys, json
-pk_val   = sys.argv[1]
-rows_raw = sys.argv[2]
-rows = json.loads(rows_raw)
-rows_by_ck = {str(r.get('clustering_key','')): r for r in rows}
-# Check for ck that DOES exist -> should fail
-spec_ck = "2024-01-01 00:00:01.000Z"
-if spec_ck in rows_by_ck:
-    print(f"  FAIL: absent_row_cluster: row ck={spec_ck!r} was expected absent but exists", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-PY
+  printf '%s\n' "$multi_row_json" \
+    | python3 "$E2E_VERIFY" "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb" "$_spec_tmp" \
+    || rc=$?
   if [[ "$rc" -eq 0 ]]; then
-    warn "Self-test FAILED: absent_row_cluster for existing row did NOT fail (it should have)"
+    warn "Self-test FAILED: absent_row_cluster for existing CK did NOT fail"
     exit 1
   fi
-  log "Self-test PASSED: absent_row_cluster correctly fails for existing row (exit $rc)"
+  log "Case 6 PASSED: absent_row_cluster correctly fails for existing CK (exit $rc)"
 
-  # --- Test absent_col: target row does NOT exist must fail ---
-  # An absent_col directive asserts a column was cell-deleted but the row
-  # still exists.  When the entire row is missing the verifier must FAIL
-  # loudly rather than silently passing (the old "partition gone" shortcut).
+  # -----------------------------------------------------------------------
+  # Case 7: absent_col when entire row is missing → must FAIL
+  #   absent_col is a cell-delete assertion; the row must still exist.
+  #   An empty result set must be reported as a clear failure.
+  # -----------------------------------------------------------------------
   local missing_row_json
-  missing_row_json='[]'   # empty result — no rows for this partition
+  missing_row_json=''   # empty stdin — no rows for this partition
 
+  printf '%s\n' \
+    "row_count=0" \
+    "row.id=cccccccc-cccc-cccc-cccc-cccccccccccc" \
+    "absent_col[cccccccc-cccc-cccc-cccc-cccccccccccc].name" \
+    > "$_spec_tmp"
+
+  log "Case 7: absent_col with entirely missing row (expect FAIL)"
   rc=0
-  python3 - "cccccccc-cccc-cccc-cccc-cccccccccccc" "$missing_row_json" <<'PY' || rc=$?
-import sys, json, re
-pk_val   = sys.argv[1]
-rows_raw = sys.argv[2]
-rows = json.loads(rows_raw)
-flat_row = rows[0] if len(rows) == 1 else None
-col_name = 'name'
-failures = []
-
-# Simulate the fixed absent_col handler from verify_table
-if not rows:
-    failures.append(
-        f"absent_col target row pk={pk_val!r} not found — "
-        f"row is missing entirely "
-        f"(use absent_row/row_count for row-level deletion)"
-    )
-else:
-    actual = flat_row.get(col_name, '__MISSING__') if flat_row else None
-    if actual is not None and actual != '__MISSING__':
-        failures.append(
-            f"absent_col: column {col_name!r} pk={pk_val!r} expected null/absent, got {actual!r}"
-        )
-
-if failures:
-    for f in failures:
-        print(f"  FAIL: {f}", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-PY
+  printf '%s' "$missing_row_json" \
+    | python3 "$E2E_VERIFY" "cccccccc-cccc-cccc-cccc-cccccccccccc" "$_spec_tmp" \
+    || rc=$?
   if [[ "$rc" -eq 0 ]]; then
-    warn "Self-test FAILED: absent_col against missing row did NOT fail (it should have)"
+    warn "Self-test FAILED: absent_col against missing row did NOT fail"
     exit 1
   fi
-  log "Self-test PASSED: absent_col correctly fails when target row is entirely missing (exit $rc)"
+  log "Case 7 PASSED: absent_col correctly fails when target row is entirely missing (exit $rc)"
 
-  log "Self-test: all checks passed"
+  # -----------------------------------------------------------------------
+  # Case 8: col_cluster — correct clustering-row value → must PASS
+  # -----------------------------------------------------------------------
+  local cluster_row_json
+  cluster_row_json='
+{ "partition_key": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", "clustering_key": "2024-01-01 00:00:01.000Z", "row_data": "alpha", "row_value": 11 }
+{ "partition_key": "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee", "clustering_key": "2024-01-01 00:00:02.000Z", "row_data": "beta",  "row_value": 22 }'
+
+  printf '%s\n' \
+    "row_count=2" \
+    "row.partition_key=eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" \
+    'col_cluster[eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee|2024-01-01 00:00:01.000Z].row_data="alpha"' \
+    'col_cluster[eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee|2024-01-01 00:00:01.000Z].row_value=11' \
+    'col_cluster[eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee|2024-01-01 00:00:02.000Z].row_data="beta"' \
+    'col_cluster[eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee|2024-01-01 00:00:02.000Z].row_value=22' \
+    > "$_spec_tmp"
+
+  log "Case 8: col_cluster correct values (expect PASS)"
+  rc=0
+  printf '%s\n' "$cluster_row_json" \
+    | python3 "$E2E_VERIFY" "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" "$_spec_tmp" \
+    || rc=$?
+  if [[ "$rc" -ne 0 ]]; then
+    warn "Self-test FAILED: col_cluster correct-value check failed unexpectedly"
+    exit 1
+  fi
+  log "Case 8 PASSED: col_cluster correctly passes for correct clustering-row values"
+
+  # -----------------------------------------------------------------------
+  # Case 9: col_cluster — wrong clustering-row value → must FAIL
+  # -----------------------------------------------------------------------
+  printf '%s\n' \
+    "row_count=2" \
+    "row.partition_key=eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" \
+    'col_cluster[eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee|2024-01-01 00:00:01.000Z].row_data="WRONG"' \
+    > "$_spec_tmp"
+
+  log "Case 9: col_cluster wrong value (expect FAIL)"
+  rc=0
+  printf '%s\n' "$cluster_row_json" \
+    | python3 "$E2E_VERIFY" "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee" "$_spec_tmp" \
+    || rc=$?
+  if [[ "$rc" -eq 0 ]]; then
+    warn "Self-test FAILED: col_cluster wrong-value check did NOT fail"
+    exit 1
+  fi
+  log "Case 9 PASSED: col_cluster correctly fails for wrong clustering-row value (exit $rc)"
+
+  log "Self-test: all 9 cases passed using production verifier ($E2E_VERIFY)"
   exit 0
 }
 
 if [[ "$SELF_TEST" -eq 1 ]]; then
   run_self_test
 fi
+
+# Source container_env ONLY on the real (Docker/podman) run path, after the
+# --self-test early exit above.  This ensures --self-test works on machines
+# that have no container runtime installed.
+# shellcheck source=test-data/scripts/container_env.sh
+. "$SCRIPTS/container_env.sh"
+export COMPOSE_FILE
 
 # ----- Working directory + cleanup ---------------------------------------
 # Pin under /tmp so `docker cp` works on macOS (Docker Desktop's default file
@@ -1317,221 +1187,12 @@ verify_table() {
       warn "[$label] No rows returned for $pk_col=$pk"; return 1
     fi
 
-    # Delegate all column checks to Python for structured comparison.
+    # Delegate all column checks to the shared production verifier.
+    # cqlsh SELECT JSON output is passed on stdin; pk and spec file as args.
     local verify_rc=0
-    python3 - "$pk" "$rows_json" "$spec" <<'PY' || verify_rc=$?
-import sys, json, re
-
-pk_val   = sys.argv[1]
-rows_raw = sys.argv[2]
-spec_path = sys.argv[3]
-
-def normalize(v):
-    """Normalize a value for comparison.
-
-    Sets come back from Cassandra's SELECT JSON as ordered JSON arrays.
-    We sort both the expected and actual side so set order does not matter.
-    Lists preserve insertion order.  Dicts (maps, UDTs) are compared with
-    key sorting for stability.
-    """
-    if isinstance(v, list):
-        # Normalize each element, then sort for set-like comparisons.
-        # For lists that must preserve order (scores, addresses), the caller
-        # writes the expected value in insertion order; we sort both sides
-        # only for 'tags' (a set type).  Since we cannot know the type here,
-        # we always sort — which is correct for sets and also correct for lists
-        # whose elements are all distinct (which is true for our test data).
-        return sorted([normalize(i) for i in v], key=lambda x: str(x))
-    if isinstance(v, dict):
-        return {k: normalize(vv) for k, vv in sorted(v.items())}
-    return v
-
-# Parse the cqlsh output.  SELECT JSON returns rows as quoted JSON strings
-# inside the tabular display; we extract the JSON objects from the lines
-# that start with a leading space followed by '{'.
-def parse_cqlsh_json_rows(raw):
-    rows = []
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if stripped.startswith('{') and stripped.endswith('}'):
-            try:
-                rows.append(json.loads(stripped))
-            except json.JSONDecodeError:
-                pass
-    return rows
-
-rows = parse_cqlsh_json_rows(rows_raw)
-
-# Build lookup structures.
-# For simple (non-clustering) tables: one row per pk.
-# For clustering tables: multiple rows per pk; indexed by clustering_key value.
-rows_by_ck = {}   # {str(ck_value): row_dict}
-for row in rows:
-    # Try clustering_key column (static-columns table uses 'clustering_key').
-    ck = row.get('clustering_key')
-    if ck is not None:
-        rows_by_ck[str(ck)] = row
-# Also keep a flat row for non-clustering tables.
-flat_row = rows[0] if len(rows) == 1 else None
-
-with open(spec_path) as fh:
-    spec_lines = fh.readlines()
-
-failures = []
-
-# Determine whether this partition is expected to have rows at all.
-# For absent_row_cluster checks on clustering tables with all rows deleted,
-# rows may legitimately be empty. For col[] / col_cluster[] checks we still
-# require rows to exist. Parse spec intent first.
-has_col_checks = any(
-    re.match(r'^col(?:_cluster)?\[', l.strip())
-    for l in spec_lines
-)
-
-if not rows and has_col_checks:
-    print(f"  FAIL: No JSON rows parsed from cqlsh output for pk={pk_val!r}", file=sys.stderr)
-    print(f"  RAW: {rows_raw[:500]}", file=sys.stderr)
-    sys.exit(1)
-
-for line in spec_lines:
-    line = line.strip()
-    if not line or line.startswith('#') or line.startswith('row_count=') or line.startswith('row.'):
-        continue
-
-    # absent_col[<pk>].<col>  — column must be null or absent in the row
-    m = re.match(r'^absent_col\[([^\]]+)\]\.(.+)$', line)
-    if m:
-        spec_pk, col_name = m.group(1), m.group(2)
-        if spec_pk != pk_val:
-            continue
-        if not rows:
-            # absent_col asserts a *column* was deleted; the row itself must
-            # still exist.  If no rows were returned the partition is entirely
-            # missing, which is a different condition (use absent_row/row_count
-            # for row-level deletion).  Report a clear failure so this is not
-            # silently masked.
-            failures.append(
-                f"absent_col target row pk={pk_val!r} not found — "
-                f"row is missing entirely "
-                f"(use absent_row/row_count for row-level deletion)"
-            )
-            continue
-        if flat_row is None:
-            failures.append(
-                f"absent_col[]: expected single row for pk={pk_val!r} "
-                f"but got {len(rows)} clustering rows"
-            )
-            continue
-        # Column must be absent from the JSON or explicitly null
-        actual = flat_row.get(col_name, '__MISSING__')
-        if actual is not None and actual != '__MISSING__':
-            failures.append(
-                f"absent_col: column {col_name!r} pk={pk_val!r} "
-                f"expected null/absent, got {actual!r}"
-            )
-        continue
-
-    # absent_row_cluster[<pk>|<ck>]  — clustering row must not exist
-    m = re.match(r'^absent_row_cluster\[([^\|]+)\|([^\]]+)\]$', line)
-    if m:
-        spec_pk, spec_ck = m.group(1), m.group(2)
-        if spec_pk != pk_val:
-            continue
-        # Check direct match and also string-coerced match
-        found = spec_ck in rows_by_ck
-        if not found:
-            for candidate in rows:
-                ck_val = candidate.get('clustering_key', '')
-                if str(ck_val) == spec_ck:
-                    found = True
-                    break
-        if found:
-            failures.append(
-                f"absent_row_cluster: clustering row pk={spec_pk!r} ck={spec_ck!r} "
-                f"was expected absent (tombstoned) but was returned by Cassandra"
-            )
-        continue
-
-    # col[<pk>].<col>=<json-value>
-    m = re.match(r'^col\[([^\]]+)\]\.([^=]+)=(.+)$', line)
-    if m:
-        spec_pk, col_name, expected_json = m.group(1), m.group(2), m.group(3)
-        if spec_pk != pk_val:
-            continue
-        try:
-            expected = json.loads(expected_json)
-        except json.JSONDecodeError as e:
-            failures.append(f"Spec JSON parse error on line {line!r}: {e}")
-            continue
-
-        if flat_row is None:
-            failures.append(
-                f"col[]: expected single row for pk={pk_val!r} "
-                f"but got {len(rows)} clustering rows"
-            )
-            continue
-        if col_name not in flat_row:
-            failures.append(f"Column {col_name!r} missing in row for pk={pk_val!r}")
-            continue
-        actual = normalize(flat_row[col_name])
-        exp_n  = normalize(expected)
-        if actual != exp_n:
-            failures.append(
-                f"Column {col_name!r} pk={pk_val!r}: "
-                f"expected {exp_n!r}, got {actual!r}"
-            )
-        continue
-
-    # col_cluster[<pk>|<ck>].<col>=<json-value>
-    m = re.match(r'^col_cluster\[([^\|]+)\|([^\]]+)\]\.([^=]+)=(.+)$', line)
-    if m:
-        spec_pk, spec_ck, col_name, expected_json = (
-            m.group(1), m.group(2), m.group(3), m.group(4)
-        )
-        if spec_pk != pk_val:
-            continue
-        try:
-            expected = json.loads(expected_json)
-        except json.JSONDecodeError as e:
-            failures.append(f"Spec JSON parse error on line {line!r}: {e}")
-            continue
-
-        row = rows_by_ck.get(spec_ck)
-        if row is None:
-            # Cassandra may render clustering_key timestamps as ISO strings; try
-            # matching by any row that has a clustering_key whose str matches.
-            for candidate in rows:
-                ck_val = candidate.get('clustering_key', '')
-                if str(ck_val) == spec_ck:
-                    row = candidate
-                    break
-        if row is None:
-            failures.append(
-                f"No clustering row found for pk={spec_pk!r} ck={spec_ck!r}; "
-                f"available cks: {list(rows_by_ck.keys())}"
-            )
-            continue
-        if col_name not in row:
-            failures.append(
-                f"Column {col_name!r} missing in clustering row "
-                f"pk={spec_pk!r} ck={spec_ck!r}"
-            )
-            continue
-        actual = normalize(row[col_name])
-        exp_n  = normalize(expected)
-        if actual != exp_n:
-            failures.append(
-                f"Column {col_name!r} pk={spec_pk!r} ck={spec_ck!r}: "
-                f"expected {exp_n!r}, got {actual!r}"
-            )
-        continue
-
-if failures:
-    for msg in failures:
-        print(f"  FAIL: {msg}", file=sys.stderr)
-    sys.exit(1)
-sys.exit(0)
-PY
+    printf '%s\n' "$rows_json" \
+      | python3 "$E2E_VERIFY" "$pk" "$spec" \
+      || verify_rc=$?
 
     if [[ "$verify_rc" -ne 0 ]]; then
       warn "[$label] Verification failed for pk=$pk"
