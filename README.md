@@ -40,7 +40,7 @@ CQLite aims to become the standard tool for Cassandra SSTable manipulation outsi
 
 ## Project Leadership
 
-CQLite is designed by **Patrick McFadin**, Apache Cassandra PMC member with 13 years of Cassandra experience. The project embodies Apache Cassandra community values and will be donated to the Apache Cassandra project upon maturity.
+CQLite is designed by **Patrick McFadin**, Apache Cassandra PMC member with over a decade of Cassandra experience. The project embodies Apache Cassandra community values and will be donated to the Apache Cassandra project upon maturity.
 
 ## Install
 
