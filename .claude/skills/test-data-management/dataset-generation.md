@@ -147,13 +147,6 @@ bash test-data/scripts/fetch-datasets.sh
 
 See `.github/workflows/` for the full CI configuration.
 
-## Known limitations
-
-`regenerate-datasets.sh` **skips tables with UDT columns** (e.g.
-`collections_with_udts` in `test_collections`) because the inline Python
-inserter cannot construct UDT values; smoke tests on a freshly regenerated
-corpus will show those tables as missing.
-
 ## Adding new schema types
 
 1. Create `test-data/schemas/my-schema.cql`

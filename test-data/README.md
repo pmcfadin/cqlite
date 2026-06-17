@@ -162,25 +162,6 @@ CI fetches binary SSTables from the `datasets-v3` GitHub Release asset:
 
 See `.github/workflows/` for the full CI configuration.
 
-## Known limitations
-
-### Tables skipped during regeneration
-
-`regenerate-datasets.sh` skips tables that contain **User-Defined Type (UDT)
-columns** because the inline Python inserter cannot yet construct UDT values via
-the Cassandra driver. The main affected table is `collections_with_udts` in the
-`test_collections` keyspace.
-
-As a result, a freshly regenerated corpus will be **missing JSONL golden files
-for UDT-heavy tables**, and `smoke-test-all-tables.sh` will report those tables
-as absent. The datasets-v3 goldens committed to git were produced with a manual
-cqlsh workflow that does include UDT data; regeneration alone does not reproduce
-them.
-
-If you need UDT table coverage, either run the manual compose-stack workflow
-(`start-clean.sh` + `export.sh`) or populate UDT tables manually via `cqlsh`
-before the export step.
-
 ## Troubleshooting
 
 **Port 9042 already in use:**

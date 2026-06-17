@@ -212,8 +212,48 @@ try:
                 return any(has_udt_type(a) for a in inner_args) if inner_args else False
         return True  # Unrecognized type = UDT
 
-    def sample_val(ctype):
-        """Generate a value for any CQL type, including nested collections."""
+    def get_udt_fields(keyspace_name, type_name):
+        """Return a dict of {field_name: field_type} for a UDT in the given keyspace."""
+        rs = session.execute(
+            "SELECT field_names, field_types FROM system_schema.types "
+            "WHERE keyspace_name=%s AND type_name=%s;",
+            (keyspace_name, type_name)
+        )
+        row = rs.one()
+        if row is None:
+            return {}
+        return dict(zip(row.field_names, row.field_types))
+
+    # Discover and register all UDTs in this keyspace so the driver can
+    # serialize UDT values as dicts (the same approach used for test_oa.udt_table).
+    udt_fields_cache = {}
+    try:
+        udts_rs = session.execute(
+            "SELECT type_name, field_names, field_types FROM system_schema.types "
+            "WHERE keyspace_name=%s;",
+            ('$keyspace',)
+        )
+        for udt_row in udts_rs:
+            udt_fields_cache[udt_row.type_name] = dict(
+                zip(udt_row.field_names, udt_row.field_types)
+            )
+            cluster.register_user_type('$keyspace', udt_row.type_name, dict)
+            print(f"  [udt] Registered UDT: $keyspace.{udt_row.type_name}", flush=True)
+    except Exception as udt_exc:
+        print(f"  [udt] Could not discover/register UDTs: {udt_exc}", flush=True)
+
+    def build_udt_value(type_name, depth=0):
+        """Construct a plain dict for a UDT, recursing for nested UDTs."""
+        if depth > 5:
+            return {}
+        fields = udt_fields_cache.get(type_name.lower(), {})
+        result = {}
+        for fname, ftype in fields.items():
+            result[fname] = sample_val(ftype, depth=depth + 1)
+        return result
+
+    def sample_val(ctype, depth=0):
+        """Generate a value for any CQL type, including nested collections and UDTs."""
         ct = ctype.strip().lower()
         # Strip frozen<> wrapper — value generation is the same for frozen and non-frozen
         bare = ct[7:-1].strip() if ct.startswith('frozen<') else ct
@@ -221,26 +261,27 @@ try:
         if bare.startswith('list<'):
             args = parse_type_args(bare)
             elem_type = args[0] if args else 'text'
-            return [sample_val(elem_type) for _ in range(3)]
+            return [sample_val(elem_type, depth=depth) for _ in range(3)]
         if bare.startswith('set<'):
             args = parse_type_args(bare)
             elem_type = args[0] if args else 'text'
-            elems = [sample_val(elem_type) for _ in range(3)]
+            elems = [sample_val(elem_type, depth=depth) for _ in range(3)]
+            # UDT dicts are not hashable; fall back to a list when set() fails
             try:
                 return set(elems)
             except TypeError:
-                return set(str(e) for e in elems)
+                return elems  # driver accepts a list for SET<FROZEN<udt>>
         if bare.startswith('map<'):
             args = parse_type_args(bare)
             k_type = args[0] if len(args) > 0 else 'text'
             v_type = args[1] if len(args) > 1 else 'text'
             result = {}
             for i in range(3):
-                k = sample_val(k_type)
+                k = sample_val(k_type, depth=depth)
                 try:
-                    result[k] = sample_val(v_type)
+                    result[k] = sample_val(v_type, depth=depth)
                 except TypeError:
-                    result[f"k{i}"] = sample_val(v_type)
+                    result[f"k{i}"] = sample_val(v_type, depth=depth)
             return result
         # Scalar primitives
         if bare == 'timeuuid':
@@ -272,6 +313,9 @@ try:
         if bare == 'duration':
             return Duration(months=random.randint(0, 12), days=random.randint(0, 30),
                             nanoseconds=random.randint(0, 10**9))
+        # UDT: if the bare type name is a known UDT in this keyspace, build a dict
+        if bare in udt_fields_cache:
+            return build_udt_value(bare, depth=depth)
         # text, varchar, ascii, and anything unrecognized
         return f"val_{random.randint(1,10000)}"
 
@@ -293,11 +337,12 @@ try:
             print(f"  [skip] {tbl}: no partition key found", flush=True)
             continue
 
-        # Skip tables with UDT columns (require table-specific insertion code)
+        # Detect tables that have UDT columns; they are now handled by the
+        # generic path via build_udt_value() + registered dict UDTs above.
         all_types_list = [t for _, (_, t) in cols.items()]
-        if any(has_udt_type(t) for t in all_types_list):
-            print(f"  [skip] {tbl}: UDT columns require table-specific insertion code", flush=True)
-            continue
+        has_udt = any(has_udt_type(t) for t in all_types_list)
+        if has_udt:
+            print(f"  [udt-table] {tbl}: UDT columns detected — using registered dict path", flush=True)
 
         # Counter tables require UPDATE, not INSERT. Detect by checking if all
         # regular columns are of type 'counter'.
