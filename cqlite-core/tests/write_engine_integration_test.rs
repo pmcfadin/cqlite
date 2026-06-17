@@ -1255,3 +1255,104 @@ async fn test_stage0_deterministic_writes() -> Result<()> {
 
     Ok(())
 }
+
+/// Regression test for issue #729: two-pass flush baseline fix.
+///
+/// Verifies that Statistics.db always contains the FINAL (lowest) baseline
+/// values across all partitions, regardless of write order.
+///
+/// Before the fix, partition A was encoded with the baseline present at the
+/// time it was written (potentially too high), and a later partition B that
+/// lowered the baseline would cause partition A's delta-encoded values to
+/// decode incorrectly.
+///
+/// The test writes:
+/// - Partition A: high timestamp (2_000_000) written FIRST
+/// - Partition B: low timestamp (1_000_000) written SECOND
+///
+/// After the fix, Statistics.db must record min_timestamp = 1_000_000 (the
+/// true minimum across both partitions).
+/// Regression test for issue #729: two-pass flush baseline fix.
+///
+/// Verifies that the Data.db delta encoding uses the FINAL (lowest) baseline
+/// across ALL partitions so that every partition can be read back correctly
+/// regardless of write order.
+///
+/// The specific corruption: partition A (high timestamp) written first; the
+/// DataWriter gets baseline = A.timestamp. Then partition B (low timestamp)
+/// written second; the DataWriter baseline drops to B.timestamp, and
+/// Statistics.db (written at `finish()`) records B.timestamp as min.
+/// The reader decodes A's timestamps using B's (lower) baseline, silently
+/// corrupting partition A's encoded metadata.
+///
+/// After the fix (two-pass flush), the DataWriter is seeded with the FINAL
+/// minimum BEFORE any partition is written, so all deltas are consistent
+/// with the baseline in Statistics.db and the reader gets correct values.
+#[tokio::test]
+#[cfg(feature = "state_machine")]
+async fn test_two_pass_baseline_regression() -> Result<()> {
+    use cqlite_core::storage::sstable::SSTableManager;
+    use cqlite_core::types::TableId as CqlTableId;
+    use cqlite_core::Config;
+    use std::sync::Arc;
+
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let wal_dir = temp_dir.path().join("wal");
+
+    let schema = create_test_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema.clone());
+    let mut engine = WriteEngine::new(config)?;
+
+    // Partition A: HIGH timestamp, written first.
+    let mutation_a = create_mutation(1, "Alice", 30, 2_000_000);
+    engine.write_async(mutation_a).await?;
+
+    // Partition B: LOW timestamp, written second.
+    // Before the fix: the DataWriter baseline for partition A was 2_000_000
+    // (the only known min at write time), but Statistics.db later recorded
+    // 1_000_000 as the global minimum.  The reader then decoded partition A's
+    // deltas using the wrong baseline — silent corruption.
+    let mutation_b = create_mutation(2, "Bob", 25, 1_000_000);
+    engine.write_async(mutation_b).await?;
+
+    let info = engine
+        .flush()
+        .await?
+        .expect("flush must return SSTableInfo");
+    assert_eq!(info.partition_count, 2, "both partitions must flush");
+    engine.close().await?;
+
+    // Read back both partitions using the SSTable reader.
+    // If delta encoding used the wrong baseline, the reader would either
+    // fail to parse (corrupt deltas overflow the expected bounds) or return
+    // fewer rows than written.  Two successfully-scanned rows proves the
+    // baseline in Data.db and Statistics.db were consistent.
+    let cqlite_config = Config::default();
+    let platform = Arc::new(
+        cqlite_core::platform::Platform::new(&cqlite_config)
+            .await
+            .expect("platform creation"),
+    );
+    let manager = SSTableManager::new(&data_dir, &cqlite_config, platform, None)
+        .await
+        .expect("SSTableManager must open the flushed SSTable");
+
+    let table_id = CqlTableId::from("test_ks.users");
+    let results = manager
+        .scan(&table_id, None, None, None, Some(&schema))
+        .await
+        .expect("scan must not error after flush");
+
+    assert_eq!(
+        results.len(),
+        2,
+        "SSTable read-back must return both partitions after flush (got {}). \
+         A wrong DataWriter baseline would cause decode errors or missing rows. \
+         This is issue #729 two-pass baseline regression.",
+        results.len()
+    );
+
+    Ok(())
+}

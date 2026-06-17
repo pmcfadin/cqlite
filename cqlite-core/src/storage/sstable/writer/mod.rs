@@ -183,6 +183,14 @@ pub struct SSTableWriter {
     summary_sample_counter: usize,
     /// Sampling interval for Summary.db (default: 128)
     summary_sample_interval: usize,
+    /// Whether encoding baselines have been pre-seeded via `pre_seed_encoding_baselines`.
+    ///
+    /// When `true`, `write_partition` skips the incremental `data_writer.update_stats()`
+    /// call so the pre-computed final baselines are not overwritten by an intermediate
+    /// (and potentially higher) baseline from an earlier partition.
+    ///
+    /// Issue #729: two-pass flush baseline fix.
+    baselines_locked: bool,
 }
 
 #[cfg(feature = "write-support")]
@@ -267,6 +275,7 @@ impl SSTableWriter {
             partition_count: 0,
             summary_sample_counter: 0,
             summary_sample_interval,
+            baselines_locked: false,
         })
     }
 
@@ -380,9 +389,15 @@ impl SSTableWriter {
                 .add_column_count(mutation.operations.len() as u64);
         }
 
-        // Update DataWriter's stats before writing
-        // This ensures delta encoding uses the correct baselines
-        self.data_writer.update_stats(self.stats.clone());
+        // Update DataWriter's stats before writing, unless baselines were
+        // pre-seeded for the whole SSTable (issue #729 two-pass flush).
+        // When baselines are locked, the DataWriter already holds the final
+        // minimum values computed over ALL partitions; overwriting them with
+        // the incrementally-growing stats of this partition would raise the
+        // baseline and corrupt delta encoding for earlier partitions.
+        if !self.baselines_locked {
+            self.data_writer.update_stats(self.stats.clone());
+        }
 
         // Extract partition tombstone and range tombstones from mutations.
         // The tombstone can arrive on ANY mutation of the partition (a DELETE
@@ -437,6 +452,101 @@ impl SSTableWriter {
         self.stats.increment_partition_count();
 
         Ok(())
+    }
+
+    /// Pre-seed the encoding baselines with pre-computed final values.
+    ///
+    /// Call this BEFORE any `write_partition` call with the minimum values
+    /// computed over ALL partitions that will be written. This ensures that
+    /// delta encoding in Data.db uses the same baselines that will be written
+    /// to Statistics.db, preventing silently corrupted values on read.
+    ///
+    /// Two-pass flush (issue #729): caller iterates all partitions once to
+    /// find final mins, then calls this, then iterates again calling
+    /// `write_partition`.
+    pub fn pre_seed_encoding_baselines(
+        &mut self,
+        min_timestamp: i64,
+        min_local_deletion_time: i32,
+        min_ttl: i32,
+    ) {
+        self.stats.min_timestamp = min_timestamp;
+        self.stats.min_local_deletion_time = min_local_deletion_time;
+        self.stats.min_ttl = min_ttl;
+        // Push final baselines to DataWriter immediately so the very first
+        // write_partition call uses them.
+        self.data_writer.update_stats(self.stats.clone());
+        // Lock baselines: write_partition will not call update_stats again.
+        self.baselines_locked = true;
+    }
+
+    /// Compute the encoding baseline stats (min values only) from a slice of mutations.
+    ///
+    /// Used for the pre-pass before `write_partition` is called (issue #729
+    /// two-pass flush).  Returns `(min_timestamp, min_local_deletion_time, min_ttl)`.
+    /// Sentinel value `i64::MAX` / `i32::MAX` is returned for each field when no
+    /// relevant data is found in the slice (caller should handle via `.min()`
+    /// accumulation and then pass the final result to `pre_seed_encoding_baselines`).
+    pub fn compute_mutations_baseline_stats(mutations_slice: &[Mutation]) -> (i64, i32, i32) {
+        let mut min_timestamp = i64::MAX;
+        let mut min_ldt = i32::MAX;
+        let mut min_ttl = i32::MAX;
+
+        for mutation in mutations_slice {
+            min_timestamp = min_timestamp.min(mutation.timestamp_micros);
+
+            for op in &mutation.operations {
+                match op {
+                    crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                        ttl_seconds,
+                        ..
+                    } => {
+                        let ttl = *ttl_seconds as i32;
+                        if ttl > 0 {
+                            min_ttl = min_ttl.min(ttl);
+                            let now_seconds = std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map(|d| d.as_secs() as i32)
+                                .unwrap_or(0);
+                            let ldt = now_seconds.saturating_add(ttl);
+                            min_ldt = min_ldt.min(ldt);
+                        }
+                    }
+                    crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
+                        let ldt = (mutation.timestamp_micros / 1_000_000) as i32;
+                        min_ldt = min_ldt.min(ldt);
+                    }
+                    _ => {}
+                }
+            }
+
+            // Partition-level TTL (top-level ttl_seconds on the Mutation)
+            if let Some(ttl) = mutation.ttl_seconds {
+                let ttl = ttl as i32;
+                if ttl > 0 {
+                    min_ttl = min_ttl.min(ttl);
+                    let now_seconds = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i32)
+                        .unwrap_or(0);
+                    let ldt = now_seconds.saturating_add(ttl);
+                    min_ldt = min_ldt.min(ldt);
+                }
+            }
+
+            if let Some(pt) = &mutation.partition_tombstone {
+                min_timestamp = min_timestamp.min(pt.deletion_time);
+                min_ldt = min_ldt.min(pt.local_deletion_time);
+            }
+
+            for rt in &mutation.range_tombstones {
+                min_timestamp = min_timestamp.min(rt.deletion_time);
+                min_ldt = min_ldt.min(rt.local_deletion_time);
+            }
+        }
+
+        (min_timestamp, min_ldt, min_ttl)
     }
 
     /// Finish writing all components and return SSTable information
