@@ -1258,42 +1258,37 @@ async fn test_stage0_deterministic_writes() -> Result<()> {
 
 /// Regression test for issue #729: two-pass flush baseline fix.
 ///
-/// Verifies that Statistics.db always contains the FINAL (lowest) baseline
-/// values across all partitions, regardless of write order.
+/// **What the bug was**: When the SSTableWriter encoded partition A first, it
+/// set its delta-encoding baseline to A's timestamp (e.g. 2_000_000).  Then
+/// partition B (lower timestamp, e.g. 1_000_000) was encoded; the baseline
+/// dropped to 1_000_000, which Statistics.db stored as `min_timestamp`.  The
+/// reader always applies `baseline_from_stats + delta`, so it reconstructed
+/// A's write-timestamp as `1_000_000 + 0 = 1_000_000` instead of
+/// `1_000_000 + 1_000_000 = 2_000_000`.
 ///
-/// Before the fix, partition A was encoded with the baseline present at the
-/// time it was written (potentially too high), and a later partition B that
-/// lowered the baseline would cause partition A's delta-encoded values to
-/// decode incorrectly.
+/// **Why the old test was wrong**: It only checked `results.len() == 2`.  Row
+/// count is unaffected by the baseline shift; the corruption is purely in the
+/// reconstructed write-timestamp.
 ///
-/// The test writes:
-/// - Partition A: high timestamp (2_000_000) written FIRST
-/// - Partition B: low timestamp (1_000_000) written SECOND
+/// **What this test checks**: After flush, open the Data.db with
+/// `iterate_all_partitions_for_compaction`, which returns the decoded
+/// per-row write-timestamp alongside each value.  Assert that the row whose
+/// partition key is `id=1` has write-timestamp `2_000_000`, not `1_000_000`.
 ///
-/// After the fix, Statistics.db must record min_timestamp = 1_000_000 (the
-/// true minimum across both partitions).
-/// Regression test for issue #729: two-pass flush baseline fix.
-///
-/// Verifies that the Data.db delta encoding uses the FINAL (lowest) baseline
-/// across ALL partitions so that every partition can be read back correctly
-/// regardless of write order.
-///
-/// The specific corruption: partition A (high timestamp) written first; the
-/// DataWriter gets baseline = A.timestamp. Then partition B (low timestamp)
-/// written second; the DataWriter baseline drops to B.timestamp, and
-/// Statistics.db (written at `finish()`) records B.timestamp as min.
-/// The reader decodes A's timestamps using B's (lower) baseline, silently
-/// corrupting partition A's encoded metadata.
-///
-/// After the fix (two-pass flush), the DataWriter is seeded with the FINAL
-/// minimum BEFORE any partition is written, so all deltas are consistent
-/// with the baseline in Statistics.db and the reader gets correct values.
+/// **Write order is deterministic**: Murmur3 token for `id=1`
+/// (-4_069_959_284_402_364_209) is strictly less than token for `id=2`
+/// (-3_248_873_570_005_575_792), so the SSTableWriter always writes id=1
+/// first.  In the buggy code that means id=1's delta is encoded against
+/// baseline 2_000_000; Statistics.db later stores 1_000_000; the reader
+/// reconstructs the wrong timestamp.  With the fix the baseline is pre-seeded
+/// to 1_000_000 before the first write, so id=1's delta encodes 1_000_000
+/// and the reader reconstructs 2_000_000 correctly.
 #[tokio::test]
 #[cfg(feature = "state_machine")]
 async fn test_two_pass_baseline_regression() -> Result<()> {
-    use cqlite_core::storage::sstable::SSTableManager;
-    use cqlite_core::types::TableId as CqlTableId;
+    use cqlite_core::storage::sstable::reader::SSTableReader;
     use cqlite_core::Config;
+    use cqlite_core::Platform;
     use std::sync::Arc;
 
     let temp_dir = TempDir::new().unwrap();
@@ -1305,15 +1300,15 @@ async fn test_two_pass_baseline_regression() -> Result<()> {
     let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema.clone());
     let mut engine = WriteEngine::new(config)?;
 
-    // Partition A: HIGH timestamp, written first.
+    // id=1 has Murmur3 token -4_069_959_284_402_364_209 (written FIRST).
+    // id=2 has Murmur3 token -3_248_873_570_005_575_792 (written SECOND).
+    // Giving id=1 the HIGH timestamp and id=2 the LOW timestamp triggers
+    // the bug: on buggy code the delta for id=1 is encoded against baseline
+    // 2_000_000 (only value seen so far), but Statistics.db stores
+    // min_timestamp=1_000_000, so the reader reconstructs 1_000_000 + 0 = 1_000_000.
     let mutation_a = create_mutation(1, "Alice", 30, 2_000_000);
     engine.write_async(mutation_a).await?;
 
-    // Partition B: LOW timestamp, written second.
-    // Before the fix: the DataWriter baseline for partition A was 2_000_000
-    // (the only known min at write time), but Statistics.db later recorded
-    // 1_000_000 as the global minimum.  The reader then decoded partition A's
-    // deltas using the wrong baseline — silent corruption.
     let mutation_b = create_mutation(2, "Bob", 25, 1_000_000);
     engine.write_async(mutation_b).await?;
 
@@ -1324,34 +1319,62 @@ async fn test_two_pass_baseline_regression() -> Result<()> {
     assert_eq!(info.partition_count, 2, "both partitions must flush");
     engine.close().await?;
 
-    // Read back both partitions using the SSTable reader.
-    // If delta encoding used the wrong baseline, the reader would either
-    // fail to parse (corrupt deltas overflow the expected bounds) or return
-    // fewer rows than written.  Two successfully-scanned rows proves the
-    // baseline in Data.db and Statistics.db were consistent.
+    // Open the SSTableReader directly so we can call
+    // iterate_all_partitions_for_compaction, which returns the decoded
+    // per-row write-timestamp as the third element of each tuple.
     let cqlite_config = Config::default();
     let platform = Arc::new(
-        cqlite_core::platform::Platform::new(&cqlite_config)
+        Platform::new(&cqlite_config)
             .await
             .expect("platform creation"),
     );
-    let manager = SSTableManager::new(&data_dir, &cqlite_config, platform, None)
+    let reader = SSTableReader::open(&info.data_path, &cqlite_config, platform)
         .await
-        .expect("SSTableManager must open the flushed SSTable");
+        .expect("SSTableReader must open the flushed SSTable");
 
-    let table_id = CqlTableId::from("test_ks.users");
-    let results = manager
-        .scan(&table_id, None, None, None, Some(&schema))
+    let entries = reader
+        .iterate_all_partitions_for_compaction(Some(&schema))
         .await
-        .expect("scan must not error after flush");
+        .expect("iterate_all_partitions_for_compaction must succeed");
+
+    // Find the row whose partition key bytes decode to id=1 ([0x00,0x00,0x00,0x01]).
+    // The write-timestamp for this row must equal 2_000_000.
+    //
+    // On BUGGY code: delta was encoded as 0 against baseline 2_000_000, but
+    // Statistics.db stored 1_000_000 as the global min.  The reader computes
+    // 1_000_000 + 0 = 1_000_000 — wrong.  This assertion fails.
+    //
+    // On FIXED code: baseline was pre-seeded to 1_000_000 before any writes,
+    // so id=1's delta is 1_000_000.  The reader computes
+    // 1_000_000 + 1_000_000 = 2_000_000 — correct.  This assertion passes.
+    let id1_key_bytes: &[u8] = &[0x00, 0x00, 0x00, 0x01];
+    let entry_for_id1 = entries
+        .iter()
+        .find(|(key, _, _)| key.as_bytes() == id1_key_bytes)
+        .expect("partition id=1 must be present in the SSTable");
+
+    let decoded_write_ts = entry_for_id1.2;
+    assert_eq!(
+        decoded_write_ts, 2_000_000_i64,
+        "Partition id=1 write-timestamp decoded as {} but expected 2_000_000. \
+         On buggy code the delta for id=1 is encoded against baseline 2_000_000 \
+         but Statistics.db stores min_timestamp=1_000_000, so the reader reconstructs \
+         1_000_000 + 0 = 1_000_000 instead of the correct 2_000_000. \
+         This is the silent value corruption from issue #729.",
+        decoded_write_ts,
+    );
+
+    // Sanity-check that id=2 is also present and has the correct timestamp.
+    let id2_key_bytes: &[u8] = &[0x00, 0x00, 0x00, 0x02];
+    let entry_for_id2 = entries
+        .iter()
+        .find(|(key, _, _)| key.as_bytes() == id2_key_bytes)
+        .expect("partition id=2 must be present in the SSTable");
 
     assert_eq!(
-        results.len(),
-        2,
-        "SSTable read-back must return both partitions after flush (got {}). \
-         A wrong DataWriter baseline would cause decode errors or missing rows. \
-         This is issue #729 two-pass baseline regression.",
-        results.len()
+        entry_for_id2.2, 1_000_000_i64,
+        "Partition id=2 write-timestamp decoded as {} but expected 1_000_000.",
+        entry_for_id2.2,
     );
 
     Ok(())
