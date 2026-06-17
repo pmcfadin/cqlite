@@ -7,6 +7,15 @@ name: "CI: E2E Cassandra Readback Gate"
 # Runs:
 #   - Nightly (schedule) to catch regressions on main
 #   - On PRs touching writer/serialization/schema paths or the script/compose file itself
+#
+# DUAL-WORKFLOW DECISION (issue #728):
+# This workflow and cassandra-validation.yml are BOTH intentionally kept.
+# They cover two distinct production ingest paths:
+#   - e2e-readback.yml (this file): validates the `nodetool refresh` ingest path
+#   - cassandra-validation.yml:     validates the `sstableloader` ingest path
+# On writer-path PRs, both workflows run (~30 min each). This overlap is accepted
+# deliberately — merging them would obscure ingest-path-specific regressions.
+# See issue #728 for the full decision record.
 
 on:
   schedule:
