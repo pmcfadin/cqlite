@@ -169,14 +169,9 @@ impl JSONWriter {
                 JsonValue::Object(udt_obj)
             }
             Value::Frozen(boxed_value) => Self::value_to_json(boxed_value),
-            Value::Tombstone(info) => {
-                json!({
-                    "type": "tombstone",
-                    "deletion_time": info.deletion_time,
-                    "tombstone_type": format!("{:?}", info.tombstone_type),
-                    "ttl": info.ttl
-                })
-            }
+            // Tombstoned cells represent deleted values. Emit JSON null to match
+            // cqlsh and Python binding behaviour (issue #806).
+            Value::Tombstone(_) => JsonValue::Null,
             Value::Inet(bytes) => {
                 // Format as IP address string if possible
                 if bytes.len() == 4 {
@@ -682,5 +677,86 @@ mod tests {
         let json_val = JSONWriter::value_to_json(&duration);
         // Should be "XmoYdZns" format, not {months, days, nanos} object
         assert_eq!(json_val.as_str().unwrap(), "2mo15d123456789ns");
+    }
+
+    /// Issue #806: tombstoned cells must render as JSON null, not as an internal
+    /// metadata object.  This matches cqlsh and Python binding behaviour.
+    #[test]
+    fn test_cell_tombstone_renders_as_null() {
+        use cqlite_core::types::{TombstoneInfo, TombstoneType};
+
+        let tombstone = Value::Tombstone(TombstoneInfo {
+            deletion_time: 1673778645000000,
+            tombstone_type: TombstoneType::CellTombstone,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        });
+
+        let json_val = JSONWriter::value_to_json(&tombstone);
+        assert!(
+            json_val.is_null(),
+            "CellTombstone must render as JSON null, got: {json_val}"
+        );
+    }
+
+    #[test]
+    fn test_row_tombstone_renders_as_null() {
+        use cqlite_core::types::{TombstoneInfo, TombstoneType};
+
+        let tombstone = Value::Tombstone(TombstoneInfo {
+            deletion_time: 1673778645000000,
+            tombstone_type: TombstoneType::RowTombstone,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        });
+
+        let json_val = JSONWriter::value_to_json(&tombstone);
+        assert!(
+            json_val.is_null(),
+            "RowTombstone must render as JSON null, got: {json_val}"
+        );
+    }
+
+    #[test]
+    fn test_tombstone_column_in_result_is_null() {
+        use cqlite_core::types::{TombstoneInfo, TombstoneType};
+
+        let mut result = QueryResult::new();
+        result.metadata.columns = vec![ColumnInfo::new(
+            "deleted_col".to_string(),
+            cqlite_core::types::DataType::Tombstone,
+            true,
+            0,
+        )];
+
+        let mut values = HashMap::new();
+        values.insert(
+            "deleted_col".to_string(),
+            Value::Tombstone(TombstoneInfo {
+                deletion_time: 0,
+                tombstone_type: TombstoneType::CellTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            }),
+        );
+        let row = QueryRow::with_values(RowKey::new(vec![1]), values);
+        result.rows.push(row);
+
+        let json_str = JSONWriter::write(&result, &default_config()).unwrap();
+        let parsed: Vec<serde_json::Value> = serde_json::from_str(&json_str).unwrap();
+
+        let col_val = &parsed[0]["deleted_col"];
+        assert!(
+            col_val.is_null(),
+            "Tombstoned column must be JSON null in output, got: {col_val}"
+        );
+        // Ensure NO internal metadata leaked
+        assert!(
+            !json_str.contains("tombstone_type"),
+            "Internal tombstone metadata must not appear in output: {json_str}"
+        );
     }
 }

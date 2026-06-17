@@ -173,14 +173,6 @@ def normalize_cli_value(value: Any) -> Any:
     - Maps with string keys: regular JSON object {"key1": v1, "key2": v2}
 
     We need to preserve the structure but recurse into nested values.
-
-    Special cases:
-    - CLI tombstone dicts ({"type": "tombstone", ...}) → None
-      Python bindings correctly return None for tombstoned cells; CLI leaks
-      internal tombstone metadata.  Treat them as equivalent so parity tests
-      do not false-fail on tombstoned optional columns.
-      This normalization is a temporary shim until the CLI tombstone-metadata
-      leak is fixed (tracked in #806).
     """
     if value is None:
         return None
@@ -210,11 +202,6 @@ def normalize_cli_value(value: Any) -> Any:
         return [normalize_cli_value(v) for v in value]
 
     if isinstance(value, dict):
-        # CLI tombstone objects leak internal metadata for tombstoned cells.
-        # Python bindings return None for these cells (correct user-facing behaviour).
-        # Normalise tombstone dicts to None so parity comparisons match.
-        if value.get("type") == "tombstone":
-            return None
         # This is either a row dict, UDT, or a map with string keys
         return {k: normalize_cli_value(v) for k, v in value.items()}
 
