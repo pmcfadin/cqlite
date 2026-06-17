@@ -4456,6 +4456,14 @@ mod tests {
 
     #[test]
     fn test_row_ttl_uses_row_ttl_cell_flags() {
+        // Regression: when a mutation carries a row-level TTL, every regular cell
+        // should be encoded with CELL_IS_EXPIRING | CELL_USE_ROW_TIMESTAMP | CELL_USE_ROW_TTL.
+        //
+        // Previous implementation used a whole-buffer byte-scan to count how many bytes
+        // equalled the flag value 0x1A. That was fragile because the LDT delta field is
+        // derived from the wall clock and can produce bytes that collide with 0x1A in
+        // roughly 1-2% of CI runs.  We now use a structural parse that walks the row
+        // header and then reads each cell's flags byte at its exact offset.
         let mut stats = create_test_stats();
         stats.min_timestamp = 1001000;
         stats.min_ttl = 7200;
@@ -4484,13 +4492,34 @@ mod tests {
         writer.write_row(&mutation, &schema).unwrap();
         let bytes = writer.finish().unwrap();
 
-        assert_eq!(bytes[0] & ROW_HAS_TTL, ROW_HAS_TTL);
-        let expiring_row_ttl_flags = CELL_IS_EXPIRING | CELL_USE_ROW_TIMESTAMP | CELL_USE_ROW_TTL;
-        let flag_count = bytes
-            .iter()
-            .filter(|&&byte| byte == expiring_row_ttl_flags)
-            .count();
-        assert_eq!(flag_count, 2, "expected both cells to inherit row TTL");
+        // Verify the row header flags first (non-structural byte is safe here).
+        assert_eq!(
+            bytes[0] & ROW_HAS_TTL,
+            ROW_HAS_TTL,
+            "row should have TTL flag"
+        );
+
+        // Structurally parse the row body to extract each cell's flags byte.
+        // Cassandra sorts regular columns by (is_complex, name) — for simple columns,
+        // this is plain alphabetical order.  The schema has "age" (int, 4 bytes fixed)
+        // and "name" (text, variable), so "age" sorts before "name".
+        let cell_flags = parse_simple_row_cell_flags(
+            &bytes,
+            &[CellValueSizing::Fixed(4), CellValueSizing::Variable],
+        );
+
+        let expected = CELL_IS_EXPIRING | CELL_USE_ROW_TIMESTAMP | CELL_USE_ROW_TTL;
+        assert_eq!(
+            cell_flags.len(),
+            2,
+            "should have parsed flags for both cells"
+        );
+        assert!(
+            cell_flags.iter().all(|&f| f == expected),
+            "expected both cells to inherit row TTL (flags 0x{:02X}), got: {:?}",
+            expected,
+            cell_flags
+        );
     }
 
     #[test]
@@ -5236,17 +5265,15 @@ mod tests {
 
         assert!(!buf.is_empty());
 
-        // Parse: complex_deletion (2 signed VInts) + cell_count + cells
-        // The first bytes are DeletionTime.LIVE encoded as signed VInts
-        // Then cell_count = 2 (unsigned VInt)
-        // Then for each cell: flags(1) + path_len(VInt) + path_bytes + (no value for SET)
-
-        // Verify we can find 2 cell flag bytes with USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE = 0x0C
+        // Structurally parse cell flags so DeletionTime.LIVE header bytes
+        // (which can coincide with flag values) are not misidentified.
         let expected_cell_flags = CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE;
-        let cell_flag_count = buf.iter().filter(|&&b| b == expected_cell_flags).count();
-        assert_eq!(
-            cell_flag_count, 2,
-            "Should have 2 SET cells with USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE flags"
+        let cell_flags = parse_complex_cell_flags(&buf);
+        assert_eq!(cell_flags.len(), 2, "Should have 2 SET cells");
+        assert!(
+            cell_flags.iter().all(|&f| f == expected_cell_flags),
+            "Should have 2 SET cells with USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE flags, got: {:?}",
+            cell_flags
         );
     }
 
@@ -5275,11 +5302,14 @@ mod tests {
 
         assert!(!buf.is_empty());
 
-        // MAP cells have USE_ROW_TIMESTAMP (0x08) but NOT HAS_EMPTY_VALUE
-        let cell_flag_count = buf.iter().filter(|&&b| b == CELL_USE_ROW_TIMESTAMP).count();
-        assert_eq!(
-            cell_flag_count, 2,
-            "Should have 2 MAP cells with USE_ROW_TIMESTAMP flags"
+        // MAP cells have USE_ROW_TIMESTAMP (0x08) but NOT HAS_EMPTY_VALUE.
+        // Use structural parse so DeletionTime.LIVE header bytes are not misidentified.
+        let cell_flags = parse_complex_cell_flags(&buf);
+        assert_eq!(cell_flags.len(), 2, "Should have 2 MAP cells");
+        assert!(
+            cell_flags.iter().all(|&f| f == CELL_USE_ROW_TIMESTAMP),
+            "Should have 2 MAP cells with USE_ROW_TIMESTAMP flags, got: {:?}",
+            cell_flags
         );
     }
 
@@ -5305,21 +5335,18 @@ mod tests {
 
         assert!(!buf.is_empty());
 
-        // LIST cells have USE_ROW_TIMESTAMP (0x08) and 16-byte TimeUUID paths
-        let cell_flag_count = buf.iter().filter(|&&b| b == CELL_USE_ROW_TIMESTAMP).count();
-        assert_eq!(
-            cell_flag_count, 2,
-            "Should have 2 LIST cells with USE_ROW_TIMESTAMP flags"
-        );
-
-        // Verify TimeUUID path length (16) appears in the output
-        // Each cell has: flags(1) + path_len_vint(1, value=16=0x10) + path(16) + val_len + val
-        // The VInt encoding of 16 is 0x10
-        let timeuuid_len_count = buf.iter().filter(|&&b| b == 0x10).count();
+        // LIST cells have USE_ROW_TIMESTAMP (0x08) and 16-byte TimeUUID paths.
+        // Use structural parse so DeletionTime.LIVE header bytes are not misidentified.
+        let cell_flags = parse_complex_cell_flags(&buf);
+        assert_eq!(cell_flags.len(), 2, "Should have 2 LIST cells");
         assert!(
-            timeuuid_len_count >= 2,
-            "Should have TimeUUID path length (16) for each list cell"
+            cell_flags.iter().all(|&f| f == CELL_USE_ROW_TIMESTAMP),
+            "Should have 2 LIST cells with USE_ROW_TIMESTAMP flags, got: {:?}",
+            cell_flags
         );
+        // The TimeUUID path length (16) is structurally verified by parse_complex_cell_flags
+        // successfully parsing each cell's path — if path_len were wrong, parsing would
+        // overshoot or the cell count would be wrong.
     }
 
     #[test]
@@ -5760,6 +5787,130 @@ mod tests {
         );
     }
 
+    /// Whether a simple (non-complex) cell value has a fixed byte size or a variable
+    /// length encoded by a preceding unsigned VInt.
+    ///
+    /// Mirrors [`cell_value_uses_length_prefix`]: Boolean, Integer, BigInt, Float32,
+    /// Float, Timestamp, and Uuid are fixed-size; everything else (Text, Blob, …) is
+    /// variable and prefixed with a VUInt length.
+    #[derive(Clone, Copy)]
+    enum CellValueSizing {
+        /// The value is exactly this many bytes (no length prefix).
+        Fixed(usize),
+        /// The value is prefixed by an unsigned VInt length.
+        Variable,
+    }
+
+    /// Parse the output of `write_row` / `writer.finish()` and return the flags byte
+    /// for each simple (non-complex) cell, in schema column order.
+    ///
+    /// This walks the deterministic row-header structure so wall-clock-derived bytes
+    /// inside the TTL/LDT delta fields cannot be misidentified as cell-flag bytes:
+    ///
+    /// ```text
+    /// [row_flags: u8]                        ← byte 0; no clustering prefix here
+    /// [row_body_size: unsigned VInt]
+    /// [prev_size: unsigned VInt]
+    /// [timestamp_delta: unsigned VInt]       ← present when ROW_HAS_TIMESTAMP
+    /// [ttl_delta: unsigned VInt]             ← present when ROW_HAS_TTL
+    /// [ldt_delta: unsigned VInt]             ← present when ROW_HAS_TTL (wall-clock!)
+    /// [column_bitmap: unsigned VInt]         ← present when NOT ROW_HAS_ALL_COLUMNS
+    /// per cell (one per `column_sizings` entry):
+    ///   [flags: u8]                          ← captured here
+    ///   if NOT CELL_USE_ROW_TIMESTAMP:
+    ///     [timestamp_delta: unsigned VInt]
+    ///   if CELL_IS_DELETED:
+    ///     [ldt_delta: unsigned VInt]
+    ///   if NOT CELL_HAS_EMPTY_VALUE:
+    ///     match sizing:
+    ///       Variable  → [value_len: unsigned VInt] + [value_len bytes]
+    ///       Fixed(n)  → [n bytes]
+    /// ```
+    ///
+    /// `column_sizings` must list one entry per regular column in schema order.
+    fn parse_simple_row_cell_flags(buf: &[u8], column_sizings: &[CellValueSizing]) -> Vec<u8> {
+        fn read_uvint(buf: &[u8], pos: &mut usize) -> u64 {
+            let first = buf[*pos];
+            *pos += 1;
+            if first == 0xFF {
+                let mut v = 0u64;
+                for _ in 0..8 {
+                    v = (v << 8) | buf[*pos] as u64;
+                    *pos += 1;
+                }
+                return v;
+            }
+            let extra = first.leading_ones() as usize;
+            let mask = 0xFF_u8.wrapping_shr((extra + 1) as u32);
+            let mut v = (first & mask) as u64;
+            for _ in 0..extra {
+                v = (v << 8) | buf[*pos] as u64;
+                *pos += 1;
+            }
+            v
+        }
+
+        let mut pos = 0usize;
+
+        // Row flags — byte 0, no clustering prefix for the test cases using this helper.
+        let row_flags = buf[pos];
+        pos += 1;
+
+        // row_body_size + prev_size (two VInts we skip)
+        read_uvint(buf, &mut pos); // row_body_size
+        read_uvint(buf, &mut pos); // prev_size
+
+        // Liveness timestamp delta
+        if (row_flags & ROW_HAS_TIMESTAMP) != 0 {
+            read_uvint(buf, &mut pos);
+        }
+        // TTL delta + LDT delta (LDT is wall-clock-derived — the source of flakiness)
+        if (row_flags & ROW_HAS_TTL) != 0 {
+            read_uvint(buf, &mut pos); // ttl_delta
+            read_uvint(buf, &mut pos); // ldt_delta
+        }
+        // Deletion time (2 VInts)
+        if (row_flags & ROW_HAS_DELETION) != 0 {
+            read_uvint(buf, &mut pos);
+            read_uvint(buf, &mut pos);
+        }
+        // Column bitmap (1 VInt; present when NOT ROW_HAS_ALL_COLUMNS)
+        if (row_flags & ROW_HAS_ALL_COLUMNS) == 0 {
+            read_uvint(buf, &mut pos);
+        }
+
+        // Now read one flags byte per column.
+        let mut flags_out = Vec::with_capacity(column_sizings.len());
+        for &sizing in column_sizings {
+            let cell_flags = buf[pos];
+            pos += 1;
+            flags_out.push(cell_flags);
+
+            // Skip timestamp delta when the cell carries its own timestamp.
+            if (cell_flags & CELL_USE_ROW_TIMESTAMP) == 0 {
+                read_uvint(buf, &mut pos);
+            }
+            // Tombstone cells carry an LDT delta.
+            if (cell_flags & CELL_IS_DELETED) != 0 {
+                read_uvint(buf, &mut pos);
+            }
+            // Skip value (absent when HAS_EMPTY_VALUE is set).
+            if (cell_flags & CELL_HAS_EMPTY_VALUE) == 0 {
+                match sizing {
+                    CellValueSizing::Variable => {
+                        let value_len = read_uvint(buf, &mut pos) as usize;
+                        pos += value_len;
+                    }
+                    CellValueSizing::Fixed(n) => {
+                        pos += n;
+                    }
+                }
+            }
+        }
+
+        flags_out
+    }
+
     /// Parse a `write_complex_column` output buffer and return the flag byte for every cell.
     ///
     /// The buffer has this deterministic structure:
@@ -6033,12 +6184,19 @@ mod tests {
             .write_complex_column(&mut buf, &column, &value, 1001000, None)
             .unwrap();
 
-        // Without TTL: USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE = 0x0C
+        // Without TTL: USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE = 0x0C.
+        // Use structural parse so DeletionTime.LIVE header bytes are not misidentified.
         let expected_flags = CELL_USE_ROW_TIMESTAMP | CELL_HAS_EMPTY_VALUE;
-        let count = buf.iter().filter(|&&b| b == expected_flags).count();
+        let cell_flags = parse_complex_cell_flags(&buf);
         assert_eq!(
-            count, 1,
-            "Without TTL, SET cells should use USE_ROW_TIMESTAMP"
+            cell_flags.len(),
+            1,
+            "SET with 1 element should produce 1 cell"
+        );
+        assert_eq!(
+            cell_flags[0], expected_flags,
+            "Without TTL, SET cells should use USE_ROW_TIMESTAMP | HAS_EMPTY_VALUE, got: 0x{:02X}",
+            cell_flags[0]
         );
     }
 
