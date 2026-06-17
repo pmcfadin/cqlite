@@ -12,6 +12,10 @@ CQLite is production-ready for the common case: reading Cassandra 5.0 BIG-format
 SSTables with standard data types. This page is honest about what it cannot do yet,
 so you know before you depend on it.
 
+This page covers what CQLite **cannot do by design or yet**. For active bugs and
+sharp edges in the current release, see [Known Issues](/cqlite/user-docs/known-issues/);
+for what is coming next, see the [Roadmap](/cqlite/user-docs/roadmap/).
+
 For the exhaustive engineering detail, see [Appendix F: Known Limitations](/cqlite/sstable-format/appendix-f/) in the SSTable Format Guide.
 
 ## Format support
@@ -108,14 +112,15 @@ The `IndexWriter` buffers all index entries in memory until `finish()` is called
 **Impact**: approximately 20 MB per 1 million partitions. For extremely large SSTables
 (hundreds of millions of partitions), split writes into multiple generation files.
 
-### Compaction not yet executable
+### Compaction is STCS-only
 
-The k-way merge compaction API is defined (STCS policy, `maintenance_step()`, etc.)
-but execution requires M5.3 SSTable reader integration to convert entries back to
-mutations. `set_merge_policy()` currently returns an error.
+STCS (size-tiered) compaction executes via `set_merge_policy()` and
+`maintenance_step()`. Other strategies (LCS, TWCS, UCS) are not implemented — a
+non-STCS policy is not selectable.
 
-**Impact**: `maintenance_step()` currently performs flush operations only. Full
-compaction is deferred to M5.3.
+**Impact**: SSTables written and compacted by CQLite follow size-tiered behavior.
+This matches the most common Cassandra default and is sufficient for offline
+write/flush/compact workflows.
 
 ## Query engine limitations
 
@@ -134,7 +139,7 @@ compaction is deferred to M5.3.
 Set element tombstones — individual element deletions inside a `set<T>` — are not
 fully surfaced. Rows containing only element tombstones may appear empty rather
 than absent. This affects a narrow edge case and is tracked in
-[issue #493](https://github.com/pmcfadin/cqlite/issues/493) for v0.9.1.
+[issue #493](https://github.com/pmcfadin/cqlite/issues/493).
 
 ## Operational constraints
 
@@ -161,9 +166,12 @@ or use Cassandra's `sstabledump` to export to JSON and reimport.
 
 ### BTI format (trie index)
 
-If your Cassandra cluster is configured with `selected_format: bti`, CQLite will
-still return correct results via sequential scan fallback. For large tables the
-scan may be slow; partition-key `WHERE` filters help bound the scan.
+If your Cassandra cluster is configured with `selected_format: bti`, CQLite detects
+the `da-*-bti-*` SSTables and rejects them with a clear error rather than misreading
+them. Convert them to the default BIG format first — run `nodetool upgradesstables`
+after switching `selected_format` back to `big`, or export with `sstabledump`.
+End-to-end BTI read support is on the [roadmap](/cqlite/user-docs/roadmap/)
+([#660](https://github.com/pmcfadin/cqlite/issues/660)).
 
 ### Wide partitions
 
