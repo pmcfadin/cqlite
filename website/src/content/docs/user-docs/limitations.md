@@ -134,13 +134,6 @@ write/flush/compact workflows.
 | Aggregate functions (`COUNT`, `SUM`, etc.) | Not implemented |
 | `GROUP BY` | Not implemented |
 
-## Collection tombstone gap (issue #493)
-
-Set element tombstones — individual element deletions inside a `set<T>` — are not
-fully surfaced. Rows containing only element tombstones may appear empty rather
-than absent. This affects a narrow edge case and is tracked in
-[issue #493](https://github.com/pmcfadin/cqlite/issues/493).
-
 ## Operational constraints
 
 - **Local files only**: CQLite reads SSTable files from the local filesystem.
