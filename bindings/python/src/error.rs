@@ -97,6 +97,10 @@ pub fn to_py_err(err: cqlite_core::Error) -> PyErr {
         // This covers cases like using a closed database
         cqlite_core::Error::InvalidState(_) => PyRuntimeError::new_err(message),
 
+        // Write-dir lock conflict -> CqliteError with clear message
+        // The formatted message already contains the path and advice
+        cqlite_core::Error::WriteDirLocked { .. } => CqliteError::new_err(message),
+
         // All other errors -> CqliteError (base exception)
         // See test_error_mapping_completeness() for the complete list of unmapped variants
         _ => CqliteError::new_err(message),
@@ -381,6 +385,9 @@ mod tests {
                 Error::Internal(_) => { /* Maps to CqliteError */ }
                 Error::Parse(_) => { /* Maps to CqliteError */ }
 
+                // Write-dir lock conflict — maps to CqliteError with clear message
+                Error::WriteDirLocked { .. } => { /* Maps to CqliteError */ }
+
                 // Conditional variant (only exists on wasm32)
                 #[cfg(target_arch = "wasm32")]
                 Error::Wasm(_) => { /* Maps to CqliteError */ }
@@ -436,6 +443,9 @@ mod tests {
             Error::Compaction("compaction error".to_string()),
             Error::Internal("internal error".to_string()),
             Error::Parse("parse error".to_string()),
+            Error::WriteDirLocked {
+                path: "/tmp/test-write-dir".to_string(),
+            },
         ];
 
         for rust_err in unmapped_cases {

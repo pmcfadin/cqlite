@@ -75,6 +75,9 @@ parquet = { workspace = true, optional = true }
 
 # Features defined at end of file to avoid duplicates
 
+# File locking for write_dir exclusivity (write-support feature only)
+fs2 = { workspace = true, optional = true }
+
 # Additional dependencies
 uuid = { version = "1.10", features = ["v4"] }
 regex = "1.10"
@@ -209,7 +212,8 @@ test-coverage-tracking = []    # Real-time coverage tracking
 test-quality-gates = []        # Quality gate enforcement
 
 # M5: Write support - SSTable generation and persistence (Issue #359)
-write-support = []
+# fs2 provides cross-platform advisory file locking for write_dir exclusivity (Issue #485)
+write-support = ["dep:fs2"]
 
 # Heap profiling: installs the dhat global allocator in examples/heap_profile.rs.
 # Dev/profiling only — never enable for production builds (allocation tracking

@@ -77,6 +77,21 @@ pub enum Error {
     #[error("Concurrency error: {0}")]
     Concurrency(String),
 
+    /// Write directory already locked by another process or Database instance
+    ///
+    /// Returned by `WriteEngine::new` when the advisory lock on `write_dir`
+    /// cannot be acquired because another `WriteEngine` (in this or another
+    /// process) already holds it.  Only one `Database` instance may hold a
+    /// `write_dir` at a time.
+    #[error(
+        "write_dir '{path}' is already locked by another process. \
+         Only one Database instance may hold a write_dir at a time."
+    )]
+    WriteDirLocked {
+        /// The path that could not be locked
+        path: String,
+    },
+
     /// Resource not found
     #[error("Not found: {0}")]
     NotFound(String),
@@ -266,6 +281,11 @@ impl Error {
         Self::UnsupportedQuery(msg.into())
     }
 
+    /// Create a write-dir locked error
+    pub fn write_dir_locked(path: impl Into<String>) -> Self {
+        Self::WriteDirLocked { path: path.into() }
+    }
+
     /// Create a table not found error
     pub fn table_not_found(msg: impl Into<String>) -> Self {
         Self::NotFound(format!("Table not found: {}", msg.into()))
@@ -304,6 +324,9 @@ impl Error {
 
             // New error types
             Error::Table(_) => false,
+
+            // Write-dir lock conflict — not recoverable without releasing the lock
+            Error::WriteDirLocked { .. } => false,
 
             #[cfg(target_arch = "wasm32")]
             Error::Wasm(_) => false,
@@ -345,6 +368,9 @@ impl Error {
 
             // New error types
             Error::Table(_) => ErrorCategory::Schema,
+
+            // Write-dir lock conflict
+            Error::WriteDirLocked { .. } => ErrorCategory::Concurrency,
 
             #[cfg(target_arch = "wasm32")]
             Error::Wasm(_) => ErrorCategory::Platform,
@@ -566,6 +592,7 @@ mod tests {
         let _ = Error::internal("test");
         let _ = Error::invalid_input("test");
         let _ = Error::parse("test");
+        let _ = Error::write_dir_locked("/tmp/test-dir");
     }
 
     #[test]
@@ -629,6 +656,10 @@ mod tests {
         assert_eq!(Error::internal("test").category(), ErrorCategory::Internal);
         assert_eq!(Error::invalid_input("test").category(), ErrorCategory::Data);
         assert_eq!(Error::parse("test").category(), ErrorCategory::Data);
+        assert_eq!(
+            Error::write_dir_locked("/tmp/test").category(),
+            ErrorCategory::Concurrency
+        );
     }
 
     #[test]
@@ -656,6 +687,7 @@ mod tests {
         assert!(!Error::internal("test").is_recoverable());
         assert!(!Error::invalid_input("test").is_recoverable());
         assert!(!Error::parse("test").is_recoverable());
+        assert!(!Error::write_dir_locked("/tmp/test").is_recoverable());
     }
 
     #[test]

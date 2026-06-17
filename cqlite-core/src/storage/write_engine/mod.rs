@@ -339,6 +339,17 @@ pub struct WriteEngine {
     merge_policy: Option<Box<dyn MergePolicy>>,
     /// Cumulative compaction statistics (M5.2, Issue #474)
     cumulative_stats: CompactionStats,
+    /// Advisory exclusive lock on `write_dir` (`.lock` file).
+    ///
+    /// Held for the lifetime of the `WriteEngine`; released on `close()` or
+    /// `Drop`.  The lock is acquired in `new()` via
+    /// `fs2::FileExt::try_lock_exclusive`, which returns an error immediately
+    /// if another process already holds it (fail-fast, no blocking).
+    ///
+    /// The lock prevents two `Database` / `WriteEngine` instances from sharing
+    /// the same `write_dir`, which would corrupt WAL files and SSTables
+    /// (Issue #485).
+    dir_lock: std::fs::File,
 }
 
 /// Reject any mutation that contains a counter cell write.
@@ -401,6 +412,24 @@ impl WriteEngine {
                 config.wal_dir, e
             ))
         })?;
+
+        // Acquire an exclusive advisory lock on the WAL directory to prevent
+        // two WriteEngine / Database instances from sharing the same write_dir
+        // and silently corrupting WAL files or SSTables (Issue #485).
+        //
+        // We use `try_lock_exclusive` (non-blocking) so that callers get an
+        // immediate, actionable error rather than hanging forever.
+        let lock_path = config.wal_dir.join(".lock");
+        let dir_lock = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .map_err(|e| {
+                Error::Storage(format!("Failed to create lock file {:?}: {}", lock_path, e))
+            })?;
+        fs2::FileExt::try_lock_exclusive(&dir_lock)
+            .map_err(|_| Error::write_dir_locked(config.wal_dir.to_string_lossy().into_owned()))?;
 
         // Startup sweep: remove orphaned compaction artifacts left by a previous crash.
         //
@@ -470,6 +499,7 @@ impl WriteEngine {
             active_merge: None,
             merge_policy: None,
             cumulative_stats: CompactionStats::default(),
+            dir_lock,
         })
     }
 
@@ -807,6 +837,14 @@ impl WriteEngine {
         if let Err(e) = self.wal.sync() {
             log::warn!("Failed to sync WAL during close: {}", e);
             // Don't fail close if sync fails - data is already persisted to SSTable
+        }
+
+        // Release the exclusive advisory lock on write_dir so a subsequent
+        // WriteEngine on the same directory can acquire it immediately.
+        // On Drop the OS would release it anyway, but explicit unlock is more
+        // deterministic in async / multi-phase shutdown sequences.
+        if let Err(e) = fs2::FileExt::unlock(&self.dir_lock) {
+            log::warn!("Failed to release write_dir advisory lock: {}", e);
         }
 
         log::info!("WriteEngine closed");
@@ -1655,6 +1693,30 @@ impl WriteEngine {
         entry: merge::MergeEntry,
     ) -> Result<crate::storage::write_engine::mutation::Mutation> {
         merge::KWayMerger::merge_entry_to_mutation(entry, &self.config.schema)
+    }
+}
+
+/// Safety-net `Drop` implementation for `WriteEngine`.
+///
+/// When a `WriteEngine` is dropped without calling `close()` (e.g. due to an
+/// early return or a panic), the OS would release the advisory lock anyway once
+/// the file descriptor is closed.  This explicit `Drop` makes the release
+/// deterministic and logs a warning so callers can distinguish a normal shutdown
+/// from an ungraceful one.
+#[cfg(feature = "write-support")]
+impl Drop for WriteEngine {
+    fn drop(&mut self) {
+        // If close() was already called the lock was already released; a second
+        // unlock is a no-op on most platforms (Linux returns ENOLCK which we
+        // ignore here).  The important invariant is that the lock is always
+        // released before the file descriptor is closed by the OS on drop.
+        if let Err(e) = fs2::FileExt::unlock(&self.dir_lock) {
+            log::debug!(
+                "WriteEngine drop: advisory lock release returned: {} \
+                 (may have been released by close() already)",
+                e
+            );
+        }
     }
 }
 
@@ -3523,6 +3585,127 @@ mod tests {
             engine2.memtable_row_count(),
             5,
             "SyncEachWrite must replay mutations durably on restart"
+        );
+    }
+
+    // ============================================================================
+    // Issue #485: write_dir file lock tests
+    // ============================================================================
+
+    /// A second WriteEngine on the same write_dir must fail fast with a clear error
+    /// while the first engine is still open.
+    #[test]
+    fn test_write_dir_lock_second_engine_fails_fast() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config1 = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema.clone(),
+        );
+
+        // First engine acquires the lock.
+        let _engine1 = WriteEngine::new(config1).unwrap();
+
+        // Second engine on the same wal_dir must fail immediately.
+        let config2 = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let result = WriteEngine::new(config2);
+        assert!(
+            result.is_err(),
+            "A second WriteEngine on the same write_dir must fail"
+        );
+
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, Error::WriteDirLocked { .. }),
+            "Expected WriteDirLocked error, got: {:?}",
+            err
+        );
+
+        // Error message must contain the path and actionable advice.
+        let msg = err.to_string();
+        assert!(
+            msg.contains("already locked"),
+            "Error message must mention the lock: {}",
+            msg
+        );
+        assert!(
+            msg.contains("Only one Database instance"),
+            "Error message must explain the constraint: {}",
+            msg
+        );
+    }
+
+    /// After the first engine is closed, a new engine must successfully acquire the lock.
+    #[tokio::test]
+    async fn test_write_dir_lock_reacquired_after_close() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config1 = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema.clone(),
+        );
+
+        // First engine acquires the lock.
+        let mut engine1 = WriteEngine::new(config1).unwrap();
+
+        // Close releases the lock.
+        engine1.close().await.unwrap();
+
+        // A new engine on the same directory must now succeed.
+        let config2 = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let engine2 = WriteEngine::new(config2);
+        assert!(
+            engine2.is_ok(),
+            "WriteEngine must acquire lock after the previous engine closed: {:?}",
+            engine2.err()
+        );
+    }
+
+    /// After the first engine is dropped (without calling close()), a new engine
+    /// must also successfully acquire the lock.
+    #[test]
+    fn test_write_dir_lock_reacquired_after_drop() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let config1 = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema.clone(),
+        );
+
+        // First engine acquires the lock; drop releases it.
+        {
+            let _engine1 = WriteEngine::new(config1).unwrap();
+            // engine1 dropped here, lock released
+        }
+
+        // A new engine on the same directory must now succeed.
+        let config2 = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+
+        let engine2 = WriteEngine::new(config2);
+        assert!(
+            engine2.is_ok(),
+            "WriteEngine must acquire lock after the previous engine was dropped: {:?}",
+            engine2.err()
         );
     }
 }
