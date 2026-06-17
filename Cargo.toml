@@ -106,6 +106,9 @@ predicates = "3.0"
 tokio-test = "0.4"
 rand = "0.9"
 
+# File locking (cross-platform advisory locks for write_dir exclusivity)
+fs2 = "0.4"
+
 # Configuration parsing
 toml = "0.8"
 serde_yaml = "0.9"

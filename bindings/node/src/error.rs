@@ -430,6 +430,11 @@ mod tests {
                 Error::Internal(_) => {}
                 Error::Parse(_) => {}
 
+                // Write-dir lock conflict — Concurrency category, maps to CONCURRENCY code
+                Error::WriteDirLocked { .. } => {
+                    assert_eq!(err.category(), ErrorCategory::Concurrency);
+                }
+
                 #[cfg(target_arch = "wasm32")]
                 Error::Wasm(_) => {}
             }
