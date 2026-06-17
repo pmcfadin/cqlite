@@ -34,9 +34,16 @@ PROJECT_ROOT = BINDINGS_DIR.parent.parent
 TEST_DATA = PROJECT_ROOT / "test-data"
 
 # Support CQLITE_DATASETS_ROOT environment variable override
+# The documented convention is CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+# (the parent of sstables/).  But we also accept a path that already ends in
+# sstables/ for backwards compatibility.  Resolution rule:
+#   1. If <root>/sstables/ exists, use that (documented convention).
+#   2. Otherwise use <root> directly (already pointing at sstables/).
 _ENV_DATASETS_ROOT = os.environ.get("CQLITE_DATASETS_ROOT")
 if _ENV_DATASETS_ROOT:
-    DATASETS = Path(_ENV_DATASETS_ROOT)
+    _root = Path(_ENV_DATASETS_ROOT)
+    _candidate = _root / "sstables"
+    DATASETS = _candidate if _candidate.exists() else _root
 else:
     DATASETS = TEST_DATA / "datasets" / "sstables"
 
