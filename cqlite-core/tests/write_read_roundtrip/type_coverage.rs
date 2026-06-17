@@ -736,6 +736,107 @@ fn test_counter_write_sync_returns_typed_error() {
     );
 }
 
+/// Counter rejection via the CQL-text `execute()` entry point (Issue #503).
+///
+/// The Mutation API guard (`reject_counter_cells`) is exercised by
+/// `test_counter_write_returns_typed_error` / `test_counter_write_sync_returns_typed_error`.
+/// This test validates that the **CQL-text path** — `WriteEngine::execute()` →
+/// `convert_cql_to_mutation()` → `update_to_mutation()` → `write()` — also triggers
+/// the same guard, so callers using the string-based execute() interface (e.g. the
+/// CLI's `--mutation` flag) cannot bypass the counter protection.
+///
+/// Route: `execute(cql_str)` → `parse_cql_to_mutation()` → `convert_cql_to_mutation()`
+/// → `update_to_mutation()` (AddAssign path: value `1` is coerced to `Value::Counter(1)`
+/// via `literal_to_value` + `integer_to_value`) → `write()` → `reject_counter_cells()`
+/// → `Error::InvalidOperation`.
+#[test]
+fn test_execute_counter_cql_returns_error() {
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("counter_col", "counter");
+
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema.clone(),
+    );
+    let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
+
+    // CQL counter increment via the string execute() path.
+    // The parser recognises `+=` as CqlAssignmentOperator::AddAssign; the integer
+    // literal `1` on the RHS is coerced to Value::Counter(1) using the schema column
+    // type, which then trips the counter guard inside write().
+    let cql = format!(
+        "UPDATE {}.{} SET counter_col += 1 WHERE pk = 1",
+        schema.keyspace, schema.table
+    );
+    let result = engine.execute(&cql);
+
+    assert!(
+        result.is_err(),
+        "Counter write via CQL execute() must return an error, but it succeeded"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, cqlite_core::error::Error::InvalidOperation(_)),
+        "Counter write via CQL execute() must return Error::InvalidOperation, got: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("counter"),
+        "Error message should mention 'counter', got: {}",
+        err
+    );
+}
+
+/// Counter rejection via the CQL INSERT execute() path (Issue #503).
+///
+/// Validates that inserting a counter value via CQL-text `execute()` using an
+/// INSERT statement also reaches `reject_counter_cells()` and returns
+/// `Error::InvalidOperation`.  The INSERT path flows through
+/// `insert_to_mutation()` → `literal_to_value()` → `integer_to_value()` →
+/// `Value::Counter(...)` → `write()` → `reject_counter_cells()`.
+#[test]
+fn test_execute_counter_insert_cql_returns_error() {
+    use cqlite_core::storage::write_engine::{WriteEngine, WriteEngineConfig};
+
+    let temp_dir = TempDir::new().unwrap();
+    let schema = create_type_test_schema("counter_col", "counter");
+
+    let config = WriteEngineConfig::new(
+        temp_dir.path().join("data"),
+        temp_dir.path().join("wal"),
+        schema.clone(),
+    );
+    let mut engine = WriteEngine::new(config).expect("Engine creation should succeed");
+
+    // CQL INSERT that supplies a raw counter value via the string execute() path.
+    // `literal_to_value` coerces the integer literal to Value::Counter(42) based on
+    // the column's counter type, which then trips the counter guard inside write().
+    let cql = format!(
+        "INSERT INTO {}.{} (pk, counter_col) VALUES (1, 42)",
+        schema.keyspace, schema.table
+    );
+    let result = engine.execute(&cql);
+
+    assert!(
+        result.is_err(),
+        "Counter INSERT via CQL execute() must return an error, but it succeeded"
+    );
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, cqlite_core::error::Error::InvalidOperation(_)),
+        "Counter INSERT via CQL execute() must return Error::InvalidOperation, got: {:?}",
+        err
+    );
+    assert!(
+        err.to_string().contains("counter"),
+        "Error message should mention 'counter', got: {}",
+        err
+    );
+}
+
 /// Test Inet type with IPv4 address
 #[tokio::test]
 async fn test_type_inet_ipv4() {
