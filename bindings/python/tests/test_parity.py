@@ -516,7 +516,7 @@ class TestRowCountParity:
                 reason=(
                     "SET<FROZEN<UDT>> deserialization: Python binding wraps UDT values "
                     "in frozenset but dict is unhashable, causing TypeError on execute(). "
-                    "Product bug — see #TBD (UDT-in-SET unhashable type)."
+                    "Product bug — see #804 (UDT-in-SET unhashable type)."
                 )
             )
         jsonl_file = find_jsonl_file("test_collections", table)
@@ -841,7 +841,7 @@ class TestE2ESummary:
     KNOWN_ISSUES = {
         # SET<FROZEN<UDT>>: Python binding wraps UDT values in frozenset but
         # dict is unhashable, causing TypeError on execute().
-        # Product bug — see #TBD (UDT-in-SET unhashable type).
+        # Product bug — see #804 (UDT-in-SET unhashable type).
         ("test_collections", "collections_with_udts"): (
             "SET<FROZEN<UDT>> unhashable dict: Python binding TypeError on execute()"
         ),

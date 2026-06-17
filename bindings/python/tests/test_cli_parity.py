@@ -179,6 +179,8 @@ def normalize_cli_value(value: Any) -> Any:
       Python bindings correctly return None for tombstoned cells; CLI leaks
       internal tombstone metadata.  Treat them as equivalent so parity tests
       do not false-fail on tombstoned optional columns.
+      This normalization is a temporary shim until the CLI tombstone-metadata
+      leak is fixed (tracked in #806).
     """
     if value is None:
         return None
@@ -524,7 +526,7 @@ class TestCLIParityCollections:
                 reason=(
                     "SET<FROZEN<UDT>> deserialization: Python binding wraps UDT values "
                     "in frozenset but dict is unhashable, causing TypeError. "
-                    "Product bug — see #TBD (UDT-in-SET unhashable type)."
+                    "Product bug — see #804 (UDT-in-SET unhashable type)."
                 )
             )
         db, schema_file = db_collections

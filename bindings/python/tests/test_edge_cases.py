@@ -228,7 +228,7 @@ class TestConcurrentAccess:
             "with 'Column not found: id', even after a warm-up sequence. "
             "Documented limitation in CLAUDE.md: 'concurrent queries on same "
             "database require a warm-up query first'. The warm-up does not fully "
-            "resolve the race. Product bug — see #TBD (concurrent-query column-not-found)."
+            "resolve the race. Product bug — see #805 (concurrent-query column-not-found)."
         )
     )
     def test_concurrent_queries_from_threads(self):
