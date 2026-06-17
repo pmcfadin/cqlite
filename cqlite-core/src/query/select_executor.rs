@@ -179,6 +179,24 @@ fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Resul
                         && compare_values_ordering(column_value, hi).is_le()
                 }
             }
+            // Single-bound clustering inequalities (Issue #788). A missing bound
+            // rejects the row, mirroring the `Range` len-guard above.
+            SSTableFilterOp::Gt => predicate
+                .values
+                .first()
+                .is_some_and(|b| compare_values_ordering(column_value, b).is_gt()),
+            SSTableFilterOp::Gte => predicate
+                .values
+                .first()
+                .is_some_and(|b| compare_values_ordering(column_value, b).is_ge()),
+            SSTableFilterOp::Lt => predicate
+                .values
+                .first()
+                .is_some_and(|b| compare_values_ordering(column_value, b).is_lt()),
+            SSTableFilterOp::Lte => predicate
+                .values
+                .first()
+                .is_some_and(|b| compare_values_ordering(column_value, b).is_le()),
             SSTableFilterOp::Prefix => matches!(
                 (column_value, predicate.values.first()),
                 (Value::Text(s), Some(Value::Text(p))) if s.starts_with(p)
@@ -1658,5 +1676,73 @@ mod tests {
             evaluate_predicates(&row, std::slice::from_ref(&predicate)).unwrap(),
             "Issue #586: WHERE id = '<literal>' must match the reconstructed PK column"
         );
+    }
+
+    /// Build a one-column `QueryRow` for predicate-evaluation tests.
+    fn row_with_int(column: &str, value: i64) -> QueryRow {
+        let mut values = std::collections::HashMap::new();
+        values.insert(column.to_string(), Value::Integer(value as i32));
+        QueryRow {
+            values,
+            key: RowKey::new(Vec::new()),
+            metadata: Default::default(),
+        }
+    }
+
+    /// Issue #788: each clustering-key inequality op must include/exclude rows on
+    /// the correct side of its bound when evaluated post-scan.
+    #[test]
+    fn inequality_predicates_apply_single_bound() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let bound = |op: SSTableFilterOp| SSTablePredicate {
+            column: "ck".to_string(),
+            operation: op,
+            values: vec![Value::Integer(200)],
+        };
+        let eval = |op: SSTableFilterOp, ck: i64| {
+            evaluate_predicates(&row_with_int("ck", ck), std::slice::from_ref(&bound(op))).unwrap()
+        };
+
+        // ck > 200
+        assert!(!eval(SSTableFilterOp::Gt, 200));
+        assert!(eval(SSTableFilterOp::Gt, 201));
+        // ck >= 200
+        assert!(eval(SSTableFilterOp::Gte, 200));
+        assert!(!eval(SSTableFilterOp::Gte, 199));
+        // ck < 200
+        assert!(eval(SSTableFilterOp::Lt, 199));
+        assert!(!eval(SSTableFilterOp::Lt, 200));
+        // ck <= 200
+        assert!(eval(SSTableFilterOp::Lte, 200));
+        assert!(!eval(SSTableFilterOp::Lte, 201));
+    }
+
+    /// Issue #788: the `pk = ? AND ck >= 0 AND ck < 200` shape — a two-bound AND
+    /// set — must include `[0, 199]` and exclude `200`/`1000`, reproducing the
+    /// 200-row slice the issue expects (previously the whole partition leaked).
+    #[test]
+    fn two_bound_inequality_slice_selects_half_open_range() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let predicates = vec![
+            SSTablePredicate {
+                column: "ck".to_string(),
+                operation: SSTableFilterOp::Gte,
+                values: vec![Value::Integer(0)],
+            },
+            SSTablePredicate {
+                column: "ck".to_string(),
+                operation: SSTableFilterOp::Lt,
+                values: vec![Value::Integer(200)],
+            },
+        ];
+        let in_slice = |ck: i64| evaluate_predicates(&row_with_int("ck", ck), &predicates).unwrap();
+
+        assert!(in_slice(0), "lower bound is inclusive");
+        assert!(in_slice(199), "last row in [0, 200) is included");
+        assert!(!in_slice(200), "upper bound is exclusive");
+        assert!(!in_slice(1000), "rows past the slice are excluded");
+        assert!(!in_slice(-1), "rows below the slice are excluded");
     }
 }
