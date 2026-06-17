@@ -369,6 +369,7 @@ impl SSTableReader {
             udt_registry: None, // Will be set when available for UDT-aware parsing
             compression_info: compression_info.map(Arc::new),
             current_chunk_index: AtomicUsize::new(0),
+            scan_mutex: tokio::sync::Mutex::new(()),
             version_gates,
         })
     }

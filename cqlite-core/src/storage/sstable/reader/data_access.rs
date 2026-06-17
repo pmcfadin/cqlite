@@ -275,6 +275,9 @@ impl SSTableReader {
     /// `Value::Tombstone` entries (with their authoritative deletion timestamps)
     /// so that tombstone-shadowing semantics can be applied during the merge.
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
+        // Issue #805: serialise concurrent scans (shared file position + chunk index).
+        let _scan_guard = self.scan_mutex.lock().await;
+
         let mut results = Vec::new();
 
         // Reset to beginning of data section
@@ -470,6 +473,9 @@ impl SSTableReader {
         schema: Option<crate::schema::TableSchema>,
         tx: mpsc::Sender<Result<(RowKey, Value)>>,
     ) -> Result<()> {
+        // Issue #805: serialise concurrent scans (shared file position + chunk index).
+        let _scan_guard = self.scan_mutex.lock().await;
+
         // Position at the start of the data section (mirrors sequential_scan).
         let header_size = self.calculate_header_size();
         {
@@ -841,6 +847,9 @@ impl SSTableReader {
     }
 
     async fn scan_for_key(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // Issue #805: serialise concurrent scans (shared file position + chunk index).
+        let _scan_guard = self.scan_mutex.lock().await;
+
         // For V5CompressedLegacy NB format, partitions can span chunk boundaries.
         // The block-by-block parser will miss any partition whose bytes cross a
         // chunk boundary.  Use the same stitched-buffer path that sequential_scan()
@@ -942,6 +951,12 @@ impl SSTableReader {
             "SSTableReader::sequential_scan - Has schema: {}",
             schema.is_some()
         );
+
+        // Issue #805: Serialise concurrent sequential scans on this reader.
+        // The file seek-position and current_chunk_index are shared state;
+        // two concurrent callers advancing them simultaneously corrupt each
+        // other's reads. Hold the scan_mutex for the full scan lifetime.
+        let _scan_guard = self.scan_mutex.lock().await;
 
         let mut results = Vec::new();
 
