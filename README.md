@@ -330,7 +330,8 @@ known gaps — none of which block the core read/export workflows. Full, dated l
 
 | Issue | Impact | Tracking |
 |-------|--------|----------|
-| Set element tombstones may hide a row | Narrow correctness edge case | [#493](https://github.com/pmcfadin/cqlite/issues/493) |
+| `SET<FROZEN<UDT>>` fails to deserialize in the Python bindings | Python only; CLI/Rust unaffected | [#804](https://github.com/pmcfadin/cqlite/issues/804) |
+| Concurrent queries on one `Database` can race (`Column not found`) | Use one handle per thread | [#805](https://github.com/pmcfadin/cqlite/issues/805) |
 | Wide partitions written by CQLite scan linearly (`promoted_index_length = 0`) | Perf on 10k+ rows/partition | [#751](https://github.com/pmcfadin/cqlite/issues/751), [#752](https://github.com/pmcfadin/cqlite/issues/752) |
 | BTI (`da`) SSTables are rejected, not read | Use BIG format or convert first | [#660](https://github.com/pmcfadin/cqlite/issues/660) |
 | Pre-5.0 formats (`md`/`mc`/`la`/`ma`) unsupported | By design — Cassandra 5.0 only | [Limitations](https://pmcfadin.github.io/cqlite/user-docs/limitations/) |
