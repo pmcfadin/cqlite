@@ -1,5 +1,14 @@
 name: "CI: Cassandra sstableloader Validation"
 
+# DUAL-WORKFLOW DECISION (issue #728):
+# This workflow and e2e-readback.yml are BOTH intentionally kept.
+# They cover two distinct production ingest paths:
+#   - cassandra-validation.yml (this file): validates the `sstableloader` ingest path
+#   - e2e-readback.yml:                     validates the `nodetool refresh` ingest path
+# On writer-path PRs, both workflows run (~30 min each). This overlap is accepted
+# deliberately — merging them would obscure ingest-path-specific regressions.
+# See issue #728 for the full decision record.
+
 on:
   pull_request:
     branches: [main, develop]
@@ -11,9 +20,9 @@ on:
       - 'cqlite-core/tests/sstableloader_integration.rs'
       - '.github/workflows/cassandra-validation.yml'
       # Note: cqlite-core/src/parser/** and schema/** are included here to gate
-      # serialization-adjacent code changes. Issue #664 adds e2e-readback.yml which
-      # also triggers on these paths; both workflows serve different validation roles
-      # (sstableloader vs readback), so some overlap is intentional.
+      # serialization-adjacent code changes. e2e-readback.yml also triggers on these
+      # paths; both workflows serve different validation roles (sstableloader vs
+      # nodetool refresh), so some overlap is intentional — see issue #728.
   push:
     branches: [main]
   workflow_dispatch:
@@ -37,6 +46,11 @@ env:
 permissions:
   contents: read
   pull-requests: write
+
+# Cancel any in-progress PR run when a new push arrives; let push/scheduled runs complete.
+concurrency:
+  group: cassandra-validation-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # This workflow validates that SSTables written by CQLite can be imported
 # into a real Cassandra 5.0 cluster using the current loader-based harness
