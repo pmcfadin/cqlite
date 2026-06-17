@@ -339,6 +339,22 @@ pub struct WriteEngine {
     merge_policy: Option<Box<dyn MergePolicy>>,
     /// Cumulative compaction statistics (M5.2, Issue #474)
     cumulative_stats: CompactionStats,
+    /// Cumulative count of rows written since the engine was opened (Issue #486).
+    ///
+    /// Incremented for each row that enters the memtable via `write()` or
+    /// `write_async()`.  Unlike `memtable.row_count()`, this counter is NOT
+    /// reset when the memtable is flushed, so it reflects the total number of
+    /// rows written across the lifetime of the session.
+    rows_written: u64,
+    /// Number of L0 SSTable files successfully flushed since the engine was
+    /// opened (Issue #486).
+    ///
+    /// Incremented once per successful `flush_internal_async()` call that
+    /// produces a non-empty SSTable.  This is an in-process counter; it is
+    /// reset to zero when the engine is re-opened (a directory scan could
+    /// also be used for persistence, but the counter is more robust and avoids
+    /// scanning the filesystem on every stats query).
+    l0_count: u64,
     /// Advisory exclusive lock on `write_dir` (`.lock` file).
     ///
     /// Held for the lifetime of the `WriteEngine`; released on `close()` or
@@ -499,6 +515,8 @@ impl WriteEngine {
             active_merge: None,
             merge_policy: None,
             cumulative_stats: CompactionStats::default(),
+            rows_written: 0,
+            l0_count: 0,
             dir_lock,
         })
     }
@@ -557,7 +575,11 @@ impl WriteEngine {
         // 3. Insert into memtable
         self.memtable.insert_with_key(decorated_key, mutation)?;
 
-        // 4. Check if memtable should be flushed (only in non-async context)
+        // 4. Increment the cumulative rows-written counter (Issue #486).
+        //    Done after a successful insert so that failed writes are not counted.
+        self.rows_written += 1;
+
+        // 5. Check if memtable should be flushed (only in non-async context)
         if self
             .memtable
             .should_flush(self.config.memtable_flush_threshold)
@@ -628,7 +650,11 @@ impl WriteEngine {
         // 3. Insert into memtable
         self.memtable.insert_with_key(decorated_key, mutation)?;
 
-        // 4. Check if memtable should be flushed
+        // 4. Increment the cumulative rows-written counter (Issue #486).
+        //    Done after a successful insert so that failed writes are not counted.
+        self.rows_written += 1;
+
+        // 5. Check if memtable should be flushed
         if self
             .memtable
             .should_flush(self.config.memtable_flush_threshold)
@@ -802,6 +828,9 @@ impl WriteEngine {
         // Clear memtable
         self.memtable.clear();
 
+        // Increment the L0 SSTable counter (Issue #486).
+        self.l0_count += 1;
+
         // Increment generation for next flush
         self.generation += 1;
 
@@ -889,6 +918,31 @@ impl WriteEngine {
     /// Get the current generation number
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// Return the cumulative number of rows written since the engine was opened
+    /// (Issue #486).
+    ///
+    /// This counter is incremented for every row that is successfully inserted
+    /// into the memtable and is NOT reset on flush.  It therefore represents
+    /// the total write throughput for the current session.
+    ///
+    /// Note: This counter is in-process only and resets to zero when the engine
+    /// is re-opened.  WAL replay rows (recovered from a previous crash) are NOT
+    /// counted; only rows written through `write()` / `write_async()` during
+    /// the current session are counted.
+    pub fn total_written(&self) -> u64 {
+        self.rows_written
+    }
+
+    /// Return the number of L0 SSTables successfully flushed since the engine
+    /// was opened (Issue #486).
+    ///
+    /// Incremented once per successful `flush()` call that produces a non-empty
+    /// SSTable.  This is an in-process counter and resets to zero when the
+    /// engine is re-opened.
+    pub fn l0_count(&self) -> u64 {
+        self.l0_count
     }
 
     /// Parse a CQL statement to a Mutation
@@ -3787,6 +3841,157 @@ mod tests {
             engine2.is_ok(),
             "WriteEngine must acquire lock after the previous engine was dropped: {:?}",
             engine2.err()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #486 — total_written and l0_count non-placeholder behaviour
+    // -----------------------------------------------------------------------
+
+    /// After writing N rows and flushing, `total_written()` == N even though
+    /// `memtable_row_count()` has been reset to 0.
+    #[tokio::test]
+    async fn test_total_written_survives_flush() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write 5 rows to the first "batch"
+        for i in 0..5 {
+            engine
+                .write(create_test_mutation(
+                    i,
+                    &format!("User{i}"),
+                    1_000_000 + i as i64,
+                ))
+                .unwrap();
+        }
+        assert_eq!(engine.total_written(), 5);
+        assert_eq!(engine.memtable_row_count(), 5);
+
+        // Flush — memtable resets but total_written must NOT
+        engine.flush().await.unwrap();
+        assert_eq!(
+            engine.memtable_row_count(),
+            0,
+            "memtable should be empty after flush"
+        );
+        assert_eq!(
+            engine.total_written(),
+            5,
+            "total_written must NOT reset after flush"
+        );
+
+        // Write 3 more rows in a second batch
+        for i in 10..13 {
+            engine
+                .write(create_test_mutation(
+                    i,
+                    &format!("User{i}"),
+                    2_000_000 + i as i64,
+                ))
+                .unwrap();
+        }
+        assert_eq!(
+            engine.total_written(),
+            8,
+            "total_written must accumulate across flushes"
+        );
+        assert_eq!(engine.memtable_row_count(), 3);
+
+        // Flush again
+        engine.flush().await.unwrap();
+        assert_eq!(engine.memtable_row_count(), 0);
+        assert_eq!(
+            engine.total_written(),
+            8,
+            "total_written must still be 8 after second flush"
+        );
+    }
+
+    /// `l0_count()` reflects the number of successful flush operations (not zero).
+    #[tokio::test]
+    async fn test_l0_count_increments_on_flush() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        assert_eq!(engine.l0_count(), 0, "l0_count should start at 0");
+
+        // Flushing an empty memtable produces no SSTable — count stays 0
+        engine.flush().await.unwrap();
+        assert_eq!(
+            engine.l0_count(),
+            0,
+            "empty flush must not increment l0_count"
+        );
+
+        // Write one row and flush — count must become 1
+        engine
+            .write(create_test_mutation(1, "Alice", 1_000_000))
+            .unwrap();
+        engine.flush().await.unwrap();
+        assert_eq!(
+            engine.l0_count(),
+            1,
+            "l0_count must be 1 after first non-empty flush"
+        );
+
+        // Write and flush again — count must become 2
+        engine
+            .write(create_test_mutation(2, "Bob", 2_000_000))
+            .unwrap();
+        engine.flush().await.unwrap();
+        assert_eq!(
+            engine.l0_count(),
+            2,
+            "l0_count must be 2 after second non-empty flush"
+        );
+    }
+
+    /// Verify that `total_written` != `memtable_row_count` after a flush —
+    /// the scenario that proves the placeholder is replaced.
+    #[tokio::test]
+    async fn test_total_written_differs_from_memtable_after_flush() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let config = WriteEngineConfig::new(
+            temp_dir.path().join("data"),
+            temp_dir.path().join("wal"),
+            schema,
+        );
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Write 7 rows and flush
+        for i in 0..7 {
+            engine
+                .write(create_test_mutation(
+                    i,
+                    &format!("User{i}"),
+                    1_000_000 + i as i64,
+                ))
+                .unwrap();
+        }
+        engine.flush().await.unwrap();
+
+        // Post-flush: memtable_row_count is 0 but total_written is 7
+        assert_eq!(engine.memtable_row_count(), 0);
+        assert_eq!(engine.total_written(), 7);
+        assert_ne!(
+            engine.total_written() as usize,
+            engine.memtable_row_count(),
+            "total_written must differ from memtable_row_count after flush — \
+             proves neither is a placeholder"
         );
     }
 }

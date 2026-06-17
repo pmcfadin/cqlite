@@ -410,3 +410,89 @@ def test_close_flushes_memtable(tmp_path, write_schema):
         f"Expected at least one flushed SSTable (*-Data.db) under {wd_data}, "
         f"but found: {list(wd_data.rglob('*'))}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Issue #486 — l0_count and total_written non-placeholder behaviour
+# ---------------------------------------------------------------------------
+
+
+def test_l0_count_increments_after_flush(writable_db):
+    """l0_count increases after flush_run(), proving it is not a hardcoded zero."""
+    stats_before = writable_db.write_stats
+    assert stats_before.l0_count == 0, "l0_count should start at 0"
+
+    writable_db.execute(
+        "INSERT INTO write_test.items (id, name, value) VALUES (600, 'l0_test', 1)"
+    )
+    writable_db.flush_run()
+
+    stats_after = writable_db.write_stats
+    assert stats_after.l0_count == 1, (
+        f"l0_count must be 1 after one flush, got {stats_after.l0_count}"
+    )
+
+    # A second insert + flush must push l0_count to 2
+    writable_db.execute(
+        "INSERT INTO write_test.items (id, name, value) VALUES (601, 'l0_test2', 2)"
+    )
+    writable_db.flush_run()
+
+    stats_final = writable_db.write_stats
+    assert stats_final.l0_count == 2, (
+        f"l0_count must be 2 after two flushes, got {stats_final.l0_count}"
+    )
+
+
+def test_total_written_survives_flush(writable_db):
+    """total_written > memtable_rows after a flush — proves it is not a proxy."""
+    # Write 3 rows
+    for i in range(3):
+        writable_db.execute(
+            f"INSERT INTO write_test.items (id, name, value) VALUES ({700 + i}, 'tw{i}', {i})"
+        )
+
+    stats_before_flush = writable_db.write_stats
+    assert stats_before_flush.total_written >= 3, (
+        f"total_written should be >= 3 before flush, got {stats_before_flush.total_written}"
+    )
+
+    # Flush — memtable_rows drops to 0 but total_written must remain >= 3
+    writable_db.flush_run()
+
+    stats_after_flush = writable_db.write_stats
+    assert stats_after_flush.memtable_rows == 0, "memtable_rows should be 0 after flush"
+    assert stats_after_flush.total_written >= 3, (
+        f"total_written must survive flush, got {stats_after_flush.total_written}"
+    )
+    assert stats_after_flush.total_written > stats_after_flush.memtable_rows, (
+        "total_written must exceed memtable_rows after flush — "
+        f"total_written={stats_after_flush.total_written}, "
+        f"memtable_rows={stats_after_flush.memtable_rows}"
+    )
+
+
+def test_total_written_accumulates_across_flushes(writable_db):
+    """total_written accumulates across multiple flush cycles."""
+    # First batch: 2 rows + flush
+    for i in range(2):
+        writable_db.execute(
+            f"INSERT INTO write_test.items (id, name, value) VALUES ({800 + i}, 'acc{i}', {i})"
+        )
+    writable_db.flush_run()
+    stats_mid = writable_db.write_stats
+    assert stats_mid.total_written >= 2
+
+    # Second batch: 3 more rows + flush
+    for i in range(3):
+        writable_db.execute(
+            f"INSERT INTO write_test.items (id, name, value) VALUES ({810 + i}, 'acc2_{i}', {i})"
+        )
+    writable_db.flush_run()
+    stats_final = writable_db.write_stats
+    assert stats_final.total_written >= 5, (
+        f"total_written must accumulate across flushes, got {stats_final.total_written}"
+    )
+    assert stats_final.l0_count >= 2, (
+        f"l0_count must be >= 2 after two flushes, got {stats_final.l0_count}"
+    )
