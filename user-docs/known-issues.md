@@ -19,17 +19,24 @@ it wrong.
   [**Open an issue**](https://github.com/pmcfadin/cqlite/issues/new/choose) — that is
   the single most useful thing you can do for the project.
 
-_Last reviewed: 2026-06-16 (v0.11.0)._
+_Last reviewed: 2026-06-17 (v0.11.0)._
 
-## Correctness
+## Python bindings
 
-### Set element tombstones may hide a row ([#493](https://github.com/pmcfadin/cqlite/issues/493))
+### `SET<FROZEN<UDT>>` fails to deserialize ([#804](https://github.com/pmcfadin/cqlite/issues/804))
 
-Individual element deletions inside a `set<T>` are not fully surfaced. A row that
-contains **only** set-element tombstones may read as empty rather than as present.
-This is a narrow edge case — full sets, set replacement, and partition/row/range
-tombstones all work correctly. Tracked in
-[#493](https://github.com/pmcfadin/cqlite/issues/493).
+Querying a table with a `set<frozen<UDT>>` column through the Python bindings raises
+a `TypeError`: UDT values are decoded as dicts and the binding tries to place them in
+a `frozenset`, but dicts are unhashable. The CLI and Rust reads of the same table are
+unaffected. Tracked in [#804](https://github.com/pmcfadin/cqlite/issues/804).
+
+### Concurrent queries can race ([#805](https://github.com/pmcfadin/cqlite/issues/805))
+
+Multiple threads issuing queries against the **same** `Database` object can
+intermittently fail with `Column not found: id`. A warm-up query reduces but does not
+fully eliminate the race. Workaround: open one `Database` per thread, or serialize
+queries through a single thread. Tracked in
+[#805](https://github.com/pmcfadin/cqlite/issues/805).
 
 ## Performance
 
@@ -55,30 +62,6 @@ rejected with a clear error rather than misread. This is by design until the
 dedicated BTI read path lands — see
 [Limitations](/cqlite/user-docs/limitations/) and roadmap item
 [#660](https://github.com/pmcfadin/cqlite/issues/660).
-
-## Contributor / CI
-
-These do not affect users of the published packages, but matter if you build and test
-from source.
-
-### Python test suite silently skips tests ([#773](https://github.com/pmcfadin/cqlite/issues/773))
-
-A path-resolution bug in the Python test harness (`CQLITE_DATASETS_ROOT`) can cause
-~120 tests to skip silently and mask real failures. If you run `pytest` against the
-Python bindings, set the dataset root explicitly:
-
-```bash
-export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
-bash test-data/scripts/fetch-datasets.sh
-```
-
-Tracked in [#773](https://github.com/pmcfadin/cqlite/issues/773).
-
-### Intermittent CI flake ([#774](https://github.com/pmcfadin/cqlite/issues/774))
-
-`test_row_ttl_uses_row_ttl_cell_flags` byte-scans flag bytes and fails
-intermittently in CI. A re-run clears it; it does not indicate a real regression.
-Tracked in [#774](https://github.com/pmcfadin/cqlite/issues/774).
 
 ## Reporting something new
 
