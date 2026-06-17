@@ -503,9 +503,6 @@ class TestCLIParityBasic:
 class TestCLIParityCollections:
     """CLI parity tests for test_collections keyspace."""
 
-    # Tables with known product bugs that prevent parity testing
-    _UDT_SET_XFAIL_TABLES = {"collections_with_udts"}
-
     @pytest.mark.parametrize(
         "table",
         [
@@ -521,14 +518,6 @@ class TestCLIParityCollections:
     )
     def test_collection_table_parity(self, db_collections, cli_binary, table: str):
         """Verify Python and CLI produce identical output for collection tables."""
-        if table in self._UDT_SET_XFAIL_TABLES:
-            pytest.xfail(
-                reason=(
-                    "SET<FROZEN<UDT>> deserialization: Python binding wraps UDT values "
-                    "in frozenset but dict is unhashable, causing TypeError. "
-                    "Product bug — see #804 (UDT-in-SET unhashable type)."
-                )
-            )
         db, schema_file = db_collections
         query = f"SELECT * FROM test_collections.{table}"
 

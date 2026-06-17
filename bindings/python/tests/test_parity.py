@@ -511,14 +511,6 @@ class TestRowCountParity:
     )
     def test_collections_row_count(self, db_collections, table):
         """Verify row count parity for test_collections tables."""
-        if table == "collections_with_udts":
-            pytest.xfail(
-                reason=(
-                    "SET<FROZEN<UDT>> deserialization: Python binding wraps UDT values "
-                    "in frozenset but dict is unhashable, causing TypeError on execute(). "
-                    "Product bug — see #804 (UDT-in-SET unhashable type)."
-                )
-            )
         jsonl_file = find_jsonl_file("test_collections", table)
         if jsonl_file is None:
             pytest.skip(f"JSONL reference not found for test_collections.{table}")
@@ -838,14 +830,7 @@ class TestE2ESummary:
 
     # Tables with known issues that are expected to fail (XFail)
     # Update this list as core issues are resolved
-    KNOWN_ISSUES = {
-        # SET<FROZEN<UDT>>: Python binding wraps UDT values in frozenset but
-        # dict is unhashable, causing TypeError on execute().
-        # Product bug — see #804 (UDT-in-SET unhashable type).
-        ("test_collections", "collections_with_udts"): (
-            "SET<FROZEN<UDT>> unhashable dict: Python binding TypeError on execute()"
-        ),
-    }
+    KNOWN_ISSUES: dict = {}
 
     def test_e2e_all_33_tables(self, datasets_root):
         """E2E validation that all 33 tables are queryable.
