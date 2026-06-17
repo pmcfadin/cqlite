@@ -11677,6 +11677,94 @@ cqlite \
 
 If you see three JSON rows, you are ready to go. If you see errors, check [Troubleshooting](/cqlite/user-docs/troubleshooting/).
 
+# Known Issues
+
+> Active bugs and sharp edges in the current CQLite release, with issue links — what to watch out for today.
+
+# Known Issues
+
+[Section titled “Known Issues”](#known-issues)
+
+This page tracks **active bugs and sharp edges** in the current release (`v0.11.0`). It is deliberately short and honest: if something here bites you, you are not doing it wrong.
+
+* For things CQLite **does not do by design or yet**, see [Limitations](/cqlite/user-docs/limitations/).
+* For **planned work and milestones**, see [Roadmap](/cqlite/user-docs/roadmap/).
+* Hit something not listed here? [**Open an issue**](https://github.com/pmcfadin/cqlite/issues/new/choose) — that is the single most useful thing you can do for the project.
+
+*Last reviewed: 2026-06-16 (v0.11.0).*
+
+## Correctness
+
+[Section titled “Correctness”](#correctness)
+
+### Set element tombstones may hide a row ([#493](https://github.com/pmcfadin/cqlite/issues/493))
+
+[Section titled “Set element tombstones may hide a row (#493)”](#set-element-tombstones-may-hide-a-row-493)
+
+Individual element deletions inside a `set<T>` are not fully surfaced. A row that contains **only** set-element tombstones may read as empty rather than as present. This is a narrow edge case — full sets, set replacement, and partition/row/range tombstones all work correctly. Tracked in [#493](https://github.com/pmcfadin/cqlite/issues/493).
+
+## Performance
+
+[Section titled “Performance”](#performance)
+
+### Wide partitions scan linearly ([#751](https://github.com/pmcfadin/cqlite/issues/751), [#752](https://github.com/pmcfadin/cqlite/issues/752))
+
+[Section titled “Wide partitions scan linearly (#751, #752)”](#wide-partitions-scan-linearly-751-752)
+
+SSTables **written** by CQLite emit `promoted_index_length = 0`, so within-partition seeks fall back to a linear scan.
+
+* Narrow partitions (< 100 rows): no measurable impact.
+* Wide partitions (10 000+ rows): O(n) scan within the partition.
+
+Reading SSTables written by Cassandra is unaffected — this only concerns the CQLite write path. The promoted-index writer and BTI-based O(log n) seeks are on the [roadmap](/cqlite/user-docs/roadmap/) (epic [#751](https://github.com/pmcfadin/cqlite/issues/751)).
+
+## Format coverage
+
+[Section titled “Format coverage”](#format-coverage)
+
+### BTI (`da`) SSTables are rejected, not read
+
+[Section titled “BTI (da) SSTables are rejected, not read”](#bti-da-sstables-are-rejected-not-read)
+
+BTI/trie-index SSTables (`da-*-bti-*`, opt-in in Cassandra 5.0) are detected and rejected with a clear error rather than misread. This is by design until the dedicated BTI read path lands — see [Limitations](/cqlite/user-docs/limitations/) and roadmap item [#660](https://github.com/pmcfadin/cqlite/issues/660).
+
+## Contributor / CI
+
+[Section titled “Contributor / CI”](#contributor--ci)
+
+These do not affect users of the published packages, but matter if you build and test from source.
+
+### Python test suite silently skips tests ([#773](https://github.com/pmcfadin/cqlite/issues/773))
+
+[Section titled “Python test suite silently skips tests (#773)”](#python-test-suite-silently-skips-tests-773)
+
+A path-resolution bug in the Python test harness (`CQLITE_DATASETS_ROOT`) can cause \~120 tests to skip silently and mask real failures. If you run `pytest` against the Python bindings, set the dataset root explicitly:
+
+```bash
+export CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+bash test-data/scripts/fetch-datasets.sh
+```
+
+Tracked in [#773](https://github.com/pmcfadin/cqlite/issues/773).
+
+### Intermittent CI flake ([#774](https://github.com/pmcfadin/cqlite/issues/774))
+
+[Section titled “Intermittent CI flake (#774)”](#intermittent-ci-flake-774)
+
+`test_row_ttl_uses_row_ttl_cell_flags` byte-scans flag bytes and fails intermittently in CI. A re-run clears it; it does not indicate a real regression. Tracked in [#774](https://github.com/pmcfadin/cqlite/issues/774).
+
+## Reporting something new
+
+[Section titled “Reporting something new”](#reporting-something-new)
+
+If you hit a bug — wrong output, a panic, a parsing error, a performance cliff — please report it. Good reports include:
+
+1. The **Cassandra version** that wrote the SSTable and the file names (e.g. `nb-1-big-Data.db`).
+2. The **CQL schema** for the table.
+3. The exact **command or code** you ran and the output (or a hex dump for parsing issues).
+
+[**→ Open an issue**](https://github.com/pmcfadin/cqlite/issues/new/choose)
+
 # Limitations
 
 > What CQLite can and cannot read — honest about unsupported formats, index types, and known gaps.
@@ -11686,6 +11774,8 @@ If you see three JSON rows, you are ready to go. If you see errors, check [Troub
 [Section titled “Limitations — What CQLite Can and Cannot Read”](#limitations--what-cqlite-can-and-cannot-read)
 
 CQLite is production-ready for the common case: reading Cassandra 5.0 BIG-format SSTables with standard data types. This page is honest about what it cannot do yet, so you know before you depend on it.
+
+This page covers what CQLite **cannot do by design or yet**. For active bugs and sharp edges in the current release, see [Known Issues](/cqlite/user-docs/known-issues/); for what is coming next, see the [Roadmap](/cqlite/user-docs/roadmap/).
 
 For the exhaustive engineering detail, see [Appendix F: Known Limitations](/cqlite/sstable-format/appendix-f/) in the SSTable Format Guide.
 
@@ -11781,13 +11871,13 @@ The `IndexWriter` buffers all index entries in memory until `finish()` is called
 
 **Impact**: approximately 20 MB per 1 million partitions. For extremely large SSTables (hundreds of millions of partitions), split writes into multiple generation files.
 
-### Compaction not yet executable
+### Compaction is STCS-only
 
-[Section titled “Compaction not yet executable”](#compaction-not-yet-executable)
+[Section titled “Compaction is STCS-only”](#compaction-is-stcs-only)
 
-The k-way merge compaction API is defined (STCS policy, `maintenance_step()`, etc.) but execution requires M5.3 SSTable reader integration to convert entries back to mutations. `set_merge_policy()` currently returns an error.
+STCS (size-tiered) compaction executes via `set_merge_policy()` and `maintenance_step()`. Other strategies (LCS, TWCS, UCS) are not implemented — a non-STCS policy is not selectable.
 
-**Impact**: `maintenance_step()` currently performs flush operations only. Full compaction is deferred to M5.3.
+**Impact**: SSTables written and compacted by CQLite follow size-tiered behavior. This matches the most common Cassandra default and is sufficient for offline write/flush/compact workflows.
 
 ## Query engine limitations
 
@@ -11807,7 +11897,7 @@ The k-way merge compaction API is defined (STCS policy, `maintenance_step()`, et
 
 [Section titled “Collection tombstone gap (issue #493)”](#collection-tombstone-gap-issue-493)
 
-Set element tombstones — individual element deletions inside a `set<T>` — are not fully surfaced. Rows containing only element tombstones may appear empty rather than absent. This affects a narrow edge case and is tracked in [issue #493](https://github.com/pmcfadin/cqlite/issues/493) for v0.9.1.
+Set element tombstones — individual element deletions inside a `set<T>` — are not fully surfaced. Rows containing only element tombstones may appear empty rather than absent. This affects a narrow edge case and is tracked in [issue #493](https://github.com/pmcfadin/cqlite/issues/493).
 
 ## Operational constraints
 
@@ -11838,7 +11928,7 @@ or use Cassandra’s `sstabledump` to export to JSON and reimport.
 
 [Section titled “BTI format (trie index)”](#bti-format-trie-index)
 
-If your Cassandra cluster is configured with `selected_format: bti`, CQLite will still return correct results via sequential scan fallback. For large tables the scan may be slow; partition-key `WHERE` filters help bound the scan.
+If your Cassandra cluster is configured with `selected_format: bti`, CQLite detects the `da-*-bti-*` SSTables and rejects them with a clear error rather than misreading them. Convert them to the default BIG format first — run `nodetool upgradesstables` after switching `selected_format` back to `big`, or export with `sstabledump`. End-to-end BTI read support is on the [roadmap](/cqlite/user-docs/roadmap/) ([#660](https://github.com/pmcfadin/cqlite/issues/660)).
 
 ### Wide partitions
 
@@ -13056,6 +13146,87 @@ For a full list, see [Limitations](/cqlite/user-docs/limitations/).
 * [Python Bindings](/cqlite/user-docs/python/) — `cqlite-py` API
 * [Node.js Bindings](/cqlite/user-docs/nodejs/) — `@cqlite/node` API
 * [Troubleshooting](/cqlite/user-docs/troubleshooting/) — common issues and fixes
+
+# Roadmap
+
+> Where CQLite is headed — milestones, in-flight epics, and how to influence priorities.
+
+# Roadmap
+
+[Section titled “Roadmap”](#roadmap)
+
+CQLite is at **v0.11.0**. The read path, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction are production-ready. This page is what comes next.
+
+The roadmap is community-driven. The fastest way to move something up the list is to [**open or +1 an issue**](https://github.com/pmcfadin/cqlite/issues) describing your use case — and to [**star the repo**](https://github.com/pmcfadin/cqlite) so the project’s reach is visible.
+
+*Last reviewed: 2026-06-16 (v0.11.0).*
+
+## Milestones
+
+[Section titled “Milestones”](#milestones)
+
+| Milestone                                     | Status              |
+| --------------------------------------------- | ------------------- |
+| M1 — Core SSTable reading                     | ✅ Complete          |
+| M2 — CLI (one-shot + REPL)                    | ✅ Complete          |
+| M3 — Output writers (CSV, JSON, Parquet, CQL) | ✅ Complete          |
+| M4 — Python + Node.js bindings                | ✅ Complete          |
+| M5 — Write support + STCS compaction          | ✅ Complete (v0.9.0) |
+| M6 — WASM bindings for the browser            | 📋 Planned          |
+| M7 — Performance validation + **v1.0**        | 📋 Planned          |
+
+## In-flight epics
+
+[Section titled “In-flight epics”](#in-flight-epics)
+
+These are the active workstreams between v0.11.0 and v1.0. Each links to its GitHub epic with the child tasks.
+
+### Query engine completeness ([#756](https://github.com/pmcfadin/cqlite/issues/756))
+
+[Section titled “Query engine completeness (#756)”](#query-engine-completeness-756)
+
+`PER PARTITION LIMIT`, static-column tracking, clustering-order (`ASC`/`DESC`) extraction, and query-plan metadata (`indexes_used`). Closes the gap between CQLite’s `SELECT` support and CQL semantics.
+
+### `WRITETIME()` and `TTL()` in `SELECT` ([#689](https://github.com/pmcfadin/cqlite/issues/689))
+
+[Section titled “WRITETIME() and TTL() in SELECT (#689)”](#writetime-and-ttl-in-select-689)
+
+Surface per-cell write timestamps and TTLs through the parser, executor, output formats, and bindings — a common need for debugging and migration workflows.
+
+### Writer format fidelity ([#762](https://github.com/pmcfadin/cqlite/issues/762))
+
+[Section titled “Writer format fidelity (#762)”](#writer-format-fidelity-762)
+
+`> 64`-column serialization headers, explicit deletion-time semantics, `DURATION` comparator parsing, and phase 1 of BTI **index writing** for SSTables CQLite produces.
+
+### Wide-partition & memory performance ([#751](https://github.com/pmcfadin/cqlite/issues/751))
+
+[Section titled “Wide-partition & memory performance (#751)”](#wide-partition--memory-performance-751)
+
+Promoted-index writing for wide partitions, streamed index/merge writers to drop the in-memory buffer, and BTI-payload Data.db offsets for O(log n) partition seeks. This also closes the wide-partition scan listed in [Known Issues](/cqlite/user-docs/known-issues/).
+
+### BTI (`da`) end-to-end read support ([#660](https://github.com/pmcfadin/cqlite/issues/660))
+
+[Section titled “BTI (da) end-to-end read support (#660)”](#bti-da-end-to-end-read-support-660)
+
+A dedicated read path for trie-indexed SSTables — full trie walk, `ByteComparable` decode, and Data.db chaining — so `da`-format files are read instead of rejected. Fixtures and `sstabledump` goldens already ship in the test corpus.
+
+### Delta-scan envelope for CDC-style Parquet ([#696](https://github.com/pmcfadin/cqlite/issues/696))
+
+[Section titled “Delta-scan envelope for CDC-style Parquet (#696)”](#delta-scan-envelope-for-cdc-style-parquet-696)
+
+A streaming `scan_delta` API and `cqlite delta-export` subcommand that emit upserts, tombstones, and per-cell metadata as Parquet for change-data-capture and reconciliation pipelines.
+
+## Influencing the roadmap
+
+[Section titled “Influencing the roadmap”](#influencing-the-roadmap)
+
+Priorities follow real-world use. If you need something:
+
+1. **Search** [existing issues](https://github.com/pmcfadin/cqlite/issues) and add a 👍 or a comment with your use case.
+2. **File** a [new issue](https://github.com/pmcfadin/cqlite/issues/new/choose) if it is not tracked.
+3. **Star** [the repo](https://github.com/pmcfadin/cqlite) — visibility directly affects how much time goes into the project.
+4. **Contribute** — see [CONTRIBUTING](https://github.com/pmcfadin/cqlite/blob/main/CONTRIBUTING.md) and look for `good-first-issue` labels.
 
 # Troubleshooting
 
