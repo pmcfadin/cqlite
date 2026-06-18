@@ -25,7 +25,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 use crate::platform::Platform;
-use crate::{types::TableId, Config, Result, RowKey, Value};
+use crate::{
+    types::{CellWriteMetadata, TableId},
+    Config, Result, RowKey, Value,
+};
 
 /// Main storage engine that coordinates all storage components
 ///
@@ -213,6 +216,29 @@ impl StorageEngine {
         // Scan SSTables directly
         self.sstables
             .scan(table_id, start_key, end_key, limit, schema)
+            .await
+    }
+
+    /// Scan a table and return per-cell write metadata alongside row values.
+    ///
+    /// Delegates to [`SSTableManager::scan_with_cell_metadata`].  Used when
+    /// `ProjectionFlags::include_cell_metadata` is set (issue #693).
+    pub async fn scan_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<
+        Vec<(
+            RowKey,
+            Value,
+            std::collections::HashMap<String, CellWriteMetadata>,
+        )>,
+    > {
+        self.sstables
+            .scan_with_cell_metadata(table_id, start_key, end_key, limit, schema)
             .await
     }
 

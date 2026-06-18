@@ -12,8 +12,8 @@
 
 use super::{
     result::{
-        cql_type_to_data_type, ColumnInfo, QueryMetadata, QueryResult, QueryResultIterator,
-        QueryRow, StreamingConfig,
+        cql_type_to_data_type, ColumnInfo, ProjectionFlags, QueryMetadata, QueryResult,
+        QueryResultIterator, QueryRow, StreamingConfig,
     },
     select_ast::*,
     select_optimizer::{AggregationPlan, ExecutionStep, OptimizedQueryPlan, SSTablePredicate},
@@ -29,13 +29,56 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+/// Clock abstraction for TTL "now" injection.
+///
+/// This trait exists solely so that tests can inject a deterministic timestamp
+/// instead of reading `SystemTime`. The only production implementation is
+/// `SystemClock`; tests use `FixedClock`.
+pub trait NowSeconds: Send + Sync {
+    /// Return the current time as seconds since Unix epoch.
+    fn now_seconds(&self) -> i64;
+}
+
+/// Production clock: reads from the system wall clock.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemClock;
+
+impl NowSeconds for SystemClock {
+    fn now_seconds(&self) -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs() as i64
+    }
+}
+
+/// Test clock: always returns a fixed value.
+#[derive(Debug, Clone, Copy)]
+pub struct FixedClock(pub i64);
+
+impl NowSeconds for FixedClock {
+    fn now_seconds(&self) -> i64 {
+        self.0
+    }
+}
+
 /// SELECT query executor for SSTable-based storage
-#[derive(Debug)]
 pub struct SelectExecutor {
     /// Schema manager for metadata
     _schema: Arc<SchemaManager>,
     /// Storage engine for SSTable access
     storage: Arc<StorageEngine>,
+    /// Clock used for TTL "remaining seconds" computation (injectable for tests).
+    clock: Arc<dyn NowSeconds>,
+}
+
+impl std::fmt::Debug for SelectExecutor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SelectExecutor")
+            .field("_schema", &self._schema)
+            .field("storage", &self.storage)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Query execution context
@@ -50,6 +93,12 @@ struct ExecutionContext {
     pub columns: Vec<ColumnInfo>,
     /// Row count processed so far
     pub rows_processed: u64,
+    /// Projection flags controlling opt-in metadata collection (Issue #692).
+    ///
+    /// Set to `include_cell_metadata = true` when any `WRITETIME` or `TTL`
+    /// select item is detected during planning so the reader can thread
+    /// per-cell write metadata.
+    pub projection_flags: ProjectionFlags,
 }
 
 /// Aggregation state for GROUP BY operations
@@ -537,6 +586,67 @@ fn const_arithmetic(op: &ArithmeticOperator, left: Value, right: Value) -> Resul
     }
 }
 
+/// Return `true` when the select clause contains at least one `WRITETIME` or
+/// `TTL` call — used during planning to set `ProjectionFlags::include_cell_metadata`.
+fn select_has_writetime_ttl(statement: &SelectStatement) -> bool {
+    let exprs = match &statement.select_clause {
+        SelectClause::All => return false,
+        SelectClause::Columns(e) | SelectClause::Distinct(e) => e,
+    };
+    exprs
+        .iter()
+        .any(|e| matches!(e, SelectExpression::WriteTimeTtl(_)))
+}
+
+/// Compute the Cassandra-convention output column name for a `WriteTimeTtlCall`.
+///
+/// - No alias: `writetime(col)` or `ttl(col)` (lowercase, matching Cassandra).
+/// - Explicit alias: the alias string, exactly as parsed.
+fn writetime_ttl_column_name(call: &WriteTimeTtlCall) -> String {
+    if let Some(alias) = &call.alias {
+        return alias.clone();
+    }
+    match call.function {
+        WriteTimeTtlFunction::WriteTime => format!("writetime({})", call.column),
+        WriteTimeTtlFunction::Ttl => format!("ttl({})", call.column),
+    }
+}
+
+/// Evaluate a `WRITETIME(col)` or `TTL(col)` call against a single `QueryRow`.
+///
+/// `now_secs` is the current epoch-second used only for TTL subtraction. It
+/// **must** be injected by the caller rather than read here so that unit tests
+/// can produce deterministic results.
+///
+/// Return values:
+/// - `WRITETIME(col)` → `Value::BigInt(micros)` when metadata exists; `Value::Null` otherwise.
+/// - `TTL(col)` → `Value::Integer(remaining_secs)` when the cell has an unexpired TTL;
+///   `Value::Null` when no expiration exists **or** the cell has already expired.
+fn evaluate_writetime_ttl(call: &WriteTimeTtlCall, row: &QueryRow, now_secs: i64) -> Value {
+    let meta = match row.get_cell_metadata(&call.column) {
+        Some(m) => m,
+        None => return Value::Null,
+    };
+
+    match call.function {
+        WriteTimeTtlFunction::WriteTime => Value::BigInt(meta.write_timestamp_micros),
+        WriteTimeTtlFunction::Ttl => match &meta.expiration {
+            None => Value::Null,
+            Some(exp) => {
+                let remaining = exp.expires_at_seconds - now_secs;
+                if remaining <= 0 {
+                    // Cell has already expired — Cassandra returns NULL.
+                    Value::Null
+                } else {
+                    // Safe cast: remaining is in (0, i32::MAX] range for any
+                    // realistic TTL (Cassandra caps TTL at 630_720_000 seconds).
+                    Value::Integer(remaining.min(i32::MAX as i64) as i32)
+                }
+            }
+        },
+    }
+}
+
 /// Translate a CQL LIKE pattern (`%`, `_`) into an anchored regex.
 fn like_pattern_to_regex(pattern: &str) -> String {
     let mut out = String::with_capacity(pattern.len() + 4);
@@ -566,11 +676,26 @@ fn parse_cql_type_str(type_str: &str) -> Option<CqlType> {
 }
 
 impl SelectExecutor {
-    /// Create a new SELECT executor
+    /// Create a new SELECT executor with a system (wall-clock) now source.
     pub fn new(schema: Arc<SchemaManager>, storage: Arc<StorageEngine>) -> Self {
         Self {
             _schema: schema,
             storage,
+            clock: Arc::new(SystemClock),
+        }
+    }
+
+    /// Create a SELECT executor with a custom clock (for deterministic tests).
+    #[cfg(test)]
+    pub fn with_clock(
+        schema: Arc<SchemaManager>,
+        storage: Arc<StorageEngine>,
+        clock: Arc<dyn NowSeconds>,
+    ) -> Self {
+        Self {
+            _schema: schema,
+            storage,
+            clock,
         }
     }
 
@@ -583,10 +708,23 @@ impl SelectExecutor {
             TableId::new("_dummy_")
         };
 
+        // Issue #692: detect whether any WRITETIME/TTL select items are present
+        // during planning and set the opt-in flag so the reader threads per-cell
+        // metadata. This is the "planning" half of the executor wiring; the
+        // "evaluation" half lives in `evaluate_select_expression`.
+        let projection_flags = ProjectionFlags {
+            include_cell_metadata: select_has_writetime_ttl(&plan.statement),
+        };
+        log::debug!(
+            "Query plan: include_cell_metadata={}",
+            projection_flags.include_cell_metadata
+        );
+
         let mut context = ExecutionContext {
             table_id,
             columns: self.get_result_columns(&plan.statement).await?,
             rows_processed: 0,
+            projection_flags,
         };
 
         // Handle queries without FROM clause (like SELECT 1)
@@ -975,9 +1113,10 @@ impl SelectExecutor {
         const MAX_RESULTS: usize = 1_000_000;
 
         log::info!(
-            "Executing SSTableScan: table=\"{}\", predicates={:?}",
+            "Executing SSTableScan: table=\"{}\", predicates={:?}, include_cell_metadata={}",
             table,
-            predicates
+            predicates,
+            context.projection_flags.include_cell_metadata,
         );
 
         let (keyspace, table_name) = parse_table_id(table);
@@ -1000,30 +1139,67 @@ impl SelectExecutor {
             ),
         }
 
-        let scan_results = self
-            .storage
-            .scan(table, None, None, None, schema_opt.as_ref())
-            .await?;
-
-        log::info!("Scan returned {} rows", scan_results.len());
-
+        // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
+        // metadata-carrying scan so per-cell timestamps reach the QueryRow.
         let mut results = Vec::new();
-        for (key, value) in scan_results {
-            context.rows_processed += 1;
+        if context.projection_flags.include_cell_metadata {
+            let scan_results = self
+                .storage
+                .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
+                .await?;
 
-            // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
-            let Some(row) = build_row_from_scan(key, value, projection, schema_opt.as_ref()) else {
-                continue;
-            };
+            log::info!("Scan (with metadata) returned {} rows", scan_results.len());
 
-            if evaluate_predicates(&row, predicates)? {
-                results.push(row);
+            for (key, value, cell_meta) in scan_results {
+                context.rows_processed += 1;
+
+                let Some(mut row) =
+                    build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                else {
+                    continue;
+                };
+
+                // Attach per-cell metadata so evaluate_writetime_ttl can read it.
+                if !cell_meta.is_empty() {
+                    row.set_cell_metadata(cell_meta);
+                }
+
+                if evaluate_predicates(&row, predicates)? {
+                    results.push(row);
+                }
+
+                if results.len() > MAX_RESULTS {
+                    return Err(Error::query_execution(
+                        "Result set too large, consider adding LIMIT".to_string(),
+                    ));
+                }
             }
+        } else {
+            let scan_results = self
+                .storage
+                .scan(table, None, None, None, schema_opt.as_ref())
+                .await?;
 
-            if results.len() > MAX_RESULTS {
-                return Err(Error::query_execution(
-                    "Result set too large, consider adding LIMIT".to_string(),
-                ));
+            log::info!("Scan returned {} rows", scan_results.len());
+
+            for (key, value) in scan_results {
+                context.rows_processed += 1;
+
+                // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
+                let Some(row) = build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                else {
+                    continue;
+                };
+
+                if evaluate_predicates(&row, predicates)? {
+                    results.push(row);
+                }
+
+                if results.len() > MAX_RESULTS {
+                    return Err(Error::query_execution(
+                        "Result set too large, consider adding LIMIT".to_string(),
+                    ));
+                }
             }
         }
 
@@ -1161,11 +1337,14 @@ impl SelectExecutor {
                     "Function expressions not yet implemented".to_string(),
                 ))
             }
-            // TODO (#692): Thread writetime/ttl cell metadata from SSTableReader
-            // up through the scan loop and return Value::BigInt(micros) for
-            // WRITETIME and Value::Int(seconds) for TTL. Until that work lands,
-            // we return NULL to avoid incorrect results.
-            SelectExpression::WriteTimeTtl(_) => Ok(Value::Null),
+            // Issue #692: evaluate WRITETIME(col) / TTL(col) against the per-cell
+            // metadata carrier threaded by the reader when `ProjectionFlags::include_cell_metadata`
+            // is set. Returns `Value::Null` when metadata is absent (e.g. no schema-aware
+            // read path or the column was a partition-key column with no cell header).
+            SelectExpression::WriteTimeTtl(call) => {
+                let now_secs = self.clock.now_seconds();
+                Ok(evaluate_writetime_ttl(call, row, now_secs))
+            }
         }
     }
 
@@ -1361,9 +1540,11 @@ impl SelectExecutor {
 
             for (i, expr) in columns.iter().enumerate() {
                 let value = self.evaluate_select_expression(expr, &row)?;
+                // Issue #692: WriteTimeTtl expressions use Cassandra-convention column names.
                 let column_name = match expr {
                     SelectExpression::Column(col_ref) => col_ref.column.clone(),
                     SelectExpression::Aliased(_, alias) => alias.clone(),
+                    SelectExpression::WriteTimeTtl(call) => writetime_ttl_column_name(call),
                     _ => format!("col_{i}"),
                 };
                 projected_values.insert(column_name, value);
@@ -1542,6 +1723,35 @@ impl SelectExecutor {
                 };
 
                 for (i, expr) in exprs.iter().enumerate() {
+                    // Issue #692: WriteTimeTtl expressions produce fixed-schema output
+                    // columns with Cassandra-convention names, independent of the table schema.
+                    if let SelectExpression::WriteTimeTtl(call) = expr {
+                        let col_name = writetime_ttl_column_name(call);
+                        let (data_type, cql_type) = match call.function {
+                            // WRITETIME returns bigint (µs since epoch)
+                            WriteTimeTtlFunction::WriteTime => {
+                                (crate::types::DataType::BigInt, Some(CqlType::BigInt))
+                            }
+                            // TTL returns int (remaining seconds)
+                            WriteTimeTtlFunction::Ttl => {
+                                (crate::types::DataType::Integer, Some(CqlType::Int))
+                            }
+                        };
+                        let mut col_info = ColumnInfo {
+                            name: col_name,
+                            data_type,
+                            nullable: true, // always nullable — absent cell → NULL
+                            position: i,
+                            table_name: None,
+                            cql_type: None,
+                        };
+                        if let Some(ct) = cql_type {
+                            col_info = col_info.with_cql_type(ct);
+                        }
+                        columns.push(col_info);
+                        continue;
+                    }
+
                     let column_name = match expr {
                         SelectExpression::Column(col_ref) => col_ref.column.clone(),
                         SelectExpression::Aliased(_, alias) => alias.clone(),
@@ -1602,9 +1812,30 @@ mod tests {
             .await
             .unwrap(),
         );
-        let _schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
 
-        SelectExecutor { _schema, storage }
+        SelectExecutor::new(schema, storage)
+    }
+
+    /// Create an executor with a fixed clock (deterministic TTL tests).
+    async fn create_test_executor_with_clock(now_secs: i64) -> SelectExecutor {
+        let temp_dir = TempDir::new().unwrap();
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.unwrap());
+        let storage = Arc::new(
+            StorageEngine::open(
+                temp_dir.path(),
+                &config,
+                platform.clone(),
+                #[cfg(feature = "state_machine")]
+                None,
+            )
+            .await
+            .unwrap(),
+        );
+        let schema = Arc::new(SchemaManager::new(temp_dir.path()).await.unwrap());
+
+        SelectExecutor::with_clock(schema, storage, Arc::new(FixedClock(now_secs)))
     }
 
     #[test]
@@ -1771,5 +2002,466 @@ mod tests {
         assert!(!in_slice(200), "upper bound is exclusive");
         assert!(!in_slice(1000), "rows past the slice are excluded");
         assert!(!in_slice(-1), "rows below the slice are excluded");
+    }
+
+    // =========================================================================
+    // Issue #692: WRITETIME() / TTL() executor wiring tests
+    // =========================================================================
+
+    use crate::query::result::{CellExpiration, CellWriteMetadata};
+
+    /// Helper: build a QueryRow with a given column value and optional cell metadata.
+    fn row_with_cell_meta(column: &str, value: Value, meta: Option<CellWriteMetadata>) -> QueryRow {
+        let mut row = QueryRow::new(RowKey::new(vec![1]));
+        row.set(column.to_string(), value);
+        if let Some(m) = meta {
+            row.insert_cell_metadata(column.to_string(), m);
+        }
+        row
+    }
+
+    // --- evaluate_writetime_ttl free-function tests ---
+
+    /// WRITETIME(col) returns Value::BigInt(micros) when metadata is present.
+    #[test]
+    fn test_writetime_returns_bigint_when_metadata_present() {
+        let write_ts = 1_700_000_000_000_000_i64;
+        let row = row_with_cell_meta(
+            "name",
+            Value::Text("Alice".to_string()),
+            Some(CellWriteMetadata {
+                write_timestamp_micros: write_ts,
+                expiration: None,
+            }),
+        );
+
+        let call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::WriteTime,
+            column: "name".to_string(),
+            alias: None,
+        };
+
+        let result = evaluate_writetime_ttl(&call, &row, 0 /* now unused for WRITETIME */);
+        assert_eq!(
+            result,
+            Value::BigInt(write_ts),
+            "WRITETIME(col) must return Value::BigInt(micros)"
+        );
+    }
+
+    /// WRITETIME(col) returns Value::Null when cell metadata is absent.
+    #[test]
+    fn test_writetime_returns_null_when_no_metadata() {
+        // Row has a value for the column but no cell metadata (e.g. partition-key column).
+        let row = row_with_cell_meta("id", Value::Integer(1), None);
+
+        let call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::WriteTime,
+            column: "id".to_string(),
+            alias: None,
+        };
+
+        let result = evaluate_writetime_ttl(&call, &row, 0);
+        assert_eq!(
+            result,
+            Value::Null,
+            "WRITETIME(col) must return NULL when no cell metadata is threaded"
+        );
+    }
+
+    /// TTL(col) returns Value::Integer(remaining) for a live TTL cell.
+    #[test]
+    fn test_ttl_returns_remaining_seconds_for_live_cell() {
+        // Cell was written at epoch 0, TTL = 3600s, expires at epoch 3600.
+        // Now = epoch 1000. Remaining = 2600s.
+        let now_secs: i64 = 1000;
+        let expires_at: i64 = 3600;
+        let row = row_with_cell_meta(
+            "score",
+            Value::Integer(42),
+            Some(CellWriteMetadata {
+                write_timestamp_micros: 0,
+                expiration: Some(CellExpiration {
+                    ttl_seconds: 3600,
+                    expires_at_seconds: expires_at,
+                }),
+            }),
+        );
+
+        let call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::Ttl,
+            column: "score".to_string(),
+            alias: None,
+        };
+
+        let result = evaluate_writetime_ttl(&call, &row, now_secs);
+        assert_eq!(
+            result,
+            Value::Integer(2600),
+            "TTL(col) must return remaining seconds for a live cell"
+        );
+    }
+
+    /// TTL(col) returns Value::Null when the cell has no expiration.
+    #[test]
+    fn test_ttl_returns_null_when_no_expiration() {
+        let row = row_with_cell_meta(
+            "name",
+            Value::Text("Bob".to_string()),
+            Some(CellWriteMetadata {
+                write_timestamp_micros: 100,
+                expiration: None, // no TTL written
+            }),
+        );
+
+        let call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::Ttl,
+            column: "name".to_string(),
+            alias: None,
+        };
+
+        let result = evaluate_writetime_ttl(&call, &row, 9999);
+        assert_eq!(
+            result,
+            Value::Null,
+            "TTL(col) must return NULL when the cell has no TTL"
+        );
+    }
+
+    /// TTL(col) returns Value::Null when the cell is expired.
+    #[test]
+    fn test_ttl_returns_null_for_expired_cell() {
+        // Cell expires at epoch 100; now is epoch 200 → expired.
+        let row = row_with_cell_meta(
+            "token",
+            Value::Text("abc".to_string()),
+            Some(CellWriteMetadata {
+                write_timestamp_micros: 0,
+                expiration: Some(CellExpiration {
+                    ttl_seconds: 100,
+                    expires_at_seconds: 100,
+                }),
+            }),
+        );
+
+        let call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::Ttl,
+            column: "token".to_string(),
+            alias: None,
+        };
+
+        // now_secs = 200 > expires_at = 100 → expired
+        let result = evaluate_writetime_ttl(&call, &row, 200);
+        assert_eq!(
+            result,
+            Value::Null,
+            "TTL(col) must return NULL when the cell is expired"
+        );
+    }
+
+    /// TTL(col) returns Value::Null when cell metadata is entirely absent.
+    #[test]
+    fn test_ttl_returns_null_when_no_metadata() {
+        let row = row_with_cell_meta("x", Value::Integer(7), None);
+
+        let call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::Ttl,
+            column: "x".to_string(),
+            alias: None,
+        };
+
+        let result = evaluate_writetime_ttl(&call, &row, 1000);
+        assert_eq!(result, Value::Null);
+    }
+
+    // --- column name convention tests ---
+
+    /// Cassandra convention: `writetime(col)` (no alias).
+    #[test]
+    fn test_writetime_ttl_column_name_no_alias() {
+        let wt_call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::WriteTime,
+            column: "name".to_string(),
+            alias: None,
+        };
+        assert_eq!(writetime_ttl_column_name(&wt_call), "writetime(name)");
+
+        let ttl_call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::Ttl,
+            column: "name".to_string(),
+            alias: None,
+        };
+        assert_eq!(writetime_ttl_column_name(&ttl_call), "ttl(name)");
+    }
+
+    /// Explicit alias overrides the Cassandra-convention name.
+    #[test]
+    fn test_writetime_ttl_column_name_with_alias() {
+        let call = WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::WriteTime,
+            column: "score".to_string(),
+            alias: Some("wt".to_string()),
+        };
+        assert_eq!(writetime_ttl_column_name(&call), "wt");
+    }
+
+    // --- planning flag tests ---
+
+    /// `select_has_writetime_ttl` returns true only when a WriteTimeTtl expression is present.
+    #[test]
+    fn test_select_has_writetime_ttl_detection() {
+        // No WriteTimeTtl → false
+        let stmt_no_wt = SelectStatement {
+            select_clause: SelectClause::Columns(vec![
+                SelectExpression::Column(ColumnRef::new("id")),
+                SelectExpression::Column(ColumnRef::new("name")),
+            ]),
+            from_clause: None,
+            where_clause: None,
+            group_by: None,
+            having_clause: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            allow_filtering: false,
+        };
+        assert!(!select_has_writetime_ttl(&stmt_no_wt));
+
+        // With WriteTimeTtl → true
+        let stmt_wt = SelectStatement {
+            select_clause: SelectClause::Columns(vec![
+                SelectExpression::Column(ColumnRef::new("id")),
+                SelectExpression::WriteTimeTtl(WriteTimeTtlCall {
+                    function: WriteTimeTtlFunction::WriteTime,
+                    column: "name".to_string(),
+                    alias: None,
+                }),
+            ]),
+            from_clause: None,
+            where_clause: None,
+            group_by: None,
+            having_clause: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            allow_filtering: false,
+        };
+        assert!(select_has_writetime_ttl(&stmt_wt));
+
+        // SELECT * → false (no expression list to inspect)
+        let stmt_star = SelectStatement {
+            select_clause: SelectClause::All,
+            from_clause: None,
+            where_clause: None,
+            group_by: None,
+            having_clause: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            allow_filtering: false,
+        };
+        assert!(!select_has_writetime_ttl(&stmt_star));
+    }
+
+    // --- executor integration tests ---
+
+    /// The executor's `evaluate_select_expression` returns the correct value for
+    /// a WRITETIME call when cell metadata is pre-attached to the row.
+    #[tokio::test]
+    async fn test_executor_evaluate_writetime_reads_cell_metadata() {
+        let executor = create_test_executor_with_clock(0).await;
+
+        let write_ts = 1_700_000_000_000_000_i64;
+        let row = row_with_cell_meta(
+            "name",
+            Value::Text("Carol".to_string()),
+            Some(CellWriteMetadata {
+                write_timestamp_micros: write_ts,
+                expiration: None,
+            }),
+        );
+
+        let expr = SelectExpression::WriteTimeTtl(WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::WriteTime,
+            column: "name".to_string(),
+            alias: None,
+        });
+
+        let result = executor.evaluate_select_expression(&expr, &row).unwrap();
+        assert_eq!(result, Value::BigInt(write_ts));
+    }
+
+    /// The executor's `evaluate_select_expression` returns NULL for WRITETIME
+    /// when cell metadata is absent (the common case before the storage reader
+    /// is updated to thread metadata).
+    #[tokio::test]
+    async fn test_executor_evaluate_writetime_null_when_no_metadata() {
+        let executor = create_test_executor_with_clock(0).await;
+
+        // Row has the column value but no attached cell metadata.
+        let row = row_with_cell_meta("name", Value::Text("Dave".to_string()), None);
+
+        let expr = SelectExpression::WriteTimeTtl(WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::WriteTime,
+            column: "name".to_string(),
+            alias: None,
+        });
+
+        let result = executor.evaluate_select_expression(&expr, &row).unwrap();
+        assert_eq!(result, Value::Null);
+    }
+
+    /// The executor returns correct TTL using the injected fixed clock.
+    #[tokio::test]
+    async fn test_executor_evaluate_ttl_with_injected_clock() {
+        // now = epoch 1000; cell expires at epoch 5000 → remaining = 4000s
+        let now_secs: i64 = 1000;
+        let executor = create_test_executor_with_clock(now_secs).await;
+
+        let row = row_with_cell_meta(
+            "session",
+            Value::Text("tok".to_string()),
+            Some(CellWriteMetadata {
+                write_timestamp_micros: 0,
+                expiration: Some(CellExpiration {
+                    ttl_seconds: 5000,
+                    expires_at_seconds: 5000,
+                }),
+            }),
+        );
+
+        let expr = SelectExpression::WriteTimeTtl(WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::Ttl,
+            column: "session".to_string(),
+            alias: None,
+        });
+
+        let result = executor.evaluate_select_expression(&expr, &row).unwrap();
+        assert_eq!(
+            result,
+            Value::Integer(4000),
+            "TTL must use the injected clock, not the wall clock"
+        );
+    }
+
+    /// Expired cell: executor returns NULL via injected clock.
+    #[tokio::test]
+    async fn test_executor_evaluate_ttl_expired_cell_returns_null() {
+        // now = epoch 9999; cell expired at epoch 100 → NULL
+        let executor = create_test_executor_with_clock(9999).await;
+
+        let row = row_with_cell_meta(
+            "cache",
+            Value::Text("val".to_string()),
+            Some(CellWriteMetadata {
+                write_timestamp_micros: 0,
+                expiration: Some(CellExpiration {
+                    ttl_seconds: 100,
+                    expires_at_seconds: 100,
+                }),
+            }),
+        );
+
+        let expr = SelectExpression::WriteTimeTtl(WriteTimeTtlCall {
+            function: WriteTimeTtlFunction::Ttl,
+            column: "cache".to_string(),
+            alias: None,
+        });
+
+        let result = executor.evaluate_select_expression(&expr, &row).unwrap();
+        assert_eq!(result, Value::Null, "Expired TTL cell must produce NULL");
+    }
+
+    /// Column info for WRITETIME uses BigInt data type and bigint cql_type.
+    #[tokio::test]
+    async fn test_get_result_columns_writetime_has_bigint_type() {
+        let executor = create_test_executor().await;
+
+        let stmt = SelectStatement {
+            select_clause: SelectClause::Columns(vec![SelectExpression::WriteTimeTtl(
+                WriteTimeTtlCall {
+                    function: WriteTimeTtlFunction::WriteTime,
+                    column: "name".to_string(),
+                    alias: None,
+                },
+            )]),
+            from_clause: None,
+            where_clause: None,
+            group_by: None,
+            having_clause: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            allow_filtering: false,
+        };
+
+        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "writetime(name)");
+        assert_eq!(cols[0].data_type, crate::types::DataType::BigInt);
+        assert!(cols[0].nullable, "WRITETIME column must be nullable");
+        assert_eq!(cols[0].cql_type, Some(CqlType::BigInt));
+    }
+
+    /// Column info for TTL uses Integer data type and int cql_type.
+    #[tokio::test]
+    async fn test_get_result_columns_ttl_has_int_type() {
+        let executor = create_test_executor().await;
+
+        let stmt = SelectStatement {
+            select_clause: SelectClause::Columns(vec![SelectExpression::WriteTimeTtl(
+                WriteTimeTtlCall {
+                    function: WriteTimeTtlFunction::Ttl,
+                    column: "score".to_string(),
+                    alias: None,
+                },
+            )]),
+            from_clause: None,
+            where_clause: None,
+            group_by: None,
+            having_clause: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            allow_filtering: false,
+        };
+
+        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(cols[0].name, "ttl(score)");
+        assert_eq!(cols[0].data_type, crate::types::DataType::Integer);
+        assert!(cols[0].nullable, "TTL column must be nullable");
+        assert_eq!(cols[0].cql_type, Some(CqlType::Int));
+    }
+
+    /// Column name uses alias when provided, overriding convention.
+    #[tokio::test]
+    async fn test_get_result_columns_writetime_with_alias() {
+        let executor = create_test_executor().await;
+
+        let stmt = SelectStatement {
+            select_clause: SelectClause::Columns(vec![SelectExpression::WriteTimeTtl(
+                WriteTimeTtlCall {
+                    function: WriteTimeTtlFunction::WriteTime,
+                    column: "name".to_string(),
+                    alias: Some("wt".to_string()),
+                },
+            )]),
+            from_clause: None,
+            where_clause: None,
+            group_by: None,
+            having_clause: None,
+            order_by: None,
+            limit: None,
+            offset: None,
+            allow_filtering: false,
+        };
+
+        let cols = executor.get_result_columns(&stmt).await.unwrap();
+        assert_eq!(cols.len(), 1);
+        assert_eq!(
+            cols[0].name, "wt",
+            "Alias must override Cassandra convention"
+        );
     }
 }

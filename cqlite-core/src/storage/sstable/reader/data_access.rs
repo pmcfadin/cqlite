@@ -5,7 +5,7 @@
 
 use super::SSTableReader;
 use crate::parser::DataFormat;
-use crate::types::{TableId, Value};
+use crate::types::{CellWriteMetadata, TableId, Value};
 use crate::util::cassandra_murmur3::cassandra_murmur3_token;
 use crate::{Error, Result, RowKey};
 use log::{debug, warn};
@@ -69,6 +69,30 @@ fn sort_by_token_order(results: &mut Vec<(RowKey, Value)>) {
         .collect();
     tagged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
     results.extend(tagged.into_iter().map(|(_, k, v)| (k, v)));
+}
+
+/// Sort `(RowKey, Value, CellMeta)` triples by Cassandra Murmur3 token order.
+fn sort_by_token_order_with_meta(
+    results: &mut Vec<(
+        RowKey,
+        Value,
+        std::collections::HashMap<String, CellWriteMetadata>,
+    )>,
+) {
+    let mut tagged: Vec<(
+        i64,
+        RowKey,
+        Value,
+        std::collections::HashMap<String, CellWriteMetadata>,
+    )> = results
+        .drain(..)
+        .map(|(k, v, m)| {
+            let t = cassandra_murmur3_token(k.as_bytes());
+            (t, k, v, m)
+        })
+        .collect();
+    tagged.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+    results.extend(tagged.into_iter().map(|(_, k, v, m)| (k, v, m)));
 }
 
 impl SSTableReader {
@@ -340,6 +364,41 @@ impl SSTableReader {
         let entries = parser.parse_block(&stitched_buffer, table_schema, self)?;
         log::debug!(
             "stitch_and_parse_all_chunks: Parsed {} entries from stitched buffer",
+            entries.len()
+        );
+
+        Ok(entries)
+    }
+
+    /// Like [`stitch_and_parse_all_chunks`] but also returns per-cell write metadata.
+    ///
+    /// Used when `ProjectionFlags::include_cell_metadata` is set (issue #693).
+    async fn stitch_and_parse_all_chunks_with_metadata(
+        &self,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<
+        Vec<(
+            TableId,
+            RowKey,
+            Value,
+            std::collections::HashMap<String, CellWriteMetadata>,
+        )>,
+    > {
+        let stitched_buffer = self.stitch_all_chunks().await?;
+        let parser = self.build_v5_parser();
+
+        let reader_schema;
+        let table_schema = if let Some(s) = schema {
+            Some(s)
+        } else {
+            reader_schema = self.get_table_schema(None);
+            reader_schema.as_ref()
+        };
+
+        let entries =
+            parser.parse_block_with_cell_metadata(&stitched_buffer, table_schema, self)?;
+        log::debug!(
+            "stitch_and_parse_all_chunks_with_metadata: Parsed {} entries with metadata",
             entries.len()
         );
 
@@ -1130,6 +1189,86 @@ impl SSTableReader {
             results.len()
         );
         Ok(results)
+    }
+
+    /// Scan a range of keys AND return per-cell write metadata.
+    ///
+    /// Used when `ProjectionFlags::include_cell_metadata` is set (issue #693).
+    /// Falls through to `stitch_and_parse_all_chunks_with_metadata` for
+    /// V5CompressedLegacy format (the common path for real SSTables).
+    /// Returns `None` as the metadata for non-V5 formats (they do not carry
+    /// per-cell timestamps in a way the parser currently surfaces).
+    pub async fn scan_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<
+        Vec<(
+            RowKey,
+            Value,
+            std::collections::HashMap<String, CellWriteMetadata>,
+        )>,
+    > {
+        log::debug!("SSTableReader::scan_with_cell_metadata - Starting");
+
+        let _scan_guard = self.scan_mutex.lock().await;
+
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        self.current_chunk_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        // V5CompressedLegacy (stitching) path — the common path for Cassandra 5.0 SSTables.
+        if self.requires_chunk_stitching() {
+            let all_entries = self
+                .stitch_and_parse_all_chunks_with_metadata(schema)
+                .await?;
+
+            let mut results = Vec::new();
+            for (_entry_table_id, entry_key, entry_value, cell_meta) in all_entries {
+                if let Some(start) = start_key {
+                    if &entry_key < start {
+                        continue;
+                    }
+                }
+                if let Some(end) = end_key {
+                    if &entry_key > end {
+                        continue;
+                    }
+                }
+                if !self.filter_tombstone(&entry_value) {
+                    continue;
+                }
+                results.push((entry_key, entry_value, cell_meta));
+            }
+
+            sort_by_token_order_with_meta(&mut results);
+            if let Some(lim) = limit {
+                results.truncate(lim);
+            }
+
+            log::debug!(
+                "SSTableReader::scan_with_cell_metadata - Returning {} results (stitched path)",
+                results.len()
+            );
+            return Ok(results);
+        }
+
+        // Non-stitching path: fall back to regular scan + empty metadata.
+        // Per-cell metadata is not yet surfaced for block-entry formats.
+        let plain = self
+            .sequential_scan(table_id, start_key, end_key, limit, schema)
+            .await?;
+        Ok(plain
+            .into_iter()
+            .map(|(k, v)| (k, v, std::collections::HashMap::new()))
+            .collect())
     }
 
     /// Read next block with enhanced error handling and streaming support
