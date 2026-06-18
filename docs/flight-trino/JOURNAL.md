@@ -220,3 +220,25 @@ Format:
   `reads_from_snapshot_directory` (produces correct rows from the snapshot) +
   `resolve_builds_snapshot_path` (path construction, live fallback). 43 total, clippy clean.
 - **Next:** Phase 3 quick review → commit → Phase 4 (Java Trino connector skeleton + Sidecar discovery).
+
+## 2026-06-17 — Phase 4: Trino connector skeleton + Sidecar discovery (Java 25)
+
+- **What:** New `trino-connector/` Gradle project (Java 25, Trino SPI 481, Arrow Flight Java 18.1).
+  - **Toolchain:** Gradle wrapper 9.1.0 + foojay-resolver 1.0.0 auto-provisions JDK 25, so the build
+    is independent of the host JDK (host has 21). (foojay 0.9.0 was incompatible with Gradle 9.1 —
+    bumped to 1.0.0.)
+  - **Sidecar client** (`sidecar/`): `SidecarClient` over `java.net.http` + Jackson, with `parse*`
+    statics for unit-testing. Models (records, ignore-unknown for version drift): RingResponse,
+    TokenRangeReplicasResponse (ReplicaInfo with start/end token longs + replicasByDatacenter), SchemaResponse.
+  - **ArrowTypeMapper:** Arrow `Field` → Trino `Type`. KEY DESIGN: the connector maps the cqlite-flight
+    server's Arrow schema (from GetSchema) → Trino types, instead of re-parsing CQL DDL in Java — CQL
+    parsing stays solely in the Rust core. Handles scalars, uuid extension → UuidType, list → ArrayType.
+  - **Trino plumbing (compiles vs SPI 481):** Plugin (ServiceLoader-registered), ConnectorFactory
+    (`cqlite_flight`), Connector (read-only, single tx handle, shutdown no-op), Config (sidecar-uri /
+    flight-port / local-datacenter), TableHandle (carries keyspace+table+ddl), ColumnHandle, minimal Metadata.
+- **Tests:** 9 green — sidecar JSON parsing (ring/token-ranges/schema/unknown-fields/malformed) + Arrow→Trino
+  mapping (scalars/uuid-extension/list). `./gradlew test` builds clean on the provisioned JDK 25.
+- **Deferred:** listSchemaNames/listTables enumeration, getColumnHandles via GetSchema→Arrow (needs the
+  Flight client from Phase 6), split manager (Phase 5), page source (Phase 6). Connector review team will
+  run once it's functional end-to-end (post Phase 6) — reviewing a non-querying skeleton in isolation is low value.
+- **Next:** Phase 5 — SplitManager: token-range-replicas → one split per range pinned to a single replica.
