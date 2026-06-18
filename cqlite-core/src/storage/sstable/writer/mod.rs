@@ -62,7 +62,9 @@ pub use digest_writer::DigestWriter;
 #[cfg(feature = "write-support")]
 pub use filter_writer::FilterWriter;
 #[cfg(feature = "write-support")]
-pub use index_writer::{IndexEntryInfo, IndexWriter};
+pub use index_writer::{
+    IndexEntryInfo, IndexWriter, PromotedIndexBlock, COLUMN_INDEX_SIZE_BYTES, INDEX_INFO_WIDTH_BASE,
+};
 #[cfg(feature = "write-support")]
 pub use stats_writer::{StatisticsMetadata, StatisticsWriter};
 #[cfg(feature = "write-support")]
@@ -416,8 +418,10 @@ impl SSTableWriter {
             .cloned()
             .collect();
 
-        // Write partition to Data.db and get offset
-        let data_offset = self.data_writer.write_partition(
+        // Write partition to Data.db, collecting promoted index blocks for wide partitions.
+        // Wide partitions (≥ 64 KiB of row data) get a non-zero promoted index so Cassandra
+        // can seek directly to a clustering-key range without reading the full partition.
+        let (data_offset, promoted_blocks) = self.data_writer.write_partition_with_index_blocks(
             &key,
             &mutations,
             &self.schema,
@@ -425,9 +429,12 @@ impl SSTableWriter {
             &range_tombstones,
         )?;
 
-        // Add partition to Index.db and get entry info
-        // IMPORTANT: Capture index_offset AFTER the entry is written to Index.db
-        let entry_info = self.index_writer.add_partition(&key, data_offset)?;
+        // Add partition to Index.db and get entry info.
+        // Pass promoted blocks (writer gates on >= 2 blocks before emitting payload).
+        // IMPORTANT: Capture index_offset AFTER the entry is written to Index.db.
+        let entry_info =
+            self.index_writer
+                .add_partition_with_promoted(&key, data_offset, &promoted_blocks)?;
 
         // Add partition key to Filter.db
         if let Some(ref mut filter) = self.filter_writer {
