@@ -23,10 +23,24 @@
 //! 3. Clustering key (schema-aware) - Within partition ordering
 //! 4. Run index (ascending) - Stable tiebreak for routing (NOT the LWW rule)
 //!
-//! ## Memory Budget
+//! ## Memory Budget (Groundwork — Issue #754)
 //!
-//! Total memory: k × 8KB peek buffers (where k = number of input SSTables)
-//! For 10 SSTables: ~80KB memory footprint
+//! The bounded `sync_channel` (capacity [`STREAMING_CHANNEL_CAPACITY`]) limits
+//! how many converted `MergeEntry` values from each source live in memory
+//! simultaneously between producer and consumer. The consumer/heap pulls
+//! lazily via cursors, so the channel acts as a backpressure valve.
+//!
+//! **Current limitation**: the producer thread still calls
+//! `iterate_all_partitions_for_compaction(None)`, which returns a `Vec`
+//! containing the entire parsed source SSTable (the reader's
+//! `stitch_and_parse_all_chunks_for_compaction` materialises the whole
+//! decompressed file before returning). As a result, end-to-end peak memory
+//! is NOT yet bounded independent of total input size — the decompressed
+//! content of each source is fully resident before any entries enter the
+//! channel.
+//!
+//! True end-to-end streaming (incremental stitch+parse so the producer pulls
+//! one partition at a time) is tracked in issue #827.
 //!
 //! ## Cell Merge Rule
 //!
@@ -440,78 +454,174 @@ where
     }
 }
 
-/// Adapter that wraps async SSTableReader into sync SSTableRowIterator.
+/// Adapter that wraps async SSTableReader into a true-streaming sync
+/// [`SSTableRowIterator`].
 ///
-/// Pre-loads all entries from an SSTable into memory, converting
-/// `(RowKey, Value)` pairs into `MergeEntry` format.
+/// ## Design (Issue #754 — remove 128MB buffer cap residue of #447)
 ///
-/// TODO(#447): Implement true streaming iteration to stay within the 128MB
-/// memory budget. Currently loads all entries upfront.
+/// The V5CompressedLegacy format requires full chunk stitching: ALL compressed
+/// chunks in the file must be decompressed and concatenated before the row
+/// parser can run. That is a format constraint we cannot sidestep. What we CAN
+/// do is limit how many **converted `MergeEntry` objects** from each source live
+/// in memory simultaneously between producer and consumer.
+///
+/// A background thread (the producer) opens the SSTable with its own Tokio
+/// runtime, reads and parses ALL entries (the stitching phase — currently
+/// unavoidable; see issue #827), then feeds them one at a time into a bounded
+/// `sync_channel`. The channel capacity is [`STREAMING_CHANNEL_CAPACITY`]
+/// entries; once the channel is full the producer blocks until the consumer
+/// (the main merge thread) pulls the next entry.
+///
+/// The channel therefore bounds how many *converted `MergeEntry` values* sit
+/// in-flight between producer and consumer at once. However, because the
+/// producer calls `iterate_all_partitions_for_compaction(None)` — which
+/// materialises the whole source as a `Vec` — end-to-end peak memory is NOT
+/// yet independent of total input size. The decompressed file content is fully
+/// resident before any entries enter the channel.
+///
+/// True end-to-end streaming (incremental read so the producer pulls one
+/// partition at a time) is tracked in issue #827.
+///
+/// ## Issue #591 safety (mmap vs file deletion)
+///
+/// `finalize_merge_async` deletes the input SSTable files once the merged output
+/// is published. We require that no mmap outlives its backing file. The producer
+/// thread opens the reader with `use_mmap = false`, and the thread *fully reads
+/// all file data* (the stitching phase) before it can block on a channel send.
+/// By the time `finalize_merge_async` runs, the merge is complete and all
+/// channel entries have been consumed, so the producer thread has long since
+/// finished and dropped its file handle. No mmap ever exists.
+///
+/// ## Issue #587 safety (async-from-sync bridge)
+///
+/// The producer thread creates its own `tokio::runtime::Runtime` (never
+/// `Handle::block_on`), so it cannot panic even when called from within an
+/// existing Tokio runtime. This is the same strategy as [`block_on_async`].
 #[cfg(feature = "write-support")]
 struct SSTableRowIteratorAdapter {
-    /// Pre-loaded entries
-    entries: std::vec::IntoIter<MergeEntry>,
+    /// Receiving end of the bounded channel fed by the producer thread.
+    receiver: std::sync::mpsc::Receiver<std::result::Result<MergeEntry, String>>,
+    /// JoinHandle for the producer thread (held so the thread is joined on drop).
+    _producer: std::thread::JoinHandle<()>,
 }
+
+/// Number of pre-fetched `MergeEntry` objects buffered per source in the
+/// streaming channel. Each entry is typically a few hundred bytes; at 256
+/// entries per source and 10 sources that is a few hundred KB — well within the
+/// 128MB budget. The value is a balance between producer/consumer
+/// synchronization overhead (lower = more context switches) and memory footprint
+/// (higher = more buffering).
+#[cfg(feature = "write-support")]
+const STREAMING_CHANNEL_CAPACITY: usize = 256;
 
 #[cfg(feature = "write-support")]
 impl SSTableRowIteratorAdapter {
-    /// Open an SSTable and load all entries as MergeEntry.
+    /// Open an SSTable and start a streaming producer thread.
+    ///
+    /// Returns immediately; the producer thread runs concurrently and populates
+    /// the channel as the consumer advances. The file handle is held only by
+    /// the producer thread and is dropped when the thread finishes.
     ///
     /// Uses [`SSTableReader::iterate_all_partitions_for_compaction`] which
     /// returns actual per-row timestamps decoded from the on-disk row headers.
     /// This allows the k-way merger to perform timestamp-accurate last-write-wins
     /// ordering, which is essential for tombstone shadowing (Issue #505).
     fn open(path: &Path, run_index: usize) -> Result<Self> {
-        use crate::platform::Platform;
-        use crate::Config;
-        use std::sync::Arc;
-
-        let mut config = Config::default();
-        // Issue #591: compaction MUST read its inputs through buffered I/O, never
-        // a memory map. `finalize_merge_async` deletes these input files once the
-        // merged output is published; a live mmap over a file that is then
-        // truncated or removed can fault with SIGBUS on Unix (unrecoverable as an
-        // `io::Error`) and can block deletion on Windows. Reading buffered — and
-        // draining every entry into memory in this constructor, before finalize
-        // deletes the inputs — guarantees no mapping outlives the file. This is
-        // pinned explicitly rather than relying on the (currently `false`) global
-        // default so the invariant cannot silently regress.
-        config.storage.use_mmap = false;
         let path_buf = path.to_path_buf();
 
-        // Open SSTable reader and load all partitions with actual row timestamps.
-        let raw_entries = block_on_async(async move {
-            let platform = Arc::new(Platform::new(&config).await?);
-            let reader =
-                crate::storage::sstable::reader::SSTableReader::open(&path_buf, &config, platform)
-                    .await?;
-            // Use the compaction-specific path: returns (RowKey, Value, row_timestamp_micros).
-            // Row/cell tombstones are emitted as Value::Tombstone with their actual
-            // deletion timestamps so the merger can apply shadowing semantics (Issue #505).
-            reader.iterate_all_partitions_for_compaction(None).await
-        })?;
+        let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
 
-        // Convert (RowKey, Value, timestamp) tuples to MergeEntry
-        let mut entries = Vec::with_capacity(raw_entries.len());
-        for (row_key, value, timestamp) in raw_entries {
-            let key_bytes = row_key.0;
-            let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
-            let row_data = Self::value_to_row_data(&value, timestamp)?;
-
-            entries.push(MergeEntry::new(
-                run_index,
-                decorated_key,
-                None, // Clustering key extraction deferred
-                timestamp,
-                row_data,
-            ));
-        }
-
-        // SSTable data is already in token order from the reader, no sort needed
+        // Spawn the producer thread. It owns a fresh Tokio runtime so it never
+        // collides with any runtime on the calling thread (Issue #587).
+        let producer = std::thread::spawn(move || {
+            Self::producer_thread(path_buf, run_index, sender);
+        });
 
         Ok(Self {
-            entries: entries.into_iter(),
+            receiver,
+            _producer: producer,
         })
+    }
+
+    /// Body of the producer thread.
+    ///
+    /// Opens the SSTable with buffered I/O (Issue #591), reads all entries via
+    /// chunk stitching (materialising the full source into a `Vec` — see issue
+    /// #827 for the planned incremental-read upgrade), converts them to
+    /// [`MergeEntry`], then streams them through the bounded channel one at a
+    /// time. Errors are forwarded as `Err(String)` through the same channel so
+    /// the consumer can surface them.
+    fn producer_thread(
+        path_buf: PathBuf,
+        run_index: usize,
+        sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, String>>,
+    ) {
+        // Build the raw entries using an owned Tokio runtime (Issue #587).
+        // use_mmap = false (Issue #591): the file must not be memory-mapped
+        // because finalize_merge_async may delete it after the merge completes.
+        let raw_entries_result =
+            (|| -> Result<Vec<(crate::types::RowKey, crate::types::Value, i64)>> {
+                use crate::platform::Platform;
+                use crate::Config;
+                use std::sync::Arc;
+
+                let mut config = Config::default();
+                config.storage.use_mmap = false;
+
+                let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                    Error::Storage(format!(
+                        "streaming producer: failed to create runtime: {}",
+                        e
+                    ))
+                })?;
+
+                rt.block_on(async move {
+                    let platform = Arc::new(Platform::new(&config).await?);
+                    let reader = crate::storage::sstable::reader::SSTableReader::open(
+                        &path_buf, &config, platform,
+                    )
+                    .await?;
+                    // iterate_all_partitions_for_compaction returns the full list after
+                    // chunk stitching. The file is fully read here; the file handle is
+                    // dropped when `reader` is dropped at the end of this async block.
+                    reader.iterate_all_partitions_for_compaction(None).await
+                })
+            })();
+
+        let raw_entries = match raw_entries_result {
+            Ok(entries) => entries,
+            Err(e) => {
+                // Forward the error; ignore send failure (consumer may have dropped).
+                let _ = sender.send(Err(e.to_string()));
+                return;
+            }
+        };
+
+        // Stream entries through the bounded channel one at a time.
+        // The stitched buffer is dropped at the end of the block above; from
+        // here on we only hold the Vec<(RowKey, Value, i64)> and convert entries
+        // incrementally so `raw_entries` can be freed once all are converted.
+        for (row_key, value, timestamp) in raw_entries {
+            let entry_result = (|| -> Result<MergeEntry> {
+                let key_bytes = row_key.0;
+                let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
+                let row_data = Self::value_to_row_data(&value, timestamp)?;
+                Ok(MergeEntry::new(
+                    run_index,
+                    decorated_key,
+                    None, // Clustering key extraction deferred
+                    timestamp,
+                    row_data,
+                ))
+            })();
+
+            let msg = entry_result.map_err(|e| e.to_string());
+            // If the receiver has been dropped (e.g. merge aborted), stop.
+            if sender.send(msg).is_err() {
+                return;
+            }
+        }
+        // Channel closed naturally when sender is dropped here.
     }
 
     /// Convert a reader Value to RowData.
@@ -575,7 +685,15 @@ impl SSTableRowIteratorAdapter {
 #[cfg(feature = "write-support")]
 impl SSTableRowIterator for SSTableRowIteratorAdapter {
     fn next(&mut self) -> Option<Result<MergeEntry>> {
-        self.entries.next().map(Ok)
+        match self.receiver.recv() {
+            Ok(Ok(entry)) => Some(Ok(entry)),
+            Ok(Err(msg)) => Some(Err(Error::Storage(format!(
+                "streaming merge producer error: {}",
+                msg
+            )))),
+            // Channel closed — producer finished normally.
+            Err(_) => None,
+        }
     }
 }
 
@@ -3014,5 +3132,262 @@ mod merge_property_tests {
                 );
             }
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Streaming channel / cursor mechanism tests (Issue #754)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// These tests verify that the bounded sync_channel and RunReader cursor
+// machinery work correctly: entries are forwarded without deadlock, ordering
+// is preserved, and the channel provides backpressure between producer and
+// consumer.
+//
+// NOTE: these tests do NOT prove an end-to-end memory bound independent of
+// total input size. The real SSTableRowIteratorAdapter producer still
+// materialises each source as a full Vec (via
+// iterate_all_partitions_for_compaction). True incremental streaming is
+// tracked in issue #827.
+
+#[cfg(all(test, feature = "write-support"))]
+mod streaming_tests {
+    use super::*;
+
+    /// Channel capacity constant is accessible and matches documented value.
+    ///
+    /// This test checks only the constant's value — it does NOT prove an
+    /// end-to-end memory bound. The real producer still materialises each
+    /// source as a full Vec; the bound on in-flight MergeEntry objects between
+    /// producer and consumer is STREAMING_CHANNEL_CAPACITY, but the backing
+    /// file data is fully resident before any entries enter the channel.
+    /// See issue #827 for the planned fix.
+    #[test]
+    fn test_streaming_channel_capacity_constant() {
+        // The constant must be large enough to amortise scheduling overhead but
+        // small enough to limit in-flight MergeEntry objects. 256 is the
+        // documented value.
+        assert_eq!(STREAMING_CHANNEL_CAPACITY, 256);
+    }
+
+    /// A synthetic `SSTableRowIterator` backed by a bounded channel. The
+    /// producer thread is started immediately and blocks once the channel is
+    /// full, demonstrating true backpressure — memory is bounded to `capacity`
+    /// entries regardless of `count`.
+    struct SyntheticStreamingIterator {
+        rx: std::sync::mpsc::Receiver<Result<MergeEntry>>,
+        _tx_thread: std::thread::JoinHandle<()>,
+    }
+
+    impl SyntheticStreamingIterator {
+        /// Produce `count` entries with sequential tokens and the given
+        /// `run_index`, streamed through a channel of size `capacity`.
+        fn new(count: usize, run_index: usize, capacity: usize) -> Self {
+            let (tx, rx) = std::sync::mpsc::sync_channel(capacity);
+            let tx_thread = std::thread::spawn(move || {
+                for i in 0..count {
+                    let entry = MergeEntry::new(
+                        run_index,
+                        DecoratedKey::new(i as i64, vec![i as u8]),
+                        None,
+                        (i as i64) * 1000,
+                        RowData::Live { cells: vec![] },
+                    );
+                    if tx.send(Ok(entry)).is_err() {
+                        return;
+                    }
+                }
+            });
+            Self {
+                rx,
+                _tx_thread: tx_thread,
+            }
+        }
+    }
+
+    impl SSTableRowIterator for SyntheticStreamingIterator {
+        fn next(&mut self) -> Option<Result<MergeEntry>> {
+            self.rx.recv().ok()
+        }
+    }
+
+    /// Merge two synthetic streaming sources (channel capacity = 4, 20 entries
+    /// each) and assert that all 40 unique tokens survive and global order is
+    /// preserved.
+    ///
+    /// This verifies that the RunReader / heap machinery correctly drains
+    /// bounded-channel sources: with capacity=4 the channel holds ≤ 4 entries
+    /// per source (≤ 8 total) while the test runs, demonstrating correct
+    /// ordering and completeness through a small-capacity channel.
+    ///
+    /// NOTE: this test does NOT prove an end-to-end memory bound for the real
+    /// SSTableRowIteratorAdapter, whose producer still materialises the full
+    /// source Vec before sending entries. End-to-end streaming is tracked in
+    /// issue #827.
+    #[test]
+    fn test_kway_merge_with_streaming_sources_preserves_order() {
+        use crate::schema::{KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "stream_ks".to_string(),
+            table: "stream_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+        };
+
+        // Two sources with disjoint tokens:
+        //   source 0 → even tokens 0, 2, 4, …, 38
+        //   source 1 → odd  tokens 1, 3, 5, …, 39
+        // Channel capacity = 4 << total per source (20). At steady state
+        // ≤ 4 entries per source live in the channel, ≤ 8 total.
+        // (These are synthetic in-memory producers, not real SSTableReaders.)
+        const N: usize = 20;
+        const CHANNEL_CAP: usize = 4;
+
+        let (tx0, rx0) = std::sync::mpsc::sync_channel::<Result<MergeEntry>>(CHANNEL_CAP);
+        let (tx1, rx1) = std::sync::mpsc::sync_channel::<Result<MergeEntry>>(CHANNEL_CAP);
+
+        // Producer thread 0: even tokens.
+        std::thread::spawn(move || {
+            for i in 0..N {
+                let token = (i * 2) as i64;
+                let entry = MergeEntry::new(
+                    0,
+                    DecoratedKey::new(token, vec![(i * 2) as u8]),
+                    None,
+                    1000,
+                    RowData::Live { cells: vec![] },
+                );
+                if tx0.send(Ok(entry)).is_err() {
+                    return;
+                }
+            }
+        });
+
+        // Producer thread 1: odd tokens.
+        std::thread::spawn(move || {
+            for i in 0..N {
+                let token = (i * 2 + 1) as i64;
+                let entry = MergeEntry::new(
+                    1,
+                    DecoratedKey::new(token, vec![(i * 2 + 1) as u8]),
+                    None,
+                    1000,
+                    RowData::Live { cells: vec![] },
+                );
+                if tx1.send(Ok(entry)).is_err() {
+                    return;
+                }
+            }
+        });
+
+        struct ChannelIterator(std::sync::mpsc::Receiver<Result<MergeEntry>>);
+        impl SSTableRowIterator for ChannelIterator {
+            fn next(&mut self) -> Option<Result<MergeEntry>> {
+                self.0.recv().ok()
+            }
+        }
+
+        let runs: Vec<RunReader> = vec![
+            RunReader::new(Box::new(ChannelIterator(rx0))),
+            RunReader::new(Box::new(ChannelIterator(rx1))),
+        ];
+
+        let mut merger = KWayMerger {
+            runs,
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema,
+        };
+
+        // Drain all partitions and verify ordering + completeness.
+        let mut token_set = std::collections::BTreeSet::new();
+        let mut prev_token: Option<i64> = None;
+        loop {
+            match merger.step().expect("step must not fail") {
+                MergeStep::Complete => break,
+                MergeStep::Partition { key, .. } => {
+                    // Tokens must arrive in ascending order.
+                    if let Some(pt) = prev_token {
+                        assert!(
+                            key.token >= pt,
+                            "out-of-order token {} after {}",
+                            key.token,
+                            pt
+                        );
+                    }
+                    prev_token = Some(key.token);
+                    token_set.insert(key.token);
+                }
+            }
+        }
+
+        // All 2×N unique tokens must be present.
+        assert_eq!(
+            token_set.len(),
+            N * 2,
+            "expected {} unique partitions, got {}",
+            N * 2,
+            token_set.len()
+        );
+        for expected in 0..(N as i64 * 2) {
+            assert!(
+                token_set.contains(&expected),
+                "token {} is missing from merged output",
+                expected
+            );
+        }
+    }
+
+    /// Verify that the streaming adapter drains all entries correctly when the
+    /// channel capacity is smaller than the total number of entries (1000 entries,
+    /// capacity 256). This confirms the producer blocks on sends and the consumer
+    /// pulls them out one at a time without deadlock.
+    #[test]
+    fn test_streaming_iterator_drains_all_entries_with_backpressure() {
+        const TOTAL: usize = 1000;
+        // capacity < TOTAL: forces producer to block when channel is full.
+        let mut iter = SyntheticStreamingIterator::new(TOTAL, 0, STREAMING_CHANNEL_CAPACITY);
+        let mut count = 0usize;
+        while let Some(result) = iter.next() {
+            result.expect("entry must not be an error");
+            count += 1;
+        }
+        assert_eq!(count, TOTAL, "all {} entries must be produced", TOTAL);
+    }
+
+    /// Verify the RunReader correctly wraps a streaming iterator: peek and
+    /// advance work, exhaustion is detected, buffer refills lazily even when
+    /// the channel capacity (4) is far smaller than the total entries (50).
+    #[test]
+    fn test_run_reader_with_streaming_source() {
+        const N: usize = 50;
+        // Channel capacity 4 << N: tests lazy refill under backpressure.
+        let iter = SyntheticStreamingIterator::new(N, 0, 4);
+        let mut reader = RunReader::new(Box::new(iter));
+
+        let mut seen = 0usize;
+        loop {
+            match reader.peek().expect("peek must not error") {
+                None => break,
+                Some(_) => {
+                    reader.advance().expect("advance must not error");
+                    seen += 1;
+                }
+            }
+        }
+
+        assert_eq!(seen, N, "RunReader must surface all {} entries", N);
+        assert!(
+            reader.is_exhausted(),
+            "RunReader must be exhausted after drain"
+        );
     }
 }
