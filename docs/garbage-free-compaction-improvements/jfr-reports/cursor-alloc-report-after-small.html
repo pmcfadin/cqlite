@@ -1,0 +1,517 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Cursor compaction allocation — AFTER Kind.values() fix (small)</title><style>
+body{font-family:-apple-system,Helvetica,sans-serif;margin:2em;max-width:1100px}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:6px 10px;text-align:left}
+th{background:#f0f0f0}tr.hl{background:#ffe9e9}code{font-size:12px}
+details{margin:2px 0}summary{cursor:pointer}.bar{background:#4a90d9;height:12px;display:inline-block}
+</style></head><body>
+<h1>Cursor compaction allocation — AFTER Kind.values() fix (small)</h1><p>Same small scenario, fix applied (ClusteringPrefix.Kind.ALL_KINDS cached array).</p>
+<p><b>Total sampled allocation within CompactionTask.execute: 130.0 MB</b> (JFR TLAB-sampled; events: ObjectAllocationInNewTLAB + OutsideTLAB, stacks to depth 64)</p>
+<h2>Buckets</h2><table><tr><th>Bucket</th><th>MB</th><th>Share</th><th></th></tr>
+<tr><td>Tombstone histogram spool (CONSTANT per compaction)</td><td>90.00</td><td>69.2%</td><td><span class="bar" style="width:207px"></span></td></tr>
+<tr><td>Ref$Debug stack capture (TEST-ENV ONLY: -Dcassandra.debugrefcount=true)</td><td>21.25</td><td>16.3%</td><td><span class="bar" style="width:49px"></span></td></tr>
+<tr><td>OTHER</td><td>8.25</td><td>6.3%</td><td><span class="bar" style="width:19px"></span></td></tr>
+<tr><td>Component writers (CONSTANT per output)</td><td>7.25</td><td>5.6%</td><td><span class="bar" style="width:16px"></span></td></tr>
+<tr><td>Chunk-cache machinery (volume-scaled infrastructure)</td><td>3.25</td><td>2.5%</td><td><span class="bar" style="width:7px"></span></td></tr>
+</table><h2>Top allocation sites</h2><table><tr><th>#</th><th>Object</th><th>Deepest Cassandra frame</th><th>MB</th><th>n</th><th>Share</th></tr>
+<tr><td>1</td><td><code>long[]</code></td><td><code>org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder$Spool.&lt;init&gt;(int)</code></td><td>60.00</td><td>30</td><td>46.2%</td></tr>
+<tr><td>2</td><td><code>int[]</code></td><td><code>org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder$Spool.&lt;init&gt;(int)</code></td><td>30.00</td><td>30</td><td>23.1%</td></tr>
+<tr><td>3</td><td><code>java.lang.StackTraceElement</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code></td><td>6.00</td><td>24</td><td>4.6%</td></tr>
+<tr><td>4</td><td><code>java.lang.Object[]</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code></td><td>6.00</td><td>24</td><td>4.6%</td></tr>
+<tr><td>5</td><td><code>byte[]</code></td><td><code>org.apache.cassandra.io.compress.BufferType$1.allocate(int)</code></td><td>4.75</td><td>19</td><td>3.7%</td></tr>
+<tr><td>6</td><td><code>java.lang.StackTraceElement</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate()</code></td><td>3.25</td><td>13</td><td>2.5%</td></tr>
+<tr><td>7</td><td><code>com.clearspring.analytics.stream.cardinality.HyperLogLogPlus</code></td><td><code>org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(ClusteringComparator, UUID)</code></td><td>2.50</td><td>10</td><td>1.9%</td></tr>
+<tr><td>8</td><td><code>java.lang.Object[]</code></td><td><code>org.apache.cassandra.io.sstable.metadata.CompactionMetadata$CompactionMetadataSerializer.serializedSize(Version, CompactionMetadata)</code></td><td>2.25</td><td>9</td><td>1.7%</td></tr>
+<tr><td>9</td><td><code>com.github.benmanes.caffeine.cache.LocalCache$$Lambda.0x00000098016545d0</code></td><td><code>org.apache.cassandra.cache.ChunkCache$CachingRebufferer.rebuffer(long)</code></td><td>2.25</td><td>9</td><td>1.7%</td></tr>
+<tr><td>10</td><td><code>java.lang.Exception</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code></td><td>2.00</td><td>8</td><td>1.5%</td></tr>
+<tr><td>11</td><td><code>java.lang.StackTraceElement[]</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code></td><td>0.75</td><td>3</td><td>0.6%</td></tr>
+<tr><td>12</td><td><code>short[]</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate()</code></td><td>0.75</td><td>3</td><td>0.6%</td></tr>
+<tr><td>13</td><td><code>com.clearspring.analytics.stream.cardinality.HyperLogLogPlus</code></td><td><code>org.apache.cassandra.io.sstable.metadata.CompactionMetadata$CompactionMetadataSerializer.deserialize(Version, DataInputPlus)</code></td><td>0.75</td><td>3</td><td>0.6%</td></tr>
+<tr><td>14</td><td><code>java.lang.StackTraceElement[]</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate()</code></td><td>0.75</td><td>3</td><td>0.6%</td></tr>
+<tr><td>15</td><td><code>long[]</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code></td><td>0.75</td><td>3</td><td>0.6%</td></tr>
+<tr><td>16</td><td><code>int[]</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code></td><td>0.50</td><td>2</td><td>0.4%</td></tr>
+<tr><td>17</td><td><code>byte[]</code></td><td><code>org.apache.cassandra.io.util.ResizableByteBuffer.&lt;init&gt;()</code></td><td>0.50</td><td>2</td><td>0.4%</td></tr>
+<tr><td>18</td><td><code>byte[]</code></td><td><code>org.apache.cassandra.io.sstable.Descriptor.fileFor(Component)</code></td><td>0.50</td><td>2</td><td>0.4%</td></tr>
+<tr><td>19</td><td><code>byte[]</code></td><td><code>org.apache.cassandra.dht.ReusableDecoratedKey.&lt;init&gt;(Token, int)</code></td><td>0.50</td><td>2</td><td>0.4%</td></tr>
+<tr><td>20</td><td><code>org.apache.cassandra.utils.concurrent.Ref$State</code></td><td><code>org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy)</code></td><td>0.50</td><td>2</td><td>0.4%</td></tr>
+</table><h2>Stacks (top 20 sites)</h2>
+<details><summary><code>long[]</code> @ <code>org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder$Spool.&lt;init&gt;(int)</code> — 60.00 MB</summary><pre>org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder$Spool.&lt;init&gt;(int) line: 433
+org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder.&lt;init&gt;(int, int, int) line: 86
+org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(ClusteringComparator, UUID) line: 122
+org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(ClusteringComparator) line: 165
+org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(Iterable, ClusteringComparator) line: 179
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.sstableWriter(Directories$DataDirectory, DecoratedKey) line: 239
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.switchCompactionWriter(Directories$DataDirectory, DecoratedKey) line: 231
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchLocation(DecoratedKey) line: 213
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchWriter(DecoratedKey) line: 178
+org.apache.cassandra.db.compaction.CursorCompactor.maybeSwitchWriter(CompactionAwareWriter) line: 1144
+org.apache.cassandra.db.compaction.CursorCompactor.startPartition(DeletionTime) line: 473
+org.apache.cassandra.db.compaction.CursorCompactor.lateStartPartition(boolean) line: 1121
+org.apache.cassandra.db.compaction.CursorCompactor.lateStartRow(LivenessInfo, DeletionTime, boolean) line: 1114
+org.apache.cassandra.db.compaction.CursorCompactor.mergeRows(int, DeletionTime, boolean, boolean) line: 568
+org.apache.cassandra.db.compaction.CursorCompactor.mergePartitions(int) line: 428
+org.apache.cassandra.db.compaction.CursorCompactor.tryWriteNextPartition(CompactionAwareWriter) line: 357
+org.apache.cassandra.db.compaction.CursorCompactor.writeNextPartition(CompactionAwareWriter) line: 321
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.processNextPartitionKey() line: 75
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 282
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111
+org.apache.cassandra.db.compaction.AbstractCompactionTask.execute(ActiveCompactionsTracker) line: 110
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.compactOnceMeasured(ThreadMXBean, ColumnFamilyStore, long) line: 228
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.recordAllocationProfile() line: 278</pre></details>
+<details><summary><code>int[]</code> @ <code>org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder$Spool.&lt;init&gt;(int)</code> — 30.00 MB</summary><pre>org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder$Spool.&lt;init&gt;(int) line: 434
+org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder.&lt;init&gt;(int, int, int) line: 86
+org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(ClusteringComparator, UUID) line: 122
+org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(ClusteringComparator) line: 165
+org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(Iterable, ClusteringComparator) line: 179
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.sstableWriter(Directories$DataDirectory, DecoratedKey) line: 239
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.switchCompactionWriter(Directories$DataDirectory, DecoratedKey) line: 231
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchLocation(DecoratedKey) line: 213
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchWriter(DecoratedKey) line: 178
+org.apache.cassandra.db.compaction.CursorCompactor.maybeSwitchWriter(CompactionAwareWriter) line: 1144
+org.apache.cassandra.db.compaction.CursorCompactor.startPartition(DeletionTime) line: 473
+org.apache.cassandra.db.compaction.CursorCompactor.lateStartPartition(boolean) line: 1121
+org.apache.cassandra.db.compaction.CursorCompactor.lateStartRow(LivenessInfo, DeletionTime, boolean) line: 1114
+org.apache.cassandra.db.compaction.CursorCompactor.mergeRows(int, DeletionTime, boolean, boolean) line: 568
+org.apache.cassandra.db.compaction.CursorCompactor.mergePartitions(int) line: 428
+org.apache.cassandra.db.compaction.CursorCompactor.tryWriteNextPartition(CompactionAwareWriter) line: 357
+org.apache.cassandra.db.compaction.CursorCompactor.writeNextPartition(CompactionAwareWriter) line: 321
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.processNextPartitionKey() line: 75
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 282
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111
+org.apache.cassandra.db.compaction.AbstractCompactionTask.execute(ActiveCompactionsTracker) line: 110
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.compactOnceMeasured(ThreadMXBean, ColumnFamilyStore, long) line: 228
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.recordAllocationProfile() line: 278</pre></details>
+<details><summary><code>java.lang.StackTraceElement</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code> — 6.00 MB</summary><pre>java.lang.StackTraceElement.of(Object, int) line: 563
+java.lang.Throwable.getOurStackTrace() line: 861
+java.lang.Throwable.getStackTrace() line: 853
+java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;() line: 313
+org.apache.cassandra.utils.concurrent.Ref$State.&lt;init&gt;(Ref$GlobalState, Ref, ReferenceQueue) line: 234
+org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy) line: 143
+org.apache.cassandra.io.util.SafeMemory.&lt;init&gt;(long) line: 34
+org.apache.cassandra.io.util.Memory.allocate(long) line: 87
+org.apache.cassandra.utils.obs.OffHeapBitSet.&lt;init&gt;(long) line: 50
+org.apache.cassandra.utils.FilterFactory.createFilter(int, long, int) line: 73
+org.apache.cassandra.utils.FilterFactory.getFilter(long, double) line: 67
+org.apache.cassandra.io.sstable.format.SortedTableWriter$AbstractIndexWriter.&lt;init&gt;(SortedTableWriter$Builder) line: 483
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$IndexWriter.&lt;init&gt;(BigTableWriter$Builder, SequentialWriter) line: 263
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$Builder.openIndexWriter(SequentialWriter) line: 420
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$Builder.openIndexWriter(SequentialWriter) line: 362
+org.apache.cassandra.io.sstable.format.SortedTableWriter.&lt;init&gt;(SortedTableWriter$Builder, ILifecycleTransaction, SSTable$Owner) line: 112
+org.apache.cassandra.io.sstable.format.big.BigTableWriter.&lt;init&gt;(BigTableWriter$Builder, ILifecycleTransaction, SSTable$Owner) line: 79
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$Builder.buildInternal(ILifecycleTransaction, SSTable$Owner) line: 456
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$Builder.buildInternal(ILifecycleTransaction, SSTable$Owner) line: 362
+org.apache.cassandra.io.sstable.format.SSTableWriter$Builder.build(ILifecycleTransaction, SSTable$Owner) line: 595
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.sstableWriter(Directories$DataDirectory, DecoratedKey) line: 246
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.switchCompactionWriter(Directories$DataDirectory, DecoratedKey) line: 231
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchLocation(DecoratedKey) line: 213</pre></details>
+<details><summary><code>java.lang.Object[]</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code> — 6.00 MB</summary><pre>java.lang.Throwable.fillInStackTrace(int)
+java.lang.Throwable.fillInStackTrace() line: 820
+java.lang.Throwable.&lt;init&gt;() line: 258
+java.lang.Exception.&lt;init&gt;() line: 55
+java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;() line: 313
+org.apache.cassandra.utils.concurrent.Ref$State.&lt;init&gt;(Ref$GlobalState, Ref, ReferenceQueue) line: 234
+org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy) line: 143
+org.apache.cassandra.utils.concurrent.Ref$DirectBufferRef.&lt;init&gt;(DirectBuffer, RefCounted$Tidy) line: 877
+org.apache.cassandra.utils.memory.BufferPool$Chunk.setAttachment(ByteBuffer) line: 1338
+org.apache.cassandra.utils.memory.BufferPool$Chunk.set(int, int, ByteBuffer) line: 1478
+org.apache.cassandra.utils.memory.BufferPool$Chunk.get(int, boolean, ByteBuffer) line: 1468
+org.apache.cassandra.utils.memory.BufferPool$MicroQueueOfChunks.get(int, boolean, ByteBuffer) line: 633
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.tryGetInternal(int, boolean) line: 967
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.tryGet(int, boolean) line: 950
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.get(int, boolean) line: 910
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.get(int) line: 900
+org.apache.cassandra.utils.memory.BufferPool.get(int, BufferType) line: 215
+org.apache.cassandra.cache.ChunkCache.load(ChunkCache$Key) line: 162
+org.apache.cassandra.cache.ChunkCache.load(Object) line: 46
+com.github.benmanes.caffeine.cache.LocalLoadingCache.lambda$newMappingFunction$3(CacheLoader, Object) line: 183
+com.github.benmanes.caffeine.cache.LocalCache.lambda$statsAware$2(Function, boolean, Object) line: 167
+com.github.benmanes.caffeine.cache.BoundedLocalCache.lambda$doComputeIfAbsent$14(Object[], Function, Object, long[], int[], Object[], Object[], RemovalCause[], Node[], Object, Node) line: 2688
+java.util.concurrent.ConcurrentHashMap.compute(Object, BiFunction) line: 1955</pre></details>
+<details><summary><code>byte[]</code> @ <code>org.apache.cassandra.io.compress.BufferType$1.allocate(int)</code> — 4.75 MB</summary><pre>java.nio.HeapByteBuffer.&lt;init&gt;(int, int, MemorySegment) line: 71
+java.nio.ByteBuffer.allocate(int) line: 391
+org.apache.cassandra.io.compress.BufferType$1.allocate(int) line: 28
+org.apache.cassandra.io.util.SequentialWriterOption.allocateBuffer() line: 101
+org.apache.cassandra.io.util.SequentialWriter.&lt;init&gt;(File, SequentialWriterOption, boolean) line: 170
+org.apache.cassandra.io.util.SequentialWriter.&lt;init&gt;(File, SequentialWriterOption) line: 159
+org.apache.cassandra.io.util.ChecksummedSequentialWriter.&lt;init&gt;(File, File, File, SequentialWriterOption) line: 35
+org.apache.cassandra.io.sstable.format.DataComponent.buildWriter(Descriptor, TableMetadata, SequentialWriterOption, MetadataCollector, OperationType, Config$FlushCompression, CompressionDictionaryManager) line: 61
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$Builder.openDataWriter() line: 403
+org.apache.cassandra.io.sstable.format.SortedTableWriter.&lt;init&gt;(SortedTableWriter$Builder, ILifecycleTransaction, SSTable$Owner) line: 109
+org.apache.cassandra.io.sstable.format.big.BigTableWriter.&lt;init&gt;(BigTableWriter$Builder, ILifecycleTransaction, SSTable$Owner) line: 79
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$Builder.buildInternal(ILifecycleTransaction, SSTable$Owner) line: 456
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$Builder.buildInternal(ILifecycleTransaction, SSTable$Owner) line: 362
+org.apache.cassandra.io.sstable.format.SSTableWriter$Builder.build(ILifecycleTransaction, SSTable$Owner) line: 595
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.sstableWriter(Directories$DataDirectory, DecoratedKey) line: 246
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.switchCompactionWriter(Directories$DataDirectory, DecoratedKey) line: 231
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchLocation(DecoratedKey) line: 213
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchWriter(DecoratedKey) line: 178
+org.apache.cassandra.db.compaction.CursorCompactor.maybeSwitchWriter(CompactionAwareWriter) line: 1144
+org.apache.cassandra.db.compaction.CursorCompactor.startPartition(DeletionTime) line: 473
+org.apache.cassandra.db.compaction.CursorCompactor.lateStartPartition(boolean) line: 1121
+org.apache.cassandra.db.compaction.CursorCompactor.lateStartRow(LivenessInfo, DeletionTime, boolean) line: 1114
+org.apache.cassandra.db.compaction.CursorCompactor.mergeRows(int, DeletionTime, boolean, boolean) line: 568
+org.apache.cassandra.db.compaction.CursorCompactor.mergePartitions(int) line: 428</pre></details>
+<details><summary><code>java.lang.StackTraceElement</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate()</code> — 3.25 MB</summary><pre>java.lang.StackTraceElement.of(Object, int) line: 563
+java.lang.Throwable.getOurStackTrace() line: 861
+java.lang.Throwable.getStackTrace() line: 853
+java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate() line: 319
+org.apache.cassandra.utils.concurrent.Ref$State.ensureReleased(Throwable) line: 260
+org.apache.cassandra.utils.concurrent.Ref.ensureReleased() line: 178
+org.apache.cassandra.utils.concurrent.SharedCloseableImpl.close() line: 45
+org.apache.cassandra.io.util.RandomAccessReader$RandomAccessReaderWithOwnChannel.close() line: 344
+org.apache.cassandra.io.sstable.metadata.MetadataSerializer.deserialize(Descriptor, EnumSet) line: 137
+org.apache.cassandra.io.sstable.format.StatsComponent.load(Descriptor, MetadataType[]) line: 63
+org.apache.cassandra.io.sstable.format.StatsComponent.load(Descriptor) line: 55
+org.apache.cassandra.io.sstable.format.SSTableReader.getApproximateKeyCount(Iterable) line: 324
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean, boolean) line: 93
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean) line: 78
+org.apache.cassandra.db.compaction.writers.DefaultCompactionWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean, int) line: 47
+org.apache.cassandra.db.compaction.CompactionTask.getCompactionAwareWriter(ColumnFamilyStore, Directories, ILifecycleTransaction, Set) line: 404
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.openWriterResource(ColumnFamilyStore, Directories, ILifecycleTransaction, Set) line: 48
+org.apache.cassandra.db.compaction.CompactionTask.getCompactionAwareWriter(Set, AbstractCompactionPipeline) line: 396
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 272
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111
+org.apache.cassandra.db.compaction.AbstractCompactionTask.execute(ActiveCompactionsTracker) line: 110
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.compactOnceMeasured(ThreadMXBean, ColumnFamilyStore, long) line: 228</pre></details>
+<details><summary><code>com.clearspring.analytics.stream.cardinality.HyperLogLogPlus</code> @ <code>org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(ClusteringComparator, UUID)</code> — 2.50 MB</summary><pre>org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(ClusteringComparator, UUID) line: 157
+org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(ClusteringComparator) line: 165
+org.apache.cassandra.io.sstable.metadata.MetadataCollector.&lt;init&gt;(Iterable, ClusteringComparator) line: 179
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.sstableWriter(Directories$DataDirectory, DecoratedKey) line: 239
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.switchCompactionWriter(Directories$DataDirectory, DecoratedKey) line: 231
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchLocation(DecoratedKey) line: 213
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.maybeSwitchWriter(DecoratedKey) line: 178
+org.apache.cassandra.db.compaction.CursorCompactor.maybeSwitchWriter(CompactionAwareWriter) line: 1144
+org.apache.cassandra.db.compaction.CursorCompactor.startPartition(DeletionTime) line: 473
+org.apache.cassandra.db.compaction.CursorCompactor.lateStartPartition(boolean) line: 1121
+org.apache.cassandra.db.compaction.CursorCompactor.lateStartRow(LivenessInfo, DeletionTime, boolean) line: 1114
+org.apache.cassandra.db.compaction.CursorCompactor.mergeRows(int, DeletionTime, boolean, boolean) line: 568
+org.apache.cassandra.db.compaction.CursorCompactor.mergePartitions(int) line: 428
+org.apache.cassandra.db.compaction.CursorCompactor.tryWriteNextPartition(CompactionAwareWriter) line: 357
+org.apache.cassandra.db.compaction.CursorCompactor.writeNextPartition(CompactionAwareWriter) line: 321
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.processNextPartitionKey() line: 75
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 282
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111
+org.apache.cassandra.db.compaction.AbstractCompactionTask.execute(ActiveCompactionsTracker) line: 110
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.compactOnceMeasured(ThreadMXBean, ColumnFamilyStore, long) line: 228
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.recordAllocationProfile() line: 278
+jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Method, Object, Object[])
+jdk.internal.reflect.NativeMethodAccessorImpl.invoke(Object, Object[]) line: 75</pre></details>
+<details><summary><code>java.lang.Object[]</code> @ <code>org.apache.cassandra.io.sstable.metadata.CompactionMetadata$CompactionMetadataSerializer.serializedSize(Version, CompactionMetadata)</code> — 2.25 MB</summary><pre>java.util.Arrays.copyOf(Object[], int) line: 3482
+java.util.ArrayList.grow(int) line: 237
+java.util.ArrayList.grow() line: 244
+java.util.ArrayList.add(Object, Object[], int) line: 483
+java.util.ArrayList.add(Object) line: 496
+com.clearspring.analytics.stream.cardinality.HyperLogLogPlus.merge(int[], int[]) line: 636
+com.clearspring.analytics.stream.cardinality.HyperLogLogPlus.mergeTempList() line: 826
+com.clearspring.analytics.stream.cardinality.HyperLogLogPlus.getBytes() line: 798
+org.apache.cassandra.io.sstable.metadata.CompactionMetadata$CompactionMetadataSerializer.serializedSize(Version, CompactionMetadata) line: 79
+org.apache.cassandra.io.sstable.metadata.CompactionMetadata$CompactionMetadataSerializer.serializedSize(Version, MetadataComponent) line: 74
+org.apache.cassandra.io.sstable.metadata.MetadataSerializer.serialize(Map, DataOutputPlus, Version) line: 93
+org.apache.cassandra.io.sstable.format.StatsComponent.save(Descriptor) line: 116
+org.apache.cassandra.io.sstable.format.SSTableWriter$TransactionalProxy.doPrepare() line: 396
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.prepareToCommit() line: 168
+org.apache.cassandra.io.sstable.format.SSTableWriter.prepareToCommit() line: 291
+org.apache.cassandra.io.sstable.SSTableRewriter.doPrepare() line: 338
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.prepareToCommit() line: 168
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.doPrepare() line: 120
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.prepareToCommit() line: 168
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.finish() line: 179
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.finish() line: 130
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.finishWriting() line: 55
+org.apache.cassandra.db.compaction.CompactionTask.finish(AbstractCompactionPipeline) line: 388
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 309</pre></details>
+<details><summary><code>com.github.benmanes.caffeine.cache.LocalCache$$Lambda.0x00000098016545d0</code> @ <code>org.apache.cassandra.cache.ChunkCache$CachingRebufferer.rebuffer(long)</code> — 2.25 MB</summary><pre>jdk.internal.misc.Unsafe.allocateInstance(Class)
+java.lang.invoke.DirectMethodHandle.allocateInstance(Object) line: 501
+com.github.benmanes.caffeine.cache.LocalCache.statsAware(Function, boolean) line: 162
+com.github.benmanes.caffeine.cache.BoundedLocalCache.computeIfAbsent(Object, Function, boolean, boolean) line: 2666
+com.github.benmanes.caffeine.cache.LocalCache.computeIfAbsent(Object, Function) line: 112
+com.github.benmanes.caffeine.cache.LocalLoadingCache.get(Object) line: 58
+org.apache.cassandra.cache.ChunkCache$CachingRebufferer.rebuffer(long) line: 240
+org.apache.cassandra.cache.ChunkCache$CachingRebufferer.rebuffer(long) line: 219
+org.apache.cassandra.io.util.RandomAccessReader.reBufferAt(long) line: 81
+org.apache.cassandra.io.util.RandomAccessReader.seek(long) line: 236
+org.apache.cassandra.io.util.RandomAccessReader.skipBytes(int) line: 249
+org.apache.cassandra.io.util.DataInputPlus.skipBytesFully(int) line: 124
+org.apache.cassandra.utils.ByteBufferUtil.skipWithVIntLength(DataInputPlus) line: 464
+org.apache.cassandra.db.marshal.AbstractType.skipValue(DataInputPlus) line: 671
+org.apache.cassandra.io.sstable.SSTableCursorReader.skipCellValue() line: 492
+org.apache.cassandra.db.compaction.CursorCompactor.mergeCells(int, DeletionTime, LivenessInfo, boolean, boolean) line: 660
+org.apache.cassandra.db.compaction.CursorCompactor.mergeRows(int, DeletionTime, boolean, boolean) line: 594
+org.apache.cassandra.db.compaction.CursorCompactor.mergePartitions(int) line: 428
+org.apache.cassandra.db.compaction.CursorCompactor.tryWriteNextPartition(CompactionAwareWriter) line: 357
+org.apache.cassandra.db.compaction.CursorCompactor.writeNextPartition(CompactionAwareWriter) line: 321
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.processNextPartitionKey() line: 75
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 282
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111</pre></details>
+<details><summary><code>java.lang.Exception</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code> — 2.00 MB</summary><pre>java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;() line: 313
+org.apache.cassandra.utils.concurrent.Ref$State.&lt;init&gt;(Ref$GlobalState, Ref, ReferenceQueue) line: 234
+org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy) line: 143
+org.apache.cassandra.utils.concurrent.Ref$DirectBufferRef.&lt;init&gt;(DirectBuffer, RefCounted$Tidy) line: 877
+org.apache.cassandra.utils.memory.BufferPool$Chunk.setAttachment(ByteBuffer) line: 1338
+org.apache.cassandra.utils.memory.BufferPool$Chunk.set(int, int, ByteBuffer) line: 1478
+org.apache.cassandra.utils.memory.BufferPool$Chunk.get(int, boolean, ByteBuffer) line: 1468
+org.apache.cassandra.utils.memory.BufferPool$MicroQueueOfChunks.get(int, boolean, ByteBuffer) line: 639
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.tryGetInternal(int, boolean) line: 967
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.tryGet(int, boolean) line: 950
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.get(int, boolean) line: 910
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.get(int) line: 900
+org.apache.cassandra.utils.memory.BufferPool.get(int, BufferType) line: 215
+org.apache.cassandra.cache.ChunkCache.load(ChunkCache$Key) line: 162
+org.apache.cassandra.cache.ChunkCache.load(Object) line: 46
+com.github.benmanes.caffeine.cache.LocalLoadingCache.lambda$newMappingFunction$3(CacheLoader, Object) line: 183
+com.github.benmanes.caffeine.cache.LocalCache.lambda$statsAware$2(Function, boolean, Object) line: 167
+com.github.benmanes.caffeine.cache.BoundedLocalCache.lambda$doComputeIfAbsent$14(Object[], Function, Object, long[], int[], Object[], Object[], RemovalCause[], Node[], Object, Node) line: 2688
+java.util.concurrent.ConcurrentHashMap.compute(Object, BiFunction) line: 1955
+com.github.benmanes.caffeine.cache.BoundedLocalCache.doComputeIfAbsent(Object, Object, Function, long[], boolean) line: 2686
+com.github.benmanes.caffeine.cache.BoundedLocalCache.computeIfAbsent(Object, Function, boolean, boolean) line: 2669
+com.github.benmanes.caffeine.cache.LocalCache.computeIfAbsent(Object, Function) line: 112
+com.github.benmanes.caffeine.cache.LocalLoadingCache.get(Object) line: 58</pre></details>
+<details><summary><code>java.lang.StackTraceElement[]</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code> — 0.75 MB</summary><pre>java.lang.Throwable.getStackTrace() line: 853
+java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;() line: 313
+org.apache.cassandra.utils.concurrent.Ref$State.&lt;init&gt;(Ref$GlobalState, Ref, ReferenceQueue) line: 234
+org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy) line: 143
+org.apache.cassandra.utils.concurrent.SharedCloseableImpl.&lt;init&gt;(RefCounted$Tidy) line: 30
+org.apache.cassandra.io.util.ChannelProxy.&lt;init&gt;(File, FileChannel) line: 99
+org.apache.cassandra.io.util.ChannelProxy.&lt;init&gt;(File, ChannelProxy$IOMode) line: 94
+org.apache.cassandra.io.util.FileHandle$Builder.lambda$complete$1(File) line: 447
+org.apache.cassandra.io.util.FileHandle$Builder.complete(Function) line: 480
+org.apache.cassandra.io.util.FileHandle$Builder.complete() line: 447
+org.apache.cassandra.io.sstable.format.big.BigTableWriter.openInternal(IndexSummaryBuilder$ReadableBoundary, SSTableReader$OpenReason) line: 171
+org.apache.cassandra.io.sstable.format.big.BigTableWriter.openFinal(SSTableReader$OpenReason) line: 230
+org.apache.cassandra.io.sstable.format.SSTableWriter$TransactionalProxy.doPrepare() line: 402
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.prepareToCommit() line: 168
+org.apache.cassandra.io.sstable.format.SSTableWriter.prepareToCommit() line: 291
+org.apache.cassandra.io.sstable.SSTableRewriter.doPrepare() line: 338
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.prepareToCommit() line: 168
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.doPrepare() line: 120
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.prepareToCommit() line: 168
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.finish() line: 179
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.finish() line: 130
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.finishWriting() line: 55
+org.apache.cassandra.db.compaction.CompactionTask.finish(AbstractCompactionPipeline) line: 388</pre></details>
+<details><summary><code>short[]</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate()</code> — 0.75 MB</summary><pre>java.lang.Throwable.fillInStackTrace(int)
+java.lang.Throwable.fillInStackTrace() line: 820
+java.lang.Throwable.&lt;init&gt;() line: 258
+java.lang.Exception.&lt;init&gt;() line: 55
+java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate() line: 319
+org.apache.cassandra.utils.concurrent.Ref$State.ensureReleased(Throwable) line: 260
+org.apache.cassandra.utils.concurrent.Ref.ensureReleased(Throwable) line: 173
+org.apache.cassandra.io.util.SafeMemory.close(Throwable) line: 68
+org.apache.cassandra.io.util.SafeMemoryWriter.close(Throwable) line: 81
+org.apache.cassandra.io.sstable.indexsummary.IndexSummaryBuilder.close(Throwable) line: 322
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$IndexWriter.doPostCleanup(Throwable) line: 357
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 114
+org.apache.cassandra.io.sstable.format.SSTableWriter$TransactionalProxy.doCommit(Throwable) line: 408
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.io.sstable.format.SSTableWriter.commit(Throwable) line: 312
+org.apache.cassandra.io.sstable.SSTableRewriter.doCommit(Throwable) line: 196
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.doCommit(Throwable) line: 114
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit() line: 195
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.finish() line: 180
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.finish() line: 130
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.finishWriting() line: 55</pre></details>
+<details><summary><code>com.clearspring.analytics.stream.cardinality.HyperLogLogPlus</code> @ <code>org.apache.cassandra.io.sstable.metadata.CompactionMetadata$CompactionMetadataSerializer.deserialize(Version, DataInputPlus)</code> — 0.75 MB</summary><pre>com.clearspring.analytics.stream.cardinality.HyperLogLogPlus$Builder.decodeBytes(DataInputStream) line: 1097
+com.clearspring.analytics.stream.cardinality.HyperLogLogPlus$Builder.build(byte[]) line: 1030
+org.apache.cassandra.io.sstable.metadata.CompactionMetadata$CompactionMetadataSerializer.deserialize(Version, DataInputPlus) line: 90
+org.apache.cassandra.io.sstable.metadata.CompactionMetadata$CompactionMetadataSerializer.deserialize(Version, DataInputPlus) line: 74
+org.apache.cassandra.io.sstable.metadata.MetadataSerializer.deserialize(Descriptor, FileDataInput, EnumSet) line: 208
+org.apache.cassandra.io.sstable.metadata.MetadataSerializer.deserialize(Descriptor, EnumSet) line: 136
+org.apache.cassandra.io.sstable.format.StatsComponent.load(Descriptor, MetadataType[]) line: 63
+org.apache.cassandra.io.sstable.format.StatsComponent.load(Descriptor) line: 55
+org.apache.cassandra.io.sstable.format.SSTableReader.getApproximateKeyCount(Iterable) line: 324
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean, boolean) line: 93
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean) line: 78
+org.apache.cassandra.db.compaction.writers.DefaultCompactionWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean, int) line: 47
+org.apache.cassandra.db.compaction.CompactionTask.getCompactionAwareWriter(ColumnFamilyStore, Directories, ILifecycleTransaction, Set) line: 404
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.openWriterResource(ColumnFamilyStore, Directories, ILifecycleTransaction, Set) line: 48
+org.apache.cassandra.db.compaction.CompactionTask.getCompactionAwareWriter(Set, AbstractCompactionPipeline) line: 396
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 272
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111
+org.apache.cassandra.db.compaction.AbstractCompactionTask.execute(ActiveCompactionsTracker) line: 110
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.compactOnceMeasured(ThreadMXBean, ColumnFamilyStore, long) line: 228
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.recordAllocationProfile() line: 278
+jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Method, Object, Object[])
+jdk.internal.reflect.NativeMethodAccessorImpl.invoke(Object, Object[]) line: 75
+jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(Object, Object[]) line: 52</pre></details>
+<details><summary><code>java.lang.StackTraceElement[]</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate()</code> — 0.75 MB</summary><pre>java.lang.Throwable.getStackTrace() line: 853
+java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.deallocate() line: 319
+org.apache.cassandra.utils.concurrent.Ref$State.ensureReleased(Throwable) line: 260
+org.apache.cassandra.utils.concurrent.Ref.ensureReleased(Throwable) line: 173
+org.apache.cassandra.utils.concurrent.SharedCloseableImpl.close(Throwable) line: 50
+org.apache.cassandra.io.sstable.format.SortedTableWriter$AbstractIndexWriter.doPostCleanup(Throwable) line: 513
+org.apache.cassandra.io.sstable.format.big.BigTableWriter$IndexWriter.doPostCleanup(Throwable) line: 356
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 114
+org.apache.cassandra.io.sstable.format.SSTableWriter$TransactionalProxy.doCommit(Throwable) line: 408
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.io.sstable.format.SSTableWriter.commit(Throwable) line: 312
+org.apache.cassandra.io.sstable.SSTableRewriter.doCommit(Throwable) line: 196
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.doCommit(Throwable) line: 114
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit() line: 195
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.finish() line: 180
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.finish() line: 130
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.finishWriting() line: 55
+org.apache.cassandra.db.compaction.CompactionTask.finish(AbstractCompactionPipeline) line: 388
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 309
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111</pre></details>
+<details><summary><code>long[]</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code> — 0.75 MB</summary><pre>java.lang.Throwable.fillInStackTrace(int)
+java.lang.Throwable.fillInStackTrace() line: 820
+java.lang.Throwable.&lt;init&gt;() line: 258
+java.lang.Exception.&lt;init&gt;() line: 55
+java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;() line: 313
+org.apache.cassandra.utils.concurrent.Ref$State.&lt;init&gt;(Ref$GlobalState, Ref, ReferenceQueue) line: 234
+org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy) line: 143
+org.apache.cassandra.utils.concurrent.SharedCloseableImpl.&lt;init&gt;(RefCounted$Tidy) line: 30
+org.apache.cassandra.io.util.ChannelProxy.&lt;init&gt;(File, FileChannel) line: 99
+org.apache.cassandra.io.util.ChannelProxy.&lt;init&gt;(File, ChannelProxy$IOMode) line: 94
+org.apache.cassandra.io.util.ChannelProxy.&lt;init&gt;(File) line: 89
+org.apache.cassandra.io.util.RandomAccessReader.open(File) line: 384
+org.apache.cassandra.io.sstable.metadata.MetadataSerializer.deserialize(Descriptor, EnumSet) line: 134
+org.apache.cassandra.io.sstable.format.StatsComponent.load(Descriptor, MetadataType[]) line: 63
+org.apache.cassandra.io.sstable.format.StatsComponent.load(Descriptor) line: 55
+org.apache.cassandra.io.sstable.format.SSTableReader.getApproximateKeyCount(Iterable) line: 324
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean, boolean) line: 93
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean) line: 78
+org.apache.cassandra.db.compaction.writers.DefaultCompactionWriter.&lt;init&gt;(ColumnFamilyStore, Directories, ILifecycleTransaction, Set, boolean, int) line: 47
+org.apache.cassandra.db.compaction.CompactionTask.getCompactionAwareWriter(ColumnFamilyStore, Directories, ILifecycleTransaction, Set) line: 404
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.openWriterResource(ColumnFamilyStore, Directories, ILifecycleTransaction, Set) line: 48
+org.apache.cassandra.db.compaction.CompactionTask.getCompactionAwareWriter(Set, AbstractCompactionPipeline) line: 396
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 272</pre></details>
+<details><summary><code>int[]</code> @ <code>org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;()</code> — 0.50 MB</summary><pre>java.lang.Throwable.fillInStackTrace(int)
+java.lang.Throwable.fillInStackTrace() line: 820
+java.lang.Throwable.&lt;init&gt;() line: 258
+java.lang.Exception.&lt;init&gt;() line: 55
+java.lang.Thread.getStackTrace() line: 2451
+org.apache.cassandra.utils.concurrent.Ref$Debug.&lt;init&gt;() line: 313
+org.apache.cassandra.utils.concurrent.Ref$State.&lt;init&gt;(Ref$GlobalState, Ref, ReferenceQueue) line: 234
+org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy) line: 143
+org.apache.cassandra.utils.concurrent.Ref$DirectBufferRef.&lt;init&gt;(DirectBuffer, RefCounted$Tidy) line: 877
+org.apache.cassandra.utils.memory.BufferPool$Chunk.setAttachment(ByteBuffer) line: 1338
+org.apache.cassandra.utils.memory.BufferPool$Chunk.set(int, int, ByteBuffer) line: 1478
+org.apache.cassandra.utils.memory.BufferPool$Chunk.get(int, boolean, ByteBuffer) line: 1468
+org.apache.cassandra.utils.memory.BufferPool$MicroQueueOfChunks.get(int, boolean, ByteBuffer) line: 639
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.tryGetInternal(int, boolean) line: 967
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.tryGet(int, boolean) line: 950
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.get(int, boolean) line: 910
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.get(int) line: 900
+org.apache.cassandra.utils.memory.BufferPool.get(int, BufferType) line: 215
+org.apache.cassandra.cache.ChunkCache.load(ChunkCache$Key) line: 162
+org.apache.cassandra.cache.ChunkCache.load(Object) line: 46
+com.github.benmanes.caffeine.cache.LocalLoadingCache.lambda$newMappingFunction$3(CacheLoader, Object) line: 183
+com.github.benmanes.caffeine.cache.LocalCache.lambda$statsAware$2(Function, boolean, Object) line: 167
+com.github.benmanes.caffeine.cache.BoundedLocalCache.lambda$doComputeIfAbsent$14(Object[], Function, Object, long[], int[], Object[], Object[], RemovalCause[], Node[], Object, Node) line: 2688
+java.util.concurrent.ConcurrentHashMap.compute(Object, BiFunction) line: 1955</pre></details>
+<details><summary><code>byte[]</code> @ <code>org.apache.cassandra.io.util.ResizableByteBuffer.&lt;init&gt;()</code> — 0.50 MB</summary><pre>org.apache.cassandra.io.util.ResizableByteBuffer.&lt;init&gt;() line: 31
+org.apache.cassandra.io.sstable.ClusteringDescriptor.&lt;init&gt;(AbstractType[]) line: 58
+org.apache.cassandra.io.sstable.UnfilteredDescriptor.&lt;init&gt;(AbstractType[]) line: 50
+org.apache.cassandra.db.compaction.StatefulCursor.&lt;init&gt;(SSTableReader, Config$DiskAccessMode) line: 64
+org.apache.cassandra.db.compaction.CursorCompactor.convertScannersToCursors(List, ImmutableSet, Config$DiskAccessMode) line: 1591
+org.apache.cassandra.db.compaction.CursorCompactor.&lt;init&gt;(OperationType, List, AbstractCompactionController, long, TimeUUID, ActiveCompactionsTracker) line: 307
+org.apache.cassandra.db.compaction.CursorCompactor.&lt;init&gt;(OperationType, List, AbstractCompactionController, long, TimeUUID) line: 256
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.&lt;init&gt;(CompactionTask, OperationType, AbstractCompactionStrategy$ScannerList, AbstractCompactionController, long, TimeUUID) line: 41
+org.apache.cassandra.db.compaction.AbstractCompactionPipeline.create(CompactionTask, OperationType, AbstractCompactionStrategy$ScannerList, AbstractCompactionController, long, TimeUUID) line: 45
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 263
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111
+org.apache.cassandra.db.compaction.AbstractCompactionTask.execute(ActiveCompactionsTracker) line: 110
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.compactOnceMeasured(ThreadMXBean, ColumnFamilyStore, long) line: 228
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.recordAllocationProfile() line: 278
+jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Method, Object, Object[])
+jdk.internal.reflect.NativeMethodAccessorImpl.invoke(Object, Object[]) line: 75
+jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(Object, Object[]) line: 52
+java.lang.reflect.Method.invoke(Object, Object[]) line: 580
+org.junit.runners.model.FrameworkMethod$1.runReflectiveCall() line: 50
+org.junit.internal.runners.model.ReflectiveCallable.run() line: 12
+org.junit.runners.model.FrameworkMethod.invokeExplosively(Object, Object[]) line: 47
+org.junit.internal.runners.statements.InvokeMethod.evaluate() line: 17
+org.junit.internal.runners.statements.RunBefores.evaluate() line: 26</pre></details>
+<details><summary><code>byte[]</code> @ <code>org.apache.cassandra.io.sstable.Descriptor.fileFor(Component)</code> — 0.50 MB</summary><pre>sun.nio.fs.UnixPath.resolve(byte[], byte[]) line: 377
+sun.nio.fs.UnixPath.resolve(Path) line: 390
+sun.nio.fs.UnixPath.resolve(Path) line: 51
+java.nio.file.Path.resolve(String) line: 516
+org.apache.cassandra.io.sstable.Descriptor.fileFor(Component) line: 184
+org.apache.cassandra.io.sstable.format.SSTableReader.bytesOnDisk(boolean) line: 1951
+org.apache.cassandra.io.sstable.format.SSTableReader.logicalBytesOnDisk() line: 1940
+org.apache.cassandra.db.lifecycle.Tracker.updateSizeTracking(Iterable, Iterable, Throwable) line: 206
+org.apache.cassandra.db.lifecycle.LifecycleTransaction.doCommit(Throwable) line: 262
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.io.sstable.SSTableRewriter.doCommit(Throwable) line: 198
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.doCommit(Throwable) line: 114
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit(Throwable) line: 113
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.commit() line: 195
+org.apache.cassandra.utils.concurrent.Transactional$AbstractTransactional.finish() line: 180
+org.apache.cassandra.db.compaction.writers.CompactionAwareWriter.finish() line: 130
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.finishWriting() line: 55
+org.apache.cassandra.db.compaction.CompactionTask.finish(AbstractCompactionPipeline) line: 388
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 309
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111
+org.apache.cassandra.db.compaction.AbstractCompactionTask.execute(ActiveCompactionsTracker) line: 110
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.compactOnceMeasured(ThreadMXBean, ColumnFamilyStore, long) line: 228</pre></details>
+<details><summary><code>byte[]</code> @ <code>org.apache.cassandra.dht.ReusableDecoratedKey.&lt;init&gt;(Token, int)</code> — 0.50 MB</summary><pre>org.apache.cassandra.dht.ReusableDecoratedKey.&lt;init&gt;(Token, int) line: 33
+org.apache.cassandra.dht.Murmur3Partitioner$ReusableMurmurKey.&lt;init&gt;(int) line: 612
+org.apache.cassandra.dht.Murmur3Partitioner.createReusableKey(int) line: 659
+org.apache.cassandra.db.compaction.CursorCompactor.&lt;init&gt;(OperationType, List, AbstractCompactionController, long, TimeUUID, ActiveCompactionsTracker) line: 313
+org.apache.cassandra.db.compaction.CursorCompactor.&lt;init&gt;(OperationType, List, AbstractCompactionController, long, TimeUUID) line: 256
+org.apache.cassandra.db.compaction.CursorCompactionPipeline.&lt;init&gt;(CompactionTask, OperationType, AbstractCompactionStrategy$ScannerList, AbstractCompactionController, long, TimeUUID) line: 41
+org.apache.cassandra.db.compaction.AbstractCompactionPipeline.create(CompactionTask, OperationType, AbstractCompactionStrategy$ScannerList, AbstractCompactionController, long, TimeUUID) line: 45
+org.apache.cassandra.db.compaction.CompactionTask.runMayThrow() line: 263
+org.apache.cassandra.utils.WrappedRunnable.run() line: 26
+org.apache.cassandra.db.compaction.CompactionTask.executeInternal(ActiveCompactionsTracker) line: 111
+org.apache.cassandra.db.compaction.AbstractCompactionTask.execute(ActiveCompactionsTracker) line: 110
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.compactOnceMeasured(ThreadMXBean, ColumnFamilyStore, long) line: 228
+org.apache.cassandra.db.compaction.differential.CursorCompactionAllocationGateTest.recordAllocationProfile() line: 278
+jdk.internal.reflect.NativeMethodAccessorImpl.invoke0(Method, Object, Object[])
+jdk.internal.reflect.NativeMethodAccessorImpl.invoke(Object, Object[]) line: 75
+jdk.internal.reflect.DelegatingMethodAccessorImpl.invoke(Object, Object[]) line: 52
+java.lang.reflect.Method.invoke(Object, Object[]) line: 580
+org.junit.runners.model.FrameworkMethod$1.runReflectiveCall() line: 50
+org.junit.internal.runners.model.ReflectiveCallable.run() line: 12
+org.junit.runners.model.FrameworkMethod.invokeExplosively(Object, Object[]) line: 47
+org.junit.internal.runners.statements.InvokeMethod.evaluate() line: 17
+org.junit.internal.runners.statements.RunBefores.evaluate() line: 26
+org.junit.internal.runners.statements.RunAfters.evaluate() line: 27
+org.junit.rules.TestWatcher$1.evaluate() line: 55</pre></details>
+<details><summary><code>org.apache.cassandra.utils.concurrent.Ref$State</code> @ <code>org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy)</code> — 0.50 MB</summary><pre>org.apache.cassandra.utils.concurrent.Ref.&lt;init&gt;(Object, RefCounted$Tidy) line: 143
+org.apache.cassandra.utils.concurrent.Ref$DirectBufferRef.&lt;init&gt;(DirectBuffer, RefCounted$Tidy) line: 877
+org.apache.cassandra.utils.memory.BufferPool$Chunk.setAttachment(ByteBuffer) line: 1338
+org.apache.cassandra.utils.memory.BufferPool$Chunk.set(int, int, ByteBuffer) line: 1478
+org.apache.cassandra.utils.memory.BufferPool$Chunk.get(int, boolean, ByteBuffer) line: 1468
+org.apache.cassandra.utils.memory.BufferPool$MicroQueueOfChunks.get(int, boolean, ByteBuffer) line: 639
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.tryGetInternal(int, boolean) line: 967
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.tryGet(int, boolean) line: 950
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.get(int, boolean) line: 910
+org.apache.cassandra.utils.memory.BufferPool$LocalPool.get(int) line: 900
+org.apache.cassandra.utils.memory.BufferPool.get(int, BufferType) line: 215
+org.apache.cassandra.cache.ChunkCache.load(ChunkCache$Key) line: 162
+org.apache.cassandra.cache.ChunkCache.load(Object) line: 46
+com.github.benmanes.caffeine.cache.LocalLoadingCache.lambda$newMappingFunction$3(CacheLoader, Object) line: 183
+com.github.benmanes.caffeine.cache.LocalCache.lambda$statsAware$2(Function, boolean, Object) line: 167
+com.github.benmanes.caffeine.cache.BoundedLocalCache.lambda$doComputeIfAbsent$14(Object[], Function, Object, long[], int[], Object[], Object[], RemovalCause[], Node[], Object, Node) line: 2688
+java.util.concurrent.ConcurrentHashMap.compute(Object, BiFunction) line: 1955
+com.github.benmanes.caffeine.cache.BoundedLocalCache.doComputeIfAbsent(Object, Object, Function, long[], boolean) line: 2686
+com.github.benmanes.caffeine.cache.BoundedLocalCache.computeIfAbsent(Object, Function, boolean, boolean) line: 2669
+com.github.benmanes.caffeine.cache.LocalCache.computeIfAbsent(Object, Function) line: 112
+com.github.benmanes.caffeine.cache.LocalLoadingCache.get(Object) line: 58
+org.apache.cassandra.cache.ChunkCache$CachingRebufferer.rebuffer(long) line: 240
+org.apache.cassandra.cache.ChunkCache$CachingRebufferer.rebuffer(long) line: 219
+org.apache.cassandra.io.util.RandomAccessReader.reBufferAt(long) line: 81</pre></details>
+</body></html>

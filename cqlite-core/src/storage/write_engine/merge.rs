@@ -1696,6 +1696,155 @@ mod tests {
     }
 
     #[test]
+    fn test_real_merger_value_tiebreak_diverges_from_cassandra() {
+        // VERIFICATION (cursor-compaction findings #4 / #21): documents that CQLite's
+        // equal-timestamp cell tie-break for two LIVE values of the SAME column
+        // DIVERGES from Cassandra.
+        //
+        // Cassandra `Cells.resolveRegular` (cursor findings #4/#21): on a timestamp
+        // tie between two live cells, the cell whose **raw value bytes** are strictly
+        // greater (unsigned lexicographic compare, length prefix excluded) wins —
+        // file/run order is NOT consulted.
+        //
+        // CQLite `reconcile_cluster` (merge.rs): on a timestamp tie between two live
+        // cells it keeps the FIRST-SEEN cell, i.e. the lower run_index (newer file).
+        // Raw value bytes are never compared.
+        //
+        // Fixture (same pk, no clustering, SAME timestamp, DIFFERENT values):
+        //   A (run_index 0, NEWER file): {v: "apple"}    raw bytes 0x61 70 70 6C 65
+        //   B (run_index 1, OLDER file): {v: "banana"}   raw bytes 0x62 ...  (GREATER)
+        //
+        // Cassandra would keep "banana" (greater raw bytes, from the older file).
+        // CQLite keeps "apple" (first-seen / newer file). The two rules pick
+        // DIFFERENT winners here, so the surviving value is byte-divergent.
+        //
+        // This test ASSERTS CQLite's current behavior and asserts that it differs
+        // from the Cassandra winner. If CQLite is later changed to match Cassandra
+        // (compare raw value bytes), THIS TEST WILL FAIL and must be updated to
+        // reflect the new, convergent behavior. See
+        // docs/garbage-free-compaction-improvements/cqlite-findings-and-applicability.md.
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let schema = TableSchema {
+            keyspace: "tiebreak_ks".to_string(),
+            table: "tiebreak_tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "v".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        const EQUAL_TS: i64 = 1_700_000_000_000_000;
+        let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+
+        // For CQL `text`, the raw cell value Cassandra compares is exactly the UTF-8
+        // bytes. "banana" > "apple" unsigned-lexicographically (0x62 > 0x61).
+        let newer_file_value = "apple"; // run_index 0 (newer)
+        let older_file_value = "banana"; // run_index 1 (older), greater raw bytes
+        assert!(
+            older_file_value.as_bytes() > newer_file_value.as_bytes(),
+            "fixture invariant: the older file must hold the lexicographically GREATER \
+             raw value, so the two tie-break rules pick different winners"
+        );
+
+        // The value Cassandra's rule (#4/#21) would keep: greater raw value bytes.
+        let cassandra_winner = if older_file_value.as_bytes() > newer_file_value.as_bytes() {
+            older_file_value
+        } else {
+            newer_file_value
+        };
+
+        let entry_newer = MergeEntry::new(
+            0, // newer file
+            partition_key.clone(),
+            None,
+            EQUAL_TS,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "v".to_string(),
+                    value: Value::Text(newer_file_value.to_string()),
+                    timestamp: EQUAL_TS,
+                    ttl: None,
+                }],
+            },
+        );
+
+        let entry_older = MergeEntry::new(
+            1, // older file
+            partition_key.clone(),
+            None,
+            EQUAL_TS,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "v".to_string(),
+                    value: Value::Text(older_file_value.to_string()),
+                    timestamp: EQUAL_TS,
+                    ttl: None,
+                }],
+            },
+        );
+
+        let merger = KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema,
+        };
+
+        // Heap-routing order (run_index ascending): newer file first — exactly what
+        // the real merge heap yields for equal (pk, ck).
+        let merged = merger
+            .merge_partition_rows(vec![entry_newer, entry_older])
+            .expect("merge_partition_rows must not fail");
+
+        assert_eq!(merged.len(), 1, "one (pk, ck) group => one merged winner");
+
+        let cells = match &merged[0].row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected a Live merged row, got {:?}", other),
+        };
+        let surviving = match &cells
+            .iter()
+            .find(|c| c.column == "v")
+            .expect("column `v` must survive")
+            .value
+        {
+            Value::Text(s) => s.clone(),
+            other => panic!("expected Text value, got {:?}", other),
+        };
+
+        // 1) CQLite's actual behavior: first-seen (newer file / lower run_index) wins.
+        assert_eq!(
+            surviving, newer_file_value,
+            "CQLite reconcile_cluster keeps the first-seen (newer file) cell on a \
+             timestamp tie; got {:?}",
+            surviving
+        );
+
+        // 2) The divergence itself, made executable: CQLite's winner is NOT the value
+        //    Cassandra's raw-value-bytes rule (#4/#21) would have kept.
+        assert_ne!(
+            surviving, cassandra_winner,
+            "EXPECTED DIVERGENCE (#4/#21): CQLite kept {:?} but Cassandra's \
+             Cells.resolveRegular keeps the greater raw value {:?}. If this assertion \
+             fails, CQLite now matches Cassandra and the finding is RESOLVED — update \
+             cqlite-findings-and-applicability.md and convert this into a convergence test.",
+            surviving, cassandra_winner
+        );
+    }
+
+    #[test]
     fn test_real_merger_same_column_conflict_resolves_by_timestamp() {
         // Issue #533: when both SSTables write the SAME column, the higher-timestamp
         // value wins (last-write-wins), but disjoint columns still survive.
