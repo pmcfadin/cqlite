@@ -169,7 +169,7 @@ jobs:
           retention-days: 30
 
       - name: Comment on PR (Success)
-        if: always() && github.event_name == 'pull_request' && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success'
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success'
         uses: actions/github-script@v8
         with:
           script: |
@@ -192,7 +192,7 @@ jobs:
             });
 
       - name: Comment on PR (Failure)
-        if: always() && github.event_name == 'pull_request' && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success')
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success')
         uses: actions/github-script@v8
         with:
           script: |
