@@ -33,11 +33,38 @@ use tonic::{Request, Response, Status, Streaming};
 
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
 
-use crate::producer::{DirSource, MergeProducer, SstableSource};
-use crate::ticket::FlightTicket;
+use crate::producer::{DirSource, MergeProducer, ProducerError};
+use crate::ticket::{FlightTicket, TicketError};
 
 /// Boxed server response stream alias.
 type BoxStream<T> = Pin<Box<dyn Stream<Item = Result<T, Status>> + Send + 'static>>;
+
+/// Map a ticket-decode failure to a client (`invalid_argument`) gRPC error so the
+/// Java connector can distinguish bad input from server faults.
+impl From<TicketError> for Status {
+    fn from(e: TicketError) -> Self {
+        Status::invalid_argument(e.to_string())
+    }
+}
+
+/// Map a producer failure to the appropriate gRPC status code, preserving the
+/// error's message (and its source chain via `thiserror` `Display`).
+impl From<ProducerError> for Status {
+    fn from(e: ProducerError) -> Self {
+        let msg = e.to_string();
+        match e {
+            ProducerError::InvalidColumnType { .. } => Status::invalid_argument(msg),
+            ProducerError::Discovery { source, .. }
+                if source.kind() == std::io::ErrorKind::NotFound =>
+            {
+                Status::not_found(msg)
+            }
+            ProducerError::Discovery { .. }
+            | ProducerError::Merge(_)
+            | ProducerError::Convert(_) => Status::internal(msg),
+        }
+    }
+}
 
 /// Flight service over a node-local SSTable data directory.
 #[derive(Clone)]
@@ -65,44 +92,14 @@ impl CqliteFlightService {
 
     /// Build a producer from a parsed schema.
     fn make_producer(&self, schema: TableSchema) -> Result<MergeProducer, Status> {
-        MergeProducer::new(schema, self.batch_size).map_err(|e| Status::internal(e.to_string()))
-    }
-
-    /// Resolve the directory holding a table's SSTables.
-    ///
-    /// Supports both the write-engine layout (`<data>/<ks>/<table>`) and the
-    /// Cassandra layout (`<data>/<ks>/<table>-<uuid>`). Snapshot resolution is
-    /// added in Phase 3.
-    fn table_dir(&self, keyspace: &str, table: &str) -> PathBuf {
-        let base = self.data_dir.join(keyspace);
-        let exact = base.join(table);
-        if exact.is_dir() {
-            return exact;
-        }
-        if let Ok(entries) = std::fs::read_dir(&base) {
-            let prefix = format!("{table}-");
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir()
-                    && entry
-                        .file_name()
-                        .to_str()
-                        .is_some_and(|n| n.starts_with(&prefix))
-                {
-                    return path;
-                }
-            }
-        }
-        exact
+        Ok(MergeProducer::new(schema, self.batch_size)?)
     }
 
     /// Arrow schema for a ticket (no SSTable access required).
     fn arrow_schema_for(&self, ticket: &FlightTicket) -> Result<ArrowSchema, Status> {
         let schema = Self::parse_schema(ticket)?;
         let producer = self.make_producer(schema)?;
-        producer
-            .arrow_schema()
-            .map_err(|e| Status::internal(e.to_string()))
+        Ok(producer.arrow_schema()?)
     }
 }
 
@@ -121,8 +118,7 @@ impl FlightService for CqliteFlightService {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
         let descriptor = request.into_inner();
-        let ticket = FlightTicket::from_bytes(&descriptor.cmd)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let ticket = FlightTicket::from_bytes(&descriptor.cmd)?;
         let arrow_schema = self.arrow_schema_for(&ticket)?;
 
         let endpoint = FlightEndpoint::new().with_ticket(Ticket::new(descriptor.cmd.clone()));
@@ -139,8 +135,7 @@ impl FlightService for CqliteFlightService {
         request: Request<FlightDescriptor>,
     ) -> Result<Response<SchemaResult>, Status> {
         let descriptor = request.into_inner();
-        let ticket = FlightTicket::from_bytes(&descriptor.cmd)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let ticket = FlightTicket::from_bytes(&descriptor.cmd)?;
         let arrow_schema = self.arrow_schema_for(&ticket)?;
 
         let options = IpcWriteOptions::default();
@@ -154,31 +149,22 @@ impl FlightService for CqliteFlightService {
         &self,
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
-        let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
         let schema = Self::parse_schema(&ticket)?;
         let producer = self.make_producer(schema)?;
-        let schema_ref = Arc::new(
-            producer
-                .arrow_schema()
-                .map_err(|e| Status::internal(e.to_string()))?,
-        );
-        let paths = DirSource::new(self.table_dir(&ticket.keyspace, &ticket.table))
-            .data_paths()
-            .map_err(|e| Status::internal(e.to_string()))?;
+        let schema_ref = Arc::new(producer.arrow_schema()?);
+        let source = DirSource::resolve(&self.data_dir, &ticket.keyspace, &ticket.table);
 
         // The merge drains SSTables into memory and is CPU-bound — run it off the
-        // async runtime so it cannot stall the gRPC reactor.
-        let mut batches = tokio::task::spawn_blocking(move || producer.produce_from_paths(paths))
+        // async runtime so it cannot stall the gRPC reactor. A missing table
+        // directory surfaces as `not_found`; an existing table with no SSTables
+        // yields an empty result (schema only).
+        let batches = tokio::task::spawn_blocking(move || producer.produce(&source))
             .await
-            .map_err(|e| Status::internal(format!("merge task panicked: {e}")))?
-            .map_err(|e| Status::internal(e.to_string()))?;
+            .map_err(|e| Status::internal(format!("merge task panicked: {e}")))??;
 
-        // Always emit the schema, even when the result is empty.
-        if batches.is_empty() {
-            batches.push(RecordBatch::new_empty(schema_ref.clone()));
-        }
-
+        // `with_schema` emits the Arrow schema as the first Flight message even
+        // when no record batches follow, so an empty result still carries the schema.
         let input = futures::stream::iter(batches.into_iter().map(Ok::<RecordBatch, FlightError>));
         let encoded = FlightDataEncoderBuilder::new()
             .with_schema(schema_ref)
@@ -245,18 +231,17 @@ mod tests {
     use arrow::array::Array;
     use arrow_flight::decode::FlightRecordBatchStream;
 
-    fn ticket(data_keyspace: &str, table: &str) -> FlightTicket {
+    fn ticket(keyspace: &str, table: &str) -> FlightTicket {
         FlightTicket {
-            keyspace: data_keyspace.into(),
+            keyspace: keyspace.into(),
             table: table.into(),
             ddl: SIMPLE_DDL.into(),
-            snapshot: None,
-            token_start: None,
-            token_end: None,
-            wraparound: false,
-            columns: None,
-            predicates: vec![],
+            ..Default::default()
         }
+    }
+
+    fn cmd_descriptor(ticket: &FlightTicket) -> FlightDescriptor {
+        FlightDescriptor::new_cmd(ticket.to_bytes().unwrap())
     }
 
     async fn decode(stream: <CqliteFlightService as FlightService>::DoGetStream) -> Vec<RecordBatch> {
@@ -311,11 +296,8 @@ mod tests {
     async fn get_schema_returns_declared_columns() {
         // No SSTables needed — schema comes from the ticket DDL.
         let svc = CqliteFlightService::new(std::env::temp_dir(), 1024);
-        let mut descriptor = FlightDescriptor::new_cmd(ticket(KS, TBL).to_bytes().unwrap());
-        descriptor.r#type = arrow_flight::flight_descriptor::DescriptorType::Cmd as i32;
-
         let resp = svc
-            .get_schema(Request::new(descriptor))
+            .get_schema(Request::new(cmd_descriptor(&ticket(KS, TBL))))
             .await
             .expect("get_schema");
         let schema: ArrowSchema = (&resp.into_inner())
@@ -325,18 +307,86 @@ mod tests {
         assert_eq!(names, vec!["id", "name", "score"]);
     }
 
+    #[tokio::test]
+    async fn get_flight_info_carries_schema_and_endpoint() {
+        let svc = CqliteFlightService::new(std::env::temp_dir(), 1024);
+        let resp = svc
+            .get_flight_info(Request::new(cmd_descriptor(&ticket(KS, TBL))))
+            .await
+            .expect("get_flight_info");
+        let info = resp.into_inner();
+        assert_eq!(info.endpoint.len(), 1, "one endpoint with the ticket");
+        assert!(
+            !info.endpoint[0].ticket.as_ref().unwrap().ticket.is_empty(),
+            "endpoint carries a non-empty ticket"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_ddl_is_invalid_argument() {
+        let svc = CqliteFlightService::new(std::env::temp_dir(), 1024);
+        let bad = FlightTicket {
+            keyspace: KS.into(),
+            table: TBL.into(),
+            ddl: "this is not valid CQL".into(),
+            ..Default::default()
+        };
+        let err = svc
+            .get_schema(Request::new(cmd_descriptor(&bad)))
+            .await
+            .expect_err("invalid ddl must error");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
     #[test]
-    fn do_get_missing_table_errors_cleanly() {
+    fn do_get_missing_table_is_not_found() {
         let schema = simple_schema();
         let (_temp, data_dir, _dir) = build_sstables(&schema, vec![vec![write_row(1, "x", 1, 100)]]);
         let svc = CqliteFlightService::new(data_dir, 1024);
         let rt = tokio::runtime::Runtime::new().unwrap();
 
-        // Point at a table with no SSTable dir → surfaces a Status, not a panic.
-        let resp = rt.block_on(async {
+        let result = rt.block_on(async {
             let bytes = ticket(KS, "missing_table").to_bytes().unwrap();
             svc.do_get(Request::new(Ticket::new(bytes))).await
         });
-        assert!(resp.is_err(), "missing table dir surfaces an error, not a panic");
+        let err = match result {
+            Ok(_) => panic!("missing table must error"),
+            Err(e) => e,
+        };
+        assert_eq!(err.code(), tonic::Code::NotFound, "got: {err:?}");
+    }
+
+    #[test]
+    fn do_get_empty_table_emits_schema_only() {
+        // An existing table directory with no SSTables → valid empty result that
+        // still carries the Arrow schema (via FlightDataEncoder `with_schema`).
+        let temp = tempfile::TempDir::new().unwrap();
+        let data_dir = temp.path().join("data");
+        std::fs::create_dir_all(data_dir.join(KS).join(TBL)).unwrap();
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let (schema, batches) = rt.block_on(async {
+            let bytes = ticket(KS, TBL).to_bytes().unwrap();
+            let resp = svc
+                .do_get(Request::new(Ticket::new(bytes)))
+                .await
+                .expect("do_get");
+            let mapped = resp
+                .into_inner()
+                .map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));
+            let mut rb = FlightRecordBatchStream::new_from_flight_data(mapped);
+            let mut out = Vec::new();
+            while let Some(b) = rb.next().await {
+                out.push(b.expect("decode"));
+            }
+            let schema = rb.schema().cloned();
+            (schema, out)
+        });
+
+        assert_eq!(total_rows(&batches), 0, "no rows for an empty table");
+        let schema = schema.expect("schema must be present even when empty");
+        let names: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["id", "name", "score"]);
     }
 }

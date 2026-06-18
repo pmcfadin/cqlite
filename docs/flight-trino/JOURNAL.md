@@ -111,3 +111,34 @@ Format:
   test-covered here (Phase 2+); token-range/predicate/projection filters are Phase 2; live-dir
   reads only (snapshot is Phase 3).
 - **Next:** Run the Phase 1 code-review team (testing gaps, smells, SOLID); fix; commit; then Phase 2.
+
+## 2026-06-17 — Phase 1 code-review team + fixes
+
+- **What:** Ran 3 parallel review agents (correctness/merge semantics, test gaps, SOLID/design).
+  Resolved findings in the cqlite-flight crate (this commit) + spawned a cqlite-core fix (separate).
+- **CRITICAL found & confirmed:** wide-row/clustering tables collapse to one row per partition
+  because the merge sets `MergeEntry.clustering_key = None`. Verified with a new test
+  (`clustering_table_preserves_distinct_rows_in_a_partition`: got 1, expected 2). This is a real
+  cqlite-core compaction defect (its own tests only covered non-clustering schemas). Per the
+  "fix root cause, never disable" rule, dispatched a background sstable-developer fix to populate
+  the clustering key from cells in the merge. The flight cross-check test is `#[ignore]` until it lands.
+- **Fixes applied (cqlite-flight):**
+  - Ticket wire-contract hardening: `#[non_exhaustive]` on `FlightTicket`/`Predicate`/`PredicateOp`,
+    added `version` field (`TICKET_VERSION`) + `Default` impl — forward-compat for the Java connector.
+  - `From<ProducerError>/From<TicketError> for Status`: real gRPC codes (invalid_argument / not_found /
+    internal) instead of flattening everything to `internal`; messages preserved. Java connector can
+    now branch on status code.
+  - `DirSource::resolve` owns table-dir resolution (write-engine + Cassandra `<table>-<uuid>` layouts),
+    deterministically picking the lexicographically-largest match; removed the duplicated `table_dir`
+    from the service (DRY/SRP; sets up Phase 3 snapshot swap behind `SstableSource`).
+  - Missing table dir → `not_found`; existing-but-empty table → schema-only stream. Removed the
+    spurious empty `RecordBatch` (verified `FlightDataEncoderBuilder::with_schema` emits schema for
+    an empty stream via a new test).
+  - Tightened surface: `DirSource.dir` private, `schema_columns` → `pub(crate)`.
+  - New tests: UUID round-trip + Arrow UUID extension metadata; null column → Arrow null;
+    get_flight_info schema/endpoint; invalid-DDL → invalid_argument; missing-table → not_found code;
+    empty-table → schema-only. 22 passing, 1 ignored (clustering, pending core fix). clippy clean.
+- **Deferred/documented (not fixed):** TTL expiry not evaluated (reader doesn't surface TTL) — known
+  limitation; PK/regular column name collision inherited from shared `build_row_from_scan` — low risk.
+  Full-result-set buffered in memory (no streaming backpressure) — documented #1 perf item for later.
+- **Next:** await background cqlite-core clustering fix → un-ignore + verify → commit → Phase 2.

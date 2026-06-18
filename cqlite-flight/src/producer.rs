@@ -67,13 +67,44 @@ pub trait SstableSource {
 /// Lists `*-Data.db` files directly under a table directory.
 pub struct DirSource {
     /// Directory holding the table's SSTable components.
-    pub dir: PathBuf,
+    dir: PathBuf,
 }
 
 impl DirSource {
-    /// Create a source over `dir` (e.g. `<data>/<keyspace>/<table>`).
+    /// Create a source over an explicit directory (e.g. `<data>/<ks>/<table>`).
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
+    }
+
+    /// Resolve the SSTable directory for `keyspace.table` under `data_dir`.
+    ///
+    /// Supports the write-engine layout (`<data>/<ks>/<table>`) and the Cassandra
+    /// layout (`<data>/<ks>/<table>-<uuid>`). When several `<table>-<uuid>` dirs
+    /// match, the lexicographically-largest name is chosen deterministically.
+    /// When nothing matches, the exact (non-existent) path is returned so that
+    /// `data_paths` surfaces a clean `NotFound`.
+    pub fn resolve(data_dir: &Path, keyspace: &str, table: &str) -> Self {
+        let base = data_dir.join(keyspace);
+        let exact = base.join(table);
+        if exact.is_dir() {
+            return Self::new(exact);
+        }
+        let prefix = format!("{table}-");
+        let mut best: Option<PathBuf> = None;
+        if let Ok(entries) = std::fs::read_dir(&base) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let matches = path.is_dir()
+                    && entry
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|n| n.starts_with(&prefix));
+                if matches && best.as_ref().is_none_or(|b| path > *b) {
+                    best = Some(path);
+                }
+            }
+        }
+        Self::new(best.unwrap_or(exact))
     }
 }
 
@@ -212,7 +243,7 @@ impl MergeProducer {
 /// Column order is partition keys, then clustering keys, then the remaining
 /// regular columns — a stable, key-first order for the downstream SQL engine.
 /// Every column carries its authoritative `CqlType` (no heuristics, issue #28).
-pub fn schema_columns(schema: &TableSchema) -> Result<Vec<ColumnInfo>, ProducerError> {
+pub(crate) fn schema_columns(schema: &TableSchema) -> Result<Vec<ColumnInfo>, ProducerError> {
     let mut seen = std::collections::HashSet::new();
     let mut columns = Vec::new();
 
@@ -316,6 +347,30 @@ mod tests {
         assert!(cols.iter().all(|c| c.cql_type.is_some()));
     }
 
+    // Cross-check for the cqlite-core merge fix (wide-row collapse). Ignored until
+    // that fix lands; the authoritative gate is the cqlite-core compaction test.
+    #[test]
+    #[ignore = "pending cqlite-core merge clustering-key fix"]
+    fn clustering_table_preserves_distinct_rows_in_a_partition() {
+        use crate::testutil::{clustering_schema, write_clustered};
+        let schema = clustering_schema();
+        // One partition (pk=1) with two clustering rows.
+        let (_temp, _data, dir) = crate::testutil::build_sstables(
+            &schema,
+            vec![vec![
+                write_clustered(1, "a", 10, 100),
+                write_clustered(1, "b", 20, 100),
+            ]],
+        );
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+        let batches = producer.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            total_rows(&batches),
+            2,
+            "both clustering rows in the partition must survive (not collapse to one)"
+        );
+    }
+
     #[test]
     fn produces_all_rows_from_single_sstable() {
         let schema = simple_schema();
@@ -335,6 +390,69 @@ mod tests {
             .map(|f| f.name().as_str())
             .collect();
         assert_eq!(field_names, vec!["id", "name", "score"]);
+    }
+
+    #[test]
+    fn null_column_is_arrow_null() {
+        use arrow::array::Array;
+        use crate::testutil::write_name_only;
+        let schema = simple_schema();
+        // id=1 has no `score` cell → null; id=2 has both.
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![write_name_only(1, "a", 100), write_row(2, "b", 50, 100)]],
+        );
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+        let batches = producer.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 2);
+
+        let batch = &batches[0];
+        let ids = batch
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        let scores = batch
+            .column_by_name("score")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap();
+        // Find the row for id=1 and assert its score is null.
+        let idx = (0..ids.len()).find(|&i| ids.value(i) == 1).expect("id=1 present");
+        assert!(scores.is_null(idx), "missing score cell must be Arrow null");
+        let idx2 = (0..ids.len()).find(|&i| ids.value(i) == 2).expect("id=2 present");
+        assert!(!scores.is_null(idx2));
+        assert_eq!(scores.value(idx2), 50);
+    }
+
+    #[test]
+    fn uuid_column_roundtrips_with_extension_metadata() {
+        use crate::testutil::{uuid_schema, write_uuid_row};
+        let schema = uuid_schema();
+        let id = [7u8; 16];
+        let (_temp, _data, dir) = build_sstables(&schema, vec![vec![write_uuid_row(id, "x", 100)]]);
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+
+        // Arrow field carries the UUID extension metadata so Trino reads it as UUID.
+        let arrow_schema = producer.arrow_schema().unwrap();
+        let id_field = arrow_schema.field_with_name("id").unwrap();
+        assert_eq!(
+            id_field.metadata().get("ARROW:extension:name").map(String::as_str),
+            Some("arrow.uuid"),
+            "uuid column must carry the Arrow UUID extension"
+        );
+
+        let batches = producer.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 1);
+        let ids = batches[0]
+            .column_by_name("id")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::FixedSizeBinaryArray>()
+            .expect("uuid → FixedSizeBinary(16)");
+        assert_eq!(ids.value(0), &id, "uuid bytes round-trip");
     }
 
     #[test]

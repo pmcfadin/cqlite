@@ -21,11 +21,23 @@ pub enum TicketError {
     Decode(#[from] serde_json::Error),
 }
 
+/// Current ticket wire-format version. Bump when the JSON contract changes in a
+/// way the server must distinguish.
+pub const TICKET_VERSION: u8 = 1;
+
+fn default_ticket_version() -> u8 {
+    TICKET_VERSION
+}
+
 /// A comparison operator for a pushed-down predicate.
 ///
 /// Mirrors the subset of `cqlite_core` `SSTableFilterOp` that makes sense to push
 /// from a SQL engine. Translation to the core evaluator happens in Phase 2.
+///
+/// `#[non_exhaustive]`: this is a cross-language wire contract with the Java Trino
+/// connector; new operators can be added without breaking the format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum PredicateOp {
     /// `column = value`
     Equal,
@@ -45,6 +57,7 @@ pub enum PredicateOp {
 
 /// A single predicate to evaluate against each emitted row.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct Predicate {
     /// Column the predicate applies to.
     pub column: String,
@@ -55,8 +68,15 @@ pub struct Predicate {
 }
 
 /// The full description of one Flight scan.
+///
+/// `#[non_exhaustive]`: the JSON form is the contract with the Java Trino
+/// connector. Construct in Rust via struct update from [`FlightTicket::default`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct FlightTicket {
+    /// Wire-format version (see [`TICKET_VERSION`]).
+    #[serde(default = "default_ticket_version")]
+    pub version: u8,
     /// Keyspace name.
     pub keyspace: String,
     /// Table name.
@@ -81,6 +101,23 @@ pub struct FlightTicket {
     /// Predicates to evaluate server-side; empty means no predicate filtering.
     #[serde(default)]
     pub predicates: Vec<Predicate>,
+}
+
+impl Default for FlightTicket {
+    fn default() -> Self {
+        Self {
+            version: TICKET_VERSION,
+            keyspace: String::new(),
+            table: String::new(),
+            ddl: String::new(),
+            snapshot: None,
+            token_start: None,
+            token_end: None,
+            wraparound: false,
+            columns: None,
+            predicates: Vec::new(),
+        }
+    }
 }
 
 impl FlightTicket {
@@ -154,6 +191,7 @@ mod tests {
     #[test]
     fn round_trips_full_ticket() {
         let ticket = FlightTicket {
+            version: TICKET_VERSION,
             keyspace: "ks".into(),
             table: "tbl".into(),
             ddl: "CREATE TABLE ks.tbl (pk int PRIMARY KEY, v int)".into(),
@@ -198,13 +236,10 @@ mod tests {
         FlightTicket {
             keyspace: "k".into(),
             table: "t".into(),
-            ddl: String::new(),
-            snapshot: None,
             token_start: start,
             token_end: end,
             wraparound: wrap,
-            columns: None,
-            predicates: Vec::new(),
+            ..Default::default()
         }
     }
 
