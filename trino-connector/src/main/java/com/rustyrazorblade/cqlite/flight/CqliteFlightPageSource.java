@@ -30,14 +30,21 @@ public class CqliteFlightPageSource implements ConnectorPageSource {
         if (finished) {
             return null;
         }
-        if (!handle.stream().next()) {
-            finished = true;
-            return null;
+        try {
+            if (!handle.stream().next()) {
+                finished = true;
+                return null;
+            }
+            VectorSchemaRoot root = handle.stream().getRoot();
+            Page page = ArrowToTrino.toPage(root, columns);
+            completedPositions += page.getPositionCount();
+            return SourcePage.create(page);
+        } catch (RuntimeException e) {
+            // Release the gRPC channel + Arrow buffers if streaming/conversion
+            // fails — Trino does not guarantee close() on the throw path.
+            close();
+            throw e;
         }
-        VectorSchemaRoot root = handle.stream().getRoot();
-        Page page = ArrowToTrino.toPage(root, columns);
-        completedPositions += page.getPositionCount();
-        return SourcePage.create(page);
     }
 
     @Override

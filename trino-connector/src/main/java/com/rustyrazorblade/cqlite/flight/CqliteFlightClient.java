@@ -33,8 +33,18 @@ public final class CqliteFlightClient {
     /** Open a DoGet stream; the caller must close the returned handle. */
     public StreamHandle openStream(String host, int port, byte[] ticket) {
         FlightClient client = connect(host, port);
-        FlightStream stream = client.getStream(new Ticket(ticket));
-        return new StreamHandle(client, stream);
+        try {
+            FlightStream stream = client.getStream(new Ticket(ticket));
+            return new StreamHandle(client, stream);
+        } catch (RuntimeException e) {
+            // Don't leak the gRPC channel if opening the stream fails.
+            try {
+                client.close();
+            } catch (Exception suppressed) {
+                e.addSuppressed(suppressed);
+            }
+            throw e;
+        }
     }
 
     private FlightClient connect(String host, int port) {

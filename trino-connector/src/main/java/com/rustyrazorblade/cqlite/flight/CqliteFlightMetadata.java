@@ -63,8 +63,11 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         String keyspaceSchema;
         try {
             keyspaceSchema = sidecar.schema(keyspace).schema();
-        } catch (RuntimeException e) {
-            return null; // keyspace not found
+        } catch (SidecarClient.SidecarException e) {
+            if (e.statusCode() == 404) {
+                return null; // keyspace genuinely not found
+            }
+            throw e; // a real Sidecar failure must not masquerade as "no table"
         }
         return CreateTableExtractor.extract(keyspaceSchema, keyspace, table)
                 .map(ddl -> (ConnectorTableHandle) new CqliteFlightTableHandle(keyspace, table, ddl))

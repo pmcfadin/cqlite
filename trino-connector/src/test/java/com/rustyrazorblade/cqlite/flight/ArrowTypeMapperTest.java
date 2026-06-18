@@ -1,10 +1,8 @@
 package com.rustyrazorblade.cqlite.flight;
 
-import io.trino.spi.type.ArrayType;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.IntegerType;
-import io.trino.spi.type.Type;
 import io.trino.spi.type.VarcharType;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -17,6 +15,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 class ArrowTypeMapperTest {
 
@@ -53,11 +52,14 @@ class ArrowTypeMapperTest {
     }
 
     @Test
-    void listMapsToArrayType() {
+    void complexTypesAreRejectedAtPlanning() {
+        // v1 supports scalar columns; collections/decimal must fail clearly at
+        // planning rather than crash mid-scan (mapper↔ArrowToTrino stay in lockstep).
         Field child = scalar("item", new ArrowType.Int(32, true));
         Field list = new Field("xs", FieldType.nullable(ArrowType.List.INSTANCE), List.of(child));
-        Type mapped = ArrowTypeMapper.toTrino(list);
-        ArrayType array = assertInstanceOf(ArrayType.class, mapped);
-        assertEquals(IntegerType.INTEGER, array.getElementType());
+        assertThrows(UnsupportedOperationException.class, () -> ArrowTypeMapper.toTrino(list));
+
+        Field decimal = scalar("d", new ArrowType.Decimal(38, 9, 128));
+        assertThrows(UnsupportedOperationException.class, () -> ArrowTypeMapper.toTrino(decimal));
     }
 }

@@ -7,10 +7,13 @@ import io.trino.spi.block.BlockBuilder;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DateType;
+import io.trino.spi.type.DateTimeEncoding;
 import io.trino.spi.type.DoubleType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.RealType;
 import io.trino.spi.type.SmallintType;
+import io.trino.spi.type.TimeZoneKey;
+import io.trino.spi.type.TimestampWithTimeZoneType;
 import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.VarbinaryType;
@@ -23,7 +26,9 @@ import org.apache.arrow.vector.FixedSizeBinaryVector;
 import org.apache.arrow.vector.Float4Vector;
 import org.apache.arrow.vector.Float8Vector;
 import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.LargeVarCharVector;
 import org.apache.arrow.vector.SmallIntVector;
+import org.apache.arrow.vector.TimeStampVector;
 import org.apache.arrow.vector.TinyIntVector;
 import org.apache.arrow.vector.VarBinaryVector;
 import org.apache.arrow.vector.VarCharVector;
@@ -72,16 +77,34 @@ public final class ArrowToTrino {
             case BigintType t -> t.writeLong(builder, ((BigIntVector) vector).get(i));
             case RealType t -> t.writeLong(builder, Float.floatToRawIntBits(((Float4Vector) vector).get(i)));
             case DoubleType t -> t.writeDouble(builder, ((Float8Vector) vector).get(i));
+            case TimestampWithTimeZoneType t -> t.writeLong(builder,
+                    DateTimeEncoding.packDateTimeWithZone(
+                            ((TimeStampVector) vector).get(i), TimeZoneKey.UTC_KEY));
             case VarcharType t -> t.writeSlice(builder, varcharSlice(vector, i));
-            case VarbinaryType t -> t.writeSlice(builder, Slices.wrappedBuffer(((VarBinaryVector) vector).get(i)));
+            case VarbinaryType t -> t.writeSlice(builder, binarySlice(vector, i));
             default -> throw new UnsupportedOperationException(
                     "Unsupported Trino type for Arrow conversion: " + type);
         }
     }
 
+    /** VARBINARY may be backed by variable or fixed-size binary vectors. */
+    private static io.airlift.slice.Slice binarySlice(FieldVector vector, int i) {
+        if (vector instanceof VarBinaryVector v) {
+            return Slices.wrappedBuffer(v.get(i));
+        }
+        if (vector instanceof FixedSizeBinaryVector v) {
+            return Slices.wrappedBuffer(v.getObject(i));
+        }
+        throw new UnsupportedOperationException(
+                "Cannot map Arrow vector " + vector.getClass().getSimpleName() + " to VARBINARY");
+    }
+
     /** VARCHAR may be backed by Utf8 (text/inet) or FixedSizeBinary(16) (uuid). */
     private static io.airlift.slice.Slice varcharSlice(FieldVector vector, int i) {
         if (vector instanceof VarCharVector v) {
+            return Slices.wrappedBuffer(v.get(i));
+        }
+        if (vector instanceof LargeVarCharVector v) {
             return Slices.wrappedBuffer(v.get(i));
         }
         if (vector instanceof FixedSizeBinaryVector u) {

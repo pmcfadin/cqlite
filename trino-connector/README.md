@@ -19,15 +19,21 @@ compacted, filtered data back as Arrow.
 | Arrow→Trino type mapping | done, tested |
 | Plugin / ConnectorFactory / Connector / Config | done |
 | SplitManager (one split per range → one replica) | done, tested |
-| docker-compose E2E topology | done (compose validates) |
-| Metadata column resolution (GetSchema→Arrow→Trino) | **TODO (Phase 6)** |
-| PageSource (Flight DoGet → Arrow → Trino Page) | **TODO (Phase 6)** |
-| Constraint/projection pushdown (TupleDomain → ticket) | **TODO (Phase 6)** |
+| docker-compose E2E topology | done, **E2E passing** |
+| Metadata column resolution (GetSchema→Arrow→Trino) | done |
+| PageSource (Flight DoGet → Arrow → Trino Page) | done |
+| Projection pushdown (only requested columns streamed) | done |
+| Predicate pushdown (TupleDomain → ticket) | deferred (Trino post-filters; server supports it) |
 
-The Rust `cqlite-flight` server (compaction-merge → token/predicate/projection
-filter → Arrow, snapshot-aware) is complete and tested. The connector's
-discovery, typing, and split planning are done; the page source and metadata
-column wiring are the remaining functional pieces before the E2E can serve queries.
+The full stack works end-to-end: `SELECT` over `cqlite.<keyspace>.<table>`
+streams compaction-merged, token-range-deduped Arrow data back to Trino.
+Validated types include int/bigint/text/boolean/uuid/timestamp.
+
+**v1 type support:** scalar columns. Complex CQL types (collections, UDTs,
+tuples, decimal) are rejected at planning with a clear message rather than
+failing mid-scan. Cassandra's default 16 vnodes produce 16 splits per table
+(each reads the SSTable filtered by token range) — correct, with split
+consolidation a future optimization.
 
 ## End-to-end stack (docker)
 

@@ -305,3 +305,27 @@ Format:
   projection IS pushed); Cassandra default 16 vnodes → 16 splits each reading the SSTable (works,
   inefficient — a future optimization); listSchemaNames enumeration.
 - **Next:** commit E2E fixes; run connector code-review team; address findings; final commit.
+
+## 2026-06-18 — Phase 6 code-review team + fixes (final)
+
+- **What:** 2 reviewers (correctness/resources, tests/design). Both independently flagged the same
+  top issue; fixed the high-value findings and re-validated the live E2E.
+- **CRITICAL fixed — mapper↔page-source type drift.** `ArrowTypeMapper` mapped TIMESTAMP/DECIMAL/LIST/
+  FixedSizeBinary-VARBINARY that `ArrowToTrino` couldn't materialize → would plan fine then crash mid-scan
+  (UnsupportedOperationException/ClassCastException). Fix: implemented TIMESTAMP_TZ (pack epoch millis,
+  UTC) and VARBINARY-from-FixedSizeBinary + LargeUtf8 in the converter; the mapper now REJECTS complex
+  types (collections/decimal/udt) at planning with a clear message so the two stay in lockstep. New
+  round-trip test covers timestamp/date/real/binary/uuid; mapper test asserts complex-type rejection.
+- **Resource safety (B2):** `openStream` closes the FlightClient if `getStream` throws; `getNextSourcePage`
+  closes the handle on any exception (Trino doesn't guarantee close() on the throw path).
+- **Error masking (W1):** `SidecarException` now carries the HTTP status; `getTableHandle` returns null
+  only on a genuine 404, rethrowing real Sidecar failures instead of reporting them as "table not found".
+- **Cleanup:** deleted dead `ArrowTypeMapper.toRow/bySignature`; refreshed the stale README status table.
+- **E2E re-validated** with a diverse-type table `analytics.typed (id uuid PK, label text, amount int,
+  created timestamp, active boolean)`: `SELECT` returns uuid as `11111111-...` and timestamp as
+  `2024-01-01 00:00:00.000 UTC` correctly; events table still returns count=5. Connector tests green.
+- **Deferred (documented, not blocking):** predicate pushdown into the ticket (projection IS pushed;
+  Trino post-filters predicates — safe); per-stream child allocators + getMemoryUsage accounting (W3/W4);
+  TrinoException error taxonomy (W2); scripted/asserting E2E harness; complex CQL types.
+- **PHASE 6 COMPLETE. All 6 phases done.** Stack: cqlite-flight (Rust) + cqlite-trino (Java 25) +
+  docker-compose (Cassandra + Sidecar sharing IP + cqlite-flight + Trino on 172.42.0.0/16).

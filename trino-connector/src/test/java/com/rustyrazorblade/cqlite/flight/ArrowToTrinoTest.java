@@ -92,6 +92,54 @@ class ArrowToTrinoTest {
     }
 
     @Test
+    void convertsTimestampDateRealBinaryAndUuid() {
+        try (BufferAllocator allocator = new RootAllocator()) {
+            var ts = new org.apache.arrow.vector.TimeStampMilliTZVector("ts", allocator, "UTC");
+            var date = new org.apache.arrow.vector.DateDayVector("d", allocator);
+            var real = new org.apache.arrow.vector.Float4Vector("r", allocator);
+            var bin = new org.apache.arrow.vector.VarBinaryVector("b", allocator);
+            var uuid = new org.apache.arrow.vector.FixedSizeBinaryVector("u", allocator, 16);
+            ts.allocateNew(1);
+            date.allocateNew(1);
+            real.allocateNew(1);
+            bin.allocateNew();
+            uuid.allocateNew(1);
+
+            long millis = 1_700_000_000_000L;
+            ts.set(0, millis);
+            date.set(0, 19_000); // days since epoch
+            real.set(0, 1.5f);
+            bin.set(0, new byte[] {1, 2, 3});
+            byte[] uuidBytes = new byte[16];
+            uuidBytes[15] = 1;
+            uuid.set(0, uuidBytes);
+
+            var root = new VectorSchemaRoot(List.of(ts, date, real, bin, uuid));
+            root.setRowCount(1);
+
+            var columns = List.of(
+                    new CqliteFlightColumnHandle("ts", io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS),
+                    new CqliteFlightColumnHandle("d", io.trino.spi.type.DateType.DATE),
+                    new CqliteFlightColumnHandle("r", io.trino.spi.type.RealType.REAL),
+                    new CqliteFlightColumnHandle("b", io.trino.spi.type.VarbinaryType.VARBINARY),
+                    new CqliteFlightColumnHandle("u", VarcharType.VARCHAR));
+
+            Page page = ArrowToTrino.toPage(root, columns);
+            assertEquals(1, page.getPositionCount());
+
+            long packed = io.trino.spi.type.TimestampWithTimeZoneType.TIMESTAMP_TZ_MILLIS.getLong(page.getBlock(0), 0);
+            assertEquals(millis, io.trino.spi.type.DateTimeEncoding.unpackMillisUtc(packed));
+            assertEquals(19_000, io.trino.spi.type.DateType.DATE.getInt(page.getBlock(1), 0));
+            assertEquals(1.5f, Float.intBitsToFloat(io.trino.spi.type.RealType.REAL.getInt(page.getBlock(2), 0)));
+            assertEquals(3, io.trino.spi.type.VarbinaryType.VARBINARY.getSlice(page.getBlock(3), 0).length());
+            assertEquals("00000000-0000-0000-0000-000000000001",
+                    VarcharType.VARCHAR.getSlice(page.getBlock(4), 0).toStringUtf8());
+
+            root.close();
+        }
+    }
+
+    @Test
     void formatsUuidBytes() {
         byte[] bytes = new byte[16];
         bytes[15] = 1;

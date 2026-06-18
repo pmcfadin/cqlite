@@ -62,7 +62,8 @@ public final class SidecarClient {
             HttpResponse<String> response = http.send(request, HttpResponse.BodyHandlers.ofString());
             if (response.statusCode() / 100 != 2) {
                 throw new SidecarException(
-                        "Sidecar GET " + path + " failed: HTTP " + response.statusCode());
+                        "Sidecar GET " + path + " failed: HTTP " + response.statusCode(),
+                        response.statusCode());
             }
             return response.body();
         } catch (IOException e) {
@@ -104,8 +105,20 @@ public final class SidecarClient {
 
     /** Unchecked error for Sidecar communication/parsing failures. */
     public static final class SidecarException extends RuntimeException {
+        /** HTTP status code, or -1 for non-HTTP failures (parse, etc.). */
+        private final int statusCode;
+
         public SidecarException(String message) {
+            this(message, -1);
+        }
+
+        public SidecarException(String message, int statusCode) {
             super(message);
+            this.statusCode = statusCode;
+        }
+
+        public int statusCode() {
+            return statusCode;
         }
     }
 }
