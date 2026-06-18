@@ -64,9 +64,18 @@
 //! - `docs/sstables-definitive-guide/chapters/06-index-and-summary.md`
 //! - `cqlite-core/src/storage/sstable/index_reader.rs` - BIG format parser
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::storage::serialization::vint::{encode_signed, encode_unsigned};
 use crate::storage::write_engine::mutation::DecoratedKey;
+use std::io::Write;
+use std::path::PathBuf;
+
+/// Buffer capacity for the streaming Index.db `BufWriter`.
+///
+/// Mirrors `DATA_SINK_BUFFER_BYTES` in `data_writer.rs`: large enough that each
+/// serialized entry coalesces into a handful of big `write()` syscalls while
+/// keeping resident memory bounded to a single entry's scratch, not the whole file.
+const INDEX_SINK_BUFFER_BYTES: usize = 512 * 1024;
 
 /// Threshold at which a new IndexInfo block is emitted (Cassandra default 64 KiB).
 ///
@@ -114,10 +123,42 @@ pub struct PromotedIndexBlock {
 /// Writes partition index entries in BIG format (NB variant) for Cassandra 5.0 compatibility.
 /// Each entry maps a partition key to a Data.db file offset, optionally with a promoted index
 /// for wide partitions (≥ 64 KiB).
+///
+/// # Memory model (Issue #753)
+///
+/// Two modes that produce **byte-identical** Index.db output:
+///
+/// * **In-memory mode** (`IndexWriter::new`): every serialized entry is appended to
+///   `buffer`; `finish()` returns the full bytes. Used by unit tests that inspect
+///   produced bytes directly.
+///
+/// * **Streaming mode** (`IndexWriter::with_sink`): each entry is serialized into
+///   a small scratch `Vec`, written to a `BufWriter<File>` over the Index.db path,
+///   and the scratch is cleared. Peak heap is therefore O(one entry) rather than
+///   O(file), keeping a multi-GB compaction within the 128 MB target. The file is
+///   opened lazily on the first `add_partition` call so the parent directory need
+///   not exist before construction.
+///
+/// In both modes `index_offset` for a new entry = `position + buffer.len()` measured
+/// before any bytes are written. In streaming mode `buffer` is empty at that point
+/// (cleared after the previous entry's flush) so the offset equals `position`; in
+/// in-memory mode `position` is always 0 and `buffer` holds all prior entries, so
+/// the offset equals `buffer.len()`.
 #[derive(Debug)]
 pub struct IndexWriter {
-    /// Serialized index data (written incrementally)
+    /// Per-entry scratch buffer.
+    ///
+    /// In streaming mode this holds exactly the bytes for one entry (cleared after
+    /// each flush). In in-memory mode it accumulates the entire Index.db output.
     buffer: Vec<u8>,
+    /// Streaming sink over the Index.db path (streaming mode only).
+    ///
+    /// Lazily opened on the first `add_partition` call. `None` in in-memory mode.
+    sink: Option<std::io::BufWriter<std::fs::File>>,
+    /// Index.db output path (streaming mode only); used for lazy sink open.
+    index_path: Option<PathBuf>,
+    /// Bytes already flushed to `sink`. Always 0 in in-memory mode.
+    position: u64,
     /// Entry count (for validation)
     entry_count: usize,
 }
@@ -134,7 +175,10 @@ pub struct IndexEntryInfo {
 }
 
 impl IndexWriter {
-    /// Create a new Index.db writer
+    /// Create a new in-memory Index.db writer.
+    ///
+    /// All entries accumulate in `buffer`; `finish()` returns the full bytes.
+    /// Prefer [`IndexWriter::with_sink`] for production writes to bound memory.
     ///
     /// # Example
     ///
@@ -147,8 +191,66 @@ impl IndexWriter {
     pub fn new() -> Self {
         Self {
             buffer: Vec::new(),
+            sink: None,
+            index_path: None,
+            position: 0,
             entry_count: 0,
         }
+    }
+
+    /// Create a streaming Index.db writer that flushes each entry to `index_path`.
+    ///
+    /// The file is opened lazily on the first `add_partition` (creating the parent
+    /// directory if needed). Peak memory is bounded to a single entry's bytes,
+    /// keeping a 10 M-partition write within the 128 MB target (Issue #753).
+    ///
+    /// # Arguments
+    /// * `index_path` - Destination path for the Index.db component
+    pub fn with_sink(index_path: PathBuf) -> Self {
+        Self {
+            buffer: Vec::new(),
+            sink: None,
+            index_path: Some(index_path),
+            position: 0,
+            entry_count: 0,
+        }
+    }
+
+    /// Lazily open the streaming sink (and create the parent directory).
+    ///
+    /// No-op in in-memory mode or once the sink is already open.
+    fn ensure_sink(&mut self) -> Result<()> {
+        if self.sink.is_some() {
+            return Ok(());
+        }
+        if let Some(path) = self.index_path.clone() {
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let file = std::fs::File::create(&path)?;
+            self.sink = Some(std::io::BufWriter::with_capacity(
+                INDEX_SINK_BUFFER_BYTES,
+                file,
+            ));
+        }
+        Ok(())
+    }
+
+    /// In streaming mode, flush the scratch buffer to the sink, advance `position`,
+    /// and clear the scratch so only one entry is ever resident.
+    /// No-op in in-memory mode (the scratch keeps accumulating).
+    fn flush_entry(&mut self) -> Result<()> {
+        if self.index_path.is_none() {
+            // In-memory mode: keep accumulating in `buffer`.
+            return Ok(());
+        }
+        self.ensure_sink()?;
+        if let Some(sink) = self.sink.as_mut() {
+            sink.write_all(&self.buffer)?;
+        }
+        self.position += self.buffer.len() as u64;
+        self.buffer.clear();
+        Ok(())
     }
 
     /// Add a partition to the index (no promoted index — simple/small partition).
@@ -204,8 +306,14 @@ impl IndexWriter {
         data_offset: u64,
         blocks: &[PromotedIndexBlock],
     ) -> Result<IndexEntryInfo> {
-        let index_offset = self.buffer.len() as u64;
+        // Index offset = bytes already flushed + whatever is in the scratch buffer.
+        // In streaming mode the scratch is empty here (cleared by previous flush_entry),
+        // so index_offset == position. In in-memory mode position == 0 and the scratch
+        // holds all prior entries, so index_offset == buffer.len().
+        let index_offset = self.position + self.buffer.len() as u64;
         let entry_size = self.write_entry(key, data_offset, blocks)?;
+        // In streaming mode, push the just-written scratch bytes to the sink and clear.
+        self.flush_entry()?;
         self.entry_count += 1;
 
         Ok(IndexEntryInfo {
@@ -257,7 +365,10 @@ impl IndexWriter {
         Ok(bytes_written)
     }
 
-    /// Finish writing and return the Index.db bytes
+    /// Finish writing and return the Index.db bytes (in-memory mode only).
+    ///
+    /// Returns an error if called on a streaming writer; use
+    /// [`IndexWriter::finish_streaming`] instead.
     ///
     /// # Example
     ///
@@ -273,7 +384,46 @@ impl IndexWriter {
     /// assert!(!bytes.is_empty());
     /// ```
     pub fn finish(self) -> Result<Vec<u8>> {
+        if self.index_path.is_some() {
+            return Err(Error::InvalidInput(
+                "IndexWriter::finish() called on a streaming writer; use finish_streaming()"
+                    .to_string(),
+            ));
+        }
         Ok(self.buffer)
+    }
+
+    /// Finish writing in streaming mode, flush the sink, and return the total bytes written.
+    ///
+    /// Returns an error if called on an in-memory writer; use [`IndexWriter::finish`] instead.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use cqlite_core::storage::sstable::writer::IndexWriter;
+    /// use cqlite_core::storage::write_engine::mutation::DecoratedKey;
+    /// use std::path::PathBuf;
+    ///
+    /// let mut writer = IndexWriter::with_sink(PathBuf::from("/tmp/nb-1-big-Index.db"));
+    /// let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
+    /// writer.add_partition(&key, 100).unwrap();
+    ///
+    /// let total_bytes = writer.finish_streaming().unwrap();
+    /// assert!(total_bytes > 0);
+    /// ```
+    pub fn finish_streaming(mut self) -> Result<u64> {
+        if self.index_path.is_none() {
+            return Err(Error::InvalidInput(
+                "finish_streaming() called on an in-memory IndexWriter".to_string(),
+            ));
+        }
+        // Flush any residual scratch (normally empty after per-entry flushes).
+        self.flush_entry()?;
+        // Flush the BufWriter so all bytes reach the OS file.
+        if let Some(mut sink) = self.sink.take() {
+            sink.flush()?;
+        }
+        Ok(self.position)
     }
 
     /// Get the number of index entries
@@ -950,6 +1100,187 @@ mod tests {
         assert_eq!(&info_bytes[0..3], &first_name[..]);
         // lastName bytes appear next
         assert_eq!(&info_bytes[3..6], &last_name[..]);
+    }
+
+    // ── Streaming mode tests (Issue #753) ──────────────────────────────────────
+
+    /// BYTE-IDENTICAL PROOF: streaming and in-memory modes produce the same bytes.
+    ///
+    /// This is the load-bearing correctness anchor for the #753 streaming refactor.
+    /// Any divergence is a bug in the streaming path — do NOT relax this assertion.
+    #[test]
+    fn test_streaming_byte_identical_to_in_memory() {
+        let partitions: Vec<(i64, Vec<u8>, u64)> = vec![
+            (100, vec![0x00, 0x00, 0x00, 0x01], 0),
+            (200, vec![0x00, 0x00, 0x00, 0x02], 256),
+            (300, vec![0x00, 0x00, 0x00, 0x03], 512),
+            (400, vec![0x00, 0x00, 0x00, 0x04], 12381), // 2-byte VInt offset
+            (500, vec![0xBB; 16], 1_000_000_000),       // large offset, UUID key
+        ];
+
+        // --- In-memory path ---
+        let mut mem_writer = IndexWriter::new();
+        let mut mem_infos = Vec::new();
+        for (token, key_bytes, offset) in &partitions {
+            let key = DecoratedKey::new(*token, key_bytes.clone());
+            let info = mem_writer.add_partition(&key, *offset).unwrap();
+            mem_infos.push(info);
+        }
+        let mem_bytes = mem_writer.finish().unwrap();
+
+        // --- Streaming path (writes to a temp file) ---
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let mut stream_writer = IndexWriter::with_sink(path.clone());
+        let mut stream_infos = Vec::new();
+        for (token, key_bytes, offset) in &partitions {
+            let key = DecoratedKey::new(*token, key_bytes.clone());
+            let info = stream_writer.add_partition(&key, *offset).unwrap();
+            stream_infos.push(info);
+        }
+        let total_bytes = stream_writer.finish_streaming().unwrap();
+        let stream_bytes = std::fs::read(&path).unwrap();
+
+        // Byte-for-byte equality
+        assert_eq!(
+            mem_bytes, stream_bytes,
+            "Streaming Index.db output must be byte-identical to in-memory output"
+        );
+
+        // Total bytes written must equal the file size
+        assert_eq!(
+            total_bytes as usize,
+            stream_bytes.len(),
+            "finish_streaming() must return exact byte count"
+        );
+
+        // IndexEntryInfo (offset + size) must be identical between modes
+        assert_eq!(
+            mem_infos.len(),
+            stream_infos.len(),
+            "Entry count must match"
+        );
+        for (i, (m, s)) in mem_infos.iter().zip(stream_infos.iter()).enumerate() {
+            assert_eq!(
+                m.index_offset, s.index_offset,
+                "Entry {i}: index_offset must match between modes"
+            );
+            assert_eq!(
+                m.entry_size, s.entry_size,
+                "Entry {i}: entry_size must match between modes"
+            );
+        }
+    }
+
+    /// BYTE-IDENTICAL PROOF with promoted index blocks (wide partitions).
+    ///
+    /// Ensures the streaming path is correct even when promoted index payload is
+    /// written — the serialized bytes must match the in-memory path exactly.
+    #[test]
+    fn test_streaming_byte_identical_with_promoted_index() {
+        let ck_prefix = vec![0x00u8, 0x61, 0x62]; // header + "ab" value
+        let make_block = |off: u64, w: u64| PromotedIndexBlock {
+            first_name: ck_prefix.clone(),
+            last_name: ck_prefix.clone(),
+            offset: off,
+            width: w,
+        };
+        let blocks = vec![
+            make_block(0, 70_000),
+            make_block(70_000, 68_000),
+            make_block(138_000, 65_000),
+        ];
+        let key = DecoratedKey::new(42, vec![0xAA, 0xBB]);
+
+        // --- In-memory ---
+        let mut mem_writer = IndexWriter::new();
+        let mem_info = mem_writer
+            .add_partition_with_promoted(&key, 1234, &blocks)
+            .unwrap();
+        let mem_bytes = mem_writer.finish().unwrap();
+
+        // --- Streaming ---
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let path = tmp.path().to_path_buf();
+        let mut stream_writer = IndexWriter::with_sink(path.clone());
+        let stream_info = stream_writer
+            .add_partition_with_promoted(&key, 1234, &blocks)
+            .unwrap();
+        let total_bytes = stream_writer.finish_streaming().unwrap();
+        let stream_bytes = std::fs::read(&path).unwrap();
+
+        assert_eq!(
+            mem_bytes, stream_bytes,
+            "Streaming wide-partition Index.db must be byte-identical to in-memory"
+        );
+        assert_eq!(total_bytes as usize, stream_bytes.len());
+        assert_eq!(mem_info.index_offset, stream_info.index_offset);
+        assert_eq!(mem_info.entry_size, stream_info.entry_size);
+    }
+
+    /// Streaming mode: entry_count increments correctly.
+    #[test]
+    fn test_streaming_entry_count() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = IndexWriter::with_sink(tmp.path().to_path_buf());
+
+        assert_eq!(writer.entry_count(), 0);
+
+        for i in 0..5u64 {
+            let key = DecoratedKey::new(i as i64 * 100, vec![i as u8]);
+            writer.add_partition(&key, i * 64).unwrap();
+        }
+
+        assert_eq!(writer.entry_count(), 5);
+        let _ = writer.finish_streaming().unwrap();
+    }
+
+    /// Streaming mode: index_offset values track position correctly across entries.
+    #[test]
+    fn test_streaming_index_offset_tracking() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let mut writer = IndexWriter::with_sink(tmp.path().to_path_buf());
+
+        let key1 = DecoratedKey::new(100, vec![0x01, 0x02, 0x03, 0x04]);
+        let info1 = writer.add_partition(&key1, 0).unwrap(); // entry: 2+4+1+1=8
+
+        let key2 = DecoratedKey::new(200, vec![0x05, 0x06]);
+        let info2 = writer.add_partition(&key2, 127).unwrap(); // entry: 2+2+1+1=6
+
+        let key3 = DecoratedKey::new(300, vec![0x07]);
+        let info3 = writer.add_partition(&key3, 12381).unwrap(); // entry: 2+1+2+1=6
+
+        assert_eq!(info1.index_offset, 0);
+        assert_eq!(info1.entry_size, 8);
+
+        assert_eq!(info2.index_offset, 8);
+        assert_eq!(info2.entry_size, 6);
+
+        assert_eq!(info3.index_offset, 14);
+        assert_eq!(info3.entry_size, 6);
+
+        let total = writer.finish_streaming().unwrap();
+        assert_eq!(total, 20, "Total bytes: 8 + 6 + 6 = 20");
+    }
+
+    /// Calling finish() on a streaming writer is an error.
+    #[test]
+    fn test_finish_on_streaming_writer_errors() {
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        let writer = IndexWriter::with_sink(tmp.path().to_path_buf());
+        let result = writer.finish();
+        assert!(result.is_err(), "finish() on streaming writer must fail");
+    }
+
+    /// Calling finish_streaming() on an in-memory writer is an error.
+    #[test]
+    fn test_finish_streaming_on_in_memory_writer_errors() {
+        let writer = IndexWriter::new();
+        let result = writer.finish_streaming();
+        assert!(
+            result.is_err(),
+            "finish_streaming() on in-memory writer must fail"
+        );
     }
 
     // Helper: parse a Cassandra unsigned VInt and return (value, bytes_consumed)

@@ -249,8 +249,11 @@ impl SSTableWriter {
         let data_path = Self::component_path(&sstable_dir, generation, "Data.db");
         let data_writer = DataWriter::with_sink(stats.clone(), data_path);
 
-        // Create Index.db writer
-        let index_writer = IndexWriter::new();
+        // Create Index.db writer in streaming mode (Issue #753): each entry is
+        // serialized and written straight to Index.db as it arrives, keeping only
+        // the current entry's bytes in memory (O(1) in partition count).
+        let index_path = Self::component_path(&sstable_dir, generation, "Index.db");
+        let index_writer = IndexWriter::with_sink(index_path);
 
         // Create Filter.db writer (1% false positive rate by default)
         let filter_path = Self::component_path(&sstable_dir, generation, "Filter.db");
@@ -607,10 +610,12 @@ impl SSTableWriter {
             tokio::fs::write(&data_path, b"").await?;
         }
 
-        // 3. Write Index.db
+        // 3. Finalize Index.db (Issue #753)
+        // The IndexWriter has been streaming each entry to Index.db as it was
+        // written, so there is no whole-file buffer to write here. `finish_streaming`
+        // flushes and syncs the sink and returns the total byte size.
         let index_path = Self::component_path(sstable_dir, self.generation, "Index.db");
-        let index_bytes = self.index_writer.finish()?;
-        tokio::fs::write(&index_path, index_bytes).await?;
+        let _index_size = self.index_writer.finish_streaming()?;
 
         // 4. Write Filter.db (path already set in constructor using sstable_dir)
         let filter_path = Self::component_path(sstable_dir, self.generation, "Filter.db");
