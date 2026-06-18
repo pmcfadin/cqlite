@@ -10,14 +10,13 @@ class SidecarClientTest {
 
     @Test
     void parsesRingResponse() {
+        // The ring endpoint returns a bare array of entries.
         String json = """
-                {
-                  "entries": [
-                    {"datacenter":"dc1","address":"172.42.0.2","port":9042,"rack":"r1",
-                     "status":"UP","state":"NORMAL","token":"-9223372036854775808",
-                     "fqdn":"cassandra","hostId":"abc","load":"1 GiB","owns":"100%"}
-                  ]
-                }
+                [
+                  {"datacenter":"dc1","address":"172.42.0.2","port":9042,"rack":"r1",
+                   "status":"UP","state":"NORMAL","token":"-9223372036854775808",
+                   "fqdn":"cassandra","hostId":"abc","load":"1 GiB","owns":"100%"}
+                ]
                 """;
         var ring = SidecarClient.parseRing(json);
         assertEquals(1, ring.entries().size());
@@ -65,7 +64,7 @@ class SidecarClientTest {
     void unknownFieldsAreIgnored() {
         // Forward-compat: a newer Sidecar adds fields we don't model.
         String json = """
-                {"entries":[{"address":"10.0.0.1","brandNewField":42}],"extra":"x"}
+                [{"address":"10.0.0.1","brandNewField":42}]
                 """;
         var ring = SidecarClient.parseRing(json);
         assertEquals("10.0.0.1", ring.entries().get(0).address());

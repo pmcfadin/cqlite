@@ -1,11 +1,13 @@
 package com.rustyrazorblade.cqlite.flight.sidecar;
 
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.URI;
+import java.util.List;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -74,7 +76,14 @@ public final class SidecarClient {
     // ── Parsing (static, testable without HTTP) ────────────────────────────────
 
     public static SidecarModels.RingResponse parseRing(String json) {
-        return read(json, SidecarModels.RingResponse.class);
+        // The ring endpoint returns a bare JSON array of entries.
+        try {
+            List<SidecarModels.RingEntry> entries =
+                    MAPPER.readValue(json, new TypeReference<List<SidecarModels.RingEntry>>() {});
+            return new SidecarModels.RingResponse(entries);
+        } catch (IOException e) {
+            throw new SidecarException("Failed to parse Sidecar ring response: " + e.getMessage());
+        }
     }
 
     public static SidecarModels.TokenRangeReplicasResponse parseTokenRangeReplicas(String json) {

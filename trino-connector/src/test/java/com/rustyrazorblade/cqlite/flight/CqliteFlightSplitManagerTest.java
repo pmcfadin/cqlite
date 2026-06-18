@@ -25,13 +25,15 @@ class CqliteFlightSplitManagerTest {
         var resp = new TokenRangeReplicasResponse(
                 List.of(),
                 List.of(
-                        range("-100", "0", Map.of("dc1", List.of("10.0.0.3", "10.0.0.2"))),
-                        range("0", "100", Map.of("dc1", List.of("10.0.0.2")))));
+                        // Sidecar returns "ip:storage_port"; the host is stripped.
+                        range("-100", "0", Map.of("dc1", List.of("10.0.0.3:7000", "10.0.0.2:7000"))),
+                        range("0", "100", Map.of("dc1", List.of("10.0.0.2:7000")))));
 
         var splits = CqliteFlightSplitManager.buildSplits(TABLE, resp, "dc1", 8815);
 
         assertEquals(2, splits.size(), "one split per token range");
-        // Each split pinned to exactly one replica (deterministic: smallest address).
+        // Each split pinned to exactly one replica (deterministic: smallest address),
+        // with the storage port stripped to leave the host.
         assertEquals("10.0.0.2", splits.get(0).host());
         assertEquals(-100, splits.get(0).tokenStart());
         assertEquals(0, splits.get(0).tokenEnd());

@@ -2,8 +2,11 @@
 # The Sidecar shares Cassandra's network namespace, so Cassandra is reachable at
 # 127.0.0.1 and JMX at 7199 (the compose sets LOCAL_JMX=no).
 cassandra_instances:
+  # host must match the address clients use to reach the Sidecar (172.42.0.2),
+  # since the Sidecar routes requests to instances by that address. CQL is
+  # reachable there; JMX stays on 127.0.0.1 (default LOCAL_JMX bind).
   - id: 1
-    host: 127.0.0.1
+    host: 172.42.0.2
     port: 9042
     storage_dir: /var/lib/cassandra
     data_dirs:
@@ -12,6 +15,12 @@ cassandra_instances:
     jmx_host: 127.0.0.1
     jmx_port: 7199
     jmx_ssl_enabled: false
+
+driver_parameters:
+  contact_points:
+    - "172.42.0.2:9042"
+  num_connections: 6
+  local_dc: dc1
 
 sidecar:
   host: 0.0.0.0

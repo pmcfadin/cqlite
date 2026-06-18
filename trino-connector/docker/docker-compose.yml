@@ -35,8 +35,8 @@ services:
       CASSANDRA_BROADCAST_RPC_ADDRESS: 172.42.0.2
       CASSANDRA_DC: dc1
       CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
-      # JMX on all interfaces so the co-located Sidecar can reach it.
-      LOCAL_JMX: "no"
+      # Keep JMX on 127.0.0.1:7199 (default): the nodetool healthcheck and the
+      # co-located Sidecar (shared network namespace) both reach it there.
     volumes:
       - cassandra-data:/var/lib/cassandra
     healthcheck:
@@ -55,7 +55,7 @@ services:
         condition: service_healthy
     volumes:
       - cassandra-data:/var/lib/cassandra
-      - ./sidecar.yaml:/etc/cassandra-sidecar/sidecar.yaml:ro
+      - ./sidecar.yaml:/conf/sidecar.yaml:ro
 
   # cqlite-flight is co-located (shares Cassandra's IP) and reads the local
   # SSTables, serving compacted data over Arrow Flight on :8815.
@@ -69,6 +69,8 @@ services:
         condition: service_healthy
     volumes:
       - cassandra-data:/var/lib/cassandra:ro
+    environment:
+      RUST_LOG: info
     command:
       - --data-dir=/var/lib/cassandra/data
       - --listen=0.0.0.0:8815
@@ -86,3 +88,4 @@ services:
       # Built by `./gradlew installPlugin`.
       - ../build/plugin/cqlite_flight:/usr/lib/trino/plugin/cqlite_flight:ro
       - ./trino/catalog:/etc/trino/catalog:ro
+      - ./trino/jvm.config:/etc/trino/jvm.config:ro

@@ -1,0 +1,12 @@
+# Keep the Docker build context small: the cqlite-flight image only needs Rust
+# source + manifests, not build artifacts, VCS, or other languages' outputs.
+.git/
+target/
+**/target/
+**/node_modules/
+**/build/
+**/.gradle/
+test-data/datasets/
+docs/
+*.zip
+nohup.out

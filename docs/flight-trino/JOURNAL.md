@@ -278,3 +278,30 @@ Format:
   Cassandra, snapshot via Sidecar, query through Trino, assert results + verify pushdown reduces bytes.
 - **Session checkpoint:** Phases 1–5 complete & committed (Rust server end-to-end + connector discovery/
   types/splits). Phase 6 infra committed. The functional page source + live E2E is the remaining work.
+
+## 2026-06-18 — Phase 6 COMPLETE: functional connector + live E2E passing
+
+- **What:** Finished the functional connector and ran the live docker-compose E2E successfully.
+  - Connector code (committed 9f349654): CqliteFlightClient (Flight Java GetSchema/DoGet), Metadata
+    (getTableHandle via Sidecar DDL + CreateTableExtractor; getColumnHandles via GetSchema→Arrow→
+    ArrowTypeMapper), ArrowToTrino (VectorSchemaRoot→Page), FlightTicketJson, PageSource(+Provider)
+    using Trino 481 SourcePage. uuid→VARCHAR to dodge Trino UUID byte-order.
+  - **E2E debugging (the live integration surfaced several real issues, all fixed):**
+    1. `.dockerignore` — build context was 12GB (target/) and filled the Docker VM; excluded artifacts.
+    2. compose `LOCAL_JMX=no` broke nodetool healthcheck + Sidecar JMX → removed (default 127.0.0.1:7199).
+    3. Sidecar config mount path is `/conf/sidecar.yaml` (not /etc/...).
+    4. Sidecar instance `host` must equal the address clients use (172.42.0.2) or it 421s.
+    5. Sidecar needs `driver_parameters.contact_points` for its CQL session (was 503 without it).
+    6. Sidecar `ring` returns a bare JSON array (not {entries:[...]}) → fixed parseRing.
+    7. token-range-replicas returns replicas as `ip:storage_port` → strip port for the flight host (hostOnly).
+    8. Trino JVM needs `--add-opens=java.base/java.nio=ALL-UNNAMED` for Arrow off-heap → mounted jvm.config.
+  - Sidecar shares Cassandra's IP via `network_mode: service:cassandra` (verified: NetworkMode=container:<cassandra>).
+- **E2E results** (`analytics.events`: id int pk, name text, score int, active boolean; 5 rows, flushed):
+  - `SELECT *` → 5 rows correct. Projection `id,name` → correct. `WHERE score > 25` → 3 rows.
+  - Aggregates `count/sum/avg` → 5 / 150 / 30.0. `WHERE active = true` → 3 rows. All correct.
+- **Verified:** connector `./gradlew test` green (20 tests); Rust `cargo test -p cqlite-flight` 43;
+  live query path Trino→connector→Sidecar→splits→cqlite-flight DoGet→merge→Arrow→Trino works end-to-end.
+- **Deferred (noted, not blocking):** predicate pushdown into the ticket (Trino currently post-filters;
+  projection IS pushed); Cassandra default 16 vnodes → 16 splits each reading the SSTable (works,
+  inefficient — a future optimization); listSchemaNames enumeration.
+- **Next:** commit E2E fixes; run connector code-review team; address findings; final commit.

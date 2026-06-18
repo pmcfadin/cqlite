@@ -56,10 +56,13 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             int flightPort) {
         List<CqliteFlightSplit> splits = new ArrayList<>();
         for (ReplicaInfo range : replicas.readReplicas()) {
-            String host = pickReplica(range.replicasByDatacenter(), localDatacenter);
-            if (host == null) {
+            String replica = pickReplica(range.replicasByDatacenter(), localDatacenter);
+            if (replica == null) {
                 continue; // range with no known replica — nothing to read
             }
+            // Sidecar returns replicas as "ip:storage_port"; the flight server
+            // listens on flightPort at the same host, so keep only the host.
+            String host = hostOnly(replica);
             long start = range.startToken();
             long end = range.endToken();
             splits.add(new CqliteFlightSplit(
@@ -93,4 +96,15 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
                 .findFirst()
                 .orElse(null);
     }
+
+    /** Strip a trailing {@code :port} from an {@code ip:port} replica address. */
+    static String hostOnly(String address) {
+        int colon = address.lastIndexOf(':');
+        if (colon > 0 && address.indexOf(':') == colon
+                && address.substring(colon + 1).chars().allMatch(Character::isDigit)) {
+            return address.substring(0, colon);
+        }
+        return address; // no port, or IPv6 (left as-is)
+    }
 }
+
