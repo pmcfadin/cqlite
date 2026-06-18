@@ -354,4 +354,58 @@ mod tests {
         let (h1, _h2) = cassandra_murmur3_x64_128(b"a");
         assert_eq!(h1, -8839064797231613815_i64);
     }
+
+    /// Validate the byte-comparable token encoding for the three UUID keys
+    /// used in the test_da/simple_table BTI fixture.  These values were verified
+    /// against the real Partitions.db trie structure (issue #755).
+    ///
+    /// The byte-comparable form of a Murmur3 token is:
+    ///   (token as u64) XOR 0x8000_0000_0000_0000  (flips sign bit → unsigned sort order)
+    ///
+    /// The first byte of each bc token matches the Sparse8 transition byte in the
+    /// real Partitions.db trie (see da-2-bti-Partitions.db hex analysis in #755).
+    #[test]
+    fn uuid_murmur3_token_bc_matches_bti_trie_transitions() {
+        // These expected values were verified by parsing the real
+        // da-2-bti-Partitions.db fixture and reading the Sparse8 transition bytes.
+        // Token order determines Data.db write order: 22 < 11 < 33.
+        struct Case {
+            uuid_byte: u8,
+            expected_token: i64,
+            expected_bc_first_byte: u8,
+        }
+        let cases = [
+            Case {
+                uuid_byte: 0x22,
+                expected_token: 1213057064512856170,
+                expected_bc_first_byte: 0x90,
+            },
+            Case {
+                uuid_byte: 0x11,
+                expected_token: 4360155383588533346,
+                expected_bc_first_byte: 0xBC,
+            },
+            Case {
+                uuid_byte: 0x33,
+                expected_token: 8780122315263850168u64 as i64,
+                expected_bc_first_byte: 0xF9,
+            },
+        ];
+        for c in &cases {
+            let uuid = [c.uuid_byte; 16];
+            let token = cassandra_murmur3_token(&uuid);
+            assert_eq!(
+                token, c.expected_token,
+                "token mismatch for UUID {:02X}*16",
+                c.uuid_byte
+            );
+            let bc = (token as u64) ^ 0x8000_0000_0000_0000u64;
+            assert_eq!(
+                (bc >> 56) as u8,
+                c.expected_bc_first_byte,
+                "bc first byte mismatch for UUID {:02X}*16",
+                c.uuid_byte
+            );
+        }
+    }
 }
