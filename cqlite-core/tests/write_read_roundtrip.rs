@@ -49,6 +49,8 @@ mod statistics;
 mod summary;
 #[path = "write_read_roundtrip/type_coverage.rs"]
 mod type_coverage;
+#[path = "write_read_roundtrip/wide_partition.rs"]
+mod wide_partition;
 
 use cqlite_core::platform::Platform;
 use cqlite_core::schema::{

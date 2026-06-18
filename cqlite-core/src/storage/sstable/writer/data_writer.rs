@@ -60,6 +60,7 @@ use crate::error::{Error, Result};
 use crate::schema::{Column, CqlType, TableSchema};
 use crate::storage::serialization::types::TypeSerializer;
 use crate::storage::serialization::vint::{encode_signed, encode_unsigned, unsigned_len};
+use crate::storage::sstable::writer::index_writer::{PromotedIndexBlock, COLUMN_INDEX_SIZE_BYTES};
 use crate::storage::sstable::writer::stats_writer::StatisticsMetadata;
 use crate::storage::write_engine::mutation::{
     ClusteringBound, ClusteringKey, DecoratedKey, Mutation, PartitionKey, PartitionTombstone,
@@ -466,6 +467,255 @@ impl DataWriter {
         self.flush_partition()?;
 
         Ok(partition_offset)
+    }
+
+    /// Write a complete partition and collect promoted index blocks for wide partitions.
+    ///
+    /// Same as [`write_partition`] but also tracks `IndexInfo` block boundaries
+    /// for partitions whose uncompressed data exceeds `COLUMN_INDEX_SIZE_BYTES` (64 KiB).
+    /// The returned `Vec<PromotedIndexBlock>` contains **one entry per 64 KiB block**;
+    /// the caller (SSTableWriter) passes this to `IndexWriter::add_partition_with_promoted`.
+    ///
+    /// Block sampling rules (mirrors `BigFormatPartitionWriter`):
+    /// - A new block is opened whenever the bytes written since the last boundary ≥ 64 KiB.
+    /// - The last open block is closed when `END_OF_PARTITION` is reached.
+    /// - Only rows with clustering keys contribute `firstName`/`lastName`; tables without
+    ///   clustering keys produce blocks with empty prefix bytes (`[0x00]` = header-only VInt).
+    /// - A promoted index is only meaningful when 2+ blocks result; the caller checks this.
+    pub fn write_partition_with_index_blocks(
+        &mut self,
+        key: &DecoratedKey,
+        mutations: &[Mutation],
+        schema: &TableSchema,
+        partition_tombstone: Option<&PartitionTombstone>,
+        range_tombstones: &[RangeTombstone],
+    ) -> Result<(u64, Vec<PromotedIndexBlock>)> {
+        // File offset of this partition
+        let partition_offset = self.position + self.buffer.len() as u64;
+
+        // Note the absolute buffer position at the start of partition data.
+        // For streaming mode this is always `self.position` (buffer is empty at start).
+        // For in-memory mode this is `self.buffer.len()` (position == 0).
+        let partition_buf_start = self.buffer.len();
+
+        // Write partition header (with optional tombstone)
+        let header_start = self.buffer.len();
+        self.write_partition_header(key, partition_tombstone)?;
+        let mut prev_unfiltered_size = (self.buffer.len() - header_start) as u64;
+
+        let partition_floor = partition_tombstone.map(|pt| pt.deletion_time);
+        let schema_has_static = schema.columns.iter().any(|c| c.is_static);
+
+        if schema_has_static {
+            let merged = collect_static_operations(mutations, schema, partition_floor);
+            let unshadowed_static = |m: &&Mutation| {
+                partition_floor.is_none_or(|floor| m.timestamp_micros > floor)
+                    && has_static_operation(m, schema)
+            };
+
+            if merged.is_empty() {
+                prev_unfiltered_size =
+                    self.write_empty_static_row(prev_unfiltered_size, schema)? as u64;
+            } else {
+                let latest_ts = mutations
+                    .iter()
+                    .filter(unshadowed_static)
+                    .map(|m| m.timestamp_micros)
+                    .max()
+                    .unwrap_or(mutations.first().map(|m| m.timestamp_micros).unwrap_or(0));
+
+                let ttl = mutations
+                    .iter()
+                    .filter(unshadowed_static)
+                    .max_by_key(|m| m.timestamp_micros)
+                    .and_then(|m| m.ttl_seconds);
+
+                let synthetic = Mutation {
+                    table: mutations
+                        .first()
+                        .map(|m| m.table.clone())
+                        .unwrap_or_else(|| TableId {
+                            keyspace: schema.keyspace.clone(),
+                            table: schema.table.clone(),
+                        }),
+                    partition_key: mutations
+                        .first()
+                        .map(|m| m.partition_key.clone())
+                        .unwrap_or_else(|| PartitionKey {
+                            columns: Vec::new(),
+                        }),
+                    clustering_key: None,
+                    operations: merged,
+                    timestamp_micros: latest_ts,
+                    ttl_seconds: ttl,
+                    partition_tombstone: None,
+                    range_tombstones: Vec::new(),
+                };
+
+                prev_unfiltered_size =
+                    self.write_static_row_with_prev_size(&synthetic, schema, prev_unfiltered_size)?
+                        as u64;
+            }
+        }
+
+        let rows = self.merge_clustering_rows(
+            mutations,
+            schema,
+            schema_has_static,
+            partition_floor,
+            range_tombstones,
+        );
+
+        enum PartitionItem<'a> {
+            Row(RowWrite<'a>),
+            Marker {
+                bound: &'a ClusteringBound,
+                is_open: bool,
+                deletion_time: i64,
+                local_deletion_time: i32,
+            },
+        }
+
+        let mut items: Vec<PartitionItem> = rows.into_iter().map(PartitionItem::Row).collect();
+        for rt in range_tombstones {
+            items.push(PartitionItem::Marker {
+                bound: &rt.start,
+                is_open: true,
+                deletion_time: rt.deletion_time,
+                local_deletion_time: rt.local_deletion_time,
+            });
+            items.push(PartitionItem::Marker {
+                bound: &rt.end,
+                is_open: false,
+                deletion_time: rt.deletion_time,
+                local_deletion_time: rt.local_deletion_time,
+            });
+        }
+
+        fn sort_class<'a, 'b>(item: &'b PartitionItem<'a>) -> (i8, Option<&'b ClusteringKey>, i8) {
+            match item {
+                PartitionItem::Row(row) => (0, row.clustering_key, 0),
+                PartitionItem::Marker { bound, is_open, .. } => match bound {
+                    ClusteringBound::Inclusive(ck) => (0, Some(ck), if *is_open { -1 } else { 1 }),
+                    ClusteringBound::Exclusive(ck) => (0, Some(ck), if *is_open { 1 } else { -1 }),
+                    ClusteringBound::Bottom => (-1, None, 0),
+                    ClusteringBound::Top => (1, None, 0),
+                },
+            }
+        }
+        items.sort_by(|a, b| {
+            let (class_a, ck_a, weight_a) = sort_class(a);
+            let (class_b, ck_b, weight_b) = sort_class(b);
+            class_a
+                .cmp(&class_b)
+                .then_with(|| match (ck_a, ck_b) {
+                    (Some(x), Some(y)) => x.compare(y, schema).unwrap_or_else(|_| x.cmp(y)),
+                    _ => std::cmp::Ordering::Equal,
+                })
+                .then(weight_a.cmp(&weight_b))
+        });
+
+        // ── Promoted index block tracking ────────────────────────────────
+        // Mirrors Cassandra's BigFormatPartitionWriter:
+        // - Start block at position 0 (immediately after partition header).
+        // - Close block + open a new one whenever accumulated bytes ≥ 64 KiB.
+        // - The last block is closed at END_OF_PARTITION.
+        //
+        // `block_start_buf_offset`: absolute position in `self.buffer` where
+        //   the current block began (relative to `partition_buf_start`).
+        // `current_block_first_ck`: serialized ClusteringPrefix of the first item
+        //   in the current block (empty bytes → "header only" VInt 0x00 for no-CK tables).
+        // `current_block_last_ck`: serialized ClusteringPrefix of the most-recent item.
+
+        let mut blocks: Vec<PromotedIndexBlock> = Vec::new();
+        let mut block_start_buf_offset = self.buffer.len() - partition_buf_start;
+        let mut current_block_first_ck: Option<Vec<u8>> = None;
+        let mut current_block_last_ck: Option<Vec<u8>> = None;
+
+        for item in items {
+            // Clustering key bytes for this item (serialized as ClusteringPrefix).
+            let ck_bytes: Vec<u8> = match &item {
+                PartitionItem::Row(row) => {
+                    if let Some(ck) = row.clustering_key {
+                        serialize_clustering_prefix_to_vec(ck, schema)
+                            .unwrap_or_else(|_| vec![0x00])
+                    } else {
+                        vec![0x00] // no clustering key — empty prefix header
+                    }
+                }
+                PartitionItem::Marker { bound, .. } => match bound {
+                    ClusteringBound::Inclusive(ck) | ClusteringBound::Exclusive(ck) => {
+                        serialize_clustering_prefix_to_vec(ck, schema)
+                            .unwrap_or_else(|_| vec![0x00])
+                    }
+                    ClusteringBound::Bottom | ClusteringBound::Top => vec![0x00],
+                },
+            };
+
+            if current_block_first_ck.is_none() {
+                current_block_first_ck = Some(ck_bytes.clone());
+            }
+            current_block_last_ck = Some(ck_bytes.clone());
+
+            // Write the item
+            prev_unfiltered_size = match item {
+                PartitionItem::Row(row) => {
+                    self.write_merged_row_with_prev_size(&row, schema, prev_unfiltered_size)? as u64
+                }
+                PartitionItem::Marker {
+                    bound,
+                    is_open,
+                    deletion_time,
+                    local_deletion_time,
+                } => self.write_range_bound(
+                    bound,
+                    is_open,
+                    deletion_time,
+                    local_deletion_time,
+                    schema,
+                    prev_unfiltered_size,
+                )? as u64,
+            };
+
+            // Bytes written in the current block so far
+            let current_buf_offset = self.buffer.len() - partition_buf_start;
+            let block_bytes = (current_buf_offset - block_start_buf_offset) as u64;
+
+            if block_bytes >= COLUMN_INDEX_SIZE_BYTES {
+                // Close this block and start a new one
+                blocks.push(PromotedIndexBlock {
+                    first_name: current_block_first_ck.take().unwrap_or_else(|| vec![0x00]),
+                    last_name: current_block_last_ck.take().unwrap_or_else(|| vec![0x00]),
+                    offset: block_start_buf_offset as u64,
+                    width: block_bytes,
+                });
+                block_start_buf_offset = current_buf_offset;
+                // first/last reset for next block
+                current_block_first_ck = None;
+                current_block_last_ck = None;
+            }
+        }
+
+        // Write end-of-partition marker
+        self.buffer.push(END_OF_PARTITION);
+
+        // Close the final block (if any items were written)
+        if let (Some(first), Some(last)) = (current_block_first_ck, current_block_last_ck) {
+            let current_buf_offset = self.buffer.len() - partition_buf_start;
+            let block_bytes = (current_buf_offset - block_start_buf_offset) as u64;
+            if block_bytes > 0 {
+                blocks.push(PromotedIndexBlock {
+                    first_name: first,
+                    last_name: last,
+                    offset: block_start_buf_offset as u64,
+                    width: block_bytes,
+                });
+            }
+        }
+
+        self.flush_partition()?;
+
+        Ok((partition_offset, blocks))
     }
 
     /// Write an empty static-row prelude.
@@ -2943,6 +3193,51 @@ fn serialize_value_for_clustering(value: &Value, comparator: &ComparatorType) ->
             value, comparator
         ))),
     }
+}
+
+/// Serialize a `ClusteringKey` as a Cassandra `ClusteringPrefix` byte sequence.
+///
+/// Format (same as the clustering prefix written in Data.db rows):
+/// ```text
+/// [header: unsigned VInt]   ← 2 bits per column: 00=present, 10=null
+/// [value bytes…]            ← type-specific bytes for each PRESENT column
+/// ```
+///
+/// Returns `Err` if a clustering column type is unknown; the caller falls back
+/// to `[0x00]` (empty header VInt, valid for "no columns") in that case.
+pub(super) fn serialize_clustering_prefix_to_vec(
+    clustering_key: &ClusteringKey,
+    schema: &TableSchema,
+) -> Result<Vec<u8>> {
+    let mut header = 0u64;
+    for (i, (_, value)) in clustering_key.columns.iter().enumerate() {
+        let state: u64 = match value {
+            Value::Null => 2, // NULL
+            _ => 0,           // PRESENT
+        };
+        header |= state << (i * 2);
+    }
+
+    let mut buf: Vec<u8> = Vec::new();
+    encode_unsigned(header, &mut buf);
+
+    for (i, (_, value)) in clustering_key.columns.iter().enumerate() {
+        if !matches!(value, Value::Null) {
+            if i >= schema.clustering_keys.len() {
+                return Err(crate::error::Error::Schema(format!(
+                    "Clustering key index {} out of range (schema has {})",
+                    i,
+                    schema.clustering_keys.len()
+                )));
+            }
+            let cluster_col = &schema.clustering_keys[i];
+            let comparator = ComparatorType::from_data_type(&cluster_col.data_type)?;
+            let value_bytes = serialize_value_for_clustering(value, &comparator)?;
+            buf.extend_from_slice(&value_bytes);
+        }
+    }
+
+    Ok(buf)
 }
 
 #[cfg(test)]
