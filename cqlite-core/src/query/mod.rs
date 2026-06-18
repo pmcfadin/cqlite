@@ -62,7 +62,7 @@ pub use result::{
 #[cfg(feature = "state_machine")]
 pub use select_ast::SelectStatement;
 #[cfg(feature = "state_machine")]
-pub use select_executor::SelectExecutor;
+pub use select_executor::{build_row_from_scan, SelectExecutor};
 #[cfg(feature = "state_machine")]
 pub use select_optimizer::{OptimizedQueryPlan, SelectOptimizer};
 #[cfg(feature = "state_machine")]

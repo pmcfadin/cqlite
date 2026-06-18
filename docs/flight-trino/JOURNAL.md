@@ -76,3 +76,38 @@ Format:
   build merge→`QueryRow`→`RecordBatch` producer (TDD), then the tonic `FlightService`
   (do_get/get_flight_info/get_schema). Then run the code-review team on the whole Phase 1,
   fix findings, commit, before Phase 2.
+
+## 2026-06-17 — Phase 1 complete: merge→Arrow producer + tonic FlightService (TDD)
+
+- **What:** Phase 1 functionally complete — `cqlite-flight` now serves a table's
+  compaction-merged rows over Arrow Flight.
+  - **Key-decoding investigation:** `RowKey`/`DecoratedKey.key` is the PARTITION KEY
+    only; clustering + regular columns arrive as decoded cells in the row's `Value::Map`
+    (the merge sets `MergeEntry.clustering_key = None`, "deferred"). Read path proves this.
+  - **`producer.rs`** (TDD): `MergeProducer` drives `KWayMerger`, reconstructs each row by
+    rebuilding the `(RowKey, Value::Map)` pair and calling cqlite-core's `build_row_from_scan`
+    (now `pub`) — so Flight output is identical to a `SELECT`. Row tombstones suppressed,
+    cell tombstones → null. `schema_columns()` builds key-first `ColumnInfo` with authoritative
+    `CqlType`. `SstableSource` trait + `DirSource` (DI for Phase 3 snapshot swap). Batches at
+    configurable size. 6 tests build real SSTables in-process via `WriteEngine`+flush (no
+    external data) and assert LWW resolution, tombstone suppression, batch splitting, ordering.
+  - **`service.rs`** (TDD): tonic `FlightService` — `get_flight_info`/`get_schema` (Arrow
+    schema from ticket DDL, no file access) and `do_get` (merge on `spawn_blocking` → 
+    `FlightDataEncoderBuilder` stream; always emits schema even when empty). Other RPCs
+    return `unimplemented`. 3 async tests incl. full do_get→decode round-trip verifying LWW.
+  - **`main.rs`**: CLI (`--data-dir --listen --batch-size`), serves `FlightServiceServer`.
+  - **`testutil.rs`** (cfg-test): shared in-process SSTable builders (DRY across producer/service).
+  - cqlite-core: `build_row_from_scan` made `pub` (re-exported from `query`) for output parity.
+- **Why:** Reusing `build_row_from_scan` guarantees Flight == SELECT output (the Trino
+  correctness target). Merge on spawn_blocking keeps the gRPC reactor responsive.
+- **Files:** new `cqlite-flight/src/{producer,service,main,testutil}.rs`; `lib.rs`,
+  `Cargo.toml` (+tonic, arrow-flight, arrow[ipc], tokio, futures, clap, tracing); cqlite-core
+  `query/{mod.rs,select_executor.rs}` (pub `build_row_from_scan`).
+- **Verified:** `cargo test -p cqlite-flight` 17/17 green; `clippy -p cqlite-flight -D warnings` clean
+  (added module `allow(result_large_err)` — tonic Status is the mandated trait error; rewrote
+  merge loop as `while let`). cqlite-core default build green.
+- **Known limitations (documented, not bugs):** wide-row/clustering correctness inherits the
+  merge engine's current behavior (clustering_key deferred); collections/UDT/composite-PK not yet
+  test-covered here (Phase 2+); token-range/predicate/projection filters are Phase 2; live-dir
+  reads only (snapshot is Phase 3).
+- **Next:** Run the Phase 1 code-review team (testing gaps, smells, SOLID); fix; commit; then Phase 2.
