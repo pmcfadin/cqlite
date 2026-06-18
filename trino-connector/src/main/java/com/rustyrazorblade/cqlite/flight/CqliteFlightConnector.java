@@ -3,6 +3,7 @@ package com.rustyrazorblade.cqlite.flight;
 import io.trino.spi.connector.Connector;
 import io.trino.spi.connector.ConnectorMetadata;
 import io.trino.spi.connector.ConnectorSession;
+import io.trino.spi.connector.ConnectorSplitManager;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.transaction.IsolationLevel;
 import io.trino.spi.type.TypeManager;
@@ -32,10 +33,14 @@ public class CqliteFlightConnector implements Connector {
     }
 
     @Override
+    public ConnectorSplitManager getSplitManager() {
+        return new CqliteFlightSplitManager(config, sidecar);
+    }
+
+    @Override
     public void shutdown() {
         // No persistent resources to release; the Flight clients are per-scan.
     }
 
-    // getSplitManager (Phase 5) and getPageSourceProvider (Phase 6) use the
-    // Connector defaults (throw) until those phases land.
+    // getPageSourceProvider (Phase 6) uses the Connector default until it lands.
 }

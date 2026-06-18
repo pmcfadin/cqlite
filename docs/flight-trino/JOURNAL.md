@@ -242,3 +242,15 @@ Format:
   Flight client from Phase 6), split manager (Phase 5), page source (Phase 6). Connector review team will
   run once it's functional end-to-end (post Phase 6) — reviewing a non-querying skeleton in isolation is low value.
 - **Next:** Phase 5 — SplitManager: token-range-replicas → one split per range pinned to a single replica.
+
+## 2026-06-17 — Phase 5: splits (token range → single replica)
+
+- **What:** `CqliteFlightSplitManager.getSplits` calls Sidecar `token-range-replicas` and emits one
+  `CqliteFlightSplit` per range, each pinned to exactly ONE replica → a row (on RF replicas) is read
+  once cluster-wide. Split carries keyspace/table/ddl + replica host + flight port + (start,end]+wraparound.
+  Replica selection (`pickReplica`, static/pure): prefer local DC, else any DC, deterministic
+  (lexicographically-smallest address). Wired `Connector.getSplitManager`.
+- **Tests:** 4 — one-split-per-range + single-replica pinning, local-DC preference, wraparound detection
+  (start>end), skip ranges with no replica. 13 total in the connector. `./gradlew test` green on JDK 25.
+- **Next:** Phase 6 — page source (Flight DoGet → Arrow → Trino Page), GetSchema-driven column metadata,
+  TupleDomain→ticket predicate/projection pushdown, and the docker-compose E2E.
