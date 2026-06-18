@@ -17,6 +17,11 @@
 use super::select_ast::*;
 use crate::{Error, Result, TableId, Value};
 
+// WRITETIME and TTL are reserved words in CQL that introduce a special
+// single-argument metadata-retrieval form. They are handled as dedicated tokens
+// so the parser can produce a first-class `SelectExpression::WriteTimeTtl`
+// rather than falling through to the generic `FunctionCall` path.
+
 /// Advanced CQL SELECT parser
 #[derive(Debug)]
 pub struct SelectParser {
@@ -60,6 +65,9 @@ pub enum Token {
     Null,
     Contains,
     Key,
+    // Metadata-retrieval functions (CQL reserved words)
+    Writetime,
+    Ttl,
 
     // Operators
     Equal,            // =
@@ -135,6 +143,8 @@ fn keyword_for(ident: &str) -> Option<Token> {
         ("NULL", Token::Null),
         ("CONTAINS", Token::Contains),
         ("KEY", Token::Key),
+        ("WRITETIME", Token::Writetime),
+        ("TTL", Token::Ttl),
         ("TRUE", Token::Boolean(true)),
         ("FALSE", Token::Boolean(false)),
     ];
@@ -582,6 +592,19 @@ impl SelectParser {
             return self.parse_aggregate_function(agg);
         }
 
+        // WRITETIME(col) and TTL(col) — first-class metadata-retrieval functions.
+        // They tokenize as dedicated keywords so they are caught here before the
+        // generic identifier path.
+        if matches!(self.peek(), Token::Writetime | Token::Ttl) {
+            let function = match self.current_token.clone() {
+                Some(Token::Writetime) => WriteTimeTtlFunction::WriteTime,
+                Some(Token::Ttl) => WriteTimeTtlFunction::Ttl,
+                _ => unreachable!("peek guard ensures only Writetime or Ttl here"),
+            };
+            self.advance()?;
+            return self.parse_writetime_ttl_call(function);
+        }
+
         // Take ownership/copy of literal payloads up front so we can call &mut self.
         match self.current_token.clone() {
             Some(Token::Identifier(name)) => {
@@ -637,6 +660,66 @@ impl SelectParser {
                 other
             ))),
         }
+    }
+
+    /// Parse `WRITETIME(col)` or `TTL(col)`.
+    ///
+    /// The function keyword has already been consumed by the caller.
+    /// Grammar: `'(' identifier ')'` optionally followed by `AS alias`.
+    fn parse_writetime_ttl_call(
+        &mut self,
+        function: WriteTimeTtlFunction,
+    ) -> Result<SelectExpression> {
+        self.expect(Token::LeftParen)?;
+
+        // Argument must be a single bare identifier (the column name).
+        let column = match self.current_token.clone() {
+            Some(Token::Identifier(name)) => {
+                self.advance()?;
+                name
+            }
+            other => {
+                return Err(Error::cql_parse(format!(
+                    "{} requires a single column name argument, found: {:?}",
+                    match function {
+                        WriteTimeTtlFunction::WriteTime => "WRITETIME",
+                        WriteTimeTtlFunction::Ttl => "TTL",
+                    },
+                    other
+                )));
+            }
+        };
+
+        self.expect(Token::RightParen)?;
+
+        // Optional alias: `WRITETIME(col) AS wt`
+        // Aliases in SELECT are supported by the grammar (the surrounding
+        // `parse_select_expression` already handles `AS`), but we handle it here
+        // too so we can attach it directly to the `WriteTimeTtlCall` for clarity.
+        // The outer `parse_select_expression` wraps us in `Aliased` when it sees
+        // `AS`; that path is the canonical one and this variant stores it inline.
+        let alias = if self.eat(&Token::As)? {
+            match self.current_token.clone() {
+                Some(Token::Identifier(alias_name)) => {
+                    self.advance()?;
+                    Some(alias_name)
+                }
+                other => {
+                    return Err(Error::cql_parse(format!(
+                        "Expected alias identifier after AS, found: {:?}",
+                        other
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+
+        Ok(SelectExpression::WriteTimeTtl(WriteTimeTtlCall {
+            function,
+            column,
+            alias,
+        }))
     }
 
     /// Parse aggregate function
@@ -937,7 +1020,179 @@ pub fn parse_select(cql: &str) -> Result<SelectStatement> {
 
 #[cfg(all(test, feature = "state_machine"))]
 mod tests {
+    use super::super::select_ast::{SelectExpression, WriteTimeTtlFunction};
     use super::*;
+
+    // --- WRITETIME / TTL parser tests (Issue #690) ---
+
+    #[test]
+    fn test_writetime_basic() {
+        let stmt = parse_select("SELECT WRITETIME(name) FROM ks.tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            assert_eq!(exprs.len(), 1);
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(call) => {
+                    assert_eq!(call.function, WriteTimeTtlFunction::WriteTime);
+                    assert_eq!(call.column, "name");
+                    assert!(call.alias.is_none());
+                }
+                other => panic!("Expected WriteTimeTtl, got: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns select clause");
+        }
+    }
+
+    #[test]
+    fn test_ttl_basic() {
+        let stmt = parse_select("SELECT TTL(name) FROM ks.tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            assert_eq!(exprs.len(), 1);
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(call) => {
+                    assert_eq!(call.function, WriteTimeTtlFunction::Ttl);
+                    assert_eq!(call.column, "name");
+                    assert!(call.alias.is_none());
+                }
+                other => panic!("Expected WriteTimeTtl, got: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns select clause");
+        }
+    }
+
+    #[test]
+    fn test_writetime_lowercase() {
+        // CQL is case-insensitive; the keyword should parse regardless of case.
+        let stmt = parse_select("SELECT writetime(name) FROM tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(call) => {
+                    assert_eq!(call.function, WriteTimeTtlFunction::WriteTime);
+                }
+                other => panic!("Expected WriteTimeTtl, got: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns");
+        }
+    }
+
+    #[test]
+    fn test_ttl_lowercase() {
+        let stmt = parse_select("SELECT ttl(name) FROM tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(call) => {
+                    assert_eq!(call.function, WriteTimeTtlFunction::Ttl);
+                }
+                other => panic!("Expected WriteTimeTtl, got: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns");
+        }
+    }
+
+    #[test]
+    fn test_writetime_mixed_case() {
+        let stmt = parse_select("SELECT WriteTime(name) FROM tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(call) => {
+                    assert_eq!(call.function, WriteTimeTtlFunction::WriteTime);
+                }
+                other => panic!("Expected WriteTimeTtl, got: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns");
+        }
+    }
+
+    #[test]
+    fn test_writetime_and_ttl_together() {
+        let stmt = parse_select("SELECT WRITETIME(name), TTL(name) FROM ks.tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            assert_eq!(exprs.len(), 2);
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(c) => {
+                    assert_eq!(c.function, WriteTimeTtlFunction::WriteTime);
+                }
+                other => panic!("Expected WriteTimeTtl for first expr, got: {:?}", other),
+            }
+            match &exprs[1] {
+                SelectExpression::WriteTimeTtl(c) => {
+                    assert_eq!(c.function, WriteTimeTtlFunction::Ttl);
+                }
+                other => panic!("Expected WriteTimeTtl for second expr, got: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns");
+        }
+    }
+
+    #[test]
+    fn test_writetime_with_alias() {
+        // Aliases on WRITETIME/TTL are supported; the parser captures them inline.
+        let stmt = parse_select("SELECT WRITETIME(name) AS wt FROM tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            assert_eq!(exprs.len(), 1);
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(call) => {
+                    assert_eq!(call.function, WriteTimeTtlFunction::WriteTime);
+                    assert_eq!(call.alias.as_deref(), Some("wt"));
+                }
+                other => panic!("Expected WriteTimeTtl with alias, got: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns");
+        }
+    }
+
+    #[test]
+    fn test_ttl_with_alias() {
+        let stmt = parse_select("SELECT ttl(name) AS remaining FROM tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(call) => {
+                    assert_eq!(call.function, WriteTimeTtlFunction::Ttl);
+                    assert_eq!(call.alias.as_deref(), Some("remaining"));
+                }
+                other => panic!("Expected WriteTimeTtl, got: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns");
+        }
+    }
+
+    #[test]
+    fn test_writetime_alongside_plain_columns() {
+        let stmt = parse_select("SELECT id, WRITETIME(name), name FROM tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            assert_eq!(exprs.len(), 3);
+            assert!(matches!(&exprs[0], SelectExpression::Column(_)));
+            assert!(matches!(&exprs[1], SelectExpression::WriteTimeTtl(_)));
+            assert!(matches!(&exprs[2], SelectExpression::Column(_)));
+        } else {
+            panic!("Expected Columns");
+        }
+    }
+
+    #[test]
+    fn test_column_name_is_preserved() {
+        let stmt = parse_select("SELECT WRITETIME(myColumn) FROM tbl").unwrap();
+        if let SelectClause::Columns(exprs) = stmt.select_clause {
+            match &exprs[0] {
+                SelectExpression::WriteTimeTtl(call) => {
+                    // The column name is preserved as parsed (not lowercased).
+                    assert_eq!(call.column, "myColumn");
+                }
+                other => panic!("Unexpected: {:?}", other),
+            }
+        } else {
+            panic!("Expected Columns");
+        }
+    }
+
+    // --- existing tests (preserved) ---
 
     #[test]
     fn test_simple_select() {

@@ -1151,6 +1151,11 @@ impl SelectExecutor {
                     "Function expressions not yet implemented".to_string(),
                 ))
             }
+            // TODO (#692): Thread writetime/ttl cell metadata from SSTableReader
+            // up through the scan loop and return Value::BigInt(micros) for
+            // WRITETIME and Value::Int(seconds) for TTL. Until that work lands,
+            // we return NULL to avoid incorrect results.
+            SelectExpression::WriteTimeTtl(_) => Ok(Value::Null),
         }
     }
 

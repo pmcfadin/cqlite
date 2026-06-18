@@ -23,6 +23,7 @@ pub mod parser;
 pub mod planner;
 pub mod prepared;
 pub mod result;
+pub mod writetime_ttl_validator;
 
 // Advanced SELECT query components
 #[cfg(feature = "state_machine")]
@@ -52,6 +53,10 @@ pub use prepared::{
 pub use result::{
     cql_type_to_data_type, ColumnInfo, PerformanceMetrics, QueryMetadata, QueryResult,
     QueryResultIterator, QueryRow, RowMetadata, StreamingConfig,
+};
+pub use writetime_ttl_validator::{
+    descriptors_from_table_schema, validate_all_writetime_ttl_calls, validate_writetime_ttl_call,
+    ColumnDescriptor as WriteTimeTtlColumnDescriptor, WriteTimeTtlKind,
 };
 
 // Re-export advanced SELECT components.

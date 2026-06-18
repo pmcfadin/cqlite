@@ -50,6 +50,11 @@ pub enum SelectExpression {
     Aggregate(AggregateFunction),
     /// Scalar function
     Function(FunctionCall),
+    /// `WRITETIME(col)` or `TTL(col)` — first-class metadata-retrieval functions.
+    ///
+    /// Using a dedicated variant avoids downstream string-matching on the function
+    /// name and keeps the executor dispatch explicit and exhaustive.
+    WriteTimeTtl(WriteTimeTtlCall),
     /// Literal value
     Literal(Value),
     /// Collection access (list[0], map['key'])
@@ -97,6 +102,35 @@ pub struct FunctionCall {
     pub name: String,
     /// Arguments
     pub args: Vec<SelectExpression>,
+}
+
+/// The two metadata-retrieval functions Cassandra exposes in SELECT.
+///
+/// These are first-class variants rather than being folded into `FunctionCall`
+/// so the executor can dispatch on them without string-matching function names.
+///
+/// # Executor TODO (#692)
+/// Evaluation is not yet wired: the executor must thread `writetime` / `ttl`
+/// cell-level metadata from `SSTableReader` up through the row-scanning loop
+/// and then return `Value::BigInt(micros)` / `Value::Int(seconds)` respectively.
+/// Until that work lands, selecting these columns returns `Value::Null`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum WriteTimeTtlFunction {
+    /// `WRITETIME(col)` — returns the write timestamp in microseconds (bigint)
+    WriteTime,
+    /// `TTL(col)` — returns the remaining TTL in seconds (int), or NULL if no TTL
+    Ttl,
+}
+
+/// A parsed `WRITETIME(col)` or `TTL(col)` select item.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct WriteTimeTtlCall {
+    /// Which function was written
+    pub function: WriteTimeTtlFunction,
+    /// The single column argument (case-preserved from the source text)
+    pub column: String,
+    /// Optional alias (`WRITETIME(col) AS wt`)
+    pub alias: Option<String>,
 }
 
 /// Collection access operations
@@ -334,6 +368,9 @@ impl SelectExpression {
             SelectExpression::Column(col_ref) => vec![col_ref.clone()],
             SelectExpression::Aggregate(agg) => collect_refs(&agg.args),
             SelectExpression::Function(func) => collect_refs(&func.args),
+            SelectExpression::WriteTimeTtl(call) => {
+                vec![ColumnRef::new(call.column.clone())]
+            }
             SelectExpression::CollectionAccess(access) => {
                 let (col_ref, sub_expr) = match access {
                     CollectionAccessExpression::ListIndex(c, e)
