@@ -15,7 +15,6 @@ import io.trino.spi.type.TinyintType;
 import io.trino.spi.type.Type;
 import io.trino.spi.type.TypeManager;
 import io.trino.spi.type.TypeSignature;
-import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarbinaryType;
 import io.trino.spi.type.VarcharType;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -36,9 +35,12 @@ public final class ArrowTypeMapper {
 
     /** Map one Arrow field to a Trino {@link Type}. */
     public static Type toTrino(Field field) {
-        // UUID is carried as FixedSizeBinary(16) tagged with the Arrow UUID extension.
+        // UUID is carried as FixedSizeBinary(16) tagged with the Arrow UUID
+        // extension. We surface it as VARCHAR (canonical hyphenated form) — this
+        // sidesteps Trino's internal UUID byte-order and keeps the page source
+        // conversion trivial and lossless for display/comparison.
         if (UUID_EXTENSION.equals(field.getMetadata().get(EXTENSION_KEY))) {
-            return UuidType.UUID;
+            return VarcharType.VARCHAR;
         }
 
         ArrowType type = field.getType();

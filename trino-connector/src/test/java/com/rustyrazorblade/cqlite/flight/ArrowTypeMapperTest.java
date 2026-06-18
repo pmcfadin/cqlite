@@ -5,7 +5,6 @@ import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.Type;
-import io.trino.spi.type.UuidType;
 import io.trino.spi.type.VarcharType;
 import org.apache.arrow.vector.types.FloatingPointPrecision;
 import org.apache.arrow.vector.types.pojo.ArrowType;
@@ -44,13 +43,13 @@ class ArrowTypeMapperTest {
     }
 
     @Test
-    void uuidExtensionMapsToUuidType() {
+    void uuidExtensionMapsToVarchar() {
         Field uuid = new Field(
                 "id",
                 new FieldType(true, new ArrowType.FixedSizeBinary(16),
                         null, Map.of("ARROW:extension:name", "arrow.uuid")),
                 List.of());
-        assertEquals(UuidType.UUID, ArrowTypeMapper.toTrino(uuid));
+        assertEquals(VarcharType.VARCHAR, ArrowTypeMapper.toTrino(uuid));
     }
 
     @Test

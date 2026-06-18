@@ -18,6 +18,6 @@ public class CqliteFlightConnectorFactory implements ConnectorFactory {
     public Connector create(String catalogName, Map<String, String> config, ConnectorContext context) {
         CqliteFlightConfig cfg = CqliteFlightConfig.fromMap(config);
         SidecarClient sidecar = new SidecarClient(cfg.sidecarUri());
-        return new CqliteFlightConnector(cfg, sidecar, context.getTypeManager());
+        return new CqliteFlightConnector(cfg, sidecar);
     }
 }
