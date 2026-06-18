@@ -347,10 +347,10 @@ mod tests {
         assert!(cols.iter().all(|c| c.cql_type.is_some()));
     }
 
-    // Cross-check for the cqlite-core merge fix (wide-row collapse). Ignored until
-    // that fix lands; the authoritative gate is the cqlite-core compaction test.
+    // Cross-check for the cqlite-core merge clustering-key fix (wide-row collapse).
+    // The authoritative gate is the cqlite-core `clustering_key_rows_survive_compaction`
+    // test; this verifies the fix end-to-end through the Flight producer.
     #[test]
-    #[ignore = "pending cqlite-core merge clustering-key fix"]
     fn clustering_table_preserves_distinct_rows_in_a_partition() {
         use crate::testutil::{clustering_schema, write_clustered};
         let schema = clustering_schema();

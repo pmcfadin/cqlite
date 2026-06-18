@@ -142,3 +142,25 @@ Format:
   limitation; PK/regular column name collision inherited from shared `build_row_from_scan` — low risk.
   Full-result-set buffered in memory (no streaming backpressure) — documented #1 perf item for later.
 - **Next:** await background cqlite-core clustering fix → un-ignore + verify → commit → Phase 2.
+
+## 2026-06-17 — Phase 1 CLOSED: wide-row merge fix landed + verified
+
+- **What:** The cqlite-core clustering-key merge fix is complete and verified; Phase 1 is done.
+- **Root cause (deeper than first thought):** two parts in `merge.rs` `SSTableRowIteratorAdapter::open`:
+  (1) it called `iterate_all_partitions_for_compaction(None)` — no schema — so the reader rebuilt a
+  schema from Statistics.db with GENERIC names (`"clustering_key"`) instead of the real CQL name (`ck`),
+  putting clustering values under the wrong cell name; (2) every `MergeEntry` had `clustering_key: None`,
+  so all rows of a partition collapsed in `reconcile_cluster`.
+- **Fix:** `open` now takes `&TableSchema`, passes `Some(schema)` to the reader (correct column names),
+  and a new `extract_clustering_key(row_data, schema)` builds the `ClusteringKey` from the decoded cells
+  (clustering columns stay in the cells for read-back). `KWayMerger::new` threads the schema through.
+  New core test `clustering_key_rows_survive_compaction` (compaction_integration.rs).
+- **Verified:** `cargo test -p cqlite-flight` 23/23 (clustering cross-check now un-ignored & passing);
+  `cargo test -p cqlite-core --features write-support --test compaction_integration` 7/7;
+  `clippy -D warnings` on cqlite-flight + cqlite-core clean. All pre-existing compaction/issue_587/
+  issue_591 tests still pass.
+- **Impact:** cqlite's OWN compaction now correctly preserves wide-partition rows (was a latent defect
+  uncovered by this work), and the Flight server serves clustering tables correctly.
+- **Phase 1 deliverable:** `cqlite-flight` serves a `keyspace.table`'s compaction-merged rows over Arrow
+  Flight, output matching SELECT, validated for int/text/uuid/null/tombstone/wide-row/LWW.
+- **Next:** Phase 2 — server-side token-range + predicate + projection filtering in `do_get`.

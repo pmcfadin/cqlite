@@ -50,10 +50,11 @@
 #![cfg(feature = "write-support")]
 
 use cqlite_core::platform::Platform;
-use cqlite_core::schema::{Column, KeyColumn, TableSchema};
+use cqlite_core::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::SSTableManager;
 use cqlite_core::storage::write_engine::{
-    CellOperation, Mutation, PartitionKey, STCSPolicy, TableId, WriteEngine, WriteEngineConfig,
+    CellOperation, ClusteringKey, Mutation, PartitionKey, STCSPolicy, TableId, WriteEngine,
+    WriteEngineConfig,
 };
 use cqlite_core::types::TableId as CqlTableId;
 use cqlite_core::types::Value;
@@ -1104,6 +1105,241 @@ fn disjoint_columns_survive_compaction() {
     eprintln!(
         "disjoint_columns_survive_compaction PASSED: PK=1 has both name+score \
          (disjoint columns preserved), PK=3 name resolves by timestamp (Issue #533)"
+    );
+
+    drop(temp_dir);
+}
+
+// ── Test 7: Wide-partition clustering-key correctness ─────────────────────────
+
+/// Regression test: the k-way merge must preserve distinct clustering rows within
+/// a partition and apply LWW within each clustering row.
+///
+/// The pre-fix merger set `clustering_key: None` on every `MergeEntry` regardless
+/// of the schema, so all rows of the same partition landed in the same
+/// `reconcile_cluster` group and collapsed to a single output row.
+///
+/// This test drives `KWayMerger` directly (the same code path used by the Flight
+/// producer) to verify the fix without depending on SSTableManager's scan path.
+///
+/// Setup (two SSTables, table: `CREATE TABLE ck_ks.wide (pk int, ck text, val int,
+/// PRIMARY KEY (pk, ck))`):
+///   - SSTable A (ts=100): (pk=1, ck='a', val=10), (pk=1, ck='b', val=20)
+///   - SSTable B (ts=200): (pk=1, ck='a', val=99)   — overrides ck='a' only
+///
+/// Expected after merge:
+///   - Partition pk=1 contains EXACTLY 2 merged rows.
+///   - The row with ck='a' has val=99   (LWW: B's ts=200 > A's ts=100).
+///   - The row with ck='b' has val=20   (A-only, not overridden).
+///
+/// If the fix is absent the two rows collapse to ONE row (the bug), failing the
+/// `assert_eq!(row_count, 2)`.
+#[test]
+fn clustering_key_rows_survive_compaction() {
+    use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
+    use cqlite_core::storage::write_engine::KWayMerger;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    let temp_dir = TempDir::new().expect("tempdir");
+    let data_dir = temp_dir.path().join("data");
+    let wal_dir = temp_dir.path().join("wal");
+
+    // Schema: pk int (partition key), ck text (clustering key), val int (regular).
+    let schema = TableSchema {
+        keyspace: "ck_ks".to_string(),
+        table: "wide".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "text".to_string(),
+            position: 0,
+            order: Default::default(),
+        }],
+        columns: vec![
+            Column {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "ck".to_string(),
+                data_type: "text".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "val".to_string(),
+                data_type: "int".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+    };
+
+    // Helper: build a mutation for (pk, ck, val).
+    let make_row = |pk: i32, ck: &str, val: i32, ts: i64| -> Mutation {
+        Mutation::new(
+            TableId::new("ck_ks", "wide"),
+            PartitionKey::single("pk", Value::Integer(pk)),
+            Some(ClusteringKey::single("ck", Value::Text(ck.to_string()))),
+            vec![CellOperation::Write {
+                column: "val".to_string(),
+                value: Value::Integer(val),
+            }],
+            ts,
+            None,
+        )
+    };
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+
+    // SSTable A (ts=100): two distinct clustering rows within partition pk=1.
+    engine
+        .write(make_row(1, "a", 10, 100))
+        .expect("write A ck=a");
+    engine
+        .write(make_row(1, "b", 20, 100))
+        .expect("write A ck=b");
+    let info_a = rt
+        .block_on(engine.flush())
+        .expect("flush A")
+        .expect("info A");
+    assert!(info_a.partition_count > 0, "SSTable A non-empty");
+
+    // SSTable B (ts=200): override only ck='a' with val=99.
+    engine
+        .write(make_row(1, "a", 99, 200))
+        .expect("write B ck=a override");
+    let info_b = rt
+        .block_on(engine.flush())
+        .expect("flush B")
+        .expect("info B");
+    assert!(info_b.partition_count > 0, "SSTable B non-empty");
+
+    rt.block_on(engine.close()).expect("close engine before direct merger test");
+
+    // ── Direct KWayMerger verification ───────────────────────────────────────
+    // Locate the two Data.db files written above.
+    let table_dir = data_dir.join("ck_ks").join("wide");
+    let mut data_files: Vec<std::path::PathBuf> = std::fs::read_dir(&table_dir)
+        .expect("read table dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with("-Data.db"))
+                .unwrap_or(false)
+        })
+        .collect();
+
+    // Sort newest generation first (same as DirSource in the flight crate).
+    data_files.sort_by(|a, b| {
+        let gen_of = |p: &std::path::Path| -> u64 {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|name| name.split('-').find_map(|seg| seg.parse::<u64>().ok()))
+                .unwrap_or(0)
+        };
+        gen_of(b).cmp(&gen_of(a))
+    });
+
+    assert!(
+        data_files.len() >= 2,
+        "Expected at least 2 Data.db files, found {}",
+        data_files.len()
+    );
+
+    let mut merger = KWayMerger::new(data_files, &schema).expect("KWayMerger::new");
+
+    // Collect all merged rows.
+    struct MergedRow {
+        ck: Option<Value>,
+        val: Option<Value>,
+    }
+    let mut merged_rows: Vec<MergedRow> = Vec::new();
+
+    loop {
+        match merger.step().expect("merger step") {
+            MergeStep::Complete => break,
+            MergeStep::Partition { rows, .. } => {
+                for entry in rows {
+                    // Skip tombstone entries.
+                    let cells = match entry.row_data {
+                        RowData::Live { cells } => cells,
+                        RowData::Tombstone { .. } => continue,
+                    };
+                    let find_col = |col: &str| -> Option<Value> {
+                        cells
+                            .iter()
+                            .find(|c| c.column == col)
+                            .map(|c| c.value.clone())
+                    };
+                    merged_rows.push(MergedRow {
+                        ck: find_col("ck"),
+                        val: find_col("val"),
+                    });
+                }
+            }
+        }
+    }
+
+    let row_count = merged_rows.len();
+    eprintln!(
+        "clustering_key_rows_survive_compaction: {} merged rows",
+        row_count
+    );
+
+    // The pre-fix bug collapses (pk=1,ck='a') and (pk=1,ck='b') to ONE row.
+    assert_eq!(
+        row_count, 2,
+        "Wide partition pk=1 must produce exactly 2 distinct clustering rows from \
+         the k-way merger (ck='a' and ck='b'). Got {} — the merger collapsed them \
+         into one row (clustering_key: None bug).",
+        row_count
+    );
+
+    // Locate the two rows by ck value.
+    let row_a = merged_rows
+        .iter()
+        .find(|r| matches!(&r.ck, Some(Value::Text(s)) if s == "a"))
+        .expect("row ck='a' must be present");
+    let row_b = merged_rows
+        .iter()
+        .find(|r| matches!(&r.ck, Some(Value::Text(s)) if s == "b"))
+        .expect("row ck='b' must be present");
+
+    // LWW within ck='a': SSTable B (ts=200, val=99) wins over A (ts=100, val=10).
+    assert_eq!(
+        row_a.val,
+        Some(Value::Integer(99)),
+        "ck='a' val must be 99 (LWW: B ts=200 > A ts=100)"
+    );
+
+    // ck='b' unchanged: only in SSTable A.
+    assert_eq!(
+        row_b.val,
+        Some(Value::Integer(20)),
+        "ck='b' val must be 20 (A-only, not overridden)"
+    );
+
+    eprintln!(
+        "clustering_key_rows_survive_compaction PASSED: 2 distinct clustering rows \
+         preserved, LWW correct within each clustering row"
     );
 
     drop(temp_dir);
