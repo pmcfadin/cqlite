@@ -893,7 +893,10 @@ mod tests {
         // Payload layout: [headerLength vint][DeletionTime 12 bytes][count vint][...]
         let (header_len, hl_bytes) = parse_vint_simple(&payload);
         // headerLength = 2 + 4 + 12 = 18
-        assert_eq!(header_len, 18, "headerLength for a 4-byte key = 2 + 4 + 12 = 18");
+        assert_eq!(
+            header_len, 18,
+            "headerLength for a 4-byte key = 2 + 4 + 12 = 18"
+        );
         let dt_skip = NB_DELETION_TIME_LIVE_SIZE;
         let (count, _) = parse_vint_simple(&payload[hl_bytes + dt_skip..]);
         assert_eq!(count, 2);
