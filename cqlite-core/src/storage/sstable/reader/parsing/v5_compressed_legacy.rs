@@ -73,11 +73,13 @@ const MAX_TYPE_NESTING_DEPTH: usize = 10;
 /// (cells, cell_metadata, row_header, next_offset, is_static)
 ///
 /// `cell_metadata` maps column name → `CellWriteMetadata` for every live cell
-/// parsed in this row. Used to surface per-cell timestamps / TTLs for
-/// `WRITETIME(col)` / `TTL(col)` queries (issue #693).
+/// parsed in this row.  It is `Some(map)` only when `want_cell_metadata == true`
+/// was passed to the function; otherwise it is `None` and zero allocations are
+/// incurred on the normal read hot-path.  Used to surface per-cell timestamps /
+/// TTLs for `WRITETIME(col)` / `TTL(col)` queries (issue #693).
 type ParsedRow = (
     HashMap<String, Value>,
-    HashMap<String, CellWriteMetadata>,
+    Option<HashMap<String, CellWriteMetadata>>,
     Option<RowHeader>,
     usize,
     bool,
@@ -416,8 +418,9 @@ impl V5CompressedLegacyParser {
                     }
                 }
 
-                match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
-                    Ok((mut cells, mut row_cell_meta, row_header_opt, next_offset, is_static)) => {
+                match self.parse_row_data_with_offset(data, offset, Some(schema), reader, true) {
+                    Ok((mut cells, row_cell_meta_opt, row_header_opt, next_offset, is_static)) => {
+                        let mut row_cell_meta = row_cell_meta_opt.unwrap_or_default();
                         offset = next_offset;
                         row_count += 1;
 
@@ -728,7 +731,13 @@ impl V5CompressedLegacyParser {
                             }
                         }
 
-                        match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
+                        match self.parse_row_data_with_offset(
+                            data,
+                            offset,
+                            Some(schema),
+                            reader,
+                            false,
+                        ) {
                             Ok((
                                 mut cells,
                                 _row_cell_meta,
@@ -1041,7 +1050,13 @@ impl V5CompressedLegacyParser {
                             }
                         }
 
-                        match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
+                        match self.parse_row_data_with_offset(
+                            data,
+                            offset,
+                            Some(schema),
+                            reader,
+                            false,
+                        ) {
                             Ok((
                                 mut cells,
                                 _row_cell_meta,
@@ -2123,10 +2138,18 @@ impl V5CompressedLegacyParser {
         mut offset: usize,
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
+        want_cell_metadata: bool,
     ) -> Result<ParsedRow> {
         let mut cells = HashMap::new();
         // Parallel per-cell write metadata map (populated alongside `cells`).
-        let mut cell_meta: HashMap<String, CellWriteMetadata> = HashMap::new();
+        // Only allocated when the caller actually needs WRITETIME/TTL metadata
+        // (i.e. `want_cell_metadata == true`).  On the normal read path this stays
+        // `None` so that zero HashMap allocations or inserts occur per cell.
+        let mut cell_meta: Option<HashMap<String, CellWriteMetadata>> = if want_cell_metadata {
+            Some(HashMap::new())
+        } else {
+            None
+        };
 
         let schema = schema.ok_or_else(|| {
             Error::schema(format!(
@@ -2451,14 +2474,17 @@ impl V5CompressedLegacyParser {
                             col_idx, column.name, value, new_offset - offset
                         );
                         // Complex (non-frozen) collection cells inherit the row-level timestamp.
-                        let row_ts = row_header.timestamp.unwrap_or(0);
-                        cell_meta.insert(
-                            column.name.clone(),
-                            CellWriteMetadata {
-                                write_timestamp_micros: row_ts,
-                                expiration: None,
-                            },
-                        );
+                        // Only compute and store metadata when the caller requested it.
+                        if let Some(ref mut meta_map) = cell_meta {
+                            let row_ts = row_header.timestamp.unwrap_or(0);
+                            meta_map.insert(
+                                column.name.clone(),
+                                CellWriteMetadata {
+                                    write_timestamp_micros: row_ts,
+                                    expiration: None,
+                                },
+                            );
+                        }
                         cells.insert(column.name.clone(), value);
                         offset = new_offset;
                     }
@@ -2481,31 +2507,35 @@ impl V5CompressedLegacyParser {
                             value,
                             new_offset - offset
                         );
-                        // Resolve effective write timestamp:
-                        // use cell's own timestamp when present, else row-level liveness timestamp.
-                        let effective_ts =
-                            cell_own_ts.unwrap_or_else(|| row_header.timestamp.unwrap_or(0));
-                        // Resolve expiration: cell-level wins; fall back to row-level TTL when
-                        // the cell used USE_ROW_TTL (cell_exp is None in that case).
-                        // USE_ROW_TTL path: row_header.ttl is the row-level TTL in seconds.
-                        // row_header.local_deletion_time is the corresponding expires_at (seconds).
-                        let row_level_exp = match (row_header.ttl, row_header.local_deletion_time) {
-                            (Some(ttl_s), Some(ldt_s)) => Some(CellExpiration {
-                                ttl_seconds: ttl_s,
-                                expires_at_seconds: ldt_s as i64,
-                            }),
-                            _ => None,
-                        };
-                        // Resolve expiration: cell-level wins; fall back to row-level TTL when
-                        // the cell used USE_ROW_TTL (cell_exp is None in that case).
-                        let effective_exp = cell_exp.or(row_level_exp);
-                        cell_meta.insert(
-                            column.name.clone(),
-                            CellWriteMetadata {
-                                write_timestamp_micros: effective_ts,
-                                expiration: effective_exp,
-                            },
-                        );
+                        // Only compute and store per-cell metadata when the caller requested it.
+                        // On the normal read hot-path (want_cell_metadata == false), cell_meta is
+                        // None and this entire block is skipped — zero allocations per cell.
+                        if let Some(ref mut meta_map) = cell_meta {
+                            // Resolve effective write timestamp:
+                            // use cell's own timestamp when present, else row-level liveness timestamp.
+                            let effective_ts =
+                                cell_own_ts.unwrap_or_else(|| row_header.timestamp.unwrap_or(0));
+                            // Resolve expiration: cell-level wins; fall back to row-level TTL when
+                            // the cell used USE_ROW_TTL (cell_exp is None in that case).
+                            // USE_ROW_TTL path: row_header.ttl is the row-level TTL in seconds.
+                            // row_header.local_deletion_time is the corresponding expires_at (seconds).
+                            let row_level_exp =
+                                match (row_header.ttl, row_header.local_deletion_time) {
+                                    (Some(ttl_s), Some(ldt_s)) => Some(CellExpiration {
+                                        ttl_seconds: ttl_s,
+                                        expires_at_seconds: ldt_s as i64,
+                                    }),
+                                    _ => None,
+                                };
+                            let effective_exp = cell_exp.or(row_level_exp);
+                            meta_map.insert(
+                                column.name.clone(),
+                                CellWriteMetadata {
+                                    write_timestamp_micros: effective_ts,
+                                    expiration: effective_exp,
+                                },
+                            );
+                        }
                         cells.insert(column.name.clone(), value);
                         offset = new_offset;
                     }
