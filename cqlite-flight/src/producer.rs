@@ -20,12 +20,14 @@ use arrow::datatypes::Schema as ArrowSchema;
 use arrow::record_batch::RecordBatch;
 
 use cqlite_core::export::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
-use cqlite_core::query::{build_row_from_scan, ColumnInfo, QueryRow};
+use cqlite_core::query::{build_row_from_scan, evaluate_predicates, ColumnInfo, QueryRow};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
 use cqlite_core::types::{DataType, Value};
 use cqlite_core::RowKey;
+
+use crate::filter::ScanSpec;
 
 /// Errors produced while merging SSTables into Arrow batches.
 #[derive(Debug, thiserror::Error)]
@@ -44,6 +46,9 @@ pub enum ProducerError {
     /// CQL → Arrow conversion failed.
     #[error(transparent)]
     Convert(#[from] ArrowConvertError),
+    /// Predicate evaluation failed (e.g. incomparable operand types).
+    #[error("predicate evaluation failed: {0}")]
+    Predicate(cqlite_core::Error),
     /// Listing SSTable files failed.
     #[error("failed to list SSTables in {path}: {source}")]
     Discovery {
@@ -144,17 +149,31 @@ pub struct MergeProducer {
     schema: TableSchema,
     columns: Vec<ColumnInfo>,
     batch_size: usize,
+    spec: ScanSpec,
 }
 
 impl MergeProducer {
-    /// Build a producer for `schema`, emitting record batches of at most
-    /// `batch_size` rows.
+    /// Build an unfiltered producer for `schema` (emits all rows and columns).
     pub fn new(schema: TableSchema, batch_size: usize) -> Result<Self, ProducerError> {
-        let columns = schema_columns(&schema)?;
+        Self::with_spec(schema, batch_size, ScanSpec::default())
+    }
+
+    /// Build a producer applying `spec` (token range, predicates, projection).
+    pub fn with_spec(
+        schema: TableSchema,
+        batch_size: usize,
+        spec: ScanSpec,
+    ) -> Result<Self, ProducerError> {
+        let mut columns = schema_columns(&schema)?;
+        if let Some(projection) = &spec.projection {
+            // Keep schema (key-first) order, restricted to the projected set.
+            columns.retain(|c| projection.iter().any(|p| p == &c.name));
+        }
         Ok(Self {
             schema,
             columns,
             batch_size: batch_size.max(1),
+            spec,
         })
     }
 
@@ -190,16 +209,31 @@ impl MergeProducer {
         let mut merger =
             KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
+        let projection = self.spec.projection_slice();
 
         while let MergeStep::Partition { key, rows } =
             merger.step().map_err(ProducerError::Merge)?
         {
+            // Token-range filter: drop whole partitions outside the split's range.
+            if let Some(token) = &self.spec.token {
+                if !token.contains(key.token) {
+                    continue;
+                }
+            }
             for entry in rows {
-                if let Some(row) = self.entry_to_row(&key.key, entry.row_data) {
-                    buffer.push(row);
-                    if buffer.len() >= self.batch_size {
-                        batches.push(self.flush_buffer(&mut buffer)?);
-                    }
+                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &projection) else {
+                    continue;
+                };
+                // Predicate pushdown: keep only rows satisfying every predicate.
+                if !self.spec.predicates.is_empty()
+                    && !evaluate_predicates(&row, &self.spec.predicates)
+                        .map_err(ProducerError::Predicate)?
+                {
+                    continue;
+                }
+                buffer.push(row);
+                if buffer.len() >= self.batch_size {
+                    batches.push(self.flush_buffer(&mut buffer)?);
                 }
             }
         }
@@ -212,7 +246,13 @@ impl MergeProducer {
 
     /// Reconstruct one logical row from a merged entry, or `None` for a row
     /// tombstone. Cell tombstones are dropped so the column reads as null.
-    fn entry_to_row(&self, partition_key: &[u8], row_data: RowData) -> Option<QueryRow> {
+    /// `projection` restricts the emitted columns (empty = all).
+    fn entry_to_row(
+        &self,
+        partition_key: &[u8],
+        row_data: RowData,
+        projection: &[String],
+    ) -> Option<QueryRow> {
         let cells = match row_data {
             RowData::Live { cells } => cells,
             // Whole-row deletion: suppress from output.
@@ -228,7 +268,7 @@ impl MergeProducer {
             .collect();
 
         let key = RowKey(partition_key.to_vec());
-        build_row_from_scan(key, Value::Map(map_entries), &[], Some(&self.schema))
+        build_row_from_scan(key, Value::Map(map_entries), projection, Some(&self.schema))
     }
 
     fn flush_buffer(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
@@ -508,6 +548,95 @@ mod tests {
         assert_eq!(total_rows(&batches), 10);
         assert!(batches.len() >= 3, "10 rows / batch_size 4 → ≥3 batches");
         assert!(batches.iter().all(|b| b.num_rows() <= 4));
+    }
+
+    fn spec_from(schema: &TableSchema, ticket: crate::ticket::FlightTicket) -> ScanSpec {
+        ScanSpec::from_ticket(&ticket, schema).unwrap()
+    }
+
+    #[test]
+    fn token_filter_selects_partitions() {
+        use crate::ticket::FlightTicket;
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        // Full ring range keeps every partition.
+        let all = spec_from(
+            &schema,
+            FlightTicket {
+                token_start: Some(i64::MIN),
+                token_end: Some(i64::MAX),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema.clone(), 1024, all).unwrap();
+        assert_eq!(total_rows(&p.produce(&DirSource::new(&dir)).unwrap()), 5);
+
+        // Empty range (MAX, MAX] keeps nothing.
+        let none = spec_from(
+            &schema,
+            FlightTicket {
+                token_start: Some(i64::MAX),
+                token_end: Some(i64::MAX),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, none).unwrap();
+        assert_eq!(total_rows(&p.produce(&DirSource::new(&dir)).unwrap()), 0);
+    }
+
+    #[test]
+    fn predicate_pushdown_filters_rows() {
+        use crate::ticket::{FlightTicket, Predicate, PredicateOp};
+        use serde_json::json;
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100)) // scores 10..50
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                predicates: vec![Predicate {
+                    column: "score".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(25),
+                }],
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        // scores 30,40,50 pass `> 25`.
+        assert_eq!(total_rows(&p.produce(&DirSource::new(&dir)).unwrap()), 3);
+    }
+
+    #[test]
+    fn projection_restricts_columns() {
+        use crate::ticket::FlightTicket;
+        let schema = simple_schema();
+        let (_temp, _data, dir) =
+            build_sstables(&schema, vec![vec![write_row(1, "a", 10, 100)]]);
+
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                columns: Some(vec!["id".into(), "name".into()]),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+
+        let arrow_schema = p.arrow_schema().unwrap();
+        let names: Vec<&str> = arrow_schema.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(names, vec!["id", "name"], "score projected out");
+
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(batches[0].num_columns(), 2);
+        assert!(batches[0].column_by_name("score").is_none());
     }
 
     #[test]

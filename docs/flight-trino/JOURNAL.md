@@ -164,3 +164,24 @@ Format:
 - **Phase 1 deliverable:** `cqlite-flight` serves a `keyspace.table`'s compaction-merged rows over Arrow
   Flight, output matching SELECT, validated for int/text/uuid/null/tombstone/wide-row/LWW.
 - **Next:** Phase 2 — server-side token-range + predicate + projection filtering in `do_get`.
+
+## 2026-06-17 — Phase 2: server-side filtering (token range + predicates + projection)
+
+- **What:** `do_get` now applies the ticket's filters during the merge.
+  - cqlite-core: exposed `evaluate_predicates`, `SSTablePredicate`, `SSTableFilterOp` (pub +
+    re-export) for reuse — same predicate semantics as SELECT.
+  - `filter.rs` (new): `ScanSpec::from_ticket(ticket, schema)` translates ticket fields into a
+    `TokenFilter` + `Vec<SSTablePredicate>` + projection. Typed JSON→`Value` conversion via the
+    column's authoritative `CqlType` (int/bigint/float/double/bool/text/uuid/timestamp; `IN`
+    expands a JSON array). `token_in_half_open_range` factored out of the ticket (shared, DRY).
+  - `producer.rs`: `MergeProducer::with_spec(schema, batch_size, spec)`. Per-partition token filter
+    (drops whole partitions outside `(start,end]` — cross-replica dedup), per-row predicate eval,
+    projection restricts both the Arrow columns and `build_row_from_scan`.
+  - `service.rs`: `build_producer(ticket)` builds the spec-aware producer for all RPCs (so the Arrow
+    schema reflects projection); `From<FilterError> for Status` → invalid_argument; `ProducerError::Predicate`.
+- **Tests:** filter.rs (8: token bounds, int/IN/uuid/clustering-col translation, unknown-column &
+  type-mismatch rejection) + producer (token selectivity, predicate `>`, projection). 34 total, clippy clean.
+- **Scope note:** predicate pushdown supports scalar columns; collections/complex types error as
+  non-pushable (logged, not silently dropped). Token filtering uses the stored `DecoratedKey.token`
+  (no Murmur3 computation), per the design.
+- **Next:** Phase 2 code-review team → fix → commit → Phase 3 (snapshot dir reads).

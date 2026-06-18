@@ -145,16 +145,27 @@ impl FlightTicket {
     pub fn token_in_range(&self, token: i64) -> bool {
         match (self.token_start, self.token_end) {
             (None, None) => true,
-            (start, end) => {
-                let start = start.unwrap_or(i64::MIN);
-                let end = end.unwrap_or(i64::MAX);
-                if self.wraparound {
-                    token > start || token <= end
-                } else {
-                    token > start && token <= end
-                }
-            }
+            (start, end) => token_in_half_open_range(
+                token,
+                start.unwrap_or(i64::MIN),
+                end.unwrap_or(i64::MAX),
+                self.wraparound,
+            ),
         }
+    }
+}
+
+/// Half-open `(start, end]` membership with optional ring wraparound.
+///
+/// Shared by [`FlightTicket::token_in_range`] and the producer's token filter so
+/// the semantics never diverge. A normal range keeps `start < token <= end`; a
+/// wraparound range (crossing the ring's min-token boundary) keeps
+/// `token > start || token <= end`.
+pub fn token_in_half_open_range(token: i64, start: i64, end: i64, wraparound: bool) -> bool {
+    if wraparound {
+        token > start || token <= end
+    } else {
+        token > start && token <= end
     }
 }
 

@@ -33,6 +33,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
 
+use crate::filter::{FilterError, ScanSpec};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
 use crate::ticket::{FlightTicket, TicketError};
 
@@ -61,8 +62,17 @@ impl From<ProducerError> for Status {
             }
             ProducerError::Discovery { .. }
             | ProducerError::Merge(_)
-            | ProducerError::Convert(_) => Status::internal(msg),
+            | ProducerError::Convert(_)
+            | ProducerError::Predicate(_) => Status::internal(msg),
         }
+    }
+}
+
+/// Bad filter input (unknown column, type mismatch, malformed operand) is a
+/// client error.
+impl From<FilterError> for Status {
+    fn from(e: FilterError) -> Self {
+        Status::invalid_argument(e.to_string())
     }
 }
 
@@ -90,16 +100,17 @@ impl CqliteFlightService {
             .map_err(|e| Status::invalid_argument(format!("invalid ddl: {e}")))
     }
 
-    /// Build a producer from a parsed schema.
-    fn make_producer(&self, schema: TableSchema) -> Result<MergeProducer, Status> {
-        Ok(MergeProducer::new(schema, self.batch_size)?)
+    /// Build a producer for a ticket, applying its token-range/predicate/projection
+    /// filters. Used by every RPC so the Arrow schema reflects the projection.
+    fn build_producer(&self, ticket: &FlightTicket) -> Result<MergeProducer, Status> {
+        let schema = Self::parse_schema(ticket)?;
+        let spec = ScanSpec::from_ticket(ticket, &schema)?;
+        Ok(MergeProducer::with_spec(schema, self.batch_size, spec)?)
     }
 
     /// Arrow schema for a ticket (no SSTable access required).
     fn arrow_schema_for(&self, ticket: &FlightTicket) -> Result<ArrowSchema, Status> {
-        let schema = Self::parse_schema(ticket)?;
-        let producer = self.make_producer(schema)?;
-        Ok(producer.arrow_schema()?)
+        Ok(self.build_producer(ticket)?.arrow_schema()?)
     }
 }
 
@@ -150,8 +161,7 @@ impl FlightService for CqliteFlightService {
         request: Request<Ticket>,
     ) -> Result<Response<Self::DoGetStream>, Status> {
         let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
-        let schema = Self::parse_schema(&ticket)?;
-        let producer = self.make_producer(schema)?;
+        let producer = self.build_producer(&ticket)?;
         let schema_ref = Arc::new(producer.arrow_schema()?);
         let source = DirSource::resolve(&self.data_dir, &ticket.keyspace, &ticket.table);
 

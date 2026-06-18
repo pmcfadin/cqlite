@@ -157,7 +157,10 @@ fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
 ///
 /// Returns `Ok(true)` only if every predicate is satisfied. A missing column
 /// causes the row to be rejected.
-fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Result<bool> {
+///
+/// Exposed publicly so the Arrow Flight server can apply identical predicate
+/// pushdown semantics to its merged rows (output parity with SELECT).
+pub fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Result<bool> {
     use super::select_optimizer::SSTableFilterOp;
     for predicate in predicates {
         let Some(column_value) = row.values.get(&predicate.column) else {
