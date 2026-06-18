@@ -81,18 +81,36 @@ impl DirSource {
         Self { dir: dir.into() }
     }
 
-    /// Resolve the SSTable directory for `keyspace.table` under `data_dir`.
+    /// Resolve the SSTable directory for `keyspace.table` under `data_dir`,
+    /// optionally inside a named snapshot.
     ///
     /// Supports the write-engine layout (`<data>/<ks>/<table>`) and the Cassandra
     /// layout (`<data>/<ks>/<table>-<uuid>`). When several `<table>-<uuid>` dirs
     /// match, the lexicographically-largest name is chosen deterministically.
-    /// When nothing matches, the exact (non-existent) path is returned so that
-    /// `data_paths` surfaces a clean `NotFound`.
-    pub fn resolve(data_dir: &Path, keyspace: &str, table: &str) -> Self {
+    /// When `snapshot` is `Some(name)`, resolves to the frozen
+    /// `<table-dir>/snapshots/<name>/` hardlink set (Phase 3). When nothing
+    /// matches, the exact (non-existent) path is returned so `data_paths`
+    /// surfaces a clean `NotFound`.
+    pub fn resolve(
+        data_dir: &Path,
+        keyspace: &str,
+        table: &str,
+        snapshot: Option<&str>,
+    ) -> Self {
+        let table_dir = Self::table_base_dir(data_dir, keyspace, table);
+        let dir = match snapshot {
+            Some(name) if !name.is_empty() => table_dir.join("snapshots").join(name),
+            _ => table_dir,
+        };
+        Self::new(dir)
+    }
+
+    /// Resolve the on-disk directory for a table (live data dir, no snapshot).
+    fn table_base_dir(data_dir: &Path, keyspace: &str, table: &str) -> PathBuf {
         let base = data_dir.join(keyspace);
         let exact = base.join(table);
         if exact.is_dir() {
-            return Self::new(exact);
+            return exact;
         }
         let prefix = format!("{table}-");
         let mut best: Option<PathBuf> = None;
@@ -109,7 +127,7 @@ impl DirSource {
                 }
             }
         }
-        Self::new(best.unwrap_or(exact))
+        best.unwrap_or(exact)
     }
 }
 
@@ -357,7 +375,9 @@ fn flat_data_type(cql: &CqlType) -> DataType {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{build_sstables, delete_row, simple_schema, total_rows, write_row};
+    use crate::testutil::{
+        build_sstables, delete_row, make_snapshot, simple_schema, total_rows, write_row, KS, TBL,
+    };
     use cqlite_core::schema::{ClusteringColumn, Column};
 
     #[test]
@@ -702,6 +722,36 @@ mod tests {
         let batches = p.produce(&DirSource::new(&dir)).unwrap();
         assert_eq!(batches[0].num_columns(), 2);
         assert!(batches[0].column_by_name("score").is_none());
+    }
+
+    #[test]
+    fn resolve_builds_snapshot_path() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join("ks").join("tbl")).unwrap();
+        let src = DirSource::resolve(tmp.path(), "ks", "tbl", Some("snap1"));
+        assert!(
+            src.dir.ends_with("ks/tbl/snapshots/snap1"),
+            "got {:?}",
+            src.dir
+        );
+        // Empty/None snapshot resolves to the live table dir.
+        let live = DirSource::resolve(tmp.path(), "ks", "tbl", None);
+        assert!(live.dir.ends_with("ks/tbl"));
+    }
+
+    #[test]
+    fn reads_from_snapshot_directory() {
+        let schema = simple_schema();
+        let rows = (1..=3)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, data_dir, table_dir) = build_sstables(&schema, vec![rows]);
+        make_snapshot(&table_dir, "snap1");
+
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+        let src = DirSource::resolve(&data_dir, KS, TBL, Some("snap1"));
+        let batches = producer.produce(&src).unwrap();
+        assert_eq!(total_rows(&batches), 3, "reads the frozen snapshot SSTables");
     }
 
     #[test]

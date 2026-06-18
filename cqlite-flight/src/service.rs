@@ -163,7 +163,12 @@ impl FlightService for CqliteFlightService {
         let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
         let producer = self.build_producer(&ticket)?;
         let schema_ref = Arc::new(producer.arrow_schema()?);
-        let source = DirSource::resolve(&self.data_dir, &ticket.keyspace, &ticket.table);
+        let source = DirSource::resolve(
+            &self.data_dir,
+            &ticket.keyspace,
+            &ticket.table,
+            ticket.snapshot.as_deref(),
+        );
 
         // The merge drains SSTables into memory and is CPU-bound — run it off the
         // async runtime so it cannot stall the gRPC reactor. A missing table

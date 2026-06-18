@@ -207,3 +207,16 @@ Format:
   never emits duplicate rows regardless of projected columns. Timestamp predicate operand is epoch i64
   (Trino sends epoch); `wraparound:true` with a single bound is a client footgun (documented).
 - **Next:** Phase 3 — read SSTables from a Sidecar snapshot directory.
+
+## 2026-06-17 — Phase 3: read from Sidecar snapshot directory
+
+- **What:** `DirSource::resolve` now honors `ticket.snapshot`: `Some(name)` resolves to
+  `<table-dir>/snapshots/<name>/` (Cassandra's frozen hardlink set, created by Sidecar
+  `PUT .../snapshots/:name`); `None`/empty reads the live data dir. Refactored resolution into
+  `table_base_dir` + snapshot join. Service `do_get` passes `ticket.snapshot.as_deref()`.
+- **Why:** reading a snapshot (not live files) is the consistency guarantee from PLAN §2 — avoids the
+  shifting-file-set / issue-#591 SIGBUS risk while Cassandra compacts underneath.
+- **Tests:** `make_snapshot` testutil hardlinks all components into `snapshots/<name>/`;
+  `reads_from_snapshot_directory` (produces correct rows from the snapshot) +
+  `resolve_builds_snapshot_path` (path construction, live fallback). 43 total, clippy clean.
+- **Next:** Phase 3 quick review → commit → Phase 4 (Java Trino connector skeleton + Sidecar discovery).

@@ -203,3 +203,20 @@ pub fn build_sstables(
 pub fn total_rows(batches: &[RecordBatch]) -> usize {
     batches.iter().map(|b| b.num_rows()).sum()
 }
+
+/// Simulate a Sidecar snapshot: hardlink every SSTable component file from
+/// `table_dir` into `table_dir/snapshots/<name>/` (Cassandra's snapshot layout).
+/// Returns the snapshot directory.
+pub fn make_snapshot(table_dir: &std::path::Path, name: &str) -> PathBuf {
+    let snap = table_dir.join("snapshots").join(name);
+    std::fs::create_dir_all(&snap).unwrap();
+    for entry in std::fs::read_dir(table_dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            let dest = snap.join(entry.file_name());
+            // Hardlink like Sidecar does; fall back to copy across filesystems.
+            std::fs::hard_link(&path, &dest).or_else(|_| std::fs::copy(&path, &dest).map(|_| ())).unwrap();
+        }
+    }
+    snap
+}
