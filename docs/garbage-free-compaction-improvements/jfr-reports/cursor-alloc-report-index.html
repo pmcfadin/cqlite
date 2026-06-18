@@ -1,0 +1,17 @@
+<!DOCTYPE html><html><head><meta charset="utf-8"><title>Cursor compaction allocation: before/after</title>
+<style>body{font-family:-apple-system,Helvetica,sans-serif;margin:2em;max-width:900px}
+table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:6px 12px}th{background:#f0f0f0}
+tr.hl{background:#ffe9e9}</style></head><body>
+<h1>Finding #8: ClusteringPrefix.Kind.values() per-row allocation — before/after</h1>
+<p>Fix: cache the enum values array once (<code>ClusteringPrefix.Kind.ALL_KINDS</code>); three cursor hot-path
+sites switched from <code>Kind.values()[i]</code> (which clones the array on every call) to the shared copy.</p>
+<table><tr><th></th><th>Before fix</th><th>After fix</th></tr>
+<tr><td>Total sampled within CompactionTask (30 compactions, small scenario)</td><td>134.8 MB</td><td>130.0 MB</td></tr>
+<tr class="hl"><td><code>ClusteringPrefix$Kind[]</code> allocation</td><td>2.88 MB</td><td>0.00 MB</td></tr>
+<tr><td>Allocation-scaling gate delta (12,000 vs 1,200 rows)</td><td>1,487,448 B (~137 B/row)</td><td>449,488 B (~41 B/row; volume-scaled test-env residual, zero cursor-owned)</td></tr>
+<tr><td>Iterator path delta (context, unchanged)</td><td colspan="2" style="text-align:center">6,689,776 B (~619 B/row)</td></tr></table>
+<p>Reports: <a href="cursor-alloc-report-before.html">before (small)</a> ·
+<a href="cursor-alloc-report-after-small.html">after (small)</a> ·
+<a href="cursor-alloc-report-after-large.html">after (large, 4 x 10MB)</a></p>
+<p>Raw recordings: /tmp/cursor-alloc-before-small.jfr, /tmp/cursor-alloc-after-small.jfr, /tmp/cursor-alloc-after-large.jfr
+(openable in JDK Mission Control for flamegraphs).</p></body></html>
