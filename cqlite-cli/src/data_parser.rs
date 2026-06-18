@@ -678,6 +678,7 @@ impl ParsedRow {
             values,
             key: self.row_key.clone(),
             metadata: RowMetadata::default(),
+            cell_metadata: None,
         }
     }
 }

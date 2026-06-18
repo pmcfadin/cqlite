@@ -2233,6 +2233,7 @@ fn convert_entry_to_query_row(
         values,
         key: row_key.clone(),
         metadata: RowMetadata::default(),
+        cell_metadata: None,
     }
 }
 

@@ -255,6 +255,7 @@ mod tests {
                     values,
                     key: RowKey::new(vec![idx as u8]),
                     metadata: Default::default(),
+                    cell_metadata: None,
                 }
             })
             .collect();

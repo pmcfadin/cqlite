@@ -1552,4 +1552,92 @@ mod tests {
         let consumed = result.unwrap();
         assert!(consumed <= data.len());
     }
+
+    // =========================================================================
+    // Issue #691: OA state-machine path — ParsedCell already carries per-cell
+    // timestamp and TTL.  These tests confirm the existing fields are present
+    // and accessible so downstream code (issue #692, QueryRow builder) can use
+    // them when ProjectionFlags::include_cell_metadata is set.
+    // =========================================================================
+
+    /// A freshly-constructed ParsedCell exposes a `timestamp` field and an
+    /// optional `ttl` field.  This is the carrier used by the OA state-machine
+    /// path to thread per-cell write-time information.
+    #[test]
+    fn test_parsed_cell_carries_timestamp_and_ttl_fields() {
+        // Build a ParsedCell as the state machine would for a live, non-TTL cell.
+        let cell = ParsedCell {
+            column_name: "score".to_string(),
+            value: Some(Value::Integer(42)),
+            timestamp: 1_700_000_000_000_000_i64,
+            ttl: None,
+        };
+
+        assert_eq!(cell.column_name, "score");
+        assert_eq!(
+            cell.timestamp, 1_700_000_000_000_000_i64,
+            "ParsedCell must expose the cell-level write timestamp (µs)"
+        );
+        assert!(cell.ttl.is_none(), "non-TTL cell must have ttl=None");
+    }
+
+    /// A ParsedCell for a TTL cell carries both timestamp and ttl.
+    #[test]
+    fn test_parsed_cell_carries_ttl_when_present() {
+        let cell = ParsedCell {
+            column_name: "temp".to_string(),
+            value: Some(Value::Float(98.6)),
+            timestamp: 2_000_000_000_i64,
+            ttl: Some(3_600), // 1-hour TTL
+        };
+
+        assert_eq!(cell.timestamp, 2_000_000_000_i64);
+        assert_eq!(
+            cell.ttl,
+            Some(3_600_u32),
+            "ParsedCell must carry the TTL in seconds for expiring cells"
+        );
+    }
+
+    /// Tombstone cell: value is None, timestamp indicates deletion time.
+    /// The OA state machine emits tombstone cells with timestamp = deletion time.
+    #[test]
+    fn test_parsed_cell_tombstone_has_timestamp_as_deletion_time() {
+        let deletion_ts = 1_600_000_000_000_000_i64;
+        let cell = ParsedCell {
+            column_name: "deleted_col".to_string(),
+            value: None, // None => tombstone / deleted
+            timestamp: deletion_ts,
+            ttl: None,
+        };
+
+        assert!(cell.value.is_none(), "tombstone cell must have value=None");
+        assert_eq!(
+            cell.timestamp, deletion_ts,
+            "tombstone cell must carry the deletion timestamp for LWW ordering"
+        );
+    }
+
+    /// RowHeader carries per-row timestamp so the OA path can fall back to the
+    /// row-level timestamp when cells use USE_ROW_TIMESTAMP flag.
+    #[test]
+    fn test_row_header_exposes_timestamp_for_fallback() {
+        let header = RowHeader {
+            flags: 0x00,
+            timestamp: 9_000_000_i64,
+            ttl: None,
+            local_deletion_time: None,
+        };
+
+        // Row-level timestamp is accessible; issue #692 uses this as the
+        // fallback write_timestamp_micros when cell-level metadata is not
+        // individually overriding it (USE_ROW_TIMESTAMP cell flag).
+        assert_eq!(header.timestamp, 9_000_000_i64);
+        assert!(header.ttl.is_none());
+        // local_deletion_time is None → this is not a row tombstone.
+        assert!(
+            header.local_deletion_time.is_none(),
+            "header with no local_deletion_time is not a row tombstone"
+        );
+    }
 }

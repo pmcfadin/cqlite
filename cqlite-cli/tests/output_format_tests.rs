@@ -55,6 +55,7 @@ fn create_single_value_result(col_name: &str, value: Value, data_type: DataType)
         values,
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
 
     QueryResult {
@@ -96,6 +97,7 @@ fn create_result_with_columns(
         values,
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
 
     QueryResult {
@@ -563,6 +565,7 @@ fn test_missing_column_treated_as_null() {
         values: HashMap::new(),
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
 
     let result = QueryResult {

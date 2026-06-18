@@ -79,6 +79,7 @@ fn create_query_result(
                 values,
                 key: RowKey::new(vec![idx as u8]),
                 metadata: Default::default(),
+                cell_metadata: None,
             }
         })
         .collect();
@@ -939,6 +940,7 @@ fn test_parquet_wide_table() {
         values,
         key: RowKey::new(vec![0]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
 
     let result = QueryResult {
@@ -999,6 +1001,7 @@ fn single_cql_typed_result(col: ColumnInfo, value: Value) -> QueryResult {
         values,
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
     QueryResult {
         rows: vec![row],
@@ -1738,6 +1741,7 @@ fn test_no_cql_type_fallback_unchanged() {
         values,
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
     let result = QueryResult {
         rows: vec![row],
@@ -1803,6 +1807,7 @@ fn single_col_multi_row_result(col: ColumnInfo, values: Vec<Value>) -> QueryResu
                 values: map,
                 key: RowKey::new(vec![i as u8]),
                 metadata: Default::default(),
+                cell_metadata: None,
             }
         })
         .collect();
@@ -3240,6 +3245,7 @@ fn test_map_legacy_path_no_cql_type() {
         values,
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
     let result = QueryResult {
         rows: vec![row],
@@ -4315,6 +4321,7 @@ fn test_tuple_legacy_path_no_cql_type() {
         values,
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
     let result = QueryResult {
         rows: vec![row],
@@ -4363,6 +4370,7 @@ fn test_udt_legacy_path_no_cql_type() {
         values,
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
     let result = QueryResult {
         rows: vec![row],
@@ -4604,6 +4612,7 @@ fn make_parity_fixture() -> QueryResult {
         values,
         key: RowKey::new(vec![1]),
         metadata: Default::default(),
+        cell_metadata: None,
     };
 
     QueryResult {
