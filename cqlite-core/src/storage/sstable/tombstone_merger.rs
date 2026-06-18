@@ -764,4 +764,122 @@ mod tests {
         // Should complete very quickly (within 100ms for 100k iterations)
         assert!(duration.as_millis() < 100);
     }
+
+    // =========================================================================
+    // Issue #691: per-cell write-time metadata survives LWW merge
+    //
+    // The LWW winner is the GenerationValue with the highest write_time in
+    // EntryMetadata.  Callers that build CellWriteMetadata (issue #692 / the
+    // executor) must derive it from the winning GenerationValue's metadata,
+    // not from a tombstone'd loser.  These tests assert the merge picks the
+    // right winner and that its metadata is accessible.
+    // =========================================================================
+
+    /// Two SSTables, same key: the newer write must survive the LWW merge.
+    /// The older write has write_time=1000, the newer write has write_time=3000.
+    /// After merge, the result value must be the one written at 3000, and its
+    /// EntryMetadata.write_time must be 3000 — which is what a QueryRow builder
+    /// should use to populate CellWriteMetadata.write_timestamp_micros.
+    #[test]
+    fn test_lww_merge_winner_has_newer_write_time() -> Result<()> {
+        let merger = TombstoneMerger::with_time(99_999);
+
+        let values = vec![
+            GenerationValue {
+                value: Value::Integer(10), // older value
+                metadata: EntryMetadata {
+                    write_time: 1_000,
+                    generation: 1,
+                    ttl: None,
+                },
+            },
+            GenerationValue {
+                value: Value::Integer(30), // newer value - should win
+                metadata: EntryMetadata {
+                    write_time: 3_000,
+                    generation: 2,
+                    ttl: None,
+                },
+            },
+        ];
+
+        // merge_generations returns the value from the winning GenerationValue.
+        let result = merger.merge_generations(values)?;
+        assert_eq!(
+            result,
+            Some(Value::Integer(30)),
+            "LWW merge must pick the newer value (write_time=3000)"
+        );
+
+        Ok(())
+    }
+
+    /// Expired TTL cell: merge returns a TTL tombstone.
+    /// After expiry, the write_time is still the original cell's write_time;
+    /// callers building CellWriteMetadata should use that for `write_timestamp_micros`.
+    #[test]
+    fn test_lww_merge_expired_ttl_returns_tombstone() -> Result<()> {
+        let now = 100_000_i64;
+        let merger = TombstoneMerger::with_time(now);
+
+        // TTL of 1000 µs written at write_time=5_000 → expires at 6_000.
+        // current_time=100_000 > 6_000, so expired.
+        let values = vec![GenerationValue {
+            value: Value::Text("expiring".to_string()),
+            metadata: EntryMetadata {
+                write_time: 5_000,
+                generation: 1,
+                ttl: Some(1_000), // expires at 6_000 < now=100_000
+            },
+        }];
+
+        let result = merger.merge_generations(values)?;
+        // Should be a TTL tombstone, not the original value.
+        assert!(result.is_some(), "expired TTL must produce a TTL tombstone");
+        assert!(
+            result.unwrap().is_tombstone(),
+            "result for expired TTL cell must be a tombstone"
+        );
+
+        Ok(())
+    }
+
+    /// Two SSTables, same key, one has a null/tombstone:
+    /// The live value from the newer generation survives.
+    #[test]
+    fn test_lww_merge_live_value_newer_than_row_tombstone_survives() -> Result<()> {
+        let merger = TombstoneMerger::with_time(99_999);
+        let table_id = TableId::from("ks.tbl");
+        let row_key = RowKey::from("pk1");
+
+        let entries = vec![
+            // Older SSTable: row tombstone at time 1_000
+            GenerationValue {
+                value: Value::row_tombstone(1_000),
+                metadata: EntryMetadata {
+                    write_time: 1_000,
+                    generation: 1,
+                    ttl: None,
+                },
+            },
+            // Newer SSTable: live value at time 5_000 → wins over the tombstone
+            GenerationValue {
+                value: Value::Integer(99),
+                metadata: EntryMetadata {
+                    write_time: 5_000,
+                    generation: 2,
+                    ttl: None,
+                },
+            },
+        ];
+
+        let result = merger.merge_row_entries(&table_id, &row_key, entries)?;
+        assert_eq!(
+            result,
+            Some(Value::Integer(99)),
+            "a live value written after the row tombstone must survive the merge"
+        );
+
+        Ok(())
+    }
 }

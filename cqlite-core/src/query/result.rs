@@ -21,6 +21,65 @@ fn row_metadata_is_populated(meta: &RowMetadata) -> bool {
     meta.version.is_some() || meta.ttl.is_some() || !meta.tags.is_empty()
 }
 
+// ============================================================================
+// Per-cell write metadata (Issue #691)
+// ============================================================================
+
+/// Per-cell write timestamp and expiration metadata.
+///
+/// Attached to a `QueryRow` only when the query plan sets
+/// `ProjectionFlags::include_cell_metadata = true` (e.g. because a
+/// `WRITETIME(col)` or `TTL(col)` item appears in the SELECT list).
+///
+/// **Hot-path guarantee**: when the flag is unset the `cell_metadata` map on
+/// `QueryRow` is `None`, so no allocation occurs per cell on normal queries.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CellWriteMetadata {
+    /// Write timestamp of the cell in **microseconds since Unix epoch**.
+    ///
+    /// This is the per-cell `timestamp` decoded from the SSTable row/cell
+    /// header, after applying the min-timestamp delta.  For cells that inherit
+    /// the row-level timestamp (the `USE_ROW_TIMESTAMP` cell flag) this is the
+    /// row timestamp.  Matches `WRITETIME(col)` semantics exactly.
+    pub write_timestamp_micros: i64,
+
+    /// Expiration info when the cell was written with a TTL.
+    ///
+    /// `None` when the cell has no TTL (it does not expire).
+    pub expiration: Option<CellExpiration>,
+}
+
+/// TTL / expiration info for a cell that was written with a TTL.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CellExpiration {
+    /// TTL in **seconds** as written by the client.
+    ///
+    /// Matches `TTL(col)` when the cell is still live.
+    pub ttl_seconds: i32,
+
+    /// Epoch-seconds at which the cell expires (local deletion time).
+    ///
+    /// When `now_seconds > expires_at`, the cell is expired and would return
+    /// `null` in a live Cassandra query.
+    pub expires_at_seconds: i64,
+}
+
+/// Projection-level flags that control opt-in metadata collection.
+///
+/// Created during query planning and threaded to the scan/build path.
+/// When all flags are `false` (the default), the hot path allocates nothing
+/// extra — `QueryRow::cell_metadata` stays `None`.
+#[derive(Debug, Clone, Default)]
+pub struct ProjectionFlags {
+    /// Set when the SELECT list contains at least one `WRITETIME(col)` or
+    /// `TTL(col)` expression.  Causes per-cell metadata to be attached to
+    /// each `QueryRow` produced by the scan.
+    ///
+    /// **Wired by**: issue #692 (executor evaluation).  Until then, callers
+    /// can set this flag manually in tests or driver code.
+    pub include_cell_metadata: bool,
+}
+
 /// Query result containing rows and metadata
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct QueryResult {
@@ -43,6 +102,18 @@ pub struct QueryRow {
     pub key: RowKey,
     /// Row metadata
     pub metadata: RowMetadata,
+    /// Per-cell write metadata (Issue #691).
+    ///
+    /// Populated **only** when `ProjectionFlags::include_cell_metadata` is
+    /// `true` during query planning.  `None` on the hot path — no allocation
+    /// is performed unless metadata is explicitly requested.
+    ///
+    /// Map key = column name; value = write timestamp + optional expiration.
+    /// Columns absent from this map either had no individual cell header in
+    /// the SSTable (e.g. partition-key columns) or were not decoded under the
+    /// current flag setting.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub cell_metadata: Option<HashMap<String, CellWriteMetadata>>,
 }
 
 /// Metadata for query results
@@ -508,6 +579,7 @@ impl QueryRow {
             values: HashMap::new(),
             key,
             metadata: RowMetadata::default(),
+            cell_metadata: None,
         }
     }
 
@@ -517,6 +589,20 @@ impl QueryRow {
             values,
             key,
             metadata: RowMetadata::default(),
+            cell_metadata: None,
+        }
+    }
+
+    /// Create a row from a column name → value map, using a synthetic empty key.
+    ///
+    /// Convenience constructor used by CLI utilities that do not track a raw
+    /// partition key.  The key is set to an empty byte vector.
+    pub fn from_map(values: HashMap<String, Value>) -> Self {
+        Self {
+            values,
+            key: RowKey::new(vec![]),
+            metadata: RowMetadata::default(),
+            cell_metadata: None,
         }
     }
 
@@ -548,6 +634,32 @@ impl QueryRow {
     /// Set row metadata
     pub fn set_metadata(&mut self, metadata: RowMetadata) {
         self.metadata = metadata;
+    }
+
+    // ---- Per-cell metadata (Issue #691) ----
+
+    /// Attach per-cell write metadata to this row.
+    ///
+    /// Replaces any previously attached map. Intended to be called by the
+    /// scan/build path when `ProjectionFlags::include_cell_metadata` is set.
+    pub fn set_cell_metadata(&mut self, map: HashMap<String, CellWriteMetadata>) {
+        self.cell_metadata = Some(map);
+    }
+
+    /// Insert a single column's write metadata.
+    ///
+    /// Initialises the map on first call; subsequent calls insert into the
+    /// existing map.  No-op when called on the hot path that never enables
+    /// metadata (the caller guards on the flag).
+    pub fn insert_cell_metadata(&mut self, column: String, meta: CellWriteMetadata) {
+        self.cell_metadata
+            .get_or_insert_with(HashMap::new)
+            .insert(column, meta);
+    }
+
+    /// Return the write metadata for `column`, if present.
+    pub fn get_cell_metadata(&self, column: &str) -> Option<&CellWriteMetadata> {
+        self.cell_metadata.as_ref()?.get(column)
     }
 
     /// Convert to JSON representation
@@ -1236,5 +1348,242 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 2);
+    }
+
+    // =========================================================================
+    // Issue #691: per-cell writetime/TTL metadata plumbing tests
+    // =========================================================================
+
+    /// Hot-path guarantee: a row constructed without setting cell metadata
+    /// must have `cell_metadata == None` — no allocation.
+    #[test]
+    fn test_cell_metadata_absent_by_default() {
+        let row = QueryRow::new(RowKey::new(vec![1]));
+        assert!(
+            row.cell_metadata.is_none(),
+            "cell_metadata must be None when no metadata is attached (hot-path, zero allocation)"
+        );
+
+        let row2 = QueryRow::with_values(RowKey::new(vec![2]), HashMap::new());
+        assert!(row2.cell_metadata.is_none());
+
+        let row3 = QueryRow::from_map(HashMap::new());
+        assert!(row3.cell_metadata.is_none());
+    }
+
+    /// ProjectionFlags::default() must not request cell metadata.
+    #[test]
+    fn test_projection_flags_default_no_metadata() {
+        let flags = ProjectionFlags::default();
+        assert!(
+            !flags.include_cell_metadata,
+            "include_cell_metadata must default to false"
+        );
+    }
+
+    /// Single SSTable scenario: attach metadata to a row and read it back.
+    #[test]
+    fn test_cell_metadata_single_sstable_single_cell() {
+        let mut row = QueryRow::new(RowKey::new(vec![1]));
+        row.set("name".to_string(), Value::Text("Alice".to_string()));
+
+        let meta = CellWriteMetadata {
+            write_timestamp_micros: 1_700_000_000_000_000, // ~2023 epoch in µs
+            expiration: None,
+        };
+        row.insert_cell_metadata("name".to_string(), meta.clone());
+
+        // cell_metadata map must now be Some
+        assert!(row.cell_metadata.is_some());
+        // Values are unchanged
+        assert_eq!(row.get("name"), Some(&Value::Text("Alice".to_string())));
+        // Metadata round-trips correctly
+        let got = row
+            .get_cell_metadata("name")
+            .expect("metadata must be present");
+        assert_eq!(got.write_timestamp_micros, meta.write_timestamp_micros);
+        assert!(got.expiration.is_none());
+    }
+
+    /// TTL / expiration path: metadata includes expiry info.
+    #[test]
+    fn test_cell_metadata_with_ttl_expiration() {
+        let mut row = QueryRow::new(RowKey::new(vec![2]));
+        row.set("score".to_string(), Value::Integer(42));
+
+        let ttl_seconds = 3600_i32;
+        let write_ts_micros = 1_700_000_000_000_000_i64;
+        // expires_at = write_ts / 1_000_000 + ttl
+        let expires_at = (write_ts_micros / 1_000_000) + ttl_seconds as i64;
+
+        let meta = CellWriteMetadata {
+            write_timestamp_micros: write_ts_micros,
+            expiration: Some(CellExpiration {
+                ttl_seconds,
+                expires_at_seconds: expires_at,
+            }),
+        };
+        row.insert_cell_metadata("score".to_string(), meta);
+
+        let got = row.get_cell_metadata("score").unwrap();
+        assert_eq!(got.write_timestamp_micros, write_ts_micros);
+        let exp = got.expiration.as_ref().unwrap();
+        assert_eq!(exp.ttl_seconds, 3600);
+        assert_eq!(exp.expires_at_seconds, expires_at);
+    }
+
+    /// Null cell: metadata is absent for columns not decoded (e.g. partition-key
+    /// columns reconstructed from the raw key bytes, not from cells).
+    #[test]
+    fn test_cell_metadata_absent_for_null_cells() {
+        let mut row = QueryRow::new(RowKey::new(vec![3]));
+        row.set("id".to_string(), Value::Null);
+        // We do NOT insert metadata for "id" — simulating a null/missing cell.
+        // Even if metadata is enabled for other columns, this one should be absent.
+        row.insert_cell_metadata(
+            "name".to_string(),
+            CellWriteMetadata {
+                write_timestamp_micros: 42,
+                expiration: None,
+            },
+        );
+
+        assert!(
+            row.get_cell_metadata("id").is_none(),
+            "no metadata for null column"
+        );
+        assert!(row.get_cell_metadata("name").is_some());
+    }
+
+    /// Two SSTables with the same key: the SURVIVING (newer) cell's metadata must
+    /// be the one carried.  This test simulates the LWW merge decision by
+    /// constructing the two candidate rows (as would be produced by two SSTable
+    /// reads), selecting the winner by timestamp, and asserting the winner's
+    /// metadata is the one present.
+    ///
+    /// The merge itself (tombstone_merger.rs) is tested at the unit level in that
+    /// module; here we only verify that the metadata carrier (`QueryRow`) can
+    /// hold the winning metadata and that callers can correctly replace it.
+    #[test]
+    fn test_cell_metadata_lww_winner_carries_newer_timestamp() {
+        // Older SSTable: timestamp 1_000_000 µs
+        let mut older_row = QueryRow::new(RowKey::new(b"partition1".to_vec()));
+        older_row.set("value".to_string(), Value::Integer(10));
+        older_row.insert_cell_metadata(
+            "value".to_string(),
+            CellWriteMetadata {
+                write_timestamp_micros: 1_000_000,
+                expiration: None,
+            },
+        );
+
+        // Newer SSTable: timestamp 2_000_000 µs — this one wins the LWW merge.
+        let mut newer_row = QueryRow::new(RowKey::new(b"partition1".to_vec()));
+        newer_row.set("value".to_string(), Value::Integer(20));
+        newer_row.insert_cell_metadata(
+            "value".to_string(),
+            CellWriteMetadata {
+                write_timestamp_micros: 2_000_000,
+                expiration: None,
+            },
+        );
+
+        // Simulate LWW merge: pick the row with the higher write timestamp.
+        let winner = if newer_row
+            .get_cell_metadata("value")
+            .map(|m| m.write_timestamp_micros)
+            .unwrap_or(0)
+            > older_row
+                .get_cell_metadata("value")
+                .map(|m| m.write_timestamp_micros)
+                .unwrap_or(0)
+        {
+            newer_row
+        } else {
+            older_row
+        };
+
+        assert_eq!(
+            winner.get("value"),
+            Some(&Value::Integer(20)),
+            "value from the newer SSTable must be present"
+        );
+        assert_eq!(
+            winner
+                .get_cell_metadata("value")
+                .map(|m| m.write_timestamp_micros),
+            Some(2_000_000),
+            "metadata must reflect the winning (newer) cell's timestamp"
+        );
+    }
+
+    /// `set_cell_metadata` replaces the entire map atomically.
+    #[test]
+    fn test_set_cell_metadata_replaces_map() {
+        let mut row = QueryRow::new(RowKey::new(vec![4]));
+        row.insert_cell_metadata(
+            "a".to_string(),
+            CellWriteMetadata {
+                write_timestamp_micros: 1,
+                expiration: None,
+            },
+        );
+
+        let mut new_map = HashMap::new();
+        new_map.insert(
+            "b".to_string(),
+            CellWriteMetadata {
+                write_timestamp_micros: 99,
+                expiration: None,
+            },
+        );
+        row.set_cell_metadata(new_map);
+
+        // Old key "a" gone; new key "b" present.
+        assert!(row.get_cell_metadata("a").is_none());
+        assert_eq!(
+            row.get_cell_metadata("b").map(|m| m.write_timestamp_micros),
+            Some(99)
+        );
+    }
+
+    /// Serde round-trip: `cell_metadata` serialises and deserialises correctly.
+    #[test]
+    fn test_cell_metadata_serde_round_trip() {
+        let mut row = QueryRow::new(RowKey::new(vec![5]));
+        row.set("x".to_string(), Value::Integer(7));
+        row.insert_cell_metadata(
+            "x".to_string(),
+            CellWriteMetadata {
+                write_timestamp_micros: 123_456_789,
+                expiration: Some(CellExpiration {
+                    ttl_seconds: 60,
+                    expires_at_seconds: 9999,
+                }),
+            },
+        );
+
+        let json = serde_json::to_string(&row).expect("serialise");
+        let back: QueryRow = serde_json::from_str(&json).expect("deserialise");
+
+        let meta = back
+            .get_cell_metadata("x")
+            .expect("metadata present after round-trip");
+        assert_eq!(meta.write_timestamp_micros, 123_456_789);
+        let exp = meta.expiration.as_ref().unwrap();
+        assert_eq!(exp.ttl_seconds, 60);
+        assert_eq!(exp.expires_at_seconds, 9999);
+    }
+
+    /// When `cell_metadata` is `None`, the JSON output must not include the field
+    /// (the `skip_serializing_if` attribute ensures backward compatibility).
+    #[test]
+    fn test_cell_metadata_none_omitted_from_json() {
+        let row = QueryRow::new(RowKey::new(vec![6]));
+        let json = serde_json::to_string(&row).expect("serialise");
+        assert!(
+            !json.contains("cell_metadata"),
+            "cell_metadata must be absent from JSON when None (backward compat)"
+        );
     }
 }

@@ -550,6 +550,7 @@ impl ReplDataApi {
                     ttl: data_row.metadata.ttl.map(|duration| duration.as_secs()),
                     tags: std::collections::HashMap::new(),
                 },
+                cell_metadata: None,
             };
             query_rows.push(query_row);
         }

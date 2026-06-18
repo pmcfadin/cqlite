@@ -288,6 +288,7 @@ fn build_row_from_scan(
         values: row_values,
         key,
         metadata: Default::default(),
+        cell_metadata: None,
     })
 }
 
@@ -470,6 +471,7 @@ fn finalize_group(
         values: row_values,
         key: RowKey::new(vec![]),
         metadata: Default::default(),
+        cell_metadata: None,
     }
 }
 
@@ -1363,6 +1365,7 @@ impl SelectExecutor {
                 values: projected_values,
                 key: RowKey::new(vec![]),
                 metadata: Default::default(),
+                cell_metadata: None,
             });
         }
 
@@ -1701,6 +1704,7 @@ mod tests {
             values,
             key: RowKey::new(Vec::new()),
             metadata: Default::default(),
+            cell_metadata: None,
         }
     }
 
