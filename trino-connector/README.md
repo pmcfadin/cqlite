@@ -54,3 +54,23 @@ cd docker && docker compose up --build
 docker compose exec trino trino
 trino> SELECT * FROM cqlite.<keyspace>.<table> LIMIT 10;
 ```
+
+## Load testing (optional `loadtest` profile)
+
+`cassandra-easy-stress` is wired in behind a separate `loadtest` profile, so a
+plain `docker compose up` ignores it. Run it on demand:
+
+```bash
+# default KeyValue workload (1m, 50% reads)
+docker compose --profile loadtest up cassandra-easy-stress
+
+# or a custom one-off run
+docker compose --profile loadtest run --rm cassandra-easy-stress \
+  run BasicTimeSeries --host 172.42.0.2 --dc dc1 -d 5m -r 0.2
+
+# then make the generated data visible to Trino (connector reads flushed SSTables)
+docker compose exec cassandra nodetool flush loadtest
+docker compose exec trino trino --execute "SELECT count(*) FROM cqlite.loadtest.keyvalue"
+```
+
+It connects over the shared bridge to Cassandra (`172.42.0.2:9042`, datacenter `dc1`).

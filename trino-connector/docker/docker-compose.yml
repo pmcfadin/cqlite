@@ -89,3 +89,39 @@ services:
       - ../build/plugin/cqlite_flight:/usr/lib/trino/plugin/cqlite_flight:ro
       - ./trino/catalog:/etc/trino/catalog:ro
       - ./trino/jvm.config:/etc/trino/jvm.config:ro
+
+  # Load generator — only runs under the "loadtest" profile, so a plain
+  # `docker compose up` ignores it. Connects to Cassandra over the shared bridge.
+  #
+  #   # one-off custom run (recommended):
+  #   docker compose --profile loadtest run --rm cassandra-easy-stress \
+  #     run BasicTimeSeries --host 172.42.0.2 --dc dc1 -d 5m -r 0.2
+  #
+  #   # or run the default KeyValue workload below:
+  #   docker compose --profile loadtest up cassandra-easy-stress
+  #
+  # Query the generated data through Trino after flushing:
+  #   docker compose exec cassandra nodetool flush loadtest
+  cassandra-easy-stress:
+    image: ghcr.io/apache/cassandra-easy-stress:latest
+    profiles: ["loadtest"]
+    networks:
+      - public
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    command:
+      - run
+      - KeyValue
+      - --host
+      - "172.42.0.2"
+      - --port
+      - "9042"
+      - --dc
+      - dc1
+      - --keyspace
+      - loadtest
+      - --duration
+      - 1m
+      - -r
+      - "0.5"
