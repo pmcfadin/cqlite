@@ -1131,30 +1131,67 @@ impl SelectExecutor {
             ),
         }
 
-        let scan_results = self
-            .storage
-            .scan(table, None, None, None, schema_opt.as_ref())
-            .await?;
-
-        log::info!("Scan returned {} rows", scan_results.len());
-
+        // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
+        // metadata-carrying scan so per-cell timestamps reach the QueryRow.
         let mut results = Vec::new();
-        for (key, value) in scan_results {
-            context.rows_processed += 1;
+        if context.projection_flags.include_cell_metadata {
+            let scan_results = self
+                .storage
+                .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
+                .await?;
 
-            // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
-            let Some(row) = build_row_from_scan(key, value, projection, schema_opt.as_ref()) else {
-                continue;
-            };
+            log::info!("Scan (with metadata) returned {} rows", scan_results.len());
 
-            if evaluate_predicates(&row, predicates)? {
-                results.push(row);
+            for (key, value, cell_meta) in scan_results {
+                context.rows_processed += 1;
+
+                let Some(mut row) =
+                    build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                else {
+                    continue;
+                };
+
+                // Attach per-cell metadata so evaluate_writetime_ttl can read it.
+                if !cell_meta.is_empty() {
+                    row.set_cell_metadata(cell_meta);
+                }
+
+                if evaluate_predicates(&row, predicates)? {
+                    results.push(row);
+                }
+
+                if results.len() > MAX_RESULTS {
+                    return Err(Error::query_execution(
+                        "Result set too large, consider adding LIMIT".to_string(),
+                    ));
+                }
             }
+        } else {
+            let scan_results = self
+                .storage
+                .scan(table, None, None, None, schema_opt.as_ref())
+                .await?;
 
-            if results.len() > MAX_RESULTS {
-                return Err(Error::query_execution(
-                    "Result set too large, consider adding LIMIT".to_string(),
-                ));
+            log::info!("Scan returned {} rows", scan_results.len());
+
+            for (key, value) in scan_results {
+                context.rows_processed += 1;
+
+                // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
+                let Some(row) = build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                else {
+                    continue;
+                };
+
+                if evaluate_predicates(&row, predicates)? {
+                    results.push(row);
+                }
+
+                if results.len() > MAX_RESULTS {
+                    return Err(Error::query_execution(
+                        "Result set too large, consider adding LIMIT".to_string(),
+                    ));
+                }
             }
         }
 

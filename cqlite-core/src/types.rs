@@ -152,6 +152,37 @@ pub struct TombstoneInfo {
     pub range_end: Option<RowKey>,
 }
 
+/// Per-cell write metadata surfaced when `WRITETIME(col)` or `TTL(col)` is in the SELECT.
+///
+/// Moved here from `crate::query::result` so the storage layer can populate it
+/// without creating a cyclic dependency (storage → query).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CellWriteMetadata {
+    /// Write timestamp of the cell in **microseconds since Unix epoch**.
+    ///
+    /// For cells that inherit the row-level liveness timestamp
+    /// (`USE_ROW_TIMESTAMP` flag) this is the row timestamp.
+    /// Matches `WRITETIME(col)` semantics exactly.
+    pub write_timestamp_micros: i64,
+
+    /// Expiration info when the cell was written with a TTL.
+    ///
+    /// `None` when the cell has no TTL (it does not expire).
+    pub expiration: Option<CellExpiration>,
+}
+
+/// TTL / expiration info for a cell that was written with a TTL.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CellExpiration {
+    /// TTL in **seconds** as written by the client.
+    pub ttl_seconds: i32,
+
+    /// Epoch-seconds at which the cell expires (local deletion time).
+    ///
+    /// When `now_seconds > expires_at`, the cell is expired.
+    pub expires_at_seconds: i64,
+}
+
 /// Types of tombstones in Cassandra
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum TombstoneType {

@@ -43,7 +43,10 @@ use crate::{
     parser::vint::{parse_vint, parse_vuint},
     schema::{CqlType, TableSchema, UdtRegistry},
     storage::sstable::version_gate::{BigVersionGates, VersionGates},
-    types::{TableId, TombstoneInfo, TombstoneType, UdtField, UdtTypeDef, UdtValue},
+    types::{
+        CellExpiration, CellWriteMetadata, TableId, TombstoneInfo, TombstoneType, UdtField,
+        UdtTypeDef, UdtValue,
+    },
     Error, Result, RowKey, Value,
 };
 
@@ -67,8 +70,23 @@ const MAX_UDT_FIELD_COUNT: usize = 1000;
 const MAX_TYPE_NESTING_DEPTH: usize = 10;
 
 /// Return type for `parse_row_data_with_offset`:
-/// (cells, row_header, next_offset, is_static)
-type ParsedRow = (HashMap<String, Value>, Option<RowHeader>, usize, bool);
+/// (cells, cell_metadata, row_header, next_offset, is_static)
+///
+/// `cell_metadata` maps column name → `CellWriteMetadata` for every live cell
+/// parsed in this row. Used to surface per-cell timestamps / TTLs for
+/// `WRITETIME(col)` / `TTL(col)` queries (issue #693).
+type ParsedRow = (
+    HashMap<String, Value>,
+    HashMap<String, CellWriteMetadata>,
+    Option<RowHeader>,
+    usize,
+    bool,
+);
+
+/// Return type for [`V5CompressedLegacy::parse_block_with_cell_metadata`].
+///
+/// Each element is `(table_id, row_key, value_map, cell_metadata_map)`.
+type ParsedBlockWithMeta = Vec<(TableId, RowKey, Value, HashMap<String, CellWriteMetadata>)>;
 
 /// Row header data extracted from V5CompressedLegacy row
 #[derive(Debug, Clone)]
@@ -319,6 +337,169 @@ impl V5CompressedLegacyParser {
         Ok(results)
     }
 
+    /// Parse a block and return both row values and per-cell write metadata.
+    ///
+    /// Identical to [`parse_block`] but the returned vector carries a fourth element:
+    /// the per-cell `CellWriteMetadata` map (column name → metadata). Used by the
+    /// executor when `ProjectionFlags::include_cell_metadata` is set (i.e. when the
+    /// query contains `WRITETIME(col)` or `TTL(col)` expressions).
+    pub fn parse_block_with_cell_metadata(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<ParsedBlockWithMeta> {
+        let mut results = Vec::new();
+        self.parse_block_emit_with_metadata(data, schema, reader, |entry| {
+            results.push(entry);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
+        Ok(results)
+    }
+
+    /// Internal streaming variant of `parse_block_with_cell_metadata`.
+    fn parse_block_emit_with_metadata<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(
+            (TableId, RowKey, Value, HashMap<String, CellWriteMetadata>),
+        ) -> Result<std::ops::ControlFlow<()>>,
+    {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy format requires schema for {}.{} (cells lack column names in binary data)",
+                self.keyspace, self.table_name
+            ))
+        })?;
+
+        let mut offset = 0;
+        let mut partition_index = 0;
+
+        while offset < data.len() {
+            // Parse partition header: returns (RowKey, next_data_offset)
+            let (partition_key, next_data_offset) = match self.parse_partition_header(data, offset)
+            {
+                Ok(ph) => ph,
+                Err(_) => break,
+            };
+
+            let table_id = TableId(format!("{}.{}", self.keyspace, self.table_name));
+            offset = next_data_offset;
+            partition_index += 1;
+
+            let mut static_cells: HashMap<String, Value> = HashMap::new();
+            let mut static_cell_meta: HashMap<String, CellWriteMetadata> = HashMap::new();
+            let mut row_count = 0;
+
+            loop {
+                if offset < data.len() && Self::is_end_of_partition(data[offset]) {
+                    offset += 1;
+                    break;
+                }
+
+                if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
+                    match self.skip_range_tombstone_marker(data, offset, schema) {
+                        Ok(next_offset) => {
+                            offset = next_offset;
+                            continue;
+                        }
+                        Err(_) => break,
+                    }
+                }
+
+                match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
+                    Ok((mut cells, mut row_cell_meta, row_header_opt, next_offset, is_static)) => {
+                        offset = next_offset;
+                        row_count += 1;
+
+                        if is_static {
+                            static_cells = cells;
+                            static_cell_meta = row_cell_meta;
+                        } else {
+                            // Merge static cells / metadata into clustering row
+                            for (k, v) in &static_cells {
+                                cells.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+                            for (k, v) in &static_cell_meta {
+                                row_cell_meta.entry(k.clone()).or_insert_with(|| v.clone());
+                            }
+
+                            let row_tombstone =
+                                row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
+
+                            let row_value = if let Some(h) = row_tombstone {
+                                h.row_tombstone()
+                            } else if cells.is_empty() {
+                                Value::Null
+                            } else {
+                                let mut map_entries: Vec<(Value, Value)> = cells
+                                    .into_iter()
+                                    .map(|(name, value)| (Value::Text(name), value))
+                                    .collect();
+                                map_entries.sort_by(|a, b| {
+                                    let a_key = if let Value::Text(s) = &a.0 {
+                                        s.as_str()
+                                    } else {
+                                        ""
+                                    };
+                                    let b_key = if let Value::Text(s) = &b.0 {
+                                        s.as_str()
+                                    } else {
+                                        ""
+                                    };
+                                    a_key.cmp(b_key)
+                                });
+                                Value::Map(map_entries)
+                            };
+
+                            match emit((
+                                table_id.clone(),
+                                partition_key.clone(),
+                                row_value,
+                                row_cell_meta,
+                            ))? {
+                                std::ops::ControlFlow::Continue(()) => {}
+                                std::ops::ControlFlow::Break(()) => return Ok(()),
+                            }
+                        }
+
+                        if offset >= data.len() {
+                            break;
+                        }
+
+                        if self.peek_is_partition_header(data, offset) {
+                            log::debug!(
+                                "V5CompressedLegacy: Partition {} detected at offset {} after {} rows",
+                                partition_index + 1, offset, row_count
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "V5CompressedLegacy: Row parse error in partition {} at offset {}: {}",
+                            partition_index,
+                            offset,
+                            e
+                        );
+                        break;
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Streaming variant of [`parse_block`]: invokes `emit` for each parsed
     /// `(TableId, RowKey, Value)` entry instead of collecting them into a `Vec`,
     /// so callers can forward rows into a bounded channel without materializing
@@ -548,7 +729,13 @@ impl V5CompressedLegacyParser {
                         }
 
                         match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
-                            Ok((mut cells, row_header_opt, next_offset, is_static)) => {
+                            Ok((
+                                mut cells,
+                                _row_cell_meta,
+                                row_header_opt,
+                                next_offset,
+                                is_static,
+                            )) => {
                                 // Update offset to point to the next row or partition
                                 offset = next_offset;
                                 row_count += 1;
@@ -855,7 +1042,13 @@ impl V5CompressedLegacyParser {
                         }
 
                         match self.parse_row_data_with_offset(data, offset, Some(schema), reader) {
-                            Ok((mut cells, row_header_opt, next_offset, is_static)) => {
+                            Ok((
+                                mut cells,
+                                _row_cell_meta,
+                                row_header_opt,
+                                next_offset,
+                                is_static,
+                            )) => {
                                 offset = next_offset;
 
                                 // For a row tombstone the authoritative timestamp is
@@ -1932,6 +2125,8 @@ impl V5CompressedLegacyParser {
         reader: &super::super::types::SSTableReader,
     ) -> Result<ParsedRow> {
         let mut cells = HashMap::new();
+        // Parallel per-cell write metadata map (populated alongside `cells`).
+        let mut cell_meta: HashMap<String, CellWriteMetadata> = HashMap::new();
 
         let schema = schema.ok_or_else(|| {
             Error::schema(format!(
@@ -2089,8 +2284,8 @@ impl V5CompressedLegacyParser {
                 next_offset
             );
 
-            // Return empty cells for tombstoned row
-            return Ok((cells, Some(row_header), next_offset, is_static));
+            // Return empty cells for tombstoned row (no cell metadata)
+            return Ok((cells, cell_meta, Some(row_header), next_offset, is_static));
         }
 
         // Advance offset past row metadata to start of cell data
@@ -2241,42 +2436,93 @@ impl V5CompressedLegacyParser {
             }
 
             // Issue #221: Branch based on column type - complex columns need special parsing
-            let parse_result = if Self::is_complex_column(&column.data_type) {
+            // Issue #693: simple columns return 4-tuple including cell timestamp / expiration;
+            //             complex columns return 2-tuple and inherit the row-level timestamp.
+            if Self::is_complex_column(&column.data_type) {
                 log::debug!(
                     "V5CompressedLegacy: Column '{}' is complex (non-frozen collection), using parse_complex_column",
                     column.name
                 );
-                self.parse_complex_column(data, offset, column, has_complex_deletion, reader)
-            } else {
-                self.parse_cell_value_schema_order(data, offset, column, reader)
-            };
-
-            match parse_result {
-                Ok((value, new_offset)) => {
-                    log::debug!(
-                        "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
-                        col_idx,
-                        column.name,
-                        column.data_type,
-                        value,
-                        new_offset - offset
-                    );
-                    cells.insert(column.name.clone(), value);
-                    offset = new_offset;
+                match self.parse_complex_column(data, offset, column, has_complex_deletion, reader)
+                {
+                    Ok((value, new_offset)) => {
+                        log::debug!(
+                            "V5CompressedLegacy:   ✓ Complex column {} '{}' = {:?}, consumed {} bytes",
+                            col_idx, column.name, value, new_offset - offset
+                        );
+                        // Complex (non-frozen) collection cells inherit the row-level timestamp.
+                        let row_ts = row_header.timestamp.unwrap_or(0);
+                        cell_meta.insert(
+                            column.name.clone(),
+                            CellWriteMetadata {
+                                write_timestamp_micros: row_ts,
+                                expiration: None,
+                            },
+                        );
+                        cells.insert(column.name.clone(), value);
+                        offset = new_offset;
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "V5CompressedLegacy:   ✗ Complex column {} '{}' at offset {} FAILED: {}",
+                            col_idx, column.name, offset, e
+                        );
+                        break;
+                    }
                 }
-                Err(e) => {
-                    log::debug!(
-                        "V5CompressedLegacy:   ✗ Column {} '{}' ({}) at offset {} FAILED: {}",
-                        col_idx,
-                        column.name,
-                        column.data_type,
-                        offset,
-                        e
-                    );
-                    // CRITICAL FIX: Stop parsing remaining columns when we hit an error
-                    // The offset doesn't advance here, but we exit the loop cleanly
-                    // rather than continuing with invalid offset
-                    break;
+            } else {
+                match self.parse_cell_value_schema_order(data, offset, column, reader) {
+                    Ok((value, cell_own_ts, cell_exp, new_offset)) => {
+                        log::debug!(
+                            "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
+                            col_idx,
+                            column.name,
+                            column.data_type,
+                            value,
+                            new_offset - offset
+                        );
+                        // Resolve effective write timestamp:
+                        // use cell's own timestamp when present, else row-level liveness timestamp.
+                        let effective_ts =
+                            cell_own_ts.unwrap_or_else(|| row_header.timestamp.unwrap_or(0));
+                        // Resolve expiration: cell-level wins; fall back to row-level TTL when
+                        // the cell used USE_ROW_TTL (cell_exp is None in that case).
+                        // USE_ROW_TTL path: row_header.ttl is the row-level TTL in seconds.
+                        // row_header.local_deletion_time is the corresponding expires_at (seconds).
+                        let row_level_exp = match (row_header.ttl, row_header.local_deletion_time) {
+                            (Some(ttl_s), Some(ldt_s)) => Some(CellExpiration {
+                                ttl_seconds: ttl_s,
+                                expires_at_seconds: ldt_s as i64,
+                            }),
+                            _ => None,
+                        };
+                        // Resolve expiration: cell-level wins; fall back to row-level TTL when
+                        // the cell used USE_ROW_TTL (cell_exp is None in that case).
+                        let effective_exp = cell_exp.or(row_level_exp);
+                        cell_meta.insert(
+                            column.name.clone(),
+                            CellWriteMetadata {
+                                write_timestamp_micros: effective_ts,
+                                expiration: effective_exp,
+                            },
+                        );
+                        cells.insert(column.name.clone(), value);
+                        offset = new_offset;
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "V5CompressedLegacy:   ✗ Column {} '{}' ({}) at offset {} FAILED: {}",
+                            col_idx,
+                            column.name,
+                            column.data_type,
+                            offset,
+                            e
+                        );
+                        // CRITICAL FIX: Stop parsing remaining columns when we hit an error
+                        // The offset doesn't advance here, but we exit the loop cleanly
+                        // rather than continuing with invalid offset
+                        break;
+                    }
                 }
             }
         }
@@ -2323,7 +2569,7 @@ impl V5CompressedLegacyParser {
             row_size, next_offset, row_size_counted_from, is_static
         );
 
-        Ok((cells, Some(row_header), next_offset, is_static))
+        Ok((cells, cell_meta, Some(row_header), next_offset, is_static))
     }
 
     /// Parse a single cell value WITHOUT column name (schema-order format)
@@ -2340,14 +2586,18 @@ impl V5CompressedLegacyParser {
     ///
     /// See CASSANDRA_5_CELL_DESERIALIZATION_FORMAT.md for complete specification.
     ///
-    /// Returns: (value, new_offset)
+    /// Returns: `(value, cell_own_timestamp, expiration, new_offset)` where:
+    /// - `cell_own_timestamp`: the cell's own decoded timestamp in µs, or `None`
+    ///   when the cell inherits the row-level timestamp (`USE_ROW_TIMESTAMP` flag).
+    /// - `expiration`: TTL / localDeletionTime pair when the cell is expiring, or
+    ///   `None` when the cell has no TTL.
     fn parse_cell_value_schema_order(
         &self,
         data: &[u8],
         mut offset: usize,
         column: &crate::schema::Column,
         _reader: &super::super::types::SSTableReader,
-    ) -> Result<(Value, usize)> {
+    ) -> Result<(Value, Option<i64>, Option<CellExpiration>, usize)> {
         // Cell flag constants (from Cassandra 5.0 Cell.Serializer)
         const CELL_IS_DELETED: u8 = 0x01;
         const CELL_IS_EXPIRING: u8 = 0x02;
@@ -2419,6 +2669,8 @@ impl V5CompressedLegacyParser {
         }
 
         // Step 2: Read localDeletionTime (if deleted or expiring, and not using row TTL)
+        // Captured as absolute epoch-seconds for CellExpiration.expires_at_seconds.
+        let mut cell_local_deletion_time: Option<i64> = None;
         if !use_row_ttl && (is_deleted || is_expiring) {
             let (remaining, deletion_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
@@ -2428,16 +2680,22 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+            let abs_ldt = self
+                .min_local_deletion_time
+                .wrapping_add(deletion_delta as i64);
             log::debug!(
-                "V5CompressedLegacy: Cell '{}' deletion_delta={} (min_local_deletion_time={})",
+                "V5CompressedLegacy: Cell '{}' deletion_delta={} (min_local_deletion_time={}) abs_ldt={}",
                 column.name,
                 deletion_delta,
-                self.min_local_deletion_time
+                self.min_local_deletion_time,
+                abs_ldt
             );
-            // Note: actual localDeletionTime = min_local_deletion_time + deletion_delta
+            cell_local_deletion_time = Some(abs_ldt);
         }
 
         // Step 3: Read TTL (if expiring and not using row TTL)
+        // Captured as absolute TTL seconds for CellExpiration.ttl_seconds.
+        let mut cell_ttl_seconds: Option<i32> = None;
         if !use_row_ttl && is_expiring {
             let (remaining, ttl_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
@@ -2447,14 +2705,31 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+            // Absolute TTL = min_ttl + delta (seconds).  Clamp to i32 range for the
+            // CellExpiration.ttl_seconds field (Cassandra caps TTL at ~630M seconds).
+            let abs_ttl = self.min_ttl.unwrap_or(0).wrapping_add(ttl_delta as i64);
             log::debug!(
-                "V5CompressedLegacy: Cell '{}' ttl_delta={} (min_ttl={:?})",
+                "V5CompressedLegacy: Cell '{}' ttl_delta={} (min_ttl={:?}) abs_ttl={}",
                 column.name,
                 ttl_delta,
-                self.min_ttl
+                self.min_ttl,
+                abs_ttl
             );
-            // Note: actual TTL = min_ttl + ttl_delta (if min_ttl exists)
+            cell_ttl_seconds = Some(abs_ttl.min(i32::MAX as i64) as i32);
         }
+
+        // Build per-cell expiration metadata (used when the flag is set).
+        // Available at both return sites below — the tombstone path also uses
+        // cell_timestamp so we compute expiration here before the tombstone check.
+        let cell_expiration: Option<CellExpiration> =
+            match (is_expiring, cell_local_deletion_time, cell_ttl_seconds) {
+                (true, Some(expires_at), Some(ttl_secs)) => Some(CellExpiration {
+                    ttl_seconds: ttl_secs,
+                    expires_at_seconds: expires_at,
+                }),
+                // use_row_ttl path: expiration info comes from the row header (caller handles it).
+                _ => None,
+            };
 
         // Step 4: Cell path for complex columns (multi-cell collections/UDTs)
         // For now, skip this - we'll add in a future iteration when we handle complex columns.
@@ -2490,6 +2765,8 @@ impl V5CompressedLegacyParser {
                     range_start: None,
                     range_end: None,
                 }),
+                cell_timestamp,
+                cell_expiration,
                 offset,
             ));
         }
@@ -2502,7 +2779,12 @@ impl V5CompressedLegacyParser {
             );
             // Return appropriate empty value for type
             // For most types, empty = empty string or empty collection
-            return Ok((Value::Text(String::new()), offset));
+            return Ok((
+                Value::Text(String::new()),
+                cell_timestamp,
+                cell_expiration,
+                offset,
+            ));
         }
 
         // At this point, we have a live cell with value data
@@ -3280,9 +3562,12 @@ impl V5CompressedLegacyParser {
                         )));
                     }
                     // Non-collection / primitive frozen type — recurse normally.
+                    // The recursive call now returns 4 elements; we only need value + offset.
                     let mut inner_column = column.clone();
                     inner_column.data_type = inner_type.clone();
-                    self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?
+                    let (inner_val, _inner_ts, _inner_exp, inner_off) =
+                        self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?;
+                    (inner_val, inner_off)
                 };
 
                 offset = new_offset;
@@ -3386,7 +3671,7 @@ impl V5CompressedLegacyParser {
             }
         };
 
-        Ok((value, offset))
+        Ok((value, cell_timestamp, cell_expiration, offset))
     }
 
     /// Extract inner type from frozen<T> type string

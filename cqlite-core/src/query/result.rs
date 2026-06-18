@@ -4,6 +4,9 @@
 //! It includes result set management, row iteration, and result metadata.
 
 use crate::{schema::CqlType, RowKey, Value};
+// Re-export cell metadata types that now live in crate::types so the storage
+// layer can use them without a cyclic dependency.
+pub use crate::types::{CellExpiration, CellWriteMetadata};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -24,45 +27,10 @@ fn row_metadata_is_populated(meta: &RowMetadata) -> bool {
 // ============================================================================
 // Per-cell write metadata (Issue #691)
 // ============================================================================
-
-/// Per-cell write timestamp and expiration metadata.
-///
-/// Attached to a `QueryRow` only when the query plan sets
-/// `ProjectionFlags::include_cell_metadata = true` (e.g. because a
-/// `WRITETIME(col)` or `TTL(col)` item appears in the SELECT list).
-///
-/// **Hot-path guarantee**: when the flag is unset the `cell_metadata` map on
-/// `QueryRow` is `None`, so no allocation occurs per cell on normal queries.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CellWriteMetadata {
-    /// Write timestamp of the cell in **microseconds since Unix epoch**.
-    ///
-    /// This is the per-cell `timestamp` decoded from the SSTable row/cell
-    /// header, after applying the min-timestamp delta.  For cells that inherit
-    /// the row-level timestamp (the `USE_ROW_TIMESTAMP` cell flag) this is the
-    /// row timestamp.  Matches `WRITETIME(col)` semantics exactly.
-    pub write_timestamp_micros: i64,
-
-    /// Expiration info when the cell was written with a TTL.
-    ///
-    /// `None` when the cell has no TTL (it does not expire).
-    pub expiration: Option<CellExpiration>,
-}
-
-/// TTL / expiration info for a cell that was written with a TTL.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct CellExpiration {
-    /// TTL in **seconds** as written by the client.
-    ///
-    /// Matches `TTL(col)` when the cell is still live.
-    pub ttl_seconds: i32,
-
-    /// Epoch-seconds at which the cell expires (local deletion time).
-    ///
-    /// When `now_seconds > expires_at`, the cell is expired and would return
-    /// `null` in a live Cassandra query.
-    pub expires_at_seconds: i64,
-}
+//
+// CellWriteMetadata and CellExpiration are defined in crate::types and
+// re-exported above.  All usages of these types within this module
+// and its callers are unchanged — the re-export makes the move transparent.
 
 /// Projection-level flags that control opt-in metadata collection.
 ///

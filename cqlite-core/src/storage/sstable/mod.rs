@@ -61,6 +61,8 @@ use tokio::sync::RwLock;
 #[cfg(feature = "tombstones")]
 use self::tombstone_merger::{EntryMetadata, GenerationValue, TombstoneMerger};
 use crate::platform::Platform;
+#[cfg(not(feature = "tombstones"))]
+use crate::types::CellWriteMetadata;
 use crate::{types::TableId, Config, Result, RowKey, Value};
 
 /// Maximum directory depth when scanning for SSTable files.
@@ -922,6 +924,87 @@ impl SSTableManager {
             );
             Ok(Vec::new())
         }
+    }
+
+    /// Scan a table and return per-cell write metadata alongside row values.
+    ///
+    /// Used when `ProjectionFlags::include_cell_metadata` is set (issue #693 — the
+    /// WRITETIME/TTL threading bridge).  Delegates to each reader's
+    /// `scan_with_cell_metadata`.  When multiple readers serve the same table the
+    /// results are concatenated; token-order sort and LIMIT are applied afterward.
+    ///
+    /// Falls back to the regular `scan` with empty metadata when the reader does not
+    /// surface metadata (non-V5CompressedLegacy paths).
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>> {
+        let table_readers = self.table_readers.read().await;
+        let table_name = table_id.name();
+
+        let readers = if table_readers.contains_key(table_name) {
+            table_readers.get(table_name)
+        } else {
+            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
+                &table_name[dot_pos + 1..]
+            } else {
+                table_name
+            };
+            table_readers.get(unqualified_name)
+        };
+
+        if let Some(reader_list) = readers {
+            let mut all_results = Vec::new();
+
+            for reader in reader_list {
+                let results = reader
+                    .scan_with_cell_metadata(table_id, start_key, end_key, None, schema)
+                    .await?;
+                all_results.extend(results);
+            }
+
+            // Sort by key (token order) and apply limit
+            all_results.sort_by(|a, b| a.0.cmp(&b.0));
+            if let Some(limit) = limit {
+                all_results.truncate(limit);
+            }
+
+            Ok(all_results)
+        } else {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Tombstones-feature variant: delegates to regular `scan` and returns empty
+    /// metadata maps.  WRITETIME/TTL will still return null when tombstones are
+    /// enabled, but at least the code compiles and does not panic.
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<
+        Vec<(
+            RowKey,
+            Value,
+            HashMap<String, crate::types::CellWriteMetadata>,
+        )>,
+    > {
+        let base = self
+            .scan(table_id, start_key, end_key, limit, schema)
+            .await?;
+        Ok(base
+            .into_iter()
+            .map(|(k, v)| (k, v, HashMap::new()))
+            .collect())
     }
 
     /// Resolve the readers serving `table_id`, returning cloned `Arc` handles.
