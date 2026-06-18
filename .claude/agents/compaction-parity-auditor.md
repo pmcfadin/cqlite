@@ -27,6 +27,10 @@ had to be handled**. It is checked out locally:
 
 Read the commit bodies (`git show <sha>`) for the precise rule each fix encodes.
 
+The rules are also codified in this repo at **`docs/compaction/byte-parity-rules.md`**
+(with per-rule status + tracking issues) — use it as the working checklist and keep
+its `Status`/`Tracking` columns current as gaps are closed.
+
 ## What to audit in CQLite
 
 The write/compaction code lives in:
