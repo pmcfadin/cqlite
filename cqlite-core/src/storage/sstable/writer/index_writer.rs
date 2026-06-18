@@ -27,11 +27,14 @@
 //! (Cassandra `RowIndexEntry.create()` lines 227-239). The promoted index payload is:
 //!
 //! ```text
-//! [headerLength: unsigned VInt]    ← byte count of the DeletionTime blob below
-//! [DeletionTime: headerLength bytes] ← partition header deletion ("oa": 0x80 = LIVE)
+//! [headerLength: unsigned VInt]    ← Data.db byte offset from partition start to first row
+//!                                    (NB format, no static rows: 2 + key_len + 12)
+//! [DeletionTime: 12 bytes]         ← partition-level DeletionTime in NB legacy format:
+//!                                    [localDeletionTime: i32 BE][markedForDeleteAt: i64 BE]
+//!                                    LIVE = Integer.MAX_VALUE + Long.MIN_VALUE
 //! [count: unsigned VInt]           ← number of IndexInfo blocks
 //! [IndexInfo[0]..]                 ← IndexInfo blocks (see PromotedIndexBlock)
-//! [offset[0]: i32 BE] ...          ← relative offsets from first IndexInfo, one per block
+//! [offset[0]: i32 BE] ...          ← relative offsets from first IndexInfo start, one per block
 //! ```
 //!
 //! Each `IndexInfo` block:
@@ -39,14 +42,16 @@
 //! [firstName: ClusteringPrefix]    ← min clustering key in block (vint header + values)
 //! [lastName: ClusteringPrefix]     ← max clustering key in block
 //! [offset: unsigned VInt]          ← byte offset from partition start
-//! [width: unsigned VInt]           ← (actual_width - WIDTH_BASE) where WIDTH_BASE = 64 KiB
-//! [endOpenMarker: u8]              ← 0 = no open range tombstone marker
+//! [width: signed VInt]             ← (actual_width - WIDTH_BASE) where WIDTH_BASE = 64 KiB,
+//!                                    zigzag-encoded (Cassandra writeVInt)
+//! [endOpenMarker: bool byte]       ← 0x00 = no open range tombstone marker
 //! ```
 //!
 //! Sources:
-//! - `RowIndexEntry.java` lines 293-296 (BIG "oa" serialization)
-//! - `IndexInfo.Serializer.serialize()` lines 107-117
-//! - `DeletionTime.java` lines 210-219 ("oa" format: mfda first, then ldt unsigned)
+//! - `RowIndexEntry.IndexedEntry.serialize()` (BIG "nb" serialization)
+//! - `IndexInfo.Serializer.serialize()` lines 119-128
+//! - `DeletionTime.LegacySerializer.serialize()` (NB "nb" format: ldt i32 BE, then mfda i64 BE)
+//! - `SortedTablePartitionWriter.getHeaderLength()` (Data.db header byte count)
 //!
 //! ## Key Requirements
 //!
@@ -60,7 +65,7 @@
 //! - `cqlite-core/src/storage/sstable/index_reader.rs` - BIG format parser
 
 use crate::error::Result;
-use crate::storage::serialization::vint::encode_unsigned;
+use crate::storage::serialization::vint::{encode_signed, encode_unsigned};
 use crate::storage::write_engine::mutation::DecoratedKey;
 
 /// Threshold at which a new IndexInfo block is emitted (Cassandra default 64 KiB).
@@ -211,7 +216,7 @@ impl IndexWriter {
 
     /// Write a single index entry to the buffer.
     ///
-    /// Cassandra BIG format Index.db entry (NB "oa" variant):
+    /// Cassandra BIG format Index.db entry (NB variant):
     /// ```text
     /// [key_len: u16 BE]                    ← Length of raw partition key
     /// [key_bytes: key_len bytes]           ← Raw partition key bytes
@@ -240,7 +245,7 @@ impl IndexWriter {
         // Only emit a promoted index when there are 2+ blocks
         // (Cassandra RowIndexEntry.create() gates on columnIndexCount > 1)
         if blocks.len() >= 2 {
-            let promoted_payload = serialize_promoted_index(blocks);
+            let promoted_payload = serialize_promoted_index(blocks, key.key.len());
             encode_unsigned(promoted_payload.len() as u64, &mut self.buffer);
             self.buffer.extend_from_slice(&promoted_payload);
         } else {
@@ -297,12 +302,23 @@ impl Default for IndexWriter {
     }
 }
 
+/// Byte size of a LIVE `DeletionTime` in the NB (legacy) serializer.
+///
+/// Cassandra NB format uses `DeletionTime.LegacySerializer`:
+///   [localDeletionTime: i32 BE = Integer.MAX_VALUE][markedForDeleteAt: i64 BE = Long.MIN_VALUE]
+/// = 4 + 8 = 12 bytes.
+///
+/// Source: `DeletionTime.LegacySerializer.serialize()` and `serializedSize()`.
+const NB_DELETION_TIME_LIVE_SIZE: usize = 12;
+
 /// Serialize the promoted index payload for a wide partition.
 ///
-/// Layout (Cassandra BIG "oa" format, `RowIndexEntry.Serializer.serialize()`):
+/// Layout (Cassandra BIG "nb" format, `RowIndexEntry.IndexedEntry.serialize()`):
 /// ```text
-/// [headerLength: unsigned VInt]    ← byte count of DeletionTime below
-/// [DeletionTime: 1 byte = 0x80]   ← LIVE partition header (oa single-byte form)
+/// [headerLength: unsigned VInt]    ← Data.db bytes from partition start to first row
+///                                    = 2 (key_len short) + raw_key_len + 12 (NB DeletionTime)
+/// [DeletionTime: 12 bytes]         ← LIVE in NB legacy format:
+///                                    [i32 BE: Integer.MAX_VALUE][i64 BE: Long.MIN_VALUE]
 /// [count: unsigned VInt]           ← number of IndexInfo blocks
 /// [IndexInfo[0]..]                 ← serialized blocks in order
 /// [offset[0]: i32 BE]             ← relative offsets from first IndexInfo start
@@ -310,15 +326,36 @@ impl Default for IndexWriter {
 /// [offset[N-1]: i32 BE]
 /// ```
 ///
+/// `raw_key_len` is the length of the raw partition key bytes (not counting the 2-byte prefix).
+///
 /// The returned `Vec<u8>` is the content that goes AFTER the `promoted_index_size`
 /// VInt in the Index.db entry.
-fn serialize_promoted_index(blocks: &[PromotedIndexBlock]) -> Vec<u8> {
+///
+/// # Correctness notes
+///
+/// - `headerLength` must match `SortedTablePartitionWriter.getHeaderLength()` in Cassandra,
+///   which is the Data.db byte offset to the first non-header unfiltered row.
+///   For CQLite-written "nb" partitions without static rows this is fixed:
+///   `2 + raw_key_len + NB_DELETION_TIME_LIVE_SIZE`.
+/// - DeletionTime must use the "nb" `LegacySerializer` (ldt i32 BE, then mfda i64 BE),
+///   NOT the "oa" single-byte `0x80` form.
+/// - `IndexInfo.width` must be written as a signed VInt (zigzag), not unsigned VInt,
+///   matching Cassandra's `writeVInt(width - WIDTH_BASE)`.
+fn serialize_promoted_index(blocks: &[PromotedIndexBlock], raw_key_len: usize) -> Vec<u8> {
     debug_assert!(blocks.len() >= 2, "caller must ensure at least 2 blocks");
 
-    // DeletionTime for a LIVE partition: single byte 0x80 (oa format, high bit = LIVE).
-    // Source: DeletionTime.java lines 210-219.
-    let deletion_time_bytes: &[u8] = &[0x80u8];
-    let header_length = deletion_time_bytes.len() as u64;
+    // headerLength: Data.db byte count from partition start to the first clustering row.
+    // For "nb" (no static columns): 2-byte key_len prefix + raw key bytes + 12-byte DeletionTime.
+    // Source: SortedTablePartitionWriter.start() + addStaticRow() → getHeaderLength().
+    let header_length: u64 = (2 + raw_key_len + NB_DELETION_TIME_LIVE_SIZE) as u64;
+
+    // LIVE DeletionTime in NB (legacy) format:
+    //   localDeletionTime = Integer.MAX_VALUE = 0x7FFFFFFF (i32 BE)
+    //   markedForDeleteAt = Long.MIN_VALUE    = 0x8000000000000000 (i64 BE)
+    // Source: DeletionTime.LegacySerializer.serialize(), serializedSize() = 12.
+    let mut deletion_time_bytes = [0u8; NB_DELETION_TIME_LIVE_SIZE];
+    deletion_time_bytes[0..4].copy_from_slice(&i32::MAX.to_be_bytes());
+    deletion_time_bytes[4..12].copy_from_slice(&i64::MIN.to_be_bytes());
 
     // --- Build IndexInfo bytes and accumulate per-block byte offsets ---
     let mut index_info_bytes: Vec<u8> = Vec::new();
@@ -333,20 +370,20 @@ fn serialize_promoted_index(blocks: &[PromotedIndexBlock]) -> Vec<u8> {
     // --- Assemble the full promoted index payload ---
     let mut payload: Vec<u8> = Vec::new();
 
-    // headerLength (vint)
+    // headerLength (unsigned VInt)
     encode_unsigned(header_length, &mut payload);
 
-    // DeletionTime bytes
-    payload.extend_from_slice(deletion_time_bytes);
+    // DeletionTime bytes (12-byte NB legacy LIVE form)
+    payload.extend_from_slice(&deletion_time_bytes);
 
-    // count (vint): number of IndexInfo blocks
+    // count (unsigned VInt): number of IndexInfo blocks
     encode_unsigned(blocks.len() as u64, &mut payload);
 
     // IndexInfo bytes
     payload.extend_from_slice(&index_info_bytes);
 
     // Offsets array: one i32 BE per block (signed, relative to first IndexInfo start)
-    // Source: RowIndexEntry.java line 640: `out.writeInt(offsets[i])`
+    // Source: RowIndexEntry.IndexedEntry.serialize() → `out.writeInt(offsets[i])`
     for &offset in &block_start_offsets {
         payload.extend_from_slice(&(offset as i32).to_be_bytes());
     }
@@ -356,14 +393,20 @@ fn serialize_promoted_index(blocks: &[PromotedIndexBlock]) -> Vec<u8> {
 
 /// Serialize one `IndexInfo` block.
 ///
-/// Layout (Cassandra `IndexInfo.Serializer.serialize()` lines 107-117):
+/// Layout (Cassandra `IndexInfo.Serializer.serialize()` lines 119-128):
 /// ```text
 /// [firstName: ClusteringPrefix bytes]  ← min clustering key in block
 /// [lastName: ClusteringPrefix bytes]   ← max clustering key in block
 /// [offset: unsigned VInt]              ← byte offset from partition start
-/// [width: unsigned VInt]               ← actual_width - WIDTH_BASE (64 KiB)
-/// [endOpenMarker: u8]                  ← 0 = no open range tombstone
+/// [width: signed VInt]                 ← (actual_width - WIDTH_BASE), zigzag-encoded
+///                                        Cassandra uses writeVInt (not writeUnsignedVInt)
+/// [endOpenMarker: bool byte]           ← 0x00 = no open range tombstone
 /// ```
+///
+/// IMPORTANT: `width - WIDTH_BASE` is written as a **signed** VInt (zigzag encoding),
+/// not an unsigned VInt.  Cassandra's `IndexInfo.Serializer.serialize()` line 124:
+/// `out.writeVInt(info.width - WIDTH_BASE)`.  For a width exactly equal to WIDTH_BASE,
+/// the delta is 0 and both encodings produce `0x00`, but for any other value they differ.
 fn serialize_index_info(buf: &mut Vec<u8>, block: &PromotedIndexBlock) {
     // firstName clustering prefix bytes (already serialized by the data writer)
     buf.extend_from_slice(&block.first_name);
@@ -374,14 +417,16 @@ fn serialize_index_info(buf: &mut Vec<u8>, block: &PromotedIndexBlock) {
     // offset (unsigned VInt)
     encode_unsigned(block.offset, buf);
 
-    // width delta-encoded: (actual_width - WIDTH_BASE)
-    // Per Cassandra `IndexInfo.java` line 112: `out.writeUnsignedVInt(lastName.getEnd() - offset - WIDTH_BASE)`
-    // The value CAN underflow if width < WIDTH_BASE (unlikely in practice but safe via wrapping).
-    let width_delta = block.width.saturating_sub(INDEX_INFO_WIDTH_BASE);
-    encode_unsigned(width_delta, buf);
+    // width delta: (actual_width - WIDTH_BASE), written as signed VInt (zigzag).
+    // Cassandra: `out.writeVInt(info.width - WIDTH_BASE)` — writeVInt uses zigzag encoding.
+    // We cast to i64 to allow negative delta (width < WIDTH_BASE), which encodes as a small
+    // negative zigzag value; in practice widths are >= WIDTH_BASE but the format supports it.
+    let width_delta = (block.width as i64) - (INDEX_INFO_WIDTH_BASE as i64);
+    encode_signed(width_delta, buf);
 
-    // endOpenMarker presence flag: 0 = no open marker (simple partitions)
-    buf.push(0u8);
+    // endOpenMarker presence: writeBoolean(false) = 0x00 for no open tombstone
+    // Source: IndexInfo.Serializer.serialize() line 126: `out.writeBoolean(info.endOpenMarker != null)`
+    buf.push(0x00u8);
 }
 
 #[cfg(test)]
@@ -793,15 +838,26 @@ mod tests {
             "entry size should exactly cover key + vints + promoted payload"
         );
 
-        // Verify promoted payload structure:
-        // [headerLength VInt][0x80][count VInt][IndexInfo*3][i32*3]
+        // Verify promoted payload structure (NB format):
+        // [headerLength VInt][DeletionTime: 12 bytes][count VInt][IndexInfo*3][i32*3]
+        //
+        // key = [0xAA, 0xBB] (len=2), so headerLength = 2 + 2 + 12 = 16
         let payload = &bytes[payload_start..payload_end];
         let (header_len, hl_bytes) = parse_vint_simple(payload);
-        assert_eq!(header_len, 1, "LIVE DeletionTime is 1 byte");
-        let deletion_byte = payload[hl_bytes];
-        assert_eq!(deletion_byte, 0x80, "LIVE DeletionTime marker = 0x80");
+        assert_eq!(
+            header_len, 16,
+            "headerLength = 2 (key_len_prefix) + 2 (key bytes) + 12 (NB DeletionTime) = 16"
+        );
 
-        let (count, _) = parse_vint_simple(&payload[hl_bytes + header_len as usize..]);
+        // DeletionTime: [i32 BE: i32::MAX][i64 BE: i64::MIN] = 12 bytes
+        let dt_start = hl_bytes;
+        let dt_end = dt_start + NB_DELETION_TIME_LIVE_SIZE;
+        let ldt = i32::from_be_bytes(payload[dt_start..dt_start + 4].try_into().unwrap());
+        let mfda = i64::from_be_bytes(payload[dt_start + 4..dt_end].try_into().unwrap());
+        assert_eq!(ldt, i32::MAX, "NB LIVE DeletionTime: ldt = i32::MAX");
+        assert_eq!(mfda, i64::MIN, "NB LIVE DeletionTime: mfda = i64::MIN");
+
+        let (count, _) = parse_vint_simple(&payload[dt_end..]);
         assert_eq!(count, 3, "Three IndexInfo blocks");
     }
 
@@ -826,15 +882,20 @@ mod tests {
             width: COLUMN_INDEX_SIZE_BYTES,
         };
 
+        // Use a 4-byte raw key for a fixed, predictable headerLength = 2 + 4 + 12 = 18.
+        let raw_key_len = 4usize;
         let blocks = vec![block_below, block_at_threshold];
-        let payload = serialize_promoted_index(&blocks);
+        let payload = serialize_promoted_index(&blocks, raw_key_len);
 
         // Payload must be non-empty (promoted index present)
         assert!(!payload.is_empty());
         // Count in payload must be 2.
-        // Payload layout: [headerLength vint][DeletionTime bytes][count vint][...]
+        // Payload layout: [headerLength vint][DeletionTime 12 bytes][count vint][...]
         let (header_len, hl_bytes) = parse_vint_simple(&payload);
-        let (count, _) = parse_vint_simple(&payload[hl_bytes + header_len as usize..]);
+        // headerLength = 2 + 4 + 12 = 18
+        assert_eq!(header_len, 18, "headerLength for a 4-byte key = 2 + 4 + 12 = 18");
+        let dt_skip = NB_DELETION_TIME_LIVE_SIZE;
+        let (count, _) = parse_vint_simple(&payload[hl_bytes + dt_skip..]);
         assert_eq!(count, 2);
     }
 
@@ -862,8 +923,8 @@ mod tests {
         // All are single-byte VInts/bytes when value = 0.
         assert_eq!(info_bytes, vec![0x00, 0x00, 0x00, 0x00, 0x00]);
 
-        // Also verify with 2-block payload that the width field is 0
-        let payload = serialize_promoted_index(&[block, block2]);
+        // Also verify with 2-block payload that the width field is 0 (use a 4-byte key).
+        let payload = serialize_promoted_index(&[block, block2], 4);
         assert!(!payload.is_empty());
     }
 
