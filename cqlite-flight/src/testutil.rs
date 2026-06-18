@@ -215,7 +215,9 @@ pub fn make_snapshot(table_dir: &std::path::Path, name: &str) -> PathBuf {
         if path.is_file() {
             let dest = snap.join(entry.file_name());
             // Hardlink like Sidecar does; fall back to copy across filesystems.
-            std::fs::hard_link(&path, &dest).or_else(|_| std::fs::copy(&path, &dest).map(|_| ())).unwrap();
+            std::fs::hard_link(&path, &dest)
+                .or_else(|_| std::fs::copy(&path, &dest).map(|_| ()))
+                .unwrap();
         }
     }
     snap

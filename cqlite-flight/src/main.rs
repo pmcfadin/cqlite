@@ -12,7 +12,10 @@ use cqlite_flight::service::CqliteFlightService;
 
 /// Command-line arguments.
 #[derive(Parser, Debug)]
-#[command(name = "cqlite-flight", about = "Arrow Flight server for compacted CQLite SSTables")]
+#[command(
+    name = "cqlite-flight",
+    about = "Arrow Flight server for compacted CQLite SSTables"
+)]
 struct Args {
     /// Root directory holding `<keyspace>/<table>[-<uuid>]/` SSTable dirs.
     #[arg(long)]

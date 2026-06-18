@@ -91,12 +91,7 @@ impl DirSource {
     /// `<table-dir>/snapshots/<name>/` hardlink set (Phase 3). When nothing
     /// matches, the exact (non-existent) path is returned so `data_paths`
     /// surfaces a clean `NotFound`.
-    pub fn resolve(
-        data_dir: &Path,
-        keyspace: &str,
-        table: &str,
-        snapshot: Option<&str>,
-    ) -> Self {
+    pub fn resolve(data_dir: &Path, keyspace: &str, table: &str, snapshot: Option<&str>) -> Self {
         let table_dir = Self::table_base_dir(data_dir, keyspace, table);
         let dir = match snapshot {
             Some(name) if !name.is_empty() => table_dir.join("snapshots").join(name),
@@ -206,10 +201,7 @@ impl MergeProducer {
     }
 
     /// Merge `source`'s SSTables and return the resulting Arrow batches.
-    pub fn produce(
-        &self,
-        source: &dyn SstableSource,
-    ) -> Result<Vec<RecordBatch>, ProducerError> {
+    pub fn produce(&self, source: &dyn SstableSource) -> Result<Vec<RecordBatch>, ProducerError> {
         let paths = source.data_paths()?;
         self.produce_from_paths(paths)
     }
@@ -224,8 +216,7 @@ impl MergeProducer {
             return Ok(batches);
         }
 
-        let mut merger =
-            KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+        let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
 
         while let MergeStep::Partition { key, rows } =
@@ -453,13 +444,16 @@ mod tests {
 
     #[test]
     fn null_column_is_arrow_null() {
-        use arrow::array::Array;
         use crate::testutil::write_name_only;
+        use arrow::array::Array;
         let schema = simple_schema();
         // id=1 has no `score` cell → null; id=2 has both.
         let (_temp, _data, dir) = build_sstables(
             &schema,
-            vec![vec![write_name_only(1, "a", 100), write_row(2, "b", 50, 100)]],
+            vec![vec![
+                write_name_only(1, "a", 100),
+                write_row(2, "b", 50, 100),
+            ]],
         );
         let producer = MergeProducer::new(schema, 1024).unwrap();
         let batches = producer.produce(&DirSource::new(&dir)).unwrap();
@@ -479,9 +473,13 @@ mod tests {
             .downcast_ref::<arrow::array::Int32Array>()
             .unwrap();
         // Find the row for id=1 and assert its score is null.
-        let idx = (0..ids.len()).find(|&i| ids.value(i) == 1).expect("id=1 present");
+        let idx = (0..ids.len())
+            .find(|&i| ids.value(i) == 1)
+            .expect("id=1 present");
         assert!(scores.is_null(idx), "missing score cell must be Arrow null");
-        let idx2 = (0..ids.len()).find(|&i| ids.value(i) == 2).expect("id=2 present");
+        let idx2 = (0..ids.len())
+            .find(|&i| ids.value(i) == 2)
+            .expect("id=2 present");
         assert!(!scores.is_null(idx2));
         assert_eq!(scores.value(idx2), 50);
     }
@@ -498,7 +496,10 @@ mod tests {
         let arrow_schema = producer.arrow_schema().unwrap();
         let id_field = arrow_schema.field_with_name("id").unwrap();
         assert_eq!(
-            id_field.metadata().get("ARROW:extension:name").map(String::as_str),
+            id_field
+                .metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str),
             Some("arrow.uuid"),
             "uuid column must carry the Arrow UUID extension"
         );
@@ -520,7 +521,10 @@ mod tests {
         // SSTable A: id=1 name="old" ts=100. SSTable B: id=1 name="new" ts=200.
         let (_temp, _data, dir) = build_sstables(
             &schema,
-            vec![vec![write_row(1, "old", 1, 100)], vec![write_row(1, "new", 2, 200)]],
+            vec![
+                vec![write_row(1, "old", 1, 100)],
+                vec![write_row(1, "new", 2, 200)],
+            ],
         );
 
         let producer = MergeProducer::new(schema, 1024).unwrap();
@@ -544,7 +548,11 @@ mod tests {
         let (_temp, _data, dir) = build_sstables(
             &schema,
             vec![
-                vec![write_row(1, "a", 1, 100), write_row(2, "b", 2, 100), write_row(3, "c", 3, 100)],
+                vec![
+                    write_row(1, "a", 1, 100),
+                    write_row(2, "b", 2, 100),
+                    write_row(3, "c", 3, 100),
+                ],
                 vec![delete_row(2, 200)],
             ],
         );
@@ -659,8 +667,16 @@ mod tests {
             &schema,
             FlightTicket {
                 predicates: vec![
-                    Predicate { column: "score".into(), op: PredicateOp::Gt, value: json!(10) },
-                    Predicate { column: "score".into(), op: PredicateOp::Lt, value: json!(40) },
+                    Predicate {
+                        column: "score".into(),
+                        op: PredicateOp::Gt,
+                        value: json!(10),
+                    },
+                    Predicate {
+                        column: "score".into(),
+                        op: PredicateOp::Lt,
+                        value: json!(40),
+                    },
                 ],
                 ..Default::default()
             },
@@ -695,16 +711,22 @@ mod tests {
         );
         let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
         let batches = p.produce(&DirSource::new(&dir)).unwrap();
-        assert_eq!(total_rows(&batches), 3, "predicate on a projected-out column still filters");
-        assert!(batches[0].column_by_name("score").is_none(), "score absent from output");
+        assert_eq!(
+            total_rows(&batches),
+            3,
+            "predicate on a projected-out column still filters"
+        );
+        assert!(
+            batches[0].column_by_name("score").is_none(),
+            "score absent from output"
+        );
     }
 
     #[test]
     fn projection_restricts_columns() {
         use crate::ticket::FlightTicket;
         let schema = simple_schema();
-        let (_temp, _data, dir) =
-            build_sstables(&schema, vec![vec![write_row(1, "a", 10, 100)]]);
+        let (_temp, _data, dir) = build_sstables(&schema, vec![vec![write_row(1, "a", 10, 100)]]);
 
         let spec = spec_from(
             &schema,
@@ -716,7 +738,11 @@ mod tests {
         let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
 
         let arrow_schema = p.arrow_schema().unwrap();
-        let names: Vec<&str> = arrow_schema.fields().iter().map(|f| f.name().as_str()).collect();
+        let names: Vec<&str> = arrow_schema
+            .fields()
+            .iter()
+            .map(|f| f.name().as_str())
+            .collect();
         assert_eq!(names, vec!["id", "name"], "score projected out");
 
         let batches = p.produce(&DirSource::new(&dir)).unwrap();
@@ -751,7 +777,11 @@ mod tests {
         let producer = MergeProducer::new(schema, 1024).unwrap();
         let src = DirSource::resolve(&data_dir, KS, TBL, Some("snap1"));
         let batches = producer.produce(&src).unwrap();
-        assert_eq!(total_rows(&batches), 3, "reads the frozen snapshot SSTables");
+        assert_eq!(
+            total_rows(&batches),
+            3,
+            "reads the frozen snapshot SSTables"
+        );
     }
 
     #[test]

@@ -1230,7 +1230,8 @@ fn clustering_key_rows_survive_compaction() {
         .expect("info B");
     assert!(info_b.partition_count > 0, "SSTable B non-empty");
 
-    rt.block_on(engine.close()).expect("close engine before direct merger test");
+    rt.block_on(engine.close())
+        .expect("close engine before direct merger test");
 
     // ── Direct KWayMerger verification ───────────────────────────────────────
     // Locate the two Data.db files written above.

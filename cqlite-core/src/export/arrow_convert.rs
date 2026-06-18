@@ -225,10 +225,7 @@ pub(crate) fn cql_type_to_arrow_field(
                 ARROW_EXTENSION_NAME_KEY.to_string(),
                 ARROW_UUID_EXTENSION_NAME.to_string(),
             );
-            Some(
-                Field::new(name, ArrowDataType::FixedSizeBinary(16), nullable)
-                    .with_metadata(meta),
-            )
+            Some(Field::new(name, ArrowDataType::FixedSizeBinary(16), nullable).with_metadata(meta))
         }
         CqlType::Inet => Some(Field::new(name, ArrowDataType::Utf8, nullable)),
         CqlType::Counter => Some(Field::new(name, ArrowDataType::Int64, nullable)),
@@ -314,9 +311,7 @@ pub(crate) fn cql_type_to_arrow_data_type(cql_type: &CqlType) -> ArrowDataType {
         CqlType::Double => ArrowDataType::Float64,
         CqlType::Text | CqlType::Ascii | CqlType::Varchar => ArrowDataType::Utf8,
         CqlType::Blob => ArrowDataType::Binary,
-        CqlType::Timestamp => {
-            ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
-        }
+        CqlType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
         CqlType::Date => ArrowDataType::Date32,
         CqlType::Time => ArrowDataType::Time64(TimeUnit::Nanosecond),
         CqlType::Decimal => {
@@ -639,8 +634,7 @@ pub(crate) fn build_typed_value_array(
                             builder.append_value(0);
                         } else {
                             let bigint = BigInt::from_signed_bytes_be(bytes);
-                            let max_abs =
-                                BigInt::from(10i64).pow(38u32) - BigInt::from(1i64);
+                            let max_abs = BigInt::from(10i64).pow(38u32) - BigInt::from(1i64);
                             let abs_val = if bigint.sign() == num_bigint::Sign::Minus {
                                 -bigint.clone()
                             } else {
@@ -648,8 +642,7 @@ pub(crate) fn build_typed_value_array(
                             };
                             if abs_val > max_abs {
                                 return Err(ArrowConvertError::InvalidValue(
-                                    "varint element exceeds Decimal128(38, 0) range"
-                                        .to_string(),
+                                    "varint element exceeds Decimal128(38, 0) range".to_string(),
                                 ));
                             }
                             let i128_val = bigint_to_i128(&bigint)?;
@@ -802,8 +795,7 @@ pub(crate) fn build_typed_value_array(
                             // Keys must be non-nullable in Arrow MapArray.
                             if matches!(k, Value::Null) {
                                 return Err(ArrowConvertError::InvalidValue(
-                                    "null key in map is not allowed in Arrow MapArray"
-                                        .to_string(),
+                                    "null key in map is not allowed in Arrow MapArray".to_string(),
                                 ));
                             }
                             flat_keys.push(Some(k));
@@ -880,10 +872,8 @@ pub(crate) fn build_typed_value_array(
             let n_fields = element_types.len();
 
             // Unwrap Frozen at the value level before inspecting tuples.
-            let unwrapped: Vec<Option<&Value>> = values
-                .iter()
-                .map(|opt| unwrap_frozen_value(*opt))
-                .collect();
+            let unwrapped: Vec<Option<&Value>> =
+                values.iter().map(|opt| unwrap_frozen_value(*opt)).collect();
 
             // Build a null bitmap: true = row is non-null (valid struct).
             let null_bitmap: Vec<bool> = unwrapped
@@ -930,11 +920,7 @@ pub(crate) fn build_typed_value_array(
                     .iter()
                     .enumerate()
                     .map(|(i, t)| {
-                        Field::new(
-                            format!("field_{i}"),
-                            cql_type_to_arrow_data_type(t),
-                            true,
-                        )
+                        Field::new(format!("field_{i}"), cql_type_to_arrow_data_type(t), true)
                     })
                     .collect::<Vec<_>>(),
             );
@@ -972,10 +958,8 @@ pub(crate) fn build_typed_value_array(
             let n_rows = values.len();
 
             // Unwrap Frozen at the value level before inspecting UDTs.
-            let unwrapped: Vec<Option<&Value>> = values
-                .iter()
-                .map(|opt| unwrap_frozen_value(*opt))
-                .collect();
+            let unwrapped: Vec<Option<&Value>> =
+                values.iter().map(|opt| unwrap_frozen_value(*opt)).collect();
 
             // Build a null bitmap: true = row is non-null (valid struct).
             let null_bitmap: Vec<bool> = unwrapped
@@ -1083,9 +1067,7 @@ pub(crate) fn data_type_to_arrow(data_type: &DataType) -> ArrowDataType {
         DataType::Float => ArrowDataType::Float64,
         DataType::Text => ArrowDataType::Utf8,
         DataType::Blob => ArrowDataType::Binary,
-        DataType::Timestamp => {
-            ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into()))
-        }
+        DataType::Timestamp => ArrowDataType::Timestamp(TimeUnit::Millisecond, Some("UTC".into())),
         DataType::Uuid => ArrowDataType::FixedSizeBinary(16),
         DataType::Json => ArrowDataType::Utf8,
         DataType::List => {
@@ -1153,9 +1135,7 @@ pub(crate) fn convert_column_to_array(
             CqlType::Decimal => return build_decimal128_array(col, rows),
             CqlType::Varint => return build_varint_as_decimal128_array(col, rows),
             CqlType::Duration => return build_duration_utf8_array(col, rows),
-            CqlType::Uuid | CqlType::TimeUuid => {
-                return build_uuid_fixed_binary_array(col, rows)
-            }
+            CqlType::Uuid | CqlType::TimeUuid => return build_uuid_fixed_binary_array(col, rows),
             CqlType::Inet => return build_inet_utf8_array(col, rows),
             CqlType::Counter => return build_int64_array(col, rows),
             // List, Set, Map, Tuple, and Udt: use the recursive typed builder.
@@ -1254,10 +1234,7 @@ pub(crate) fn rescale_decimal(scale: i32, unscaled: &[u8]) -> Result<i128, Arrow
 // Type-specific array builders (flat / column-based)
 // =========================================================================
 
-fn build_boolean_array(
-    col: &ColumnInfo,
-    rows: &[QueryRow],
-) -> Result<ArrayRef, ArrowConvertError> {
+fn build_boolean_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<bool>> = rows
         .iter()
         .map(|row| {
@@ -1330,10 +1307,7 @@ fn build_int64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Ar
     Ok(Arc::new(Int64Array::from(values)))
 }
 
-fn build_float32_array(
-    col: &ColumnInfo,
-    rows: &[QueryRow],
-) -> Result<ArrayRef, ArrowConvertError> {
+fn build_float32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<f32>> = rows
         .iter()
         .map(|row| {
@@ -1347,10 +1321,7 @@ fn build_float32_array(
     Ok(Arc::new(Float32Array::from(values)))
 }
 
-fn build_float64_array(
-    col: &ColumnInfo,
-    rows: &[QueryRow],
-) -> Result<ArrayRef, ArrowConvertError> {
+fn build_float64_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<f64>> = rows
         .iter()
         .map(|row| {
@@ -1365,10 +1336,7 @@ fn build_float64_array(
     Ok(Arc::new(Float64Array::from(values)))
 }
 
-fn build_string_array(
-    col: &ColumnInfo,
-    rows: &[QueryRow],
-) -> Result<ArrayRef, ArrowConvertError> {
+fn build_string_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<String>> = rows
         .iter()
         .map(|row| {
@@ -1384,10 +1352,7 @@ fn build_string_array(
     Ok(Arc::new(StringArray::from(values)))
 }
 
-fn build_binary_array(
-    col: &ColumnInfo,
-    rows: &[QueryRow],
-) -> Result<ArrayRef, ArrowConvertError> {
+fn build_binary_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<&[u8]>> = rows
         .iter()
         .map(|row| {
@@ -1447,10 +1412,7 @@ fn build_uuid_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arr
 // =========================================================================
 
 /// Build an Arrow `Date32` array from `Value::Date(i32)`.
-fn build_date32_array(
-    col: &ColumnInfo,
-    rows: &[QueryRow],
-) -> Result<ArrayRef, ArrowConvertError> {
+fn build_date32_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, ArrowConvertError> {
     let values: Vec<Option<i32>> = rows
         .iter()
         .map(|row| {
@@ -1700,8 +1662,7 @@ fn build_map_array(col: &ColumnInfo, rows: &[QueryRow]) -> Result<ArrayRef, Arro
         Field::new("value", ArrowDataType::Utf8, true),
     ]);
 
-    let entries_array =
-        StructArray::new(struct_fields.clone(), vec![key_array, value_array], None);
+    let entries_array = StructArray::new(struct_fields.clone(), vec![key_array, value_array], None);
 
     let map_field = Arc::new(Field::new(
         "entries",

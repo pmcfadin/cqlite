@@ -214,7 +214,9 @@ impl FlightService for CqliteFlightService {
         &self,
         _request: Request<Streaming<FlightData>>,
     ) -> Result<Response<Self::DoPutStream>, Status> {
-        Err(Status::unimplemented("do_put is not supported (read-only server)"))
+        Err(Status::unimplemented(
+            "do_put is not supported (read-only server)",
+        ))
     }
 
     async fn do_exchange(
@@ -242,7 +244,9 @@ impl FlightService for CqliteFlightService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::testutil::{build_sstables, simple_schema, total_rows, write_row, KS, SIMPLE_DDL, TBL};
+    use crate::testutil::{
+        build_sstables, simple_schema, total_rows, write_row, KS, SIMPLE_DDL, TBL,
+    };
     use arrow::array::Array;
     use arrow_flight::decode::FlightRecordBatchStream;
 
@@ -259,7 +263,9 @@ mod tests {
         FlightDescriptor::new_cmd(ticket.to_bytes().unwrap())
     }
 
-    async fn decode(stream: <CqliteFlightService as FlightService>::DoGetStream) -> Vec<RecordBatch> {
+    async fn decode(
+        stream: <CqliteFlightService as FlightService>::DoGetStream,
+    ) -> Vec<RecordBatch> {
         let mapped = stream.map(|r| r.map_err(|s| FlightError::ExternalError(Box::new(s))));
         let mut rb = FlightRecordBatchStream::new_from_flight_data(mapped);
         let mut out = Vec::new();
@@ -356,7 +362,8 @@ mod tests {
     #[test]
     fn do_get_missing_table_is_not_found() {
         let schema = simple_schema();
-        let (_temp, data_dir, _dir) = build_sstables(&schema, vec![vec![write_row(1, "x", 1, 100)]]);
+        let (_temp, data_dir, _dir) =
+            build_sstables(&schema, vec![vec![write_row(1, "x", 1, 100)]]);
         let svc = CqliteFlightService::new(data_dir, 1024);
         let rt = tokio::runtime::Runtime::new().unwrap();
 

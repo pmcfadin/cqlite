@@ -380,8 +380,8 @@ mod tests {
     use super::*;
     use crate::query::{ColumnInfo, QueryRow};
     use crate::{RowKey, Value};
-    use arrow::array::{Array, FixedSizeBinaryArray, StringArray};
     use arrow::array::BinaryArray;
+    use arrow::array::{Array, FixedSizeBinaryArray, StringArray};
     use bytes::Bytes;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
     use std::collections::HashMap;

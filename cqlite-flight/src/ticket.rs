@@ -289,7 +289,10 @@ mod tests {
         // uniform (start, end] convention. Real Murmur3 tokens are never
         // i64::MIN (it is the ring's sentinel), so excluding it loses no data.
         let only_end = ticket_with_range(None, Some(0), false);
-        assert!(!only_end.token_in_range(i64::MIN), "defaulted start is exclusive");
+        assert!(
+            !only_end.token_in_range(i64::MIN),
+            "defaulted start is exclusive"
+        );
         assert!(only_end.token_in_range(i64::MIN + 1));
         assert!(only_end.token_in_range(0));
         assert!(!only_end.token_in_range(1));
@@ -297,6 +300,9 @@ mod tests {
         let only_start = ticket_with_range(Some(0), None, false);
         assert!(!only_start.token_in_range(0));
         assert!(only_start.token_in_range(1));
-        assert!(only_start.token_in_range(i64::MAX), "defaulted end is inclusive");
+        assert!(
+            only_start.token_in_range(i64::MAX),
+            "defaulted end is inclusive"
+        );
     }
 }

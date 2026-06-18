@@ -397,6 +397,9 @@ mod tests {
             value: json!(i64::from(i32::MAX) + 1),
         }]);
         let err = ScanSpec::from_ticket(&t, &simple_schema()).unwrap_err();
-        assert!(matches!(err, FilterError::BadOperand { .. }), "must error, not wrap");
+        assert!(
+            matches!(err, FilterError::BadOperand { .. }),
+            "must error, not wrap"
+        );
     }
 }
