@@ -185,3 +185,25 @@ Format:
   non-pushable (logged, not silently dropped). Token filtering uses the stored `DecoratedKey.token`
   (no Murmur3 computation), per the design.
 - **Next:** Phase 2 code-review team → fix → commit → Phase 3 (snapshot dir reads).
+
+## 2026-06-17 — Phase 2 code-review team + fixes
+
+- **What:** 2 parallel reviewers (correctness/security, tests/design). Both independently flagged the
+  same CRITICAL; resolved it plus several hardening items.
+- **CRITICAL fixed — predicate on a projected-out column rejected ALL rows.** Projection was applied in
+  `build_row_from_scan` BEFORE predicate eval, so the predicate's column was absent → `evaluate_predicates`
+  rejected every row. Fix: `entry_to_row` now builds the FULL row (no projection); predicates evaluate on
+  the full row; output projection is applied solely via `self.columns` during Arrow conversion. This also
+  removed the projection-applied-twice duplication the design reviewer flagged. New test
+  `predicate_on_projected_out_column_still_filters`.
+- **Fixed:** integer operands now use `i32::try_from` (no silent `as i32` wrap → `BadOperand` on overflow);
+  empty `IN ()` rejected; `null` operand rejected with a clear message. (Float operands already stored as
+  f64 `Value::Float` — no f32 narrowing, contrary to one review note.)
+- **Tests added:** multiple-AND predicates intersect; predicate value-identity (asserts WHICH rows survive,
+  not just counts); service-level do_get predicate pushdown end-to-end; unknown predicate column → 
+  invalid_argument; empty-IN / null-operand / int-overflow rejection. 41 total, clippy clean.
+- **Documented decisions (not bugs):** projection may drop partition-key columns — SAFE here because
+  cross-replica dedup is SPLIT-level (one token range → one replica), not row-value-level, so the server
+  never emits duplicate rows regardless of projected columns. Timestamp predicate operand is epoch i64
+  (Trino sends epoch); `wraparound:true` with a single bound is a client footgun (documented).
+- **Next:** Phase 3 — read SSTables from a Sidecar snapshot directory.

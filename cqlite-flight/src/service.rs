@@ -367,6 +367,53 @@ mod tests {
     }
 
     #[test]
+    fn do_get_applies_predicate_pushdown() {
+        use crate::ticket::{Predicate, PredicateOp};
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100)) // scores 10..50
+            .collect::<Vec<_>>();
+        let (_temp, data_dir, _dir) = build_sstables(&schema, vec![rows]);
+        let svc = CqliteFlightService::new(data_dir, 1024);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+
+        let mut t = ticket(KS, TBL);
+        t.predicates = vec![Predicate {
+            column: "score".into(),
+            op: PredicateOp::Gte,
+            value: serde_json::json!(40),
+        }];
+
+        let batches = rt.block_on(async {
+            let resp = svc
+                .do_get(Request::new(Ticket::new(t.to_bytes().unwrap())))
+                .await
+                .expect("do_get");
+            decode(resp.into_inner()).await
+        });
+        // score >= 40 → 40, 50.
+        assert_eq!(total_rows(&batches), 2);
+    }
+
+    #[tokio::test]
+    async fn do_get_unknown_predicate_column_is_invalid_argument() {
+        use crate::ticket::{Predicate, PredicateOp};
+        let svc = CqliteFlightService::new(std::env::temp_dir(), 1024);
+        let mut t = ticket(KS, TBL);
+        t.predicates = vec![Predicate {
+            column: "nonexistent".into(),
+            op: PredicateOp::Equal,
+            value: serde_json::json!(1),
+        }];
+        // get_schema also runs the ticket through build_producer → ScanSpec.
+        let err = svc
+            .get_schema(Request::new(cmd_descriptor(&t)))
+            .await
+            .expect_err("unknown predicate column must error");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
     fn do_get_empty_table_emits_schema_only() {
         // An existing table directory with no SSTables → valid empty result that
         // still carries the Arrow schema (via FlightDataEncoder `with_schema`).

@@ -93,11 +93,6 @@ impl ScanSpec {
             projection: ticket.columns.clone(),
         })
     }
-
-    /// Projection as the slice `build_row_from_scan` expects (empty = all).
-    pub fn projection_slice(&self) -> Vec<String> {
-        self.projection.clone().unwrap_or_default()
-    }
 }
 
 /// Resolve a column's CQL type from the schema (searches all column lists).
@@ -161,6 +156,13 @@ fn to_sstable_predicate(
         (_, v) => vec![json_to_value(v, &cql, &p.column)?],
     };
 
+    if matches!(p.op, PredicateOp::In) && values.is_empty() {
+        return Err(FilterError::BadOperand {
+            column: p.column.clone(),
+            message: "IN requires at least one value".into(),
+        });
+    }
+
     Ok(SSTablePredicate {
         column: p.column.clone(),
         operation,
@@ -183,6 +185,10 @@ fn json_to_value(
         message,
     };
 
+    if json.is_null() {
+        return Err(bad("null is not a valid predicate operand".into()));
+    }
+
     let unwrap_frozen = |t: &CqlType| -> CqlType {
         match t {
             CqlType::Frozen(inner) => (**inner).clone(),
@@ -191,10 +197,16 @@ fn json_to_value(
     };
 
     match unwrap_frozen(cql) {
-        CqlType::TinyInt | CqlType::SmallInt | CqlType::Int => json
-            .as_i64()
-            .map(|n| Value::Integer(n as i32))
-            .ok_or_else(|| bad(format!("expected integer, got {json}"))),
+        CqlType::TinyInt | CqlType::SmallInt | CqlType::Int => {
+            let n = json
+                .as_i64()
+                .ok_or_else(|| bad(format!("expected integer, got {json}")))?;
+            // Avoid silent wrap; numeric coercion in evaluate_predicates handles
+            // comparison against the column's actual integer width.
+            i32::try_from(n)
+                .map(Value::Integer)
+                .map_err(|_| bad(format!("integer {n} out of range for an int column")))
+        }
         CqlType::BigInt | CqlType::Counter | CqlType::Timestamp => json
             .as_i64()
             .map(Value::BigInt)
@@ -353,5 +365,38 @@ mod tests {
         }]);
         let err = ScanSpec::from_ticket(&t, &simple_schema()).unwrap_err();
         assert!(matches!(err, FilterError::BadOperand { .. }));
+    }
+
+    #[test]
+    fn empty_in_is_rejected() {
+        let t = ticket_with(vec![Predicate {
+            column: "score".into(),
+            op: PredicateOp::In,
+            value: json!([]),
+        }]);
+        let err = ScanSpec::from_ticket(&t, &simple_schema()).unwrap_err();
+        assert!(matches!(err, FilterError::BadOperand { .. }));
+    }
+
+    #[test]
+    fn null_operand_is_rejected() {
+        let t = ticket_with(vec![Predicate {
+            column: "score".into(),
+            op: PredicateOp::Equal,
+            value: serde_json::Value::Null,
+        }]);
+        let err = ScanSpec::from_ticket(&t, &simple_schema()).unwrap_err();
+        assert!(matches!(err, FilterError::BadOperand { .. }));
+    }
+
+    #[test]
+    fn out_of_range_int_is_rejected_not_truncated() {
+        let t = ticket_with(vec![Predicate {
+            column: "score".into(),
+            op: PredicateOp::Equal,
+            value: json!(i64::from(i32::MAX) + 1),
+        }]);
+        let err = ScanSpec::from_ticket(&t, &simple_schema()).unwrap_err();
+        assert!(matches!(err, FilterError::BadOperand { .. }), "must error, not wrap");
     }
 }

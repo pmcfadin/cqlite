@@ -209,7 +209,6 @@ impl MergeProducer {
         let mut merger =
             KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
         let mut buffer: Vec<QueryRow> = Vec::with_capacity(self.batch_size);
-        let projection = self.spec.projection_slice();
 
         while let MergeStep::Partition { key, rows } =
             merger.step().map_err(ProducerError::Merge)?
@@ -221,7 +220,10 @@ impl MergeProducer {
                 }
             }
             for entry in rows {
-                let Some(row) = self.entry_to_row(&key.key, entry.row_data, &projection) else {
+                // Build the FULL row so predicates can reference any column, even
+                // one projected out of the output. Output projection is applied
+                // separately via `self.columns` during Arrow conversion.
+                let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
                     continue;
                 };
                 // Predicate pushdown: keep only rows satisfying every predicate.
@@ -244,15 +246,12 @@ impl MergeProducer {
         Ok(batches)
     }
 
-    /// Reconstruct one logical row from a merged entry, or `None` for a row
+    /// Reconstruct one full logical row from a merged entry, or `None` for a row
     /// tombstone. Cell tombstones are dropped so the column reads as null.
-    /// `projection` restricts the emitted columns (empty = all).
-    fn entry_to_row(
-        &self,
-        partition_key: &[u8],
-        row_data: RowData,
-        projection: &[String],
-    ) -> Option<QueryRow> {
+    ///
+    /// The row carries ALL columns (no projection) so predicate evaluation can
+    /// reference any column; output projection is applied later via `self.columns`.
+    fn entry_to_row(&self, partition_key: &[u8], row_data: RowData) -> Option<QueryRow> {
         let cells = match row_data {
             RowData::Live { cells } => cells,
             // Whole-row deletion: suppress from output.
@@ -268,7 +267,7 @@ impl MergeProducer {
             .collect();
 
         let key = RowKey(partition_key.to_vec());
-        build_row_from_scan(key, Value::Map(map_entries), projection, Some(&self.schema))
+        build_row_from_scan(key, Value::Map(map_entries), &[], Some(&self.schema))
     }
 
     fn flush_buffer(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
@@ -610,8 +609,74 @@ mod tests {
             },
         );
         let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
-        // scores 30,40,50 pass `> 25`.
-        assert_eq!(total_rows(&p.produce(&DirSource::new(&dir)).unwrap()), 3);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        // scores 30,40,50 pass `> 25` — assert WHICH rows, not just the count.
+        let mut survivors: Vec<i32> = Vec::new();
+        for b in &batches {
+            let scores = b
+                .column_by_name("score")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            survivors.extend((0..scores.len()).map(|i| scores.value(i)));
+        }
+        survivors.sort_unstable();
+        assert_eq!(survivors, vec![30, 40, 50]);
+    }
+
+    #[test]
+    fn multiple_predicates_are_anded() {
+        use crate::ticket::{FlightTicket, Predicate, PredicateOp};
+        use serde_json::json;
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100)) // 10..50
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                predicates: vec![
+                    Predicate { column: "score".into(), op: PredicateOp::Gt, value: json!(10) },
+                    Predicate { column: "score".into(), op: PredicateOp::Lt, value: json!(40) },
+                ],
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        // 10 < score < 40 → 20, 30.
+        assert_eq!(total_rows(&p.produce(&DirSource::new(&dir)).unwrap()), 2);
+    }
+
+    #[test]
+    fn predicate_on_projected_out_column_still_filters() {
+        use crate::ticket::{FlightTicket, Predicate, PredicateOp};
+        use serde_json::json;
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        // Project out `score` but filter on it — must still filter correctly.
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                columns: Some(vec!["id".into(), "name".into()]),
+                predicates: vec![Predicate {
+                    column: "score".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(25),
+                }],
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 3, "predicate on a projected-out column still filters");
+        assert!(batches[0].column_by_name("score").is_none(), "score absent from output");
     }
 
     #[test]
