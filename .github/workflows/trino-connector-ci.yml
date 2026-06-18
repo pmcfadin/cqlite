@@ -1,0 +1,59 @@
+name: Trino Connector CI
+
+# Builds and tests the Java Trino connector and publishes the assembled plugin
+# directory as a workflow artifact. The Gradle wrapper (9.1) runs on JDK 21 and
+# auto-provisions the JDK 25 toolchain via the foojay resolver.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'trino-connector/**'
+      - '.github/workflows/trino-connector-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'trino-connector/**'
+      - '.github/workflows/trino-connector-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: gradle test + plugin
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup JDK 21 (runs Gradle; toolchain fetches JDK 25)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: trino-connector/*.gradle.kts
+
+      - name: Test
+        working-directory: trino-connector
+        run: ./gradlew --no-daemon test
+
+      - name: Assemble plugin
+        working-directory: trino-connector
+        run: ./gradlew --no-daemon installPlugin
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cqlite-trino-plugin
+          path: trino-connector/build/plugin/cqlite_flight
+          if-no-files-found: error
+
+      - name: Upload test reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trino-connector-test-reports
+          path: trino-connector/build/reports/tests
+          if-no-files-found: ignore

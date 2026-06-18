@@ -2,6 +2,7 @@
 members = [
     "cqlite-core",
     "cqlite-cli",
+    "cqlite-flight",
     "bindings/python",
     "bindings/node",
     "tests",

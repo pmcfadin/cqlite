@@ -526,15 +526,22 @@ impl SSTableRowIteratorAdapter {
     /// returns actual per-row timestamps decoded from the on-disk row headers.
     /// This allows the k-way merger to perform timestamp-accurate last-write-wins
     /// ordering, which is essential for tombstone shadowing (Issue #505).
-    fn open(path: &Path, run_index: usize) -> Result<Self> {
+    ///
+    /// When the schema has clustering columns, their values are extracted from
+    /// the decoded cells (in the producer thread, by column name in schema order)
+    /// and stored on `MergeEntry.clustering_key` so `merge_partition_rows` groups
+    /// and reconciles distinct clustering rows correctly. The clustering columns
+    /// are left in the cells as well, since the read-back path expects them there.
+    fn open(path: &Path, run_index: usize, schema: &TableSchema) -> Result<Self> {
         let path_buf = path.to_path_buf();
+        let schema = schema.clone();
 
         let (sender, receiver) = std::sync::mpsc::sync_channel(STREAMING_CHANNEL_CAPACITY);
 
         // Spawn the producer thread. It owns a fresh Tokio runtime so it never
         // collides with any runtime on the calling thread (Issue #587).
         let producer = std::thread::spawn(move || {
-            Self::producer_thread(path_buf, run_index, sender);
+            Self::producer_thread(path_buf, run_index, schema, sender);
         });
 
         Ok(Self {
@@ -548,12 +555,13 @@ impl SSTableRowIteratorAdapter {
     /// Opens the SSTable with buffered I/O (Issue #591), reads all entries via
     /// chunk stitching (materialising the full source into a `Vec` — see issue
     /// #827 for the planned incremental-read upgrade), converts them to
-    /// [`MergeEntry`], then streams them through the bounded channel one at a
-    /// time. Errors are forwarded as `Err(String)` through the same channel so
-    /// the consumer can surface them.
+    /// [`MergeEntry`] (populating the clustering key from the decoded cells when
+    /// the schema has clustering columns), then streams them through the bounded
+    /// channel one at a time. Errors are forwarded as `Err(String)`.
     fn producer_thread(
         path_buf: PathBuf,
         run_index: usize,
+        schema: TableSchema,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, String>>,
     ) {
         // Build the raw entries using an owned Tokio runtime (Issue #587).
@@ -567,6 +575,9 @@ impl SSTableRowIteratorAdapter {
 
                 let mut config = Config::default();
                 config.storage.use_mmap = false;
+                // Cloned so the async block can take it by move while the outer
+                // `schema` stays available for extract_clustering_key below.
+                let schema_for_reader = schema.clone();
 
                 let rt = tokio::runtime::Runtime::new().map_err(|e| {
                     Error::Storage(format!(
@@ -581,10 +592,12 @@ impl SSTableRowIteratorAdapter {
                         &path_buf, &config, platform,
                     )
                     .await?;
-                    // iterate_all_partitions_for_compaction returns the full list after
-                    // chunk stitching. The file is fully read here; the file handle is
-                    // dropped when `reader` is dropped at the end of this async block.
-                    reader.iterate_all_partitions_for_compaction(None).await
+                    // Pass the schema so the parser uses the real clustering column
+                    // names; the header-inferred fallback uses generic names like
+                    // "clustering_key", which would defeat extract_clustering_key.
+                    reader
+                        .iterate_all_partitions_for_compaction(Some(&schema_for_reader))
+                        .await
                 })
             })();
 
@@ -598,18 +611,19 @@ impl SSTableRowIteratorAdapter {
         };
 
         // Stream entries through the bounded channel one at a time.
-        // The stitched buffer is dropped at the end of the block above; from
-        // here on we only hold the Vec<(RowKey, Value, i64)> and convert entries
-        // incrementally so `raw_entries` can be freed once all are converted.
         for (row_key, value, timestamp) in raw_entries {
             let entry_result = (|| -> Result<MergeEntry> {
                 let key_bytes = row_key.0;
                 let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
                 let row_data = Self::value_to_row_data(&value, timestamp)?;
+                // Populate the clustering key from the decoded cells so wide-row
+                // (clustering) partitions reconcile per (pk, ck) instead of
+                // collapsing into one row.
+                let clustering_key = Self::extract_clustering_key(&row_data, &schema);
                 Ok(MergeEntry::new(
                     run_index,
                     decorated_key,
-                    None, // Clustering key extraction deferred
+                    clustering_key,
                     timestamp,
                     row_data,
                 ))
@@ -622,6 +636,49 @@ impl SSTableRowIteratorAdapter {
             }
         }
         // Channel closed naturally when sender is dropped here.
+    }
+
+    /// Extract a `ClusteringKey` from the row's live cells using the schema.
+    ///
+    /// For each clustering column declared in the schema (in position order),
+    /// look for a cell with that column name in the decoded `RowData::Live`
+    /// cells.  If all clustering columns are found, return `Some(ClusteringKey)`;
+    /// otherwise (including for tombstone entries that have no cells) return
+    /// `None`.
+    ///
+    /// The clustering columns are intentionally left inside the cells so the
+    /// downstream read-back path can still find them.
+    fn extract_clustering_key(row_data: &RowData, schema: &TableSchema) -> Option<ClusteringKey> {
+        if schema.clustering_keys.is_empty() {
+            return None;
+        }
+
+        let cells = match row_data {
+            RowData::Live { cells } => cells,
+            RowData::Tombstone { .. } => return None,
+        };
+
+        // Build the clustering key columns in schema order.
+        let mut ck_columns: Vec<(String, Value)> = Vec::with_capacity(schema.clustering_keys.len());
+
+        for ck_col in &schema.clustering_keys {
+            let found = cells
+                .iter()
+                .find(|cell| cell.column == ck_col.name)
+                .map(|cell| (ck_col.name.clone(), cell.value.clone()));
+
+            match found {
+                Some(pair) => ck_columns.push(pair),
+                // If any clustering column is missing, we cannot form a valid
+                // ClusteringKey — return None so the row falls into the None
+                // bucket (treated as an unclustered row).
+                None => return None,
+            }
+        }
+
+        Some(ClusteringKey {
+            columns: ck_columns,
+        })
     }
 
     /// Convert a reader Value to RowData.
@@ -770,7 +827,7 @@ impl KWayMerger {
         // Create run readers for each input SSTable (ordered newest to oldest)
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {
-            let adapter = SSTableRowIteratorAdapter::open(path, run_index)?;
+            let adapter = SSTableRowIteratorAdapter::open(path, run_index, schema)?;
             runs.push(RunReader::new(Box::new(adapter)));
         }
 

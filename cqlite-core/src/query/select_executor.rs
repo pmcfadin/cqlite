@@ -157,7 +157,10 @@ fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
 ///
 /// Returns `Ok(true)` only if every predicate is satisfied. A missing column
 /// causes the row to be rejected.
-fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Result<bool> {
+///
+/// Exposed publicly so the Arrow Flight server can apply identical predicate
+/// pushdown semantics to its merged rows (output parity with SELECT).
+pub fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Result<bool> {
     use super::select_optimizer::SSTableFilterOp;
     for predicate in predicates {
         let Some(column_value) = row.values.get(&predicate.column) else {
@@ -223,7 +226,12 @@ fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Resul
 /// is raw bytes, so its column was silently dropped from scan-built rows.
 ///
 /// Returns `None` for tombstoned rows (so the caller can `continue`).
-fn build_row_from_scan(
+///
+/// Exposed publicly so other readers (e.g. the Arrow Flight server's compaction
+/// merge producer) can assemble rows identically to the SELECT path, guaranteeing
+/// output parity. The `value` is expected to be a `Value::Map` of decoded
+/// non-partition-key cells; partition-key columns are reconstructed from `key`.
+pub fn build_row_from_scan(
     key: RowKey,
     value: Value,
     projection: &[String],

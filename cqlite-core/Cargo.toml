@@ -14,7 +14,7 @@ readme = "../README.md"
 # docs.rs build: document the commonly used features. Deliberately excludes
 # `wasm` (wasm32-only deps would fail the default x86_64 docs.rs target).
 [package.metadata.docs.rs]
-features = ["all-compression", "state_machine", "write-support", "parquet", "cli-helpers"]
+features = ["all-compression", "state_machine", "write-support", "arrow", "parquet", "cli-helpers"]
 
 [dependencies]
 # Async runtime
@@ -160,10 +160,15 @@ all-compression = ["lz4", "snappy", "deflate", "zstd"]
 # Requires state_machine for query engine and discovery dependencies
 cli-helpers = ["state_machine"]
 
+# Embeddable Arrow RecordBatch conversion (Epic #682) - NOT in defaults so that
+# `cargo build --package cqlite-core` does not compile the arrow crate.
+# Requires state_machine because the conversion consumes query::QueryResult.
+arrow = ["state_machine", "dep:arrow"]
+
 # Embeddable Parquet export (Epic #682) - NOT in defaults so that
 # `cargo build --package cqlite-core` does not compile arrow/parquet.
-# Requires state_machine because the writer consumes query::QueryResult.
-parquet = ["state_machine", "dep:arrow", "dep:parquet"]
+# Depends on `arrow` for the CQL→RecordBatch conversion layer.
+parquet = ["arrow", "dep:parquet"]
 
 # Other features
 metrics = []

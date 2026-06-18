@@ -67,9 +67,11 @@ pub use writetime_ttl_validator::{
 #[cfg(feature = "state_machine")]
 pub use select_ast::SelectStatement;
 #[cfg(feature = "state_machine")]
-pub use select_executor::SelectExecutor;
+pub use select_executor::{build_row_from_scan, evaluate_predicates, SelectExecutor};
 #[cfg(feature = "state_machine")]
-pub use select_optimizer::{OptimizedQueryPlan, SelectOptimizer};
+pub use select_optimizer::{
+    OptimizedQueryPlan, SSTableFilterOp, SSTablePredicate, SelectOptimizer,
+};
 #[cfg(feature = "state_machine")]
 pub use select_parser::{parse_select, SelectParser};
 

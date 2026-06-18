@@ -7,13 +7,18 @@
 //!
 //! # Feature flags
 //!
-//! | Submodule | Feature   | In defaults? |
-//! |-----------|-----------|--------------|
-//! | `parquet` | `parquet` | No           |
+//! | Submodule       | Feature   | In defaults? |
+//! |-----------------|-----------|--------------|
+//! | `arrow_convert` | `arrow`   | No           |
+//! | `parquet`       | `parquet` | No           |
 //!
-//! The `parquet` feature pulls in the `arrow` and `parquet` crates as
-//! optional dependencies; the default build's dependency surface is
-//! unchanged.
+//! The `arrow` feature pulls in the `arrow` crate as an optional dependency
+//! and exposes `build_arrow_schema` / `rows_to_record_batch` for use by any
+//! consumer that wants Arrow RecordBatches without Parquet.
+//!
+//! The `parquet` feature depends on `arrow` and additionally pulls in the
+//! `parquet` crate; it is off by default so the default build's dependency
+//! surface is unchanged.
 //!
 //! # External-committer boundary
 //!
@@ -23,5 +28,12 @@
 //! management — is the job of an external committer and is deliberately out of
 //! scope for this crate.
 
+#[cfg(feature = "arrow")]
+pub mod arrow_convert;
+
 #[cfg(feature = "parquet")]
 pub mod parquet;
+
+// Re-export the public arrow_convert API at the `export` module level.
+#[cfg(feature = "arrow")]
+pub use arrow_convert::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
