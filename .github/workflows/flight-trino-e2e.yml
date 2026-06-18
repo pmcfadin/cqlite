@@ -1,0 +1,58 @@
+name: Flight ↔ Trino E2E
+
+# Full integration test of BOTH sides: builds the Java connector plugin and the
+# cqlite-flight Rust image, brings up Cassandra + Sidecar + cqlite-flight + Trino
+# via docker compose, loads data, flushes to SSTables, and asserts query results
+# through the connector (incl. SSTable-vs-memtable semantics).
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'cqlite-flight/**'
+      - 'cqlite-core/**'
+      - 'trino-connector/**'
+      - '.github/workflows/flight-trino-e2e.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'cqlite-flight/**'
+      - 'cqlite-core/**'
+      - 'trino-connector/**'
+      - '.github/workflows/flight-trino-e2e.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    name: docker-compose integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      # The Rust image build + Cassandra/Sidecar/Trino images need headroom.
+      - name: Free disk space
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup \
+            /usr/local/lib/android /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+
+      - name: Setup JDK 21 (for the connector plugin build inside the script)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+          cache-dependency-path: trino-connector/*.gradle.kts
+
+      - name: Run end-to-end integration test
+        run: ./trino-connector/docker/e2e-test.sh
+
+      - name: Dump container logs on failure
+        if: failure()
+        run: |
+          cd trino-connector/docker
+          docker compose logs --tail 200 || true

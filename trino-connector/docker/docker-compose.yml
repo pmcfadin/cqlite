@@ -62,7 +62,7 @@ services:
   cqlite-flight:
     build:
       context: ../..
-      dockerfile: trino-connector/docker/Dockerfile.flight
+      dockerfile: cqlite-flight/Dockerfile
     network_mode: "service:cassandra"
     depends_on:
       cassandra:

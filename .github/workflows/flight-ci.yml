@@ -1,0 +1,107 @@
+name: Flight CI
+
+# Builds, lints, and tests the cqlite-flight Arrow Flight server; publishes the
+# release binary as a workflow artifact and (on main / tags) a container image to
+# GHCR.
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+    paths:
+      - 'cqlite-flight/**'
+      - 'cqlite-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/flight-ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'cqlite-flight/**'
+      - 'cqlite-core/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/flight-ci.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt / clippy / test / build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-flight-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: rustfmt
+        run: cargo fmt --package cqlite-flight -- --check
+
+      - name: clippy
+        run: cargo clippy --package cqlite-flight --all-targets -- -D warnings
+
+      - name: test
+        run: cargo test --package cqlite-flight
+
+      - name: build release binary
+        run: cargo build --release --package cqlite-flight
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cqlite-flight-linux-x86_64
+          path: target/release/cqlite-flight
+          if-no-files-found: error
+
+  image:
+    name: build & push container image
+    needs: test
+    # Don't publish images from PRs (no write creds / untrusted).
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/cqlite-flight
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' }}
+            type=ref,event=tag
+            type=sha
+
+      - name: Build & push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: cqlite-flight/Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

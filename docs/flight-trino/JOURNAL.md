@@ -329,3 +329,25 @@ Format:
   TrinoException error taxonomy (W2); scripted/asserting E2E harness; complex CQL types.
 - **PHASE 6 COMPLETE. All 6 phases done.** Stack: cqlite-flight (Rust) + cqlite-trino (Java 25) +
   docker-compose (Cassandra + Sidecar sharing IP + cqlite-flight + Trino on 172.42.0.0/16).
+
+## 2026-06-18 — Docs, container, CI, and automated E2E
+
+- **What:** README + container + CI/CD + load-test + scripted integration test.
+  - `cqlite-flight/README.md`: architecture diagram, gRPC surface, the Flight ticket JSON contract,
+    CLI usage, pyarrow.flight client example, limitations.
+  - **Container:** canonical `cqlite-flight/Dockerfile` (build context = repo root); compose now points
+    at it; removed the duplicate `trino-connector/docker/Dockerfile.flight`.
+  - **Load testing:** `cassandra-easy-stress` service behind a `loadtest` compose profile
+    (`ghcr.io/apache/cassandra-easy-stress:latest`); validated with a 10k-op KeyValue run (0 errors).
+  - **Scripted E2E:** `trino-connector/docker/e2e-test.sh` — clean→build plugin→`up --build`→load→flush→
+    assert through the connector (counts, projection, aggregate, uuid, timestamp) + SSTable-semantics
+    (memtable invisible until flush). Reproducible; runs locally and in CI. Added a Sidecar CQL-session
+    readiness gate (first queries raced the warmup). **All 8 assertions PASS locally.**
+  - **CI (3 workflows, YAML-validated):**
+    - `flight-ci.yml` — fmt/clippy/test cqlite-flight, upload release binary artifact, build & push the
+      container image to `ghcr.io/<owner>/cqlite-flight` (main/tags, not PRs).
+    - `trino-connector-ci.yml` — gradle test (JDK 21 runs Gradle 9.1; foojay provisions JDK 25), assemble
+      + upload the plugin artifact, upload test reports.
+    - `flight-trino-e2e.yml` — runs `e2e-test.sh` (both sides, full docker-compose integration) on PR/main.
+- **Artifacts published:** flight binary + GHCR container image (Rust side); Trino plugin dir (Java side).
+- **Next:** commit; push.
