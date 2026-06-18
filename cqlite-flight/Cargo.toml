@@ -1,0 +1,26 @@
+[package]
+name = "cqlite-flight"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Arrow Flight server exposing on-the-fly compacted CQLite SSTable data"
+publish = false
+
+[dependencies]
+# Conversion + merge engine. `arrow` brings the CQL->Arrow RecordBatch converter
+# (cqlite-core::export::arrow_convert); default features bring the write_engine
+# k-way merge (write-support) and the query engine (state_machine).
+cqlite-core = { path = "../cqlite-core", features = ["arrow"] }
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true
