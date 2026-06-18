@@ -2,7 +2,7 @@
 
 **Comprehensive validation tracking for all test tables across the CQLite test suite**
 
-**Last Updated**: 2025-12-18 (After Issue #220 fix - UDT support)
+**Last Updated**: 2026-06-18 (After Issue #694 — WRITETIME/TTL parity tests added)
 **Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) - Validate all 33 test tables can be loaded successfully
 **Current Status**: 33/33 PASS (100% pass rate) - **COMPLETE!**
 
@@ -63,7 +63,7 @@
 | static_columns_table | 99 | ✅ | ✅ | ✅ | ⚠️ (1 test) | **PASS** | Fixed by Issue #210 |
 | uncompressed_table | 99 | ✅ | ✅ | ✅ | ✅ (5 tests) | **PASS** | Fixed by Issue #213 |
 
-### test_collections (8 tables - 7 PASS / 1 FAIL) 87.5%
+### test_collections (8 tables - 8 PASS / 0 FAIL) ✅ 100%
 
 | Table | Rows | Load | Parse | Count | Int Test | Status | Notes |
 |-------|------|------|-------|-------|----------|--------|-------|
@@ -102,6 +102,42 @@
 | multi_metric_timeseries | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 | product_catalog | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 | sparse_data_table | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
+
+---
+
+## WRITETIME/TTL parity (issue #694)
+
+**Added**: 2026-06-18
+
+### Parity test coverage
+
+| Table | Keyspace | Format | WRITETIME parity | TTL validation | Test |
+|-------|----------|--------|-----------------|----------------|------|
+| ttl_test_table | test_basic | nb | ✅ 20 rows cross-checked | ✅ derivation: tstamp+ttl*1e6≈expires_at (20 rows); TTL() accepted as null/non-negative | `issue_694_writetime_ttl_parity::writetime_parity_test_basic_ttl_test_table` |
+| collection_table | test_collections | nb | ✅ 20 rows cross-checked | N/A (no TTL) | `issue_694_writetime_ttl_parity::writetime_parity_test_collections_collection_table` |
+| sensor_data | test_timeseries | nb | ✅ 30 rows cross-checked | N/A (no TTL) | `issue_694_writetime_ttl_parity::writetime_parity_test_timeseries_sensor_data` |
+| product_catalog | test_wide_rows | nb | ✅ 20 rows cross-checked | N/A (no TTL) | `issue_694_writetime_ttl_parity::writetime_parity_test_wide_rows_product_catalog` |
+
+### Concrete parity proof
+
+Example row from `test_basic.ttl_test_table`:
+- `id = 05098ace-6f85-4659-917f-54393c68ec2e`
+- Golden `tstamp` (sstabledump): `2025-10-06T01:12:06.469627Z`
+- Converted to epoch µs: `1759713126469627`
+- `WRITETIME(temporary_data)` returned: `1759713126469627` ✓
+
+### TTL fixture gap (da/BTI format)
+
+The `test_da` keyspace contains a `ttl_table` in da/BTI format that has TTL cells.
+BTI (da) Data.db format is **not yet supported** by the CQLite reader.
+No da-format TTL parity test is included here.
+
+Readable TTL fixtures tested above:
+- `test_basic.ttl_test_table` (nb, default_time_to_live=86400) — WRITETIME+TTL both validated
+- `test_timeseries.app_metrics` (nb, default_time_to_live=2592000) — not separately tested (WRITETIME parity covered via sensor_data test above)
+- `test_timeseries.log_entries` (nb, default_time_to_live=604800) — not separately tested
+
+No new SSTable fixtures were generated for this issue (Docker/Cassandra required for new data).
 
 ---
 
