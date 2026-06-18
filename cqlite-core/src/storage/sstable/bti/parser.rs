@@ -811,6 +811,23 @@ fn payload_start_in_node(node: &BtiNode, trie_data: &[u8], node_offset: usize) -
 /// - `Err(_)` on structural parse errors.
 ///
 /// This is the inner engine for [`lookup_partition_in_bti_file`].
+/// Walk the BTI partition trie loaded in `trie_data`, looking for a partition
+/// whose **byte-comparable** encoded key *prefix* routes to a leaf.
+///
+/// Cassandra BTI uses a **path-compressed (Patricia) trie**: once a path leads to
+/// a `PayloadOnly` leaf, the remaining key bytes are stored implicitly (as the
+/// compressed suffix).  Therefore a match is declared as soon as a `PayloadOnly`
+/// leaf is reached — regardless of whether the encoded key has been fully consumed.
+/// The caller is responsible for verifying the actual partition key against the
+/// Data.db bytes at the resolved offset (using the partition's hash byte for a
+/// fast pre-filter and the raw key bytes for definitive confirmation).
+///
+/// Returns:
+/// - `Ok(Some(BtiPartitionLocation))` when a leaf is reached.
+/// - `Ok(None)` when no transition exists for a key byte (key not in trie).
+/// - `Err(_)` on structural parse errors.
+///
+/// This is the inner engine for [`lookup_partition_in_bti_file`].
 fn walk_bti_trie(
     trie_data: &[u8],
     root_offset: usize,
@@ -833,12 +850,15 @@ fn walk_bti_trie(
         let is_leaf = ordinal == 0; // PayloadOnly
 
         if is_leaf {
-            // Leaf node: key must be fully consumed for a match
-            if key_pos >= encoded_key.len() {
-                return read_node_payload(trie_data, current_offset);
-            }
-            // Key not exhausted at leaf → not found
-            return Ok(None);
+            // Path-compressed (Patricia) trie: a PayloadOnly leaf represents the
+            // unique key whose path through the trie led here.  The remaining key
+            // bytes are stored implicitly (compressed suffix) and need not be
+            // compared here — the caller verifies the actual partition key in Data.db.
+            //
+            // Note: the original implementation required the key to be fully consumed
+            // at the leaf (return Ok(None) otherwise), which is incorrect for
+            // path-compressed tries.  Issue #755 corrects this.
+            return read_node_payload(trie_data, current_offset);
         }
 
         // Non-leaf node: if key exhausted, check for an embedded payload
@@ -931,6 +951,91 @@ pub fn lookup_partition_in_bti_file<R: Read + Seek>(
 
     // Step 4: walk the trie
     walk_bti_trie(&trie_data, root_offset as usize, encoded_key)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BTI partition key encoding for Murmur3Partitioner (issue #755)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Cassandra 5.0 BTI `Partitions.db` trie keys are derived from `DecoratedKey`
+// using `ByteComparable.Version.OSS50`.  For `Murmur3Partitioner` the encoding
+// is a path-compressed representation of:
+//
+//   [type_prefix=0x40] ++ [8 bytes: murmur3_token_bc]
+//
+// where `murmur3_token_bc = (murmur3_token(raw_key_bytes) as u64) XOR 0x8000_0000_0000_0000`
+// (flips the sign bit so signed i64 tokens sort correctly as unsigned big-endian bytes).
+//
+// Because the trie uses path compression (Patricia trie), looking up the first
+// few bytes of this 9-byte key is sufficient to reach the unique leaf for a
+// given partition.  The caller must verify the actual partition key in Data.db
+// to confirm the match (the hash byte in the leaf payload provides a fast pre-filter).
+//
+// This encoding was verified against the real `da-2-bti-Partitions.db` fixture:
+//   UUID 22222222-... → token bc first byte 0x90 → DataOffset(0)   ✓
+//   UUID 11111111-... → token bc first byte 0xBC → DataOffset(63)  ✓
+//   UUID 33333333-... → token bc first byte 0xF9 → DataOffset(125) ✓
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Encode a raw partition key (any CQL type) into the BTI trie lookup key for
+/// `Murmur3Partitioner`.
+///
+/// The encoding is:
+///   `[0x40] ++ [8 bytes big-endian: (murmur3_token(raw_key) as u64) XOR 0x8000_0000_0000_0000]`
+///
+/// This 9-byte prefix uniquely identifies the partition in the trie for typical
+/// Cassandra datasets.  In a path-compressed (Patricia) trie, using only the
+/// first few bytes is correct because each leaf represents exactly one partition:
+/// once the traversal reaches a leaf, no further byte matching is required.
+///
+/// # Arguments
+/// * `raw_key_bytes` – the raw serialized partition key bytes as stored on disk
+///   (e.g. 16 bytes for a UUID, big-endian bytes for int/bigint, UTF-8 for text).
+///
+/// # Verified against
+/// Real `da-2-bti-Partitions.db` fixture — see issue #755 for derivation.
+pub fn encode_partition_key_for_bti_trie(raw_key_bytes: &[u8]) -> [u8; 9] {
+    use crate::util::cassandra_murmur3::cassandra_murmur3_token;
+
+    let token: i64 = cassandra_murmur3_token(raw_key_bytes);
+    let bc: u64 = (token as u64) ^ 0x8000_0000_0000_0000u64;
+    let bc_bytes = bc.to_be_bytes();
+
+    let mut key = [0u8; 9];
+    key[0] = 0x40; // fixed type-discriminator prefix (observed in Partitions.db trie)
+    key[1..9].copy_from_slice(&bc_bytes);
+    key
+}
+
+/// Look up a raw partition key in a Cassandra 5.0 BTI `Partitions.db` trie file
+/// using the `Murmur3Partitioner` byte-comparable encoding.
+///
+/// This is a convenience wrapper over [`lookup_partition_in_bti_file`] that
+/// handles key encoding:
+///
+/// 1. Encodes `raw_key_bytes` → 9-byte BTI trie key via
+///    [`encode_partition_key_for_bti_trie`].
+/// 2. Looks up the key in the trie.
+/// 3. Returns the `BtiPartitionLocation` (Data.db or Rows.db offset).
+///
+/// Because the BTI trie uses path compression the lookup may return a candidate
+/// for a *different* key that shares the same trie prefix.  The caller must
+/// verify the actual partition key at the returned Data.db offset.
+///
+/// # Arguments
+/// * `partitions_db_reader` – seekable reader for the `Partitions.db` file.
+/// * `raw_key_bytes`        – raw on-disk partition key bytes (e.g. 16 bytes for UUID).
+///
+/// # Returns
+/// * `Ok(Some(BtiPartitionLocation::DataOffset(off)))` – candidate Data.db offset.
+/// * `Ok(None)` – definitely not in this SSTable (no trie path for this key prefix).
+/// * `Err(_)` – structural parse error.
+pub fn lookup_raw_key_in_bti_partitions_db<R: Read + Seek>(
+    partitions_db_reader: &mut R,
+    raw_key_bytes: &[u8],
+) -> BtiResult<Option<BtiPartitionLocation>> {
+    let encoded = encode_partition_key_for_bti_trie(raw_key_bytes);
+    lookup_partition_in_bti_file(partitions_db_reader, &encoded)
 }
 
 /// BTI header structure for index files

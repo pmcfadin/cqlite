@@ -16,8 +16,9 @@ pub use node::{
     TrieNavigator,
 };
 pub use parser::{
-    lookup_partition_in_bti_file, BtiHeader, BtiIndexStats, BtiPartitionLocation, PartitionsParser,
-    RowsParser, FLAG_HAS_HASH_BYTE,
+    decode_bti_partition_payload, encode_partition_key_for_bti_trie, lookup_partition_in_bti_file,
+    lookup_raw_key_in_bti_partitions_db, BtiHeader, BtiIndexStats, BtiPartitionLocation,
+    PartitionsParser, RowsParser, FLAG_HAS_HASH_BYTE,
 };
 
 use crate::parser::header::CassandraVersion;
