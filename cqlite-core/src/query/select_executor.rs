@@ -966,7 +966,17 @@ impl SelectExecutor {
         }
 
         // Check for DISTINCT
-        matches!(plan.statement.select_clause, SelectClause::Distinct(_))
+        if matches!(plan.statement.select_clause, SelectClause::Distinct(_)) {
+            return true;
+        }
+
+        // Issue #693: WRITETIME()/TTL() expressions require full materialisation
+        // because the streaming background task only emits raw scan rows without
+        // applying the WRITETIME/TTL projection (cell metadata extraction and
+        // value computation).  Falling back to execute_and_stream ensures the
+        // complete execute() path runs, which correctly populates writetime(col)/
+        // ttl(col) keys in each row's values map.
+        select_has_writetime_ttl(&plan.statement)
     }
 
     /// Fallback: Execute query fully, then stream the results
