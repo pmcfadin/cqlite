@@ -37,6 +37,16 @@ tasks.test {
     useJUnitPlatform()
 }
 
+// Assemble the Trino plugin directory (jar + runtime deps) for docker-compose to
+// mount at /usr/lib/trino/plugin/cqlite_flight. Trino loads each plugin from its
+// own isolated classloader directory, so runtime deps must be co-located.
+tasks.register<Sync>("installPlugin") {
+    dependsOn(tasks.jar)
+    into(layout.buildDirectory.dir("plugin/cqlite_flight"))
+    from(tasks.jar)
+    from(configurations.runtimeClasspath)
+}
+
 // Arrow on JDK 25 needs the foreign-memory module opened for off-heap access.
 tasks.withType<Test>().configureEach {
     jvmArgs("--add-opens=java.base/java.nio=ALL-UNNAMED", "--enable-native-access=ALL-UNNAMED")

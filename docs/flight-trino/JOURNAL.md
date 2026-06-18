@@ -254,3 +254,27 @@ Format:
   (start>end), skip ranges with no replica. 13 total in the connector. `./gradlew test` green on JDK 25.
 - **Next:** Phase 6 — page source (Flight DoGet → Arrow → Trino Page), GetSchema-driven column metadata,
   TupleDomain→ticket predicate/projection pushdown, and the docker-compose E2E.
+
+## 2026-06-17 — Phase 6 (part 1): docker-compose E2E topology
+
+- **What:** Stood up the E2E infrastructure (validated, not yet run live).
+  - `docker/docker-compose.yml`: custom bridge `scylla_rust_driver_public` (172.42.0.0/16);
+    `cassandra:5.0` bound to its network IP `172.42.0.2` (not 127.0.0.1, per request);
+    `ghcr.io/apache/cassandra-sidecar:latest` via `network_mode: service:cassandra` → SAME IP as
+    Cassandra (per request); `cqlite-flight` co-located (shares the IP) reading the SSTable volume,
+    serving Flight on :8815; `trinodb/trino:481` with the connector plugin mounted.
+  - `Dockerfile.flight` (multi-stage Rust build of cqlite-flight), `sidecar.yaml` (co-located single
+    node, JMX on 7199 via LOCAL_JMX=no), `trino/catalog/cqlite.properties`, Gradle `installPlugin`
+    task (assembles jar + runtime deps into build/plugin/cqlite_flight for Trino's isolated classloader).
+  - `trino-connector/README.md` with run steps + a status table.
+- **Verified:** `docker compose config` OK; `./gradlew installPlugin` assembles the plugin dir with all
+  deps (arrow/jackson/connector). Did NOT run the live cluster (heavy image pulls + multi-container
+  bring-up; better as focused interactive validation).
+- **Remaining (Phase 6, part 2 — the functional connector):** Metadata column resolution
+  (getTableHandle via Sidecar DDL; getColumnHandles via the server's GetSchema → Arrow →
+  ArrowTypeMapper); FlightClient wrapper; PageSource (DoGet → Arrow VectorSchemaRoot → Trino Page,
+  per-type block building); ConstraintTranslator (TupleDomain + required columns → FlightTicket JSON
+  predicates + projection); wire getPageSourceProvider. Then run the live E2E: load data into
+  Cassandra, snapshot via Sidecar, query through Trino, assert results + verify pushdown reduces bytes.
+- **Session checkpoint:** Phases 1–5 complete & committed (Rust server end-to-end + connector discovery/
+  types/splits). Phase 6 infra committed. The functional page source + live E2E is the remaining work.

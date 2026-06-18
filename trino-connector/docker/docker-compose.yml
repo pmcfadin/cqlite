@@ -1,0 +1,88 @@
+# End-to-end stack: Cassandra + Sidecar (sharing Cassandra's IP) + cqlite-flight
+# (co-located, reading Cassandra's SSTables) + Trino with the cqlite_flight
+# connector. Cassandra binds its network IP (not 127.0.0.1) on a custom bridge.
+#
+# Usage:
+#   ../gradlew installPlugin            # build the connector plugin dir
+#   docker compose up --build           # bring up the stack
+#   docker compose exec trino trino     # open the Trino CLI
+#
+# Then: SELECT * FROM cqlite.<keyspace>.<table>;
+
+networks:
+  public:
+    name: scylla_rust_driver_public
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.42.0.0/16
+
+volumes:
+  cassandra-data:
+
+services:
+  cassandra:
+    image: cassandra:5.0
+    networks:
+      public:
+        ipv4_address: 172.42.0.2
+    environment:
+      # Bind to the container's network IP, not 127.0.0.1.
+      CASSANDRA_LISTEN_ADDRESS: 172.42.0.2
+      CASSANDRA_BROADCAST_ADDRESS: 172.42.0.2
+      CASSANDRA_RPC_ADDRESS: 0.0.0.0
+      CASSANDRA_BROADCAST_RPC_ADDRESS: 172.42.0.2
+      CASSANDRA_DC: dc1
+      CASSANDRA_ENDPOINT_SNITCH: GossipingPropertyFileSnitch
+      # JMX on all interfaces so the co-located Sidecar can reach it.
+      LOCAL_JMX: "no"
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+    healthcheck:
+      test: ["CMD-SHELL", "nodetool status | grep -q '^UN'"]
+      interval: 15s
+      timeout: 10s
+      retries: 20
+
+  # Sidecar shares Cassandra's network namespace → SAME IP (172.42.0.2). It
+  # reaches Cassandra at 127.0.0.1 within that namespace and serves on :9043.
+  sidecar:
+    image: ghcr.io/apache/cassandra-sidecar:latest
+    network_mode: "service:cassandra"
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - cassandra-data:/var/lib/cassandra
+      - ./sidecar.yaml:/etc/cassandra-sidecar/sidecar.yaml:ro
+
+  # cqlite-flight is co-located (shares Cassandra's IP) and reads the local
+  # SSTables, serving compacted data over Arrow Flight on :8815.
+  cqlite-flight:
+    build:
+      context: ../..
+      dockerfile: trino-connector/docker/Dockerfile.flight
+    network_mode: "service:cassandra"
+    depends_on:
+      cassandra:
+        condition: service_healthy
+    volumes:
+      - cassandra-data:/var/lib/cassandra:ro
+    command:
+      - --data-dir=/var/lib/cassandra/data
+      - --listen=0.0.0.0:8815
+
+  trino:
+    image: trinodb/trino:481
+    networks:
+      public:
+        ipv4_address: 172.42.0.3
+    depends_on:
+      - cqlite-flight
+    ports:
+      - "8080:8080"
+    volumes:
+      # Built by `./gradlew installPlugin`.
+      - ../build/plugin/cqlite_flight:/usr/lib/trino/plugin/cqlite_flight:ro
+      - ./trino/catalog:/etc/trino/catalog:ro
