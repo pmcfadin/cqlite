@@ -15,7 +15,10 @@ pub use node::{
     BtiError, BtiNode, BtiNodeData, BtiNodeType, BtiResult, PayloadRef, SizedPointer, Transition,
     TrieNavigator,
 };
-pub use parser::{BtiHeader, BtiIndexStats, PartitionsParser, RowsParser};
+pub use parser::{
+    lookup_partition_in_bti_file, BtiHeader, BtiIndexStats, BtiPartitionLocation, PartitionsParser,
+    RowsParser, FLAG_HAS_HASH_BYTE,
+};
 
 use crate::parser::header::CassandraVersion;
 use std::collections::HashMap;
