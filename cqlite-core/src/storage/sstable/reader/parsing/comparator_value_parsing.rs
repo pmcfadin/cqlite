@@ -13,7 +13,7 @@
 //! `AbstractType.writeValue()`.
 
 use crate::{
-    parser::vint::parse_vint_length,
+    parser::vint::{parse_vint, parse_vint_length},
     types::{ComparatorType, UdtField, UdtValue, Value},
     Error, Result,
 };
@@ -197,12 +197,7 @@ pub fn parse_value_with_comparator(
             let unscaled = value_data[4..].to_vec();
             Ok(Value::Decimal { scale, unscaled })
         }
-        ComparatorType::Duration => {
-            // Duration format: 3 signed vints: months, days, nanoseconds
-            // For now, store as blob until proper vint parsing is needed
-            // TODO: Parse months, days, nanos as vints
-            Ok(Value::Blob(value_data.to_vec()))
-        }
+        ComparatorType::Duration => parse_duration_value(value_data),
         ComparatorType::Json => {
             let json_text = String::from_utf8(value_data.to_vec())
                 .map_err(|_| Error::corruption("Invalid UTF-8 in JSON value"))?;
@@ -234,6 +229,41 @@ pub fn parse_value_with_comparator(
             Ok(Value::Blob(value_data.to_vec()))
         }
     }
+}
+
+/// Parse a CQL `DURATION` value body.
+///
+/// Cassandra's `DurationType` stores three consecutive signed (ZigZag) VInts:
+/// `months` (i32), `days` (i32), and `nanoseconds` (i64). See
+/// `org.apache.cassandra.cql3.Duration` / `DurationSerializer` and the
+/// definitive guide Appendix B (VInt cheat sheet).
+///
+/// `value_data` is the cell value body only; any outer length prefix has
+/// already been stripped by the caller (mirroring the `Decimal`/`Blob` arms).
+fn parse_duration_value(value_data: &[u8]) -> Result<Value> {
+    // months (signed VInt -> i32)
+    let (remaining, months) = parse_vint(value_data)
+        .map_err(|_| Error::corruption("Failed to parse duration months VInt"))?;
+
+    // days (signed VInt -> i32)
+    let (remaining, days) = parse_vint(remaining)
+        .map_err(|_| Error::corruption("Failed to parse duration days VInt"))?;
+
+    // nanoseconds (signed VInt -> i64)
+    let (remaining, nanos) = parse_vint(remaining)
+        .map_err(|_| Error::corruption("Failed to parse duration nanos VInt"))?;
+
+    if !remaining.is_empty() {
+        return Err(Error::corruption(
+            "Duration value has trailing bytes after months/days/nanos",
+        ));
+    }
+
+    Ok(Value::Duration {
+        months: months as i32,
+        days: days as i32,
+        nanos,
+    })
 }
 
 /// Parse a list value using the element comparator
@@ -448,6 +478,116 @@ mod tests {
         let comparator = ComparatorType::Text;
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
         assert_eq!(result, Value::Text("hello".to_string()));
+    }
+
+    /// Build a Duration value-body (three signed/zigzag VInts: months, days, nanos)
+    /// using the writer's `encode_signed`, which is the matched encoder for
+    /// `parse_vint`. This mirrors what `data_writer::serialize_value` emits for
+    /// `Value::Duration`.
+    fn build_duration_bytes(months: i32, days: i32, nanos: i64) -> Vec<u8> {
+        use crate::storage::serialization::vint::encode_signed;
+        let mut buf = Vec::new();
+        encode_signed(months as i64, &mut buf);
+        encode_signed(days as i64, &mut buf);
+        encode_signed(nanos, &mut buf);
+        buf
+    }
+
+    #[test]
+    fn test_parse_duration_zero() {
+        // All-zero duration: zigzag(0) == 0 -> three 0x00 bytes.
+        let data = vec![0x00, 0x00, 0x00];
+        let comparator = ComparatorType::Duration;
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+        assert_eq!(
+            result,
+            Value::Duration {
+                months: 0,
+                days: 0,
+                nanos: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_positive() {
+        // 1 month, 2 days, 3 nanos.
+        // zigzag(1)=2(0x02), zigzag(2)=4(0x04), zigzag(3)=6(0x06).
+        let data = vec![0x02, 0x04, 0x06];
+        assert_eq!(data, build_duration_bytes(1, 2, 3));
+        let comparator = ComparatorType::Duration;
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+        assert_eq!(
+            result,
+            Value::Duration {
+                months: 1,
+                days: 2,
+                nanos: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_negative() {
+        // -1 month, -1 day, -1 nano. zigzag(-1)=1(0x01) for each.
+        let data = vec![0x01, 0x01, 0x01];
+        assert_eq!(data, build_duration_bytes(-1, -1, -1));
+        let comparator = ComparatorType::Duration;
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+        assert_eq!(
+            result,
+            Value::Duration {
+                months: -1,
+                days: -1,
+                nanos: -1,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_mixed_sign() {
+        // Negative months, positive days, large negative nanos.
+        let months = -13_i32;
+        let days = 200_i32;
+        let nanos = -86_400_000_000_000_i64; // -1 day in nanos, spans multiple VInt bytes
+        let data = build_duration_bytes(months, days, nanos);
+        let comparator = ComparatorType::Duration;
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+        assert_eq!(
+            result,
+            Value::Duration {
+                months,
+                days,
+                nanos,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_i32_extremes() {
+        // Ensure i32 truncation of the i64-decoded months/days is correct at the edges.
+        let data = build_duration_bytes(i32::MIN, i32::MAX, i64::MAX);
+        let comparator = ComparatorType::Duration;
+        let result = parse_value_with_comparator(&data, &comparator).unwrap();
+        assert_eq!(
+            result,
+            Value::Duration {
+                months: i32::MIN,
+                days: i32::MAX,
+                nanos: i64::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_duration_truncated_errors() {
+        // Only two VInts present where three are required -> corruption error.
+        let mut data = Vec::new();
+        use crate::storage::serialization::vint::encode_signed;
+        encode_signed(1, &mut data);
+        encode_signed(2, &mut data);
+        let comparator = ComparatorType::Duration;
+        assert!(parse_value_with_comparator(&data, &comparator).is_err());
     }
 
     #[test]
