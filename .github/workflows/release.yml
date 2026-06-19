@@ -18,11 +18,14 @@ jobs:
     strategy:
       matrix:
         include:
-          # Linux builds use cross-compilation on Ubuntu
+          # Linux gnu build runs under cross so the binary links against an
+          # older glibc (cross's image floor is ~2.31) rather than the
+          # ubuntu-latest host's glibc (2.39 on 24.04). This keeps the binary
+          # runnable on enterprise distros like Rocky/RHEL 9 (glibc 2.34). (#864)
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             exe_suffix: ""
-            use_cross: false
+            use_cross: true
           # Static musl build — runs on any Linux without a libc dependency
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
