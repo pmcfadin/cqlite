@@ -810,6 +810,21 @@ impl StatisticsWriter {
     /// When `schema` is Some, populates keyType, clustering types, and column
     /// names/types from the actual table schema. When None, falls back to a
     /// minimal stub (BytesType, zero columns).
+    ///
+    /// # Column-set encoding (>64 columns)
+    ///
+    /// The static/regular column sets are encoded exactly as Cassandra's
+    /// `SerializationHeader.Serializer.writeColumnsWithTypes`
+    /// (cassandra-5.0.0 `SerializationHeader.java` lines 489-497): an unsigned-VInt
+    /// column count followed by `count` `(VInt-length name, VInt-length marshal type)`
+    /// pairs. This path has **no** 64-column limit and never uses a bitmap.
+    ///
+    /// The 64-bit bitmap encoding lives in `Columns.serializer.serializeSubset`
+    /// (`Columns.java` lines 503-531) and is only used to serialise a per-row column
+    /// subset against a pre-shared superset (Data.db rows / inter-node messaging),
+    /// where `supersetCount < 64` selects the bitmap and `>= 64` switches to a VInt
+    /// delta list. It is never used for the SSTable SERIALIZATION_HEADER, so wide
+    /// tables (>64 columns) round-trip losslessly here.
     fn build_serialization_header_component(
         &self,
         schema: Option<&TableSchema>,
@@ -1815,5 +1830,179 @@ mod tests {
         let (pt0, v0) = entries[0];
         assert_eq!(pt0, 1_700_000_000.0f64);
         assert_eq!(v0, 2);
+    }
+
+    /// Parse a Cassandra SSTable SERIALIZATION_HEADER column-set the way Cassandra's
+    /// `SerializationHeader.Serializer.readColumnsWithType` does (cassandra-5.0.0
+    /// `SerializationHeader.java` lines 510-520):
+    ///
+    /// ```text
+    /// unsigned-vint  count
+    /// repeat count times:
+    ///   vint-length-prefixed UTF-8  column name
+    ///   vint-length-prefixed UTF-8  marshal type
+    /// ```
+    ///
+    /// Returns the parsed `(name, marshal_type)` pairs and the slice remaining after
+    /// the column set, so chained sets (static then regular) can be parsed.
+    fn parse_columns_with_types(input: &[u8]) -> (Vec<(String, String)>, &[u8]) {
+        use crate::parser::vint::parse_vuint;
+
+        let (mut rest, count) = parse_vuint(input).expect("column count vint");
+        let mut cols = Vec::with_capacity(count as usize);
+        for _ in 0..count {
+            let (after_name_len, name_len) = parse_vuint(rest).expect("name length vint");
+            let name =
+                String::from_utf8(after_name_len[..name_len as usize].to_vec()).expect("name utf8");
+            let after_name = &after_name_len[name_len as usize..];
+
+            let (after_type_len, type_len) = parse_vuint(after_name).expect("type length vint");
+            let marshal =
+                String::from_utf8(after_type_len[..type_len as usize].to_vec()).expect("type utf8");
+            rest = &after_type_len[type_len as usize..];
+
+            cols.push((name, marshal));
+        }
+        (cols, rest)
+    }
+
+    /// Build a schema with `n` regular columns named `c00..c{n-1}` plus a uuid PK.
+    fn wide_schema(n: usize) -> crate::schema::TableSchema {
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use std::collections::HashMap;
+
+        let mut columns = vec![Column {
+            name: "id".to_string(),
+            data_type: "uuid".to_string(),
+            nullable: false,
+            default: None,
+            is_static: false,
+        }];
+        for i in 0..n {
+            columns.push(Column {
+                name: format!("c{i:03}"),
+                data_type: "int".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            });
+        }
+
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "wide_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns,
+            comments: HashMap::new(),
+        }
+    }
+
+    /// Regression test for issue #763: a table with more than 64 regular columns
+    /// must produce a SERIALIZATION_HEADER that encodes every column.
+    ///
+    /// Cassandra's on-disk header uses `writeColumnsWithTypes` (SerializationHeader.java
+    /// lines 489-497): an unsigned-VInt count followed by `count` (name, type) pairs.
+    /// There is NO 64-bit bitmap on this path — the bitmap (`Columns.serializeSubset`,
+    /// Columns.java lines 503-531) is only used for per-row column subsets against a
+    /// pre-shared superset, never for the SSTable header. So a 70-column table is a
+    /// fully supported, lossless encoding.
+    #[test]
+    fn test_serialization_header_70_columns_roundtrip() {
+        let schema = wide_schema(70);
+        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+        let meta = StatisticsMetadata::new();
+        let bytes = writer
+            .build_serialization_header_component(Some(&schema), &meta)
+            .expect("build header for 70-column schema");
+
+        // Skip the 3 EncodingStats VInts, the key type, and the clustering list to
+        // reach the static/regular column sets.
+        use crate::parser::vint::parse_vuint;
+        let (rest, _min_ts) = parse_vuint(&bytes).expect("encoding stats minTimestamp");
+        let (rest, _min_ldt) = parse_vuint(rest).expect("encoding stats minLocalDeletionTime");
+        let (rest, _min_ttl) = parse_vuint(rest).expect("encoding stats minTTL");
+
+        // keyType: vint-length-prefixed UTF-8
+        let (rest, key_len) = parse_vuint(rest).expect("key type length");
+        let key_type = std::str::from_utf8(&rest[..key_len as usize]).expect("key type utf8");
+        assert_eq!(key_type, "org.apache.cassandra.db.marshal.UUIDType");
+        let rest = &rest[key_len as usize..];
+
+        // clusteringTypes: vint count (0 here)
+        let (rest, ck_count) = parse_vuint(rest).expect("clustering count");
+        assert_eq!(ck_count, 0, "no clustering columns");
+
+        // staticColumns then regularColumns
+        let (statics, rest) = parse_columns_with_types(rest);
+        assert_eq!(statics.len(), 0, "no static columns");
+
+        let (regulars, rest) = parse_columns_with_types(rest);
+        assert!(rest.is_empty(), "header fully consumed, no trailing bytes");
+
+        // All 70 regular columns must be present (the PK `id` is excluded).
+        assert_eq!(
+            regulars.len(),
+            70,
+            "all 70 regular columns must be encoded, got {}",
+            regulars.len()
+        );
+
+        // Columns are emitted in alphabetical order; verify a sample round-trips.
+        assert_eq!(regulars[0].0, "c000");
+        assert_eq!(regulars[0].1, "org.apache.cassandra.db.marshal.Int32Type");
+        assert_eq!(regulars[69].0, "c069");
+
+        // Every column name and type must be intact (lossless).
+        let mut names: Vec<String> = regulars.iter().map(|(n, _)| n.clone()).collect();
+        names.sort();
+        for (i, name) in names.iter().enumerate().take(70) {
+            assert_eq!(*name, format!("c{i:03}"));
+        }
+    }
+
+    /// Verify the column-count field is encoded as a true unsigned VInt (not a single
+    /// byte). For 200 columns the count 200 (0xC8) requires a 2-byte VInt, which is
+    /// where a naive single-byte writer would silently corrupt the header.
+    #[test]
+    fn test_serialization_header_200_columns_count_is_vint() {
+        use crate::parser::vint::{encode_vuint, parse_vuint};
+
+        let schema = wide_schema(200);
+        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+        let meta = StatisticsMetadata::new();
+        let bytes = writer
+            .build_serialization_header_component(Some(&schema), &meta)
+            .expect("build header for 200-column schema");
+
+        let (rest, _) = parse_vuint(&bytes).expect("minTimestamp");
+        let (rest, _) = parse_vuint(rest).expect("minLocalDeletionTime");
+        let (rest, _) = parse_vuint(rest).expect("minTTL");
+        let (rest, key_len) = parse_vuint(rest).expect("key type length");
+        let rest = &rest[key_len as usize..];
+        let (rest, _ck) = parse_vuint(rest).expect("clustering count");
+        let (statics, rest) = parse_columns_with_types(rest);
+        assert_eq!(statics.len(), 0);
+
+        // The regular-column count must be the 2-byte VInt encoding of 200.
+        let expected_count_bytes = encode_vuint(200);
+        assert_eq!(
+            expected_count_bytes.len(),
+            2,
+            "200 must require a 2-byte VInt (sanity)"
+        );
+        assert_eq!(
+            &rest[..expected_count_bytes.len()],
+            expected_count_bytes.as_slice(),
+            "regular-column count must be a multi-byte unsigned VInt"
+        );
+
+        let (regulars, tail) = parse_columns_with_types(rest);
+        assert!(tail.is_empty());
+        assert_eq!(regulars.len(), 200, "all 200 columns must be encoded");
     }
 }
