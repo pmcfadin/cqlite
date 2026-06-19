@@ -1024,14 +1024,19 @@ impl SelectParser {
         Ok(OrderByClause { items })
     }
 
-    /// Parse LIMIT clause
+    /// Parse the query-wide LIMIT clause.
+    ///
+    /// `LIMIT 0` is intentionally accepted and yields an empty result set
+    /// (enforced downstream); this preserves long-standing CQLite behavior
+    /// (`test_limit_zero_returns_empty`). Only `PER PARTITION LIMIT` is required
+    /// to be strictly positive (Issue #757).
     fn parse_limit_clause(&mut self) -> Result<LimitClause> {
-        let count = self.parse_positive_limit("LIMIT")?;
+        let count = self.expect_integer("LIMIT")? as u64;
         Ok(LimitClause { count })
     }
 
-    /// Parse a positive integer limit, rejecting zero/negative values. Cassandra
-    /// requires both `LIMIT` and `PER PARTITION LIMIT` to be strictly positive.
+    /// Parse a strictly-positive integer limit, rejecting zero/negative values.
+    /// Used for `PER PARTITION LIMIT`, which Cassandra requires to be >= 1.
     fn parse_positive_limit(&mut self, clause: &str) -> Result<u64> {
         let value = self.expect_integer(clause)?;
         if value < 1 {
@@ -1338,6 +1343,14 @@ mod tests {
     #[test]
     fn test_per_partition_limit_rejects_zero() {
         assert!(parse_select("SELECT * FROM ks.t PER PARTITION LIMIT 0").is_err());
+    }
+
+    #[test]
+    fn test_global_limit_zero_is_accepted() {
+        // Regression: `LIMIT 0` must parse (yields empty result downstream);
+        // only PER PARTITION LIMIT requires a strictly-positive value.
+        let stmt = parse_select("SELECT * FROM ks.t LIMIT 0").unwrap();
+        assert_eq!(stmt.limit.map(|l| l.count), Some(0));
     }
 
     #[test]
