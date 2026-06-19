@@ -232,6 +232,7 @@ impl SSTableFormatTests {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "timestamp".to_string(),
@@ -240,6 +241,7 @@ impl SSTableFormatTests {
                 key_position: Some(1),
                 is_static: false,
                 is_clustering: true,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "data".to_string(),
@@ -248,6 +250,7 @@ impl SSTableFormatTests {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "metadata".to_string(),
@@ -256,6 +259,7 @@ impl SSTableFormatTests {
                 key_position: None,
                 is_static: true,
                 is_clustering: false,
+                clustering_reversed: false,
             },
         ];
 
@@ -433,6 +437,7 @@ impl SSTableFormatTests {
                 key_position: if i == 0 { Some(0) } else { None },
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             });
         }
 
@@ -512,6 +517,7 @@ impl SSTableFormatTests {
                     key_position: Some(0),
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
                 ColumnInfo {
                     name: "name".to_string(),
@@ -520,6 +526,7 @@ impl SSTableFormatTests {
                     key_position: None,
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
             ],
             properties,

@@ -474,6 +474,7 @@ impl ParserBenchmarks {
                     key_position: Some(0),
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
                 header::ColumnInfo {
                     name: "timestamp".to_string(),
@@ -482,6 +483,7 @@ impl ParserBenchmarks {
                     key_position: None,
                     is_static: false,
                     is_clustering: true,
+                    clustering_reversed: false,
                 },
                 header::ColumnInfo {
                     name: "data".to_string(),
@@ -490,6 +492,7 @@ impl ParserBenchmarks {
                     key_position: None,
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
             ],
             properties: HashMap::new(),

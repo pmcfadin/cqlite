@@ -612,7 +612,16 @@ impl TableSchema {
                 name: col.name.clone(),
                 data_type: col.column_type.clone(),
                 position: pos, // Contiguous internal position, not header key_position
-                order: ClusteringOrder::Asc, // TODO(Future): Extract clustering order from header properties when format documented
+                // Issue #759: the serialization header wraps a DESC clustering
+                // column's comparator in `ReversedType(...)`. That authoritative
+                // signal is captured in `ColumnInfo::clustering_reversed` during
+                // Statistics.db parsing (no heuristics). `data_type` already holds
+                // the unwrapped inner CQL type, so deserialization is undisturbed.
+                order: if col.clustering_reversed {
+                    ClusteringOrder::Desc
+                } else {
+                    ClusteringOrder::Asc
+                },
             })
             .collect();
 
@@ -1565,6 +1574,7 @@ mod tests {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "name".to_string(),
@@ -1573,6 +1583,7 @@ mod tests {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
         ];
 

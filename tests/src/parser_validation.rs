@@ -212,6 +212,7 @@ impl ParserValidationSuite {
                     key_position: Some(0),
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
                 ColumnInfo {
                     name: "data".to_string(),
@@ -220,6 +221,7 @@ impl ParserValidationSuite {
                     key_position: None,
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
             ],
             properties: {
