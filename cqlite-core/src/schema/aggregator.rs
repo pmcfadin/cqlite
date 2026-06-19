@@ -888,6 +888,28 @@ impl SchemaAggregator {
         {
             let registry = self.registry.write().await;
             for (_key, table_schema) in table_map {
+                // Fail fast on undefined UDT references (issue #761): a column
+                // referencing a UDT not in the registry surfaces here with the
+                // missing type named, rather than later as a confusing
+                // parse/deserialization error. Gated by the same flag that
+                // controls UDT dependency validation.
+                if self.config.validate_udt_dependencies {
+                    let udt_registry = self.udt_registry.read().await;
+                    if let Err(e) = table_schema.validate_udt_references(&udt_registry) {
+                        self.errors.push(SchemaLoadError {
+                            file_path: None,
+                            error_type: LoadErrorType::ValidationFailed,
+                            message: format!(
+                                "Failed to register table '{}.{}': {}",
+                                table_schema.keyspace, table_schema.table, e
+                            ),
+                        });
+                        if !self.config.graceful_degradation {
+                            return (udts_loaded, tables_loaded);
+                        }
+                        continue;
+                    }
+                }
                 match registry
                     .register_schema(
                         table_schema.clone(),
@@ -1528,6 +1550,96 @@ mod tests {
         let schema = registry.get_schema("test_ks", "users").await.unwrap();
         assert_eq!(schema.table, "users");
         assert_eq!(schema.columns.len(), 3);
+    }
+
+    /// Issue #761: a table column referencing an undefined UDT must fail to load
+    /// with an error naming the missing UDT (top-level reference).
+    #[tokio::test]
+    async fn test_table_referencing_undefined_udt_top_level_fails() {
+        let (mut aggregator, temp_dir) = setup_test_aggregator().await;
+
+        let cql_content = r#"
+        CREATE TABLE test_ks.users (
+            id uuid PRIMARY KEY,
+            name text,
+            contact ContactInfo
+        );
+        "#;
+
+        let cql_path = write_file(temp_dir.path(), "schema.cql", cql_content);
+        let result = aggregator.load_from_paths(&[cql_path]).await.unwrap();
+
+        assert_eq!(
+            result.schemas_loaded, 0,
+            "table referencing undefined UDT must not load"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("ContactInfo")),
+            "an error must name the missing UDT, got: {:?}",
+            result.errors
+        );
+    }
+
+    /// Issue #761: nested UDT references (UDT inside a collection/frozen) must be
+    /// validated, not just top-level columns.
+    #[tokio::test]
+    async fn test_table_referencing_undefined_udt_nested_fails() {
+        let (mut aggregator, temp_dir) = setup_test_aggregator().await;
+
+        let cql_content = r#"
+        CREATE TABLE test_ks.users (
+            id uuid PRIMARY KEY,
+            contacts list<frozen<ContactInfo>>
+        );
+        "#;
+
+        let cql_path = write_file(temp_dir.path(), "schema.cql", cql_content);
+        let result = aggregator.load_from_paths(&[cql_path]).await.unwrap();
+
+        assert_eq!(
+            result.schemas_loaded, 0,
+            "table referencing undefined nested UDT must not load"
+        );
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("ContactInfo")),
+            "an error must name the missing nested UDT, got: {:?}",
+            result.errors
+        );
+    }
+
+    /// Issue #761: a table whose UDT reference IS defined still loads cleanly.
+    #[tokio::test]
+    async fn test_table_referencing_defined_udt_loads() {
+        let (mut aggregator, temp_dir) = setup_test_aggregator().await;
+
+        let cql_content = r#"
+        CREATE TYPE test_ks.contact_info (
+            email text,
+            phone text
+        );
+
+        CREATE TABLE test_ks.users (
+            id uuid PRIMARY KEY,
+            contact contact_info
+        );
+        "#;
+
+        let cql_path = write_file(temp_dir.path(), "schema.cql", cql_content);
+        let result = aggregator.load_from_paths(&[cql_path]).await.unwrap();
+
+        assert!(
+            result.errors.is_empty(),
+            "defined UDT reference should load without errors, got: {:?}",
+            result.errors
+        );
+        assert_eq!(result.udts_loaded, 1);
+        assert_eq!(result.schemas_loaded, 1);
     }
 
     #[tokio::test]

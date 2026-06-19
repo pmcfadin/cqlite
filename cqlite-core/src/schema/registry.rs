@@ -1218,11 +1218,42 @@ impl SchemaRegistry {
     ) {
         match cql_type {
             CqlType::Udt(udt_name, _) => {
-                if !udt_registry.contains_udt(keyspace, udt_name) {
+                if !udt_registry.contains_udt(keyspace, udt_name)
+                    && !udt_registry.contains_udt("system", udt_name)
+                {
                     errors.push(ValidationError {
                         code: "UDT_NOT_FOUND".to_string(),
                         message: format!("UDT '{}' not found in keyspace '{}'", udt_name, keyspace),
                         component: Some(udt_name.clone()),
+                        severity: ErrorSeverity::High,
+                    });
+                }
+            }
+            // `CqlType::parse` represents UDT references as `Custom("udt:<name>")`
+            // for mixed-case/underscore/digit names but as a bare `Custom("<name>")`
+            // for purely-lowercase names (e.g. `address`). Either way `parse` only
+            // yields `Custom` for non-primitive, non-collection type strings — i.e.
+            // UDT references — so validate the de-prefixed name (issue #761,
+            // roborev job 44).
+            CqlType::Custom(name) => {
+                let udt_name = name.strip_prefix("udt:").unwrap_or(name);
+                let (lookup_keyspace, bare_name) = match udt_name.split_once('.') {
+                    Some((ks, n)) => (ks, n),
+                    None => (keyspace, udt_name),
+                };
+                // Skip structural fragments parse couldn't resolve (e.g. an
+                // uppercase `SET<TEXT>`); only simple identifiers name a UDT.
+                if crate::schema::is_udt_identifier(udt_name)
+                    && !udt_registry.contains_udt(lookup_keyspace, bare_name)
+                    && !udt_registry.contains_udt("system", bare_name)
+                {
+                    errors.push(ValidationError {
+                        code: "UDT_NOT_FOUND".to_string(),
+                        message: format!(
+                            "UDT '{}' not found in keyspace '{}'",
+                            udt_name, lookup_keyspace
+                        ),
+                        component: Some(udt_name.to_string()),
                         severity: ErrorSeverity::High,
                     });
                 }
@@ -1463,6 +1494,61 @@ mod tests {
         let registry = make_registry(SchemaRegistryConfig::default()).await;
         let stats = registry.get_statistics().await.unwrap();
         assert_eq!(stats.total_schemas, 0);
+    }
+
+    /// Regression (roborev job 44): the registry's `validate_cql_type_udts` must
+    /// flag an undefined purely-lowercase UDT (bare `Custom("address")`, no
+    /// `udt:` prefix), matching `TableSchema::check_type_udt_references`.
+    #[tokio::test]
+    async fn test_registry_validate_lowercase_udt_not_found() {
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
+        let udt_registry = UdtRegistry::new();
+        let mut errors = Vec::new();
+        let mut warnings = Vec::new();
+
+        let cql_type = CqlType::parse("address").expect("parse");
+        registry.validate_cql_type_udts(
+            &cql_type,
+            "test_ks",
+            &udt_registry,
+            &mut errors,
+            &mut warnings,
+        );
+
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == "UDT_NOT_FOUND" && e.message.contains("address")),
+            "undefined lowercase UDT must be reported, got: {errors:?}"
+        );
+    }
+
+    /// Regression (roborev job 55): the registry validation path must also catch
+    /// an undefined UDT nested inside an UPPERCASE collection, mirroring
+    /// `TableSchema::validate_udt_references`.
+    #[tokio::test]
+    async fn test_registry_validate_uppercase_collection_udt_not_found() {
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
+        let udt_registry = UdtRegistry::new();
+
+        for ty in ["LIST<MissingType>", "MAP<TEXT, MissingType>"] {
+            let mut errors = Vec::new();
+            let mut warnings = Vec::new();
+            let cql_type = CqlType::parse(ty).expect("parse");
+            registry.validate_cql_type_udts(
+                &cql_type,
+                "test_ks",
+                &udt_registry,
+                &mut errors,
+                &mut warnings,
+            );
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.code == "UDT_NOT_FOUND" && e.message.contains("MissingType")),
+                "undefined UDT in '{ty}' must be reported, got: {errors:?}"
+            );
+        }
     }
 
     #[test]
