@@ -58,15 +58,18 @@ async fn discovered_schema_classifies_static_columns() {
         static_data
     );
 
-    // Regular columns must remain non-static.
+    // Regular columns must remain non-static. Require their presence so a
+    // discovered schema that silently drops a column fails the test instead of
+    // skipping the assertion (roborev job 41).
     for name in ["row_data", "row_value"] {
-        if let Some(col) = schema.get_column(name) {
-            assert!(
-                !col.is_static,
-                "regular column {} must not be classified static",
-                name
-            );
-        }
+        let col = schema.get_column(name).unwrap_or_else(|| {
+            panic!("regular column {name} must be present in discovered schema")
+        });
+        assert!(
+            !col.is_static,
+            "regular column {} must not be classified static",
+            name
+        );
     }
 }
 
@@ -97,16 +100,33 @@ async fn discovered_static_classification_matches_explicit_cql() {
         .schema()
         .expect("Discovered schema should be available for static_columns_table");
 
-    // For every regular/static column the explicit CQL knows about, the discovered
-    // schema must agree on the static classification.
+    // For every non-key column the explicit CQL knows about, the discovered
+    // schema must both expose it and agree on the static classification.
+    // Requiring presence (rather than skipping absent columns) ensures a
+    // discovered schema that drops a regular/static column fails the test
+    // (roborev job 41). Partition/clustering columns are tracked separately
+    // from `columns` in the discovered schema, so they are excluded here.
+    let key_names: std::collections::HashSet<&str> = explicit
+        .partition_keys
+        .iter()
+        .map(|k| k.name.as_str())
+        .chain(explicit.clustering_keys.iter().map(|k| k.name.as_str()))
+        .collect();
     for col in &explicit.columns {
-        if let Some(disc) = discovered.get_column(&col.name) {
-            assert_eq!(
-                disc.is_static, col.is_static,
-                "is_static mismatch for column {}: discovered={}, explicit-cql={}",
-                col.name, disc.is_static, col.is_static
-            );
+        if key_names.contains(col.name.as_str()) {
+            continue;
         }
+        let disc = discovered.get_column(&col.name).unwrap_or_else(|| {
+            panic!(
+                "discovered schema is missing column {} present in explicit CQL",
+                col.name
+            )
+        });
+        assert_eq!(
+            disc.is_static, col.is_static,
+            "is_static mismatch for column {}: discovered={}, explicit-cql={}",
+            col.name, disc.is_static, col.is_static
+        );
     }
 
     // And specifically the static column must be present and flagged in both.
