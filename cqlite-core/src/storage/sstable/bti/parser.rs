@@ -1259,41 +1259,63 @@ pub fn iterate_partitions_in_bti_file<R: Read + Seek>(
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // IMPORTANT: `Rows.db` in-trie payloads are NOT the `Partitions.db` payload
-// format (which is a hash byte + SizedInts position).  A `Rows.db` trie leaf
-// carries a *row index block* entry as described by Cassandra's
-// `RowIndexReader.java` / `TrieIndexEntry.java`:
+// format (which is a hash byte + SizedInts *signed* position).  A `Rows.db`
+// trie leaf carries a `RowIndexReader.IndexInfo` whose byte layout is defined
+// authoritatively by `RowIndexReader.readPayload`
+// (cassandra-5.0.0 `RowIndexReader.java:111-125`):
 //
-//   - Data.db position of the block start (unsigned vint)
-//   - if the payload's flag bits include `FLAG_OPEN_MARKER`, a 12-byte
-//     `DeletionTime` (4-byte localDeletionTime + 8-byte markedForDeleteAt)
-//     follows the position vint.
+//   static IndexInfo readPayload(ByteBuffer buf, int ppos, int bits, Version v) {
+//       if (bits == 0) return null;
+//       int bytes = bits & ~FLAG_OPEN_MARKER;            // FLAG_OPEN_MARKER = 8
+//       long offset = SizedInts.read(buf, ppos, bytes);  // SizedInts, NOT a vint
+//       ppos += bytes;
+//       DeletionTime del = (bits & FLAG_OPEN_MARKER) != 0
+//                          ? DeletionTime.deserialize(buf, ppos) : null;
+//       return new IndexInfo(offset, del);
+//   }
 //
-// The low nibble of the node header byte is the BTI `payloadBits`.  For Rows.db
-// the convention used by Cassandra's RowIndexReader is:
-//   bit 0x8 (FLAG_OPEN_MARKER) → an open-marker DeletionTime follows.
-// We decode the Data.db block position (the definitive field) and, when the
-// open-marker flag is set, the trailing DeletionTime.  Length is not recoverable
-// from a single payload and is reported as 0.
+// So the low nibble of the node header byte (`payloadBits`) splits as:
+//   - low 3 bits  → the number of `SizedInts` bytes encoding the block offset
+//   - bit 0x8     → FLAG_OPEN_MARKER: an open-deletion `DeletionTime` follows
 //
-// Reference: docs/sstables-definitive-guide chapter 17 (lines ~148-162),
-//            Cassandra `RowIndexReader.java` / `TrieIndexEntry.java`.
+// The `offset` field is the block's offset **relative to the partition start**
+// in `Data.db` (the IndexInfo doc: "where in the data file to start looking for
+// a given key"), so absolute Data.db position = `entry.data_position + offset`.
+//
+// The writer side (`RowIndexWriter.getSerializer.write`,
+// `RowIndexWriter.java:160-180`) confirms this exactly:
+//   bytes = SizedInts.nonZeroSize(payload.offset);
+//   type.serialize(dest, node, bytes | hasOpenMarker, nodePosition);
+//   SizedInts.write(dest, payload.offset, bytes);
+//   if (hasOpenMarker) DeletionTime.serialize(payload.openDeletion, dest);
+//
+// Earlier this decoder read the offset as an *unsigned vint* and treated the
+// whole low nibble as a flag — that misparsed every real wide-partition block
+// (issue #832, Finding A's sibling bug: payloads came out as 64/0/1/… garbage).
+//
+// Reference: docs/sstables-definitive-guide chapter 17 (Rows.db footer);
+//            cassandra-5.0.0 `RowIndexReader.java`, `RowIndexWriter.java`,
+//            `TrieIndexEntry.java`, `SizedInts.java`.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// The `FLAG_OPEN_MARKER` bit in a `Rows.db` trie node's `payloadBits`
-/// (low nibble of the header byte).  When set, a 12-byte open-marker
-/// `DeletionTime` follows the Data.db position vint.
+/// (low nibble of the header byte).  When set, an open-deletion `DeletionTime`
+/// follows the `SizedInts` block offset.  Mirrors
+/// `RowIndexReader.FLAG_OPEN_MARKER`.
 pub const FLAG_OPEN_MARKER: u8 = 0x8;
 
-/// A decoded `Rows.db` in-trie row-index block entry.
+/// A decoded `Rows.db` in-trie row-index block entry (`RowIndexReader.IndexInfo`).
 ///
-/// Mirrors the fields a `RowIndexReader` produces per block.  The headline
-/// field is [`data_offset`](Self::data_offset): the Data.db byte position of the
-/// indexed block (as Cassandra stores it in the row index).
+/// The headline field is [`data_offset`](Self::data_offset): the block's offset
+/// **relative to the partition start** in `Data.db`.  To obtain the absolute
+/// `Data.db` byte position, add the partition's data position (see
+/// [`BtiRowIndexHeader::data_position`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtiRowIndexEntry {
-    /// Data.db block position decoded from the payload's leading unsigned vint.
+    /// Block offset **relative to the partition start**, decoded via
+    /// `SizedInts.read(buf, ppos, payloadBits & ~FLAG_OPEN_MARKER)`.
     pub data_offset: u64,
-    /// Open-marker deletion time `(local_deletion_time, marked_for_delete_at)`,
+    /// Open-deletion time `(local_deletion_time, marked_for_delete_at)`,
     /// present only when the `FLAG_OPEN_MARKER` payload bit is set.
     pub open_marker: Option<(i32, i64)>,
 }
@@ -1345,11 +1367,20 @@ fn read_unsigned_vint_from_slice(data: &[u8]) -> BtiResult<(u64, usize)> {
     Ok((value, total))
 }
 
-/// Decode a `Rows.db` in-trie payload at `payload_start` inside `trie_data`,
-/// given the node's `payload_bits` (low nibble of the header byte).
+/// Decode a `Rows.db` in-trie payload (`RowIndexReader.IndexInfo`) at
+/// `payload_start` inside `trie_data`, given the node's `payload_bits` (low
+/// nibble of the header byte).
 ///
-/// See the module-level note above for the format.  Returns the decoded
-/// [`BtiRowIndexEntry`].
+/// Layout (mirrors `RowIndexReader.readPayload`, cassandra-5.0.0
+/// `RowIndexReader.java:111-125`):
+///   - `bytes = payload_bits & !FLAG_OPEN_MARKER` → block offset is a
+///     `SizedInts` value of `bytes` bytes (the offset is relative to the
+///     partition's data position).
+///   - if `payload_bits & FLAG_OPEN_MARKER`, an open-deletion `DeletionTime`
+///     follows (legacy fixed 12-byte form when present in `trie_data`).
+///
+/// A `payload_bits` of `0` is not a valid leaf payload here (the caller filters
+/// such nodes out) and yields an error.
 fn decode_bti_row_payload(
     trie_data: &[u8],
     payload_start: usize,
@@ -1361,18 +1392,39 @@ fn decode_bti_row_payload(
             trie_data.len()
         )));
     }
-    let slice = &trie_data[payload_start..];
-    let (data_offset, consumed) = read_unsigned_vint_from_slice(slice)?;
+
+    // Low 3 bits = number of SizedInts bytes; bit 0x8 = open-marker flag.
+    let offset_bytes = (payload_bits & !FLAG_OPEN_MARKER) as usize;
+    if offset_bytes == 0 || offset_bytes > 7 {
+        // RowIndexWriter asserts `bytes < 8` ("rows larger than 32 PiB"); a
+        // 0-byte offset would mean an empty payload, which the trie does not
+        // emit for a real row-index block.
+        return Err(Error::Parse(format!(
+            "Rows.db payload: invalid SizedInts byte count {offset_bytes} \
+             (payload_bits=0x{payload_bits:02x}); expected 1..=7"
+        )));
+    }
+    if payload_start + offset_bytes > trie_data.len() {
+        return Err(Error::Parse(format!(
+            "Rows.db payload: SizedInts offset needs {offset_bytes} bytes, have {}",
+            trie_data.len().saturating_sub(payload_start)
+        )));
+    }
+
+    // SizedInts is a signed sign-extended big-endian read (SizedInts.read).
+    // Block offsets are non-negative in practice, but we decode faithfully.
+    let raw = sized_ints_read_from_slice(&trie_data[payload_start..payload_start + offset_bytes])?;
+    let data_offset = raw as u64;
 
     let open_marker = if payload_bits & FLAG_OPEN_MARKER != 0 {
-        let dt_start = consumed;
-        if dt_start + 12 > slice.len() {
+        let dt_start = payload_start + offset_bytes;
+        if dt_start + 12 > trie_data.len() {
             return Err(Error::Parse(format!(
                 "Rows.db payload: open-marker DeletionTime needs 12 bytes, have {}",
-                slice.len().saturating_sub(dt_start)
+                trie_data.len().saturating_sub(dt_start)
             )));
         }
-        let dt = &slice[dt_start..dt_start + 12];
+        let dt = &trie_data[dt_start..dt_start + 12];
         let local_deletion_time = i32::from_be_bytes([dt[0], dt[1], dt[2], dt[3]]);
         let marked_for_delete_at =
             i64::from_be_bytes([dt[4], dt[5], dt[6], dt[7], dt[8], dt[9], dt[10], dt[11]]);
@@ -1473,6 +1525,231 @@ pub fn iterate_rows_in_bti_trie(
     root_offset: usize,
 ) -> BtiResult<Vec<(Vec<u8>, BtiRowIndexEntry)>> {
     dfs_collect_row_entries(trie_data, root_offset)
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Per-partition Rows.db entry resolution — TrieIndexEntry (issue #832 Finding A)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The positive `position` stored in a `Partitions.db` leaf payload
+// (`BtiPartitionLocation::RowsOffset`) does NOT point at a row-index trie root.
+// It points at this partition's **row-index entry** in `Rows.db`, which must be
+// deserialized to recover the actual trie root (plus the partition's Data.db
+// position, block count and partition-level deletion).  Feeding `RowsOffset`
+// straight to `iterate_rows_in_bti_trie` parses entry metadata as a trie node
+// and fails (or, worse, returns garbage) on real wide partitions.
+//
+// On-disk layout at `RowsOffset` (validated against the `wide_table` fixture —
+// see `tests/issue_832_bti_traversal.rs`; cassandra-5.0.0 `TrieIndexEntry.java`
+// `serialize`/`deserialize`, lines 89-120, and `RowIndexWriter.complete`):
+//
+//   [u16 key_length][partition key bytes]      ← short-length-prefixed key
+//   [data file position : unsigned vint]       ← partition start in Data.db
+//   [trie_root - base    : SIGNED vint]         ← base = RowsOffset + key_length
+//   [row index block count : unsigned vint32]
+//   [partition DeletionTime]                    ← delta/compact form; best-effort
+//
+// `TrieIndexEntry.deserialize` computes `indexTrieRoot = readVInt() + base`.
+// Cassandra passes `base` as the file position from which the entry is read;
+// for this fixture that base is `RowsOffset + key_length` (the partition key
+// is length-prefixed and precedes the vint fields).  Concretely, the three
+// `wide_table` partitions decode as:
+//
+//   RowsOffset 242 → key=pk1, dataPos=0,       rootΔ=-10 → trieRoot=236, blocks=38
+//   RowsOffset 494 → key=pk2, dataPos=619201,  rootΔ=-10 → trieRoot=488, blocks=38
+//   RowsOffset 748 → key=pk3, dataPos=1238408, rootΔ=-10 → trieRoot=742, blocks=38
+//
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A single `Rows.db` row-index entry paired with its reconstructed
+/// byte-comparable clustering separator key, as yielded by the in-order DFS.
+pub type BtiRowIndexEntryWithKey = (Vec<u8>, BtiRowIndexEntry);
+
+/// A deserialized per-partition `Rows.db` row-index entry (Cassandra
+/// `TrieIndexEntry`).  Produced by [`resolve_rows_db_entry`] from the
+/// `RowsOffset` returned by a `Partitions.db` lookup.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BtiRowIndexHeader {
+    /// Absolute byte position of the partition's start in `Data.db`.  Block
+    /// offsets in [`BtiRowIndexEntry::data_offset`] are relative to this.
+    pub data_position: u64,
+    /// Byte offset, within the `Rows.db` file, of this partition's row-index
+    /// trie root node.  Feed this to [`iterate_rows_in_bti_trie`] /
+    /// [`RowsParser::range_query`] / [`RowsParser::iterate_rows`].
+    pub trie_root: usize,
+    /// Number of row-index blocks indexed by this partition's trie.
+    pub block_count: u32,
+    /// Partition-level deletion `(local_deletion_time, marked_for_delete_at)`,
+    /// when it could be decoded as the legacy fixed 12-byte form; `None` for the
+    /// compact "live" sentinel or when too few trailing bytes remain.
+    pub partition_deletion: Option<(i32, i64)>,
+}
+
+/// Read a signed VInt (Cassandra zig-zag, `DataInputPlus.readVInt`) from `data`,
+/// returning `(value, bytes_consumed)`.
+fn read_signed_vint_from_slice(data: &[u8]) -> BtiResult<(i64, usize)> {
+    let (u, n) = read_unsigned_vint_from_slice(data)?;
+    // ZigZag decode: (u >>> 1) ^ -(u & 1)
+    let value = ((u >> 1) as i64) ^ -((u & 1) as i64);
+    Ok((value, n))
+}
+
+/// Resolve a partition's row-index entry in `Rows.db`, given the `RowsOffset`
+/// from a `Partitions.db` lookup ([`BtiPartitionLocation::RowsOffset`]).
+///
+/// This is the fix for issue #832 Finding A: `RowsOffset` is the offset of the
+/// per-partition `TrieIndexEntry`, NOT a trie root.  This deserializes that
+/// entry — recovering the partition's Data.db position, the actual row-index
+/// trie root, the block count and the partition deletion — so traversal can be
+/// rooted correctly.
+///
+/// `rows_db` is the full `Rows.db` file contents; `rows_offset` is the
+/// `RowsOffset` value.  All reads are bounds-checked.
+///
+/// # Errors
+/// Returns a parse error if `rows_offset` is out of bounds, the key length is
+/// implausible, the vint fields are truncated, or the recovered trie root falls
+/// outside `rows_db`.
+pub fn resolve_rows_db_entry(rows_db: &[u8], rows_offset: usize) -> BtiResult<BtiRowIndexHeader> {
+    if rows_offset + 2 > rows_db.len() {
+        return Err(Error::Parse(format!(
+            "Rows.db entry: rows_offset {rows_offset} + 2 (key length) exceeds file size {}",
+            rows_db.len()
+        )));
+    }
+
+    // [u16 key_length][key bytes]
+    let key_length = u16::from_be_bytes([rows_db[rows_offset], rows_db[rows_offset + 1]]) as usize;
+    let entry_start = rows_offset + 2 + key_length;
+    if entry_start > rows_db.len() {
+        return Err(Error::Parse(format!(
+            "Rows.db entry: key length {key_length} at offset {rows_offset} overruns file size {}",
+            rows_db.len()
+        )));
+    }
+
+    // base for the SIGNED root delta = RowsOffset + key_length (see module note).
+    let base = rows_offset + key_length;
+
+    let mut cur = entry_start;
+    let (data_position, n) = read_unsigned_vint_from_slice(&rows_db[cur..])?;
+    cur += n;
+
+    let (root_delta, n) = read_signed_vint_from_slice(&rows_db[cur..])?;
+    cur += n;
+
+    // indexTrieRoot = readVInt() + base   (TrieIndexEntry.deserialize)
+    let trie_root_signed = root_delta + base as i64;
+    if trie_root_signed < 0 || (trie_root_signed as usize) >= rows_db.len() {
+        return Err(Error::Parse(format!(
+            "Rows.db entry: recovered trie root {trie_root_signed} out of bounds \
+             (base={base}, delta={root_delta}, file size={})",
+            rows_db.len()
+        )));
+    }
+    let trie_root = trie_root_signed as usize;
+
+    let (block_count_u64, n) = read_unsigned_vint_from_slice(&rows_db[cur..])?;
+    cur += n;
+    let block_count = u32::try_from(block_count_u64).map_err(|_| {
+        Error::Parse(format!(
+            "Rows.db entry: implausible block count {block_count_u64}"
+        ))
+    })?;
+
+    // Partition DeletionTime: the `da`-family form is delta/compact and not
+    // required for traversal correctness, so decode the legacy fixed 12-byte
+    // form best-effort and otherwise leave it `None` rather than failing.
+    let partition_deletion = if cur + 12 <= rows_db.len() {
+        let dt = &rows_db[cur..cur + 12];
+        let ldt = i32::from_be_bytes([dt[0], dt[1], dt[2], dt[3]]);
+        let mfda = i64::from_be_bytes([dt[4], dt[5], dt[6], dt[7], dt[8], dt[9], dt[10], dt[11]]);
+        Some((ldt, mfda))
+    } else {
+        None
+    };
+
+    Ok(BtiRowIndexHeader {
+        data_position,
+        trie_root,
+        block_count,
+        partition_deletion,
+    })
+}
+
+/// Select the row-index blocks that may contain clustering keys in the
+/// inclusive byte-comparable range `[start, end]`, applying row-index
+/// **separator** semantics (issue #832 Finding B).
+///
+/// ## Why naive `[start, end]` filtering is wrong
+///
+/// A `Rows.db` row-index trie stores **separators**, not block start keys.  For
+/// consecutive blocks the writer (`RowIndexWriter.add`) stores the shortest
+/// `sep` with `prevMax < sep <= nextBlockFirstKey`, and `complete()` appends a
+/// trailing separator after the last block.  Consequently the separator `s_i`
+/// labels the boundary at the START of block `i`'s key range, and block `i`
+/// covers the half-open key interval `[s_i, s_{i+1})` (the final block runs to
+/// the trailing separator).  A reader locates the block for a key `K` via the
+/// trie *floor* of `K` (`RowIndexReader.separatorFloor`), i.e. the block whose
+/// separator is the greatest `<= K`.
+///
+/// Therefore a block `i` overlaps the requested clustering range `[start, end]`
+/// iff its key interval `[s_i, s_{i+1})` intersects `[start, end]`:
+///
+///   `s_i <= end`  AND  `s_{i+1} > start`
+///
+/// (For the last block, `s_{i+1}` is treated as +∞.)  Filtering separators by
+/// `start <= s_i <= end` — as the original implementation did — drops the
+/// *floor* block whose separator is below `start` but whose interval still
+/// contains `start`, and mishandles the block straddling `end`.
+///
+/// `entries` MUST be the full ascending-order `(separator, block)` list for one
+/// partition (as produced by [`iterate_rows_in_bti_trie`]).  `start`/`end` are
+/// byte-comparable clustering bounds in the **same encoding as the trie keys**
+/// (Cassandra OSS50 clustering byte-comparable order).  Reversed bounds
+/// (`start > end`) yield an empty result.
+pub fn select_row_index_blocks_for_range(
+    entries: &[(Vec<u8>, BtiRowIndexEntry)],
+    start: &[u8],
+    end: &[u8],
+) -> Vec<BtiRowIndexEntry> {
+    if start > end || entries.is_empty() {
+        return Vec::new();
+    }
+
+    let mut out = Vec::new();
+    for (i, (sep_i, block)) in entries.iter().enumerate() {
+        // s_{i+1}: the next separator, or +∞ for the last block.
+        let next_is_greater_than_start = match entries.get(i + 1) {
+            Some((sep_next, _)) => sep_next.as_slice() > start,
+            None => true, // +∞ > start
+        };
+        let overlaps = sep_i.as_slice() <= end && next_is_greater_than_start;
+        if overlaps {
+            out.push(block.clone());
+        }
+    }
+    out
+}
+
+/// Enumerate every row-index block entry for the partition whose `Rows.db`
+/// row-index entry is at `rows_offset` (the `RowsOffset` from `Partitions.db`),
+/// in ascending byte-comparable (clustering) order.
+///
+/// This is the convenience entry point that combines [`resolve_rows_db_entry`]
+/// (Finding A) with [`iterate_rows_in_bti_trie`]: it resolves the real trie root
+/// from the per-partition entry and then traverses from that root.  Each
+/// returned [`BtiRowIndexEntry::data_offset`] is **relative to the partition
+/// start**; add `header.data_position` for an absolute `Data.db` position.
+///
+/// Returns `(header, entries)`.
+pub fn iterate_rows_for_partition(
+    rows_db: &[u8],
+    rows_offset: usize,
+) -> BtiResult<(BtiRowIndexHeader, Vec<BtiRowIndexEntryWithKey>)> {
+    let header = resolve_rows_db_entry(rows_db, rows_offset)?;
+    let entries = iterate_rows_in_bti_trie(rows_db, header.trie_root)?;
+    Ok((header, entries))
 }
 
 /// Enumerate row-index entries in a `Rows.db` file that is a **single-partition**
@@ -1832,61 +2109,73 @@ impl<R: Read + Seek> RowsParser<R> {
     }
 
     /// Clustering-key range/slice traversal of a single partition's `Rows.db`
-    /// row-index trie (issue #832).
+    /// row-index trie (issue #832), taking **pre-encoded byte-comparable
+    /// clustering bounds** and applying row-index **separator** semantics.
     ///
-    /// ## Rooting (Finding 2)
+    /// ## Rooting (Finding A)
     ///
-    /// `rows_root` is the byte offset, within the `Rows.db` file, of THIS
-    /// partition's row-index trie root — i.e. the `RowsOffset` returned from the
-    /// `Partitions.db` lookup ([`BtiPartitionLocation::RowsOffset`]).  A real
-    /// `Rows.db` concatenates one such trie per wide partition, so the traversal
-    /// must be rooted at the partition's offset, NOT at a whole-file footer.
+    /// `rows_offset` is the partition's `RowsOffset` from the `Partitions.db`
+    /// lookup ([`BtiPartitionLocation::RowsOffset`]).  It points at the
+    /// per-partition `TrieIndexEntry`, NOT the trie root, so this resolves the
+    /// real trie root via [`resolve_rows_db_entry`] before traversing.
     ///
-    /// Encodes `start_key` and `end_key` via the byte-comparable encoder, then
-    /// returns every row-index entry whose reconstructed byte-comparable key
-    /// falls within `[encoded_start, encoded_end]` (inclusive both ends, matching
-    /// Cassandra clustering-slice semantics).  Reversed bounds (start > end)
-    /// yield an empty result.
+    /// ## Separator semantics (Finding B)
     ///
-    /// ## Soundness of the byte-comparable filter (Finding 3)
+    /// `encoded_start`/`encoded_end` are inclusive byte-comparable clustering
+    /// bounds in the **same encoding as the trie keys** (Cassandra OSS50
+    /// clustering byte-comparable form — e.g. an `int` clustering `ck` encodes
+    /// as `(ck as u32 ^ 0x8000_0000).to_be_bytes()`).  Because the trie stores
+    /// separators (block boundaries), block selection uses
+    /// [`select_row_index_blocks_for_range`]: a block is returned iff its
+    /// half-open key interval `[s_i, s_{i+1})` intersects `[start, end]`.  This
+    /// correctly includes the *floor* block that contains `start` even when its
+    /// separator is below `start`, and excludes blocks that only abut the range.
     ///
-    /// The filter compares the *full* encoded bounds against the keys
-    /// reconstructed by the DFS, and that comparison is sound because every BTI
-    /// trie edge in this representation carries **exactly one transition byte**
-    /// (the only node kinds are `Single`, `Sparse`, and `Dense` — there is no
-    /// multi-byte "chain" node).  Concatenating the transition bytes from the
-    /// root to any node therefore reconstructs the COMPLETE byte-comparable key
-    /// terminating at that node.  An internal node may itself carry a payload
-    /// whose key `K` is a strict prefix of a deeper leaf's key `K2`; because the
-    /// keys are complete (not truncated), ordinary lexicographic comparison
-    /// handles the prefix relationship correctly — `K` is included iff it lies
-    /// in `[start, end]`, independently of `K2`. No key is spuriously dropped or
-    /// included.
+    /// Reversed bounds yield an empty result.
+    ///
+    /// Returns the resolved [`BtiRowIndexHeader`] (for the partition's Data.db
+    /// position and block count) together with the selected blocks; each block's
+    /// `data_offset` is relative to `header.data_position`.
+    pub fn range_query_encoded(
+        &mut self,
+        rows_offset: usize,
+        encoded_start: &[u8],
+        encoded_end: &[u8],
+    ) -> BtiResult<(BtiRowIndexHeader, Vec<BtiRowIndexEntry>)> {
+        let trie_data = self.read_full_rows_db()?;
+        let header = resolve_rows_db_entry(&trie_data, rows_offset)?;
+        let all = iterate_rows_in_bti_trie(&trie_data, header.trie_root)?;
+        let blocks = select_row_index_blocks_for_range(&all, encoded_start, encoded_end);
+        Ok((header, blocks))
+    }
+
+    /// Clustering-key range/slice traversal using the **custom CQLite**
+    /// byte-comparable encoder ([`ByteComparableEncoder`]).
+    ///
+    /// NOTE: the CQLite encoder is NOT byte-identical to Cassandra's on-disk
+    /// OSS50 clustering encoding (it prefixes a type discriminator), so for
+    /// fixture-faithful filtering against real `Rows.db` separators callers
+    /// should encode bounds in the Cassandra form and use
+    /// [`range_query_encoded`](Self::range_query_encoded).  This method is kept
+    /// for in-process round-trips where both the writer and the bounds use the
+    /// CQLite encoder.
+    ///
+    /// `rows_offset` is the partition's `RowsOffset` (resolved to the real trie
+    /// root via [`resolve_rows_db_entry`], Finding A).  Separator semantics
+    /// (Finding B) are applied via [`select_row_index_blocks_for_range`].
     pub fn range_query(
         &mut self,
-        rows_root: usize,
+        rows_offset: usize,
         start_key: &[Value],
         end_key: &[Value],
     ) -> BtiResult<Vec<BtiRowIndexEntry>> {
         let encoded_start = self.encoder.encode_composite_key(start_key)?;
         let encoded_end = self.encoder.encode_composite_key(end_key)?;
-
-        // Reversed bounds → empty range.
         if encoded_start > encoded_end {
             return Ok(Vec::new());
         }
-
-        let trie_data = self.read_full_rows_db()?;
-        let all = iterate_rows_in_bti_trie(&trie_data, rows_root)?;
-
-        Ok(all
-            .into_iter()
-            .filter(|(key, _)| {
-                key.as_slice() >= encoded_start.as_slice()
-                    && key.as_slice() <= encoded_end.as_slice()
-            })
-            .map(|(_, entry)| entry)
-            .collect())
+        let (_, blocks) = self.range_query_encoded(rows_offset, &encoded_start, &encoded_end)?;
+        Ok(blocks)
     }
 
     /// Read the entire `Rows.db` file into a buffer for in-trie traversal.
@@ -1902,13 +2191,17 @@ impl<R: Read + Seek> RowsParser<R> {
         Ok(buf)
     }
 
-    /// Iterator over all rows in a single partition's row-index trie, rooted at
-    /// `rows_root` (the partition's `RowsOffset` from `Partitions.db`).
+    /// Iterator over all row-index blocks of a single partition, given the
+    /// partition's `RowsOffset` from `Partitions.db`
+    /// ([`BtiPartitionLocation::RowsOffset`]).
     ///
-    /// See [`range_query`](Self::range_query) for why an explicit root is
-    /// required: a `Rows.db` holds one row-index trie per partition.
-    pub fn iterate_rows(&mut self, rows_root: usize) -> BtiResult<RowIterator<'_, R>> {
-        RowIterator::new(self, rows_root)
+    /// `rows_offset` points at the per-partition `TrieIndexEntry` (NOT the trie
+    /// root); this resolves the real root via [`resolve_rows_db_entry`]
+    /// (Finding A) before traversing.  Blocks are yielded in ascending
+    /// byte-comparable clustering order; each [`BtiRowIndexEntry::data_offset`]
+    /// is relative to the partition's Data.db position.
+    pub fn iterate_rows(&mut self, rows_offset: usize) -> BtiResult<RowIterator<'_, R>> {
+        RowIterator::new(self, rows_offset)
     }
 
     /// Get header information
@@ -1968,17 +2261,18 @@ impl<'a, R: Read + Seek> Iterator for PartitionIterator<'a, R> {
     }
 }
 
-/// Iterator over the row-index entries of **one partition's** `Rows.db`
-/// row-index trie, rooted at an explicit `rows_root`, in byte-comparable order
-/// (issue #832).
+/// Iterator over the row-index block entries of **one partition's** `Rows.db`
+/// row-index trie (issue #832), in ascending byte-comparable clustering order.
 ///
-/// A real `Rows.db` concatenates one row-index trie per wide partition, so the
-/// iterator is rooted at the partition's `RowsOffset` (from `Partitions.db`),
-/// NOT at a whole-file footer (Finding 2).  The full file is read into memory
-/// and traversed in-order during construction.  Each yielded `Vec<u8>` is the
-/// reconstructed byte-comparable clustering key; the [`BtiRowIndexEntry`]
-/// carries the Data.db block position (definitive) and an optional open-marker
-/// `DeletionTime`.
+/// A real `Rows.db` concatenates one per-partition `TrieIndexEntry` + row-index
+/// trie per wide partition.  The iterator is created from the partition's
+/// `RowsOffset` (from `Partitions.db`); that offset points at the per-partition
+/// entry, so the real trie root is resolved via [`resolve_rows_db_entry`]
+/// (Finding A) before traversal — it is NOT a whole-file footer root.  The full
+/// file is read into memory and traversed in-order during construction.  Each
+/// yielded `Vec<u8>` is the reconstructed byte-comparable clustering separator
+/// key; the [`BtiRowIndexEntry`] carries the block offset (relative to the
+/// partition's Data.db position) and an optional open-deletion `DeletionTime`.
 ///
 /// An empty (e.g. 0-byte) `Rows.db` yields nothing without panicking.
 pub struct RowIterator<'a, R: Read + Seek> {
@@ -1989,7 +2283,7 @@ pub struct RowIterator<'a, R: Read + Seek> {
 }
 
 impl<'a, R: Read + Seek> RowIterator<'a, R> {
-    fn new(parser: &'a mut RowsParser<R>, rows_root: usize) -> BtiResult<Self> {
+    fn new(parser: &'a mut RowsParser<R>, rows_offset: usize) -> BtiResult<Self> {
         // An empty Rows.db (e.g. a 0-byte file for SSTables with no row index)
         // yields nothing rather than erroring.
         let file_size = parser.reader.seek(SeekFrom::End(0))?;
@@ -2001,10 +2295,12 @@ impl<'a, R: Read + Seek> RowIterator<'a, R> {
             });
         }
 
-        let (entries, pending_error) = match parser
-            .read_full_rows_db()
-            .and_then(|trie| iterate_rows_in_bti_trie(&trie, rows_root))
-        {
+        // Finding A: resolve the per-partition TrieIndexEntry at `rows_offset`
+        // to recover the actual trie root, then traverse from THAT root.
+        let (entries, pending_error) = match parser.read_full_rows_db().and_then(|trie| {
+            let header = resolve_rows_db_entry(&trie, rows_offset)?;
+            iterate_rows_in_bti_trie(&trie, header.trie_root)
+        }) {
             Ok(v) => (v, None),
             Err(e) => (Vec::new(), Some(e)),
         };
@@ -3615,6 +3911,153 @@ mod tests {
         assert_eq!(filter(&[0x31], &[0xFF]), Vec::<u64>::new()); // above range
         assert_eq!(filter(&[0x30], &[0x10]), Vec::<u64>::new()); // reversed bounds
         assert_eq!(filter(&[0x10], &[0x30]), vec![5, 17, 99]); // full inclusive
+    }
+
+    /// Finding B (issue #832): `select_row_index_blocks_for_range` applies
+    /// row-index SEPARATOR semantics — a block whose half-open key interval
+    /// `[s_i, s_{i+1})` overlaps `[start, end]` is included, including the FLOOR
+    /// block whose separator is below `start`.  This is the property naive
+    /// `[start, end]` membership filtering gets wrong.
+    #[test]
+    fn select_blocks_separator_semantics() {
+        // Three separators (block boundaries) at byte-comparable keys 0x10, 0x20,
+        // 0x30 with offsets 5, 17, 99.  Block intervals:
+        //   block@5  : [0x10, 0x20)
+        //   block@17 : [0x20, 0x30)
+        //   block@99 : [0x30, +inf)
+        let entries = vec![
+            (
+                vec![0x10u8],
+                BtiRowIndexEntry {
+                    data_offset: 5,
+                    open_marker: None,
+                },
+            ),
+            (
+                vec![0x20u8],
+                BtiRowIndexEntry {
+                    data_offset: 17,
+                    open_marker: None,
+                },
+            ),
+            (
+                vec![0x30u8],
+                BtiRowIndexEntry {
+                    data_offset: 99,
+                    open_marker: None,
+                },
+            ),
+        ];
+        let offs = |start: &[u8], end: &[u8]| -> Vec<u64> {
+            select_row_index_blocks_for_range(&entries, start, end)
+                .into_iter()
+                .map(|b| b.data_offset)
+                .collect()
+        };
+
+        // A key strictly inside the FIRST block's interval ([0x10,0x20)): the
+        // floor block @5 must be selected even though its separator (0x10) is
+        // <= start (0x18) — naive `start<=sep<=end` would WRONGLY drop it.
+        assert_eq!(
+            offs(&[0x18], &[0x18]),
+            vec![5],
+            "floor block must be selected"
+        );
+
+        // A range spanning block 1 into block 2 selects both.
+        assert_eq!(offs(&[0x18], &[0x28]), vec![5, 17]);
+
+        // A range starting exactly at a separator includes that block (and the
+        // straddling next is excluded because its s_{i} > end).
+        assert_eq!(offs(&[0x20], &[0x2F]), vec![17]);
+
+        // A range above the last separator selects only the open-ended last block.
+        assert_eq!(offs(&[0x40], &[0x50]), vec![99]);
+
+        // Below the first separator: block@5's interval [0x10,0x20) does not
+        // overlap [0x00,0x0F], so nothing is selected.
+        assert_eq!(offs(&[0x00], &[0x0F]), Vec::<u64>::new());
+
+        // Full range selects all blocks.
+        assert_eq!(offs(&[0x00], &[0xFF]), vec![5, 17, 99]);
+
+        // Reversed bounds → empty.
+        assert_eq!(offs(&[0x30], &[0x10]), Vec::<u64>::new());
+
+        // Empty entries → empty.
+        assert!(select_row_index_blocks_for_range(&[], &[0x00], &[0xFF]).is_empty());
+    }
+
+    /// Finding A (issue #832): `resolve_rows_db_entry` deserializes a synthetic
+    /// per-partition `TrieIndexEntry` and recovers the trie root via
+    /// `indexTrieRoot = readVInt() + (RowsOffset + key_length)`.  Mirrors the
+    /// real `wide_table` layout: `[u16 keylen][key][dataPos uvint][rootΔ svint]
+    /// [blockCount uvint][deletion 12B]`.
+    #[test]
+    fn resolve_rows_db_entry_recovers_root_and_metadata() {
+        // Place a 1-byte pad so the trie "root" lives at a non-zero offset.
+        let mut buf = vec![0xEEu8; 4]; // bytes 0..4: pretend trie nodes
+        let rows_offset = buf.len(); // entry starts here, e.g. 4
+
+        // key: length 4, value 0x00000007
+        buf.extend_from_slice(&4u16.to_be_bytes());
+        buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x07]);
+        let base = rows_offset + 4; // RowsOffset + key_length
+
+        // dataPos = 123 (unsigned vint, 1 byte since < 128)
+        buf.push(123);
+        // rootΔ such that trie_root = 2 (a node inside the pad region): Δ = 2 - base
+        let root_delta: i64 = 2 - base as i64;
+        // zigzag-encode then unsigned-vint (1 byte for small magnitudes)
+        let zig = ((root_delta << 1) ^ (root_delta >> 63)) as u64;
+        assert!(zig < 128, "test setup expects a 1-byte vint");
+        buf.push(zig as u8);
+        // blockCount = 38 (unsigned vint)
+        buf.push(38);
+        // partition DeletionTime (legacy fixed 12 bytes): ldt=0x09, mfda=0x11
+        buf.extend_from_slice(&9i32.to_be_bytes());
+        buf.extend_from_slice(&17i64.to_be_bytes());
+
+        let header = resolve_rows_db_entry(&buf, rows_offset).unwrap();
+        assert_eq!(header.data_position, 123);
+        assert_eq!(
+            header.trie_root, 2,
+            "trie root = rootΔ + (RowsOffset + keylen)"
+        );
+        assert_eq!(header.block_count, 38);
+        assert_eq!(header.partition_deletion, Some((9, 17)));
+
+        // Out-of-bounds RowsOffset → clean error, no panic.
+        assert!(resolve_rows_db_entry(&buf, buf.len() + 10).is_err());
+    }
+
+    /// Signed vint (zig-zag) decode round-trips small +/- values.
+    #[test]
+    fn read_signed_vint_zigzag() {
+        // -10 → zigzag 19 → 1-byte vint 0x13 (the real wide_table rootΔ).
+        let (v, n) = read_signed_vint_from_slice(&[0x13]).unwrap();
+        assert_eq!((v, n), (-10, 1));
+        // 0 → 0x00
+        assert_eq!(read_signed_vint_from_slice(&[0x00]).unwrap(), (0, 1));
+        // 63 → zigzag 126 → 0x7E
+        assert_eq!(read_signed_vint_from_slice(&[0x7E]).unwrap(), (63, 1));
+    }
+
+    /// The Rows.db payload offset is a SizedInts value (NOT an unsigned vint):
+    /// `bytes = payloadBits & ~FLAG_OPEN_MARKER`.  A 2-byte SizedInts offset of
+    /// 0x4080 (=16512, the real first block offset) must decode correctly.
+    #[test]
+    fn decode_row_payload_sizedints_two_bytes() {
+        // payloadBits = 2 → 2 SizedInts bytes, no open marker.
+        let data = vec![0x40u8, 0x80];
+        let entry = decode_bti_row_payload(&data, 0, 0x2).unwrap();
+        assert_eq!(
+            entry,
+            BtiRowIndexEntry {
+                data_offset: 16512,
+                open_marker: None,
+            }
+        );
     }
 
     /// PartitionIterator footer-based loading: build a complete in-memory
