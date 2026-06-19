@@ -1,6 +1,7 @@
 # CQLite Claude Code Skills
 
-This directory contains 5 specialized skills to accelerate M1-M6 development of the cqlite project.
+This directory contains specialized skills to accelerate M1-M6 development of the cqlite project,
+plus general-purpose Rust guidance.
 
 ## Skills Overview
 
@@ -100,6 +101,42 @@ cargo clippy --package cqlite-core --lib --all-features -- -D warnings
 cargo test --package cqlite-core --lib --all-features
 ./scripts/ci/validate-cleanup.sh
 ```
+
+---
+
+### 6. Rust Skills (General Idioms)
+**Location:** `rust-skills/`
+
+**Purpose:** Comprehensive Rust coding guidelines — 265 rules across 26 categories
+covering ownership, error handling, async, concurrency, unsafe code, API design,
+memory/performance optimization, serde, pattern matching, macros, testing, and
+common anti-patterns. Use when writing, reviewing, or refactoring any Rust code.
+
+**Trigger keywords:** idiomatic Rust, code review, refactor, ownership, borrow,
+clone, unwrap, async, lifetime, anti-pattern, optimization, API design
+
+**Supports:** All milestones (general Rust quality, complements the SSTable-specific
+`rust-patterns` skill)
+
+**Invoke with:** `/rust-skills`
+
+**Install:** Installed via the upstream CLI
+([leonardomso/rust-skills](https://github.com/leonardomso/rust-skills), MIT):
+
+```bash
+npx add-skill leonardomso/rust-skills
+```
+
+This places the full skill in the universal `.agents/skills/rust-skills/`
+directory (shared across agents) and symlinks it into `.claude/skills/rust-skills`
+for Claude Code. The pinned source + content hash live in `skills-lock.json` at
+the repo root; re-run `add-skill` to update.
+
+**Files** (under `.agents/skills/rust-skills/`):
+- `SKILL.md` - Index of all 265 rules grouped by category and priority
+- `rules/` - One Markdown file per rule (`<prefix>-<name>.md`) with rationale,
+  bad/good examples, and references
+- `LICENSE`, `README.md` - Upstream license (MIT) and docs
 
 ---
 
