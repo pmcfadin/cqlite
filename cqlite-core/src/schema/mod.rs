@@ -625,7 +625,10 @@ impl TableSchema {
                 data_type: col.column_type.clone(),
                 nullable: !col.is_primary_key, // Primary keys are non-nullable
                 default: None,
-                is_static: false, // TODO: Header format doesn't track static columns yet
+                // Static-column classification is authoritative metadata from the
+                // Statistics.db SerializationHeader (definitive guide Ch.7 / Appendix B),
+                // surfaced on ColumnInfo.is_static. Issue #758 / Epic #756.
+                is_static: col.is_static,
             })
             .collect();
 
