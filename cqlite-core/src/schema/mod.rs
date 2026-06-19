@@ -730,7 +730,9 @@ impl TableSchema {
             })?;
         }
 
-        // TODO: Add UDT type validation - check that referenced UDTs exist in registry
+        // NOTE: UDT-reference validation requires a registry and is not done here
+        // (a TableSchema is self-contained). At schema-load time, call
+        // `validate_udt_references(&registry)` to fail fast on undefined UDTs.
 
         // Validate all key columns exist in columns list
         for key in &self.partition_keys {
@@ -752,6 +754,91 @@ impl TableSchema {
         }
 
         Ok(())
+    }
+
+    /// Validate that every UDT referenced by a column exists in the registry.
+    ///
+    /// This is a schema-load-time pass that fails fast with a schema-category
+    /// error naming the missing UDT, instead of surfacing the problem later as a
+    /// confusing parse/deserialization error (issue #761). Nested references are
+    /// validated recursively: a UDT inside a collection, `frozen<>`, a tuple, or
+    /// another UDT is checked just like a top-level reference.
+    ///
+    /// UDTs are looked up in the schema's own keyspace; the `system` keyspace is
+    /// also consulted so built-in/system UDTs resolve regardless of the table's
+    /// keyspace.
+    pub fn validate_udt_references(&self, registry: &UdtRegistry) -> Result<()> {
+        for column in &self.columns {
+            // Reuse the same parse the rest of validation uses; parse errors are
+            // reported by `validate()`, so ignore them here.
+            if let Ok(cql_type) = CqlType::parse(&column.data_type) {
+                self.check_type_udt_references(&cql_type, &column.name, registry)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Recursively check a single CQL type for UDT references that are not
+    /// present in the registry.
+    fn check_type_udt_references(
+        &self,
+        cql_type: &CqlType,
+        column_name: &str,
+        registry: &UdtRegistry,
+    ) -> Result<()> {
+        match cql_type {
+            CqlType::Udt(name, _) => {
+                self.ensure_udt_exists(name, column_name, registry)?;
+            }
+            // `CqlType::parse` represents UDT references encountered in a column's
+            // declared type string as `Custom("udt:<name>")`.
+            CqlType::Custom(name) => {
+                if let Some(udt_name) = name.strip_prefix("udt:") {
+                    self.ensure_udt_exists(udt_name, column_name, registry)?;
+                }
+            }
+            CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
+                self.check_type_udt_references(inner, column_name, registry)?;
+            }
+            CqlType::Map(key_type, value_type) => {
+                self.check_type_udt_references(key_type, column_name, registry)?;
+                self.check_type_udt_references(value_type, column_name, registry)?;
+            }
+            CqlType::Tuple(field_types) => {
+                for field_type in field_types {
+                    self.check_type_udt_references(field_type, column_name, registry)?;
+                }
+            }
+            _ => {} // Primitive types reference no UDTs.
+        }
+        Ok(())
+    }
+
+    /// Confirm a referenced UDT exists in the table's keyspace (or the `system`
+    /// keyspace), returning a schema-category error naming the missing UDT.
+    fn ensure_udt_exists(
+        &self,
+        udt_name: &str,
+        column_name: &str,
+        registry: &UdtRegistry,
+    ) -> Result<()> {
+        // A reference may be qualified as `keyspace.udt`; honor an explicit
+        // keyspace, otherwise resolve against the table's keyspace.
+        let (lookup_keyspace, bare_name) = match udt_name.split_once('.') {
+            Some((ks, name)) => (ks, name),
+            None => (self.keyspace.as_str(), udt_name),
+        };
+
+        if registry.contains_udt(lookup_keyspace, bare_name)
+            || registry.contains_udt("system", bare_name)
+        {
+            return Ok(());
+        }
+
+        Err(Error::schema(format!(
+            "Column '{}' references undefined UDT '{}' in keyspace '{}'",
+            column_name, udt_name, lookup_keyspace
+        )))
     }
 
     /// Get column by name
@@ -1500,6 +1587,125 @@ mod tests {
 
         // This should succeed as we allow custom types
         assert!(TableSchema::from_json(invalid_type).is_ok());
+    }
+
+    fn udt_schema(column_type: &str) -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "t".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "uuid".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "value".to_string(),
+                    data_type: column_type.to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn test_udt_reference_undefined_top_level_errors() {
+        let registry = UdtRegistry::new();
+        let schema = udt_schema("MyMissingType");
+
+        let err = schema
+            .validate_udt_references(&registry)
+            .expect_err("undefined UDT reference must fail validation");
+        let msg = err.to_string();
+        assert!(
+            matches!(err, Error::Schema(_)),
+            "expected schema-category error, got {err:?}"
+        );
+        assert!(
+            msg.contains("MyMissingType"),
+            "error must name the missing UDT, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_udt_reference_undefined_nested_in_collection_errors() {
+        let registry = UdtRegistry::new();
+        let schema = udt_schema("list<frozen<NestedMissing>>");
+
+        let err = schema
+            .validate_udt_references(&registry)
+            .expect_err("nested undefined UDT reference must fail validation");
+        let msg = err.to_string();
+        assert!(matches!(err, Error::Schema(_)));
+        assert!(
+            msg.contains("NestedMissing"),
+            "error must name the nested missing UDT, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_udt_reference_undefined_nested_in_map_errors() {
+        let registry = UdtRegistry::new();
+        let schema = udt_schema("map<text, MapValueMissing>");
+
+        let err = schema
+            .validate_udt_references(&registry)
+            .expect_err("undefined UDT in map value must fail validation");
+        assert!(matches!(err, Error::Schema(_)));
+        assert!(err.to_string().contains("MapValueMissing"));
+    }
+
+    #[test]
+    fn test_udt_reference_defined_top_level_ok() {
+        let mut registry = UdtRegistry::new();
+        registry.register_udt(
+            UdtTypeDef::new("test_ks".to_string(), "MyType".to_string()).with_field(
+                "a".to_string(),
+                CqlType::Text,
+                true,
+            ),
+        );
+        let schema = udt_schema("MyType");
+        schema
+            .validate_udt_references(&registry)
+            .expect("defined UDT should validate");
+    }
+
+    #[test]
+    fn test_udt_reference_defined_nested_ok() {
+        let mut registry = UdtRegistry::new();
+        registry.register_udt(
+            UdtTypeDef::new("test_ks".to_string(), "MyType".to_string()).with_field(
+                "a".to_string(),
+                CqlType::Text,
+                true,
+            ),
+        );
+        let schema = udt_schema("list<frozen<MyType>>");
+        schema
+            .validate_udt_references(&registry)
+            .expect("defined nested UDT should validate");
+    }
+
+    #[test]
+    fn test_validate_udt_references_no_udts_ok() {
+        // Schemas without any UDT columns must validate against an empty registry.
+        let registry = UdtRegistry::new();
+        let schema = udt_schema("map<text, list<int>>");
+        schema
+            .validate_udt_references(&registry)
+            .expect("primitive/collection-only schema should validate");
     }
 
     #[tokio::test]

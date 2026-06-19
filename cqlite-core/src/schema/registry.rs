@@ -1218,13 +1218,38 @@ impl SchemaRegistry {
     ) {
         match cql_type {
             CqlType::Udt(udt_name, _) => {
-                if !udt_registry.contains_udt(keyspace, udt_name) {
+                if !udt_registry.contains_udt(keyspace, udt_name)
+                    && !udt_registry.contains_udt("system", udt_name)
+                {
                     errors.push(ValidationError {
                         code: "UDT_NOT_FOUND".to_string(),
                         message: format!("UDT '{}' not found in keyspace '{}'", udt_name, keyspace),
                         component: Some(udt_name.clone()),
                         severity: ErrorSeverity::High,
                     });
+                }
+            }
+            // `CqlType::parse` represents UDT references in declared column type
+            // strings as `Custom("udt:<name>")` (issue #761).
+            CqlType::Custom(name) => {
+                if let Some(udt_name) = name.strip_prefix("udt:") {
+                    let (lookup_keyspace, bare_name) = match udt_name.split_once('.') {
+                        Some((ks, n)) => (ks, n),
+                        None => (keyspace, udt_name),
+                    };
+                    if !udt_registry.contains_udt(lookup_keyspace, bare_name)
+                        && !udt_registry.contains_udt("system", bare_name)
+                    {
+                        errors.push(ValidationError {
+                            code: "UDT_NOT_FOUND".to_string(),
+                            message: format!(
+                                "UDT '{}' not found in keyspace '{}'",
+                                udt_name, lookup_keyspace
+                            ),
+                            component: Some(udt_name.to_string()),
+                            severity: ErrorSeverity::High,
+                        });
+                    }
                 }
             }
             CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
