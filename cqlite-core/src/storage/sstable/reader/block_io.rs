@@ -14,6 +14,23 @@ use super::source::BlockSource;
 use super::types::SSTableReaderConfig;
 use crate::{Error, Result};
 
+/// Maximum bytes returned by a single `read_uncompressed_data_block` call.
+///
+/// An uncompressed NB SSTable (CQLite's own write output has no CompressionInfo.db)
+/// has no chunk boundaries to read against. Returning the WHOLE data section in
+/// one `Vec` makes every stitching consumer's working set scale with the file
+/// size — defeating the bounded sliding-window compaction read (issue #827).
+///
+/// Instead this path yields the data section in fixed-size pieces across
+/// successive `read_next_block` calls (advancing the file's stream position).
+/// Stitching consumers (`stitch_all_chunks`,
+/// `stream_all_partitions_for_compaction`) concatenate pieces and drain whole
+/// partitions out of the front, so a partition straddling a piece boundary is
+/// handled by the same NeedMore refill logic as a real compression chunk. The
+/// value mirrors Cassandra's default 64 KiB compression chunk so behaviour is
+/// uniform across compressed and uncompressed inputs.
+const UNCOMPRESSED_READ_PIECE_BYTES: usize = 64 * 1024;
+
 /// Read next block with enhanced error handling and streaming support
 pub(crate) async fn read_next_block(
     file: &Arc<Mutex<BlockSource>>,
@@ -616,22 +633,29 @@ async fn read_uncompressed_data_block(
         return Ok(None);
     }
 
+    // Yield at most one fixed-size piece per call so the caller's working set
+    // (and any sliding-window stitch buffer) stays bounded regardless of file
+    // size (issue #827). The file's stream position advances by the bytes read,
+    // so the next call returns the next piece and EOF is reached naturally.
+    let to_read = remaining.min(UNCOMPRESSED_READ_PIECE_BYTES);
+
     log::debug!(
-        "read_uncompressed_data_block: Reading {} bytes from position {}",
+        "read_uncompressed_data_block: Reading {} of {} remaining bytes from position {}",
+        to_read,
         remaining,
         current_pos
     );
 
-    // Read remaining data through a capped scratch buffer so the transient
-    // working set does not scale with the file size (Issue #592).
+    // Read the piece through a capped scratch buffer so the transient working
+    // set does not scale with the file size (Issue #592).
     let data = {
         let mut file_guard = file.lock().await;
-        read_into_vec_capped(&mut *file_guard, remaining, config.read_buffer_size)
+        read_into_vec_capped(&mut *file_guard, to_read, config.read_buffer_size)
             .await
             .map_err(|e| {
                 Error::Io(std::io::Error::other(format!(
                     "Failed to read uncompressed data block ({} bytes): {}",
-                    remaining, e
+                    to_read, e
                 )))
             })?
     };
@@ -1067,15 +1091,18 @@ mod tests {
         );
     }
 
-    /// Issue #592: end-to-end, `read_uncompressed_data_block` must stream a block
-    /// far larger than `read_buffer_size` through the capped path and return
-    /// byte-identical data.
+    /// Issue #592 + #827: `read_uncompressed_data_block` must stream a data
+    /// section far larger than both `read_buffer_size` and the per-call piece
+    /// cap, returning byte-identical data when the pieces are concatenated, and
+    /// bounding each returned piece to `UNCOMPRESSED_READ_PIECE_BYTES` so the
+    /// sliding-window compaction read stays memory-bounded.
     #[tokio::test]
     async fn uncompressed_data_block_streams_large_block_byte_identical() {
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("issue_592_uncompressed_large.bin");
 
-        let size = 256 * 1024; // 256 KiB, well above the 8 KiB buffer below
+        // 3.5 piece-caps so several pieces plus a short tail are returned.
+        let size = UNCOMPRESSED_READ_PIECE_BYTES * 3 + UNCOMPRESSED_READ_PIECE_BYTES / 2;
         let test_data: Vec<u8> = (0..size).map(|i| (i % 256) as u8).collect();
         tokio::fs::write(&temp_file, &test_data).await.unwrap();
 
@@ -1083,16 +1110,33 @@ mod tests {
         let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         let config = SSTableReaderConfig {
-            read_buffer_size: 8 * 1024, // small buffer forces ~32 streamed chunks
+            read_buffer_size: 8 * 1024, // small buffer forces capped scratch reads
             ..Default::default()
         };
 
-        let data = read_uncompressed_data_block(&file, &config)
+        // Each call returns at most one piece; concatenating all pieces must
+        // reproduce the section byte-for-byte. EOF is signalled by Ok(None).
+        let mut assembled = Vec::new();
+        let mut pieces = 0;
+        while let Some(piece) = read_uncompressed_data_block(&file, &config)
             .await
             .expect("read should succeed")
-            .expect("non-empty block");
-        assert_eq!(data.len(), size);
-        assert_eq!(data, test_data);
+        {
+            assert!(
+                piece.len() <= UNCOMPRESSED_READ_PIECE_BYTES,
+                "piece {} bytes exceeds the {} byte cap — read is not bounded",
+                piece.len(),
+                UNCOMPRESSED_READ_PIECE_BYTES
+            );
+            assembled.extend_from_slice(&piece);
+            pieces += 1;
+        }
+        assert_eq!(assembled.len(), size);
+        assert_eq!(assembled, test_data);
+        assert!(
+            pieces >= 4,
+            "expected the section to be split into multiple bounded pieces, got {pieces}"
+        );
 
         tokio::fs::remove_file(&temp_file).await.ok();
     }

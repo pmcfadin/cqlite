@@ -1581,9 +1581,10 @@ impl WriteEngine {
         // NOT return an error — the merge output is correct.
         //
         // Issue #591 (write-while-mapped / Windows policy): the inputs were read
-        // through buffered I/O and fully drained into memory by `KWayMerger::new`
-        // before this point, so the merger holds no mapping over them — deleting
-        // them cannot fault with SIGBUS. `delete_sstable_files` removes each
+        // through buffered I/O (never memory-mapped) and the merge has fully
+        // drained every source through its streaming producer by this point
+        // (issue #827), so the merger holds no mapping over them — deleting them
+        // cannot fault with SIGBUS. `delete_sstable_files` removes each
         // input's TOC.txt first (unpublishing it) and is best-effort on the data
         // components, so a component still pinned by a concurrent mapped reader on
         // Windows becomes an invisible orphan reclaimed on the next startup rather

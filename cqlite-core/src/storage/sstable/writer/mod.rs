@@ -681,10 +681,31 @@ impl SSTableWriter {
     }
 
     /// Compute CRC32 checksum of a file
+    /// Compute the CRC32 digest of a finished component by streaming it through
+    /// a fixed-size buffer.
+    ///
+    /// Reads the file in 64 KiB pieces rather than slurping the whole component
+    /// into one `Vec` (`tokio::fs::read`). For a multi-GB merge output the
+    /// digest pass would otherwise allocate a buffer the size of the entire
+    /// Data.db, making end-to-end compaction peak memory scale with the output
+    /// size — defeating the bounded compaction-read work of issue #827. The
+    /// CRC32 is order-sensitive but chunk-size-agnostic, so streaming yields the
+    /// identical digest.
     async fn compute_crc32(file_path: &PathBuf) -> Result<u32> {
-        let data = tokio::fs::read(file_path).await?;
+        use tokio::io::AsyncReadExt;
+
+        const DIGEST_READ_BUFFER_BYTES: usize = 64 * 1024;
+
+        let mut file = tokio::fs::File::open(file_path).await?;
         let mut hasher = crc32fast::Hasher::new();
-        hasher.update(&data);
+        let mut buffer = vec![0u8; DIGEST_READ_BUFFER_BYTES];
+        loop {
+            let n = file.read(&mut buffer).await?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buffer[..n]);
+        }
         Ok(hasher.finalize())
     }
 }

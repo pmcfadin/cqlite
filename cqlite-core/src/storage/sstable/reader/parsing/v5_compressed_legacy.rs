@@ -90,6 +90,26 @@ type ParsedRow = (
 /// Each element is `(table_id, row_key, value_map, cell_metadata_map)`.
 type ParsedBlockWithMeta = Vec<(TableId, RowKey, Value, HashMap<String, CellWriteMetadata>)>;
 
+/// Outcome of [`V5CompressedLegacyParser::parse_one_partition_with_timestamps`].
+///
+/// The sliding-window compaction-read driver (issue #827) feeds the parser a
+/// `data` slice that grows as decompressed chunks are appended and shrinks as
+/// confirmed partitions are drained. Because a single partition can straddle a
+/// compression-chunk boundary, the bounded parser must distinguish "I parsed a
+/// complete partition" from "I ran out of buffer mid-partition and need more
+/// bytes" — conflating the two would silently drop trailing partitions.
+#[derive(Debug, PartialEq, Eq)]
+pub enum ParseStep {
+    /// A full partition was parsed; `usize` bytes of `data` were consumed and
+    /// can be drained from the front of the sliding window.
+    Emitted(usize),
+    /// `data` appears truncated mid-partition. The caller should append the
+    /// next decompressed chunk and retry. Only returned when `!at_final_chunk`.
+    NeedMore,
+    /// Genuine end of partitions in `data` (no more bytes to consume).
+    Done,
+}
+
 /// Row header data extracted from V5CompressedLegacy row
 #[derive(Debug, Clone)]
 struct RowHeader {
@@ -983,15 +1003,39 @@ impl V5CompressedLegacyParser {
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
     ) -> Result<Vec<(TableId, RowKey, Value, i64)>> {
-        // parse_block now emits Value::Tombstone correctly; we just add the
-        // per-row timestamp from the row header.
-        //
-        // Rather than duplicating the entire loop we parse with parse_block and
-        // separately call parse_row_data_with_offset to obtain the timestamp.
-        // However, that would re-parse the data twice.  Instead, we duplicate the
-        // loop here — it is a thin wrapper that adds the timestamp extraction.
+        // Thin wrapper that collects the streaming emit variant into a Vec, so
+        // every existing caller/test is byte-for-byte unchanged (issue #827).
+        let mut results: Vec<(TableId, RowKey, Value, i64)> = Vec::new();
+        self.parse_block_with_timestamps_emit(data, schema, reader, |entry| {
+            results.push(entry);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
+        Ok(results)
+    }
+
+    /// Streaming variant of [`parse_block_with_timestamps`]: invokes `emit` for
+    /// each parsed `(TableId, RowKey, Value, row_timestamp_micros)` entry rather
+    /// than collecting into a `Vec`, so the compaction read path can forward
+    /// rows into a bounded channel without materialising the whole block at once
+    /// (issue #827). Returning `ControlFlow::Break` from `emit` stops parsing
+    /// early — used when the streaming consumer is dropped.
+    ///
+    /// The tombstone/timestamp semantics are byte-identical to
+    /// [`parse_block_with_timestamps`] (Issue #505/#533): a row tombstone is
+    /// emitted as `Value::Tombstone` carrying its `markedForDeleteAt`, and the
+    /// fourth tuple element is the row write timestamp for live rows.
+    pub fn parse_block_with_timestamps_emit<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut((TableId, RowKey, Value, i64)) -> Result<std::ops::ControlFlow<()>>,
+    {
         if data.is_empty() {
-            return Ok(Vec::new());
+            return Ok(());
         }
 
         let schema = schema.ok_or_else(|| {
@@ -1001,158 +1045,280 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
-        let mut results: Vec<(TableId, RowKey, Value, i64)> = Vec::new();
         let mut offset = 0;
-        let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
-
-        const CASSANDRA_MAX_KEY_SIZE: usize = 65536;
-        const FORMAT_MAX_KEY_SIZE: usize = 255;
-
-        let mut partition_index = 0;
         let mut skipped_partitions = 0;
 
+        // Wrap `emit` so a Break is observable here as well as inside the
+        // one-partition parser (which stops its inner row loop on Break). This
+        // lets the outer loop terminate promptly when the consumer is dropped.
+        // `Cell` so the wrapping closure can borrow it shared while the outer
+        // loop also reads it between calls.
+        let broke = std::cell::Cell::new(false);
+        let mut tracking_emit = |entry| -> Result<std::ops::ControlFlow<()>> {
+            let flow = emit(entry)?;
+            if matches!(flow, std::ops::ControlFlow::Break(())) {
+                broke.set(true);
+            }
+            Ok(flow)
+        };
+
         while offset < data.len() {
-            if offset + 2 > data.len() {
-                break;
-            }
-
-            let flags = data[offset];
-            let key_len = data[offset + 1] as usize;
-            let header_min_size = 1 + 1 + key_len + 4 + 8;
-
-            if key_len == 0
-                || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE)
-                || offset + header_min_size > data.len()
-            {
-                skipped_partitions += 1;
-                offset += 1;
-                let _ = flags; // silence unused warning
-                continue;
-            }
-
-            match self.parse_partition_header(data, offset) {
-                Ok((partition_key, new_offset)) => {
-                    offset = new_offset;
-                    let mut static_cells: HashMap<String, Value> = HashMap::new();
-
-                    loop {
-                        if offset < data.len() && Self::is_end_of_partition(data[offset]) {
-                            offset += 1;
-                            break;
-                        }
-                        if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
-                            match self.skip_range_tombstone_marker(data, offset, schema) {
-                                Ok(next_offset) => {
-                                    offset = next_offset;
-                                    continue;
-                                }
-                                Err(_) => break,
-                            }
-                        }
-
-                        match self.parse_row_data_with_offset(
-                            data,
-                            offset,
-                            Some(schema),
-                            reader,
-                            false,
-                        ) {
-                            Ok((
-                                mut cells,
-                                _row_cell_meta,
-                                row_header_opt,
-                                next_offset,
-                                is_static,
-                            )) => {
-                                offset = next_offset;
-
-                                // For a row tombstone the authoritative timestamp is
-                                // markedForDeleteAt (HAS_TIMESTAMP is absent for pure row
-                                // deletes). For a live row it is the row write timestamp.
-                                // Both the merger tuple `row_ts` and the emitted
-                                // Value::Tombstone must agree, so resolve once here (#505).
-                                let row_tombstone =
-                                    row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
-                                let row_ts = match row_tombstone {
-                                    Some(h) => h.row_tombstone_deletion_time(),
-                                    None => row_header_opt
-                                        .as_ref()
-                                        .and_then(|h| h.timestamp)
-                                        .unwrap_or(0),
-                                };
-
-                                if is_static {
-                                    static_cells = cells;
-                                } else {
-                                    for (k, v) in &static_cells {
-                                        cells.entry(k.clone()).or_insert_with(|| v.clone());
-                                    }
-
-                                    // Row tombstone → Value::Tombstone(markedForDeleteAt)
-                                    let row_value = if let Some(h) = row_tombstone {
-                                        h.row_tombstone()
-                                    } else if cells.is_empty() {
-                                        Value::Null
-                                    } else {
-                                        let mut map_entries: Vec<(Value, Value)> = cells
-                                            .into_iter()
-                                            .map(|(name, value)| (Value::Text(name), value))
-                                            .collect();
-                                        map_entries.sort_by(|a, b| {
-                                            let a_key = if let Value::Text(s) = &a.0 {
-                                                s.as_str()
-                                            } else {
-                                                ""
-                                            };
-                                            let b_key = if let Value::Text(s) = &b.0 {
-                                                s.as_str()
-                                            } else {
-                                                ""
-                                            };
-                                            a_key.cmp(b_key)
-                                        });
-                                        Value::Map(map_entries)
-                                    };
-
-                                    results.push((
-                                        table_id.clone(),
-                                        partition_key.clone(),
-                                        row_value,
-                                        row_ts,
-                                    ));
-                                }
-
-                                if offset >= data.len() {
-                                    break;
-                                }
-                                if self.peek_is_partition_header(data, offset) {
-                                    break;
-                                }
-                            }
-                            Err(_) => break,
-                        }
+            match self.parse_one_partition_with_timestamps(
+                &data[offset..],
+                Some(schema),
+                reader,
+                // The whole block is present; never request a refill. A trailing
+                // parse failure is terminal here (matches the legacy
+                // `Err(_) => break` behaviour of the original loop).
+                true,
+                &mut tracking_emit,
+            )? {
+                ParseStep::Emitted(consumed) => {
+                    if consumed == 0 {
+                        // Defensive: avoid an infinite loop on a zero-byte
+                        // partition (should not happen — a header is >= 2 bytes).
+                        skipped_partitions += 1;
+                        offset += 1;
+                    } else {
+                        offset += consumed;
                     }
-
-                    partition_index += 1;
                 }
-                Err(_) => {
-                    skipped_partitions += 1;
-                    offset += 1;
-                    continue;
-                }
+                // `at_final_chunk = true` collapses NeedMore into Done: there is
+                // no further chunk to append, so a truncated tail is end-of-data.
+                ParseStep::NeedMore | ParseStep::Done => break,
+            }
+            // Propagate an early Break from `emit` (consumer dropped).
+            if broke.get() {
+                break;
             }
         }
 
         if skipped_partitions > 0 {
             log::warn!(
-                "V5CompressedLegacy (compaction): parsed {} entries, skipped {} malformed partitions",
-                results.len(),
+                "V5CompressedLegacy (compaction): skipped {} malformed partitions",
                 skipped_partitions
             );
         }
-        let _ = partition_index; // used for bookkeeping
 
-        Ok(results)
+        Ok(())
+    }
+
+    /// Parse exactly ONE partition from the front of `data`, emitting each row
+    /// via `emit`, and report how the parse terminated (issue #827).
+    ///
+    /// This isolates the body of the outer partition loop so the sliding-window
+    /// compaction driver can drain one partition at a time and `drain(0..consumed)`
+    /// from its window between calls. The crucial distinction over the legacy
+    /// monolithic loop is `NeedMore` vs `Done`:
+    ///
+    /// - [`ParseStep::Emitted(consumed)`] — a full partition was parsed and
+    ///   terminated by an END_OF_PARTITION marker or a confirmed next-partition
+    ///   header. `consumed` bytes may be drained from the window.
+    /// - [`ParseStep::NeedMore`] — `data` is (possibly) truncated mid-partition
+    ///   and `!at_final_chunk`, so the caller must append the next chunk and
+    ///   retry. NEVER returned when `at_final_chunk` is true.
+    /// - [`ParseStep::Done`] — genuine end of partitions, or (when
+    ///   `at_final_chunk`) a trailing truncation that cannot be resolved by more
+    ///   data. Terminal.
+    ///
+    /// `at_final_chunk` flips a mid-partition parse failure between a refill
+    /// request (`NeedMore`) and a terminal stop. The legacy code conflated
+    /// parse-error with end-of-partitions (`Err(_) => break`); doing that
+    /// mid-stream would silently drop every partition after a chunk boundary, so
+    /// we return `NeedMore` whenever the buffer may simply be truncated and we
+    /// are not yet at the final chunk.
+    pub fn parse_one_partition_with_timestamps<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        at_final_chunk: bool,
+        emit: &mut F,
+    ) -> Result<ParseStep>
+    where
+        F: FnMut((TableId, RowKey, Value, i64)) -> Result<std::ops::ControlFlow<()>>,
+    {
+        if data.is_empty() {
+            return Ok(ParseStep::Done);
+        }
+
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                self.keyspace, self.table_name
+            ))
+        })?;
+
+        let table_id = TableId::new(format!("{}.{}", self.keyspace, self.table_name));
+
+        const CASSANDRA_MAX_KEY_SIZE: usize = 65536;
+        const FORMAT_MAX_KEY_SIZE: usize = 255;
+
+        // A partition header is at least flags(1) + key_len(1). If we cannot even
+        // read those two bytes, we are truncated: request more unless final.
+        if data.len() < 2 {
+            return Ok(if at_final_chunk {
+                ParseStep::Done
+            } else {
+                ParseStep::NeedMore
+            });
+        }
+
+        let key_len = data[1] as usize;
+        let header_min_size = 1 + 1 + key_len + 4 + 8;
+
+        // Invalid header shape (zero/over-long key) → malformed; advance by one
+        // byte so the outer loop can resynchronise. Returning Emitted(1) here
+        // mirrors the legacy `offset += 1; continue` skip-a-byte recovery.
+        if key_len == 0 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE) {
+            return Ok(ParseStep::Emitted(1));
+        }
+
+        // Header declared but not fully present in `data` → truncated mid-header.
+        if header_min_size > data.len() {
+            return Ok(if at_final_chunk {
+                // No more bytes will ever arrive; the legacy loop treated this
+                // as the end of parseable partitions.
+                ParseStep::Done
+            } else {
+                ParseStep::NeedMore
+            });
+        }
+
+        let (partition_key, mut offset) = match self.parse_partition_header(data, 0) {
+            Ok(v) => v,
+            Err(_) => {
+                // Fixed header bytes are present but did not parse: skip a byte
+                // to resynchronise — matching the legacy
+                // `Err(_) => { offset += 1; continue }` recovery.
+                return Ok(ParseStep::Emitted(1));
+            }
+        };
+
+        let mut static_cells: HashMap<String, Value> = HashMap::new();
+
+        loop {
+            // END_OF_PARTITION (0x01): partition complete, consume the marker.
+            if offset < data.len() && Self::is_end_of_partition(data[offset]) {
+                offset += 1;
+                return Ok(ParseStep::Emitted(offset));
+            }
+
+            // Consumed everything but never saw END_OF_PARTITION: the partition
+            // may continue in the next chunk.
+            if offset >= data.len() {
+                return Ok(if at_final_chunk {
+                    ParseStep::Emitted(offset)
+                } else {
+                    ParseStep::NeedMore
+                });
+            }
+
+            if Self::is_range_tombstone_marker(data[offset]) {
+                match self.skip_range_tombstone_marker(data, offset, schema) {
+                    Ok(next_offset) => {
+                        offset = next_offset;
+                        continue;
+                    }
+                    Err(_) => {
+                        // Marker body truncated? request more unless final.
+                        return Ok(if at_final_chunk {
+                            ParseStep::Emitted(offset)
+                        } else {
+                            ParseStep::NeedMore
+                        });
+                    }
+                }
+            }
+
+            match self.parse_row_data_with_offset(data, offset, Some(schema), reader, false) {
+                Ok((mut cells, _row_cell_meta, row_header_opt, next_offset, is_static)) => {
+                    offset = next_offset;
+
+                    // For a row tombstone the authoritative timestamp is
+                    // markedForDeleteAt (HAS_TIMESTAMP is absent for pure row
+                    // deletes). For a live row it is the row write timestamp.
+                    // Both the merger tuple `row_ts` and the emitted
+                    // Value::Tombstone must agree, so resolve once here (#505).
+                    let row_tombstone = row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
+                    let row_ts = match row_tombstone {
+                        Some(h) => h.row_tombstone_deletion_time(),
+                        None => row_header_opt
+                            .as_ref()
+                            .and_then(|h| h.timestamp)
+                            .unwrap_or(0),
+                    };
+
+                    if is_static {
+                        static_cells = cells;
+                    } else {
+                        for (k, v) in &static_cells {
+                            cells.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+
+                        // Row tombstone → Value::Tombstone(markedForDeleteAt)
+                        let row_value = if let Some(h) = row_tombstone {
+                            h.row_tombstone()
+                        } else if cells.is_empty() {
+                            Value::Null
+                        } else {
+                            let mut map_entries: Vec<(Value, Value)> = cells
+                                .into_iter()
+                                .map(|(name, value)| (Value::Text(name), value))
+                                .collect();
+                            map_entries.sort_by(|a, b| {
+                                let a_key = if let Value::Text(s) = &a.0 {
+                                    s.as_str()
+                                } else {
+                                    ""
+                                };
+                                let b_key = if let Value::Text(s) = &b.0 {
+                                    s.as_str()
+                                } else {
+                                    ""
+                                };
+                                a_key.cmp(b_key)
+                            });
+                            Value::Map(map_entries)
+                        };
+
+                        match emit((table_id.clone(), partition_key.clone(), row_value, row_ts))? {
+                            std::ops::ControlFlow::Continue(()) => {}
+                            std::ops::ControlFlow::Break(()) => {
+                                // Consumer dropped: stop emitting. Report bytes
+                                // consumed so far so the caller can drain.
+                                return Ok(ParseStep::Emitted(offset));
+                            }
+                        }
+                    }
+
+                    if offset >= data.len() {
+                        // End of the buffer without an explicit END_OF_PARTITION:
+                        // the partition may continue in the next chunk.
+                        return Ok(if at_final_chunk {
+                            ParseStep::Emitted(offset)
+                        } else {
+                            ParseStep::NeedMore
+                        });
+                    }
+                    if self.peek_is_partition_header(data, offset) {
+                        // Next partition starts here — current one is complete.
+                        return Ok(ParseStep::Emitted(offset));
+                    }
+                }
+                Err(_) => {
+                    // A row failed to parse. The legacy loop unconditionally
+                    // `break`s here (end-of-partition). Mid-stream that may
+                    // instead be a row straddling the chunk boundary, so request
+                    // more bytes unless this is the final chunk.
+                    return Ok(if at_final_chunk {
+                        ParseStep::Emitted(offset)
+                    } else {
+                        ParseStep::NeedMore
+                    });
+                }
+            }
+        }
     }
 
     /// Parse row flags only (Issue #213 fix: split from parse_row_header)
