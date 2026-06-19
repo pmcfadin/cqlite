@@ -202,7 +202,7 @@ impl SSTableReader {
     /// - **Prefix-collision guard**: the trie may return a candidate for a
     ///   prefix-colliding key, so the decoded partition key is verified to equal
     ///   the queried key before any row is returned.
-    async fn bti_point_lookup(&self, _table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+    async fn bti_point_lookup(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
         // 1. Resolve the uncompressed Data.db offset via the trie.
         let offset = match self.lookup_partition_via_bti_trie(key.as_bytes())? {
             Some(off) => off as usize,
@@ -266,11 +266,12 @@ impl SSTableReader {
             &decompressed[offset..],
             schema_opt.as_ref(),
             self,
-            |(_tid, entry_key, entry_value)| {
+            |(tid, entry_key, entry_value)| {
                 // The first partition in the slice is the one the trie resolved.
-                // Defensively re-check the key (the parser-decoded partition key
-                // must equal the queried key).
-                if entry_key.as_bytes() == key.as_bytes() {
+                // Verify BOTH that the emitted table id matches the queried table
+                // (so a wrong-table query never returns a row, issue #831 review)
+                // AND that the parser-decoded partition key equals the queried key.
+                if table_ids_match(&tid, table_id) && entry_key.as_bytes() == key.as_bytes() {
                     found = Some(entry_value);
                 }
                 Ok(std::ops::ControlFlow::Break(()))

@@ -149,7 +149,10 @@ async fn read_next_block_impl(
     );
     if is_bti && compression_info.is_none() {
         log::debug!("block_io::read_next_block_impl: BTI without CompressionInfo, direct read");
-        return read_uncompressed_data_block(file, config).await;
+        // BTI direct read is parsed as a self-contained unit (like V5_0Uncompressed
+        // above), so return the whole data section contiguously (issue #827 Finding 2):
+        // piecewise here would truncate any partition/row crossing a 64 KiB boundary.
+        return read_uncompressed_data_block(file, config, false).await;
     }
 
     if cassandra_version.is_nb_format() || is_bti {
