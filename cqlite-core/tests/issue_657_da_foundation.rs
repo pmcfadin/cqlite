@@ -256,8 +256,13 @@ mod da_directory_discovery {
         );
     }
 
-    /// All three da tables (simple_table, collection_table, ttl_table) must be
-    /// discoverable from the `test_da` keyspace directory.
+    /// The three foundational da tables (simple_table, collection_table,
+    /// ttl_table) must be discoverable from the `test_da` keyspace directory.
+    ///
+    /// NOTE (issue #832): the `test_da` keyspace also carries a `wide_table`
+    /// fixture used by the BTI row-index traversal tests, so the directory count
+    /// is now >= 3 rather than exactly 3.  This test pins the *required* tables'
+    /// presence, not an exact directory count.
     #[test]
     fn da_keyspace_discovers_three_tables() {
         let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
@@ -286,11 +291,10 @@ mod da_directory_discovery {
             .filter(|e| e.path().is_dir())
             .collect();
 
-        assert_eq!(
-            table_dirs.len(),
-            3,
-            "test_da keyspace must have exactly 3 table directories: \
-             simple_table, collection_table, ttl_table. Found: {:?}",
+        assert!(
+            table_dirs.len() >= 3,
+            "test_da keyspace must have at least the 3 foundational table \
+             directories (simple_table, collection_table, ttl_table). Found: {:?}",
             table_dirs.iter().map(|e| e.file_name()).collect::<Vec<_>>()
         );
 
