@@ -784,6 +784,175 @@ impl SSTableReader {
             .collect())
     }
 
+    /// Streaming compaction read (issue #827): yield `(RowKey, Value, ts)`
+    /// entries via `emit` one partition at a time, so peak memory is bounded by
+    /// `max_partition_size + one_chunk` rather than by the total input size.
+    ///
+    /// This is the incremental counterpart of
+    /// [`iterate_all_partitions_for_compaction`], which fully materialises the
+    /// decompressed data section and parses every entry into a `Vec` before
+    /// returning. The k-way merge producer (`merge::producer_thread`) uses this
+    /// to forward entries into its bounded channel directly, so a source's
+    /// decompressed content is never fully resident.
+    ///
+    /// ## Sliding-window driver
+    ///
+    /// The V5CompressedLegacy chunk-stitching path keeps a `window: Vec<u8>` of
+    /// decompressed bytes. After appending each decompressed chunk it drains
+    /// confirmed partitions via `parse_one_partition_with_timestamps`,
+    /// `drain(0..consumed)`-ing the front of the window after every `Emitted`,
+    /// and stopping at `NeedMore` to await the next chunk (a partition can
+    /// straddle a chunk boundary). At EOF a final drain pass runs with
+    /// `at_final_chunk = true` so the trailing (possibly truncated) partition is
+    /// terminal rather than requesting a refill that will never come.
+    ///
+    /// Returning `ControlFlow::Break` from `emit` stops the scan early
+    /// (consumer dropped). Tombstone / timestamp semantics are byte-identical to
+    /// the Vec variant (Issue #505/#533).
+    pub async fn stream_all_partitions_for_compaction<F>(
+        &self,
+        schema: Option<&crate::schema::TableSchema>,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(RowKey, Value, i64) -> Result<std::ops::ControlFlow<()>>,
+    {
+        // Reset chunk reader to the start of the data section (mirrors
+        // iterate_all_partitions_for_compaction).
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        self.current_chunk_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        // Non-stitching formats are single-block / small: emit via the
+        // materialising iterator with ts=0 (matches the Vec-variant fallback).
+        if !self.requires_chunk_stitching() {
+            let entries = self.iterate_all_partitions().await?;
+            for (key, value) in entries {
+                match emit(key, value, 0)? {
+                    std::ops::ControlFlow::Continue(()) => {}
+                    std::ops::ControlFlow::Break(()) => return Ok(()),
+                }
+            }
+            return Ok(());
+        }
+
+        // Resolve the schema the parser needs (cells lack column names on disk).
+        let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
+        let parser = self.build_v5_parser();
+
+        let mut window: Vec<u8> = Vec::new();
+        let mut broke = false;
+
+        use crate::storage::sstable::compression::Compression;
+        let mut chunk_count = 0;
+        while let Some(compressed_chunk) = self.read_next_block().await? {
+            let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
+                let compression = Compression::new(*compression_reader.algorithm())?;
+                compression.decompress(&compressed_chunk).map_err(|e| {
+                    Error::corruption(format!(
+                        "stream_all_partitions_for_compaction: Failed to decompress chunk {}: {}",
+                        chunk_count, e
+                    ))
+                })?
+            } else {
+                compressed_chunk
+            };
+            window.extend_from_slice(&decompressed_chunk);
+            chunk_count += 1;
+
+            // Not the final chunk yet: NeedMore means "await more bytes". Drain
+            // every confirmed partition from the front of the window.
+            self.drain_compaction_window(
+                &parser,
+                owned_schema.as_ref(),
+                &mut window,
+                false,
+                &mut emit,
+                &mut broke,
+            )?;
+            if broke {
+                return Ok(());
+            }
+        }
+
+        // EOF: final drain — a truncated/unterminated trailing partition is now
+        // terminal (Done), not a refill request.
+        if !broke {
+            self.drain_compaction_window(
+                &parser,
+                owned_schema.as_ref(),
+                &mut window,
+                true,
+                &mut emit,
+                &mut broke,
+            )?;
+        }
+
+        log::debug!(
+            "stream_all_partitions_for_compaction: drained {} chunks (final window {} bytes)",
+            chunk_count,
+            window.len()
+        );
+
+        Ok(())
+    }
+
+    /// Drain every confirmed partition from the front of the sliding `window`,
+    /// emitting each row via `emit` (issue #827). After each `Emitted` the
+    /// consumed prefix is removed so the window's peak size stays bounded by
+    /// `max_partition_size + one_chunk`. Stops at `NeedMore` / `Done` (await the
+    /// next chunk / genuine end) or when `emit` returns `Break` (sets `*broke`).
+    fn drain_compaction_window<F>(
+        &self,
+        parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+        schema: Option<&crate::schema::TableSchema>,
+        window: &mut Vec<u8>,
+        at_final_chunk: bool,
+        emit: &mut F,
+        broke: &mut bool,
+    ) -> Result<()>
+    where
+        F: FnMut(RowKey, Value, i64) -> Result<std::ops::ControlFlow<()>>,
+    {
+        use crate::storage::sstable::reader::parsing::ParseStep;
+        loop {
+            if *broke || window.is_empty() {
+                return Ok(());
+            }
+            let mut local_break = false;
+            let step = parser.parse_one_partition_with_timestamps(
+                window.as_slice(),
+                schema,
+                self,
+                at_final_chunk,
+                &mut |(_tid, key, value, ts): (TableId, RowKey, Value, i64)| match emit(
+                    key, value, ts,
+                )? {
+                    std::ops::ControlFlow::Continue(()) => Ok(std::ops::ControlFlow::Continue(())),
+                    std::ops::ControlFlow::Break(()) => {
+                        local_break = true;
+                        Ok(std::ops::ControlFlow::Break(()))
+                    }
+                },
+            )?;
+            match step {
+                ParseStep::Emitted(consumed) => {
+                    let take = if consumed == 0 { 1 } else { consumed };
+                    window.drain(0..take.min(window.len()));
+                    if local_break {
+                        *broke = true;
+                        return Ok(());
+                    }
+                }
+                ParseStep::NeedMore | ParseStep::Done => return Ok(()),
+            }
+        }
+    }
+
     /// Read value at a specific offset with caching
     pub async fn read_value_at_offset(&self, offset: u64, size: u32) -> Result<Option<Value>> {
         use crate::parser::header::CassandraVersion;
