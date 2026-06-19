@@ -81,6 +81,46 @@ fn table_ids_match_strict(entry_table_id: &TableId, query_table_id: &TableId) ->
     }
 }
 
+/// Per-iteration decision for the BTI chunk-targeted point-lookup loop.
+#[derive(Debug, PartialEq, Eq)]
+enum BtiLookupStep {
+    /// The full partition-key prefix is buffered and matches the queried key —
+    /// parse the partition.
+    Parse,
+    /// The header/key prefix straddles a chunk boundary and is not yet fully
+    /// buffered — read the next chunk before parsing (chunk-targeted path only).
+    PullNextChunk,
+    /// Treat the partition as absent: either the buffered key prefix does not
+    /// match, or a whole-section window is structurally too short to grow.
+    Absent,
+}
+
+/// Decide what the BTI point-lookup loop should do for the current window state.
+///
+/// Pure so the chunk-straddle control flow is unit-testable without a real
+/// multi-chunk BTI fixture (DataOffset partitions are narrow and fit in one
+/// chunk, so a boundary-straddling header cannot be produced by the available
+/// fixtures). Crucially, when the key prefix is not yet buffered on the
+/// chunk-targeted path this returns [`BtiLookupStep::PullNextChunk`] — it must
+/// NOT lead to parsing a truncated header (issue #831 review).
+fn bti_lookup_step(
+    key_prefix_available: bool,
+    key_matches: bool,
+    chunk_targeted: bool,
+) -> BtiLookupStep {
+    if key_prefix_available {
+        if key_matches {
+            BtiLookupStep::Parse
+        } else {
+            BtiLookupStep::Absent
+        }
+    } else if chunk_targeted {
+        BtiLookupStep::PullNextChunk
+    } else {
+        BtiLookupStep::Absent
+    }
+}
+
 /// Sort a result slice in ascending Cassandra token order.
 ///
 /// The authoritative ordering for SSTable partitions is ascending Murmur3 token, with
@@ -422,28 +462,29 @@ impl SSTableReader {
                 )));
             }
 
-            // INVARIANT 3: verify the on-disk partition-key bytes match the queried
-            // key before decoding (guard against prefix-collision trie candidates).
-            if Self::bti_partition_key_bytes_available(&window, within, key.as_bytes()) {
-                if !self.bti_partition_key_matches(&window, within, key.as_bytes()) {
-                    debug!(
-                        "BTI trie candidate at offset {} did not match queried key (prefix \
-                         collision); treating as absent",
-                        offset
-                    );
+            // INVARIANT 3 + chunk-straddle gate. The parse/pull/absent decision is
+            // factored into the pure `bti_lookup_step` so the chunk-straddle control
+            // flow is unit-testable without a multi-chunk fixture (issue #831 review):
+            // when the header/key prefix is not yet fully buffered we must NOT invoke
+            // the parser on a truncated header (it can skip bytes and emit a later
+            // false-positive entry), and must read the next chunk first.
+            let key_available =
+                Self::bti_partition_key_bytes_available(&window, within, key.as_bytes());
+            let key_matches =
+                key_available && self.bti_partition_key_matches(&window, within, key.as_bytes());
+            match bti_lookup_step(key_available, key_matches, chunk_targeted) {
+                BtiLookupStep::Parse => { /* full key prefix buffered and matches */ }
+                BtiLookupStep::PullNextChunk => continue,
+                BtiLookupStep::Absent => {
+                    if key_available {
+                        debug!(
+                            "BTI trie candidate at offset {} did not match queried key \
+                             (prefix collision); treating as absent",
+                            offset
+                        );
+                    }
                     return Ok(None);
                 }
-                // Full key prefix is buffered and matches — safe to parse below.
-            } else if chunk_targeted {
-                // The partition header/key straddles a chunk boundary and is not
-                // yet fully buffered. Do NOT invoke the parser on a truncated
-                // header: `parse_block_emit` may skip bytes and emit a later
-                // false-positive entry, returning Ok and stopping the lookup
-                // prematurely (issue #831 review). Pull the next chunk first.
-                continue;
-            } else {
-                // Whole-section fallback but the key prefix is structurally short.
-                return Ok(None);
             }
 
             // Attempt to parse the FIRST partition at window[within..]. The parser
@@ -1844,6 +1885,45 @@ mod tests {
     // =========================================================================
     // table_ids_match tests
     // =========================================================================
+
+    #[test]
+    fn test_table_ids_match_strict_keyspace_aware() {
+        let a = TableId::new("ks_a.users".to_string());
+        let b = TableId::new("ks_b.users".to_string());
+        // Both qualified, different keyspace, same table name → must NOT match
+        // (the permissive helper would match these).
+        assert!(table_ids_match(&a, &b), "permissive helper matches on name");
+        assert!(
+            !table_ids_match_strict(&a, &b),
+            "strict guard must reject a wrong-keyspace same-name query"
+        );
+        // Both qualified, identical → match.
+        let a2 = TableId::new("ks_a.users".to_string());
+        assert!(table_ids_match_strict(&a, &a2));
+        // One side unqualified → fall back to permissive name match.
+        let unq = TableId::new("users".to_string());
+        assert!(table_ids_match_strict(&a, &unq));
+        assert!(table_ids_match_strict(&unq, &a));
+    }
+
+    #[test]
+    fn test_bti_lookup_step_decision() {
+        // Key prefix buffered and matches → parse.
+        assert_eq!(bti_lookup_step(true, true, true), BtiLookupStep::Parse);
+        assert_eq!(bti_lookup_step(true, true, false), BtiLookupStep::Parse);
+        // Key prefix buffered but does NOT match → absent (prefix collision).
+        assert_eq!(bti_lookup_step(true, false, true), BtiLookupStep::Absent);
+        assert_eq!(bti_lookup_step(true, false, false), BtiLookupStep::Absent);
+        // Key prefix NOT yet buffered (header straddles a chunk boundary):
+        //  - chunk-targeted path MUST pull the next chunk, never parse a
+        //    truncated header (issue #831 review regression);
+        assert_eq!(
+            bti_lookup_step(false, false, true),
+            BtiLookupStep::PullNextChunk
+        );
+        //  - whole-section fallback cannot grow → absent.
+        assert_eq!(bti_lookup_step(false, false, false), BtiLookupStep::Absent);
+    }
 
     #[test]
     fn test_table_ids_match_exact() {
