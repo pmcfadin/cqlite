@@ -1,0 +1,17 @@
+<!--
+  Quiet Cassandra's logging during parity runs. CQLTester pulls in Cassandra's
+  full logging; without this the harness output is dominated by INFO/DEBUG flush
+  and compaction chatter. Only WARN+ and the harness's own output are shown.
+-->
+<configuration>
+  <appender name="STDERR" class="ch.qos.logback.core.ConsoleAppender">
+    <target>System.err</target>
+    <encoder>
+      <pattern>%-5level %logger{36} - %msg%n</pattern>
+    </encoder>
+  </appender>
+
+  <root level="WARN">
+    <appender-ref ref="STDERR" />
+  </root>
+</configuration>

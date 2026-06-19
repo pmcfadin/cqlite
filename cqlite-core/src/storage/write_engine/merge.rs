@@ -789,6 +789,153 @@ pub struct KWayMerger {
     current_partition: Option<DecoratedKey>,
     /// Table schema for schema-aware merging
     schema: TableSchema,
+    /// gc_grace cutoff (seconds since epoch): tombstones/cells whose
+    /// `local_deletion_time < gc_before_secs` are purgeable.
+    ///
+    /// Threaded in for deterministic, Cassandra-matching purge decisions
+    /// (issue #842 parity harness). NOTE: purging is NOT yet applied during the
+    /// merge — see `reconcile_cluster` (issues #845 gc_grace purging, #848
+    /// TTL/expiring tie-break). The value is currently carried but unused so the
+    /// `cqlite compact --gc-before` plumbing and parity harness can land ahead of
+    /// the purge semantics.
+    #[allow(dead_code)]
+    gc_before_secs: Option<i64>,
+    /// "now" (seconds since epoch) used to evaluate TTL expiry during merge.
+    /// Carried but not yet consulted — see the note on `gc_before_secs`.
+    #[allow(dead_code)]
+    now_secs: Option<i64>,
+}
+
+/// Report returned by [`compact_sstables`].
+#[cfg(feature = "write-support")]
+#[derive(Debug)]
+pub struct CompactReport {
+    /// Metadata for the SSTable written by the compaction.
+    pub output: crate::storage::sstable::writer::SSTableInfo,
+    /// Statistics about the merge that produced it.
+    pub stats: MergeStats,
+}
+
+/// Compute output encoding baselines (min timestamp / local-deletion-time / TTL)
+/// from the input SSTables' `Statistics.db` files (two-pass compaction, issue #729).
+///
+/// The output's delta-encoding baseline must be `<=` every per-partition value in
+/// every input, so this returns the minimum across all inputs. Each component is
+/// left at its `MAX` sentinel when no input contributes a value — matching the
+/// value `SSTableWriter::pre_seed_encoding_baselines` then receives.
+///
+/// Shared by [`compact_sstables`] and `WriteEngine::start_merge` so the one-shot
+/// and policy-driven compaction paths seed baselines identically.
+#[cfg(feature = "write-support")]
+pub(crate) fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
+    let mut baseline_min_ts = i64::MAX;
+    let mut baseline_min_ldt = i32::MAX;
+    let mut baseline_min_ttl = i32::MAX;
+    for data_path in input_paths {
+        // Derive Statistics.db path from Data.db path
+        let stats_path = {
+            let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let stats_filename = filename.replace("Data.db", "Statistics.db");
+            data_path
+                .parent()
+                .unwrap_or(data_path.as_path())
+                .join(stats_filename)
+        };
+        if !stats_path.exists() {
+            continue;
+        }
+        let stats_bytes = match std::fs::read(&stats_path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!(
+                    "Could not read Statistics.db {:?} for baseline pre-seeding: {}",
+                    stats_path,
+                    e
+                );
+                continue;
+            }
+        };
+        match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+            &stats_bytes,
+            None,
+        ) {
+            Ok((_, sstable_stats)) => {
+                let ts_stats = &sstable_stats.timestamp_stats;
+                baseline_min_ts = baseline_min_ts.min(ts_stats.min_timestamp);
+                // min_deletion_time of 0 is the normalized "no tombstones" sentinel
+                // (StatisticsMetadata::finalize() maps i32::MAX→0). We include 0 so the
+                // baseline stays safe for merger tombstones that also use
+                // local_deletion_time=0. Exclude negatives and the raw i32::MAX sentinel.
+                let ldt = ts_stats.min_deletion_time;
+                if ldt >= 0 && ldt < i32::MAX as i64 {
+                    baseline_min_ldt = baseline_min_ldt.min(ldt as i32);
+                }
+                if let Some(min_ttl) = ts_stats.min_ttl {
+                    if min_ttl > 0 && min_ttl < i32::MAX as i64 {
+                        baseline_min_ttl = baseline_min_ttl.min(min_ttl as i32);
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "Could not parse Statistics.db {:?} for baseline pre-seeding: {:?}",
+                    stats_path,
+                    e
+                );
+            }
+        }
+    }
+    (baseline_min_ts, baseline_min_ldt, baseline_min_ttl)
+}
+
+/// Compact an explicit set of input SSTables into a single output SSTable.
+///
+/// Unlike [`WriteEngine::maintenance_step`](super::WriteEngine::maintenance_step),
+/// this is a one-shot, policy-free compaction over exactly `input_paths`, writing
+/// the merged result to `output_dir` (the writer appends `keyspace/table/`). It is
+/// the engine entry point behind the `cqlite compact` CLI command and the
+/// compaction-parity harness (issue #842).
+///
+/// `input_paths` must be ordered newest-to-oldest: index 0 is the newest run, which
+/// wins last-write-wins ties at equal timestamp/liveness.
+///
+/// `gc_before_secs` / `now_secs` are threaded into the merger for deterministic,
+/// Cassandra-matching purge decisions. NOTE: tombstone purging and TTL expiry are
+/// NOT yet applied during the merge (issues #845, #848); these parameters are
+/// currently carried but do not yet drop purgeable data. The plumbing lands first
+/// so the parity harness can drive out the purge semantics.
+#[cfg(feature = "write-support")]
+pub async fn compact_sstables(
+    input_paths: Vec<PathBuf>,
+    output_dir: &std::path::Path,
+    schema: &TableSchema,
+    generation: u64,
+    gc_before_secs: Option<i64>,
+    now_secs: Option<i64>,
+) -> Result<CompactReport> {
+    if input_paths.is_empty() {
+        return Err(Error::InvalidInput(
+            "compaction requires at least one input SSTable".to_string(),
+        ));
+    }
+
+    let merger = KWayMerger::new_with_gc(input_paths.clone(), schema, gc_before_secs, now_secs)?;
+
+    let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
+        output_dir.to_path_buf(),
+        generation,
+        schema,
+    )?;
+
+    // Two-pass compaction (issue #729): seed the output's encoding baselines from
+    // the inputs' Statistics.db before writing any partition.
+    let (baseline_min_ts, baseline_min_ldt, baseline_min_ttl) = compute_baseline_min(&input_paths);
+    writer.pre_seed_encoding_baselines(baseline_min_ts, baseline_min_ldt, baseline_min_ttl);
+
+    let stats = merger.merge(&mut writer)?;
+    let output = writer.finish().await?;
+
+    Ok(CompactReport { output, stats })
 }
 
 #[cfg(feature = "write-support")]
@@ -818,6 +965,30 @@ impl KWayMerger {
     /// let merger = KWayMerger::new(input_paths, &schema)?;
     /// ```
     pub fn new(input_paths: Vec<PathBuf>, schema: &TableSchema) -> Result<Self> {
+        Self::new_with_gc(input_paths, schema, None, None)
+    }
+
+    /// Create a new k-way merger with explicit purge parameters.
+    ///
+    /// Identical to [`KWayMerger::new`] but threads an explicit gc_grace cutoff
+    /// (`gc_before_secs`) and TTL evaluation time (`now_secs`) into the merge.
+    /// This is the deterministic entry point used by `compact_sstables` (the
+    /// `cqlite compact` CLI command) and the compaction-parity harness (issue
+    /// #842): Cassandra's compaction takes the same `gcBefore`, so purge
+    /// decisions cannot diverge between the two engines.
+    ///
+    /// # Arguments
+    ///
+    /// * `input_paths` - Paths to input SSTable Data.db files (ordered newest to oldest)
+    /// * `schema` - Table schema for schema-aware merging
+    /// * `gc_before_secs` - gc_grace cutoff (seconds since epoch), or `None` to not purge
+    /// * `now_secs` - "now" (seconds since epoch) for TTL expiry, or `None` for engine default
+    pub fn new_with_gc(
+        input_paths: Vec<PathBuf>,
+        schema: &TableSchema,
+        gc_before_secs: Option<i64>,
+        now_secs: Option<i64>,
+    ) -> Result<Self> {
         if input_paths.is_empty() {
             return Err(Error::InvalidInput(
                 "K-way merge requires at least one input file".to_string(),
@@ -839,6 +1010,8 @@ impl KWayMerger {
             heap,
             current_partition: None,
             schema: schema.clone(),
+            gc_before_secs,
+            now_secs,
         })
     }
 
@@ -1602,6 +1775,8 @@ mod tests {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
             schema,
         };
 
@@ -1709,6 +1884,8 @@ mod tests {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
             schema,
         };
 
@@ -1840,6 +2017,8 @@ mod tests {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
             schema,
         };
 
@@ -1974,6 +2153,8 @@ mod tests {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
             schema,
         };
 
@@ -2102,6 +2283,8 @@ mod tests {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
             schema,
         };
 
@@ -2220,6 +2403,8 @@ mod tests {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
             schema,
         };
 
@@ -2305,6 +2490,8 @@ mod tests {
             runs: vec![],
             heap: BinaryHeap::new(),
             current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
             schema,
         };
 
@@ -3188,6 +3375,8 @@ mod merge_property_tests {
                 runs: vec![],
                 heap: std::collections::BinaryHeap::new(),
                 current_partition: None,
+                gc_before_secs: None,
+                now_secs: None,
                 schema: schema.clone(),
             };
             let real_merged = merger.merge_partition_rows(merge_entries.clone())
@@ -3304,6 +3493,8 @@ mod merge_property_tests {
                 runs: vec![],
                 heap: std::collections::BinaryHeap::new(),
                 current_partition: None,
+                gc_before_secs: None,
+                now_secs: None,
                 schema: schema.clone(),
             };
             let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
@@ -3510,6 +3701,8 @@ mod streaming_tests {
             runs,
             heap: BinaryHeap::new(),
             current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
             schema,
         };
 

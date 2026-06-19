@@ -315,6 +315,136 @@ pub async fn handle_export(
     })
 }
 
+/// Result of a one-shot `compact` operation
+#[cfg(feature = "write-support")]
+#[derive(Debug)]
+pub struct CompactResult {
+    /// Path to the written output Data.db
+    pub output_path: std::path::PathBuf,
+    /// Number of input SSTables merged
+    pub input_files: usize,
+    /// Partitions written to the output
+    pub output_partitions: u64,
+    /// Rows written to the output
+    pub output_rows: u64,
+    /// Size of the output Data.db in bytes
+    pub data_file_size: u64,
+    /// Wall-clock execution time in milliseconds
+    pub execution_time_ms: f64,
+}
+
+#[cfg(feature = "write-support")]
+impl CompactResult {
+    /// Display the result to stdout
+    pub fn display(&self) {
+        println!(
+            "OK: compacted {} SSTable(s) → {}",
+            self.input_files,
+            self.output_path.display()
+        );
+        println!(
+            "  partitions: {}, rows: {}, Data.db: {} bytes ({:.1}ms)",
+            self.output_partitions, self.output_rows, self.data_file_size, self.execution_time_ms
+        );
+    }
+}
+
+/// Handle the `compact` subcommand: one-shot, policy-free compaction of an
+/// explicit set of input SSTables into a single output SSTable (Issue #842).
+///
+/// Reads the published `nb-*-big-Data.db` files under `args.input_dir`
+/// (newest-generation first, so the newest run wins last-write-wins ties),
+/// merges them, and writes the result under `args.output`.
+///
+/// `args.gc_before` / `args.now_sec` are threaded into the merge for
+/// deterministic purge decisions but are not yet applied (issues #845/#848).
+#[cfg(feature = "write-support")]
+pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<CompactResult> {
+    let start = Instant::now();
+
+    let schema = crate::commands::load_schema_file(&args.schema, false, None)?;
+
+    let inputs = discover_input_sstables(&args.input_dir)?;
+    if inputs.is_empty() {
+        return Err(anyhow::anyhow!(
+            "No published SSTables (nb-*-big-Data.db with a sibling TOC.txt) found under {}",
+            args.input_dir.display()
+        ));
+    }
+
+    let report = cqlite_core::storage::write_engine::merge::compact_sstables(
+        inputs,
+        &args.output,
+        &schema,
+        args.generation,
+        args.gc_before,
+        args.now_sec,
+    )
+    .await
+    .with_context(|| "compaction failed")?;
+
+    Ok(CompactResult {
+        output_path: report.output.data_path,
+        input_files: report.stats.input_files,
+        output_partitions: report.stats.output_partitions,
+        output_rows: report.stats.output_rows,
+        data_file_size: report.output.data_size,
+        execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
+    })
+}
+
+/// Recursively discover published input SSTables under `dir`, ordered
+/// newest-to-oldest by generation (the order `compact_sstables` expects).
+#[cfg(feature = "write-support")]
+fn discover_input_sstables(dir: &Path) -> Result<Vec<std::path::PathBuf>> {
+    let mut found: Vec<(u64, std::path::PathBuf)> = Vec::new();
+    collect_data_files(dir, &mut found, 8)?;
+    // Highest generation first: run_index 0 must be the newest run.
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(found.into_iter().map(|(_, p)| p).collect())
+}
+
+/// Recursively collect `nb-<gen>-big-Data.db` files that have a sibling
+/// `TOC.txt` (the publication barrier), pairing each with its generation.
+#[cfg(feature = "write-support")]
+fn collect_data_files(
+    dir: &Path,
+    out: &mut Vec<(u64, std::path::PathBuf)>,
+    depth: usize,
+) -> Result<()> {
+    for entry in std::fs::read_dir(dir)
+        .with_context(|| format!("Failed to read input directory: {}", dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        let name = path
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+
+        if name.starts_with("nb-") && name.ends_with("-big-Data.db") {
+            // Honor the TOC.txt publication barrier: a Data.db without a sibling
+            // TOC.txt is an unpublished/partial SSTable and must not be compacted.
+            let base = name.trim_end_matches("-Data.db");
+            let toc = path.with_file_name(format!("{base}-TOC.txt"));
+            if !toc.exists() {
+                continue;
+            }
+            // Parse generation from nb-<gen>-big-Data.db
+            let generation = name
+                .strip_prefix("nb-")
+                .and_then(|s| s.split("-big-").next())
+                .and_then(|g| g.parse::<u64>().ok())
+                .unwrap_or(0);
+            out.push((generation, path));
+        } else if depth > 0 && path.is_dir() {
+            collect_data_files(&path, out, depth - 1)?;
+        }
+    }
+    Ok(())
+}
+
 /// Handle the flush operation
 ///
 /// # Arguments

@@ -1417,63 +1417,8 @@ impl WriteEngine {
         // Two-pass compaction (issue #729): compute output FINAL encoding baselines
         // by reading the minimum values from each input SSTable's Statistics.db.
         // The output baseline must be ≤ all per-partition values from all inputs.
-        let mut baseline_min_ts = i64::MAX;
-        let mut baseline_min_ldt = i32::MAX;
-        let mut baseline_min_ttl = i32::MAX;
-        for data_path in &input_paths {
-            // Derive Statistics.db path from Data.db path
-            let stats_path = {
-                let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                let stats_filename = filename.replace("Data.db", "Statistics.db");
-                data_path
-                    .parent()
-                    .unwrap_or(data_path.as_path())
-                    .join(stats_filename)
-            };
-            if stats_path.exists() {
-                match std::fs::read(&stats_path) {
-                    Ok(stats_bytes) => {
-                        match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
-                            &stats_bytes,
-                            None,
-                        ) {
-                            Ok((_, sstable_stats)) => {
-                                let ts_stats = &sstable_stats.timestamp_stats;
-                                baseline_min_ts = baseline_min_ts.min(ts_stats.min_timestamp);
-                                // min_deletion_time of 0 is the normalized "no tombstones"
-                                // sentinel (StatisticsMetadata::finalize() sets i32::MAX→0).
-                                // We include 0 so the baseline remains safe for merger
-                                // tombstones that also use local_deletion_time=0.
-                                // Exclude negative values and the raw i32::MAX sentinel.
-                                let ldt = ts_stats.min_deletion_time;
-                                if ldt >= 0 && ldt < i32::MAX as i64 {
-                                    baseline_min_ldt = baseline_min_ldt.min(ldt as i32);
-                                }
-                                if let Some(min_ttl) = ts_stats.min_ttl {
-                                    if min_ttl > 0 && min_ttl < i32::MAX as i64 {
-                                        baseline_min_ttl = baseline_min_ttl.min(min_ttl as i32);
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::warn!(
-                                    "Could not parse Statistics.db {:?} for baseline pre-seeding: {:?}",
-                                    stats_path,
-                                    e
-                                );
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        log::warn!(
-                            "Could not read Statistics.db {:?} for baseline pre-seeding: {}",
-                            stats_path,
-                            e
-                        );
-                    }
-                }
-            }
-        }
+        let (baseline_min_ts, baseline_min_ldt, baseline_min_ttl) =
+            merge::compute_baseline_min(&input_paths);
         writer.pre_seed_encoding_baselines(baseline_min_ts, baseline_min_ldt, baseline_min_ttl);
 
         // Increment generation for next operation

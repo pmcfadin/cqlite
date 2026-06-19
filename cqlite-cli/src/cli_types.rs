@@ -288,6 +288,11 @@ pub enum Commands {
         long_about = "Export data from the write engine as Cassandra-compatible SSTables. Use --compact to run compaction before export to merge multiple SSTables into one. Example: cqlite export-sstable /tmp/export --compact --writable --write-dir /path/to/data"
     )]
     ExportSstable(ExportSstableArgs),
+    /// Compact an explicit set of input SSTables into one output SSTable
+    #[command(
+        long_about = "One-shot, policy-free compaction over exactly the SSTables in <input-dir>, writing the merged result to --output. Unlike maintenance/export-sstable this does not use a managed write-dir and takes an explicit --gc-before for deterministic, Cassandra-matching purge decisions (used by the compaction-parity harness, issue #842). Example: cqlite compact ./inputs -o ./out --schema ks.tbl.cql --gc-before 1700000000"
+    )]
+    Compact(CompactArgs),
 }
 
 #[derive(Subcommand)]
@@ -394,6 +399,33 @@ pub struct MaintenanceArgs {
     /// Time budget in milliseconds for this maintenance step
     #[arg(long, default_value = "100")]
     pub budget_ms: u64,
+}
+
+// Arguments for the compact subcommand (Issue #842 — compaction parity harness)
+#[derive(Args, Debug, Clone)]
+pub struct CompactArgs {
+    /// Directory containing the input SSTables to compact (scanned for nb-*-big-Data.db)
+    pub input_dir: PathBuf,
+    /// Output directory for the compacted SSTable (keyspace/table/ is appended)
+    #[arg(short, long)]
+    pub output: PathBuf,
+    /// CQL (.cql) or JSON (.json) schema file for the table being compacted
+    #[arg(long, value_name = "PATH")]
+    pub schema: PathBuf,
+    /// gc_grace cutoff in seconds since epoch. Tombstones/cells whose
+    /// localDeletionTime < this value are purgeable. Omit to disable purging.
+    /// NOTE: purging is not yet applied during the merge (issues #845/#848);
+    /// the value is currently accepted and threaded through but does not yet
+    /// drop purgeable data.
+    #[arg(long, value_name = "SECS")]
+    pub gc_before: Option<i64>,
+    /// "now" in seconds since epoch for TTL expiry evaluation. Omit for engine
+    /// default. (Carried but not yet consulted — see --gc-before note.)
+    #[arg(long, value_name = "SECS")]
+    pub now_sec: Option<i64>,
+    /// Output SSTable generation number (filename nb-<gen>-big-*.db)
+    #[arg(long, default_value = "1")]
+    pub generation: u64,
 }
 
 // Arguments for the export-sstable subcommand (Issue #392)
