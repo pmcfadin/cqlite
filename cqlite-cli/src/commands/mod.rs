@@ -1649,7 +1649,7 @@ fn resolve_sstable_path(sstable_path: &Path) -> Result<PathBuf> {
 }
 
 /// Load schema from JSON or CQL file
-fn load_schema_file(
+pub(crate) fn load_schema_file(
     schema_path: &Path,
     _auto_detect: bool,
     _cassandra_version: Option<&str>,

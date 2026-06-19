@@ -948,6 +948,21 @@ async fn run_main() -> Result<()> {
                 ))
             }
         }
+        Some(Commands::Compact(args)) => {
+            #[cfg(feature = "write-support")]
+            {
+                let result = commands::write::handle_compact(&args).await?;
+                result.display();
+                Ok(())
+            }
+            #[cfg(not(feature = "write-support"))]
+            {
+                let _ = args;
+                Err(anyhow::anyhow!(
+                    "Write support is not enabled. Build with --features write-support to enable write operations."
+                ))
+            }
+        }
         None => {
             // Default to help message for now
             println!("CQLite CLI v{}", env!("CARGO_PKG_VERSION"));
