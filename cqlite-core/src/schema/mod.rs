@@ -1086,27 +1086,38 @@ impl CqlType {
     pub fn parse(type_str: &str) -> Result<Self> {
         let type_str = type_str.trim();
 
+        // CQL type keywords are case-insensitive (`SET<TEXT>` == `set<text>`),
+        // so match collection/frozen/tuple prefixes case-insensitively. Matching
+        // only lowercase here previously left uppercase collections to fall
+        // through to a bare `Custom("SET<TEXT>")`, which both broke type-aware
+        // handling and confused UDT-reference validation (roborev job 51).
+        fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {
+            s.get(..prefix.len())
+                .filter(|head| head.eq_ignore_ascii_case(prefix))
+                .map(|_| &s[prefix.len()..])
+        }
+
         // Handle frozen types
-        if let Some(inner) = type_str.strip_prefix("frozen<") {
+        if let Some(inner) = strip_prefix_ci(type_str, "frozen<") {
             if let Some(inner) = inner.strip_suffix('>') {
                 return Ok(CqlType::Frozen(Box::new(Self::parse(inner)?)));
             }
         }
 
         // Handle collection types
-        if let Some(inner) = type_str.strip_prefix("list<") {
+        if let Some(inner) = strip_prefix_ci(type_str, "list<") {
             if let Some(inner) = inner.strip_suffix('>') {
                 return Ok(CqlType::List(Box::new(Self::parse(inner)?)));
             }
         }
 
-        if let Some(inner) = type_str.strip_prefix("set<") {
+        if let Some(inner) = strip_prefix_ci(type_str, "set<") {
             if let Some(inner) = inner.strip_suffix('>') {
                 return Ok(CqlType::Set(Box::new(Self::parse(inner)?)));
             }
         }
 
-        if let Some(inner) = type_str.strip_prefix("map<") {
+        if let Some(inner) = strip_prefix_ci(type_str, "map<") {
             if let Some(inner) = inner.strip_suffix('>') {
                 let parts = Self::split_top_level_types(inner)?;
                 if parts.len() != 2 {
@@ -1120,7 +1131,7 @@ impl CqlType {
         }
 
         // Handle tuple types
-        if let Some(inner) = type_str.strip_prefix("tuple<") {
+        if let Some(inner) = strip_prefix_ci(type_str, "tuple<") {
             if let Some(inner) = inner.strip_suffix('>') {
                 let parts = Self::split_top_level_types(inner)?;
                 let mut types = Vec::new();
@@ -1680,16 +1691,43 @@ mod tests {
     }
 
     #[test]
-    fn test_unparsed_uppercase_collection_is_not_treated_as_udt() {
-        // Regression: `CqlType::parse` returns a bare `Custom("SET<TEXT>")` for an
-        // uppercase collection it doesn't structurally parse. That is NOT a UDT
-        // reference and must not fail validation (collections fixture regression).
+    fn test_uppercase_collection_of_primitives_is_not_a_udt() {
+        // Regression (collections fixture): uppercase collections of primitives
+        // must parse and not be mistaken for a UDT reference.
         let registry = UdtRegistry::new();
-        for col_type in ["SET<TEXT>", "LIST<INT>", "MAP<TEXT, TEXT>"] {
+        for col_type in [
+            "SET<TEXT>",
+            "LIST<INT>",
+            "MAP<TEXT, TEXT>",
+            "FROZEN<LIST<INT>>",
+        ] {
             let schema = udt_schema(col_type);
             schema
                 .validate_udt_references(&registry)
                 .unwrap_or_else(|e| panic!("'{col_type}' must not be flagged as a UDT: {e}"));
+        }
+    }
+
+    #[test]
+    fn test_uppercase_collection_with_undefined_udt_errors() {
+        // Regression (roborev job 51): an undefined UDT nested inside an
+        // UPPERCASE collection must still be detected — case-insensitive parsing
+        // means the nested reference is validated, not skipped.
+        let registry = UdtRegistry::new();
+        for col_type in [
+            "LIST<MissingType>",
+            "MAP<TEXT, MissingType>",
+            "FROZEN<SET<MissingType>>",
+        ] {
+            let schema = udt_schema(col_type);
+            let err = schema
+                .validate_udt_references(&registry)
+                .expect_err("undefined UDT in uppercase collection must fail");
+            assert!(matches!(err, Error::Schema(_)), "got {err:?}");
+            assert!(
+                err.to_string().contains("MissingType"),
+                "error must name the missing UDT, got: {err}"
+            );
         }
     }
 
