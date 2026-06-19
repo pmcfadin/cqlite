@@ -514,11 +514,9 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   # Generate Statistics.db.txt reference files (matches nb corpus convention)
   log "Generating Statistics.db.txt for test_deltas tables..."
   while IFS= read -r -d '' data_file; do
-    local rel
     rel="${data_file#"$SSTABLES_DIR"/}"
-    local stats_txt="${data_file%.db}.db.txt"
     # Rewrite path to strip "test_deltas/..." prefix for the plain filename
-    local stats_base="${data_file%Data.db}Statistics.db.txt"
+    stats_base="${data_file%Data.db}Statistics.db.txt"
     log "  sstablemetadata: $rel"
     $ENGINE run --rm \
       -v "$SSTABLES_DIR:/data" \

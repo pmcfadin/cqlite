@@ -4,7 +4,7 @@
 
 **Last Updated**: 2026-06-19 (After Issue #701 — test_deltas delete-bearing fixtures added)
 **Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) - Validate all 33 test tables can be loaded successfully
-**Current Status**: 41/41 PASS (100% pass rate across nb+oa corpus) — test_deltas (8 tables) added
+**Current Status**: 39/39 PASS (100% pass rate across nb+oa corpus) — test_deltas (8 tables) skip-pending until dataset asset published (#701)
 
 ---
 
@@ -12,10 +12,11 @@
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| **Total Tables** | 41 | 4 nb keyspaces (33) + test_oa (6) + test_deltas (8); test_da skip-pending |
-| **Tables with JSONL** | 41 | 100% coverage - all enforced tables have sstabledump reference files |
-| **Smoke Test Pass** | 41/41 | 100% pass rate (nb+oa corpus) |
-| **Smoke Test Fail** | 0/41 | 0% failure rate |
+| **Total Tables** | 47 | 4 nb keyspaces (33) + test_oa (6) + test_deltas (8); test_da skip-pending |
+| **Enforced Tables** | 39 | nb (33) + test_oa (6); test_deltas skip-pending until dataset asset published (#701) |
+| **Tables with JSONL** | 47 | 100% coverage - all tables (incl. skip-pending) have sstabledump reference files |
+| **Smoke Test Pass** | 39/39 | 100% pass rate (nb+oa enforced corpus) |
+| **Smoke Test Fail** | 0/39 | 0% failure rate |
 | **Exit Code 3 Failures** | 0 | None remaining (Issue #220 fixed) |
 | **Exit Code 5 Failures** | 0 | None remaining |
 
@@ -27,9 +28,9 @@
 | **test_collections** | 8 | 0 | 8 | 100% ✅ |
 | **test_timeseries** | 9 | 0 | 9 | 100% ✅ |
 | **test_wide_rows** | 8 | 0 | 8 | 100% ✅ |
-| **test_deltas** | 8 | 0 | 8 | 100% ✅ (added Issue #701) |
+| **test_deltas** | — | — | 8 | SKIP-PENDING (binaries not in dataset asset yet; see #701) |
 
-**Note**: All 41 enforced tables now passing. test_deltas covers all 8 delete/shape cases (Issue #701, coordinates with #667).
+**Note**: All 39 enforced tables now passing. test_deltas (8 tables, Issue #701) has JSONL goldens committed but is skip-pending in smoke test until a new dataset asset containing its Data.db files is published and `fetch-datasets.sh`'s pin is bumped. At that point move `test_deltas` from `SKIP_PENDING_KEYSPACES` to `KEYSPACES` in `smoke-test-all-tables.sh`.
 
 ### Recent Fixes (Dec 2025)
 

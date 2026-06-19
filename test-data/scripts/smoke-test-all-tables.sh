@@ -3,12 +3,16 @@
 # Issue #200: Validate that all 33 nb test tables can be loaded successfully
 # Issue #654: Also discover oa/da keyspaces
 # Issue #656 (VG4): Promote test_oa to enforced (nb + oa = 39 tables); test_da stays skip-pending
-# Issue #701 (DS5): Add test_deltas (8 delete-bearing tables); nb + oa + deltas = 47 enforced
+# Issue #701 (DS5): Add test_deltas (8 delete-bearing tables); currently skip-pending
+#   until a new dataset asset containing test_deltas binaries is published and
+#   fetch-datasets.sh's pin (DATASET_TAG/DATASET_ASSET/DATASET_SHA256) is bumped.
+#   At that point, move "test_deltas" from SKIP_PENDING_KEYSPACES back into KEYSPACES.
 #
 # This script discovers all test tables across all keyspaces:
 #   - nb (enforced): test_basic, test_collections, test_timeseries, test_wide_rows
 #   - oa (enforced, VG4): test_oa — oa format BIG read implemented in #655
-#   - nb/deltas (enforced, DS5 #701): test_deltas — delete-bearing fixtures (8 tables)
+#   - nb/deltas (skip-pending, DS5 #701): test_deltas — delete-bearing fixtures (8 tables);
+#     binaries not yet included in the published dataset asset; skipped if binaries absent
 #   - da/bti (skip-pending, BTI read epic #660): test_da
 #
 # Tables in SKIP_PENDING_KEYSPACES are discovered and listed, but not run
@@ -53,17 +57,20 @@ OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/smoke-test-all-tables-results}"
 
 # Enforced keyspaces (must all pass, failures exit non-zero)
 # Issue #656 (VG4): test_oa promoted from skip-pending to enforced (nb=33 + oa=6 = 39 tables)
-# Issue #701 (DS5): test_deltas added (8 delete-bearing nb tables); total = 47 enforced
-KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa" "test_deltas")
+# Issue #701 (DS5): test_deltas fixtures created but kept skip-pending until its binaries are
+#   published in a new dataset asset and fetch-datasets.sh pin is bumped (DATASET_TAG etc).
+KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa")
 
 # Skip-pending keyspaces (Issue #654):
-#   - test_da: da/BTI format - skip until BTI read epic #660
+#   - test_da:     da/BTI format - skip until BTI read epic #660
+#   - test_deltas: delete-bearing fixtures (#701) - skip until dataset asset includes binaries;
+#                  flip to enforced (move into KEYSPACES above) once fetch-datasets.sh pin is bumped
 # These keyspaces are discovered and listed explicitly as SKIP-PENDING,
-# but are not run through read-sstable (would produce parse errors).
-SKIP_PENDING_KEYSPACES=("test_da")
+# but are not run through read-sstable (would produce parse errors or missing Data.db).
+SKIP_PENDING_KEYSPACES=("test_da" "test_deltas")
 # Reason per keyspace (parallel arrays, bash 3.x compatible)
-SKIP_PENDING_KEYSPACE_NAMES=("test_da")
-SKIP_PENDING_KEYSPACE_REASONS=("da/BTI-format parsing not yet implemented (see BTI read epic #660)")
+SKIP_PENDING_KEYSPACE_NAMES=("test_da" "test_deltas")
+SKIP_PENDING_KEYSPACE_REASONS=("da/BTI-format parsing not yet implemented (see BTI read epic #660)" "binaries not in published dataset asset yet (see issue #701 — promote once fetch-datasets.sh pin is bumped)")
 
 # Get skip reason for a keyspace (bash 3.x compatible, no associative arrays)
 get_skip_reason() {
@@ -426,7 +433,7 @@ print_summary() {
     echo "    SMOKE TEST SUMMARY - ALL TABLES"
     echo "========================================="
     echo ""
-    echo "  Total Tables Tested: ${total_tables}/47 (nb=33 + oa=6 + deltas=8, enforced)"
+    echo "  Total Tables Tested: ${total_tables}/39 (nb=33 + oa=6, enforced; test_deltas=8 skip-pending until dataset publish)"
     echo -e "  ${GREEN}Passed:              ${#PASSED_TABLES[@]}${NC}"
 
     if [[ ${#FAILED_TABLES[@]} -gt 0 ]]; then
@@ -465,7 +472,8 @@ print_summary() {
 
     if [[ ${#FAILED_TABLES[@]} -eq 0 ]]; then
         echo -e "${GREEN}=========================================${NC}"
-        echo -e "${GREEN}  All nb+oa+deltas tables (47) passed smoke test${NC}"
+        echo -e "${GREEN}  All nb+oa tables (39) passed smoke test${NC}"
+        echo -e "${GREEN}  test_deltas (8): skip-pending until dataset publish (#701)${NC}"
         echo -e "${GREEN}  da/BTI tables present but skip-pending (BTI read epic #660)${NC}"
         echo -e "${GREEN}=========================================${NC}"
         return 0
@@ -482,7 +490,7 @@ main() {
     log_info "CQLite Comprehensive Table Loading Smoke Test"
     log_info "Issue #200: Validate all 33 nb test tables load successfully"
     log_info "Issue #656 (VG4): oa tables (test_oa) now enforced; da tables listed as SKIP-PENDING"
-    log_info "Issue #701 (DS5): test_deltas (8 delete-bearing tables) now enforced"
+    log_info "Issue #701 (DS5): test_deltas fixtures added; skip-pending until dataset asset published"
     echo ""
 
     detect_timeout_command
