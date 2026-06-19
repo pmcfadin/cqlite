@@ -583,7 +583,7 @@ mod full_header_unit_tests {
                 key_position: if i < 3 { Some(i as u16) } else { None },
                 is_static: i % 5 == 0,
                 is_clustering: i % 3 == 0,
-            });
+                clustering_reversed: false,            });
         }
 
         let header = SSTableHeader {
@@ -798,7 +798,7 @@ mod property_unit_tests {
                     key_position: Some(0),
                     is_static: false,
                     is_clustering: false,
-                }
+                    clustering_reversed: false,                }
             ],
             properties: {
                 let mut props = HashMap::new();

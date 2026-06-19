@@ -1347,6 +1347,11 @@ fn is_reversed_comparator(marshal_type: &str) -> bool {
     while value.starts_with('(') && value.ends_with(')') && value.len() > 2 {
         value = value[1..value.len() - 1].trim();
     }
+    // Some accepted header encodings prefix the comparator list with a `[`
+    // (e.g. `[org.apache.cassandra.db.marshal.ReversedType(...)`); strip a
+    // leading bracket so the ReversedType detection matches that form too
+    // (roborev job 43).
+    let value = value.trim_start_matches('[').trim_start();
     value.starts_with("org.apache.cassandra.db.marshal.ReversedType(")
         || value.starts_with("ReversedType(")
 }
@@ -2415,6 +2420,11 @@ mod tests {
         assert!(is_reversed_comparator(
             "(org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.SimpleDateType))"
         ));
+        // ...and sometimes with a structural '[' (roborev job 43) — still DESC.
+        assert!(is_reversed_comparator(
+            "[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)"
+        ));
+        assert!(is_reversed_comparator("[ReversedType(Int32Type)"));
         // Non-reversed comparators are ASC.
         assert!(!is_reversed_comparator(
             "org.apache.cassandra.db.marshal.UTF8Type"

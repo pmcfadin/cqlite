@@ -678,7 +678,7 @@ fn create_test_header() -> SSTableHeader {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
-            }
+                clustering_reversed: false,            }
         ],
         properties: HashMap::new(),
     }
@@ -696,7 +696,7 @@ fn create_complex_header() -> SSTableHeader {
             key_position: None,
             is_static: i % 3 == 0,
             is_clustering: i % 2 == 0,
-        });
+            clustering_reversed: false,        });
     }
 
     for i in 0..20 {
@@ -721,7 +721,7 @@ fn create_extremely_large_header() -> SSTableHeader {
             key_position: if i < 5 { Some(i as u16) } else { None },
             is_static: i % 10 == 0,
             is_clustering: i % 7 == 0,
-        });
+            clustering_reversed: false,        });
     }
 
     // Large number of properties

@@ -266,7 +266,7 @@ fn test_oa_complete_header_roundtrip() {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
-            },
+                clustering_reversed: false,            },
             ColumnInfo {
                 name: "data".to_string(),
                 column_type: "text".to_string(),
@@ -274,7 +274,7 @@ fn test_oa_complete_header_roundtrip() {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
-            }
+                clustering_reversed: false,            }
         ],
         properties: {
             let mut props = HashMap::new();

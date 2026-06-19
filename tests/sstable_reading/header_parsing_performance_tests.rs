@@ -653,7 +653,7 @@ fn create_simple_header() -> SSTableHeader {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
-            }
+                clustering_reversed: false,            }
         ],
         properties: HashMap::new(),
     }
@@ -673,7 +673,7 @@ fn create_typical_header() -> SSTableHeader {
             key_position: Some(0),
             is_static: false,
             is_clustering: false,
-        },
+            clustering_reversed: false,        },
         ColumnInfo {
             name: "created_at".to_string(),
             column_type: "timestamp".to_string(),
@@ -681,7 +681,7 @@ fn create_typical_header() -> SSTableHeader {
             key_position: None,
             is_static: false,
             is_clustering: true,
-        },
+            clustering_reversed: false,        },
         ColumnInfo {
             name: "data".to_string(),
             column_type: "text".to_string(),
@@ -689,7 +689,7 @@ fn create_typical_header() -> SSTableHeader {
             key_position: None,
             is_static: false,
             is_clustering: false,
-        },
+            clustering_reversed: false,        },
     ];
 
     // Add typical properties
@@ -727,7 +727,7 @@ fn create_complex_header() -> SSTableHeader {
             key_position: if i < 3 { Some(i as u16) } else { None },
             is_static: i % 7 == 0,
             is_clustering: i % 3 == 0,
-        });
+            clustering_reversed: false,        });
     }
 
     // Add more properties
@@ -754,7 +754,7 @@ fn create_large_header() -> SSTableHeader {
             key_position: if i < 10 { Some(i as u16) } else { None },
             is_static: i % 13 == 0,
             is_clustering: i % 17 == 0,
-        });
+            clustering_reversed: false,        });
     }
 
     // Large property set
@@ -794,7 +794,7 @@ fn create_header_with_columns(column_count: usize) -> SSTableHeader {
             key_position: if i < 5 { Some(i as u16) } else { None },
             is_static: i % 10 == 0,
             is_clustering: i % 7 == 0,
-        });
+            clustering_reversed: false,        });
     }
 
     header
