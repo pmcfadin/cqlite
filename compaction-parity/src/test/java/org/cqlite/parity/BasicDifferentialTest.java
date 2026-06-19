@@ -20,7 +20,6 @@ package org.cqlite.parity;
 
 import java.util.List;
 
-import org.junit.Ignore;
 import org.junit.Test;
 
 /**
@@ -34,13 +33,6 @@ import org.junit.Test;
  */
 public class BasicDifferentialTest extends DifferentialParityTester
 {
-    // KNOWN DIVERGENCE (tracked as a #842 sub-issue): cqlite's compacted Data.db for
-    // a table WITH clustering columns is not Cassandra-readable — sstabledump decodes
-    // partition 1 then fails with CorruptSSTableException/EOFException at
-    // Columns$Serializer.deserializeSubset. cqlite also reads its own such output as
-    // 0 rows via the CLI. No-clustering tables round-trip (compact_command.rs). Remove
-    // @Ignore once the writer is fixed; the harness itself is correct and ready.
-    @Ignore("reveals cqlite writer divergence on clustering tables (#857); un-ignore when fixed")
     @Test
     public void liveRowsLastWriteWinsAcrossTwoSSTables() throws Exception
     {

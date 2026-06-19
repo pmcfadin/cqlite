@@ -1002,7 +1002,19 @@ impl DataWriter {
                     op,
                     CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
                 ) {
+                    // A write — even of a primary-key column — means the row is
+                    // live. This must be recorded BEFORE the key-column skip below,
+                    // so a row whose only cells are clustering values (a pure
+                    // primary-key row) keeps its liveness instead of vanishing.
                     contributes_liveness = true;
+                }
+                // Primary-key columns are encoded positionally (partition key +
+                // clustering prefix), never as cells. The compaction path can
+                // surface a clustering column as a Write op (#857) — drop it so the
+                // writer doesn't emit a phantom cell that corrupts the row body for
+                // strict readers.
+                if is_primary_key_column(column, schema) {
+                    continue;
                 }
 
                 let candidate = MergedOp {
@@ -3051,6 +3063,20 @@ fn is_static_operation(
     }
 }
 
+/// Returns true if `column` is part of the primary key — a partition-key or
+/// clustering-key column.
+///
+/// Primary-key columns are encoded positionally (the partition key and the row's
+/// clustering prefix); they must NEVER be written as regular cells. The compaction
+/// path can surface a clustering column as a `Write` op (the merger keeps the
+/// clustering cell for its own read-back, and `merge_entry_to_mutation` turns it
+/// into a `Write`); emitting it as a cell writes the value a second time and
+/// corrupts the row body for strict readers (#857). The writer drops such ops.
+fn is_primary_key_column(column: &str, schema: &TableSchema) -> bool {
+    schema.partition_keys.iter().any(|k| k.name == column)
+        || schema.clustering_keys.iter().any(|k| k.name == column)
+}
+
 /// Returns true if this mutation contributes at least one static-column operation.
 fn has_static_operation(mutation: &Mutation, schema: &TableSchema) -> bool {
     mutation
@@ -3289,6 +3315,203 @@ mod tests {
         stats.min_ttl = 0;
         stats.min_local_deletion_time = 0;
         stats
+    }
+
+    /// Schema with a clustering column: id (pk) / ck (clustering) / v (regular).
+    fn clustering_test_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ck".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "v".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    fn op_columns(row: &RowWrite<'_>) -> Vec<String> {
+        row.ops
+            .iter()
+            .filter_map(|m| match m.op {
+                CellOperation::Write { column, .. }
+                | CellOperation::WriteWithTtl { column, .. }
+                | CellOperation::Delete { column } => Some(column.clone()),
+                CellOperation::DeleteRow => None,
+            })
+            .collect()
+    }
+
+    /// Regression for #857. In the compaction path, `merge_entry_to_mutation`
+    /// turns the retained clustering cell into a `Write` op, so the merged mutation
+    /// carries the clustering column in BOTH `clustering_key` AND `operations`.
+    /// `merge_row_group` must drop primary-key (partition + clustering) columns from
+    /// `RowWrite.ops`; otherwise the writer emits the clustering value a second time
+    /// as a phantom regular cell, which:
+    ///   - corrupts the row body for Cassandra's reader (CorruptSSTableException at
+    ///     Columns$Serializer.deserializeSubset), and
+    ///   - desyncs HAS_ALL_COLUMNS (ops.len() != regular_column_count).
+    #[test]
+    fn merge_row_group_excludes_primary_key_columns_from_ops() {
+        let schema = clustering_test_schema();
+
+        // Exactly the shape merge_entry_to_mutation produces for a compacted row.
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(7))),
+            vec![
+                CellOperation::Write {
+                    column: "ck".to_string(),
+                    value: Value::Integer(7),
+                },
+                CellOperation::Write {
+                    column: "v".to_string(),
+                    value: Value::Text("hello".to_string()),
+                },
+            ],
+            2000,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("row group must produce a row");
+
+        let cols = op_columns(&row);
+        assert!(
+            !cols.iter().any(|c| c == "ck"),
+            "clustering column 'ck' must not appear as a cell op (#857); got {cols:?}"
+        );
+        assert!(
+            cols.iter().any(|c| c == "v"),
+            "regular column 'v' must be present; got {cols:?}"
+        );
+        assert_eq!(
+            cols.len(),
+            1,
+            "only the single regular column should remain as a cell op; got {cols:?}"
+        );
+    }
+
+    /// A partition-key column accidentally present in `operations` must also be
+    /// dropped from the row ops (defends the same invariant for the pk).
+    #[test]
+    fn merge_row_group_excludes_partition_key_column_from_ops() {
+        let schema = clustering_test_schema();
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(7))),
+            vec![
+                CellOperation::Write {
+                    column: "id".to_string(),
+                    value: Value::Integer(1),
+                },
+                CellOperation::Write {
+                    column: "v".to_string(),
+                    value: Value::Text("hello".to_string()),
+                },
+            ],
+            2000,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("row group must produce a row");
+        let cols = op_columns(&row);
+        assert_eq!(
+            cols,
+            vec!["v".to_string()],
+            "partition-key column 'id' must not appear as a cell op; got {cols:?}"
+        );
+    }
+
+    /// Direct (non-compaction) mutations never put key columns in `operations`, so
+    /// the filter must be a no-op for them — guards against over-filtering.
+    #[test]
+    fn merge_row_group_keeps_all_regular_ops_for_direct_mutation() {
+        let schema = clustering_test_schema();
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(7))),
+            vec![CellOperation::Write {
+                column: "v".to_string(),
+                value: Value::Text("hello".to_string()),
+            }],
+            2000,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("row group must produce a row");
+        assert_eq!(op_columns(&row), vec!["v".to_string()]);
+    }
+
+    /// A row whose only cells are primary-key columns (a pure primary-key row,
+    /// e.g. `INSERT INTO t (id, ck) VALUES (...)`) must SURVIVE compaction with its
+    /// liveness intact even though the key columns are dropped from the cells. The
+    /// key-column write still signals liveness, so the row is emitted (no cells).
+    /// Without that, filtering would silently drop such rows.
+    #[test]
+    fn merge_row_group_keeps_pure_primary_key_row_alive() {
+        let schema = clustering_test_schema();
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(7))),
+            // Only the clustering column is present as an op (as the compaction path
+            // produces for a row that has no regular columns set).
+            vec![CellOperation::Write {
+                column: "ck".to_string(),
+                value: Value::Integer(7),
+            }],
+            2000,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("a pure primary-key row must not be dropped");
+        assert!(
+            op_columns(&row).is_empty(),
+            "no regular cells for a pure primary-key row; got {:?}",
+            op_columns(&row)
+        );
+        assert_eq!(
+            row.liveness_ts,
+            Some(2000),
+            "pure primary-key row must keep its liveness timestamp"
+        );
     }
 
     fn phase3_address_schema() -> UdtTypeDef {

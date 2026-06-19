@@ -46,16 +46,26 @@ cd compaction-parity && gradle test
 The Cassandra checkout location can be overridden with `-PcassandraSrc=<dir>` or
 `$CQLITE_CASSANDRA_SRC`.
 
-## Known divergences
+## Scenarios
+
+Both current scenarios PASS — the harness confirms cqlite's compaction matches
+Apache Cassandra's for these cases:
+
+- `liveRowsLastWriteWinsNoClustering` — partition-key-only table, LWW overlap.
+- `liveRowsLastWriteWinsAcrossTwoSSTables` — clustering table, LWW overlap.
+
+## Resolved divergences
 
 The harness is wired to catch writer/compaction divergences; each is tracked as a
-sub-issue of #842 and the corresponding scenario is `@Ignore`d until fixed.
+sub-issue of #842 and its scenario is `@Ignore`d only while open.
 
-- **`liveRowsLastWriteWinsAcrossTwoSSTables`** — `@Ignore`d, tracked as **#857**.
-  cqlite's compacted
-  `Data.db` for a table **with clustering columns** is not Cassandra-readable:
-  `sstabledump` decodes the first partition then fails with
-  `CorruptSSTableException` / `EOFException` at `Columns$Serializer.deserializeSubset`
-  (row-body / column-subset / index-offset encoding). cqlite also reads its own
-  such output as 0 rows via the CLI query path. (No-clustering tables round-trip;
-  see `cqlite-core/tests/compact_command.rs`.) Un-ignore once the writer is fixed.
+- **#857 (fixed)** — cqlite's compacted `Data.db` for a table **with clustering
+  columns** was not Cassandra-readable: `sstabledump` decoded the first partition
+  then failed at `Columns$Serializer.deserializeSubset`. Root cause: the merge left
+  clustering columns inside the row's cells, so the writer emitted each clustering
+  value a second time as a phantom regular cell. Fixed by dropping primary-key
+  columns from a merged row's cell ops in `merge_row_group` (the clustering value is
+  still written positionally in the clustering prefix). Regression tests:
+  `data_writer::tests::merge_row_group_excludes_*` and
+  `cqlite-core/tests/compact_command.rs::compact_clustering_table_preserves_rows_and_lww`,
+  plus this harness's `liveRowsLastWriteWinsAcrossTwoSSTables`.

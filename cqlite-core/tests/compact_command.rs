@@ -17,11 +17,12 @@
 #![cfg(feature = "write-support")]
 
 use cqlite_core::platform::Platform;
+use cqlite_core::schema::{ClusteringColumn, ClusteringOrder};
 use cqlite_core::schema::{Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::SSTableManager;
 use cqlite_core::storage::write_engine::merge::compact_sstables;
 use cqlite_core::storage::write_engine::{
-    CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
+    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::TableId as CqlTableId;
 use cqlite_core::types::Value;
@@ -234,6 +235,162 @@ fn compact_sstables_merges_explicit_inputs_with_lww() {
         assert!(
             rendered.contains(&format!("b-name-{id}")),
             "PK {id}: newest write (b-name-{id}) must win LWW, got {rendered}"
+        );
+    }
+}
+
+// ── Clustering-key regression (#857) ────────────────────────────────────────
+
+fn make_clustering_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "compact_ks".to_string(),
+        table: "items".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "v".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+    }
+}
+
+fn write_clustered_row(id: i32, ck: i32, v: &str, timestamp: i64) -> Mutation {
+    Mutation::new(
+        TableId::new("compact_ks", "items"),
+        PartitionKey::single("id", Value::Integer(id)),
+        Some(ClusteringKey::single("ck", Value::Integer(ck))),
+        vec![CellOperation::Write {
+            column: "v".to_string(),
+            value: Value::Text(v.to_string()),
+        }],
+        timestamp,
+        None,
+    )
+}
+
+/// Regression for #857: compacting a table WITH clustering columns must produce a
+/// valid SSTable. cqlite previously left the clustering column inside the row's
+/// cells, so the writer emitted it a second time as a phantom regular cell — which
+/// corrupted the row body (Cassandra's sstabledump and cqlite's own reader both
+/// failed; the read-back returned 0 rows). Multiple clustering rows in one
+/// partition exercise the wide-row path.
+#[test]
+fn compact_clustering_table_preserves_rows_and_lww() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let temp = TempDir::new().unwrap();
+    let data_dir = temp.path().join("data");
+    let wal_dir = temp.path().join("wal");
+    let output_dir = temp.path().join("out");
+    let schema = make_clustering_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+
+    // SSTable A (ts=1000): partition id=1, clustering rows ck=0,1,2.
+    for ck in 0_i32..=2 {
+        engine
+            .write(write_clustered_row(1, ck, &format!("a{ck}"), 1000))
+            .expect("write A");
+    }
+    rt.block_on(engine.flush())
+        .expect("flush A")
+        .expect("info A");
+
+    // SSTable B (ts=2000): overrides ck=1,2 and adds ck=3.
+    for ck in 1_i32..=3 {
+        engine
+            .write(write_clustered_row(1, ck, &format!("b{ck}"), 2000))
+            .expect("write B");
+    }
+    rt.block_on(engine.flush())
+        .expect("flush B")
+        .expect("info B");
+
+    drop(engine);
+
+    let inputs = discover_inputs(&data_dir);
+    assert_eq!(inputs.len(), 2, "expected 2 input SSTables, got {inputs:?}");
+
+    let report = rt
+        .block_on(compact_sstables(
+            inputs,
+            &output_dir,
+            &schema,
+            9,
+            None,
+            None,
+        ))
+        .expect("compaction must succeed");
+    assert_eq!(report.stats.output_partitions, 1, "single partition id=1");
+
+    // Re-open and scan: the merged partition must have 4 clustering rows with LWW.
+    let cqlite_config = Config::default();
+    let manager = rt.block_on(async {
+        let platform = Arc::new(Platform::new(&cqlite_config).await.expect("platform"));
+        SSTableManager::new(
+            &output_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager opens the compacted clustering output")
+    });
+
+    let table_id = CqlTableId::from("compact_ks.items");
+    let results = rt
+        .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
+        .expect("post-compaction scan");
+
+    assert_eq!(
+        results.len(),
+        4,
+        "merged partition must have 4 clustering rows (ck=0..=3), got {}",
+        results.len()
+    );
+
+    // Newest write wins per clustering row: ck0=a0, ck1=b1, ck2=b2, ck3=b3.
+    let rendered = format!("{:?}", results.iter().map(|(_, v)| v).collect::<Vec<_>>());
+    for expected in ["a0", "b1", "b2", "b3"] {
+        assert!(
+            rendered.contains(expected),
+            "merged output must contain {expected}; shadowed a1/a2 must not win. got {rendered}"
+        );
+    }
+    for shadowed in ["a1", "a2"] {
+        assert!(
+            !rendered.contains(shadowed),
+            "{shadowed} was overwritten at ts=2000 and must not appear; got {rendered}"
         );
     }
 }
