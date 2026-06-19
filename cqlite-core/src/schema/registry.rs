@@ -1241,7 +1241,10 @@ impl SchemaRegistry {
                     Some((ks, n)) => (ks, n),
                     None => (keyspace, udt_name),
                 };
-                if !udt_registry.contains_udt(lookup_keyspace, bare_name)
+                // Skip structural fragments parse couldn't resolve (e.g. an
+                // uppercase `SET<TEXT>`); only simple identifiers name a UDT.
+                if crate::schema::is_udt_identifier(udt_name)
+                    && !udt_registry.contains_udt(lookup_keyspace, bare_name)
                     && !udt_registry.contains_udt("system", bare_name)
                 {
                     errors.push(ValidationError {

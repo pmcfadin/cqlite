@@ -545,6 +545,20 @@ impl UdtRegistry {
     }
 }
 
+/// Whether a de-prefixed `Custom` type name is a plausible UDT reference.
+///
+/// `CqlType::parse` returns `Custom(..)` both for real UDT names and for type
+/// strings it cannot structurally parse (e.g. an uppercase `SET<TEXT>` whose
+/// collection prefix it doesn't recognize). Only simple identifiers
+/// (alphanumeric / `_` / `.`) can name a UDT, so structural fragments
+/// containing `<`, `>`, `,` or whitespace are excluded from UDT validation.
+pub(crate) fn is_udt_identifier(name: &str) -> bool {
+    !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
+}
+
 impl TableSchema {
     /// Extract schema from SSTable header column metadata
     ///
@@ -793,12 +807,16 @@ impl TableSchema {
             // `CqlType::parse` represents UDT references as `Custom("udt:<name>")`
             // for names with mixed case / underscores / digits, but as a bare
             // `Custom("<name>")` for purely-lowercase names (e.g. `address`).
-            // Either way, `parse` only yields `Custom` for non-primitive,
-            // non-collection type strings — i.e. UDT references — so validate the
-            // de-prefixed name against the registry (roborev job 39).
+            // Validate the de-prefixed name *only* when it is a simple type
+            // identifier: `parse` also yields a bare `Custom` for type strings it
+            // can't structurally parse (e.g. an uppercase `SET<TEXT>` collection),
+            // which must NOT be mistaken for a UDT (roborev job 39 + the
+            // collections-fixture regression).
             CqlType::Custom(name) => {
                 let udt_name = name.strip_prefix("udt:").unwrap_or(name);
-                self.ensure_udt_exists(udt_name, column_name, registry)?;
+                if is_udt_identifier(udt_name) {
+                    self.ensure_udt_exists(udt_name, column_name, registry)?;
+                }
             }
             CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
                 self.check_type_udt_references(inner, column_name, registry)?;
@@ -1658,6 +1676,20 @@ mod tests {
                 err.to_string().contains("address"),
                 "error must name the missing UDT, got: {err}"
             );
+        }
+    }
+
+    #[test]
+    fn test_unparsed_uppercase_collection_is_not_treated_as_udt() {
+        // Regression: `CqlType::parse` returns a bare `Custom("SET<TEXT>")` for an
+        // uppercase collection it doesn't structurally parse. That is NOT a UDT
+        // reference and must not fail validation (collections fixture regression).
+        let registry = UdtRegistry::new();
+        for col_type in ["SET<TEXT>", "LIST<INT>", "MAP<TEXT, TEXT>"] {
+            let schema = udt_schema(col_type);
+            schema
+                .validate_udt_references(&registry)
+                .unwrap_or_else(|e| panic!("'{col_type}' must not be flagged as a UDT: {e}"));
         }
     }
 
