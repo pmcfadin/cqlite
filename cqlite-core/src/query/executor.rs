@@ -174,10 +174,24 @@ impl QueryExecutor {
     /// explicit marker makes EXPLAIN-style output and bindings stats truthful
     /// and self-describing.
     fn indexes_used_for(plan: &QueryPlan) -> Vec<String> {
-        use super::planner::{IndexType, PlanType};
+        use super::planner::{IndexType, PlanType, StepType};
 
         // The marker used for any path that walks rows sequentially.
         let scan = || vec!["scan".to_string()];
+
+        // A TableScan plan can actually be an INSERT or a CREATE TABLE; those
+        // are dispatched away from `execute_table_scan` in `execute()` and never
+        // call `storage.scan`, so they have no access path to report (roborev
+        // job 40). Mirror that classification here.
+        let has_insert_step = plan
+            .steps
+            .iter()
+            .any(|step| matches!(step.step_type, StepType::Insert));
+        let is_create_table =
+            plan.steps.is_empty() && plan.table.is_some() && plan.estimated_rows == 0;
+        if matches!(plan.plan_type, PlanType::TableScan) && (has_insert_step || is_create_table) {
+            return Vec::new();
+        }
 
         match plan.plan_type {
             // Resolves a single partition via `StorageEngine::get`.
@@ -947,6 +961,43 @@ mod tests {
     fn test_indexes_used_table_scan_reports_scan_marker() {
         let plan = plan_with(super::super::planner::PlanType::TableScan, Vec::new());
         assert_eq!(QueryExecutor::indexes_used_for(&plan), vec!["scan"]);
+    }
+
+    /// Regression (roborev job 40): a TableScan plan that is actually an INSERT
+    /// or a CREATE TABLE never calls `storage.scan`, so it must NOT report the
+    /// "scan" access path. `execute()` special-cases these before
+    /// `execute_table_scan`; `indexes_used_for` must mirror that.
+    #[test]
+    fn test_indexes_used_insert_and_ddl_table_scan_report_no_scan() {
+        use super::super::planner::{ParallelizationInfo, StepType};
+
+        // INSERT: a TableScan plan carrying an Insert step.
+        let insert_step = ExecutionStep {
+            step_type: StepType::Insert,
+            columns: Vec::new(),
+            conditions: Vec::new(),
+            cost: 0.0,
+            parallelization: ParallelizationInfo {
+                can_parallelize: false,
+                suggested_threads: 1,
+                partition_key: None,
+            },
+        };
+        let mut insert_plan = plan_with(super::super::planner::PlanType::TableScan, Vec::new());
+        insert_plan.steps = vec![insert_step];
+        assert!(
+            QueryExecutor::indexes_used_for(&insert_plan).is_empty(),
+            "INSERT must not report a scan access path"
+        );
+
+        // CREATE TABLE: empty steps, a target table, zero estimated rows.
+        let mut ddl_plan = plan_with(super::super::planner::PlanType::TableScan, Vec::new());
+        ddl_plan.table = Some(TableId::new("t"));
+        ddl_plan.estimated_rows = 0;
+        assert!(
+            QueryExecutor::indexes_used_for(&ddl_plan).is_empty(),
+            "CREATE TABLE must not report a scan access path"
+        );
     }
 
     /// Range scans degrade to a sequential scan in the executor → "scan".
