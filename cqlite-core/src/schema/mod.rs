@@ -790,12 +790,15 @@ impl TableSchema {
             CqlType::Udt(name, _) => {
                 self.ensure_udt_exists(name, column_name, registry)?;
             }
-            // `CqlType::parse` represents UDT references encountered in a column's
-            // declared type string as `Custom("udt:<name>")`.
+            // `CqlType::parse` represents UDT references as `Custom("udt:<name>")`
+            // for names with mixed case / underscores / digits, but as a bare
+            // `Custom("<name>")` for purely-lowercase names (e.g. `address`).
+            // Either way, `parse` only yields `Custom` for non-primitive,
+            // non-collection type strings — i.e. UDT references — so validate the
+            // de-prefixed name against the registry (roborev job 39).
             CqlType::Custom(name) => {
-                if let Some(udt_name) = name.strip_prefix("udt:") {
-                    self.ensure_udt_exists(udt_name, column_name, registry)?;
-                }
+                let udt_name = name.strip_prefix("udt:").unwrap_or(name);
+                self.ensure_udt_exists(udt_name, column_name, registry)?;
             }
             CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
                 self.check_type_udt_references(inner, column_name, registry)?;
@@ -1636,6 +1639,26 @@ mod tests {
             msg.contains("MyMissingType"),
             "error must name the missing UDT, got: {msg}"
         );
+    }
+
+    #[test]
+    fn test_udt_reference_undefined_lowercase_errors() {
+        // Regression (roborev job 39): a UDT name that is purely lowercase
+        // letters (no underscore/digit) parses to a bare `Custom("<name>")`
+        // with no `udt:` prefix, so validation must still catch it —
+        // top-level and nested.
+        let registry = UdtRegistry::new();
+        for col_type in ["address", "list<frozen<address>>"] {
+            let schema = udt_schema(col_type);
+            let err = schema
+                .validate_udt_references(&registry)
+                .expect_err("undefined lowercase UDT must fail validation");
+            assert!(matches!(err, Error::Schema(_)), "got {err:?}");
+            assert!(
+                err.to_string().contains("address"),
+                "error must name the missing UDT, got: {err}"
+            );
+        }
     }
 
     #[test]
