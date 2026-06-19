@@ -14,7 +14,7 @@ readme = "../README.md"
 # docs.rs build: document the commonly used features. Deliberately excludes
 # `wasm` (wasm32-only deps would fail the default x86_64 docs.rs target).
 [package.metadata.docs.rs]
-features = ["all-compression", "state_machine", "write-support", "arrow", "parquet", "cli-helpers"]
+features = ["all-compression", "state_machine", "write-support", "arrow", "parquet", "cli-helpers", "delta-scan"]
 
 [dependencies]
 # Async runtime
@@ -219,6 +219,13 @@ test-quality-gates = []        # Quality gate enforcement
 # M5: Write support - SSTable generation and persistence (Issue #359)
 # fs2 provides cross-platform advisory file locking for write_dir exclusivity (Issue #485)
 write-support = ["dep:fs2"]
+
+# Delta-scan envelope (Epic #696) - off by default.
+# Adds the DeltaRecord model, RangeBound, and CellDelta types for CDC-style
+# Parquet projections of individual SSTable generations.  Does NOT pull in any
+# extra dependencies; the scan_delta() streaming API (Issue #698) builds on top
+# of this feature flag.
+delta-scan = []
 
 # Heap profiling: installs the dhat global allocator in examples/heap_profile.rs.
 # Dev/profiling only — never enable for production builds (allocation tracking

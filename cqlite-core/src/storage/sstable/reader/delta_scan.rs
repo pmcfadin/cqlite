@@ -1,0 +1,741 @@
+//! Delta-scan record model for CDC-style Parquet projections (Epic #696, Issue #697).
+//!
+//! A flushed SSTable is a delta, not a snapshot.  Projecting it to Parquet
+//! correctly requires carrying per-cell write-timestamps and representing every
+//! delete shape Cassandra produces — otherwise a downstream union of per-flush
+//! files resurrects deleted data and merges stale cells.
+//!
+//! This module defines the **CQLite-native envelope** types.  The streaming
+//! API ([`scan_delta`][future]) is implemented in Issue #698.
+//!
+//! ## Design contract
+//!
+//! One SSTable generation in, faithful change events out.  Reconciliation
+//! (LWW merge, tombstone application, TTL filtering) is deliberately the
+//! downstream consumer's responsibility.
+//!
+//! ## Types
+//!
+//! | Type | Purpose |
+//! |------|---------|
+//! | [`DeltaRecord`] | Discriminated union of every change shape |
+//! | [`CellDelta`] | Per-cell value + writetime + TTL + collection flag |
+//! | [`RangeBound`] | Typed, possibly-prefix clustering-key bound |
+//! | [`RowKeys`] | Partition key + optional clustering columns |
+//! | [`CellMeta`] | Row liveness metadata (timestamp, TTL) |
+//!
+//! ## Feature gate
+//!
+//! Everything in this module is behind `feature = "delta-scan"` and will not
+//! compile into the default crate build.
+
+use crate::types::{ColumnId, Value};
+
+// ---------------------------------------------------------------------------
+// RowKeys
+// ---------------------------------------------------------------------------
+
+/// Combined partition key + clustering columns for a single row (or partition).
+///
+/// For records that address a full partition (`PartitionDelete`,
+/// `StaticUpsert`, `RangeDelete`) the `clustering` vec is empty.  For
+/// row-addressed records it holds the decoded clustering column values in
+/// primary-key definition order.
+///
+/// Values are decoded according to the `TableSchema` in effect at scan time;
+/// the no-heuristics mandate applies — every component uses schema-authorised
+/// types.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowKeys {
+    /// Decoded partition-key components in definition order.
+    ///
+    /// Multi-component partition keys (composite) appear as multiple elements.
+    pub partition: Vec<Value>,
+
+    /// Decoded clustering-key components in definition order.
+    ///
+    /// Empty when the record is partition-scoped (partition delete, static
+    /// upsert, or range-delete — in which case bounds carry the clustering
+    /// information instead).
+    pub clustering: Vec<Value>,
+}
+
+impl RowKeys {
+    /// Create a partition-scoped key (no clustering components).
+    pub fn partition_only(partition: Vec<Value>) -> Self {
+        Self {
+            partition,
+            clustering: Vec::new(),
+        }
+    }
+
+    /// Create a fully-specified row key.
+    pub fn new(partition: Vec<Value>, clustering: Vec<Value>) -> Self {
+        Self {
+            partition,
+            clustering,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CellMeta — row liveness info
+// ---------------------------------------------------------------------------
+
+/// Liveness metadata for a row's primary-key cell.
+///
+/// Cassandra writes a liveness-info record alongside a row when the row was
+/// created with `INSERT` (not `UPDATE`).  `UPDATE` statements produce rows
+/// with no liveness info; those rows have `liveness: None` in
+/// [`DeltaRecord::Upsert`].
+///
+/// The `writetime` here is the row-level primary-key liveness timestamp,
+/// equivalent to `__ts` in the Parquet envelope.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellMeta {
+    /// Writetime in microseconds since the Unix epoch.
+    pub writetime: i64,
+
+    /// Expiry time in microseconds since the Unix epoch, if a TTL was set on
+    /// the `INSERT`.  `None` means no TTL.
+    pub expires_at: Option<i64>,
+}
+
+impl CellMeta {
+    /// Create a liveness record with no TTL.
+    pub fn new(writetime: i64) -> Self {
+        Self {
+            writetime,
+            expires_at: None,
+        }
+    }
+
+    /// Create a liveness record with a TTL expiry time.
+    pub fn with_ttl(writetime: i64, expires_at: i64) -> Self {
+        Self {
+            writetime,
+            expires_at: Some(expires_at),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CellDelta
+// ---------------------------------------------------------------------------
+
+/// Per-cell change record carried inside [`DeltaRecord::Upsert`] and
+/// [`DeltaRecord::StaticUpsert`].
+///
+/// A `null` [`value`][Self::value] represents a cell tombstone
+/// (`DELETE col FROM t WHERE …`).  A non-null value is the cell content as
+/// decoded by the schema-aware reader — no heuristics.
+///
+/// ## Collection columns (v1 limitation)
+///
+/// Non-frozen collection columns carry per-element writetimes and element
+/// tombstones that v1 cannot faithfully represent at element granularity.
+/// For those columns:
+///
+/// - `value` holds the elements present in this generation (for an append
+///   `s = s + {…}` that is only the appended elements — correct delta
+///   semantics).
+/// - `writetime` is the maximum element writetime.
+/// - `replaced` is `true` when the generation carries a collection tombstone
+///   (i.e. an overwrite `s = {…}`), signalling consumers to replace rather
+///   than merge.
+///
+/// Full element-level fidelity is a tracked follow-up (Issue #493).
+#[derive(Debug, Clone, PartialEq)]
+pub struct CellDelta {
+    /// The decoded cell value, or `None` for a cell tombstone.
+    pub value: Option<Value>,
+
+    /// Writetime in microseconds since the Unix epoch.
+    pub writetime: i64,
+
+    /// TTL expiry time in microseconds since the Unix epoch.
+    ///
+    /// `None` means no TTL was set on this cell.  The delta-scan layer never
+    /// resolves TTLs at scan time — whether a cell is expired is left to the
+    /// downstream consumer (idempotent output guarantee).
+    pub expires_at: Option<i64>,
+
+    /// `true` when this collection cell carries a collection-level tombstone,
+    /// meaning the downstream consumer must **replace** rather than merge the
+    /// prior collection state.
+    ///
+    /// Always `false` for scalar (non-collection) columns.
+    pub replaced: bool,
+}
+
+impl CellDelta {
+    /// Create a simple value cell with no TTL and no collection-replace flag.
+    pub fn value(value: Value, writetime: i64) -> Self {
+        Self {
+            value: Some(value),
+            writetime,
+            expires_at: None,
+            replaced: false,
+        }
+    }
+
+    /// Create a cell tombstone (no value, just a deletion timestamp).
+    pub fn tombstone(writetime: i64) -> Self {
+        Self {
+            value: None,
+            writetime,
+            expires_at: None,
+            replaced: false,
+        }
+    }
+
+    /// Create a value cell with a TTL expiry time.
+    pub fn value_with_ttl(value: Value, writetime: i64, expires_at: i64) -> Self {
+        Self {
+            value: Some(value),
+            writetime,
+            expires_at: Some(expires_at),
+            replaced: false,
+        }
+    }
+
+    /// Create a collection cell that replaces (not merges) prior state.
+    pub fn collection_replace(value: Value, writetime: i64) -> Self {
+        Self {
+            value: Some(value),
+            writetime,
+            expires_at: None,
+            replaced: true,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RangeBound
+// ---------------------------------------------------------------------------
+
+/// One bound of a range-tombstone clustering-key range.
+///
+/// ## Prefix bounds
+///
+/// Cassandra range tombstones may specify bounds that are **prefixes** of the
+/// full clustering key — for example, a table with clustering columns
+/// `(year INT, month INT, day INT)` can have a range tombstone covering all
+/// rows in `year = 2024`.  In that case:
+///
+/// ```text
+/// start = RangeBound { values: [Value::Integer(2024)], inclusive: true  }
+/// end   = RangeBound { values: [Value::Integer(2024)], inclusive: true  }
+/// ```
+///
+/// Trailing clustering components that are absent from the bound are simply
+/// not present in [`values`][Self::values].  Consumers must treat a prefix
+/// bound as matching all rows whose clustering key begins with the given
+/// prefix (within the inclusive/exclusive constraint).
+///
+/// ## Empty bound
+///
+/// An empty `values` vec with `inclusive: false` represents an open
+/// (unbounded) end — i.e. from/to the beginning or end of the partition.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RangeBound {
+    /// The clustering-key prefix values for this bound, in primary-key order.
+    ///
+    /// May be shorter than the full clustering-key arity (prefix bound).
+    /// An empty vec means an open (unbounded) end.
+    pub values: Vec<Value>,
+
+    /// Whether the bound is inclusive (`>=` / `<=`) or exclusive (`>` / `<`).
+    pub inclusive: bool,
+}
+
+impl RangeBound {
+    /// Create a bound from a full or partial set of clustering values.
+    pub fn new(values: Vec<Value>, inclusive: bool) -> Self {
+        Self { values, inclusive }
+    }
+
+    /// Convenience: create an inclusive bound.
+    pub fn inclusive(values: Vec<Value>) -> Self {
+        Self {
+            values,
+            inclusive: true,
+        }
+    }
+
+    /// Convenience: create an exclusive bound.
+    pub fn exclusive(values: Vec<Value>) -> Self {
+        Self {
+            values,
+            inclusive: false,
+        }
+    }
+
+    /// An open (unbounded) end — matches from/to the start or end of the partition.
+    pub fn open() -> Self {
+        Self {
+            values: Vec::new(),
+            inclusive: false,
+        }
+    }
+
+    /// Returns `true` if this is a prefix bound (fewer values than the full
+    /// clustering-key arity of the table, or the full arity is not known).
+    ///
+    /// Note: callers that know the table's clustering-key arity should compare
+    /// `self.values.len()` against that arity directly rather than relying on
+    /// this method.
+    pub fn is_prefix(&self) -> bool {
+        // An empty bound is not a prefix — it is an open bound.
+        // Any non-empty bound with at least one value is potentially a prefix;
+        // the caller is responsible for comparing against the full arity.
+        !self.values.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DeltaRecord
+// ---------------------------------------------------------------------------
+
+/// A single change record emitted by the delta-scan API.
+///
+/// Records stream in SSTable order (partition, then clustering).  The scan
+/// makes no cross-SSTable decisions — no merge, no GC-grace filtering.
+///
+/// ## Variant reference
+///
+/// | Variant | CQL operation | Key scope |
+/// |---------|---------------|-----------|
+/// | `Upsert` | `INSERT`/`UPDATE` on regular columns | `(pk, ck)` |
+/// | `StaticUpsert` | `UPDATE` on static columns | `pk` |
+/// | `RowDelete` | `DELETE FROM t WHERE pk=? AND ck=?` | `(pk, ck)` |
+/// | `RangeDelete` | `DELETE FROM t WHERE pk=? AND ck>=? AND ck<?` | `pk` + bounds |
+/// | `PartitionDelete` | `DELETE FROM t WHERE pk=?` | `pk` |
+///
+/// ## Downstream merge keys
+///
+/// - `Upsert` / `RowDelete` — reconcile on `(partition, clustering)`.
+/// - `StaticUpsert` — reconcile on `partition`.
+/// - `PartitionDelete` / `RangeDelete` — apply as predicates using `__ts`
+///   (i.e. `deleted_at`) to decide last-write-wins per cell.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DeltaRecord {
+    /// A row-level insert or update of regular (non-static) columns.
+    ///
+    /// `liveness` is `Some` when the row was created with `INSERT` and carries
+    /// a primary-key liveness timestamp.  `UPDATE` statements produce rows
+    /// with `liveness: None`.
+    ///
+    /// Each element of `cells` is a `(column_id, delta)` pair.  Only the
+    /// columns actually written in this generation appear; absent columns are
+    /// not present (they are null in the Parquet envelope).
+    Upsert {
+        /// Partition key + clustering columns for this row.
+        keys: RowKeys,
+        /// Row liveness info, present only for `INSERT` operations.
+        liveness: Option<CellMeta>,
+        /// Per-column cell deltas for non-static columns modified in this row.
+        cells: Vec<(ColumnId, CellDelta)>,
+    },
+
+    /// An update of one or more static columns for a partition.
+    ///
+    /// Static columns belong to the partition, not individual rows.  The
+    /// clustering key is empty in `partition_key`.
+    StaticUpsert {
+        /// Partition key (no clustering columns).
+        partition_key: RowKeys,
+        /// Per-column cell deltas for static columns modified.
+        cells: Vec<(ColumnId, CellDelta)>,
+    },
+
+    /// A row-level tombstone (`DELETE FROM t WHERE pk=? AND ck=?`).
+    RowDelete {
+        /// Partition key + clustering columns identifying the deleted row.
+        keys: RowKeys,
+        /// Deletion timestamp in microseconds since the Unix epoch
+        /// (`markedForDeleteAt` in Cassandra internals).
+        deleted_at: i64,
+    },
+
+    /// A range tombstone covering a contiguous clustering-key range within a
+    /// single partition.
+    ///
+    /// `start` and `end` may be prefix bounds (see [`RangeBound`]).
+    ///
+    /// ```text
+    /// DELETE FROM t WHERE pk=1 AND ck >= 'a' AND ck < 'm'
+    /// ```
+    RangeDelete {
+        /// Partition key (no clustering columns — bounds carry the range).
+        partition_key: RowKeys,
+        /// Inclusive or exclusive lower clustering-key bound.
+        start: RangeBound,
+        /// Inclusive or exclusive upper clustering-key bound.
+        end: RangeBound,
+        /// Deletion timestamp in microseconds since the Unix epoch.
+        deleted_at: i64,
+    },
+
+    /// A partition-level tombstone (`DELETE FROM t WHERE pk=?`).
+    ///
+    /// Supersedes every row and cell in the partition whose writetime is older
+    /// than `deleted_at`.
+    PartitionDelete {
+        /// Partition key (no clustering columns).
+        partition_key: RowKeys,
+        /// Deletion timestamp in microseconds since the Unix epoch.
+        deleted_at: i64,
+    },
+}
+
+impl DeltaRecord {
+    /// Return the partition-key portion of any record type.
+    pub fn partition_key(&self) -> &[Value] {
+        match self {
+            DeltaRecord::Upsert { keys, .. } => &keys.partition,
+            DeltaRecord::StaticUpsert { partition_key, .. } => &partition_key.partition,
+            DeltaRecord::RowDelete { keys, .. } => &keys.partition,
+            DeltaRecord::RangeDelete { partition_key, .. } => &partition_key.partition,
+            DeltaRecord::PartitionDelete { partition_key, .. } => &partition_key.partition,
+        }
+    }
+
+    /// Return the `__op` discriminator string used in the Parquet envelope.
+    pub fn op_name(&self) -> &'static str {
+        match self {
+            DeltaRecord::Upsert { .. } => "upsert",
+            DeltaRecord::StaticUpsert { .. } => "static_upsert",
+            DeltaRecord::RowDelete { .. } => "row_delete",
+            DeltaRecord::RangeDelete { .. } => "range_delete",
+            DeltaRecord::PartitionDelete { .. } => "partition_delete",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Value;
+
+    // ------------------------------------------------------------------
+    // RowKeys helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn row_keys_partition_only() {
+        let keys = RowKeys::partition_only(vec![Value::Integer(42)]);
+        assert_eq!(keys.partition, vec![Value::Integer(42)]);
+        assert!(keys.clustering.is_empty());
+    }
+
+    #[test]
+    fn row_keys_full() {
+        let keys = RowKeys::new(vec![Value::Integer(1)], vec![Value::Text("a".into())]);
+        assert_eq!(keys.partition.len(), 1);
+        assert_eq!(keys.clustering.len(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // CellMeta helpers
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cell_meta_no_ttl() {
+        let m = CellMeta::new(1_000_000);
+        assert_eq!(m.writetime, 1_000_000);
+        assert!(m.expires_at.is_none());
+    }
+
+    #[test]
+    fn cell_meta_with_ttl() {
+        let m = CellMeta::with_ttl(1_000_000, 2_000_000);
+        assert_eq!(m.expires_at, Some(2_000_000));
+    }
+
+    // ------------------------------------------------------------------
+    // CellDelta constructors
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn cell_delta_value() {
+        let d = CellDelta::value(Value::Text("hello".into()), 100);
+        assert!(d.value.is_some());
+        assert_eq!(d.writetime, 100);
+        assert!(d.expires_at.is_none());
+        assert!(!d.replaced);
+    }
+
+    #[test]
+    fn cell_delta_tombstone() {
+        let d = CellDelta::tombstone(200);
+        assert!(d.value.is_none());
+        assert_eq!(d.writetime, 200);
+        assert!(!d.replaced);
+    }
+
+    #[test]
+    fn cell_delta_with_ttl() {
+        let d = CellDelta::value_with_ttl(Value::Integer(7), 100, 9999);
+        assert_eq!(d.expires_at, Some(9999));
+        assert!(!d.replaced);
+    }
+
+    #[test]
+    fn cell_delta_collection_replace() {
+        let d = CellDelta::collection_replace(Value::Text("x".into()), 300);
+        assert!(d.replaced);
+        assert!(d.value.is_some());
+    }
+
+    // ------------------------------------------------------------------
+    // RangeBound
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn range_bound_inclusive() {
+        let b = RangeBound::inclusive(vec![Value::Text("a".into())]);
+        assert!(b.inclusive);
+        assert_eq!(b.values.len(), 1);
+    }
+
+    #[test]
+    fn range_bound_exclusive() {
+        let b = RangeBound::exclusive(vec![Value::Text("m".into())]);
+        assert!(!b.inclusive);
+    }
+
+    #[test]
+    fn range_bound_open() {
+        let b = RangeBound::open();
+        assert!(b.values.is_empty());
+        assert!(!b.inclusive);
+        // An open bound is NOT considered a prefix.
+        assert!(!b.is_prefix());
+    }
+
+    #[test]
+    fn range_bound_prefix() {
+        // Two-column clustering key; only the first column is present → prefix.
+        let b = RangeBound::inclusive(vec![Value::Integer(2024)]);
+        assert!(b.is_prefix());
+    }
+
+    // ------------------------------------------------------------------
+    // DeltaRecord — one construction test per variant
+    // ------------------------------------------------------------------
+
+    fn sample_pk() -> RowKeys {
+        RowKeys::partition_only(vec![Value::Integer(1)])
+    }
+
+    fn sample_row_keys() -> RowKeys {
+        RowKeys::new(vec![Value::Integer(1)], vec![Value::Text("ck1".into())])
+    }
+
+    fn sample_cell() -> (ColumnId, CellDelta) {
+        (
+            ColumnId::new("val"),
+            CellDelta::value(Value::Text("hello".into()), 1_700_000_000_000_000),
+        )
+    }
+
+    #[test]
+    fn delta_record_upsert() {
+        let rec = DeltaRecord::Upsert {
+            keys: sample_row_keys(),
+            liveness: Some(CellMeta::new(1_700_000_000_000_000)),
+            cells: vec![sample_cell()],
+        };
+        assert_eq!(rec.op_name(), "upsert");
+        assert_eq!(rec.partition_key(), &[Value::Integer(1)]);
+
+        if let DeltaRecord::Upsert {
+            keys,
+            liveness,
+            cells,
+        } = &rec
+        {
+            assert_eq!(keys.clustering, vec![Value::Text("ck1".into())]);
+            assert!(liveness.is_some());
+            assert_eq!(cells.len(), 1);
+        } else {
+            panic!("expected Upsert");
+        }
+    }
+
+    #[test]
+    fn delta_record_upsert_no_liveness() {
+        // UPDATE (not INSERT) — no liveness info.
+        let rec = DeltaRecord::Upsert {
+            keys: sample_row_keys(),
+            liveness: None,
+            cells: vec![sample_cell()],
+        };
+        if let DeltaRecord::Upsert { liveness, .. } = &rec {
+            assert!(liveness.is_none());
+        } else {
+            panic!("expected Upsert");
+        }
+    }
+
+    #[test]
+    fn delta_record_static_upsert() {
+        let rec = DeltaRecord::StaticUpsert {
+            partition_key: sample_pk(),
+            cells: vec![(
+                ColumnId::new("st"),
+                CellDelta::value(Value::Text("S".into()), 1_700_000_000_000_000),
+            )],
+        };
+        assert_eq!(rec.op_name(), "static_upsert");
+        assert_eq!(rec.partition_key(), &[Value::Integer(1)]);
+
+        if let DeltaRecord::StaticUpsert {
+            partition_key,
+            cells,
+        } = &rec
+        {
+            assert!(partition_key.clustering.is_empty());
+            assert_eq!(cells.len(), 1);
+        } else {
+            panic!("expected StaticUpsert");
+        }
+    }
+
+    #[test]
+    fn delta_record_row_delete() {
+        let rec = DeltaRecord::RowDelete {
+            keys: sample_row_keys(),
+            deleted_at: 1_700_000_000_000_000,
+        };
+        assert_eq!(rec.op_name(), "row_delete");
+        if let DeltaRecord::RowDelete { deleted_at, .. } = &rec {
+            assert_eq!(*deleted_at, 1_700_000_000_000_000);
+        } else {
+            panic!("expected RowDelete");
+        }
+    }
+
+    #[test]
+    fn delta_record_range_delete() {
+        let rec = DeltaRecord::RangeDelete {
+            partition_key: sample_pk(),
+            start: RangeBound::inclusive(vec![Value::Text("a".into())]),
+            end: RangeBound::exclusive(vec![Value::Text("m".into())]),
+            deleted_at: 1_700_000_000_000_001,
+        };
+        assert_eq!(rec.op_name(), "range_delete");
+        if let DeltaRecord::RangeDelete {
+            start,
+            end,
+            deleted_at,
+            ..
+        } = &rec
+        {
+            assert!(start.inclusive);
+            assert!(!end.inclusive);
+            assert_eq!(*deleted_at, 1_700_000_000_000_001);
+        } else {
+            panic!("expected RangeDelete");
+        }
+    }
+
+    #[test]
+    fn delta_record_range_delete_prefix_bound() {
+        // Two-column clustering key (year INT, month INT);
+        // bound only specifies year → prefix semantics.
+        let rec = DeltaRecord::RangeDelete {
+            partition_key: sample_pk(),
+            start: RangeBound::inclusive(vec![Value::Integer(2024)]),
+            end: RangeBound::inclusive(vec![Value::Integer(2024)]),
+            deleted_at: 1_700_000_000_000_002,
+        };
+        if let DeltaRecord::RangeDelete { start, end, .. } = &rec {
+            assert!(start.is_prefix());
+            assert!(end.is_prefix());
+            assert_eq!(start.values.len(), 1);
+            assert_eq!(end.values.len(), 1);
+        } else {
+            panic!("expected RangeDelete");
+        }
+    }
+
+    #[test]
+    fn delta_record_partition_delete() {
+        let rec = DeltaRecord::PartitionDelete {
+            partition_key: sample_pk(),
+            deleted_at: 1_700_000_000_000_003,
+        };
+        assert_eq!(rec.op_name(), "partition_delete");
+        if let DeltaRecord::PartitionDelete {
+            partition_key,
+            deleted_at,
+        } = &rec
+        {
+            assert_eq!(partition_key.partition, vec![Value::Integer(1)]);
+            assert!(partition_key.clustering.is_empty());
+            assert_eq!(*deleted_at, 1_700_000_000_000_003);
+        } else {
+            panic!("expected PartitionDelete");
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // op_name exhaustiveness sanity check
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn op_names_are_distinct() {
+        let ops = [
+            DeltaRecord::Upsert {
+                keys: sample_row_keys(),
+                liveness: None,
+                cells: vec![],
+            },
+            DeltaRecord::StaticUpsert {
+                partition_key: sample_pk(),
+                cells: vec![],
+            },
+            DeltaRecord::RowDelete {
+                keys: sample_row_keys(),
+                deleted_at: 0,
+            },
+            DeltaRecord::RangeDelete {
+                partition_key: sample_pk(),
+                start: RangeBound::open(),
+                end: RangeBound::open(),
+                deleted_at: 0,
+            },
+            DeltaRecord::PartitionDelete {
+                partition_key: sample_pk(),
+                deleted_at: 0,
+            },
+        ];
+
+        let names: Vec<&str> = ops.iter().map(|r| r.op_name()).collect();
+        // All five names must be distinct.
+        let mut unique = names.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), names.len(), "duplicate op_name: {:?}", names);
+    }
+
+    // ------------------------------------------------------------------
+    // TombstoneType::PartitionTombstone integration
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn partition_tombstone_type_exists() {
+        use crate::types::TombstoneType;
+        // Verify the new variant is reachable and its display formatting works.
+        let t = TombstoneType::PartitionTombstone;
+        // Round-trip through Debug (basic smoke test — not format-sensitive).
+        let s = format!("{:?}", t);
+        assert!(s.contains("Partition"), "unexpected debug: {}", s);
+    }
+}

@@ -1690,6 +1690,10 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 TombstoneType::CellTombstone => 1u8,
                 TombstoneType::RangeTombstone => 2u8,
                 TombstoneType::TtlExpiration => 3u8,
+                // PartitionTombstone is a delta-scan concept not stored in the
+                // legacy binary format; encode as RowTombstone (byte 0) so that
+                // existing SSTable round-trip tests remain unaffected.
+                TombstoneType::PartitionTombstone => 0u8,
             };
             result.push(tombstone_type_byte);
 
