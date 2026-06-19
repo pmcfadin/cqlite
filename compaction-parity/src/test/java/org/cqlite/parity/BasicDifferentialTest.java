@@ -40,7 +40,7 @@ public class BasicDifferentialTest extends DifferentialParityTester
     // Columns$Serializer.deserializeSubset. cqlite also reads its own such output as
     // 0 rows via the CLI. No-clustering tables round-trip (compact_command.rs). Remove
     // @Ignore once the writer is fixed; the harness itself is correct and ready.
-    @Ignore("reveals cqlite writer divergence on clustering tables; un-ignore when fixed (#842)")
+    @Ignore("reveals cqlite writer divergence on clustering tables (#857); un-ignore when fixed")
     @Test
     public void liveRowsLastWriteWinsAcrossTwoSSTables() throws Exception
     {
@@ -57,6 +57,29 @@ public class BasicDifferentialTest extends DifferentialParityTester
             "INSERT INTO %s (id, ck, v) VALUES (2, 0, 'b-2') USING TIMESTAMP 2000",
             "INSERT INTO %s (id, ck, v) VALUES (3, 0, 'b-3') USING TIMESTAMP 2000",
             "INSERT INTO %s (id, ck, v) VALUES (4, 0, 'b-4') USING TIMESTAMP 2000");
+
+        assertCqliteMatchesCassandra(ddl, List.of(a, b));
+    }
+
+    /**
+     * No-clustering variant: a partition-key-only table (one row per partition).
+     * cqlite round-trips these (see compact_command.rs); this asserts Cassandra
+     * agrees, i.e. the harness confirms a genuine MATCH, not just catches mismatches.
+     */
+    @Test
+    public void liveRowsLastWriteWinsNoClustering() throws Exception
+    {
+        String ddl = "CREATE TABLE %s (id int PRIMARY KEY, v text)";
+
+        List<String> a = List.of(
+            "INSERT INTO %s (id, v) VALUES (1, 'a-1') USING TIMESTAMP 1000",
+            "INSERT INTO %s (id, v) VALUES (2, 'a-2') USING TIMESTAMP 1000",
+            "INSERT INTO %s (id, v) VALUES (3, 'a-3') USING TIMESTAMP 1000");
+
+        List<String> b = List.of(
+            "INSERT INTO %s (id, v) VALUES (2, 'b-2') USING TIMESTAMP 2000",
+            "INSERT INTO %s (id, v) VALUES (3, 'b-3') USING TIMESTAMP 2000",
+            "INSERT INTO %s (id, v) VALUES (4, 'b-4') USING TIMESTAMP 2000");
 
         assertCqliteMatchesCassandra(ddl, List.of(a, b));
     }

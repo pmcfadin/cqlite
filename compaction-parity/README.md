@@ -51,7 +51,8 @@ The Cassandra checkout location can be overridden with `-PcassandraSrc=<dir>` or
 The harness is wired to catch writer/compaction divergences; each is tracked as a
 sub-issue of #842 and the corresponding scenario is `@Ignore`d until fixed.
 
-- **`liveRowsLastWriteWinsAcrossTwoSSTables`** — `@Ignore`d. cqlite's compacted
+- **`liveRowsLastWriteWinsAcrossTwoSSTables`** — `@Ignore`d, tracked as **#857**.
+  cqlite's compacted
   `Data.db` for a table **with clustering columns** is not Cassandra-readable:
   `sstabledump` decodes the first partition then fails with
   `CorruptSSTableException` / `EOFException` at `Columns$Serializer.deserializeSubset`
