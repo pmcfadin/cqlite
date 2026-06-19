@@ -422,6 +422,16 @@ pub struct ColumnInfo {
     pub is_static: bool,
     /// Whether the column is clustering
     pub is_clustering: bool,
+    /// Clustering sort order is descending (Issue #759).
+    ///
+    /// Cassandra's serialization header encodes a DESC clustering column by
+    /// wrapping its comparator class in `ReversedType(...)`. This flag captures
+    /// that authoritative signal so schema discovery can report
+    /// `ClusteringOrder::Desc`. Always `false` for non-clustering columns and
+    /// for ASC clustering columns. `#[serde(default)]` keeps previously
+    /// serialized headers (without the field) deserializable.
+    #[serde(default)]
+    pub clustering_reversed: bool,
 }
 
 /// Parse the SSTable magic number and version, supporting multiple Cassandra versions
@@ -608,6 +618,11 @@ pub fn parse_column_info(input: &[u8]) -> IResult<&[u8], ColumnInfo> {
             key_position,
             is_static,
             is_clustering,
+            // The Header.db per-column flags byte does not carry clustering
+            // order; the authoritative DESC signal lives in the Statistics.db
+            // serialization-header comparator (ReversedType). See Issue #759
+            // and `enhanced_statistics_parser::build_clustering_key_columns`.
+            clustering_reversed: false,
         },
     ))
 }
@@ -999,6 +1014,7 @@ mod tests {
             key_position: Some(0),
             is_static: false,
             is_clustering: false,
+            clustering_reversed: false,
         };
 
         let mut serialized = Vec::new();
@@ -1137,6 +1153,7 @@ mod tests {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             }],
             properties,
         };

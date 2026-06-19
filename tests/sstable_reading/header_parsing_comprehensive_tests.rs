@@ -1103,7 +1103,7 @@ fn create_test_header() -> SSTableHeader {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
-            },
+                clustering_reversed: false,            },
             ColumnInfo {
                 name: "data".to_string(),
                 column_type: "text".to_string(),
@@ -1111,7 +1111,7 @@ fn create_test_header() -> SSTableHeader {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
-            },
+                clustering_reversed: false,            },
         ],
         properties: {
             let mut props = HashMap::new();
@@ -1133,7 +1133,7 @@ fn create_large_test_header() -> SSTableHeader {
             key_position: if i < 5 { Some(i as u16) } else { None },
             is_static: i % 10 == 0,
             is_clustering: i % 7 == 0,
-        });
+            clustering_reversed: false,        });
     }
 
     // Add many properties

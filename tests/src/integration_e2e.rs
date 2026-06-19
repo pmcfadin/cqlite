@@ -950,6 +950,7 @@ fn create_mock_cassandra5_header() -> SSTableHeader {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "data".to_string(),
@@ -958,6 +959,7 @@ fn create_mock_cassandra5_header() -> SSTableHeader {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
         ],
         properties: HashMap::new(),

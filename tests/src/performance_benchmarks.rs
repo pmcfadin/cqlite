@@ -779,6 +779,7 @@ impl PerformanceBenchmarks {
                 key_position: if i < 3 { Some(i as u16) } else { None },
                 is_static: i % 10 == 0,
                 is_clustering: i < 3 && i > 0,
+                clustering_reversed: false,
             })
             .collect();
 

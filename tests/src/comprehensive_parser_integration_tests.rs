@@ -1109,6 +1109,7 @@ impl ParserIntegrationTestSuite {
                     key_position: Some(0),
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
                 ColumnInfo {
                     name: "data".to_string(),
@@ -1117,6 +1118,7 @@ impl ParserIntegrationTestSuite {
                     key_position: None,
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
             ],
             properties: HashMap::new(),
@@ -1162,6 +1164,7 @@ impl ParserIntegrationTestSuite {
                     key_position: Some(0),
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
                 ColumnInfo {
                     name: "clustering_key".to_string(),
@@ -1170,6 +1173,7 @@ impl ParserIntegrationTestSuite {
                     key_position: Some(1),
                     is_static: false,
                     is_clustering: true,
+                    clustering_reversed: false,
                 },
                 ColumnInfo {
                     name: "static_column".to_string(),
@@ -1178,6 +1182,7 @@ impl ParserIntegrationTestSuite {
                     key_position: None,
                     is_static: true,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
                 ColumnInfo {
                     name: "regular_column".to_string(),
@@ -1186,6 +1191,7 @@ impl ParserIntegrationTestSuite {
                     key_position: None,
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
             ],
             properties,

@@ -646,6 +646,7 @@ impl CompatibilityTestFramework {
                     key_position: Some(0),
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
                 ColumnInfo {
                     name: "name".to_string(),
@@ -654,6 +655,7 @@ impl CompatibilityTestFramework {
                     key_position: None,
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 },
             ],
             properties: HashMap::new(),

@@ -125,6 +125,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "boolean_col".to_string(),
@@ -133,6 +134,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "int_col".to_string(),
@@ -141,6 +143,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "bigint_col".to_string(),
@@ -149,6 +152,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "float_col".to_string(),
@@ -157,6 +161,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "double_col".to_string(),
@@ -165,6 +170,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "text_col".to_string(),
@@ -173,6 +179,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "varchar_col".to_string(),
@@ -181,6 +188,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "blob_col".to_string(),
@@ -189,6 +197,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "timestamp_col".to_string(),
@@ -197,6 +206,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "uuid_col".to_string(),
@@ -205,6 +215,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
         ];
 
@@ -307,6 +318,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "text_list".to_string(),
@@ -315,6 +327,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "int_set".to_string(),
@@ -323,6 +336,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "text_to_int_map".to_string(),
@@ -331,6 +345,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "nested_list".to_string(),
@@ -339,6 +354,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
         ];
 
@@ -438,6 +454,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "large_text".to_string(),
@@ -446,6 +463,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "large_blob".to_string(),
@@ -454,6 +472,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
             ColumnInfo {
                 name: "json_data".to_string(),
@@ -462,6 +481,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: None,
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             },
         ];
 
@@ -559,6 +579,7 @@ impl SSTableTestFixtureGenerator {
                 key_position: Some(0),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             }];
 
             // Create empty file as placeholder

@@ -663,6 +663,7 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
             key_position: None,
             is_static: true, // Mark as static column!
             is_clustering: false,
+            clustering_reversed: false,
         });
 
         input = remaining;
@@ -747,6 +748,7 @@ fn parse_serialization_header_at_offset(input: &[u8]) -> IResult<&[u8], Serializ
             key_position: None,
             is_static: false,
             is_clustering: false,
+            clustering_reversed: false,
         });
     }
 
@@ -1074,6 +1076,7 @@ fn parse_regular_columns(
                     key_position: None,
                     is_static: false,
                     is_clustering: false,
+                    clustering_reversed: false,
                 });
             }
 
@@ -1242,6 +1245,7 @@ fn fallback_parse_serialization_header_ascii(
                         key_position: None,
                         is_static: false,
                         is_clustering: false,
+                        clustering_reversed: false,
                     });
 
                     // Advance past control bytes to next potential column entry
@@ -1327,11 +1331,41 @@ fn split_type_arguments(input: &str) -> Vec<&str> {
     args
 }
 
+/// Detect whether a clustering comparator class denotes descending order.
+///
+/// Issue #759: Cassandra encodes a DESC clustering column by wrapping its
+/// comparator class in `org.apache.cassandra.db.marshal.ReversedType(...)`.
+/// This is the documented, authoritative signal for descending order
+/// (definitive guide Ch.7 / Appendix B) — no heuristics. We mirror the
+/// leading-paren stripping that `convert_marshal_type_to_cql` performs (the
+/// header sometimes prefixes types with `(`), then check for the `ReversedType(`
+/// prefix with or without the marshal package namespace.
+fn is_reversed_comparator(marshal_type: &str) -> bool {
+    let mut value = marshal_type.trim();
+    // Strip the optional leading wrapping paren(s) the header adds to the
+    // top-level type (matches `convert_marshal_type_to_cql`'s normalization).
+    while value.starts_with('(') && value.ends_with(')') && value.len() > 2 {
+        value = value[1..value.len() - 1].trim();
+    }
+    // Some accepted header encodings prefix the comparator list with a `[`
+    // (e.g. `[org.apache.cassandra.db.marshal.ReversedType(...)`); strip a
+    // leading bracket so the ReversedType detection matches that form too
+    // (roborev job 43).
+    let value = value.trim_start_matches('[').trim_start();
+    value.starts_with("org.apache.cassandra.db.marshal.ReversedType(")
+        || value.starts_with("ReversedType(")
+}
+
 /// Convert Cassandra internal marshal type to CQL type name
 fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
     fn strip_wrapping_parens(mut value: &str) -> &str {
         loop {
-            let trimmed = value.trim();
+            // Also strip a leading structural `[` the header may prefix the
+            // comparator list with (e.g. `[org...ReversedType(...)`), so the
+            // wrapper-prefix checks below match the bracketed form too and the
+            // inner CQL type is derived correctly (roborev job 48). This mirrors
+            // the same normalization in `is_reversed_comparator`.
+            let trimmed = value.trim().trim_start_matches('[').trim_start();
             if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() > 2 {
                 value = &trimmed[1..trimmed.len() - 1];
             } else {
@@ -1467,6 +1501,7 @@ fn build_partition_key_columns(partition_types: &[String]) -> Vec<super::header:
                 key_position: Some(idx as u16),
                 is_static: false,
                 is_clustering: false,
+                clustering_reversed: false,
             }
         })
         .collect()
@@ -1483,6 +1518,13 @@ fn build_clustering_key_columns(clustering_types: &[String]) -> Vec<super::heade
         .iter()
         .enumerate()
         .map(|(idx, marshal_type)| {
+            // Issue #759: a DESC clustering column is encoded by wrapping its
+            // comparator class in `ReversedType(...)`. Detect that authoritative
+            // signal here, BEFORE `convert_marshal_type_to_cql` unwraps it, so
+            // schema discovery can report `ClusteringOrder::Desc`. The CQL type
+            // continues to come from `convert_marshal_type_to_cql`, which strips
+            // `ReversedType` so the inner type's deserialization is undisturbed.
+            let clustering_reversed = is_reversed_comparator(marshal_type);
             let cql_type = convert_marshal_type_to_cql(marshal_type);
             let name = if total == 1 {
                 "clustering_key".to_string()
@@ -1497,6 +1539,7 @@ fn build_clustering_key_columns(clustering_types: &[String]) -> Vec<super::heade
                 key_position: Some(idx as u16),
                 is_static: false,
                 is_clustering: true,
+                clustering_reversed,
             }
         })
         .collect()
@@ -1670,6 +1713,7 @@ fn parse_serialization_header_sequential(
             key_position: None,
             is_static: true,
             is_clustering: false,
+            clustering_reversed: false,
         });
 
         input = remaining;
@@ -1752,6 +1796,7 @@ fn parse_serialization_header_sequential(
             key_position: None,
             is_static: false,
             is_clustering: false,
+            clustering_reversed: false,
         });
 
         input = remaining;
@@ -1851,8 +1896,14 @@ fn parse_serialization_header_schema(input: &[u8]) -> IResult<&[u8], Serializati
         }
 
         let (remaining, ck_type_bytes) = take(ck_type_len as usize)(remaining)?;
+        // Issue #759: preserve the RAW comparator class name (including any
+        // `ReversedType(...)` wrapper) here. `build_clustering_key_columns` is
+        // the single place that converts to a CQL type AND derives clustering
+        // order from the wrapper, so converting eagerly would discard the DESC
+        // signal. Conversion in `build_clustering_key_columns` is idempotent for
+        // already-CQL strings, keeping the other parse paths correct.
         let ck_type = match std::str::from_utf8(ck_type_bytes) {
-            Ok(s) => convert_marshal_type_to_cql(s),
+            Ok(s) => s.to_string(),
             Err(_) => {
                 log::debug!("Invalid UTF-8 in clustering key type {}", i);
                 return Err(nom::Err::Error(nom::error::Error::new(
@@ -1955,6 +2006,7 @@ fn parse_serialization_header_schema(input: &[u8]) -> IResult<&[u8], Serializati
             key_position: None,
             is_static: true,
             is_clustering: false,
+            clustering_reversed: false,
         });
 
         input = remaining;
@@ -2043,6 +2095,7 @@ fn parse_serialization_header_schema(input: &[u8]) -> IResult<&[u8], Serializati
             key_position: None,
             is_static: false,
             is_clustering: false,
+            clustering_reversed: false,
         });
 
         input = remaining;
@@ -2359,6 +2412,83 @@ pub fn parse_statistics_with_fallback<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Issue #759: ReversedType wrapping is the authoritative DESC signal.
+    #[test]
+    fn test_is_reversed_comparator() {
+        // Fully-qualified and short forms both denote DESC.
+        assert!(is_reversed_comparator(
+            "org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)"
+        ));
+        assert!(is_reversed_comparator("ReversedType(Int32Type)"));
+        // The header sometimes prefixes the top-level type with '(' — still DESC.
+        assert!(is_reversed_comparator(
+            "(org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.SimpleDateType))"
+        ));
+        // ...and sometimes with a structural '[' (roborev job 43) — still DESC.
+        assert!(is_reversed_comparator(
+            "[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)"
+        ));
+        assert!(is_reversed_comparator("[ReversedType(Int32Type)"));
+        // Non-reversed comparators are ASC.
+        assert!(!is_reversed_comparator(
+            "org.apache.cassandra.db.marshal.UTF8Type"
+        ));
+        assert!(!is_reversed_comparator("Int32Type"));
+        // ReversedType only counts as the outer wrapper, not nested as an arg.
+        assert!(!is_reversed_comparator(
+            "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.Int32Type))"
+        ));
+    }
+
+    // Issue #759: ReversedType drives ClusteringColumn order without disturbing
+    // the inner type's CQL conversion (used for deserialization).
+    #[test]
+    fn test_build_clustering_key_columns_reversed_order() {
+        let clustering_types = vec![
+            "org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)".to_string(),
+            "org.apache.cassandra.db.marshal.UTF8Type".to_string(),
+            "org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.Int32Type)".to_string(),
+        ];
+
+        let cols = build_clustering_key_columns(&clustering_types);
+        assert_eq!(cols.len(), 3);
+
+        // DESC columns flag clustering_reversed; inner CQL type is preserved.
+        assert!(cols[0].clustering_reversed);
+        assert_eq!(cols[0].column_type, "timestamp");
+        assert!(!cols[1].clustering_reversed);
+        assert_eq!(cols[1].column_type, "text");
+        assert!(cols[2].clustering_reversed);
+        assert_eq!(cols[2].column_type, "int");
+
+        // Never leak the ReversedType wrapper into the resolved CQL type.
+        for col in &cols {
+            assert!(!col.column_type.contains("Reversed"));
+            assert!(col.is_clustering);
+        }
+    }
+
+    /// Regression (roborev job 48): a bracket-prefixed reversed comparator must
+    /// be DESC *and* resolve to the correct inner CQL type (not `timestamptype`).
+    #[test]
+    fn test_build_clustering_key_columns_bracket_prefixed_reversed() {
+        let clustering_types = vec![
+            "[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)"
+                .to_string(),
+        ];
+        let cols = build_clustering_key_columns(&clustering_types);
+        assert_eq!(cols.len(), 1);
+        assert!(
+            cols[0].clustering_reversed,
+            "bracket-prefixed ReversedType is DESC"
+        );
+        assert_eq!(
+            cols[0].column_type, "timestamp",
+            "inner CQL type must resolve through the bracket, got {}",
+            cols[0].column_type
+        );
+    }
 
     #[test]
     fn test_serialization_header_with_no_clustering_keys() {
