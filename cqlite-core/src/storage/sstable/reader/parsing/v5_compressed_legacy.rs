@@ -1197,21 +1197,52 @@ impl V5CompressedLegacyParser {
 
         let mut static_cells: HashMap<String, Value> = HashMap::new();
 
+        // Finding 1 (#827): buffer this partition's emitted rows locally and only
+        // forward them to the external `emit` once the partition is CONFIRMED
+        // complete (a `ParseStep::Emitted` return). If the buffer is truncated
+        // mid-partition (`NeedMore`) after one or more rows were parsed, we must
+        // emit NOTHING and let the caller refill and re-parse this partition from
+        // its start — otherwise the already-forwarded rows would be re-emitted on
+        // the retry, duplicating them in the streaming compaction output.
+        //
+        // The buffer is bounded by ONE partition's rows (the documented
+        // `max_partition_size` bound), not the whole file, so memory stays
+        // bounded as required by the #827 deliverable.
+        let mut pending: Vec<(TableId, RowKey, Value, i64)> = Vec::new();
+
+        // Flush the buffered rows to the external `emit`, honouring an early
+        // `Break`. Returns the `ParseStep` to surface to the caller: on `Break`
+        // we still report the bytes consumed for this (complete) partition so the
+        // caller drains correctly, but stop forwarding the remaining buffered
+        // rows. `flushed_break` becomes true so the driver can stop promptly.
+        macro_rules! flush_and_emitted {
+            ($consumed:expr, $pending:expr, $emit:expr) => {{
+                for entry in $pending.drain(..) {
+                    match $emit(entry)? {
+                        std::ops::ControlFlow::Continue(()) => {}
+                        std::ops::ControlFlow::Break(()) => break,
+                    }
+                }
+                Ok(ParseStep::Emitted($consumed))
+            }};
+        }
+
         loop {
             // END_OF_PARTITION (0x01): partition complete, consume the marker.
             if offset < data.len() && Self::is_end_of_partition(data[offset]) {
                 offset += 1;
-                return Ok(ParseStep::Emitted(offset));
+                return flush_and_emitted!(offset, pending, emit);
             }
 
             // Consumed everything but never saw END_OF_PARTITION: the partition
-            // may continue in the next chunk.
+            // may continue in the next chunk. On NeedMore emit NOTHING (drop the
+            // buffered rows) so the caller can refill and re-parse from the start
+            // without duplicating already-buffered rows (Finding 1).
             if offset >= data.len() {
-                return Ok(if at_final_chunk {
-                    ParseStep::Emitted(offset)
-                } else {
-                    ParseStep::NeedMore
-                });
+                if at_final_chunk {
+                    return flush_and_emitted!(offset, pending, emit);
+                }
+                return Ok(ParseStep::NeedMore);
             }
 
             if Self::is_range_tombstone_marker(data[offset]) {
@@ -1222,11 +1253,10 @@ impl V5CompressedLegacyParser {
                     }
                     Err(_) => {
                         // Marker body truncated? request more unless final.
-                        return Ok(if at_final_chunk {
-                            ParseStep::Emitted(offset)
-                        } else {
-                            ParseStep::NeedMore
-                        });
+                        if at_final_chunk {
+                            return flush_and_emitted!(offset, pending, emit);
+                        }
+                        return Ok(ParseStep::NeedMore);
                     }
                 }
             }
@@ -1282,28 +1312,25 @@ impl V5CompressedLegacyParser {
                             Value::Map(map_entries)
                         };
 
-                        match emit((table_id.clone(), partition_key.clone(), row_value, row_ts))? {
-                            std::ops::ControlFlow::Continue(()) => {}
-                            std::ops::ControlFlow::Break(()) => {
-                                // Consumer dropped: stop emitting. Report bytes
-                                // consumed so far so the caller can drain.
-                                return Ok(ParseStep::Emitted(offset));
-                            }
-                        }
+                        // Finding 1: buffer the row instead of forwarding it now.
+                        // It is flushed to `emit` only when the partition is
+                        // confirmed complete (a `flush_and_emitted!` return). A
+                        // mid-partition `NeedMore` discards `pending` and the
+                        // caller re-parses from the partition start.
+                        pending.push((table_id.clone(), partition_key.clone(), row_value, row_ts));
                     }
 
                     if offset >= data.len() {
                         // End of the buffer without an explicit END_OF_PARTITION:
                         // the partition may continue in the next chunk.
-                        return Ok(if at_final_chunk {
-                            ParseStep::Emitted(offset)
-                        } else {
-                            ParseStep::NeedMore
-                        });
+                        if at_final_chunk {
+                            return flush_and_emitted!(offset, pending, emit);
+                        }
+                        return Ok(ParseStep::NeedMore);
                     }
                     if self.peek_is_partition_header(data, offset) {
                         // Next partition starts here — current one is complete.
-                        return Ok(ParseStep::Emitted(offset));
+                        return flush_and_emitted!(offset, pending, emit);
                     }
                 }
                 Err(_) => {
@@ -1311,11 +1338,10 @@ impl V5CompressedLegacyParser {
                     // `break`s here (end-of-partition). Mid-stream that may
                     // instead be a row straddling the chunk boundary, so request
                     // more bytes unless this is the final chunk.
-                    return Ok(if at_final_chunk {
-                        ParseStep::Emitted(offset)
-                    } else {
-                        ParseStep::NeedMore
-                    });
+                    if at_final_chunk {
+                        return flush_and_emitted!(offset, pending, emit);
+                    }
+                    return Ok(ParseStep::NeedMore);
                 }
             }
         }

@@ -14,21 +14,30 @@ use super::source::BlockSource;
 use super::types::SSTableReaderConfig;
 use crate::{Error, Result};
 
-/// Maximum bytes returned by a single `read_uncompressed_data_block` call.
+/// Maximum bytes returned by a single *piecewise* `read_uncompressed_data_block`
+/// call.
 ///
 /// An uncompressed NB SSTable (CQLite's own write output has no CompressionInfo.db)
 /// has no chunk boundaries to read against. Returning the WHOLE data section in
 /// one `Vec` makes every stitching consumer's working set scale with the file
 /// size — defeating the bounded sliding-window compaction read (issue #827).
 ///
-/// Instead this path yields the data section in fixed-size pieces across
-/// successive `read_next_block` calls (advancing the file's stream position).
-/// Stitching consumers (`stitch_all_chunks`,
-/// `stream_all_partitions_for_compaction`) concatenate pieces and drain whole
-/// partitions out of the front, so a partition straddling a piece boundary is
-/// handled by the same NeedMore refill logic as a real compression chunk. The
-/// value mirrors Cassandra's default 64 KiB compression chunk so behaviour is
-/// uniform across compressed and uncompressed inputs.
+/// So for the **stitching** consumers (NB-without-CompressionInfo:
+/// `stitch_all_chunks`, `stream_all_partitions_for_compaction`) this path yields
+/// the data section in fixed-size pieces across successive `read_next_block`
+/// calls (advancing the file's stream position). Those consumers concatenate
+/// pieces and drain whole partitions out of the front, so a partition straddling
+/// a piece boundary is handled by the same NeedMore refill logic as a real
+/// compression chunk. The value mirrors Cassandra's default 64 KiB compression
+/// chunk so behaviour is uniform across compressed and uncompressed inputs.
+///
+/// CRITICAL (issue #827 Finding 2): the piecewise split is applied ONLY to those
+/// stitching consumers. The `V5_0Uncompressed` format is NOT stitched — its
+/// callers (`iterate_all_partitions`, `sequential_scan`) parse each returned
+/// block as a SELF-CONTAINED unit. Handing them a 64 KiB piece would truncate any
+/// partition/row crossing a piece boundary (silent drop/corruption). Those
+/// callers therefore receive the ENTIRE data section as one CONTIGUOUS buffer
+/// (`piecewise = false`), exactly as before the #827 change.
 const UNCOMPRESSED_READ_PIECE_BYTES: usize = 64 * 1024;
 
 /// Read next block with enhanced error handling and streaming support
@@ -120,7 +129,11 @@ async fn read_next_block_impl(
         crate::parser::header::CassandraVersion::V5_0Uncompressed
     ) {
         log::debug!("block_io::read_next_block_impl: Using uncompressed direct read");
-        return read_uncompressed_data_block(file, config).await;
+        // V5_0Uncompressed is NOT stitched: its callers parse each returned block
+        // as a self-contained unit, so return the whole data section contiguously
+        // (issue #827 Finding 2). Piecewise here would silently truncate any
+        // partition/row crossing a 64 KiB boundary.
+        return read_uncompressed_data_block(file, config, false).await;
     }
 
     if cassandra_version.is_nb_format() {
@@ -260,7 +273,11 @@ async fn read_nb_format_chunk_data(
         log::debug!(
             "read_nb_format_chunk_data: No CompressionInfo.db, falling back to raw data read"
         );
-        return read_uncompressed_data_block(file, config).await;
+        // NB-without-CompressionInfo IS stitched (requires_chunk_stitching() is
+        // true for NB format): the sliding-window stitchers reassemble pieces and
+        // handle NeedMore across boundaries, so piecewise reads keep their working
+        // set bounded (issue #827) without truncating partitions.
+        return read_uncompressed_data_block(file, config, true).await;
     };
 
     let chunk_idx = current_chunk_index.load(std::sync::atomic::Ordering::Relaxed);
@@ -568,19 +585,30 @@ async fn read_large_block_streaming(
         })
 }
 
-/// Read uncompressed data block for V5_0Uncompressed format
+/// Read uncompressed data block (no compression, no block headers): the data
+/// section after the file header is raw partition data.
 ///
-/// This format has no compression and no block headers - the entire data section
-/// after the 4096-byte file header is raw partition data. We read remaining data
-/// from current position to EOF, returning it as a single block.
+/// `piecewise` selects the return contract (issue #827 Finding 2):
 ///
-/// The returned block is inherently sized to the data section (the parser needs
-/// it contiguous), but the *read itself* streams through a capped scratch buffer
+/// - `false` (DEFAULT for `V5_0Uncompressed`): return the ENTIRE remaining data
+///   section as one CONTIGUOUS buffer. Non-stitching callers
+///   (`iterate_all_partitions`, `sequential_scan`) parse each returned block as a
+///   self-contained unit, so they MUST receive a complete unit — a partition or
+///   row crossing a 64 KiB boundary would otherwise be parsed as truncated and
+///   silently dropped/corrupted.
+/// - `true` (for NB-without-CompressionInfo stitching callers): return at most
+///   one [`UNCOMPRESSED_READ_PIECE_BYTES`] piece per call, advancing the file's
+///   stream position so successive calls walk the section. Only the sliding-
+///   window stitchers (which reassemble across pieces and handle `NeedMore`) use
+///   this, keeping their working set bounded regardless of file size.
+///
+/// In BOTH modes the *read itself* streams through a capped scratch buffer
 /// (`config.read_buffer_size`) rather than allocating and zeroing a second
 /// file-sized buffer up front. See [`read_into_vec_capped`] and Issue #592.
 async fn read_uncompressed_data_block(
     file: &Arc<Mutex<BlockSource>>,
     config: &SSTableReaderConfig,
+    piecewise: bool,
 ) -> Result<Option<Vec<u8>>> {
     let (current_pos, file_size) = {
         let mut file_guard = file.lock().await;
@@ -633,11 +661,19 @@ async fn read_uncompressed_data_block(
         return Ok(None);
     }
 
-    // Yield at most one fixed-size piece per call so the caller's working set
-    // (and any sliding-window stitch buffer) stays bounded regardless of file
-    // size (issue #827). The file's stream position advances by the bytes read,
-    // so the next call returns the next piece and EOF is reached naturally.
-    let to_read = remaining.min(UNCOMPRESSED_READ_PIECE_BYTES);
+    // Piecewise (stitching callers): yield at most one fixed-size piece per call
+    // so the sliding-window stitch buffer stays bounded regardless of file size
+    // (issue #827). The file's stream position advances by the bytes read, so the
+    // next call returns the next piece and EOF is reached naturally.
+    //
+    // Contiguous (V5_0Uncompressed non-stitching callers, Finding 2): return the
+    // WHOLE remaining section so the block is a complete, self-contained parse
+    // unit and no partition/row is truncated at a piece boundary.
+    let to_read = if piecewise {
+        remaining.min(UNCOMPRESSED_READ_PIECE_BYTES)
+    } else {
+        remaining
+    };
 
     log::debug!(
         "read_uncompressed_data_block: Reading {} of {} remaining bytes from position {}",
@@ -891,7 +927,8 @@ mod tests {
         let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
 
         let config = SSTableReaderConfig::default();
-        let result = read_uncompressed_data_block(&file, &config).await;
+        // Contiguous (V5_0Uncompressed non-stitching) read.
+        let result = read_uncompressed_data_block(&file, &config, false).await;
         assert!(result.is_ok());
 
         let data = result.unwrap();
@@ -915,7 +952,7 @@ mod tests {
 
         // Should return None for EOF
         let config = SSTableReaderConfig::default();
-        let result = read_uncompressed_data_block(&file, &config).await;
+        let result = read_uncompressed_data_block(&file, &config, false).await;
         assert!(result.is_ok());
         assert!(result.unwrap().is_none());
 
@@ -1091,11 +1128,12 @@ mod tests {
         );
     }
 
-    /// Issue #592 + #827: `read_uncompressed_data_block` must stream a data
-    /// section far larger than both `read_buffer_size` and the per-call piece
-    /// cap, returning byte-identical data when the pieces are concatenated, and
-    /// bounding each returned piece to `UNCOMPRESSED_READ_PIECE_BYTES` so the
-    /// sliding-window compaction read stays memory-bounded.
+    /// Issue #592 + #827: the PIECEWISE `read_uncompressed_data_block` (stitching
+    /// callers: NB-without-CompressionInfo) must stream a data section far larger
+    /// than both `read_buffer_size` and the per-call piece cap, returning
+    /// byte-identical data when the pieces are concatenated, and bounding each
+    /// returned piece to `UNCOMPRESSED_READ_PIECE_BYTES` so the sliding-window
+    /// compaction read stays memory-bounded.
     #[tokio::test]
     async fn uncompressed_data_block_streams_large_block_byte_identical() {
         let temp_dir = std::env::temp_dir();
@@ -1114,11 +1152,11 @@ mod tests {
             ..Default::default()
         };
 
-        // Each call returns at most one piece; concatenating all pieces must
-        // reproduce the section byte-for-byte. EOF is signalled by Ok(None).
+        // piecewise = true: each call returns at most one piece; concatenating all
+        // pieces must reproduce the section byte-for-byte. EOF is Ok(None).
         let mut assembled = Vec::new();
         let mut pieces = 0;
-        while let Some(piece) = read_uncompressed_data_block(&file, &config)
+        while let Some(piece) = read_uncompressed_data_block(&file, &config, true)
             .await
             .expect("read should succeed")
         {
@@ -1136,6 +1174,131 @@ mod tests {
         assert!(
             pieces >= 4,
             "expected the section to be split into multiple bounded pieces, got {pieces}"
+        );
+
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    /// Issue #827 Finding 2: the CONTIGUOUS `read_uncompressed_data_block`
+    /// (`piecewise = false`, the `V5_0Uncompressed` non-stitching path) must
+    /// return the ENTIRE data section in ONE call even when it far exceeds
+    /// `UNCOMPRESSED_READ_PIECE_BYTES`. Non-stitching callers parse each returned
+    /// block as a self-contained unit, so a piecewise split here would truncate
+    /// any partition/row crossing a 64 KiB boundary (silent drop/corruption).
+    /// A regression to unconditional piecewise reads trips the single-call
+    /// assertion below.
+    #[tokio::test]
+    async fn uncompressed_data_block_contiguous_returns_whole_section_in_one_call() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("issue_827_uncompressed_contiguous.bin");
+
+        // Larger than several piece-caps — a single partition this size would be
+        // shredded if the read split it.
+        let size = UNCOMPRESSED_READ_PIECE_BYTES * 3 + 7;
+        let test_data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        tokio::fs::write(&temp_file, &test_data).await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
+
+        let config = SSTableReaderConfig {
+            read_buffer_size: 8 * 1024, // small scratch buffer (#592) must NOT cause splitting
+            ..Default::default()
+        };
+
+        // piecewise = false: the FIRST call must return the whole section.
+        let first = read_uncompressed_data_block(&file, &config, false)
+            .await
+            .expect("read should succeed")
+            .expect("a non-empty section");
+        assert_eq!(
+            first.len(),
+            size,
+            "Finding 2: contiguous read must return the whole {size}-byte section \
+             in one call, got {} bytes (it was split into pieces)",
+            first.len()
+        );
+        assert_eq!(first, test_data, "contiguous read must be byte-identical");
+
+        // And the next call is EOF (the section was fully consumed).
+        let next = read_uncompressed_data_block(&file, &config, false)
+            .await
+            .expect("read should succeed");
+        assert!(
+            next.is_none(),
+            "Finding 2: after a contiguous full-section read the next call must be EOF"
+        );
+
+        tokio::fs::remove_file(&temp_file).await.ok();
+    }
+
+    /// Issue #827 Finding 2 (dispatch-level): `read_next_block` for the
+    /// `V5_0Uncompressed` format must return the whole data section as ONE
+    /// contiguous block (no chunk stitching is applied to this format, so each
+    /// returned block is a complete parse unit). This exercises the exact
+    /// `read_next_block_impl` dispatch a NORMAL (non-compaction) scan takes for a
+    /// V5_0Uncompressed SSTable whose data section exceeds 64 KiB.
+    #[tokio::test]
+    async fn read_next_block_v5_0_uncompressed_returns_contiguous_section() {
+        use crate::parser::header::CassandraVersion;
+
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("issue_827_v5_uncompressed_block.bin");
+
+        // A >64 KiB "partition" body. We position the reader at offset 0 (the
+        // dispatch reads from the current stream position to EOF).
+        let size = UNCOMPRESSED_READ_PIECE_BYTES * 2 + 123;
+        let test_data: Vec<u8> = (0..size).map(|i| (i % 199) as u8).collect();
+        tokio::fs::write(&temp_file, &test_data).await.unwrap();
+
+        let file = tokio::fs::File::open(&temp_file).await.unwrap();
+        let file = Arc::new(Mutex::new(BlockSource::buffered(file)));
+
+        let config = SSTableReaderConfig {
+            read_buffer_size: 8 * 1024,
+            ..Default::default()
+        };
+        let chunk_index = AtomicUsize::new(0);
+
+        // V5_0Uncompressed dispatch: contiguous whole-section read.
+        let block = read_next_block(
+            &file,
+            &CassandraVersion::V5_0Uncompressed,
+            &config,
+            &None, // no CompressionInfo
+            &chunk_index,
+            0,
+        )
+        .await
+        .expect("read_next_block should succeed")
+        .expect("a non-empty block");
+
+        assert_eq!(
+            block.len(),
+            size,
+            "Finding 2: a normal V5_0Uncompressed read must return the whole \
+             {size}-byte section as one block, got {} (truncated to a piece)",
+            block.len()
+        );
+        assert_eq!(
+            block, test_data,
+            "block must be byte-identical to the section"
+        );
+
+        // Next dispatch is EOF.
+        let next = read_next_block(
+            &file,
+            &CassandraVersion::V5_0Uncompressed,
+            &config,
+            &None,
+            &chunk_index,
+            0,
+        )
+        .await
+        .expect("read_next_block should succeed");
+        assert!(
+            next.is_none(),
+            "Finding 2: second V5_0Uncompressed read is EOF"
         );
 
         tokio::fs::remove_file(&temp_file).await.ok();

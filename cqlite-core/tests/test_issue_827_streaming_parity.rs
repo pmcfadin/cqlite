@@ -32,10 +32,10 @@
 use std::sync::Arc;
 
 use cqlite_core::platform::Platform;
-use cqlite_core::schema::{Column, KeyColumn, TableSchema};
+use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use cqlite_core::storage::sstable::reader::SSTableReader;
 use cqlite_core::storage::write_engine::{
-    CellOperation, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
+    CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
 use cqlite_core::{Config, RowKey};
@@ -305,6 +305,182 @@ async fn test_streaming_parity_with_row_tombstone() {
     );
 
     assert_parity(&vec_entries, &stream_entries, "row_tombstone");
+}
+
+// ===========================================================================
+// Finding 1 (#827): multi-row partition straddling a chunk boundary.
+//
+// The bounded one-partition parser must NOT re-emit rows it already emitted
+// when a partition is truncated mid-parse (NeedMore) after several rows. The
+// fixtures above only use single-row partitions, so they cannot catch the
+// duplicate-row regression. This uses a CLUSTERED schema: one partition with
+// many clustering rows whose serialised size exceeds one 16 KiB compression
+// chunk, forcing a mid-partition straddle AFTER several rows were parsed.
+// ===========================================================================
+
+const CLUSTERED_TABLE: &str = "events";
+
+/// A partition-key + clustering-key schema, so a single partition can hold many
+/// rows (one per clustering value).
+fn make_clustered_schema() -> TableSchema {
+    TableSchema {
+        keyspace: KEYSPACE.to_string(),
+        table: CLUSTERED_TABLE.to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "payload".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+    }
+}
+
+fn write_clustered_row(pk: i32, ck: i32, payload: &str, timestamp: i64) -> Mutation {
+    let table_id = TableId::new(KEYSPACE, CLUSTERED_TABLE);
+    let partition = PartitionKey::single("pk", Value::Integer(pk));
+    let clustering = ClusteringKey::single("ck", Value::Integer(ck));
+    let ops = vec![CellOperation::Write {
+        column: "payload".to_string(),
+        value: Value::Text(payload.to_string()),
+    }];
+    Mutation::new(table_id, partition, Some(clustering), ops, timestamp, None)
+}
+
+/// Write `mutations` into one SSTable under `CLUSTERED_TABLE` and return its
+/// Data.db path (kept alive by the returned `TempDir`).
+async fn write_clustered_sstable(mutations: Vec<Mutation>) -> (TempDir, std::path::PathBuf) {
+    let temp_dir = TempDir::new().unwrap();
+    let data_dir = temp_dir.path().join("data");
+    let wal_dir = temp_dir.path().join("wal");
+    let schema = make_clustered_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir, schema);
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+    for m in mutations {
+        engine.write(m).expect("write row");
+    }
+    engine
+        .flush()
+        .await
+        .expect("flush sstable")
+        .expect("non-empty sstable");
+    engine.close().await.expect("close engine");
+
+    let table_dir = data_dir.join(KEYSPACE).join(CLUSTERED_TABLE);
+    let path = std::fs::read_dir(&table_dir)
+        .expect("read sstable dir")
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.ends_with("-Data.db"))
+        })
+        .expect("a Data.db file should exist after flush");
+    (temp_dir, path)
+}
+
+/// Finding 1 regression: a SINGLE partition with MANY clustering rows whose
+/// total serialised size exceeds one 16 KiB compression chunk. The window will
+/// be truncated mid-partition AFTER several rows have already been parsed,
+/// returning `NeedMore`. The streaming read MUST yield exactly the same entries
+/// as the materialising Vec read — no row duplicated (the bug) and none dropped.
+#[tokio::test]
+async fn test_streaming_parity_multi_row_partition_chunk_straddle() {
+    let schema = make_clustered_schema();
+
+    // One partition, 200 clustering rows. Each row carries a ~512-byte payload,
+    // so the partition serialises to well over 16 KiB (multiple chunks) and the
+    // straddle happens after many rows were already emitted by the parser.
+    const ROWS: i32 = 200;
+    let payload = "Q".repeat(512);
+    let mut mutations = Vec::new();
+    for ck in 0..ROWS {
+        mutations.push(write_clustered_row(7, ck, &payload, 5_000 + ck as i64));
+    }
+    let (_tmp, data_path) = write_clustered_sstable(mutations).await;
+
+    let reader = open_reader(&data_path).await;
+    let vec_entries = collect_vec(&reader, &schema).await;
+    // Precondition: every clustering row is a distinct compaction entry, so the
+    // single partition produced many entries.
+    assert!(
+        vec_entries.len() >= ROWS as usize,
+        "Finding 1 precondition: expected >= {ROWS} entries from a multi-row \
+         partition, got {} (did clustering rows collapse?)",
+        vec_entries.len()
+    );
+
+    let stream_entries = collect_stream(&reader, &schema).await;
+
+    // The core assertion: no duplicates and none dropped — exact parity.
+    assert_eq!(
+        stream_entries.len(),
+        vec_entries.len(),
+        "Finding 1: streaming read returned {} entries, materialising read \
+         returned {} — a multi-row partition straddling a chunk boundary \
+         re-emitted (duplicated) or dropped rows",
+        stream_entries.len(),
+        vec_entries.len()
+    );
+
+    // Stronger guard: the multiset of (key,value,ts) must match exactly. Sort
+    // both so any duplicate/drop shows up as a mismatch regardless of ordering.
+    let mut vec_sorted = vec_entries.clone();
+    let mut stream_sorted = stream_entries.clone();
+    let sort_key = |e: &EntrySnapshot| (e.0.clone(), e.2);
+    vec_sorted.sort_by_key(sort_key);
+    stream_sorted.sort_by_key(sort_key);
+    assert_eq!(
+        stream_sorted, vec_sorted,
+        "Finding 1: streaming entries differ from materialising entries for a \
+         multi-row partition straddling a chunk boundary (duplicate/dropped rows)"
+    );
+
+    // Belt-and-suspenders: assert no exact-duplicate entry appears in the stream
+    // that is not also duplicated in the Vec read (catches re-emission directly).
+    let mut seen: HashMap<(Vec<u8>, i64), usize> = HashMap::new();
+    for e in &stream_entries {
+        *seen.entry((e.0.clone(), e.2)).or_insert(0) += 1;
+    }
+    let mut want: HashMap<(Vec<u8>, i64), usize> = HashMap::new();
+    for e in &vec_entries {
+        *want.entry((e.0.clone(), e.2)).or_insert(0) += 1;
+    }
+    assert_eq!(
+        seen, want,
+        "Finding 1: per-(key,ts) entry counts differ — duplicate rows emitted \
+         across a chunk-straddling multi-row partition"
+    );
 }
 
 /// Early-Break: returning `ControlFlow::Break` from the emit callback must stop
