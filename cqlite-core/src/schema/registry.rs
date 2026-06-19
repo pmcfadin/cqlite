@@ -1523,6 +1523,34 @@ mod tests {
         );
     }
 
+    /// Regression (roborev job 55): the registry validation path must also catch
+    /// an undefined UDT nested inside an UPPERCASE collection, mirroring
+    /// `TableSchema::validate_udt_references`.
+    #[tokio::test]
+    async fn test_registry_validate_uppercase_collection_udt_not_found() {
+        let registry = make_registry(SchemaRegistryConfig::default()).await;
+        let udt_registry = UdtRegistry::new();
+
+        for ty in ["LIST<MissingType>", "MAP<TEXT, MissingType>"] {
+            let mut errors = Vec::new();
+            let mut warnings = Vec::new();
+            let cql_type = CqlType::parse(ty).expect("parse");
+            registry.validate_cql_type_udts(
+                &cql_type,
+                "test_ks",
+                &udt_registry,
+                &mut errors,
+                &mut warnings,
+            );
+            assert!(
+                errors
+                    .iter()
+                    .any(|e| e.code == "UDT_NOT_FOUND" && e.message.contains("MissingType")),
+                "undefined UDT in '{ty}' must be reported, got: {errors:?}"
+            );
+        }
+    }
+
     #[test]
     fn test_schema_query_creation() {
         let query = SchemaQuery {
