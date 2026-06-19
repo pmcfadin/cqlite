@@ -6,6 +6,12 @@
 **Inspiration**: the Cassandra `cursor-compaction-completion` branch's
 `DifferentialCompactionTester` and `differential/` scenario tree
 (rustyrazorblade/cassandra)
+**Rule set**: this harness is the runtime enforcement mechanism for the codified
+rules in [`docs/compaction/byte-parity-rules.md`](../compaction/byte-parity-rules.md)
+(#854). That file says *what* must match Cassandra byte-for-byte and tracks each
+rule's status; this harness and the `compaction-parity/` module are *how* those
+rules are asserted (the differential CI of #842). The scenario catalog below maps
+onto that rule set, and the `compaction-parity-auditor` agent audits code against it.
 
 ## Problem
 

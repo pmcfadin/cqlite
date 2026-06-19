@@ -16,6 +16,11 @@ fixed. The guiding principle, from that branch:
 **How this is used.**
 - The byte-for-byte parity CI (umbrella issue #842) asserts these rules by diffing
   CQLite output against Cassandra output.
+- The **differential parity harness** (`compaction-parity/`, designed in
+  [`docs/plans/2026-06-18-compaction-parity-harness-design.md`](../plans/2026-06-18-compaction-parity-harness-design.md))
+  is the runtime mechanism: it runs Cassandra's compaction in-JVM and `cqlite compact`
+  over the same input SSTables, then compares the outputs. Each scenario below maps to
+  one or more of these rules.
 - The `compaction-parity-auditor` agent (`.claude/agents/`) audits the code against
   this list and the branch history.
 - `Status` / `Tracking` columns reflect the current CQLite gap analysis. Update them
@@ -86,6 +91,7 @@ test), **Gap** (not handled), **N/A** (out of scope, e.g. intentionally rejected
 |------|------------------|--------|----------|
 | A complex-deletion marker's **encoded size equals the bytes written** for far-future `localDeletionTime` in `[2^31, 2^32)` (same i32 cast on both paths). | `c81fbae1` | Partial — verify size path | #853 |
 | **Disabled bloom filter** (`bloom_filter_fp_chance = 1.0`) is tolerated (always-present/empty filter). | `6ab1d9c0` | Gap — fp_chance validated to (0,1) | #852 |
+| **Primary-key columns are never written as cells** — clustering (and partition-key) values are encoded positionally (clustering prefix), not duplicated in the row body. | (baseline) | **Covered** | #857 — `merge_row_group` drops key columns from ops; tests in data_writer.rs + compaction-parity harness |
 | Index block **start offset is 64-bit** (partitions past 2 GiB). | `e1c6aed4` | **Covered** | index_writer.rs (u64) |
 | **Fail loudly** on unknown writer formats. | `673b694f` | Partial — verify | — |
 | Output format: CQLite writes **BIG** (BTI output is a separate format; `e6822e93` adds BTI in Cassandra). | `e6822e93` | N/A — BIG only | — |
