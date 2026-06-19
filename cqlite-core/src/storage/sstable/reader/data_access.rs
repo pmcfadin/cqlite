@@ -62,6 +62,25 @@ fn table_ids_match(entry_table_id: &TableId, query_table_id: &TableId) -> bool {
     entry_unqualified == query_unqualified
 }
 
+/// Stricter table-id match used by the BTI point-lookup guard (issue #831 review).
+///
+/// [`table_ids_match`] matches on the unqualified table name, so it treats
+/// `ks_a.users` and `ks_b.users` as equal — fine for index lookups that are
+/// already scoped to one table, but too permissive as a defensive guard against
+/// a fully-qualified wrong-keyspace query. When BOTH ids are qualified
+/// (`keyspace.table`), this requires exact `keyspace.table` equality; it only
+/// falls back to the permissive unqualified match when one side lacks a
+/// keyspace (preserving qualified-vs-unqualified flexibility).
+fn table_ids_match_strict(entry_table_id: &TableId, query_table_id: &TableId) -> bool {
+    let entry_qualified = entry_table_id.name().contains('.');
+    let query_qualified = query_table_id.name().contains('.');
+    if entry_qualified && query_qualified {
+        entry_table_id.name() == query_table_id.name()
+    } else {
+        table_ids_match(entry_table_id, query_table_id)
+    }
+}
+
 /// Sort a result slice in ascending Cassandra token order.
 ///
 /// The authoritative ordering for SSTable partitions is ascending Murmur3 token, with
@@ -437,7 +456,9 @@ impl SSTableReader {
                     // Verify BOTH the emitted table id matches the queried table
                     // (a wrong-table query never returns a row, issue #831 review)
                     // AND the parser-decoded partition key equals the queried key.
-                    if table_ids_match(&tid, table_id) && entry_key.as_bytes() == key.as_bytes() {
+                    if table_ids_match_strict(&tid, table_id)
+                        && entry_key.as_bytes() == key.as_bytes()
+                    {
                         found = Some(entry_value);
                     }
                     Ok(std::ops::ControlFlow::Break(()))

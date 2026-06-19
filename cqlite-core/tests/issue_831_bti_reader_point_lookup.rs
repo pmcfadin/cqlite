@@ -240,6 +240,48 @@ async fn bti_reader_get_returns_row_for_known_key() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 3a: a fully-qualified WRONG-KEYSPACE query must NOT return a row, even
+// though the table name matches (issue #831 review: the BTI guard must compare
+// keyspace.table exactly, not just the unqualified table name).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bti_reader_get_wrong_keyspace_returns_none() {
+    let Some(data_db) = da_data_db_path() else {
+        eprintln!("SKIP: test_da/simple_table BTI fixture not available");
+        return;
+    };
+    let reader = open_reader(&data_db).await;
+
+    // Same table name, different keyspace — both fully qualified.
+    let wrong_ks = TableId::from("other_keyspace.simple_table");
+    // A key that DOES exist in this SSTable under the correct keyspace.
+    let existing_key = RowKey::new([TEST_PARTITIONS[0].uuid_byte; 16].to_vec());
+
+    let result = reader
+        .get(&wrong_ks, &existing_key)
+        .await
+        .expect("get() with a wrong-keyspace table id must not error");
+    assert!(
+        result.is_none(),
+        "BTI point lookup returned a row for a wrong-keyspace query \
+         (other_keyspace.simple_table); the keyspace-aware guard must reject it"
+    );
+
+    // Sanity: the same key under the CORRECT qualified id still resolves.
+    let right_ks = TableId::from(TABLE_ID);
+    let ok = reader
+        .get(&right_ks, &existing_key)
+        .await
+        .expect("get() with the correct table id must not error");
+    assert!(
+        ok.is_some(),
+        "control: correct keyspace.table must still return the row"
+    );
+    eprintln!("bti_reader_get_wrong_keyspace_returns_none PASSED");
+}
+
+// ---------------------------------------------------------------------------
 // Test 3b: chunk-targeted decompress lands on the correct chunk (issue #831
 // perf finding) — the lookup decompresses only the chunk containing the trie
 // offset, not the whole section. For this single-chunk fixture every golden
