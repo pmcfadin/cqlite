@@ -1541,20 +1541,18 @@ impl SelectExecutor {
     }
 
     /// Execute PER PARTITION LIMIT: keep at most `count` rows per partition,
-    /// preserving order (Issue #757). Rows arrive grouped by partition key from
-    /// the scan, so we track the current partition by its raw key bytes and
-    /// reset the per-partition counter at each boundary.
+    /// preserving order (Issue #757). Counts are keyed on the partition (raw key
+    /// bytes) rather than tracking only the most recent partition, so the cap
+    /// holds even when a partition's rows are not contiguous — e.g. when an
+    /// upstream `ORDER BY` interleaves rows from different partitions (roborev
+    /// job 38).
     fn execute_per_partition_limit(rows: Vec<QueryRow>, count: u64) -> Vec<QueryRow> {
         let mut out = Vec::with_capacity(rows.len());
-        let mut current_partition: Option<Vec<u8>> = None;
-        let mut partition_count: u64 = 0;
+        let mut counts: HashMap<Vec<u8>, u64> = HashMap::new();
         for row in rows {
-            if current_partition.as_deref() != Some(row.key.0.as_slice()) {
-                current_partition = Some(row.key.0.clone());
-                partition_count = 0;
-            }
-            if partition_count < count {
-                partition_count += 1;
+            let seen = counts.entry(row.key.0.clone()).or_insert(0);
+            if *seen < count {
+                *seen += 1;
                 out.push(row);
             }
         }
@@ -1997,6 +1995,42 @@ mod tests {
             metadata: Default::default(),
             cell_metadata: None,
         }
+    }
+
+    fn row_with_key(partition: &[u8]) -> QueryRow {
+        QueryRow {
+            values: std::collections::HashMap::new(),
+            key: RowKey::new(partition.to_vec()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        }
+    }
+
+    /// Regression (roborev job 38): in the batch path PER PARTITION LIMIT must
+    /// cap per partition even when a partition's rows are NOT contiguous (e.g.
+    /// after ORDER BY interleaves them). Counting must key on the partition, not
+    /// just track the most recent one.
+    #[test]
+    fn per_partition_limit_caps_interleaved_partitions() {
+        let a = b"A".as_slice();
+        let b = b"B".as_slice();
+        // Partition A appears 3 times but is split by a B row in the middle.
+        let rows = vec![
+            row_with_key(a),
+            row_with_key(b),
+            row_with_key(a),
+            row_with_key(a),
+            row_with_key(b),
+        ];
+        let out = SelectExecutor::execute_per_partition_limit(rows, 2);
+        let count = |p: &[u8]| out.iter().filter(|r| r.key.0 == p).count();
+        assert_eq!(
+            count(a),
+            2,
+            "partition A must be capped at 2 despite interleaving"
+        );
+        assert_eq!(count(b), 2, "partition B has 2 rows, all kept");
+        assert_eq!(out.len(), 4);
     }
 
     /// Issue #788: each clustering-key inequality op must include/exclude rows on

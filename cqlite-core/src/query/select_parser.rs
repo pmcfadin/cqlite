@@ -545,14 +545,6 @@ impl SelectParser {
             None
         };
 
-        // PER PARTITION LIMIT after LIMIT is invalid ordering; reject it loudly
-        // instead of silently ignoring the trailing clause (Issue #757).
-        if self.at(&Token::PerPartitionLimit) {
-            return Err(Error::cql_parse(
-                "PER PARTITION LIMIT must appear before LIMIT",
-            ));
-        }
-
         let offset = if self.eat(&Token::Offset)? {
             Some(self.expect_integer("OFFSET")? as u64)
         } else {
@@ -565,6 +557,16 @@ impl SelectParser {
         } else {
             false
         };
+
+        // PER PARTITION LIMIT must precede LIMIT (and any trailing OFFSET/ALLOW
+        // FILTERING). Checking here — after every trailing clause is consumed —
+        // rejects all mis-orderings instead of silently ignoring the clause,
+        // including `LIMIT n OFFSET m PER PARTITION LIMIT k` (roborev job 38).
+        if self.at(&Token::PerPartitionLimit) {
+            return Err(Error::cql_parse(
+                "PER PARTITION LIMIT must appear before LIMIT",
+            ));
+        }
 
         Ok(SelectStatement {
             select_clause,
@@ -1346,6 +1348,14 @@ mod tests {
     #[test]
     fn test_per_partition_limit_rejects_after_global_limit() {
         assert!(parse_select("SELECT * FROM ks.t LIMIT 5 PER PARTITION LIMIT 2").is_err());
+    }
+
+    #[test]
+    fn test_per_partition_limit_rejects_after_limit_offset() {
+        // Regression (roborev job 38): the ordering guard must catch a trailing
+        // PER PARTITION LIMIT even when LIMIT is followed by OFFSET, not just
+        // when it immediately follows LIMIT.
+        assert!(parse_select("SELECT * FROM ks.t LIMIT 5 OFFSET 1 PER PARTITION LIMIT 2").is_err());
     }
 
     #[test]
