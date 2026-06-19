@@ -227,8 +227,16 @@ pub enum BtiNodeData {
     Dense {
         /// Starting byte value for the consecutive range
         start_byte: u8,
-        /// Child pointers for the consecutive range
-        children: Vec<SizedPointer>,
+        /// Child pointers for the consecutive range.
+        ///
+        /// Each slot represents the transition `start_byte + index`.  `None`
+        /// means "no transition" (the raw Dense delta was `0`, the sentinel);
+        /// `Some(ptr)` is a real child.  Presence is tracked explicitly because
+        /// a REAL child can legitimately live at absolute trie offset `0` (the
+        /// first-written leaf in BTI's bottom-up layout): an offset of `0` is a
+        /// valid child and must NOT be confused with the absent-transition
+        /// sentinel.
+        children: Vec<Option<SizedPointer>>,
     },
 }
 
@@ -267,11 +275,15 @@ impl BtiNode {
     }
 
     /// Create a dense node
+    ///
+    /// `children[i]` is the transition for byte `start_byte + i`: `None` for a
+    /// missing transition (raw delta `0`), `Some(ptr)` for a real child (which
+    /// may point at absolute offset `0`).
     pub fn dense(
         level: u16,
         key_prefix: Vec<u8>,
         start_byte: u8,
-        children: Vec<SizedPointer>,
+        children: Vec<Option<SizedPointer>>,
     ) -> Self {
         Self {
             node_type: BtiNodeType::Dense,
@@ -312,7 +324,9 @@ impl BtiNode {
                 if byte >= *start_byte && (byte as usize) < (*start_byte as usize + children.len())
                 {
                     let index = byte as usize - *start_byte as usize;
-                    children.get(index)
+                    // `None` means "no transition" for this byte; `Some(ptr)` is
+                    // a real child (possibly at absolute offset 0).
+                    children.get(index).and_then(|slot| slot.as_ref())
                 } else {
                     None
                 }
@@ -520,9 +534,9 @@ mod tests {
     #[test]
     fn test_dense_node_lookup() {
         let children = vec![
-            SizedPointer::new(100),
-            SizedPointer::new(200),
-            SizedPointer::new(300),
+            Some(SizedPointer::new(100)),
+            Some(SizedPointer::new(200)),
+            Some(SizedPointer::new(300)),
         ];
 
         let node = BtiNode::dense(1, Vec::new(), b'a', children);
@@ -532,6 +546,41 @@ mod tests {
         assert!(node.find_child(b'c').is_some());
         assert!(node.find_child(b'd').is_none());
         assert!(node.find_child(b'@').is_none()); // Before range
+    }
+
+    /// Finding 1 (issue #832): a Dense node where the FIRST real child points at
+    /// absolute trie offset 0 (a legitimate position — the first-written leaf in
+    /// BTI's bottom-up layout) and a later slot is the "no transition" sentinel
+    /// (`None`).  `find_child` must return the offset-0 child for the real byte
+    /// and `None` for the gap byte — the offset-0 pointer must NOT be treated as
+    /// "no transition".
+    #[test]
+    fn test_dense_node_offset_zero_child_distinct_from_no_transition() {
+        // start_byte = b'a':
+        //   b'a' → real child at offset 0 (SizedPointer distance 0)
+        //   b'b' → no transition (None)
+        //   b'c' → real child at offset 300
+        let children = vec![
+            Some(SizedPointer::new(0)), // real child at absolute offset 0
+            None,                       // no transition
+            Some(SizedPointer::new(300)),
+        ];
+        let node = BtiNode::dense(1, Vec::new(), b'a', children);
+
+        let a = node.find_child(b'a');
+        assert!(a.is_some(), "offset-0 child must be found, not dropped");
+        assert_eq!(
+            a.unwrap().distance,
+            0,
+            "the real child at absolute offset 0 must be returned"
+        );
+        assert!(
+            node.find_child(b'b').is_none(),
+            "no-transition slot must return None"
+        );
+        assert!(node.find_child(b'c').is_some());
+        // child_count is the dense RANGE length (slots), independent of gaps.
+        assert_eq!(node.child_count(), 3);
     }
 
     #[test]

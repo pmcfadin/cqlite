@@ -256,8 +256,13 @@ mod da_directory_discovery {
         );
     }
 
-    /// All three da tables (simple_table, collection_table, ttl_table) must be
-    /// discoverable from the `test_da` keyspace directory.
+    /// The three foundational da tables (simple_table, collection_table,
+    /// ttl_table) must be discoverable from the `test_da` keyspace directory.
+    ///
+    /// NOTE (issue #832): the `test_da` keyspace also carries a `wide_table`
+    /// fixture used by the BTI row-index traversal tests, so the directory count
+    /// is now >= 3 rather than exactly 3.  This test pins the *required* tables'
+    /// presence, not an exact directory count.
     #[test]
     fn da_keyspace_discovers_three_tables() {
         let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
@@ -286,11 +291,10 @@ mod da_directory_discovery {
             .filter(|e| e.path().is_dir())
             .collect();
 
-        assert_eq!(
-            table_dirs.len(),
-            3,
-            "test_da keyspace must have exactly 3 table directories: \
-             simple_table, collection_table, ttl_table. Found: {:?}",
+        assert!(
+            table_dirs.len() >= 3,
+            "test_da keyspace must have at least the 3 foundational table \
+             directories (simple_table, collection_table, ttl_table). Found: {:?}",
             table_dirs.iter().map(|e| e.file_name()).collect::<Vec<_>>()
         );
 
@@ -344,7 +348,7 @@ mod da_directory_discovery {
 }
 
 #[cfg(test)]
-mod da_reader_graceful_rejection {
+mod da_reader_open {
     use cqlite_core::{storage::sstable::reader::SSTableReader, Config, Error};
     use std::sync::Arc;
 
@@ -373,12 +377,12 @@ mod da_reader_graceful_rejection {
             .map(|e| e.path())
     }
 
-    /// Opening a da Data.db with `SSTableReader::open` must return
-    /// `Error::UnsupportedFormat` — not a panic, and not a confusing parse error.
-    ///
-    /// The error message must mention "BTI (da)" so callers can act on it.
+    /// Issue #831: opening a da Data.db with `SSTableReader::open` now SUCCEEDS
+    /// when the sibling `*-Partitions.db` trie is present. The reader wires the
+    /// BTI trie point-lookup primitive (#755) into its open + get path, so the
+    /// pre-#831 `Error::UnsupportedFormat` gate is gone.
     #[tokio::test]
-    async fn da_reader_open_returns_unsupported_format_error() {
+    async fn da_reader_open_succeeds_with_partitions_db() {
         let Some(data_db) = da_data_db_path() else {
             eprintln!(
                 "SKIP: CQLITE_DATASETS_ROOT not set or da Data.db not found; \
@@ -397,44 +401,51 @@ mod da_reader_graceful_rejection {
         let result = SSTableReader::open(&data_db, &config, platform).await;
 
         assert!(
-            result.is_err(),
-            "SSTableReader::open on a da Data.db must return an error"
-        );
-
-        let err = result.unwrap_err();
-
-        // Must be UnsupportedFormat — not Corruption or Parse or Internal.
-        assert!(
-            matches!(err, Error::UnsupportedFormat(_)),
-            "Error must be UnsupportedFormat, got: {:?}",
-            err
-        );
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("BTI (da)"),
-            "Error message must contain 'BTI (da)' for actionable diagnosis. Got: {msg}"
-        );
-        assert!(
-            msg.contains("not yet implemented"),
-            "Error message must say 'not yet implemented'. Got: {msg}"
-        );
-
-        // The error must not be recoverable (it's a format limitation, not a transient I/O issue).
-        assert!(
-            !err.is_recoverable(),
-            "UnsupportedFormat error must not be recoverable"
+            result.is_ok(),
+            "SSTableReader::open on a da Data.db (with Partitions.db present) must \
+             now succeed (#831), got error: {:?}",
+            result.err()
         );
     }
 
-    /// Verify the error message includes a pointer to the scoping document.
+    /// Issue #831 negative variant: opening a BTI Data.db whose sibling
+    /// `*-Partitions.db` trie is ABSENT must still fail with a clear, actionable
+    /// `UnsupportedFormat` error (the trie is required for partition lookup).
+    ///
+    /// We copy just the Data.db (and the CompressionInfo/Statistics it needs to
+    /// parse a header) into a temp dir WITHOUT Partitions.db, then assert open
+    /// errors.
     #[tokio::test]
-    async fn da_reader_error_mentions_scoping_doc() {
+    async fn da_reader_open_errors_when_partitions_db_absent() {
         let Some(data_db) = da_data_db_path() else {
             eprintln!("SKIP: CQLITE_DATASETS_ROOT not set or da Data.db not found");
             return;
         };
+        let src_dir = data_db.parent().expect("Data.db has a parent dir");
+        let data_name = data_db
+            .file_name()
+            .and_then(|n| n.to_str())
+            .expect("Data.db file name");
 
+        // Stage a copy of the SSTable WITHOUT Partitions.db.
+        let tmp = std::env::temp_dir().join(format!(
+            "cqlite-issue831-no-partitions-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).expect("create temp dir");
+
+        for entry in std::fs::read_dir(src_dir).expect("read src dir").flatten() {
+            let name = entry.file_name();
+            let s = name.to_string_lossy();
+            // Skip Partitions.db (the file under test) and the JSONL/txt sidecars.
+            if s.ends_with("-Partitions.db") || s.ends_with(".jsonl") || s.ends_with(".txt") {
+                continue;
+            }
+            std::fs::copy(entry.path(), tmp.join(&name)).expect("copy component");
+        }
+
+        let staged_data = tmp.join(data_name);
         let config = Config::default();
         let platform = Arc::new(
             cqlite_core::platform::Platform::new(&config)
@@ -442,13 +453,19 @@ mod da_reader_graceful_rejection {
                 .expect("Platform::new must succeed"),
         );
 
-        let result = SSTableReader::open(&data_db, &config, platform).await;
-        let err = result.expect_err("Must return an error for da Data.db");
-        let msg = err.to_string();
+        let result = SSTableReader::open(&staged_data, &config, platform).await;
+        let _ = std::fs::remove_dir_all(&tmp);
 
+        let err = result.expect_err("open must error when Partitions.db is absent");
         assert!(
-            msg.contains("bti-read-support-scoping"),
-            "Error message must reference 'bti-read-support-scoping' doc. Got: {msg}"
+            matches!(err, Error::UnsupportedFormat(_)),
+            "Error must be UnsupportedFormat, got: {:?}",
+            err
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("Partitions.db"),
+            "Error message must mention the missing Partitions.db. Got: {msg}"
         );
     }
 }

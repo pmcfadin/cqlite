@@ -266,6 +266,20 @@ pub(crate) async fn parse_header_with_version_detection(
         }
     }
 
+    // Issue #831: BTI ("da") format Data.db is headerless, exactly like nb/oa
+    // BIG format — the file begins directly with compressed-chunk data and all
+    // metadata lives in the companion Statistics.db / CompressionInfo.db. There is
+    // never an embedded magic number, so we go straight to a minimal header
+    // (versioned V5_0Bti so schema extraction and the V5 row parser engage).
+    if matches!(gates, VersionGates::Bti(_)) {
+        log::debug!(
+            "Detected BTI (da) format from filename '{}' — headerless Data.db, \
+             building minimal header from CompressionInfo.db",
+            path.display()
+        );
+        return create_minimal_bti_header(path).await;
+    }
+
     // Read first 4 bytes as potential magic number or CRC32 checksum
     let first_4_bytes = u32::from_be_bytes([
         header_buffer[0],
@@ -637,6 +651,60 @@ async fn create_minimal_nb_header(path: &Path) -> Result<SSTableHeader> {
         cassandra_version: CassandraVersion::V5_0NewBig, // NB format maps to NewBig
         version: 0,        // NB format doesn't have version in Data.db
         table_id: [0; 16], // Table ID is in other components
+        keyspace: extract_keyspace_from_path(path),
+        table_name: extract_table_name_from_path(path),
+        generation: extract_generation_from_path(path),
+        compression: CompressionInfo {
+            algorithm: compression_algorithm,
+            chunk_size: 16384, // Default chunk size
+            parameters: std::collections::HashMap::new(),
+        },
+        stats: SSTableStats {
+            row_count: 0,
+            min_timestamp: 0,
+            max_timestamp: 0,
+            max_deletion_time: 0,
+            compression_ratio: 1.0,
+            row_size_histogram: vec![],
+        },
+        columns: vec![],
+        properties: std::collections::HashMap::new(),
+    })
+}
+
+/// Build a minimal headerless header for BTI ("da") format Data.db (issue #831).
+///
+/// BTI Data.db is headerless and chunk-compressed, just like nb/oa BIG format,
+/// so this mirrors [`create_minimal_nb_header`] but sets `cassandra_version` to
+/// [`CassandraVersion::V5_0Bti`] — which is what makes the reader engage schema
+/// extraction (mod.rs schema-eligible match) and schema-aware V5 row parsing for
+/// the BTI partition decode path. Compression metadata is loaded from the sibling
+/// CompressionInfo.db (BTI Data.db is LZ4-chunk-compressed).
+async fn create_minimal_bti_header(path: &Path) -> Result<SSTableHeader> {
+    let compression_algorithm = match load_nb_compression_info(path).await {
+        Ok(info) => {
+            log::info!(
+                "Loaded CompressionInfo.db for BTI format: algorithm={}, chunk_length={}, chunks={}",
+                info.algorithm,
+                info.chunk_length,
+                info.chunk_offsets.len()
+            );
+            info.algorithm
+        }
+        Err(e) => {
+            log::warn!(
+                "Could not load CompressionInfo.db for BTI format file '{}': {}. Assuming no compression.",
+                path.display(),
+                e
+            );
+            "NONE".to_string()
+        }
+    };
+
+    Ok(SSTableHeader {
+        cassandra_version: CassandraVersion::V5_0Bti, // da format maps to BTI
+        version: 0,                                   // headerless: no version in Data.db
+        table_id: [0; 16],                            // Table ID is in other components
         keyspace: extract_keyspace_from_path(path),
         table_name: extract_table_name_from_path(path),
         generation: extract_generation_from_path(path),

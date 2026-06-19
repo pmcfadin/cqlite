@@ -21,6 +21,10 @@ mod value_parsing;
 // Re-export V5CompressedLegacy parser for internal use
 pub(in crate::storage::sstable::reader) use v5_compressed_legacy::V5CompressedLegacyParser;
 
+// Re-export the sliding-window parse outcome enum (issue #827) so the
+// compaction-read streaming driver in data_access.rs can match on it.
+pub(in crate::storage::sstable::reader) use v5_compressed_legacy::ParseStep;
+
 // Re-export publicly for integration tests (Issue #166 regression tests)
 // Using doc(hidden) to keep it out of public documentation but available for testing
 #[doc(hidden)]

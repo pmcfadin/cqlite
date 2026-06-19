@@ -23,24 +23,24 @@
 //! 3. Clustering key (schema-aware) - Within partition ordering
 //! 4. Run index (ascending) - Stable tiebreak for routing (NOT the LWW rule)
 //!
-//! ## Memory Budget (Groundwork — Issue #754)
+//! ## Memory Budget (Issue #754 groundwork, Issue #827 streaming read)
 //!
 //! The bounded `sync_channel` (capacity [`STREAMING_CHANNEL_CAPACITY`]) limits
 //! how many converted `MergeEntry` values from each source live in memory
 //! simultaneously between producer and consumer. The consumer/heap pulls
 //! lazily via cursors, so the channel acts as a backpressure valve.
 //!
-//! **Current limitation**: the producer thread still calls
-//! `iterate_all_partitions_for_compaction(None)`, which returns a `Vec`
-//! containing the entire parsed source SSTable (the reader's
-//! `stitch_and_parse_all_chunks_for_compaction` materialises the whole
-//! decompressed file before returning). As a result, end-to-end peak memory
-//! is NOT yet bounded independent of total input size — the decompressed
-//! content of each source is fully resident before any entries enter the
-//! channel.
-//!
-//! True end-to-end streaming (incremental stitch+parse so the producer pulls
-//! one partition at a time) is tracked in issue #827.
+//! The producer thread streams its source via
+//! [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
+//! which uses a sliding-window incremental stitch+parse: it decompresses one
+//! chunk at a time, drains every fully-decoded partition out of the window, and
+//! forwards each entry through the bounded channel before pulling the next
+//! chunk. The blocking `SyncSender::send` backpressure plus the bounded window
+//! mean a source's decompressed content is NEVER fully resident — peak memory
+//! is bounded by roughly `max_partition_size + one_chunk + channel_capacity`
+//! per source, independent of total input size (issue #827). The dhat test
+//! `tests/test_issue_827_merge_streaming_memory.rs` asserts the 128 MiB bound
+//! against inputs whose total decompressed size exceeds it.
 //!
 //! ## Cell Merge Rule
 //!
@@ -459,28 +459,25 @@ where
 ///
 /// ## Design (Issue #754 — remove 128MB buffer cap residue of #447)
 ///
-/// The V5CompressedLegacy format requires full chunk stitching: ALL compressed
-/// chunks in the file must be decompressed and concatenated before the row
-/// parser can run. That is a format constraint we cannot sidestep. What we CAN
-/// do is limit how many **converted `MergeEntry` objects** from each source live
-/// in memory simultaneously between producer and consumer.
+/// The V5CompressedLegacy format requires chunk stitching: a partition may
+/// straddle compression-chunk boundaries, so the decoder needs a contiguous
+/// view spanning at least one whole partition. The reader's streaming path
+/// keeps only a **sliding window** of that view — one chunk plus the partition
+/// currently being decoded — rather than the whole decompressed file.
 ///
 /// A background thread (the producer) opens the SSTable with its own Tokio
-/// runtime, reads and parses ALL entries (the stitching phase — currently
-/// unavoidable; see issue #827), then feeds them one at a time into a bounded
+/// runtime and calls
+/// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
+/// which decompresses one chunk at a time, drains every fully-decoded partition
+/// out of the window, and forwards each entry one at a time into a bounded
 /// `sync_channel`. The channel capacity is [`STREAMING_CHANNEL_CAPACITY`]
 /// entries; once the channel is full the producer blocks until the consumer
 /// (the main merge thread) pulls the next entry.
 ///
-/// The channel therefore bounds how many *converted `MergeEntry` values* sit
-/// in-flight between producer and consumer at once. However, because the
-/// producer calls `iterate_all_partitions_for_compaction(None)` — which
-/// materialises the whole source as a `Vec` — end-to-end peak memory is NOT
-/// yet independent of total input size. The decompressed file content is fully
-/// resident before any entries enter the channel.
-///
-/// True end-to-end streaming (incremental read so the producer pulls one
-/// partition at a time) is tracked in issue #827.
+/// The bounded window plus the bounded channel together make end-to-end peak
+/// memory independent of total input size: a source's decompressed content is
+/// never fully resident. Peak is roughly `max_partition_size + one_chunk +
+/// channel_capacity` per source (issue #827).
 ///
 /// ## Issue #591 safety (mmap vs file deletion)
 ///
@@ -552,90 +549,113 @@ impl SSTableRowIteratorAdapter {
 
     /// Body of the producer thread.
     ///
-    /// Opens the SSTable with buffered I/O (Issue #591), reads all entries via
-    /// chunk stitching (materialising the full source into a `Vec` — see issue
-    /// #827 for the planned incremental-read upgrade), converts them to
-    /// [`MergeEntry`] (populating the clustering key from the decoded cells when
-    /// the schema has clustering columns), then streams them through the bounded
-    /// channel one at a time. Errors are forwarded as `Err(String)`.
+    /// Opens the SSTable with buffered I/O (Issue #591), then **streams** the
+    /// source one partition at a time via
+    /// [`stream_all_partitions_for_compaction`](crate::storage::sstable::reader::SSTableReader::stream_all_partitions_for_compaction),
+    /// converting each entry to a [`MergeEntry`] (populating the clustering key
+    /// from the decoded cells when the schema has clustering columns) and
+    /// sending it through the bounded channel immediately (issue #827). The
+    /// blocking `SyncSender::send` provides the backpressure that — together
+    /// with the reader's sliding-window stitch+parse — keeps peak memory bounded
+    /// by `max_partition_size + one_chunk + channel_capacity`, independent of
+    /// the total source size. Errors are forwarded as `Err(String)`.
     fn producer_thread(
         path_buf: PathBuf,
         run_index: usize,
         schema: TableSchema,
         sender: std::sync::mpsc::SyncSender<std::result::Result<MergeEntry, String>>,
     ) {
-        // Build the raw entries using an owned Tokio runtime (Issue #587).
+        // Drive the streaming read on an owned Tokio runtime (Issue #587): the
+        // producer owns its single-purpose runtime, so the blocking
+        // `SyncSender::send` inside the emit callback never stalls a shared
+        // runtime, and there is no nested `block_on` / `Handle::current`.
         // use_mmap = false (Issue #591): the file must not be memory-mapped
         // because finalize_merge_async may delete it after the merge completes.
-        let raw_entries_result =
-            (|| -> Result<Vec<(crate::types::RowKey, crate::types::Value, i64)>> {
-                use crate::platform::Platform;
-                use crate::Config;
-                use std::sync::Arc;
+        // Clone the sender for the error path: the streaming closure moves one
+        // clone for per-entry sends, leaving this one to report a fatal error.
+        let error_sender = sender.clone();
+        let stream_result = (|| -> Result<()> {
+            use crate::platform::Platform;
+            use crate::Config;
+            use std::sync::Arc;
 
-                let mut config = Config::default();
-                config.storage.use_mmap = false;
-                // Cloned so the async block can take it by move while the outer
-                // `schema` stays available for extract_clustering_key below.
-                let schema_for_reader = schema.clone();
+            let mut config = Config::default();
+            config.storage.use_mmap = false;
+            // Cloned so the async block can take it by move while the outer
+            // `schema` stays available for build_merge_entry below.
+            let schema_for_reader = schema.clone();
 
-                let rt = tokio::runtime::Runtime::new().map_err(|e| {
-                    Error::Storage(format!(
-                        "streaming producer: failed to create runtime: {}",
-                        e
-                    ))
-                })?;
-
-                rt.block_on(async move {
-                    let platform = Arc::new(Platform::new(&config).await?);
-                    let reader = crate::storage::sstable::reader::SSTableReader::open(
-                        &path_buf, &config, platform,
-                    )
-                    .await?;
-                    // Pass the schema so the parser uses the real clustering column
-                    // names; the header-inferred fallback uses generic names like
-                    // "clustering_key", which would defeat extract_clustering_key.
-                    reader
-                        .iterate_all_partitions_for_compaction(Some(&schema_for_reader))
-                        .await
-                })
-            })();
-
-        let raw_entries = match raw_entries_result {
-            Ok(entries) => entries,
-            Err(e) => {
-                // Forward the error; ignore send failure (consumer may have dropped).
-                let _ = sender.send(Err(e.to_string()));
-                return;
-            }
-        };
-
-        // Stream entries through the bounded channel one at a time.
-        for (row_key, value, timestamp) in raw_entries {
-            let entry_result = (|| -> Result<MergeEntry> {
-                let key_bytes = row_key.0;
-                let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
-                let row_data = Self::value_to_row_data(&value, timestamp)?;
-                // Populate the clustering key from the decoded cells so wide-row
-                // (clustering) partitions reconcile per (pk, ck) instead of
-                // collapsing into one row.
-                let clustering_key = Self::extract_clustering_key(&row_data, &schema);
-                Ok(MergeEntry::new(
-                    run_index,
-                    decorated_key,
-                    clustering_key,
-                    timestamp,
-                    row_data,
+            let rt = tokio::runtime::Runtime::new().map_err(|e| {
+                Error::Storage(format!(
+                    "streaming producer: failed to create runtime: {}",
+                    e
                 ))
-            })();
+            })?;
 
-            let msg = entry_result.map_err(|e| e.to_string());
-            // If the receiver has been dropped (e.g. merge aborted), stop.
-            if sender.send(msg).is_err() {
-                return;
-            }
+            rt.block_on(async move {
+                let platform = Arc::new(Platform::new(&config).await?);
+                let reader = crate::storage::sstable::reader::SSTableReader::open(
+                    &path_buf, &config, platform,
+                )
+                .await?;
+
+                // Pass the schema so the parser uses the real clustering column
+                // names; the header-inferred fallback uses generic names like
+                // "clustering_key", which would defeat extract_clustering_key.
+                //
+                // The emit callback converts and forwards one entry at a time.
+                // A blocking `send` applies backpressure; an `Err` from `send`
+                // means the consumer was dropped → stop the scan (Break).
+                reader
+                    .stream_all_partitions_for_compaction(
+                        Some(&schema_for_reader),
+                        |row_key, value, timestamp| {
+                            let msg = Self::build_merge_entry(
+                                run_index, row_key, value, timestamp, &schema,
+                            )
+                            .map_err(|e| e.to_string());
+                            match sender.send(msg) {
+                                Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
+                                Err(_) => Ok(std::ops::ControlFlow::Break(())),
+                            }
+                        },
+                    )
+                    .await
+            })
+        })();
+
+        if let Err(e) = stream_result {
+            // Forward the error; ignore send failure (consumer may have dropped).
+            let _ = error_sender.send(Err(e.to_string()));
         }
         // Channel closed naturally when sender is dropped here.
+    }
+
+    /// Convert one streamed `(RowKey, Value, timestamp)` source entry into a
+    /// [`MergeEntry`] for run `run_index` (issue #827).
+    ///
+    /// Factored out of the producer loop so the streaming emit callback can call
+    /// it inline. Populates the clustering key from the decoded cells so wide-row
+    /// (clustering) partitions reconcile per `(pk, ck)` instead of collapsing
+    /// into one row.
+    fn build_merge_entry(
+        run_index: usize,
+        row_key: crate::types::RowKey,
+        value: crate::types::Value,
+        timestamp: i64,
+        schema: &TableSchema,
+    ) -> Result<MergeEntry> {
+        let key_bytes = row_key.0;
+        let decorated_key = DecoratedKey::from_key_bytes(key_bytes)?;
+        let row_data = Self::value_to_row_data(&value, timestamp)?;
+        let clustering_key = Self::extract_clustering_key(&row_data, schema);
+        Ok(MergeEntry::new(
+            run_index,
+            decorated_key,
+            clustering_key,
+            timestamp,
+            row_data,
+        ))
     }
 
     /// Extract a `ClusteringKey` from the row's live cells using the schema.
@@ -3541,11 +3561,11 @@ mod merge_property_tests {
 // is preserved, and the channel provides backpressure between producer and
 // consumer.
 //
-// NOTE: these tests do NOT prove an end-to-end memory bound independent of
-// total input size. The real SSTableRowIteratorAdapter producer still
-// materialises each source as a full Vec (via
-// iterate_all_partitions_for_compaction). True incremental streaming is
-// tracked in issue #827.
+// NOTE: these tests verify the channel/cursor mechanism in isolation; they do
+// NOT themselves prove the end-to-end memory bound. The end-to-end bound — the
+// real producer streaming its source via stream_all_partitions_for_compaction
+// (issue #827) — is asserted by the dhat test
+// tests/test_issue_827_merge_streaming_memory.rs.
 
 #[cfg(all(test, feature = "write-support"))]
 mod streaming_tests {
@@ -3554,11 +3574,11 @@ mod streaming_tests {
     /// Channel capacity constant is accessible and matches documented value.
     ///
     /// This test checks only the constant's value — it does NOT prove an
-    /// end-to-end memory bound. The real producer still materialises each
-    /// source as a full Vec; the bound on in-flight MergeEntry objects between
-    /// producer and consumer is STREAMING_CHANNEL_CAPACITY, but the backing
-    /// file data is fully resident before any entries enter the channel.
-    /// See issue #827 for the planned fix.
+    /// end-to-end memory bound. The bound on in-flight MergeEntry objects
+    /// between producer and consumer is STREAMING_CHANNEL_CAPACITY; the
+    /// end-to-end memory bound (the producer streaming its source one partition
+    /// at a time, issue #827) is asserted by the dhat test
+    /// tests/test_issue_827_merge_streaming_memory.rs.
     #[test]
     fn test_streaming_channel_capacity_constant() {
         // The constant must be large enough to amortise scheduling overhead but
@@ -3617,10 +3637,10 @@ mod streaming_tests {
     /// per source (≤ 8 total) while the test runs, demonstrating correct
     /// ordering and completeness through a small-capacity channel.
     ///
-    /// NOTE: this test does NOT prove an end-to-end memory bound for the real
-    /// SSTableRowIteratorAdapter, whose producer still materialises the full
-    /// source Vec before sending entries. End-to-end streaming is tracked in
-    /// issue #827.
+    /// NOTE: this test exercises the synthetic streaming-iterator path only; the
+    /// end-to-end memory bound for the real SSTableRowIteratorAdapter (whose
+    /// producer streams its source one partition at a time, issue #827) is
+    /// asserted by the dhat test tests/test_issue_827_merge_streaming_memory.rs.
     #[test]
     fn test_kway_merge_with_streaming_sources_preserves_order() {
         use crate::schema::{KeyColumn, TableSchema};
