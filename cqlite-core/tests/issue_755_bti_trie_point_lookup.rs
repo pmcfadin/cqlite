@@ -24,12 +24,12 @@
 //! 7. Assert the UUID bytes match the partition key we originally looked up
 //!    (proves trie resolved the right offset, not a lucky scan result).
 //!
-//! # Architecture constraint
+//! # Architecture note
 //!
-//! `SSTableReader::open` still returns `Error::UnsupportedFormat` for BTI Data.db
-//! (the `issue_657_da_foundation.rs` test asserts this; that gate is intentional).
-//! This test bypasses the high-level reader and calls the lower-level trie and
-//! compression APIs directly — the same path a future BTI-aware reader would use.
+//! This test exercises the low-level trie + compression primitives directly.
+//! As of issue #831, `SSTableReader::open` now SUCCEEDS for BTI Data.db and wires
+//! these same primitives into the public open + get path (see
+//! `issue_831_bti_reader_point_lookup.rs` for the end-to-end reader test).
 //!
 //! # Test data requirement
 //!
@@ -365,17 +365,14 @@ fn bti_trie_offset_points_to_correct_uuid_in_data_db() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression guard: SSTableReader::open on BTI Data.db still returns
-// UnsupportedFormat (issue_657_da_foundation.rs contract must not break)
+// Issue #831: SSTableReader::open now SUCCEEDS for BTI Data.db (the pre-#831
+// UnsupportedFormat gate has been lifted). The end-to-end reader assertions
+// live in issue_831_bti_reader_point_lookup.rs; this is a light guard that the
+// gate is gone.
 // ---------------------------------------------------------------------------
 
-/// Verify that the BTI gate in SSTableReader::open is still in effect.
-///
-/// This is a redundant guard — `issue_657_da_foundation.rs` is the canonical
-/// home of this assertion — but having it here makes the #755 test file
-/// self-contained and prevents accidental removal of the gate.
 #[tokio::test]
-async fn bti_sstable_reader_open_still_returns_unsupported_format() {
+async fn bti_sstable_reader_open_now_succeeds() {
     let Some(dir) = da_simple_table_dir() else {
         eprintln!("SKIP: test_da/simple_table binary SSTables not available");
         return;
@@ -389,7 +386,7 @@ async fn bti_sstable_reader_open_still_returns_unsupported_format() {
         }
     };
 
-    use cqlite_core::{storage::sstable::reader::SSTableReader, Config, Error};
+    use cqlite_core::{storage::sstable::reader::SSTableReader, Config};
     use std::sync::Arc;
 
     let config = Config::default();
@@ -401,25 +398,10 @@ async fn bti_sstable_reader_open_still_returns_unsupported_format() {
 
     let result = SSTableReader::open(&data_db, &config, platform).await;
     assert!(
-        result.is_err(),
-        "SSTableReader::open on BTI Data.db must still return an error"
+        result.is_ok(),
+        "SSTableReader::open on BTI Data.db must now succeed (#831), got: {:?}",
+        result.err()
     );
 
-    let err = result.unwrap_err();
-    assert!(
-        matches!(err, Error::UnsupportedFormat(_)),
-        "Error must be UnsupportedFormat, got: {:?}",
-        err
-    );
-
-    let msg = err.to_string();
-    assert!(
-        msg.contains("BTI (da)"),
-        "Error message must contain 'BTI (da)'. Got: {msg}"
-    );
-
-    eprintln!(
-        "bti_sstable_reader_open_still_returns_unsupported_format PASSED: \
-         SSTableReader::open gate is intact"
-    );
+    eprintln!("bti_sstable_reader_open_now_succeeds PASSED: BTI open gate lifted");
 }

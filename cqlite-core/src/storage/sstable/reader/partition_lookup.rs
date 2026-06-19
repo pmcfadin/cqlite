@@ -49,6 +49,62 @@ impl SSTableReader {
         Ok(None)
     }
 
+    /// BTI ("da") partition point lookup via the in-memory Partitions.db trie
+    /// (issue #831, building on the verified #755 primitive).
+    ///
+    /// Encodes `partition_key` into the BTI byte-comparable trie key and walks the
+    /// trie to resolve the partition's location. Returns:
+    ///
+    /// - `Ok(Some(offset))` — the UNCOMPRESSED Data.db byte offset of the
+    ///   partition (`BtiPartitionLocation::DataOffset`). INVARIANT: this offset
+    ///   indexes into the DECOMPRESSED data section, never raw file bytes.
+    /// - `Ok(None)` — the reader is not BTI, or the key has no trie path (the
+    ///   partition is definitely absent from this SSTable).
+    /// - `Err(_)` — a structural trie parse error, or a `RowsOffset` result (the
+    ///   Rows.db read path is not yet implemented; narrow tables like
+    ///   `simple_table` always resolve to `DataOffset`).
+    ///
+    /// Because the BTI trie uses path compression, a returned offset may be a
+    /// candidate for a *prefix-colliding* key. The caller (`bti_point_lookup`)
+    /// MUST verify the partition-key bytes at the resolved offset equal the
+    /// queried key before returning rows.
+    pub fn lookup_partition_via_bti_trie(&self, partition_key: &[u8]) -> Result<Option<u64>> {
+        use crate::storage::sstable::bti::{
+            lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation,
+        };
+
+        let Some(partitions_db) = &self.bti_partitions_db else {
+            // Not a BTI reader — no trie to consult.
+            return Ok(None);
+        };
+
+        let mut cursor = std::io::Cursor::new(partitions_db.as_slice());
+        match lookup_raw_key_in_bti_partitions_db(&mut cursor, partition_key).map_err(|e| {
+            Error::corruption(format!(
+                "BTI Partitions.db trie lookup failed for partition key (len={}): {}",
+                partition_key.len(),
+                e
+            ))
+        })? {
+            Some(BtiPartitionLocation::DataOffset(off)) => {
+                debug!(
+                    "BTI trie resolved partition (key len={}) to Data.db offset {}",
+                    partition_key.len(),
+                    off
+                );
+                Ok(Some(off))
+            }
+            Some(BtiPartitionLocation::RowsOffset(off)) => Err(Error::unsupported_format(format!(
+                "BTI Rows.db read path not yet implemented (trie returned RowsOffset({}) \
+                 for partition key len={}). Wide-partition BTI tables are out of scope for \
+                 issue #831.",
+                off,
+                partition_key.len()
+            ))),
+            None => Ok(None),
+        }
+    }
+
     /// Enhanced partition lookup using schema-driven key digest computation
     pub async fn lookup_partition_with_schema_context(
         &self,

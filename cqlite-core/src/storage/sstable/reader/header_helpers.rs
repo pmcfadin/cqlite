@@ -92,6 +92,14 @@ pub(crate) fn calculate_actual_header_size(
         return Ok(0);
     }
 
+    // Issue #831: BTI ("da") Data.db is headerless — create_minimal_bti_header()
+    // sets version=0 as the headerless sentinel. The Data.db buffer is compressed
+    // chunk data starting at offset 0, not an embedded header.
+    if header.cassandra_version == CassandraVersion::V5_0Bti && header.version == 0 {
+        debug!("Headerless BTI (da) format detected (version=0) - Data.db starts at offset 0");
+        return Ok(0);
+    }
+
     // Use proper structured parsing to find the end of the header
     match header.cassandra_version {
         CassandraVersion::V5_0NewBig => {

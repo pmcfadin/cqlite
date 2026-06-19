@@ -284,4 +284,14 @@ pub struct SSTableReader {
     /// Decision points that WILL be gated in VG3 are annotated with
     /// `// VG3: use self.version_gates.has_XXX()` comments at each call site.
     pub(crate) version_gates: Arc<VersionGates>,
+    /// Raw bytes of the sibling BTI `*-Partitions.db` trie, when this reader was
+    /// opened on a BTI ("da") SSTable (issue #831).
+    ///
+    /// `Some` for BTI SSTables (Partitions.db is tiny — a single small trie),
+    /// `None` for BIG-format SSTables. The BTI point-lookup path
+    /// (`lookup_partition_via_bti_trie` / `bti_point_lookup`) wraps these bytes in
+    /// a `std::io::Cursor` per lookup and walks the trie to resolve the
+    /// uncompressed Data.db offset for a partition key — an O(log n) point lookup
+    /// instead of the sequential scan used when no index is available.
+    pub(crate) bti_partitions_db: Option<Arc<Vec<u8>>>,
 }

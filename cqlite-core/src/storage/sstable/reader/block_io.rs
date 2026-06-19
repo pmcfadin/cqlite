@@ -106,8 +106,24 @@ async fn read_next_block_impl(
         return read_uncompressed_data_block(file, config).await;
     }
 
-    if cassandra_version.is_nb_format() {
-        log::debug!("block_io::read_next_block_impl: Using NB format chunk reader");
+    // Issue #831: BTI ("da") Data.db is chunk-compressed exactly like NB — the
+    // chunk offsets live in CompressionInfo.db and the file is a stream of
+    // LZ4-compressed chunks (each followed by a 4-byte CRC32), NOT a sequence of
+    // self-describing 12-byte block headers. When CompressionInfo is present,
+    // route BTI through the same CompressionInfo-driven chunk reader as NB rather
+    // than the (incorrect) block-header reader below. Without CompressionInfo, an
+    // uncompressed BTI Data.db is read directly.
+    let is_bti = matches!(
+        cassandra_version,
+        crate::parser::header::CassandraVersion::V5_0Bti
+    );
+    if is_bti && compression_info.is_none() {
+        log::debug!("block_io::read_next_block_impl: BTI without CompressionInfo, direct read");
+        return read_uncompressed_data_block(file, config).await;
+    }
+
+    if cassandra_version.is_nb_format() || is_bti {
+        log::debug!("block_io::read_next_block_impl: Using NB/BTI format chunk reader");
 
         // Get file size for chunk size calculation
         let file_size = {
