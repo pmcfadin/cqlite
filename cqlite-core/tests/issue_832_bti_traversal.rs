@@ -17,8 +17,9 @@
 use cqlite_core::storage::sstable::bti::{
     iterate_partitions_in_bti_file, iterate_rows_for_partition, iterate_rows_in_bti_file,
     iterate_rows_in_bti_trie, lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
-    select_row_index_blocks_for_range, BtiPartitionLocation,
+    select_row_index_blocks_for_range, BtiPartitionLocation, RowsParser,
 };
+use cqlite_core::types::Value;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
@@ -261,7 +262,7 @@ fn rows_offset_resolves_real_trie_root() {
     let Some(root) = datasets_root() else {
         return;
     };
-    let Some([ro1, _ro2, _ro3]) = wide_rows_offsets(&root) else {
+    let Some([ro1, _ro2, ro3]) = wide_rows_offsets(&root) else {
         return;
     };
     let Some(rdb) = read_component(&root, "da-2-bti-Rows.db") else {
@@ -287,6 +288,22 @@ fn rows_offset_resolves_real_trie_root() {
     );
     assert_eq!(header.data_position, 0, "pk=1 Data.db position must be 0");
     assert_eq!(header.block_count, 38, "pk=1 must have 38 row-index blocks");
+
+    // Finding 2 (issue #832): the fixture issued no deletes, so the MODERN DA
+    // partition DeletionTime is the `0x80` LIVE sentinel and must decode to
+    // `None`.  The OLD legacy decoder would have mis-read the 12 following bytes
+    // (the next partition's entry data) as a bogus deletion.
+    assert_eq!(
+        header.partition_deletion, None,
+        "pk=1 partition deletion must be LIVE (0x80 sentinel → None)"
+    );
+    // pk=3 is the LAST entry; its 0x80 live sentinel is the final byte of the
+    // file, so the modern decoder must not over-read.
+    let header3 = resolve_rows_db_entry(&rdb, ro3).expect("pk=3 entry must deserialize");
+    assert_eq!(
+        header3.partition_deletion, None,
+        "pk=3 partition deletion must be LIVE (0x80 sentinel → None)"
+    );
 
     // Traversal from the recovered root yields exactly blockCount valid blocks.
     let entries = iterate_rows_in_bti_trie(&rdb, header.trie_root)
@@ -510,4 +527,97 @@ fn range_query_wide_partition_returns_correct_clustering_subset() {
     let reversed =
         select_row_index_blocks_for_range(&all, &encode_ck_int(150), &encode_ck_int(100));
     assert!(reversed.is_empty(), "reversed bounds must select no blocks");
+}
+
+/// Finding 1 (issue #832): the TYPED public `RowsParser::range_query` must encode
+/// `Value` clustering bounds in the SAME Cassandra OSS50 byte-comparable form the
+/// `Rows.db` trie stores (NOT CQLite's custom prefixed encoder).  This proves the
+/// typed API selects the correct block subset against the REAL trie separators,
+/// rather than the test hand-encoding the bytes (which hid the encoding bug).
+///
+/// We pass `&[Value::Integer(100)]..=&[Value::Integer(150)]` directly and assert
+/// the result is byte-for-byte identical to the pre-encoded
+/// `select_row_index_blocks_for_range` path (Finding B golden), including the
+/// floor block for ck=100, and that below-/above-range typed queries match too.
+#[test]
+fn typed_range_query_encodes_compatibly_with_real_trie() {
+    let Some(root) = datasets_root() else {
+        return;
+    };
+    let Some([ro1, _, _]) = wide_rows_offsets(&root) else {
+        return;
+    };
+    let Some(mut cursor) = load_component(
+        &root,
+        "sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786/da-2-bti-Rows.db",
+    ) else {
+        return;
+    };
+    let Some(rdb) = read_component(&root, "da-2-bti-Rows.db") else {
+        return;
+    };
+
+    // Pre-encoded golden (Finding B path) for ck in [100, 150].
+    let (_, all) = iterate_rows_for_partition(&rdb, ro1).expect("partition row index");
+    let golden_in: Vec<u64> =
+        select_row_index_blocks_for_range(&all, &encode_ck_int(100), &encode_ck_int(150))
+            .into_iter()
+            .map(|b| b.data_offset)
+            .collect();
+    assert!(
+        !golden_in.is_empty(),
+        "golden in-range set must be non-empty"
+    );
+
+    let mut parser = RowsParser::new(&mut cursor).expect("RowsParser::new on real Rows.db");
+
+    // TYPED call — Value bounds, NOT hand-encoded bytes.
+    let typed_in: Vec<u64> = parser
+        .range_query(ro1, &[Value::Integer(100)], &[Value::Integer(150)])
+        .expect("typed range_query must succeed")
+        .into_iter()
+        .map(|b| b.data_offset)
+        .collect();
+    assert_eq!(
+        typed_in, golden_in,
+        "typed range_query(Value::Integer 100..=150) must select the SAME blocks \
+         as the pre-encoded OSS50 byte-comparable path (proves compatible encoding)"
+    );
+
+    // Floor block for ck=100 (separator floor 96, interval [96,104)) must be present.
+    let sep_to_ck = |k: &[u8]| -> i64 {
+        let mut buf = [0u8; 4];
+        for (i, b) in k.iter().take(4).enumerate() {
+            buf[i] = *b;
+        }
+        (u32::from_be_bytes(buf) ^ 0x8000_0000) as i32 as i64
+    };
+    let floor_off = all
+        .iter()
+        .filter(|(k, _)| sep_to_ck(k) <= 100)
+        .max_by_key(|(k, _)| sep_to_ck(k))
+        .map(|(_, e)| e.data_offset)
+        .expect("a floor separator for ck=100 must exist");
+    assert!(
+        typed_in.contains(&floor_off),
+        "typed range_query must include the floor block (off={floor_off}) for ck=100"
+    );
+
+    // Below-range typed query (ck < 0): no blocks.
+    let typed_below = parser
+        .range_query(ro1, &[Value::Integer(-50)], &[Value::Integer(-10)])
+        .expect("typed range_query below range");
+    assert!(
+        typed_below.is_empty(),
+        "typed below-range query must select no blocks"
+    );
+
+    // Reversed typed bounds → empty.
+    let typed_rev = parser
+        .range_query(ro1, &[Value::Integer(150)], &[Value::Integer(100)])
+        .expect("typed reversed range_query");
+    assert!(
+        typed_rev.is_empty(),
+        "typed reversed bounds must select no blocks"
+    );
 }

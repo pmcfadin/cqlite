@@ -1367,6 +1367,68 @@ fn read_unsigned_vint_from_slice(data: &[u8]) -> BtiResult<(u64, usize)> {
     Ok((value, total))
 }
 
+/// The modern (DA/BTI) `DeletionTime` "live" sentinel byte.
+///
+/// In the `da`-family on-disk serializer, a `DeletionTime` written by the BTI
+/// row-index / trie-index path is encoded as a single `0x80` byte when it is
+/// `DeletionTime.LIVE` (no deletion), and otherwise as the full value (see
+/// [`decode_da_deletion_time`]).  Mirrors the live/no-deletion fast-path of
+/// `org.apache.cassandra.db.DeletionTime.Serializer` in the trie-index
+/// (`cassandra-5.0.0`) format, where the live sentinel avoids writing the
+/// 12-byte body.
+const DA_DELETION_TIME_LIVE_SENTINEL: u8 = 0x80;
+
+/// Width of a non-live modern (DA) `DeletionTime` body: `i64 markedForDeleteAt`
+/// followed by `u32 localDeletionTime`.
+const DA_DELETION_TIME_BODY_LEN: usize = 12;
+
+/// Decode a modern (DA/BTI) `DeletionTime` at `data[start..]`, returning
+/// `(deletion, bytes_consumed)` where `deletion` is `None` for the LIVE
+/// sentinel (issue #832 Finding 2).
+///
+/// Layout (mirrors `org.apache.cassandra.db.DeletionTime.Serializer` in the
+/// `da`/trie-index format, cassandra-5.0.0):
+///
+///   - a single `0x80` byte → `DeletionTime.LIVE` (no deletion); consumes 1 byte.
+///   - otherwise the body is `[markedForDeleteAt : i64 BE][localDeletionTime :
+///     u32 BE]` — `markedForDeleteAt` FIRST, then `localDeletionTime`; consumes
+///     12 bytes.  This differs from the LEGACY layout
+///     (`[localDeletionTime i32][markedForDeleteAt i64]`) in BOTH field order
+///     and the width/signedness of `localDeletionTime` (modern: `u32`).
+///
+/// Returns the deletion as `(local_deletion_time, marked_for_delete_at)` to
+/// match [`BtiRowIndexEntry::open_marker`]'s existing tuple ordering, even
+/// though the modern wire order is the reverse.
+///
+/// # Errors
+/// Returns a parse error if `start` is out of bounds or a non-live value is
+/// truncated.
+fn decode_da_deletion_time(data: &[u8], start: usize) -> BtiResult<(Option<(i32, i64)>, usize)> {
+    if start >= data.len() {
+        return Err(Error::Parse(format!(
+            "DA DeletionTime: start {start} beyond buffer size {}",
+            data.len()
+        )));
+    }
+    if data[start] == DA_DELETION_TIME_LIVE_SENTINEL {
+        return Ok((None, 1));
+    }
+    if start + DA_DELETION_TIME_BODY_LEN > data.len() {
+        return Err(Error::Parse(format!(
+            "DA DeletionTime: non-live value needs {DA_DELETION_TIME_BODY_LEN} bytes, have {}",
+            data.len().saturating_sub(start)
+        )));
+    }
+    let b = &data[start..start + DA_DELETION_TIME_BODY_LEN];
+    // markedForDeleteAt FIRST (i64), then localDeletionTime (u32).
+    let marked_for_delete_at = i64::from_be_bytes([b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7]]);
+    let local_deletion_time = u32::from_be_bytes([b[8], b[9], b[10], b[11]]) as i32;
+    Ok((
+        Some((local_deletion_time, marked_for_delete_at)),
+        DA_DELETION_TIME_BODY_LEN,
+    ))
+}
+
 /// Decode a `Rows.db` in-trie payload (`RowIndexReader.IndexInfo`) at
 /// `payload_start` inside `trie_data`, given the node's `payload_bits` (low
 /// nibble of the header byte).
@@ -1377,7 +1439,8 @@ fn read_unsigned_vint_from_slice(data: &[u8]) -> BtiResult<(u64, usize)> {
 ///     `SizedInts` value of `bytes` bytes (the offset is relative to the
 ///     partition's data position).
 ///   - if `payload_bits & FLAG_OPEN_MARKER`, an open-deletion `DeletionTime`
-///     follows (legacy fixed 12-byte form when present in `trie_data`).
+///     follows in the MODERN DA form ([`decode_da_deletion_time`]): a `0x80`
+///     LIVE sentinel, else `[i64 markedForDeleteAt][u32 localDeletionTime]`.
 ///
 /// A `payload_bits` of `0` is not a valid leaf payload here (the caller filters
 /// such nodes out) and yields an error.
@@ -1417,18 +1480,12 @@ fn decode_bti_row_payload(
     let data_offset = raw as u64;
 
     let open_marker = if payload_bits & FLAG_OPEN_MARKER != 0 {
+        // DA/BTI modern DeletionTime (issue #832 Finding 2): a 0x80 sentinel
+        // means LIVE (no open deletion); otherwise [i64 markedForDeleteAt][u32
+        // localDeletionTime].  This is NOT the legacy [i32 ldt][i64 mfda] form.
         let dt_start = payload_start + offset_bytes;
-        if dt_start + 12 > trie_data.len() {
-            return Err(Error::Parse(format!(
-                "Rows.db payload: open-marker DeletionTime needs 12 bytes, have {}",
-                trie_data.len().saturating_sub(dt_start)
-            )));
-        }
-        let dt = &trie_data[dt_start..dt_start + 12];
-        let local_deletion_time = i32::from_be_bytes([dt[0], dt[1], dt[2], dt[3]]);
-        let marked_for_delete_at =
-            i64::from_be_bytes([dt[4], dt[5], dt[6], dt[7], dt[8], dt[9], dt[10], dt[11]]);
-        Some((local_deletion_time, marked_for_delete_at))
+        let (deletion, _consumed) = decode_da_deletion_time(trie_data, dt_start)?;
+        deletion
     } else {
         None
     };
@@ -1580,8 +1637,9 @@ pub struct BtiRowIndexHeader {
     /// Number of row-index blocks indexed by this partition's trie.
     pub block_count: u32,
     /// Partition-level deletion `(local_deletion_time, marked_for_delete_at)`,
-    /// when it could be decoded as the legacy fixed 12-byte form; `None` for the
-    /// compact "live" sentinel or when too few trailing bytes remain.
+    /// decoded via the MODERN DA `DeletionTime` form
+    /// ([`decode_da_deletion_time`], issue #832 Finding 2); `None` for the `0x80`
+    /// LIVE sentinel or when too few trailing bytes remain.
     pub partition_deletion: Option<(i32, i64)>,
 }
 
@@ -1657,16 +1715,15 @@ pub fn resolve_rows_db_entry(rows_db: &[u8], rows_offset: usize) -> BtiResult<Bt
         ))
     })?;
 
-    // Partition DeletionTime: the `da`-family form is delta/compact and not
-    // required for traversal correctness, so decode the legacy fixed 12-byte
-    // form best-effort and otherwise leave it `None` rather than failing.
-    let partition_deletion = if cur + 12 <= rows_db.len() {
-        let dt = &rows_db[cur..cur + 12];
-        let ldt = i32::from_be_bytes([dt[0], dt[1], dt[2], dt[3]]);
-        let mfda = i64::from_be_bytes([dt[4], dt[5], dt[6], dt[7], dt[8], dt[9], dt[10], dt[11]]);
-        Some((ldt, mfda))
-    } else {
-        None
+    // Partition DeletionTime: decode the MODERN DA/BTI form (issue #832
+    // Finding 2) — a 0x80 byte means LIVE (no deletion, the common case when no
+    // deletes were issued); otherwise [i64 markedForDeleteAt][u32
+    // localDeletionTime].  Decoded best-effort: if too few trailing bytes
+    // remain, leave it `None` rather than failing (it is not required for
+    // traversal correctness).
+    let partition_deletion = match decode_da_deletion_time(rows_db, cur) {
+        Ok((deletion, _consumed)) => deletion,
+        Err(_) => None,
     };
 
     Ok(BtiRowIndexHeader {
@@ -1675,6 +1732,121 @@ pub fn resolve_rows_db_entry(rows_db: &[u8], rows_offset: usize) -> BtiResult<Bt
         block_count,
         partition_deletion,
     })
+}
+
+/// Cassandra component separator used between clustering components in the
+/// OSS50 byte-comparable form.  Mirrors `ByteSource.NEXT_COMPONENT` (value
+/// `0x40`) emitted by `ClusteringComparator.asByteComparable` /
+/// `ByteSource.withTerminator`/`ByteSource.of(...)` in
+/// `org.apache.cassandra.utils.bytecomparable.ByteSource` (cassandra-5.0.0).
+const OSS50_NEXT_COMPONENT: u8 = 0x40;
+
+/// Encode a single clustering-component [`Value`] in Cassandra OSS50
+/// **byte-comparable** form (the SAME encoding the `Rows.db` row-index trie
+/// stores its separators in), appending to `out`.
+///
+/// This is NOT CQLite's custom [`ByteComparableEncoder`] (which prepends a
+/// 1-byte type discriminator and so is byte-incompatible with the on-disk
+/// trie).  It reproduces the per-type `AbstractType.asComparableBytes(...)`
+/// production used by Cassandra to build the byte-comparable keys:
+///
+/// - `Int32Type` → `(v as u32 ^ 0x8000_0000)` big-endian (sign-flip, 4B), per
+///   `Int32Type.asComparableBytes` / `ByteSource.optionalSignedFixedLengthNumber`.
+/// - `LongType` → `(v as u64 ^ 0x8000_0000_0000_0000)` big-endian (8B), per
+///   `LongType.asComparableBytes`.
+/// - `ShortType`/`ByteType` (`smallint`/`tinyint`) → sign-flip big-endian (2B /
+///   1B), per `ShortType`/`ByteType.asComparableBytes`.
+/// - `BooleanType` → single byte `0x00`/`0x01`, per `BooleanType.asComparableBytes`.
+/// - `TimestampType` (`timestamp`) → `LongType`-style sign-flip 8B (`TimestampType`
+///   extends `LongType`'s comparable form).
+/// - `UUIDType`/`TimeUUIDType` → the 16 raw bytes (network order is already
+///   byte-comparable for the on-disk separator form here).
+/// - `UTF8Type`/`AsciiType` (`text`/`ascii`) and `BytesType` (`blob`) → the raw
+///   value bytes, terminated by the OSS50 variable-length component terminator
+///   (`0x00`) so a shorter value sorts before a longer one sharing its prefix
+///   (`ByteSource.of(ByteBuffer)` + the terminator convention in
+///   `ByteComparable.Version.OSS50`).
+///
+/// Any clustering type not enumerated here returns an explicit parse error
+/// (NO silent wrong results — issue #28 no-heuristics mandate).
+fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiResult<()> {
+    match value {
+        // int — Int32Type: sign-flip, big-endian (matches `wide_table` separators,
+        // e.g. ck=8 → 80 00 00 08).
+        Value::Integer(v) => {
+            out.extend_from_slice(&((*v as u32) ^ 0x8000_0000).to_be_bytes());
+            Ok(())
+        }
+        // bigint — LongType: sign-flip, big-endian, 8 bytes.
+        Value::BigInt(v) | Value::Counter(v) => {
+            out.extend_from_slice(&((*v as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
+            Ok(())
+        }
+        // smallint — ShortType: sign-flip, big-endian, 2 bytes.
+        Value::SmallInt(v) => {
+            out.extend_from_slice(&((*v as u16) ^ 0x8000).to_be_bytes());
+            Ok(())
+        }
+        // tinyint — ByteType: sign-flip, 1 byte.
+        Value::TinyInt(v) => {
+            out.push((*v as u8) ^ 0x80);
+            Ok(())
+        }
+        // boolean — BooleanType: single 0x00/0x01 byte.
+        Value::Boolean(b) => {
+            out.push(if *b { 0x01 } else { 0x00 });
+            Ok(())
+        }
+        // timestamp — TimestampType shares LongType's comparable form (8-byte
+        // sign-flip big-endian of the millisecond value).
+        Value::Timestamp(v) => {
+            out.extend_from_slice(&((*v as u64) ^ 0x8000_0000_0000_0000).to_be_bytes());
+            Ok(())
+        }
+        // uuid / timeuuid — raw 16 bytes (already byte-comparable in the on-disk
+        // separator form for this fixed-length type).
+        Value::Uuid(bytes) => {
+            out.extend_from_slice(bytes);
+            Ok(())
+        }
+        // text / ascii — raw UTF-8/ASCII bytes + variable-length component
+        // terminator (0x00) so prefixes sort first.
+        Value::Text(s) => {
+            out.extend_from_slice(s.as_bytes());
+            out.push(0x00);
+            Ok(())
+        }
+        // blob — raw bytes + variable-length component terminator (0x00).
+        Value::Blob(b) | Value::Inet(b) => {
+            out.extend_from_slice(b);
+            out.push(0x00);
+            Ok(())
+        }
+        other => Err(Error::Parse(format!(
+            "BTI range_query: byte-comparable encoding not implemented for {:?}",
+            other.data_type()
+        ))),
+    }
+}
+
+/// Encode a multi-component clustering bound (`&[Value]`) in Cassandra OSS50
+/// byte-comparable form — the SAME encoding the `Rows.db` trie stores.
+///
+/// A single-component clustering encodes to the bare component bytes (matching
+/// the `wide_table` fixture separators, e.g. ck=8 → `80 00 00 08`, NO framing).
+/// Multi-component clusterings concatenate per-component byte-comparable
+/// encodings separated by [`OSS50_NEXT_COMPONENT`] (`ByteSource.NEXT_COMPONENT`,
+/// per `ClusteringComparator.asByteComparable`), with no leading/trailing frame
+/// so a prefix bound sorts before any longer key sharing it.
+fn encode_clustering_bound_oss50(values: &[Value]) -> BtiResult<Vec<u8>> {
+    let mut out = Vec::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(OSS50_NEXT_COMPONENT);
+        }
+        encode_clustering_component_oss50(v, &mut out)?;
+    }
+    Ok(out)
 }
 
 /// Select the row-index blocks that may contain clustering keys in the
@@ -1800,6 +1972,22 @@ impl BtiHeader {
 
     /// Current BTI version
     pub const VERSION: u16 = 0x0001;
+
+    /// A benign placeholder header for files that carry no fictional
+    /// [`BtiHeader`] (i.e. every real Cassandra `Rows.db`/`Partitions.db`, which
+    /// are footer-rooted).  Used by [`RowsParser::new`] so the trie-based,
+    /// whole-file entry points work on real files that legitimately lack the
+    /// header; the fields are never consulted by those entry points.
+    pub fn placeholder() -> Self {
+        BtiHeader {
+            magic: Self::MAGIC,
+            version: Self::VERSION,
+            flags: 0,
+            root_offset: 0,
+            entry_count: 0,
+            metadata_size: 0,
+        }
+    }
 
     /// Parse BTI header from bytes
     pub fn parse(data: &[u8]) -> BtiResult<(Self, usize)> {
@@ -2013,14 +2201,35 @@ pub struct RowsParser<R: Read + Seek> {
 }
 
 impl<R: Read + Seek> RowsParser<R> {
-    /// Create new rows parser
+    /// Create new rows parser.
+    ///
+    /// A real Cassandra 5.0 `Rows.db` has **no** whole-file [`BtiHeader`] (that
+    /// fictional 28-byte header is only emitted by CQLite's own test/index
+    /// writers); its leading bytes are trie node data and its layout is described
+    /// per-partition via the `RowsOffset` from `Partitions.db`.  The trie-based
+    /// entry points used here ([`range_query`](Self::range_query),
+    /// [`range_query_encoded`](Self::range_query_encoded),
+    /// [`iterate_rows`](Self::iterate_rows)) read the whole file and root from a
+    /// resolved per-partition entry, so they do not consult `self.header`.
+    ///
+    /// We therefore *attempt* to parse the fictional header (for files that do
+    /// carry it) but fall back to a benign default when it is absent — rather
+    /// than rejecting every real `Rows.db` with an "invalid BTI magic" error.
     pub fn new(mut reader: R) -> BtiResult<Self> {
-        // Read and parse header
+        // Attempt to read the (optional, CQLite-only) fictional header.  Real
+        // Rows.db files have no such header; a parse failure there is expected
+        // and must not block construction.
         reader.seek(SeekFrom::Start(0))?;
         let mut header_data = vec![0u8; 28];
-        reader.read_exact(&mut header_data)?;
-
-        let (header, _) = BtiHeader::parse(&header_data)?;
+        let header = match reader.read_exact(&mut header_data) {
+            Ok(()) => BtiHeader::parse(&header_data)
+                .map(|(h, _)| h)
+                .unwrap_or_else(|_| BtiHeader::placeholder()),
+            // File shorter than 28 bytes (e.g. tiny/empty Rows.db): also fine.
+            Err(_) => BtiHeader::placeholder(),
+        };
+        // Leave the reader positioned at the start for whole-file reads.
+        reader.seek(SeekFrom::Start(0))?;
 
         Ok(Self {
             reader,
@@ -2149,28 +2358,36 @@ impl<R: Read + Seek> RowsParser<R> {
         Ok((header, blocks))
     }
 
-    /// Clustering-key range/slice traversal using the **custom CQLite**
-    /// byte-comparable encoder ([`ByteComparableEncoder`]).
+    /// Typed clustering-key range/slice traversal (issue #832 Finding 1).
     ///
-    /// NOTE: the CQLite encoder is NOT byte-identical to Cassandra's on-disk
-    /// OSS50 clustering encoding (it prefixes a type discriminator), so for
-    /// fixture-faithful filtering against real `Rows.db` separators callers
-    /// should encode bounds in the Cassandra form and use
-    /// [`range_query_encoded`](Self::range_query_encoded).  This method is kept
-    /// for in-process round-trips where both the writer and the bounds use the
-    /// CQLite encoder.
+    /// Encodes the `Value` clustering bounds in Cassandra **OSS50
+    /// byte-comparable** form — the SAME encoding the `Rows.db` row-index trie
+    /// stores its separators in — via [`encode_clustering_bound_oss50`], then
+    /// delegates to the separator-aware [`range_query_encoded`].  This is the
+    /// fix for the prior bug where bounds were encoded with CQLite's custom
+    /// [`ByteComparableEncoder`] (which prepends a type discriminator and so is
+    /// byte-incompatible with the on-disk trie), causing the typed API to
+    /// compare incompatible byte formats and return empty/wrong block sets for
+    /// real callers.
+    ///
+    /// Supported clustering types: `int`, `bigint`/`counter`, `smallint`,
+    /// `tinyint`, `boolean`, `timestamp`, `uuid`/`timeuuid`, `text`/`ascii`,
+    /// `blob`/`inet`.  Any other clustering type returns an explicit
+    /// `Error::Parse("BTI range_query: byte-comparable encoding not implemented
+    /// for <type>")` (no silent wrong results — issue #28).
     ///
     /// `rows_offset` is the partition's `RowsOffset` (resolved to the real trie
     /// root via [`resolve_rows_db_entry`], Finding A).  Separator semantics
     /// (Finding B) are applied via [`select_row_index_blocks_for_range`].
+    /// Reversed bounds yield an empty result.
     pub fn range_query(
         &mut self,
         rows_offset: usize,
         start_key: &[Value],
         end_key: &[Value],
     ) -> BtiResult<Vec<BtiRowIndexEntry>> {
-        let encoded_start = self.encoder.encode_composite_key(start_key)?;
-        let encoded_end = self.encoder.encode_composite_key(end_key)?;
+        let encoded_start = encode_clustering_bound_oss50(start_key)?;
+        let encoded_end = encode_clustering_bound_oss50(end_key)?;
         if encoded_start > encoded_end {
             return Ok(Vec::new());
         }
@@ -3855,23 +4072,115 @@ mod tests {
         assert!(node.find_child(0x12).is_some());
     }
 
-    /// Rows.db payload with FLAG_OPEN_MARKER decodes a trailing 12-byte
-    /// DeletionTime.
+    /// Rows.db payload with FLAG_OPEN_MARKER decodes a trailing MODERN DA
+    /// DeletionTime (issue #832 Finding 2): `[i64 markedForDeleteAt][u32
+    /// localDeletionTime]` — markedForDeleteAt FIRST.
     #[test]
-    fn decode_row_payload_open_marker() {
+    fn decode_row_payload_open_marker_modern() {
         // payloadBits = 0x9 → FLAG_OPEN_MARKER (0x8) set.
-        // payload: [pos vint = 7][localDeletionTime i32][markedForDeleteAt i64]
+        // payload: [pos vint = 7][i64 markedForDeleteAt=567890][u32 localDeletionTime=1234]
         let mut data = vec![0x07u8]; // pos = 7
-        data.extend_from_slice(&1234i32.to_be_bytes());
         data.extend_from_slice(&567890i64.to_be_bytes());
+        data.extend_from_slice(&1234u32.to_be_bytes());
         let entry = decode_bti_row_payload(&data, 0, 0x9).unwrap();
         assert_eq!(
             entry,
             BtiRowIndexEntry {
                 data_offset: 7,
+                // open_marker tuple is (local_deletion_time, marked_for_delete_at).
                 open_marker: Some((1234, 567890)),
             }
         );
+    }
+
+    /// Rows.db payload with FLAG_OPEN_MARKER but a `0x80` LIVE sentinel decodes
+    /// to NO open deletion (issue #832 Finding 2): the live fast-path consumes
+    /// only 1 byte and yields `open_marker == None`.
+    #[test]
+    fn decode_row_payload_open_marker_live_sentinel() {
+        // payloadBits = 0x9 → FLAG_OPEN_MARKER set; payload: [pos=7][0x80 live].
+        let data = vec![0x07u8, 0x80u8];
+        let entry = decode_bti_row_payload(&data, 0, 0x9).unwrap();
+        assert_eq!(
+            entry,
+            BtiRowIndexEntry {
+                data_offset: 7,
+                open_marker: None,
+            }
+        );
+    }
+
+    /// Direct coverage of the modern DA `DeletionTime` decoder (issue #832
+    /// Finding 2): the `0x80` sentinel → live (None, 1 byte); a non-live value
+    /// → `[i64 markedForDeleteAt][u32 localDeletionTime]` in the CORRECT order
+    /// and widths (12 bytes); a truncated non-live value errors; an
+    /// out-of-bounds start errors.
+    #[test]
+    fn da_deletion_time_decoder() {
+        // Live sentinel.
+        assert_eq!(decode_da_deletion_time(&[0x80], 0).unwrap(), (None, 1));
+        // Live sentinel mid-buffer (trailing bytes ignored, consumes 1).
+        assert_eq!(
+            decode_da_deletion_time(&[0x00, 0x80, 0xFF], 1).unwrap(),
+            (None, 1)
+        );
+
+        // Non-live: markedForDeleteAt FIRST (i64), then localDeletionTime (u32).
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&987_654_321_000i64.to_be_bytes()); // mfda
+        buf.extend_from_slice(&1_700_000_000u32.to_be_bytes()); // ldt
+        let (del, n) = decode_da_deletion_time(&buf, 0).unwrap();
+        assert_eq!(n, 12);
+        assert_eq!(del, Some((1_700_000_000i32, 987_654_321_000i64)));
+
+        // The leading byte of mfda here is 0x00 (not 0x80), so this is correctly
+        // treated as non-live rather than the live sentinel.
+        assert_ne!(buf[0], 0x80);
+
+        // Truncated non-live value (leading byte != 0x80 but < 12 bytes) errors.
+        assert!(decode_da_deletion_time(&[0x00, 0x01, 0x02], 0).is_err());
+        // Out-of-bounds start errors.
+        assert!(decode_da_deletion_time(&[0x00], 5).is_err());
+    }
+
+    /// The OSS50 byte-comparable clustering encoder (issue #832 Finding 1)
+    /// reproduces the on-disk trie separator bytes: `int` is sign-flip BE
+    /// (ck=8 → 80 00 00 08), and a multi-component clustering joins components
+    /// with the `0x40` NEXT_COMPONENT separator.  Unsupported clustering types
+    /// error out explicitly (no silent wrong results).
+    #[test]
+    fn oss50_clustering_encoder() {
+        // Single int component — bare, sign-flip big-endian (matches fixture).
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::Integer(8)]).unwrap(),
+            vec![0x80, 0x00, 0x00, 0x08]
+        );
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::Integer(-1)]).unwrap(),
+            vec![0x7F, 0xFF, 0xFF, 0xFF]
+        );
+        // Ordering is preserved: -1 < 0 < 100 byte-comparably.
+        let neg = encode_clustering_bound_oss50(&[Value::Integer(-1)]).unwrap();
+        let zero = encode_clustering_bound_oss50(&[Value::Integer(0)]).unwrap();
+        let pos = encode_clustering_bound_oss50(&[Value::Integer(100)]).unwrap();
+        assert!(neg < zero && zero < pos);
+
+        // bigint — 8-byte sign-flip BE.
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::BigInt(1)]).unwrap(),
+            vec![0x80, 0, 0, 0, 0, 0, 0, 0x01]
+        );
+
+        // Multi-component: int(1) + text("ab") joined with 0x40 NEXT_COMPONENT,
+        // text terminated by 0x00.
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::Integer(1), Value::Text("ab".to_string())])
+                .unwrap(),
+            vec![0x80, 0x00, 0x00, 0x01, 0x40, b'a', b'b', 0x00]
+        );
+
+        // Unsupported clustering type errors out explicitly.
+        assert!(encode_clustering_bound_oss50(&[Value::Float(1.0)]).is_err());
     }
 
     /// Multi-byte unsigned vint decode (count-leading-ones, NOT zigzag).
@@ -3992,7 +4301,8 @@ mod tests {
     /// per-partition `TrieIndexEntry` and recovers the trie root via
     /// `indexTrieRoot = readVInt() + (RowsOffset + key_length)`.  Mirrors the
     /// real `wide_table` layout: `[u16 keylen][key][dataPos uvint][rootΔ svint]
-    /// [blockCount uvint][deletion 12B]`.
+    /// [blockCount uvint][modern DA deletion]`.  The deletion here is a non-live
+    /// MODERN value `[i64 markedForDeleteAt][u32 localDeletionTime]` (Finding 2).
     #[test]
     fn resolve_rows_db_entry_recovers_root_and_metadata() {
         // Place a 1-byte pad so the trie "root" lives at a non-zero offset.
@@ -4014,9 +4324,10 @@ mod tests {
         buf.push(zig as u8);
         // blockCount = 38 (unsigned vint)
         buf.push(38);
-        // partition DeletionTime (legacy fixed 12 bytes): ldt=0x09, mfda=0x11
-        buf.extend_from_slice(&9i32.to_be_bytes());
+        // partition DeletionTime (MODERN DA non-live): [i64 mfda=17][u32 ldt=9].
+        // (Leading byte 0x00 != 0x80 live sentinel.)
         buf.extend_from_slice(&17i64.to_be_bytes());
+        buf.extend_from_slice(&9u32.to_be_bytes());
 
         let header = resolve_rows_db_entry(&buf, rows_offset).unwrap();
         assert_eq!(header.data_position, 123);
@@ -4025,10 +4336,35 @@ mod tests {
             "trie root = rootΔ + (RowsOffset + keylen)"
         );
         assert_eq!(header.block_count, 38);
+        // (local_deletion_time, marked_for_delete_at) = (9, 17).
         assert_eq!(header.partition_deletion, Some((9, 17)));
 
         // Out-of-bounds RowsOffset → clean error, no panic.
         assert!(resolve_rows_db_entry(&buf, buf.len() + 10).is_err());
+    }
+
+    /// Finding 2 (issue #832): a `TrieIndexEntry` whose partition DeletionTime is
+    /// the MODERN `0x80` LIVE sentinel decodes to `partition_deletion == None`.
+    #[test]
+    fn resolve_rows_db_entry_live_partition_deletion() {
+        let mut buf = vec![0xEEu8; 4];
+        let rows_offset = buf.len();
+        buf.extend_from_slice(&4u16.to_be_bytes());
+        buf.extend_from_slice(&[0x00, 0x00, 0x00, 0x07]);
+        let base = rows_offset + 4;
+        buf.push(123); // dataPos
+        let root_delta: i64 = 2 - base as i64;
+        let zig = ((root_delta << 1) ^ (root_delta >> 63)) as u64;
+        buf.push(zig as u8); // rootΔ
+        buf.push(38); // blockCount
+        buf.push(0x80); // MODERN DA live sentinel → no deletion
+
+        let header = resolve_rows_db_entry(&buf, rows_offset).unwrap();
+        assert_eq!(header.block_count, 38);
+        assert_eq!(
+            header.partition_deletion, None,
+            "0x80 live sentinel must decode to no partition deletion"
+        );
     }
 
     /// Signed vint (zig-zag) decode round-trips small +/- values.
