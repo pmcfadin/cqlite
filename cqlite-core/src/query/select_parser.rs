@@ -43,6 +43,7 @@ pub enum Token {
     Having,
     OrderBy,
     Limit,
+    PerPartitionLimit,
     Offset,
     And,
     Or,
@@ -291,12 +292,22 @@ impl Tokenizer {
 
     /// Consume the literal keyword `BY` (case-insensitive) following GROUP/ORDER.
     fn expect_by_keyword(&mut self, after: &str) -> Result<()> {
+        self.expect_keyword_word("BY", after)
+    }
+
+    /// Consume the literal `word` (case-insensitive) as the next identifier,
+    /// erroring if it is absent. Used to resolve multi-word keywords (e.g. the
+    /// `PARTITION`/`LIMIT` words of `PER PARTITION LIMIT`).
+    fn expect_keyword_word(&mut self, word: &str, after: &str) -> Result<()> {
         self.skip_whitespace();
         let next = self.read_identifier();
-        if next.eq_ignore_ascii_case("BY") {
+        if next.eq_ignore_ascii_case(word) {
             Ok(())
         } else {
-            Err(Error::cql_parse(format!("Expected BY after {}", after)))
+            Err(Error::cql_parse(format!(
+                "Expected {} after {}",
+                word, after
+            )))
         }
     }
 
@@ -383,6 +394,13 @@ impl Tokenizer {
                     if identifier.eq_ignore_ascii_case("ORDER") {
                         self.expect_by_keyword("ORDER")?;
                         return Ok(Token::OrderBy);
+                    }
+                    // PER PARTITION LIMIT is a three-word keyword; resolve it
+                    // here so the parser only ever sees a single token.
+                    if identifier.eq_ignore_ascii_case("PER") {
+                        self.expect_keyword_word("PARTITION", "PER")?;
+                        self.expect_keyword_word("LIMIT", "PER PARTITION")?;
+                        return Ok(Token::PerPartitionLimit);
                     }
                     return Ok(keyword_for(&identifier).unwrap_or(Token::Identifier(identifier)));
                 }
@@ -514,11 +532,26 @@ impl SelectParser {
             None
         };
 
+        // PER PARTITION LIMIT precedes the query-wide LIMIT in CQL grammar.
+        let per_partition_limit = if self.eat(&Token::PerPartitionLimit)? {
+            Some(self.parse_positive_limit("PER PARTITION LIMIT")?)
+        } else {
+            None
+        };
+
         let limit = if self.eat(&Token::Limit)? {
             Some(self.parse_limit_clause()?)
         } else {
             None
         };
+
+        // PER PARTITION LIMIT after LIMIT is invalid ordering; reject it loudly
+        // instead of silently ignoring the trailing clause (Issue #757).
+        if self.at(&Token::PerPartitionLimit) {
+            return Err(Error::cql_parse(
+                "PER PARTITION LIMIT must appear before LIMIT",
+            ));
+        }
 
         let offset = if self.eat(&Token::Offset)? {
             Some(self.expect_integer("OFFSET")? as u64)
@@ -541,6 +574,7 @@ impl SelectParser {
             having_clause,
             order_by,
             limit,
+            per_partition_limit,
             offset,
             allow_filtering,
         })
@@ -990,11 +1024,21 @@ impl SelectParser {
 
     /// Parse LIMIT clause
     fn parse_limit_clause(&mut self) -> Result<LimitClause> {
-        let count = self.expect_integer("LIMIT")? as u64;
-        Ok(LimitClause {
-            count,
-            per_partition: false, // TODO: Add PER PARTITION support
-        })
+        let count = self.parse_positive_limit("LIMIT")?;
+        Ok(LimitClause { count })
+    }
+
+    /// Parse a positive integer limit, rejecting zero/negative values. Cassandra
+    /// requires both `LIMIT` and `PER PARTITION LIMIT` to be strictly positive.
+    fn parse_positive_limit(&mut self, clause: &str) -> Result<u64> {
+        let value = self.expect_integer(clause)?;
+        if value < 1 {
+            return Err(Error::cql_parse(format!(
+                "{} must be a positive integer, got {}",
+                clause, value
+            )));
+        }
+        Ok(value as u64)
     }
 }
 
@@ -1262,6 +1306,46 @@ mod tests {
         if let Some(limit) = stmt.limit {
             assert_eq!(limit.count, 10);
         }
+    }
+
+    // --- PER PARTITION LIMIT parser tests (Issue #757) ---
+
+    #[test]
+    fn test_per_partition_limit_basic() {
+        let stmt = parse_select("SELECT * FROM ks.t PER PARTITION LIMIT 2").unwrap();
+        assert_eq!(stmt.per_partition_limit, Some(2));
+        assert!(stmt.limit.is_none());
+    }
+
+    #[test]
+    fn test_per_partition_limit_with_global_limit() {
+        let stmt = parse_select("SELECT * FROM ks.t PER PARTITION LIMIT 2 LIMIT 5").unwrap();
+        assert_eq!(stmt.per_partition_limit, Some(2));
+        assert_eq!(stmt.limit.map(|l| l.count), Some(5));
+    }
+
+    #[test]
+    fn test_per_partition_limit_after_order_by() {
+        let stmt = parse_select("SELECT * FROM ks.t ORDER BY c DESC PER PARTITION LIMIT 3 LIMIT 9")
+            .unwrap();
+        assert!(stmt.order_by.is_some());
+        assert_eq!(stmt.per_partition_limit, Some(3));
+        assert_eq!(stmt.limit.map(|l| l.count), Some(9));
+    }
+
+    #[test]
+    fn test_per_partition_limit_rejects_zero() {
+        assert!(parse_select("SELECT * FROM ks.t PER PARTITION LIMIT 0").is_err());
+    }
+
+    #[test]
+    fn test_per_partition_limit_rejects_negative() {
+        assert!(parse_select("SELECT * FROM ks.t PER PARTITION LIMIT -1").is_err());
+    }
+
+    #[test]
+    fn test_per_partition_limit_rejects_after_global_limit() {
+        assert!(parse_select("SELECT * FROM ks.t LIMIT 5 PER PARTITION LIMIT 2").is_err());
     }
 
     #[test]

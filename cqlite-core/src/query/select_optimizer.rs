@@ -43,6 +43,11 @@ pub enum ExecutionStep {
         count: u64,
         offset: Option<u64>,
     },
+    /// Cap rows emitted per partition key, applied upstream of `Limit`
+    /// (Cassandra `PER PARTITION LIMIT`, Issue #757).
+    PerPartitionLimit {
+        count: u64,
+    },
     Project {
         columns: Vec<SelectExpression>,
     },
@@ -144,6 +149,13 @@ impl SelectOptimizer {
             plan.execution_steps.push(ExecutionStep::Sort {
                 order_by: order_by.clone(),
             });
+        }
+
+        // PER PARTITION LIMIT caps rows per partition before the query-wide
+        // LIMIT, so it must be emitted ahead of the Limit step.
+        if let Some(count) = statement.per_partition_limit {
+            plan.execution_steps
+                .push(ExecutionStep::PerPartitionLimit { count });
         }
 
         if let Some(limit) = &statement.limit {
