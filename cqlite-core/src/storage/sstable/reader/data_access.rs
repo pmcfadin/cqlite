@@ -424,9 +424,6 @@ impl SSTableReader {
 
             // INVARIANT 3: verify the on-disk partition-key bytes match the queried
             // key before decoding (guard against prefix-collision trie candidates).
-            // Only meaningful once the key prefix is present in `window`; if the key
-            // bytes are not yet fully buffered, fall through to a parse attempt which
-            // will report truncation (Err) and pull another chunk.
             if Self::bti_partition_key_bytes_available(&window, within, key.as_bytes()) {
                 if !self.bti_partition_key_matches(&window, within, key.as_bytes()) {
                     debug!(
@@ -436,7 +433,15 @@ impl SSTableReader {
                     );
                     return Ok(None);
                 }
-            } else if !chunk_targeted {
+                // Full key prefix is buffered and matches — safe to parse below.
+            } else if chunk_targeted {
+                // The partition header/key straddles a chunk boundary and is not
+                // yet fully buffered. Do NOT invoke the parser on a truncated
+                // header: `parse_block_emit` may skip bytes and emit a later
+                // false-positive entry, returning Ok and stopping the lookup
+                // prematurely (issue #831 review). Pull the next chunk first.
+                continue;
+            } else {
                 // Whole-section fallback but the key prefix is structurally short.
                 return Ok(None);
             }
