@@ -13,6 +13,17 @@ use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::mpsc;
 
+/// Counter of `scan_for_key` invocations, used by tests to prove the BTI
+/// point-lookup path never falls through to a sequential scan (issue #831).
+///
+/// Incremented at the top of [`SSTableReader::scan_for_key`] and read via
+/// [`SSTableReader::scan_for_key_call_count`]. The increment is a single
+/// `Relaxed` atomic add on a cold path, so the runtime cost is negligible; it is
+/// not gated behind `cfg(test)` because integration tests in the `tests/`
+/// directory compile against the library crate without its `test` cfg.
+pub(crate) static SCAN_FOR_KEY_CALLS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
 /// Compare two table IDs, handling both qualified (keyspace.table) and unqualified (table) formats.
 ///
 /// This function allows flexible matching:
@@ -126,6 +137,14 @@ impl SSTableReader {
             }
         }
 
+        // Issue #831: BTI ("da") readers resolve partitions via the Partitions.db
+        // trie (O(log n)), never via Index.db (absent for BTI) or the sequential
+        // scan. Branch BEFORE the Index.db block so a BTI get() can never fall
+        // through to scan_for_key.
+        if self.bti_partitions_db.is_some() {
+            return self.bti_point_lookup(table_id, key).await;
+        }
+
         // Use index for efficient lookup if available
         if let Some(index) = &self.index {
             if let Some(entry) = index.find_entry(table_id, key).await? {
@@ -157,6 +176,141 @@ impl SSTableReader {
             // No index at all — fall back to sequential scan
             return self.scan_for_key(table_id, key).await;
         }
+    }
+
+    /// Current value of the test-only `scan_for_key` invocation counter.
+    ///
+    /// Issue #831: tests use this to assert that a BTI `get()` resolves entirely
+    /// through the Partitions.db trie and never falls through to the sequential
+    /// scan. See [`SCAN_FOR_KEY_CALLS`].
+    pub fn scan_for_key_call_count() -> u64 {
+        SCAN_FOR_KEY_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// BTI ("da") point lookup: resolve a partition key via the Partitions.db
+    /// trie, decode the partition at the resolved offset, and return its row
+    /// `Value` (issue #831).
+    ///
+    /// Correctness invariants (see issue #831 / #755):
+    ///
+    /// - **Offset domain**: the trie returns an *uncompressed* Data.db offset, so
+    ///   we decode the partition out of the DECOMPRESSED data section, never via
+    ///   `read_value_at_offset`/`get_cached_data` (which seek raw file bytes).
+    /// - **Own decompression**: `requires_chunk_stitching()` is `false` for BTI,
+    ///   so this path decompresses the chunk-compressed Data.db itself via the
+    ///   reader's CompressionInfo + compression_reader (`stitch_all_chunks`).
+    /// - **Prefix-collision guard**: the trie may return a candidate for a
+    ///   prefix-colliding key, so the decoded partition key is verified to equal
+    ///   the queried key before any row is returned.
+    async fn bti_point_lookup(&self, _table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // 1. Resolve the uncompressed Data.db offset via the trie.
+        let offset = match self.lookup_partition_via_bti_trie(key.as_bytes())? {
+            Some(off) => off as usize,
+            None => return Ok(None), // not in this SSTable
+        };
+
+        // 2. Decompress the data section into a single buffer. The trie offset
+        //    indexes into THIS decompressed buffer (INVARIANT 1).
+        //
+        //    Reuse the shared chunk-stitch helper, which decompresses every chunk
+        //    via the reader's compression_reader. Serialise against other scans
+        //    (shared file position + chunk index) per issue #805.
+        let decompressed = {
+            let _scan_guard = self.scan_mutex.lock().await;
+            let header_size = self.calculate_header_size();
+            {
+                let mut file_guard = self.file.lock().await;
+                file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+            }
+            self.current_chunk_index
+                .store(0, std::sync::atomic::Ordering::Relaxed);
+            self.stitch_all_chunks().await?
+        };
+
+        if offset >= decompressed.len() {
+            return Err(Error::corruption(format!(
+                "BTI trie resolved Data.db offset {} beyond decompressed data section ({} bytes)",
+                offset,
+                decompressed.len()
+            )));
+        }
+
+        // 3. Verify the partition-key bytes at the resolved offset match the
+        //    queried key (INVARIANT 3: guard against prefix-collision candidates).
+        //
+        //    Partition on-disk header (oa/da, hasUIntDeletionTime):
+        //      [0]      flags (0x00)
+        //      [1]      key_len (u8)
+        //      [2..2+L] raw partition-key bytes
+        //      [..]     partition deletion time
+        if !self.bti_partition_key_matches(&decompressed, offset, key.as_bytes()) {
+            debug!(
+                "BTI trie candidate at offset {} did not match queried key (prefix collision); \
+                 treating as absent",
+                offset
+            );
+            return Ok(None);
+        }
+
+        // 4. Decode the partition. Feed the decompressed buffer FROM the resolved
+        //    offset to the schema-aware V5 parser, which parses the partition-key
+        //    header itself and stops at the next partition boundary / end-of-buffer
+        //    (it detects the next partition header structurally and honours the
+        //    0x01 end-of-partition marker). Stop after the first emitted entry so
+        //    only the target partition is decoded.
+        let schema_opt = self.get_table_schema(None);
+        let parser = self.build_v5_parser();
+
+        let mut found: Option<Value> = None;
+        parser.parse_block_emit(
+            &decompressed[offset..],
+            schema_opt.as_ref(),
+            self,
+            |(_tid, entry_key, entry_value)| {
+                // The first partition in the slice is the one the trie resolved.
+                // Defensively re-check the key (the parser-decoded partition key
+                // must equal the queried key).
+                if entry_key.as_bytes() == key.as_bytes() {
+                    found = Some(entry_value);
+                }
+                Ok(std::ops::ControlFlow::Break(()))
+            },
+        )?;
+
+        match found {
+            Some(value) => {
+                if !self.filter_tombstone(&value) {
+                    return Ok(None);
+                }
+                Ok(Some(value))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Verify the on-disk partition-key bytes at `offset` in the decompressed
+    /// data section equal `expected_key` (issue #831, INVARIANT 3).
+    ///
+    /// Reads the `[flags][key_len: u8][key bytes]` prefix. Returns `false` (rather
+    /// than erroring) on any structural mismatch so the caller can treat the trie
+    /// candidate as absent.
+    fn bti_partition_key_matches(
+        &self,
+        decompressed: &[u8],
+        offset: usize,
+        expected_key: &[u8],
+    ) -> bool {
+        // Need at least flags + key_len.
+        if offset + 2 > decompressed.len() {
+            return false;
+        }
+        let key_len = decompressed[offset + 1] as usize;
+        let key_start = offset + 2;
+        let key_end = key_start + key_len;
+        if key_end > decompressed.len() {
+            return false;
+        }
+        &decompressed[key_start..key_end] == expected_key
     }
 
     /// Scan a range of keys
@@ -1075,6 +1229,10 @@ impl SSTableReader {
     }
 
     async fn scan_for_key(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // Issue #831: record the call so tests can assert the BTI point-lookup
+        // path never reaches the sequential scan.
+        SCAN_FOR_KEY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
         // Issue #805: serialise concurrent scans (shared file position + chunk index).
         let _scan_guard = self.scan_mutex.lock().await;
 

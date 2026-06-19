@@ -177,19 +177,41 @@ impl SSTableReader {
             }
         });
 
-        // VG5: BTI (da) read support is not yet implemented.
-        // Detect the BTI format early — before header parsing — and return a
-        // structured, actionable error rather than a confusing parse failure.
-        // Full BTI reading is tracked in the scoping issue created by issue #657.
-        if matches!(*version_gates, VersionGates::Bti(_)) {
-            return Err(Error::unsupported_format(format!(
-                "BTI (da) read support not yet implemented for '{}'. \
-                 da-format SSTables use Partitions.db/Rows.db trie indexes instead of \
-                 Index.db/Summary.db and require a dedicated BTI read path. \
-                 See docs/reports/bti-read-support-scoping.md for the implementation plan.",
-                path.display()
-            )));
-        }
+        // VG5 / Issue #831: BTI ("da") read support.
+        //
+        // BTI SSTables use a Partitions.db trie (and optional Rows.db) instead of
+        // Index.db/Summary.db. We load the (tiny) Partitions.db trie fully into
+        // memory here so the point-lookup path (`lookup_partition_via_bti_trie` /
+        // `bti_point_lookup`) can walk it for O(log n) partition resolution.
+        //
+        // Loading Partitions.db is the ONLY BTI-specific step in open(): the rest
+        // of the flow (header / compression / Statistics-driven schema) tolerates
+        // the absent Index.db/Summary.db gracefully (those loaders return None).
+        let bti_partitions_db: Option<Arc<Vec<u8>>> =
+            if matches!(*version_gates, VersionGates::Bti(_)) {
+                let base = extract_sstable_base_name(path).ok_or_else(|| {
+                    Error::unsupported_format(format!(
+                        "BTI (da) SSTable '{}' has a non-standard filename; cannot derive the \
+                         sibling Partitions.db name required for trie point lookup (#831).",
+                        path.display()
+                    ))
+                })?;
+                let parent = path.parent().unwrap_or_else(|| Path::new("."));
+                let partitions_path = parent.join(format!("{}-Partitions.db", base));
+                let bytes = tokio::fs::read(&partitions_path).await.map_err(|e| {
+                    Error::unsupported_format(format!(
+                        "BTI (da) SSTable '{}' is missing its sibling Partitions.db trie \
+                         (expected '{}'): {}. BTI read support requires Partitions.db for \
+                         partition-key point lookup (#831).",
+                        path.display(),
+                        partitions_path.display(),
+                        e
+                    ))
+                })?;
+                Some(Arc::new(bytes))
+            } else {
+                None
+            };
 
         let config = crate::cql::config::ParserConfig::default();
         let parser = SSTableParser::new(config)?;
@@ -371,6 +393,7 @@ impl SSTableReader {
             current_chunk_index: AtomicUsize::new(0),
             scan_mutex: tokio::sync::Mutex::new(()),
             version_gates,
+            bti_partitions_db,
         })
     }
 
