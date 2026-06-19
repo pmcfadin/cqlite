@@ -259,9 +259,16 @@ fn parse_duration_value(value_data: &[u8]) -> Result<Value> {
         ));
     }
 
+    // months and days are i32 in Cassandra's DurationType; reject (rather than
+    // silently wrap) any encoded value outside the i32 range.
+    let months =
+        i32::try_from(months).map_err(|_| Error::corruption("Duration months out of i32 range"))?;
+    let days =
+        i32::try_from(days).map_err(|_| Error::corruption("Duration days out of i32 range"))?;
+
     Ok(Value::Duration {
-        months: months as i32,
-        days: days as i32,
+        months,
+        days,
         nanos,
     })
 }
@@ -565,7 +572,7 @@ mod tests {
 
     #[test]
     fn test_parse_duration_i32_extremes() {
-        // Ensure i32 truncation of the i64-decoded months/days is correct at the edges.
+        // The i32 boundary values must decode losslessly (they fit in i32).
         let data = build_duration_bytes(i32::MIN, i32::MAX, i64::MAX);
         let comparator = ComparatorType::Duration;
         let result = parse_value_with_comparator(&data, &comparator).unwrap();
@@ -577,6 +584,26 @@ mod tests {
                 nanos: i64::MAX,
             }
         );
+    }
+
+    #[test]
+    fn test_parse_duration_months_out_of_i32_range_errors() {
+        // months/days are i32 in Cassandra; an encoded value outside the i32
+        // range must be rejected as corruption, not silently wrapped.
+        use crate::storage::serialization::vint::encode_signed;
+        let comparator = ComparatorType::Duration;
+
+        let mut over = Vec::new();
+        encode_signed(i32::MAX as i64 + 1, &mut over); // months overflow
+        encode_signed(0, &mut over);
+        encode_signed(0, &mut over);
+        assert!(parse_value_with_comparator(&over, &comparator).is_err());
+
+        let mut under = Vec::new();
+        encode_signed(0, &mut under);
+        encode_signed(i32::MIN as i64 - 1, &mut under); // days underflow
+        encode_signed(0, &mut under);
+        assert!(parse_value_with_comparator(&under, &comparator).is_err());
     }
 
     #[test]
