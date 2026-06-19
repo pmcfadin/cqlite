@@ -123,7 +123,8 @@ impl QueryExecutor {
             plan_type: format!("{:?}", plan.plan_type),
             estimated_cost: plan.estimated_cost,
             actual_cost: elapsed_ms as f64,
-            indexes_used: Vec::new(), // TODO: populate with actual indexes used
+            // Access path(s) the executor actually consulted (issue #760).
+            indexes_used: Self::indexes_used_for(plan),
             steps: plan
                 .steps
                 .iter()
@@ -143,6 +144,67 @@ impl QueryExecutor {
     }
 
     // -- helpers ------------------------------------------------------------
+
+    /// Report the access path(s) the executor *actually consulted* for `plan`,
+    /// for the `indexes_used` field of [`super::result::PlanInfo`] (issue #760,
+    /// Epic #756).
+    ///
+    /// # Truthfulness contract (no-heuristics spirit, issue #28)
+    ///
+    /// This mirrors the dispatch in [`Self::execute`] and reports only what the
+    /// executed code path genuinely does — never what the planner merely
+    /// preferred. The storage layer (`StorageEngine::get` / `scan`) does not yet
+    /// surface *which* on-disk structure (Index.db partition lookup, Summary.db
+    /// sampling, or BTI trie) resolved a partition, so we cannot distinguish
+    /// those sub-paths. We therefore report at the granularity we can prove:
+    ///
+    /// - **Point lookup** (`PointLookup`, and `IndexScan` over a `Primary` or
+    ///   `BloomFilter` index) calls `StorageEngine::get`, which resolves the
+    ///   partition through the partition index. We report the selected index's
+    ///   name (e.g. `"PRIMARY"`).
+    /// - **Sequential scan** (`TableScan`, `RangeScan`, and `IndexScan` over a
+    ///   `Secondary`/`Composite` index — these currently degrade to a full scan
+    ///   in the executor) reports the explicit marker `"scan"`.
+    ///
+    /// ## Scan-marker decision
+    ///
+    /// The issue allows either an empty list or an explicit marker for a full
+    /// scan; we pick the explicit **`"scan"`** marker. An empty list is
+    /// ambiguous (it cannot be told apart from "not yet recorded"), whereas an
+    /// explicit marker makes EXPLAIN-style output and bindings stats truthful
+    /// and self-describing.
+    fn indexes_used_for(plan: &QueryPlan) -> Vec<String> {
+        use super::planner::{IndexType, PlanType};
+
+        // The marker used for any path that walks rows sequentially.
+        let scan = || vec!["scan".to_string()];
+
+        match plan.plan_type {
+            // Resolves a single partition via `StorageEngine::get`.
+            PlanType::PointLookup => match plan.selected_indexes.first() {
+                Some(idx) => vec![idx.index_name.clone()],
+                // No selected index recorded but we still did a partition
+                // lookup — report the generic primary-key path.
+                None => vec!["PRIMARY".to_string()],
+            },
+            // IndexScan dispatch depends on the index type: Primary/Bloom do a
+            // real point lookup; Secondary/Composite degrade to a full scan.
+            PlanType::IndexScan => match plan.selected_indexes.first() {
+                Some(idx) => match idx.index_type {
+                    IndexType::Primary | IndexType::BloomFilter => {
+                        vec![idx.index_name.clone()]
+                    }
+                    IndexType::Secondary | IndexType::Composite => scan(),
+                },
+                None => scan(),
+            },
+            // Sequential-scan paths.
+            PlanType::TableScan | PlanType::RangeScan => scan(),
+            // Placeholder executors return empty results without touching any
+            // index structure; report nothing rather than fabricate a path.
+            PlanType::Join | PlanType::Aggregation | PlanType::Subquery => Vec::new(),
+        }
+    }
 
     /// Resolve `plan.table` or surface a uniform query-execution error.
     fn require_table<'a>(&self, plan: &'a QueryPlan) -> Result<&'a TableId> {
@@ -837,6 +899,87 @@ mod tests {
             value: Value::Text("test".to_string()),
         };
         assert!(executor.evaluate_condition(&row, &condition).unwrap());
+    }
+
+    // -- indexes_used access-path reporting (issue #760, Epic #756) --------
+
+    use super::super::planner::{IndexSelection, IndexType};
+
+    /// Build a minimal plan with the given type and selected indexes.
+    fn plan_with(
+        plan_type: super::super::planner::PlanType,
+        selected_indexes: Vec<IndexSelection>,
+    ) -> QueryPlan {
+        QueryPlan {
+            plan_type,
+            table: None,
+            estimated_cost: 0.0,
+            estimated_rows: 0,
+            selected_indexes,
+            steps: Vec::new(),
+            hints: super::super::planner::QueryHints::default(),
+        }
+    }
+
+    fn primary_index() -> IndexSelection {
+        IndexSelection {
+            index_name: "PRIMARY".to_string(),
+            columns: vec!["id".to_string()],
+            selectivity: 0.1,
+            index_type: IndexType::Primary,
+        }
+    }
+
+    /// A point lookup resolves the partition via the partition index
+    /// (Index.db / Summary.db) — it MUST report the index it used, not "scan".
+    #[test]
+    fn test_indexes_used_point_lookup_reports_partition_index() {
+        let plan = plan_with(
+            super::super::planner::PlanType::PointLookup,
+            vec![primary_index()],
+        );
+        assert_eq!(QueryExecutor::indexes_used_for(&plan), vec!["PRIMARY"]);
+    }
+
+    /// A full table scan reports the explicit "scan" marker (we picked the
+    /// marker over an empty list so EXPLAIN output is unambiguous).
+    #[test]
+    fn test_indexes_used_table_scan_reports_scan_marker() {
+        let plan = plan_with(super::super::planner::PlanType::TableScan, Vec::new());
+        assert_eq!(QueryExecutor::indexes_used_for(&plan), vec!["scan"]);
+    }
+
+    /// Range scans degrade to a sequential scan in the executor → "scan".
+    #[test]
+    fn test_indexes_used_range_scan_reports_scan_marker() {
+        let plan = plan_with(super::super::planner::PlanType::RangeScan, Vec::new());
+        assert_eq!(QueryExecutor::indexes_used_for(&plan), vec!["scan"]);
+    }
+
+    /// IndexScan on a Primary/Bloom index does a real point lookup → report
+    /// the index name. (These executor paths call `storage.get`.)
+    #[test]
+    fn test_indexes_used_index_scan_primary_reports_index() {
+        let plan = plan_with(
+            super::super::planner::PlanType::IndexScan,
+            vec![primary_index()],
+        );
+        assert_eq!(QueryExecutor::indexes_used_for(&plan), vec!["PRIMARY"]);
+    }
+
+    /// IndexScan on a Secondary index currently degrades to a full scan in the
+    /// executor (the secondary lookup is not yet wired up). Report "scan" —
+    /// reporting the index would be fabrication.
+    #[test]
+    fn test_indexes_used_index_scan_secondary_reports_scan() {
+        let secondary = IndexSelection {
+            index_name: "idx_name".to_string(),
+            columns: vec!["name".to_string()],
+            selectivity: 0.1,
+            index_type: IndexType::Secondary,
+        };
+        let plan = plan_with(super::super::planner::PlanType::IndexScan, vec![secondary]);
+        assert_eq!(QueryExecutor::indexes_used_for(&plan), vec!["scan"]);
     }
 
     #[tokio::test]
