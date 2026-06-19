@@ -22,8 +22,11 @@ pub struct SelectStatement {
     pub having_clause: Option<WhereExpression>,
     /// ORDER BY clause - sorting specification
     pub order_by: Option<OrderByClause>,
-    /// LIMIT clause - result size limitation
+    /// LIMIT clause - query-wide result size limitation
     pub limit: Option<LimitClause>,
+    /// PER PARTITION LIMIT - cap on rows returned per partition, applied
+    /// before the query-wide `limit` (Cassandra semantics, Issue #757)
+    pub per_partition_limit: Option<u64>,
     /// OFFSET clause - result pagination
     pub offset: Option<u64>,
     /// Allow filtering flag (for non-indexed queries)
@@ -286,8 +289,6 @@ pub enum SortDirection {
 pub struct LimitClause {
     /// Maximum number of rows
     pub count: u64,
-    /// Per-partition limit (Cassandra-specific)
-    pub per_partition: bool,
 }
 
 impl SelectStatement {
@@ -301,6 +302,7 @@ impl SelectStatement {
             having_clause: None,
             order_by: None,
             limit: None,
+            per_partition_limit: None,
             offset: None,
             allow_filtering: false,
         }
@@ -503,6 +505,7 @@ mod tests {
             having_clause: None,
             order_by: None,
             limit: None,
+            per_partition_limit: None,
             offset: None,
             allow_filtering: false,
         };

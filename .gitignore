@@ -171,9 +171,9 @@ property_test_results.json
 ci-validation-results/
 validation_artifacts/
 
-# Binaries in root  
-check_vuint
-test_issue_*
+# Binaries in root (root-scoped so they don't shadow cqlite-core/tests/test_issue_*.rs)
+/check_vuint
+/test_issue_*
 
 # Development directories
 config/
@@ -193,3 +193,5 @@ cassandra5-small.tar.gz.sha256
 # SSTable guide audit working artifacts (not committed)
 docs/cassandra-5.0-src/
 docs/sstable-guide-audit/
+# roborev snapshots
+/.roborev/

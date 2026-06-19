@@ -774,6 +774,10 @@ impl SelectExecutor {
                         .execute_aggregation(intermediate_results, agg_plan, &mut context)
                         .await?;
                 }
+                ExecutionStep::PerPartitionLimit { count } => {
+                    intermediate_results =
+                        Self::execute_per_partition_limit(intermediate_results, *count);
+                }
                 ExecutionStep::Limit { count, offset } => {
                     intermediate_results = self
                         .execute_limit(intermediate_results, *count, *offset, &mut context)
@@ -1035,6 +1039,17 @@ impl SelectExecutor {
             return Ok(());
         }
 
+        // Issue #757: PER PARTITION LIMIT caps rows per partition before the
+        // query-wide LIMIT/OFFSET. The scan yields rows grouped by partition
+        // key, so we track the current partition (by its raw key bytes) and
+        // reset the counter at each boundary.
+        let per_partition_limit = execution_steps.iter().find_map(|step| match step {
+            ExecutionStep::PerPartitionLimit { count } => Some(*count),
+            _ => None,
+        });
+        let mut current_partition: Option<Vec<u8>> = None;
+        let mut partition_count: u64 = 0;
+
         let mut sent: u64 = 0;
 
         for step in &execution_steps {
@@ -1060,6 +1075,9 @@ impl SelectExecutor {
 
                     while let Some(item) = scan_stream.recv().await {
                         let (key, value) = item?;
+                        // Capture the partition key bytes before `key` is moved
+                        // into row construction (only when needed).
+                        let part_sig = per_partition_limit.map(|_| key.0.clone());
                         let Some(row) =
                             build_row_from_scan(key, value, projection, schema_opt.as_ref())
                         else {
@@ -1068,6 +1086,19 @@ impl SelectExecutor {
 
                         if !evaluate_predicates(&row, predicates)? {
                             continue;
+                        }
+
+                        // Apply PER PARTITION LIMIT: cap matching rows per
+                        // partition, before OFFSET/LIMIT (Cassandra semantics).
+                        if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
+                            if current_partition.as_deref() != Some(sig.as_slice()) {
+                                current_partition = Some(sig);
+                                partition_count = 0;
+                            }
+                            if partition_count >= cap {
+                                continue;
+                            }
+                            partition_count += 1;
                         }
 
                         // Apply OFFSET: skip the first `offset_remaining` matches.
@@ -1092,8 +1123,8 @@ impl SelectExecutor {
                         }
                     }
                 }
-                ExecutionStep::Limit { .. } => {
-                    // Enforced inline during the scan above (see the limit bound
+                ExecutionStep::Limit { .. } | ExecutionStep::PerPartitionLimit { .. } => {
+                    // Enforced inline during the scan above (see the bounds
                     // extracted before the loop).
                 }
                 // Projection and predicate filtering are pushed into SSTableScan above.
@@ -1517,6 +1548,25 @@ impl SelectExecutor {
             .collect();
 
         Ok(result_rows)
+    }
+
+    /// Execute PER PARTITION LIMIT: keep at most `count` rows per partition,
+    /// preserving order (Issue #757). Counts are keyed on the partition (raw key
+    /// bytes) rather than tracking only the most recent partition, so the cap
+    /// holds even when a partition's rows are not contiguous — e.g. when an
+    /// upstream `ORDER BY` interleaves rows from different partitions (roborev
+    /// job 38).
+    fn execute_per_partition_limit(rows: Vec<QueryRow>, count: u64) -> Vec<QueryRow> {
+        let mut out = Vec::with_capacity(rows.len());
+        let mut counts: HashMap<Vec<u8>, u64> = HashMap::new();
+        for row in rows {
+            let seen = counts.entry(row.key.0.clone()).or_insert(0);
+            if *seen < count {
+                *seen += 1;
+                out.push(row);
+            }
+        }
+        out
     }
 
     /// Execute limit step (apply OFFSET then truncate to LIMIT).
@@ -1957,6 +2007,42 @@ mod tests {
         }
     }
 
+    fn row_with_key(partition: &[u8]) -> QueryRow {
+        QueryRow {
+            values: std::collections::HashMap::new(),
+            key: RowKey::new(partition.to_vec()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        }
+    }
+
+    /// Regression (roborev job 38): in the batch path PER PARTITION LIMIT must
+    /// cap per partition even when a partition's rows are NOT contiguous (e.g.
+    /// after ORDER BY interleaves them). Counting must key on the partition, not
+    /// just track the most recent one.
+    #[test]
+    fn per_partition_limit_caps_interleaved_partitions() {
+        let a = b"A".as_slice();
+        let b = b"B".as_slice();
+        // Partition A appears 3 times but is split by a B row in the middle.
+        let rows = vec![
+            row_with_key(a),
+            row_with_key(b),
+            row_with_key(a),
+            row_with_key(a),
+            row_with_key(b),
+        ];
+        let out = SelectExecutor::execute_per_partition_limit(rows, 2);
+        let count = |p: &[u8]| out.iter().filter(|r| r.key.0 == p).count();
+        assert_eq!(
+            count(a),
+            2,
+            "partition A must be capped at 2 despite interleaving"
+        );
+        assert_eq!(count(b), 2, "partition B has 2 rows, all kept");
+        assert_eq!(out.len(), 4);
+    }
+
     /// Issue #788: each clustering-key inequality op must include/exclude rows on
     /// the correct side of its bound when evaluated post-scan.
     #[test]
@@ -2232,6 +2318,7 @@ mod tests {
             having_clause: None,
             order_by: None,
             limit: None,
+            per_partition_limit: None,
             offset: None,
             allow_filtering: false,
         };
@@ -2253,6 +2340,7 @@ mod tests {
             having_clause: None,
             order_by: None,
             limit: None,
+            per_partition_limit: None,
             offset: None,
             allow_filtering: false,
         };
@@ -2267,6 +2355,7 @@ mod tests {
             having_clause: None,
             order_by: None,
             limit: None,
+            per_partition_limit: None,
             offset: None,
             allow_filtering: false,
         };
@@ -2401,6 +2490,7 @@ mod tests {
             having_clause: None,
             order_by: None,
             limit: None,
+            per_partition_limit: None,
             offset: None,
             allow_filtering: false,
         };
@@ -2432,6 +2522,7 @@ mod tests {
             having_clause: None,
             order_by: None,
             limit: None,
+            per_partition_limit: None,
             offset: None,
             allow_filtering: false,
         };
@@ -2463,6 +2554,7 @@ mod tests {
             having_clause: None,
             order_by: None,
             limit: None,
+            per_partition_limit: None,
             offset: None,
             allow_filtering: false,
         };
