@@ -1769,6 +1769,25 @@ const OSS50_NEXT_COMPONENT: u8 = 0x40;
 ///
 /// Any clustering type not enumerated here returns an explicit parse error
 /// (NO silent wrong results — issue #28 no-heuristics mandate).
+/// OSS50 variable-length byte-comparable encoding for `BytesType`/`UTF8Type`
+/// (Cassandra `ByteSource`): every literal `0x00` byte is escaped as
+/// `0x00 0xFE` (`ESCAPE` + `ESCAPED_0_CONT`) and the component is terminated
+/// with `0x00 0xFF` (`ESCAPE` + `ESCAPED_0_DONE`).  This makes the encoding
+/// weakly prefix-free, so a shorter value sorts before a longer value that
+/// shares its prefix — matching the separators stored in a real `Rows.db`
+/// trie.  (The project's `ByteComparableEncoder` uses a different,
+/// non-Cassandra escape scheme and must NOT be used for trie-compatible bounds.)
+fn encode_varlen_oss50(bytes: &[u8], out: &mut Vec<u8>) {
+    for &b in bytes {
+        out.push(b);
+        if b == 0x00 {
+            out.push(0xFE);
+        }
+    }
+    out.push(0x00);
+    out.push(0xFF);
+}
+
 fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiResult<()> {
     match value {
         // int — Int32Type: sign-flip, big-endian (matches `wide_table` separators,
@@ -1809,17 +1828,14 @@ fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiRes
             out.extend_from_slice(bytes);
             Ok(())
         }
-        // text / ascii — raw UTF-8/ASCII bytes + variable-length component
-        // terminator (0x00) so prefixes sort first.
+        // text / ascii — OSS50 variable-length byte-comparable encoding.
         Value::Text(s) => {
-            out.extend_from_slice(s.as_bytes());
-            out.push(0x00);
+            encode_varlen_oss50(s.as_bytes(), out);
             Ok(())
         }
-        // blob — raw bytes + variable-length component terminator (0x00).
+        // blob / inet — OSS50 variable-length byte-comparable encoding.
         Value::Blob(b) | Value::Inet(b) => {
-            out.extend_from_slice(b);
-            out.push(0x00);
+            encode_varlen_oss50(b, out);
             Ok(())
         }
         other => Err(Error::Parse(format!(
@@ -4172,12 +4188,28 @@ mod tests {
         );
 
         // Multi-component: int(1) + text("ab") joined with 0x40 NEXT_COMPONENT,
-        // text terminated by 0x00.
+        // text terminated by the OSS50 end marker 0x00 0xFF.
         assert_eq!(
             encode_clustering_bound_oss50(&[Value::Integer(1), Value::Text("ab".to_string())])
                 .unwrap(),
-            vec![0x80, 0x00, 0x00, 0x01, 0x40, b'a', b'b', 0x00]
+            vec![0x80, 0x00, 0x00, 0x01, 0x40, b'a', b'b', 0x00, 0xFF]
         );
+
+        // Variable-length OSS50: text terminates with 0x00 0xFF; a literal 0x00
+        // byte is escaped as 0x00 0xFE so it never collides with the terminator.
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::Text("a".to_string())]).unwrap(),
+            vec![b'a', 0x00, 0xFF]
+        );
+        assert_eq!(
+            encode_clustering_bound_oss50(&[Value::Blob(vec![0x01, 0x00, 0x02])]).unwrap(),
+            vec![0x01, 0x00, 0xFE, 0x02, 0x00, 0xFF]
+        );
+        // Prefix-free ordering: "a" sorts before "ab" (00 0xFE/0xFF < any byte
+        // after the shared prefix means the shorter value compares first).
+        let a = encode_clustering_bound_oss50(&[Value::Text("a".to_string())]).unwrap();
+        let ab = encode_clustering_bound_oss50(&[Value::Text("ab".to_string())]).unwrap();
+        assert!(a < ab);
 
         // Unsupported clustering type errors out explicitly.
         assert!(encode_clustering_bound_oss50(&[Value::Float(1.0)]).is_err());
