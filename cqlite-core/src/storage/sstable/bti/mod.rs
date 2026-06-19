@@ -17,9 +17,10 @@ pub use node::{
 };
 pub use parser::{
     decode_bti_partition_payload, encode_partition_key_for_bti_trie,
-    iterate_partitions_in_bti_file, iterate_rows_in_bti_file, lookup_partition_in_bti_file,
-    lookup_raw_key_in_bti_partitions_db, BtiHeader, BtiIndexStats, BtiPartitionLocation,
-    BtiRowIndexEntry, PartitionsParser, RowsParser, FLAG_HAS_HASH_BYTE, FLAG_OPEN_MARKER,
+    iterate_partitions_in_bti_file, iterate_rows_in_bti_file, iterate_rows_in_bti_trie,
+    lookup_partition_in_bti_file, lookup_raw_key_in_bti_partitions_db, BtiHeader, BtiIndexStats,
+    BtiPartitionLocation, BtiRowIndexEntry, PartitionsParser, RowsParser, FLAG_HAS_HASH_BYTE,
+    FLAG_OPEN_MARKER,
 };
 
 use crate::parser::header::CassandraVersion;

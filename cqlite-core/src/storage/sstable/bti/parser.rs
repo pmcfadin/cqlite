@@ -348,13 +348,16 @@ fn parse_bti_node(data: &[u8], offset: u64) -> BtiResult<BtiNode> {
                 let mut children = Vec::with_capacity(range_len);
                 for i in 0..range_len {
                     let delta = read_12bit_packed(&data[3..], i);
-                    // delta == 0 means "no transition" for Dense nodes
-                    let child_offset = if delta == 0 {
-                        0
+                    // delta == 0 is the "no transition" sentinel → None.  Any
+                    // other delta is a real child at `offset - delta` (which may
+                    // be absolute offset 0 — a legitimate child, distinct from
+                    // the sentinel).
+                    let child = if delta == 0 {
+                        None
                     } else {
-                        offset.saturating_sub(delta)
+                        Some(SizedPointer::new(offset.saturating_sub(delta)))
                     };
-                    children.push(SizedPointer::new(child_offset));
+                    children.push(child);
                 }
                 Ok(BtiNode {
                     node_type,
@@ -380,13 +383,16 @@ fn parse_bti_node(data: &[u8], offset: u64) -> BtiResult<BtiNode> {
                 for i in 0..range_len {
                     let ptr_off = 3 + i * ptr_bytes;
                     let delta = read_be_unsigned(&data[ptr_off..ptr_off + ptr_bytes]);
-                    // delta == 0 means "no transition" for Dense nodes
-                    let child_offset = if delta == 0 {
-                        0
+                    // delta == 0 is the "no transition" sentinel → None.  Any
+                    // other delta is a real child at `offset - delta` (which may
+                    // be absolute offset 0 — a legitimate child, distinct from
+                    // the sentinel).
+                    let child = if delta == 0 {
+                        None
                     } else {
-                        offset.saturating_sub(delta)
+                        Some(SizedPointer::new(offset.saturating_sub(delta)))
                     };
-                    children.push(SizedPointer::new(child_offset));
+                    children.push(child);
                 }
                 Ok(BtiNode {
                     node_type,
@@ -1118,9 +1124,12 @@ fn load_bti_trie_via_footer<R: Read + Seek>(reader: &mut R) -> BtiResult<(Vec<u8
 /// for a parsed BTI node, ready for in-order DFS.
 ///
 /// Crucially this iterates `Dense` children directly by index (transition byte =
-/// `start_byte + i`) and **skips** any child whose absolute offset is `0`, which
-/// is the Dense "no transition" sentinel.  ([`BtiNode::get_transitions`] returns
-/// an empty Vec for Dense nodes and must NOT be used for traversal.)
+/// `start_byte + i`) and **skips** the `None` slots, which are the Dense "no
+/// transition" sentinels (raw delta `0`).  A `Some(ptr)` slot is a real child
+/// and is always emitted — *including* one whose absolute offset is `0` (the
+/// first-written leaf in BTI's bottom-up layout legitimately lives at offset 0).
+/// ([`BtiNode::get_transitions`] returns an empty Vec for Dense nodes and must
+/// NOT be used for traversal.)
 ///
 /// `Sparse` transitions are returned in their stored order; the parser preserves
 /// the on-disk ascending order, and we sort defensively.
@@ -1145,16 +1154,14 @@ fn ordered_children(node: &BtiNode) -> Vec<(u8, usize)> {
         } => {
             let mut out = Vec::new();
             for (i, child) in children.iter().enumerate() {
-                let off = child.distance as usize;
-                // distance == 0 is the Dense "no transition" sentinel.  For a
-                // Dense node a real child can never live at absolute offset 0:
-                // the parent is at a higher offset and Cassandra never emits a
-                // Dense delta equal to the node offset for a real transition.
-                if off == 0 {
-                    continue;
+                // `None` is the Dense "no transition" sentinel (raw delta 0):
+                // skip it.  `Some(ptr)` is a real child and is always emitted,
+                // even when `ptr.distance == 0` — a real child can live at
+                // absolute trie offset 0 (the first-written leaf).
+                if let Some(ptr) = child {
+                    let transition_byte = start_byte.wrapping_add(i as u8);
+                    out.push((transition_byte, ptr.distance as usize));
                 }
-                let transition_byte = start_byte.wrapping_add(i as u8);
-                out.push((transition_byte, off));
             }
             out
         }
@@ -1442,12 +1449,46 @@ fn dfs_collect_row_entries(
     })
 }
 
-/// Enumerate **all** row-index entries in a real Cassandra 5.0 `Rows.db` BTI
-/// file (issue #832), in byte-comparable order.
+/// Enumerate every row-index entry in a `Rows.db` row-index trie **rooted at an
+/// explicit `root_offset`**, in byte-comparable order
+/// (`(reconstructed_clustering_key, BtiRowIndexEntry)`).
 ///
-/// Headerless public entry point (footer-based, NOT [`BtiHeader`]).  A
-/// `< 8`-byte (e.g. 0-byte) `Rows.db` — common for partitions with no row index
-/// — yields an empty Vec without erroring.
+/// ## Why the root must be supplied by the caller
+///
+/// A real Cassandra 5.0 `Rows.db` is NOT a single whole-file trie: it holds
+/// **many independent per-partition row-index tries** concatenated together.
+/// There is one row-index trie per (wide) partition, and the root of a given
+/// partition's trie is the `RowsOffset` returned from the corresponding
+/// `Partitions.db` lookup ([`BtiPartitionLocation::RowsOffset`]) — it is NOT the
+/// 8-byte file footer, which spans the whole file and would misparse any
+/// multi-partition `Rows.db`.
+///
+/// This is therefore the correct general entry point: pass the full `Rows.db`
+/// bytes as `trie_data` and the partition's `RowsOffset` as `root_offset`.
+///
+/// An out-of-bounds `root_offset` (e.g. on empty `trie_data`) yields a clean
+/// parse error rather than a panic.
+pub fn iterate_rows_in_bti_trie(
+    trie_data: &[u8],
+    root_offset: usize,
+) -> BtiResult<Vec<(Vec<u8>, BtiRowIndexEntry)>> {
+    dfs_collect_row_entries(trie_data, root_offset)
+}
+
+/// Enumerate row-index entries in a `Rows.db` file that is a **single-partition**
+/// trie rooted at its 8-byte footer, in byte-comparable order.
+///
+/// ## Precondition
+///
+/// This treats the WHOLE file as one trie whose root is named by the trailing
+/// 8-byte footer.  That is only correct when the `Rows.db` contains exactly one
+/// partition's row-index trie (or is empty).  For a real multi-partition
+/// `Rows.db` you MUST instead use [`iterate_rows_in_bti_trie`] with the
+/// per-partition `RowsOffset` obtained from `Partitions.db`; the file footer
+/// does not describe a single whole-file root in that case.
+///
+/// A `< 8`-byte (e.g. 0-byte) `Rows.db` — common for SSTables where no partition
+/// has a row index — yields an empty Vec without erroring.
 pub fn iterate_rows_in_bti_file<R: Read + Seek>(
     reader: &mut R,
 ) -> BtiResult<Vec<(Vec<u8>, BtiRowIndexEntry)>> {
@@ -1456,7 +1497,7 @@ pub fn iterate_rows_in_bti_file<R: Read + Seek>(
         return Ok(Vec::new());
     }
     let (trie_data, root_offset) = load_bti_trie_via_footer(reader)?;
-    dfs_collect_row_entries(&trie_data, root_offset)
+    iterate_rows_in_bti_trie(&trie_data, root_offset)
 }
 
 /// BTI header structure for index files
@@ -1790,20 +1831,40 @@ impl<R: Read + Seek> RowsParser<R> {
         parse_bti_node(data, offset)
     }
 
-    /// Clustering-key range/slice traversal of a `Rows.db` trie (issue #832).
+    /// Clustering-key range/slice traversal of a single partition's `Rows.db`
+    /// row-index trie (issue #832).
+    ///
+    /// ## Rooting (Finding 2)
+    ///
+    /// `rows_root` is the byte offset, within the `Rows.db` file, of THIS
+    /// partition's row-index trie root — i.e. the `RowsOffset` returned from the
+    /// `Partitions.db` lookup ([`BtiPartitionLocation::RowsOffset`]).  A real
+    /// `Rows.db` concatenates one such trie per wide partition, so the traversal
+    /// must be rooted at the partition's offset, NOT at a whole-file footer.
     ///
     /// Encodes `start_key` and `end_key` via the byte-comparable encoder, then
     /// returns every row-index entry whose reconstructed byte-comparable key
     /// falls within `[encoded_start, encoded_end]` (inclusive both ends, matching
-    /// Cassandra clustering-slice semantics).  Comparison is lexicographic over
-    /// the reconstructed transition-byte keys.
+    /// Cassandra clustering-slice semantics).  Reversed bounds (start > end)
+    /// yield an empty result.
     ///
-    /// First-cut correctness implementation: runs the full in-order DFS and
-    /// filters by the byte-comparable bounds.  Reversed bounds (start > end)
-    /// yield an empty result.  The trie is loaded via the footer (NOT the
-    /// fictional [`BtiHeader`]).
+    /// ## Soundness of the byte-comparable filter (Finding 3)
+    ///
+    /// The filter compares the *full* encoded bounds against the keys
+    /// reconstructed by the DFS, and that comparison is sound because every BTI
+    /// trie edge in this representation carries **exactly one transition byte**
+    /// (the only node kinds are `Single`, `Sparse`, and `Dense` — there is no
+    /// multi-byte "chain" node).  Concatenating the transition bytes from the
+    /// root to any node therefore reconstructs the COMPLETE byte-comparable key
+    /// terminating at that node.  An internal node may itself carry a payload
+    /// whose key `K` is a strict prefix of a deeper leaf's key `K2`; because the
+    /// keys are complete (not truncated), ordinary lexicographic comparison
+    /// handles the prefix relationship correctly — `K` is included iff it lies
+    /// in `[start, end]`, independently of `K2`. No key is spuriously dropped or
+    /// included.
     pub fn range_query(
         &mut self,
+        rows_root: usize,
         start_key: &[Value],
         end_key: &[Value],
     ) -> BtiResult<Vec<BtiRowIndexEntry>> {
@@ -1815,8 +1876,8 @@ impl<R: Read + Seek> RowsParser<R> {
             return Ok(Vec::new());
         }
 
-        let (trie_data, root_offset) = load_bti_trie_via_footer(&mut self.reader)?;
-        let all = dfs_collect_row_entries(&trie_data, root_offset)?;
+        let trie_data = self.read_full_rows_db()?;
+        let all = iterate_rows_in_bti_trie(&trie_data, rows_root)?;
 
         Ok(all
             .into_iter()
@@ -1828,9 +1889,26 @@ impl<R: Read + Seek> RowsParser<R> {
             .collect())
     }
 
-    /// Iterator over all rows in the index
-    pub fn iterate_rows(&mut self) -> BtiResult<RowIterator<'_, R>> {
-        RowIterator::new(self)
+    /// Read the entire `Rows.db` file into a buffer for in-trie traversal.
+    ///
+    /// Unlike `Partitions.db`, a `Rows.db` has no whole-file footer describing a
+    /// single root (see [`iterate_rows_in_bti_trie`]); callers supply the
+    /// per-partition `RowsOffset` separately.
+    fn read_full_rows_db(&mut self) -> BtiResult<Vec<u8>> {
+        let file_size = self.reader.seek(SeekFrom::End(0))?;
+        self.reader.seek(SeekFrom::Start(0))?;
+        let mut buf = vec![0u8; file_size as usize];
+        self.reader.read_exact(&mut buf)?;
+        Ok(buf)
+    }
+
+    /// Iterator over all rows in a single partition's row-index trie, rooted at
+    /// `rows_root` (the partition's `RowsOffset` from `Partitions.db`).
+    ///
+    /// See [`range_query`](Self::range_query) for why an explicit root is
+    /// required: a `Rows.db` holds one row-index trie per partition.
+    pub fn iterate_rows(&mut self, rows_root: usize) -> BtiResult<RowIterator<'_, R>> {
+        RowIterator::new(self, rows_root)
     }
 
     /// Get header information
@@ -1890,17 +1968,19 @@ impl<'a, R: Read + Seek> Iterator for PartitionIterator<'a, R> {
     }
 }
 
-/// Iterator over **all** row-index entries in a `Rows.db` BTI index (for a
-/// single partition's trie), in byte-comparable order (issue #832).
+/// Iterator over the row-index entries of **one partition's** `Rows.db`
+/// row-index trie, rooted at an explicit `rows_root`, in byte-comparable order
+/// (issue #832).
 ///
-/// Like [`PartitionIterator`], the trie is loaded via the footer-based loader
+/// A real `Rows.db` concatenates one row-index trie per wide partition, so the
+/// iterator is rooted at the partition's `RowsOffset` (from `Partitions.db`),
+/// NOT at a whole-file footer (Finding 2).  The full file is read into memory
 /// and traversed in-order during construction.  Each yielded `Vec<u8>` is the
 /// reconstructed byte-comparable clustering key; the [`BtiRowIndexEntry`]
 /// carries the Data.db block position (definitive) and an optional open-marker
 /// `DeletionTime`.
 ///
-/// An empty (< 8-byte, e.g. 0-byte) `Rows.db` trie yields nothing without
-/// panicking.
+/// An empty (e.g. 0-byte) `Rows.db` yields nothing without panicking.
 pub struct RowIterator<'a, R: Read + Seek> {
     #[allow(dead_code)]
     parser: &'a mut RowsParser<R>,
@@ -1909,11 +1989,11 @@ pub struct RowIterator<'a, R: Read + Seek> {
 }
 
 impl<'a, R: Read + Seek> RowIterator<'a, R> {
-    fn new(parser: &'a mut RowsParser<R>) -> BtiResult<Self> {
-        // An empty Rows.db (< 8 bytes, e.g. a 0-byte file for partitions with no
-        // row index) yields nothing rather than erroring.
+    fn new(parser: &'a mut RowsParser<R>, rows_root: usize) -> BtiResult<Self> {
+        // An empty Rows.db (e.g. a 0-byte file for SSTables with no row index)
+        // yields nothing rather than erroring.
         let file_size = parser.reader.seek(SeekFrom::End(0))?;
-        if file_size < 8 {
+        if file_size == 0 {
             return Ok(Self {
                 parser,
                 entries: Vec::new().into_iter(),
@@ -1921,8 +2001,9 @@ impl<'a, R: Read + Seek> RowIterator<'a, R> {
             });
         }
 
-        let (entries, pending_error) = match load_bti_trie_via_footer(&mut parser.reader)
-            .and_then(|(trie, root)| dfs_collect_row_entries(&trie, root))
+        let (entries, pending_error) = match parser
+            .read_full_rows_db()
+            .and_then(|trie| iterate_rows_in_bti_trie(&trie, rows_root))
         {
             Ok(v) => (v, None),
             Err(e) => (Vec::new(), Some(e)),
@@ -2500,7 +2581,7 @@ mod tests {
             } => {
                 assert_eq!(*start_byte, b'A');
                 assert_eq!(children.len(), 1);
-                assert_eq!(children[0].distance, offset - 0x123);
+                assert_eq!(children[0].as_ref().unwrap().distance, offset - 0x123);
             }
             other => panic!("Expected BtiNodeData::Dense, got {:?}", other),
         }
@@ -2527,8 +2608,8 @@ mod tests {
             } => {
                 assert_eq!(*start_byte, b'A');
                 assert_eq!(children.len(), 2);
-                assert_eq!(children[0].distance, offset - 0x100);
-                assert_eq!(children[1].distance, offset - 0x200);
+                assert_eq!(children[0].as_ref().unwrap().distance, offset - 0x100);
+                assert_eq!(children[1].as_ref().unwrap().distance, offset - 0x200);
             }
             other => panic!("Expected BtiNodeData::Dense, got {:?}", other),
         }
@@ -2553,11 +2634,11 @@ mod tests {
                 assert_eq!(*start_byte, b'a');
                 assert_eq!(children.len(), 3);
                 // child 0 (b'a'): offset = 0x200 - 0x0010 = 0x1F0
-                assert_eq!(children[0].distance, 0x200 - 0x0010);
-                // child 1 (b'b'): delta=0 → no child, offset=0
-                assert_eq!(children[1].distance, 0);
+                assert_eq!(children[0].as_ref().unwrap().distance, 0x200 - 0x0010);
+                // child 1 (b'b'): delta=0 → no transition → None
+                assert!(children[1].is_none());
                 // child 2 (b'c'): offset = 0x200 - 0x0030 = 0x1D0
-                assert_eq!(children[2].distance, 0x200 - 0x0030);
+                assert_eq!(children[2].as_ref().unwrap().distance, 0x200 - 0x0030);
             }
             other => panic!("Expected Dense, got {:?}", other),
         }
@@ -2576,8 +2657,8 @@ mod tests {
             } => {
                 assert_eq!(*start_byte, b'A');
                 assert_eq!(children.len(), 2);
-                assert_eq!(children[0].distance, 0x10000 - 0x100);
-                assert_eq!(children[1].distance, 0x10000 - 0x200);
+                assert_eq!(children[0].as_ref().unwrap().distance, 0x10000 - 0x100);
+                assert_eq!(children[1].as_ref().unwrap().distance, 0x10000 - 0x200);
             }
             other => panic!("Expected Dense, got {:?}", other),
         }
@@ -3420,6 +3501,64 @@ mod tests {
         );
     }
 
+    /// Finding 1 (issue #832): a Dense node whose FIRST real child is at
+    /// absolute trie offset 0 (the first-written leaf in BTI's bottom-up layout)
+    /// AND that has a "no transition" gap elsewhere.  DFS must:
+    ///   - emit the offset-0 child (NOT silently drop it), and
+    ///   - skip the gap byte.
+    ///
+    /// Layout (bottom-up; children at lower offsets):
+    ///   offset 0: Rows leaf  pos=5   (the offset-0 child)
+    ///   offset 2: Rows leaf  pos=9
+    ///   offset 4: Dense16 root, start=0x10, range 3:
+    ///       0x10 → delta 4 → child offset 0  (real, absolute offset 0)
+    ///       0x11 → delta 0 → no transition   (sentinel)
+    ///       0x12 → delta 2 → child offset 2  (real)
+    #[test]
+    fn dfs_dense_emits_offset_zero_child_and_skips_gap() {
+        let mut trie = Vec::new();
+        trie.extend_from_slice(&row_leaf_no_marker(5)); // offset 0
+        trie.extend_from_slice(&row_leaf_no_marker(9)); // offset 2
+        let root = trie.len() as u64; // 4
+
+        // Dense16 root: delta 0 is the "no transition" sentinel.
+        let deltas = [root as u16, 0x0000, (root - 2) as u16];
+        trie.extend(dense16_node(0, 0x10, &deltas));
+
+        let entries = dfs_collect_row_entries(&trie, root as usize).unwrap();
+        assert_eq!(
+            entries,
+            vec![
+                (
+                    vec![0x10],
+                    BtiRowIndexEntry {
+                        data_offset: 5,
+                        open_marker: None
+                    }
+                ),
+                (
+                    vec![0x12],
+                    BtiRowIndexEntry {
+                        data_offset: 9,
+                        open_marker: None
+                    }
+                ),
+            ],
+            "DFS must emit the real child at absolute offset 0 and skip the \
+             no-transition gap (0x11)"
+        );
+
+        // And find_child on the parsed Dense root must agree.
+        let node = parse_bti_node_for_traversal(&trie, root as usize).unwrap();
+        let c10 = node.find_child(0x10).expect("0x10 child must be found");
+        assert_eq!(c10.distance, 0, "0x10 must route to absolute offset 0");
+        assert!(
+            node.find_child(0x11).is_none(),
+            "0x11 is the no-transition gap"
+        );
+        assert!(node.find_child(0x12).is_some());
+    }
+
     /// Rows.db payload with FLAG_OPEN_MARKER decodes a trailing 12-byte
     /// DeletionTime.
     #[test]
@@ -3506,13 +3645,117 @@ mod tests {
         );
     }
 
-    /// A < 8-byte (e.g. 0-byte) Rows.db file must not load a trie (the public
-    /// `RowIterator` treats this as "no rows" and yields nothing without
-    /// panicking; the real 0-byte fixture is covered by the integration test).
+    /// Finding 2 (issue #832): the rooted Rows.db API must handle the empty /
+    /// out-of-bounds cases cleanly (no panic).  Empty `trie_data` or a root
+    /// beyond the buffer yields a clean parse error; a real partition root is
+    /// what callers pass in production (from `Partitions.db` `RowsOffset`).
     #[test]
-    fn row_iterator_empty_file_yields_nothing() {
-        let mut cursor = Cursor::new(Vec::<u8>::new());
-        let res = load_bti_trie_via_footer(&mut cursor);
-        assert!(res.is_err(), "0-byte file must not load a trie");
+    fn iterate_rows_in_bti_trie_empty_and_oob_root() {
+        // Empty trie_data with root 0 → out-of-bounds → clean error, no panic.
+        let err = iterate_rows_in_bti_trie(&[], 0);
+        assert!(err.is_err(), "empty Rows.db trie must error, not panic");
+
+        // Non-empty trie but root beyond bounds → clean error.
+        let (trie, _root) = make_rows_trie_three((0x10, 5), (0x20, 17), (0x30, 99));
+        let err = iterate_rows_in_bti_trie(&trie, trie.len() + 100);
+        assert!(err.is_err(), "out-of-bounds root must error, not panic");
+
+        // A valid per-partition root traverses correctly.
+        let (trie, root) = make_rows_trie_three((0x10, 5), (0x20, 17), (0x30, 99));
+        let entries = iterate_rows_in_bti_trie(&trie, root).unwrap();
+        assert_eq!(entries.len(), 3);
+    }
+
+    /// Finding 3 (issue #832): range_query soundness over reconstructed keys
+    /// when an internal-node payload's key is a STRICT PREFIX of a deeper leaf
+    /// key.  This exercises the byte-comparable inclusive filter applied on top
+    /// of the DFS — the same filter `RowsParser::range_query` uses — and proves
+    /// that prefixes are neither spuriously dropped nor included.
+    ///
+    /// Trie layout (bottom-up):
+    ///   K  = [0x10]        (internal node, carries a payload: pos=1)
+    ///   K2 = [0x10, 0x20]  (deeper leaf: pos=2)
+    ///
+    ///   offset 0: Rows leaf pos=2                         → K2 payload
+    ///   offset 2: Single8 trans=0x20 delta=2, payload pos=1 (the K node)
+    ///   offset 5: Single8 root trans=0x10 delta=3, no payload
+    ///
+    /// So root --0x10--> K(internal, payload) --0x20--> K2(leaf).
+    #[test]
+    fn range_filter_prefix_relationship_is_sound() {
+        let mut trie = Vec::new();
+        // offset 0: leaf for K2 = [0x10,0x20], pos=2
+        trie.extend_from_slice(&row_leaf_no_marker(2));
+        // offset 2: Single8 with payload — the K = [0x10] node.
+        //   header 0x21 (ordinal=2 Single8, payloadBits=1), transition=0x20,
+        //   delta=2 (child = 2 - 2 = 0 → the K2 leaf), then payload pos=1.
+        let k_off = trie.len() as u64; // 2
+        trie.push(0x21); // Single8 + payloadBits=1
+        trie.push(0x20); // transition byte
+        trie.push(k_off as u8); // delta=2 → child at offset 0
+        trie.push(0x01); // payload: unsigned vint pos=1
+
+        // offset 6: Single8 root, no payload, transition=0x10 → child = k_off (2).
+        let root = trie.len() as u64; // 6
+        trie.push(0x20); // Single8, payloadBits=0 (no payload)
+        trie.push(0x10); // transition byte
+        trie.push((root - k_off) as u8); // delta=4 → child at k_off=2
+
+        let all = iterate_rows_in_bti_trie(&trie, root as usize).unwrap();
+        // DFS emits K's own payload before descending to K2.
+        assert_eq!(
+            all,
+            vec![
+                (
+                    vec![0x10],
+                    BtiRowIndexEntry {
+                        data_offset: 1,
+                        open_marker: None
+                    }
+                ),
+                (
+                    vec![0x10, 0x20],
+                    BtiRowIndexEntry {
+                        data_offset: 2,
+                        open_marker: None
+                    }
+                ),
+            ],
+            "K (internal payload) must sort before its descendant K2"
+        );
+
+        // Inclusive byte-comparable filter mirroring range_query's filter.
+        let filter = |lo: &[u8], hi: &[u8]| -> Vec<u64> {
+            if lo > hi {
+                return Vec::new();
+            }
+            all.iter()
+                .filter(|(k, _)| k.as_slice() >= lo && k.as_slice() <= hi)
+                .map(|(_, e)| e.data_offset)
+                .collect()
+        };
+
+        let k = [0x10u8];
+        let k2 = [0x10u8, 0x20u8];
+
+        // [K..=K] returns K but NOT K2 (K2 = [0x10,0x20] > [0x10]).
+        assert_eq!(
+            filter(&k, &k),
+            vec![1],
+            "[K..=K] must include K and exclude the longer K2"
+        );
+        // [K..=K2] returns both.
+        assert_eq!(
+            filter(&k, &k2),
+            vec![1, 2],
+            "[K..=K2] must include both K and K2"
+        );
+        // A bound strictly between K and K2 excludes both:
+        //   [0x10,0x00] ..= [0x10,0x10]; K=[0x10] < [0x10,0x00], K2=[0x10,0x20] > [0x10,0x10].
+        assert_eq!(
+            filter(&[0x10, 0x00], &[0x10, 0x10]),
+            Vec::<u64>::new(),
+            "a range strictly between K and K2 must exclude both"
+        );
     }
 }
