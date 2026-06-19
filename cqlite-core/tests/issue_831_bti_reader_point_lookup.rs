@@ -240,6 +240,60 @@ async fn bti_reader_get_returns_row_for_known_key() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 3b: chunk-targeted decompress lands on the correct chunk (issue #831
+// perf finding) — the lookup decompresses only the chunk containing the trie
+// offset, not the whole section. For this single-chunk fixture every golden
+// offset (0/63/125) maps to target_chunk 0, and get() must still return the
+// identical golden rows (proving the chunk-targeted branch produced correct
+// output rather than falling back to the whole-section stitch).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bti_reader_get_uses_chunk_targeted_decompress() {
+    let Some(data_db) = da_data_db_path() else {
+        eprintln!("SKIP: test_da/simple_table BTI fixture not available");
+        return;
+    };
+    let reader = open_reader(&data_db).await;
+    let table_id = TableId::from(TABLE_ID);
+
+    // The fixture is chunk-compressed: CompressionInfo must be present, and the
+    // chunk-targeting math must place every golden offset in chunk 0.
+    let comp = reader
+        .compression_info
+        .as_ref()
+        .expect("BTI fixture is chunk-compressed (CompressionInfo.db present)");
+    let chunk_length = comp.chunk_length as u64;
+    assert!(chunk_length > 0, "chunk_length must be non-zero");
+
+    for p in TEST_PARTITIONS {
+        let target_chunk = (p.expected_offset / chunk_length) as usize;
+        assert_eq!(
+            target_chunk, 0,
+            "offset {} (chunk_length {}) must target chunk 0 for this fixture",
+            p.expected_offset, chunk_length
+        );
+
+        // And get() through the chunk-targeted path still returns the golden row.
+        let raw: [u8; 16] = [p.uuid_byte; 16];
+        let key = RowKey::new(raw.to_vec());
+        let value = reader
+            .get(&table_id, &key)
+            .await
+            .unwrap_or_else(|e| panic!("get() for UUID {} errored: {}", p.label, e))
+            .unwrap_or_else(|| panic!("get() for UUID {} returned None", p.label));
+        match cell(&value, "name") {
+            Some(Value::Text(s)) => assert_eq!(s, p.name, "UUID {} name mismatch", p.label),
+            other => panic!("UUID {} missing/!text name cell: {:?}", p.label, other),
+        }
+    }
+    eprintln!(
+        "bti_reader_get_uses_chunk_targeted_decompress PASSED: target_chunk=0 for all golden \
+         offsets and rows match"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test 4: missing key returns None
 // ---------------------------------------------------------------------------
 

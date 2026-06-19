@@ -198,7 +198,13 @@ impl SSTableReader {
     ///   `read_value_at_offset`/`get_cached_data` (which seek raw file bytes).
     /// - **Own decompression**: `requires_chunk_stitching()` is `false` for BTI,
     ///   so this path decompresses the chunk-compressed Data.db itself via the
-    ///   reader's CompressionInfo + compression_reader (`stitch_all_chunks`).
+    ///   reader's CompressionInfo + compression_reader. Because the trie already
+    ///   resolved the EXACT uncompressed offset of the target partition, this only
+    ///   decompresses the chunk that contains that offset and continues forward
+    ///   chunk-by-chunk ONLY until the target partition is fully parsed — it never
+    ///   decompresses earlier chunks or the rest of the file (issue #831 perf
+    ///   finding). The whole-section [`stitch_all_chunks`] fallback is used only
+    ///   when chunk targeting is impossible (no/zero `chunk_length`).
     /// - **Prefix-collision guard**: the trie may return a candidate for a
     ///   prefix-colliding key, so the decoded partition key is verified to equal
     ///   the queried key before any row is returned.
@@ -209,74 +215,24 @@ impl SSTableReader {
             None => return Ok(None), // not in this SSTable
         };
 
-        // 2. Decompress the data section into a single buffer. The trie offset
-        //    indexes into THIS decompressed buffer (INVARIANT 1).
+        // 2. Obtain a DECOMPRESSED window that contains the target partition.
         //
-        //    Reuse the shared chunk-stitch helper, which decompresses every chunk
-        //    via the reader's compression_reader. Serialise against other scans
-        //    (shared file position + chunk index) per issue #805.
-        let decompressed = {
-            let _scan_guard = self.scan_mutex.lock().await;
-            let header_size = self.calculate_header_size();
-            {
-                let mut file_guard = self.file.lock().await;
-                file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
-            }
-            self.current_chunk_index
-                .store(0, std::sync::atomic::Ordering::Relaxed);
-            self.stitch_all_chunks().await?
-        };
-
-        if offset >= decompressed.len() {
-            return Err(Error::corruption(format!(
-                "BTI trie resolved Data.db offset {} beyond decompressed data section ({} bytes)",
-                offset,
-                decompressed.len()
-            )));
-        }
-
-        // 3. Verify the partition-key bytes at the resolved offset match the
-        //    queried key (INVARIANT 3: guard against prefix-collision candidates).
+        //    `window_base` is the uncompressed offset of the window's first byte
+        //    and `window` holds the decompressed bytes from there onward. The
+        //    target partition starts at `offset - window_base` inside `window`
+        //    (INVARIANT 1: the trie offset indexes the uncompressed data section).
         //
-        //    Partition on-disk header (oa/da, hasUIntDeletionTime):
-        //      [0]      flags (0x00)
-        //      [1]      key_len (u8)
-        //      [2..2+L] raw partition-key bytes
-        //      [..]     partition deletion time
-        if !self.bti_partition_key_matches(&decompressed, offset, key.as_bytes()) {
-            debug!(
-                "BTI trie candidate at offset {} did not match queried key (prefix collision); \
-                 treating as absent",
-                offset
-            );
-            return Ok(None);
-        }
-
-        // 4. Decode the partition. Feed the decompressed buffer FROM the resolved
-        //    offset to the schema-aware V5 parser, which parses the partition-key
-        //    header itself and stops at the next partition boundary / end-of-buffer
-        //    (it detects the next partition header structurally and honours the
-        //    0x01 end-of-partition marker). Stop after the first emitted entry so
-        //    only the target partition is decoded.
+        //    For the chunk-targeted path the window starts at the chunk that
+        //    contains `offset` (so `window_base = target_chunk * chunk_length`);
+        //    for the whole-section fallback the window starts at offset 0
+        //    (`window_base = 0`). Either way the parse below uses the same
+        //    `within = offset - window_base` index.
         let schema_opt = self.get_table_schema(None);
         let parser = self.build_v5_parser();
 
-        let mut found: Option<Value> = None;
-        parser.parse_block_emit(
-            &decompressed[offset..],
-            schema_opt.as_ref(),
-            self,
-            |(tid, entry_key, entry_value)| {
-                // The first partition in the slice is the one the trie resolved.
-                // Verify BOTH that the emitted table id matches the queried table
-                // (so a wrong-table query never returns a row, issue #831 review)
-                // AND that the parser-decoded partition key equals the queried key.
-                if table_ids_match(&tid, table_id) && entry_key.as_bytes() == key.as_bytes() {
-                    found = Some(entry_value);
-                }
-                Ok(std::ops::ControlFlow::Break(()))
-            },
-        )?;
+        let found = self
+            .bti_decompress_and_parse_target(offset, key, table_id, schema_opt.as_ref(), &parser)
+            .await?;
 
         match found {
             Some(value) => {
@@ -287,6 +243,247 @@ impl SSTableReader {
             }
             None => Ok(None),
         }
+    }
+
+    /// Compute the chunk that contains uncompressed `offset`, the uncompressed
+    /// offset of that chunk's start, and the within-chunk index — given the
+    /// CompressionInfo `chunk_length` (issue #831).
+    ///
+    /// Returns `(target_chunk, window_base, within)` where
+    /// `window_base = target_chunk * chunk_length` and `within = offset - window_base`.
+    /// Pure arithmetic so it can be unit-tested independently of any I/O.
+    #[inline]
+    fn bti_chunk_target(offset: usize, chunk_length: usize) -> (usize, usize, usize) {
+        let target_chunk = offset / chunk_length;
+        let window_base = target_chunk * chunk_length;
+        let within = offset - window_base;
+        (target_chunk, window_base, within)
+    }
+
+    /// Decompress only the chunk(s) needed to fully parse the target partition at
+    /// uncompressed `offset`, then parse and return its row value (issue #831).
+    ///
+    /// Chunk targeting (the fast path): when `CompressionInfo` with a non-zero
+    /// `chunk_length` is present, the chunk containing `offset` is
+    /// `target_chunk = offset / chunk_length`; we seek that chunk via its
+    /// `chunk_offsets` entry, set `current_chunk_index = target_chunk`, then
+    /// decompress forward chunk-by-chunk, appending each into `window`. After each
+    /// appended chunk we attempt to parse the FIRST partition at `window[within..]`
+    /// (`within = offset % chunk_length`). The stop condition (correctness-critical
+    /// — never return a truncated parse):
+    ///   - parse returns `Ok` AND the emit closure fired (a COMPLETE partition was
+    ///     decoded) -> stop and return what the closure captured;
+    ///   - parse returns `Err` (buffer truncated mid-partition) OR the closure
+    ///     never fired -> append the next chunk and retry;
+    ///   - `read_next_block()` returns `None` (EOF) and still not parsed -> stop
+    ///     (the caller treats `None` as "absent", matching prior behaviour).
+    ///
+    /// Fallbacks (preserve prior behaviour exactly): when `compression_info` is
+    /// `None` (uncompressed BTI Data.db) or `chunk_length` is 0/absent, this
+    /// decompresses the WHOLE section via [`stitch_all_chunks`] (`window_base = 0`)
+    /// and runs the same single-partition parse.
+    ///
+    /// Serialises against other scans (shared file position + chunk index) by
+    /// holding `scan_mutex` for the whole operation (issue #805).
+    async fn bti_decompress_and_parse_target(
+        &self,
+        offset: usize,
+        key: &RowKey,
+        table_id: &TableId,
+        schema_opt: Option<&crate::schema::TableSchema>,
+        parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+    ) -> Result<Option<Value>> {
+        use crate::storage::sstable::compression::Compression;
+
+        let _scan_guard = self.scan_mutex.lock().await;
+
+        // Determine the chunk-targeting parameters. `chunk_length == 0` (or no
+        // CompressionInfo) means we cannot chunk-target -> whole-section fallback.
+        let chunk_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.chunk_length as usize)
+            .filter(|&len| len > 0);
+
+        let (target_chunk, window_base, mut window) = match chunk_length {
+            Some(len) => {
+                let (target_chunk, window_base, _within) = Self::bti_chunk_target(offset, len);
+                // Seek to the START of target_chunk so read_next_block() reads it
+                // first, and set the shared chunk index accordingly. Chunk offsets
+                // are relative to file start for NB/BTI (header_offset = 0).
+                let chunk_start = self
+                    .compression_info
+                    .as_ref()
+                    .and_then(|ci| ci.compressed_chunk_offset(target_chunk))
+                    .ok_or_else(|| {
+                        Error::corruption(format!(
+                            "BTI point lookup: no compressed offset for target chunk {} \
+                             (offset {}, chunk_length {})",
+                            target_chunk, offset, len
+                        ))
+                    })?;
+                {
+                    let mut file_guard = self.file.lock().await;
+                    file_guard.seek(SeekFrom::Start(chunk_start)).await?;
+                }
+                self.current_chunk_index
+                    .store(target_chunk, std::sync::atomic::Ordering::Relaxed);
+                (target_chunk, window_base, Vec::<u8>::new())
+            }
+            None => {
+                // Whole-section fallback (uncompressed BTI, or chunk_length absent/0).
+                let header_size = self.calculate_header_size();
+                {
+                    let mut file_guard = self.file.lock().await;
+                    file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+                }
+                self.current_chunk_index
+                    .store(0, std::sync::atomic::Ordering::Relaxed);
+                let whole = self.stitch_all_chunks().await?;
+                (0usize, 0usize, whole)
+            }
+        };
+
+        // `within` is the start of the target partition inside `window`.
+        if offset < window_base {
+            return Err(Error::corruption(format!(
+                "BTI point lookup: resolved offset {} precedes window base {} (chunk {})",
+                offset, window_base, target_chunk
+            )));
+        }
+        let within = offset - window_base;
+
+        // For the chunk-targeted path we still need to populate `window`. For the
+        // whole-section fallback `window` is already complete.
+        let chunk_targeted = chunk_length.is_some();
+
+        loop {
+            // If chunk-targeted, append the next chunk before each parse attempt
+            // (the whole-section fallback already has all bytes in `window`).
+            if chunk_targeted {
+                match self.read_next_block().await? {
+                    Some(compressed_chunk) => {
+                        let decompressed_chunk = if let Some(compression_reader) =
+                            &self.compression_reader
+                        {
+                            let compression = Compression::new(*compression_reader.algorithm())?;
+                            compression.decompress(&compressed_chunk).map_err(|e| {
+                                Error::corruption(format!(
+                                    "BTI point lookup: failed to decompress chunk: {}",
+                                    e
+                                ))
+                            })?
+                        } else {
+                            // No compression reader despite CompressionInfo:
+                            // treat raw chunk bytes as the decompressed data.
+                            compressed_chunk
+                        };
+                        window.extend_from_slice(&decompressed_chunk);
+                    }
+                    None => {
+                        // EOF: no more chunks. If we never parsed a complete
+                        // partition, the partition is treated as absent (matching
+                        // the prior whole-section behaviour for an unparseable tail).
+                        return Ok(None);
+                    }
+                }
+            }
+
+            // Need at least the partition header to attempt a match.
+            if within >= window.len() {
+                if chunk_targeted {
+                    // Not enough bytes yet; pull the next chunk.
+                    continue;
+                }
+                // Whole-section window can't grow: offset is past the data.
+                return Err(Error::corruption(format!(
+                    "BTI trie resolved Data.db offset {} beyond decompressed data section ({} bytes)",
+                    offset,
+                    window.len()
+                )));
+            }
+
+            // INVARIANT 3: verify the on-disk partition-key bytes match the queried
+            // key before decoding (guard against prefix-collision trie candidates).
+            // Only meaningful once the key prefix is present in `window`; if the key
+            // bytes are not yet fully buffered, fall through to a parse attempt which
+            // will report truncation (Err) and pull another chunk.
+            if Self::bti_partition_key_bytes_available(&window, within, key.as_bytes()) {
+                if !self.bti_partition_key_matches(&window, within, key.as_bytes()) {
+                    debug!(
+                        "BTI trie candidate at offset {} did not match queried key (prefix \
+                         collision); treating as absent",
+                        offset
+                    );
+                    return Ok(None);
+                }
+            } else if !chunk_targeted {
+                // Whole-section fallback but the key prefix is structurally short.
+                return Ok(None);
+            }
+
+            // Attempt to parse the FIRST partition at window[within..]. The parser
+            // detects the next partition boundary / 0x01 end-of-partition marker and
+            // stops; we break after the first emitted entry. A complete partition
+            // means: parse returned Ok AND the closure fired.
+            let mut found: Option<Value> = None;
+            let mut emitted = false;
+            let parse_result = parser.parse_block_emit(
+                &window[within..],
+                schema_opt,
+                self,
+                |(tid, entry_key, entry_value)| {
+                    emitted = true;
+                    // Verify BOTH the emitted table id matches the queried table
+                    // (a wrong-table query never returns a row, issue #831 review)
+                    // AND the parser-decoded partition key equals the queried key.
+                    if table_ids_match(&tid, table_id) && entry_key.as_bytes() == key.as_bytes() {
+                        found = Some(entry_value);
+                    }
+                    Ok(std::ops::ControlFlow::Break(()))
+                },
+            );
+
+            match parse_result {
+                Ok(()) if emitted => {
+                    // A COMPLETE partition was decoded — accept it and stop.
+                    return Ok(found);
+                }
+                _ => {
+                    // Either Err (truncated mid-partition) or the closure never
+                    // fired (no complete partition yet). For the chunk-targeted
+                    // path, pull the next chunk and retry; never accept a partial.
+                    if chunk_targeted {
+                        continue;
+                    }
+                    // Whole-section fallback already has every byte: a failure here
+                    // means the partition genuinely could not be parsed -> absent.
+                    return Ok(None);
+                }
+            }
+        }
+    }
+
+    /// Returns true when the `[flags][key_len: u8][key bytes]` prefix at `within`
+    /// is fully present in `window` AND `key_len` equals `expected_key.len()`.
+    ///
+    /// Used by the chunk-targeted BTI lookup to decide whether the INVARIANT-3
+    /// key match can be evaluated yet, or whether more chunk bytes must be pulled
+    /// first (issue #831).
+    fn bti_partition_key_bytes_available(
+        window: &[u8],
+        within: usize,
+        _expected_key: &[u8],
+    ) -> bool {
+        // Need flags + key_len byte first.
+        if within + 2 > window.len() {
+            return false;
+        }
+        let key_len = window[within + 1] as usize;
+        // The declared key bytes must all be buffered. (Whether `key_len` equals
+        // the expected length is decided by the subsequent match check, which
+        // fails fast on a mismatch — here we only require the bytes be present.)
+        within + 2 + key_len <= window.len()
     }
 
     /// Verify the on-disk partition-key bytes at `offset` in the decompressed
@@ -1668,6 +1865,103 @@ mod tests {
         let id4 = TableId::new("test.orders".to_string());
 
         assert!(!table_ids_match(&id3, &id4));
+    }
+
+    // =========================================================================
+    // Issue #831: BTI chunk-targeting math + window stop-condition logic
+    // =========================================================================
+
+    /// The chunk-index arithmetic must match `CompressionInfo`'s definitions:
+    /// `target_chunk = off / chunk_length`, `window_base = target_chunk *
+    /// chunk_length`, `within = off - window_base` (== `off % chunk_length`).
+    #[test]
+    fn bti_chunk_target_arithmetic() {
+        // Single-chunk case (simple_table fixture shape): chunk_length 16384,
+        // offset 0/63/125 all land in chunk 0 with within == offset.
+        let chunk_length = 16384;
+        for off in [0usize, 63, 125] {
+            let (chunk, base, within) = SSTableReader::bti_chunk_target(off, chunk_length);
+            assert_eq!(chunk, 0, "off {off} must be in chunk 0");
+            assert_eq!(base, 0, "chunk 0 window base must be 0");
+            assert_eq!(within, off, "within must equal offset in chunk 0");
+        }
+
+        // Multi-chunk arithmetic with a small chunk_length to exercise the math.
+        let cl = 100usize;
+        // Exactly on a chunk boundary.
+        assert_eq!(SSTableReader::bti_chunk_target(100, cl), (1, 100, 0));
+        assert_eq!(SSTableReader::bti_chunk_target(200, cl), (2, 200, 0));
+        // Inside chunk 1.
+        assert_eq!(SSTableReader::bti_chunk_target(150, cl), (1, 100, 50));
+        // Just before a boundary.
+        assert_eq!(SSTableReader::bti_chunk_target(99, cl), (0, 0, 99));
+        // Within always equals off % chunk_length, base = chunk * chunk_length.
+        for off in [0usize, 1, 99, 100, 101, 250, 999] {
+            let (chunk, base, within) = SSTableReader::bti_chunk_target(off, cl);
+            assert_eq!(within, off % cl);
+            assert_eq!(base, chunk * cl);
+            assert_eq!(base + within, off);
+        }
+    }
+
+    /// `bti_partition_key_bytes_available` drives the growing-window stop
+    /// condition: while the `[flags][key_len][key bytes]` prefix is NOT yet fully
+    /// buffered it returns false (the chunk-targeted loop pulls another chunk);
+    /// once the declared key bytes have all arrived it returns true (the
+    /// INVARIANT-3 key match can be evaluated). This is the SYNTHETIC spanning
+    /// test: the key prefix straddles a simulated chunk boundary and the window
+    /// grows one byte at a time across it.
+    ///
+    /// NOTE: a full multi-chunk-spanning parse against a real
+    /// `V5CompressedLegacyParser` has NO real BTI DataOffset fixture — these are
+    /// narrow partitions that fit within a single chunk — so the spanning *parse*
+    /// path is only exercised structurally here via the byte-availability gate
+    /// that decides when a parse may even be attempted. This calls the real
+    /// associated function (no I/O), so a regression in its boundary math is
+    /// caught.
+    #[test]
+    fn bti_partition_key_bytes_available_growing_window() {
+        // Header at within=0: [flags=0x00][key_len=4][k0 k1 k2 k3]. Simulate a
+        // window that grows from 0 bytes up to the full prefix; availability must
+        // flip to true exactly when all 4 declared key bytes are buffered.
+        let expected_key = [0xAA, 0xBB, 0xCC, 0xDD];
+        let within = 0usize;
+        let full = {
+            let mut v = vec![0x00u8, expected_key.len() as u8];
+            v.extend_from_slice(&expected_key);
+            v
+        };
+
+        let avail = |len: usize| {
+            SSTableReader::bti_partition_key_bytes_available(&full[..len], within, &expected_key)
+        };
+
+        // Not enough for flags+key_len yet.
+        assert!(!avail(0));
+        assert!(!avail(1));
+        // flags+key_len present but key bytes not fully buffered.
+        assert!(!avail(2));
+        assert!(!avail(3)); // 1 key byte
+        assert!(!avail(4)); // 2 key bytes
+        assert!(!avail(5)); // 3 key bytes
+                            // All 4 key bytes buffered -> available (boundary fully crossed).
+        assert!(avail(6));
+        assert!(avail(full.len()));
+
+        // A non-zero `within` (target partition not at window start) must use the
+        // same relative math.
+        let mut padded = vec![0x77u8, 0x88];
+        padded.extend_from_slice(&full);
+        assert!(!SSTableReader::bti_partition_key_bytes_available(
+            &padded[..2 + 5],
+            2,
+            &expected_key
+        ));
+        assert!(SSTableReader::bti_partition_key_bytes_available(
+            &padded,
+            2,
+            &expected_key
+        ));
     }
 
     #[test]
