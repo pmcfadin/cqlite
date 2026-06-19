@@ -3,10 +3,12 @@
 # Issue #200: Validate that all 33 nb test tables can be loaded successfully
 # Issue #654: Also discover oa/da keyspaces
 # Issue #656 (VG4): Promote test_oa to enforced (nb + oa = 39 tables); test_da stays skip-pending
+# Issue #701 (DS5): Add test_deltas (8 delete-bearing tables); nb + oa + deltas = 47 enforced
 #
 # This script discovers all test tables across all keyspaces:
 #   - nb (enforced): test_basic, test_collections, test_timeseries, test_wide_rows
 #   - oa (enforced, VG4): test_oa — oa format BIG read implemented in #655
+#   - nb/deltas (enforced, DS5 #701): test_deltas — delete-bearing fixtures (8 tables)
 #   - da/bti (skip-pending, BTI read epic #660): test_da
 #
 # Tables in SKIP_PENDING_KEYSPACES are discovered and listed, but not run
@@ -51,7 +53,8 @@ OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/smoke-test-all-tables-results}"
 
 # Enforced keyspaces (must all pass, failures exit non-zero)
 # Issue #656 (VG4): test_oa promoted from skip-pending to enforced (nb=33 + oa=6 = 39 tables)
-KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa")
+# Issue #701 (DS5): test_deltas added (8 delete-bearing nb tables); total = 47 enforced
+KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa" "test_deltas")
 
 # Skip-pending keyspaces (Issue #654):
 #   - test_da: da/BTI format - skip until BTI read epic #660
@@ -423,7 +426,7 @@ print_summary() {
     echo "    SMOKE TEST SUMMARY - ALL TABLES"
     echo "========================================="
     echo ""
-    echo "  Total Tables Tested: ${total_tables}/39 (nb=33 + oa=6, enforced)"
+    echo "  Total Tables Tested: ${total_tables}/47 (nb=33 + oa=6 + deltas=8, enforced)"
     echo -e "  ${GREEN}Passed:              ${#PASSED_TABLES[@]}${NC}"
 
     if [[ ${#FAILED_TABLES[@]} -gt 0 ]]; then
@@ -462,7 +465,7 @@ print_summary() {
 
     if [[ ${#FAILED_TABLES[@]} -eq 0 ]]; then
         echo -e "${GREEN}=========================================${NC}"
-        echo -e "${GREEN}  All nb+oa tables (39) passed smoke test${NC}"
+        echo -e "${GREEN}  All nb+oa+deltas tables (47) passed smoke test${NC}"
         echo -e "${GREEN}  da/BTI tables present but skip-pending (BTI read epic #660)${NC}"
         echo -e "${GREEN}=========================================${NC}"
         return 0
@@ -479,6 +482,7 @@ main() {
     log_info "CQLite Comprehensive Table Loading Smoke Test"
     log_info "Issue #200: Validate all 33 nb test tables load successfully"
     log_info "Issue #656 (VG4): oa tables (test_oa) now enforced; da tables listed as SKIP-PENDING"
+    log_info "Issue #701 (DS5): test_deltas (8 delete-bearing tables) now enforced"
     echo ""
 
     detect_timeout_command
