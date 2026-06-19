@@ -1690,10 +1690,16 @@ pub fn serialize_cql_value(value: &Value) -> Result<Vec<u8>> {
                 TombstoneType::CellTombstone => 1u8,
                 TombstoneType::RangeTombstone => 2u8,
                 TombstoneType::TtlExpiration => 3u8,
-                // PartitionTombstone is a delta-scan concept not stored in the
-                // legacy binary format; encode as RowTombstone (byte 0) so that
-                // existing SSTable round-trip tests remain unaffected.
-                TombstoneType::PartitionTombstone => 0u8,
+                // PartitionTombstone is a delta-scan concept that has no encoding
+                // in the legacy binary format.  Silently mapping it to byte 0
+                // (RowTombstone) would cause a silent lossy round-trip, violating
+                // the no-silent-corruption mandate.  Fail loudly instead.
+                TombstoneType::PartitionTombstone => {
+                    return Err(Error::invalid_operation(
+                        "PartitionTombstone cannot be serialized via the legacy CQL value \
+                         binary format; it is a delta-scan concept only",
+                    ));
+                }
             };
             result.push(tombstone_type_byte);
 
@@ -2232,6 +2238,31 @@ mod tests {
             deletion_time_bytes[7],
         ]);
         assert_eq!(deletion_time, 5000);
+    }
+
+    #[test]
+    fn test_partition_tombstone_serialize_errors() {
+        // PartitionTombstone has no encoding in the legacy CQL binary format.
+        // Serializing one must return an explicit error, not silently alias to
+        // RowTombstone (byte 0) — that would be a silent lossy round-trip.
+        use crate::types::{TombstoneInfo, TombstoneType};
+        let partition_tombstone = Value::Tombstone(TombstoneInfo {
+            deletion_time: 9999,
+            tombstone_type: TombstoneType::PartitionTombstone,
+            ttl: None,
+            range_start: None,
+            range_end: None,
+        });
+        let result = serialize_cql_value(&partition_tombstone);
+        assert!(
+            result.is_err(),
+            "serializing PartitionTombstone must return Err, not Ok"
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("PartitionTombstone"),
+            "error message should mention PartitionTombstone, got: {err_msg}"
+        );
     }
 
     #[test]

@@ -134,6 +134,16 @@ jobs:
           cargo test --package cqlite-core --features write-support --test write_read_roundtrip
           cargo test --package cqlite-core --features write-support --test compaction_integration
 
+      - name: Run delta-scan tests (issue #697)
+        env:
+          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+        run: |
+          echo "Running delta-scan unit tests (issue #697)..."
+          # The delta-scan feature flag gates DeltaRecord, RangeBound, and related
+          # delta_scan module tests.  These are self-contained unit tests that do
+          # not require fixture data.
+          cargo test --package cqlite-core --features delta-scan --lib
+
       - name: Run CLI unit tests
         env:
           CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
