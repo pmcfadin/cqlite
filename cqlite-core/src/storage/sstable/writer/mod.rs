@@ -347,8 +347,10 @@ impl SSTableWriter {
                 let local_deletion_time = now_seconds.saturating_add(ttl as i32);
                 self.stats.update_local_deletion_time(local_deletion_time);
             }
-            // Track local deletion times for tombstones and TTL cells
-            // TODO(Issue #401): Get proper local_deletion_time from Mutation struct
+            // Track local deletion times for tombstones and TTL cells.
+            // Issue #764: row/cell tombstones use the caller-supplied
+            // `local_deletion_time` when present, else the timestamp-derived
+            // value (`effective_local_deletion_time`).
             for op in &mutation.operations {
                 match op {
                     crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
@@ -368,8 +370,9 @@ impl SSTableWriter {
                     }
                     crate::storage::write_engine::mutation::CellOperation::Delete { .. }
                     | crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
-                        // Derive local_deletion_time from timestamp (workaround)
-                        let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+                        // Issue #764: honor the explicit local_deletion_time if
+                        // the mutation supplied one, else derive from timestamp.
+                        let local_deletion_time = mutation.effective_local_deletion_time();
                         self.stats.update_local_deletion_time(local_deletion_time);
                     }
                     _ => {}
@@ -524,7 +527,10 @@ impl SSTableWriter {
                     }
                     crate::storage::write_engine::mutation::CellOperation::Delete { .. }
                     | crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
-                        let ldt = (mutation.timestamp_micros / 1_000_000) as i32;
+                        // Issue #764: the encoding baseline must match the LDT the
+                        // row/cell tombstone will actually be written with, else the
+                        // delta underflows for an explicit LDT below the timestamp.
+                        let ldt = mutation.effective_local_deletion_time();
                         min_ldt = min_ldt.min(ldt);
                     }
                     _ => {}

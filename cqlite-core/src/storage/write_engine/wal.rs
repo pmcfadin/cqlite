@@ -32,7 +32,10 @@
 //! - Valid entries: returned in order for memtable replay
 
 use crate::error::{Error, Result};
-use crate::storage::write_engine::mutation::Mutation;
+use crate::storage::write_engine::mutation::{
+    CellOperation, ClusteringKey, Mutation, PartitionKey, PartitionTombstone, RangeTombstone,
+    TableId,
+};
 use crc32fast::Hasher;
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
@@ -138,6 +141,60 @@ fn set_secure_permissions(file: &File) -> Result<()> {
 fn set_secure_permissions(_file: &File) -> Result<()> {
     // No-op on Windows - NTFS permissions are handled differently
     Ok(())
+}
+
+/// Legacy on-disk `Mutation` layout (pre-Issue #764).
+///
+/// The WAL has no per-record version field; mutations are bincode-serialized
+/// directly and bincode is positional, so the `local_deletion_time` field added
+/// in #764 changes the byte layout. To keep recovering WAL records written by an
+/// older binary, `decode_mutation` first tries the current layout and, on
+/// failure, falls back to this legacy layout (which lacks `local_deletion_time`)
+/// and upgrades it to `local_deletion_time: None` — exactly the pre-#764
+/// behavior. The field order here MUST mirror the historical `Mutation` struct.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyMutation {
+    table: TableId,
+    partition_key: PartitionKey,
+    clustering_key: Option<ClusteringKey>,
+    operations: Vec<CellOperation>,
+    timestamp_micros: i64,
+    ttl_seconds: Option<u32>,
+    partition_tombstone: Option<PartitionTombstone>,
+    range_tombstones: Vec<RangeTombstone>,
+}
+
+impl From<LegacyMutation> for Mutation {
+    fn from(m: LegacyMutation) -> Self {
+        Mutation {
+            table: m.table,
+            partition_key: m.partition_key,
+            clustering_key: m.clustering_key,
+            operations: m.operations,
+            timestamp_micros: m.timestamp_micros,
+            ttl_seconds: m.ttl_seconds,
+            partition_tombstone: m.partition_tombstone,
+            range_tombstones: m.range_tombstones,
+            // Pre-#764 records had no explicit local deletion time; preserving
+            // None means the writer derives it from the timestamp as before.
+            local_deletion_time: None,
+        }
+    }
+}
+
+/// Deserialize a `Mutation` from WAL bytes, tolerating records written by an
+/// older binary that predates the `local_deletion_time` field (Issue #764).
+fn decode_mutation(bytes: &[u8]) -> std::result::Result<Mutation, bincode::Error> {
+    match bincode::deserialize::<Mutation>(bytes) {
+        Ok(mutation) => Ok(mutation),
+        Err(current_err) => {
+            // Fall back to the legacy layout. If that also fails, surface the
+            // original (current-layout) error which is the more informative one.
+            bincode::deserialize::<LegacyMutation>(bytes)
+                .map(Mutation::from)
+                .map_err(|_| current_err)
+        }
+    }
 }
 
 /// Write-ahead log for crash recovery
@@ -440,8 +497,8 @@ impl WriteAheadLog {
                 continue;
             }
 
-            // Deserialize mutation
-            match bincode::deserialize::<Mutation>(&mutation_bytes) {
+            // Deserialize mutation (tolerating legacy pre-#764 records).
+            match decode_mutation(&mutation_bytes) {
                 Ok(mutation) => {
                     mutations.push(mutation);
                 }
@@ -887,6 +944,98 @@ mod tests {
         assert!(matches!(
             &mutations[0].operations[0],
             CellOperation::DeleteRow
+        ));
+    }
+
+    #[test]
+    fn test_wal_roundtrips_explicit_local_deletion_time() {
+        // Issue #764: an explicit local_deletion_time must survive a WAL
+        // append + replay round-trip.
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+        let ops = vec![CellOperation::DeleteRow];
+        let mutation = Mutation::new(table_id, pk, None, ops, 1_700_000_000_000_000, None)
+            .with_local_deletion_time(1_650_000_000);
+
+        wal.append(&mutation).unwrap();
+        wal.sync().unwrap();
+
+        let mutations = wal.replay().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(
+            mutations[0].local_deletion_time,
+            Some(1_650_000_000),
+            "Explicit local_deletion_time must round-trip through the WAL"
+        );
+    }
+
+    #[test]
+    fn test_wal_default_local_deletion_time_is_none() {
+        // Default (None) must round-trip unchanged, preserving historical
+        // timestamp-derived behavior.
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        let mutation = create_test_mutation(1, "Alice");
+        assert_eq!(mutation.local_deletion_time, None);
+        wal.append(&mutation).unwrap();
+        wal.sync().unwrap();
+
+        let mutations = wal.replay().unwrap();
+        assert_eq!(mutations.len(), 1);
+        assert_eq!(mutations[0].local_deletion_time, None);
+    }
+
+    #[test]
+    fn test_wal_decodes_legacy_record_without_local_deletion_time() {
+        // Issue #764: the WAL has no per-record version field. A record written
+        // by an older binary (legacy layout, no local_deletion_time) must still
+        // decode, upgrading to local_deletion_time: None.
+        let legacy = LegacyMutation {
+            table: TableId::new("ks", "tbl"),
+            partition_key: PartitionKey::single("id", Value::Integer(3)),
+            clustering_key: None,
+            operations: vec![CellOperation::Delete {
+                column: "name".to_string(),
+            }],
+            timestamp_micros: 1_234_567_890,
+            ttl_seconds: None,
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+        };
+
+        // Serialize using the LEGACY layout (no local_deletion_time field).
+        let legacy_bytes = bincode::serialize(&legacy).unwrap();
+
+        // Sanity: the new layout has a different length (extra Option byte) so
+        // this genuinely exercises the legacy fallback path.
+        let mutation = Mutation::new(
+            TableId::new("ks", "tbl"),
+            PartitionKey::single("id", Value::Integer(3)),
+            None,
+            vec![CellOperation::Delete {
+                column: "name".to_string(),
+            }],
+            1_234_567_890,
+            None,
+        );
+        let current_bytes = bincode::serialize(&mutation).unwrap();
+        assert_eq!(
+            current_bytes.len(),
+            legacy_bytes.len() + 1,
+            "Current layout should add exactly one byte (Option<i32> discriminant) for None"
+        );
+
+        // The fallback must decode the legacy bytes into None.
+        let decoded = decode_mutation(&legacy_bytes).expect("legacy record must decode");
+        assert_eq!(decoded.local_deletion_time, None);
+        assert_eq!(decoded.timestamp_micros, 1_234_567_890);
+        assert!(matches!(
+            &decoded.operations[0],
+            CellOperation::Delete { .. }
         ));
     }
 

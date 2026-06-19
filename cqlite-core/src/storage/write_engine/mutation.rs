@@ -81,6 +81,20 @@ pub struct Mutation {
     pub partition_tombstone: Option<PartitionTombstone>,
     /// Range tombstones (delete clustering key ranges within partition)
     pub range_tombstones: Vec<RangeTombstone>,
+    /// Explicit local deletion time (seconds since Unix epoch) for the row and
+    /// cell tombstones (`DeleteRow`, `Delete`) produced by this mutation.
+    ///
+    /// `None` (the default) preserves historical behavior: the writer derives
+    /// the local deletion time from `timestamp_micros` (`timestamp_micros /
+    /// 1_000_000`). When `Some(ldt)`, the writer emits exactly `ldt` as the
+    /// `localDeletionTime` of every row/cell tombstone in this mutation, and
+    /// feeds it into the Statistics.db min/max `localDeletionTime` aggregates.
+    ///
+    /// Partition and range tombstones carry their own `local_deletion_time`
+    /// inside [`PartitionTombstone`] / [`RangeTombstone`] and are unaffected by
+    /// this field. (Issue #764)
+    #[serde(default)]
+    pub local_deletion_time: Option<i32>,
 }
 
 impl Mutation {
@@ -102,7 +116,26 @@ impl Mutation {
             ttl_seconds,
             partition_tombstone: None,
             range_tombstones: Vec::new(),
+            local_deletion_time: None,
         }
+    }
+
+    /// Set an explicit local deletion time (seconds since Unix epoch) for the
+    /// row/cell tombstones produced by this mutation (Issue #764).
+    ///
+    /// When unset, the writer derives the local deletion time from
+    /// `timestamp_micros` exactly as it did historically.
+    pub fn with_local_deletion_time(mut self, local_deletion_time: i32) -> Self {
+        self.local_deletion_time = Some(local_deletion_time);
+        self
+    }
+
+    /// Local deletion time (seconds since Unix epoch) to stamp on the row/cell
+    /// tombstones of this mutation, falling back to the timestamp-derived value
+    /// when no explicit value was supplied (Issue #764).
+    pub fn effective_local_deletion_time(&self) -> i32 {
+        self.local_deletion_time
+            .unwrap_or((self.timestamp_micros / 1_000_000) as i32)
     }
 
     /// Get the decorated key for this mutation (token + raw bytes)

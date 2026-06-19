@@ -358,6 +358,15 @@ impl DataWriter {
                     ttl_seconds: ttl,
                     partition_tombstone: None,
                     range_tombstones: Vec::new(),
+                    // Issue #764: carry an explicit local_deletion_time from the
+                    // latest static-contributing mutation that supplied one, so a
+                    // static-column delete preserves its deletion time. Falls back
+                    // to None (timestamp-derived) when none was set.
+                    local_deletion_time: mutations
+                        .iter()
+                        .filter(unshadowed_static)
+                        .max_by_key(|m| m.timestamp_micros)
+                        .and_then(|m| m.local_deletion_time),
                 };
 
                 prev_unfiltered_size =
@@ -550,6 +559,15 @@ impl DataWriter {
                     ttl_seconds: ttl,
                     partition_tombstone: None,
                     range_tombstones: Vec::new(),
+                    // Issue #764: carry an explicit local_deletion_time from the
+                    // latest static-contributing mutation that supplied one, so a
+                    // static-column delete preserves its deletion time. Falls back
+                    // to None (timestamp-derived) when none was set.
+                    local_deletion_time: mutations
+                        .iter()
+                        .filter(unshadowed_static)
+                        .max_by_key(|m| m.timestamp_micros)
+                        .and_then(|m| m.local_deletion_time),
                 };
 
                 prev_unfiltered_size =
@@ -965,7 +983,8 @@ impl DataWriter {
                 && shadow_floor.is_none_or(|floor| m.timestamp_micros > floor)
                 && row_deletion.is_none_or(|(ts, _)| m.timestamp_micros >= ts)
             {
-                row_deletion = Some((m.timestamp_micros, (m.timestamp_micros / 1_000_000) as i32));
+                // Issue #764: honor the mutation's explicit local_deletion_time.
+                row_deletion = Some((m.timestamp_micros, m.effective_local_deletion_time()));
             }
         }
         // Cells and liveness are shadowed by the strongest covering deletion:
@@ -1021,6 +1040,7 @@ impl DataWriter {
                     op,
                     timestamp_micros: m.timestamp_micros,
                     row_ttl_seconds: m.ttl_seconds,
+                    cell_local_deletion_time: m.effective_local_deletion_time(),
                 };
                 match cells.entry(column) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
@@ -1331,7 +1351,8 @@ impl DataWriter {
             let ts_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
             encode_unsigned(ts_delta, &mut body);
 
-            let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+            // Issue #764: honor the explicit local_deletion_time when supplied.
+            let local_deletion_time = mutation.effective_local_deletion_time();
             let ldt_delta =
                 local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
             encode_unsigned(ldt_delta as u64, &mut body);
@@ -1438,7 +1459,8 @@ impl DataWriter {
                 crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
                     // Only process if it's a static column
                     if static_column_names.contains(column) {
-                        let local_deletion_time = (mutation.timestamp_micros / 1_000_000) as i32;
+                        // Issue #764: honor explicit local_deletion_time.
+                        let local_deletion_time = mutation.effective_local_deletion_time();
                         self.write_tombstone_cell(
                             buf,
                             column,
@@ -1836,7 +1858,8 @@ impl DataWriter {
                         // with active deletion time (not LIVE)
                         self.write_complex_column_deletion(buf, mop.timestamp_micros)?;
                     } else {
-                        let local_deletion_time = (mop.timestamp_micros / 1_000_000) as i32;
+                        // Issue #764: honor explicit local_deletion_time.
+                        let local_deletion_time = mop.cell_local_deletion_time;
                         self.write_tombstone_cell(
                             buf,
                             column,
@@ -2750,6 +2773,10 @@ struct MergedOp<'a> {
     /// Row-level TTL (`Mutation::ttl_seconds`) of the originating mutation.
     /// Per-cell TTL lives inside `CellOperation::WriteWithTtl` itself.
     row_ttl_seconds: Option<u32>,
+    /// Local deletion time (seconds since epoch) for a `Delete` cell tombstone,
+    /// honoring the originating mutation's explicit `local_deletion_time` when
+    /// present (Issue #764). Derived from the timestamp otherwise.
+    cell_local_deletion_time: i32,
 }
 
 /// One Data.db row assembled by merging every mutation of a partition that
