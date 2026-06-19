@@ -1360,7 +1360,12 @@ fn is_reversed_comparator(marshal_type: &str) -> bool {
 fn convert_marshal_type_to_cql(marshal_type: &str) -> String {
     fn strip_wrapping_parens(mut value: &str) -> &str {
         loop {
-            let trimmed = value.trim();
+            // Also strip a leading structural `[` the header may prefix the
+            // comparator list with (e.g. `[org...ReversedType(...)`), so the
+            // wrapper-prefix checks below match the bracketed form too and the
+            // inner CQL type is derived correctly (roborev job 48). This mirrors
+            // the same normalization in `is_reversed_comparator`.
+            let trimmed = value.trim().trim_start_matches('[').trim_start();
             if trimmed.starts_with('(') && trimmed.ends_with(')') && trimmed.len() > 2 {
                 value = &trimmed[1..trimmed.len() - 1];
             } else {
@@ -2462,6 +2467,27 @@ mod tests {
             assert!(!col.column_type.contains("Reversed"));
             assert!(col.is_clustering);
         }
+    }
+
+    /// Regression (roborev job 48): a bracket-prefixed reversed comparator must
+    /// be DESC *and* resolve to the correct inner CQL type (not `timestamptype`).
+    #[test]
+    fn test_build_clustering_key_columns_bracket_prefixed_reversed() {
+        let clustering_types = vec![
+            "[org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.TimestampType)"
+                .to_string(),
+        ];
+        let cols = build_clustering_key_columns(&clustering_types);
+        assert_eq!(cols.len(), 1);
+        assert!(
+            cols[0].clustering_reversed,
+            "bracket-prefixed ReversedType is DESC"
+        );
+        assert_eq!(
+            cols[0].column_type, "timestamp",
+            "inner CQL type must resolve through the bracket, got {}",
+            cols[0].column_type
+        );
     }
 
     #[test]
