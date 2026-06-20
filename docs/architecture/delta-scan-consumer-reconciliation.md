@@ -323,8 +323,11 @@ CREATE OR REPLACE VIEW all_deltas AS
 SELECT * FROM read_parquet('/path/to/deltas/my_ks/t/nb-*-Data.db.delta.parquet');
 ```
 
-Each file produced by `cqlite delta-export` is one generation. DuckDB's
-`read_parquet` with a glob unions all files transparently.
+Each file is produced either by the `cqlite delta-export` subcommand (issue
+#705, part of Epic #696) or directly via the `DeltaParquetWriter` Rust API
+in `cqlite-core/src/export/delta_parquet.rs`. One file corresponds to one
+SSTable generation. DuckDB's `read_parquet` with a glob unions all files
+transparently.
 
 ### Complete reference merge
 
@@ -392,24 +395,33 @@ range_delete_hwm AS (
 -- For each (pk, ck), keep only the cell struct with the highest writetime.
 -- The cell struct may have value=null (tombstone) or value=<text> (live).
 -- Null struct = column absent in this delta = skip (do not overwrite).
+--
+-- Tie-break (Finding 3): when two cells share a writetime Cassandra's rule is
+-- that a tombstone beats a live value, and among two live values the larger
+-- value wins. The secondary ORDER BY terms below enforce this deterministically:
+--   1. (val.value IS NULL) DESC  — tombstone (true) sorts before live (false)
+--   2. val.value DESC NULLS FIRST — larger live value wins; nulls already won above
 val_lww AS (
     SELECT
         pk,
         ck,
-        val.value     AS val_value,      -- null if cell tombstone
-        val.writetime AS val_writetime,
+        val.value      AS val_value,     -- null if cell tombstone
+        val.writetime  AS val_writetime,
         val.expires_at AS val_expires_at
     FROM all_deltas
     WHERE __op = 'upsert'
-      AND val IS NOT NULL                 -- skip absent-column records
+      AND val IS NOT NULL                -- skip absent-column records
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY pk, ck
-        ORDER BY val.writetime DESC       -- highest writetime wins
+        ORDER BY val.writetime DESC,
+                 (val.value IS NULL) DESC,   -- tombstone wins on tie
+                 val.value DESC NULLS FIRST  -- larger value wins on tie
     ) = 1
 ),
 
 -- Step 4b: LWW merge for the static column `st` across all static_upsert records.
 -- Merge key is pk only (static columns are per-partition).
+-- Same deterministic tie-break as val_lww.
 st_lww AS (
     SELECT
         pk,
@@ -421,41 +433,53 @@ st_lww AS (
       AND st IS NOT NULL
     QUALIFY ROW_NUMBER() OVER (
         PARTITION BY pk
-        ORDER BY st.writetime DESC
+        ORDER BY st.writetime DESC,
+                 (st.value IS NULL) DESC,
+                 st.value DESC NULLS FIRST
     ) = 1
 ),
 
--- Step 5: Assemble the final merged view.
--- Combine LWW cell values, apply delete suppression, and filter expired TTL cells.
-final AS (
+-- Step 4c: Reconcile the static LWW value against partition_delete independently
+-- of the regular-row path (Finding 2a). A partition_delete at del_ts T suppresses
+-- a static cell whose st_writetime <= T even when a regular row in the same
+-- partition survives because its val_writetime > T.
+st_final AS (
+    SELECT
+        s.pk,
+        CASE
+            -- Suppress if partition_delete covers this static cell's writetime
+            WHEN pd.del_ts IS NOT NULL
+             AND pd.del_ts >= s.st_writetime THEN NULL
+            -- Suppress tombstoned static cell (value IS NULL inside struct)
+            WHEN s.st_value IS NULL THEN NULL
+            -- Suppress TTL-expired static cell
+            WHEN s.st_expires_at IS NOT NULL
+             AND s.st_expires_at <= epoch_us(current_timestamp) THEN NULL
+            ELSE s.st_value
+        END AS st_value,
+        s.st_writetime
+    FROM st_lww s
+    LEFT JOIN partition_delete_hwm pd ON pd.pk = s.pk
+),
+
+-- Step 5a: Regular rows — apply cell LWW and all delete suppressions.
+regular_rows AS (
     SELECT
         v.pk,
         v.ck,
-        -- val: null if tombstoned (val_value IS NULL), expired, or deleted
         CASE
             WHEN v.val_value IS NULL THEN NULL            -- cell tombstone
             WHEN v.val_expires_at IS NOT NULL
              AND v.val_expires_at <= epoch_us(current_timestamp) THEN NULL  -- TTL expired
             ELSE v.val_value
-        END AS val,
-
-        -- st: joined from static LWW (may be null if no static write in these generations)
-        CASE
-            WHEN s.st_value IS NULL THEN NULL
-            WHEN s.st_expires_at IS NOT NULL
-             AND s.st_expires_at <= epoch_us(current_timestamp) THEN NULL
-            ELSE s.st_value
-        END AS st
-
+        END AS val
     FROM val_lww v
-    LEFT JOIN st_lww s ON s.pk = v.pk
-
     -- Suppress rows killed by a row_delete with del_ts >= the winning writetime.
     WHERE NOT EXISTS (
         SELECT 1 FROM row_delete_hwm rd
         WHERE rd.pk = v.pk
           AND rd.ck = v.ck
-          AND rd.del_ts >= v.val_writetime  -- delete timestamp at or after cell write
+          AND rd.del_ts >= v.val_writetime
     )
     -- Suppress rows killed by a partition_delete.
     AND NOT EXISTS (
@@ -470,6 +494,34 @@ final AS (
           AND rg.ck = v.ck
           AND rg.del_ts >= v.val_writetime
     )
+),
+
+-- Step 5b: Assemble the final merged view.
+-- Union regular rows (with static column joined in) with static-only partitions
+-- (Finding 2b): a partition that has a surviving static value but no surviving
+-- regular rows must still appear in the output with ck=NULL.
+final AS (
+    -- Regular rows: join the surviving static value from st_final.
+    SELECT
+        r.pk,
+        r.ck,
+        r.val,
+        sf.st_value AS st
+    FROM regular_rows r
+    LEFT JOIN st_final sf ON sf.pk = r.pk
+
+    UNION ALL
+
+    -- Static-only partitions: partitions where a static write survived all
+    -- deletions but there are no surviving regular rows.
+    SELECT
+        sf.pk,
+        NULL AS ck,
+        NULL AS val,
+        sf.st_value AS st
+    FROM st_final sf
+    WHERE sf.st_value IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM regular_rows r WHERE r.pk = sf.pk)
 )
 
 SELECT pk, ck, val, st
@@ -657,16 +709,59 @@ A delete op at `__ts = T` overrides an earlier upsert with `cell.writetime <= T`
 ## DuckDB validation output
 
 The reference SQL in this document was validated against DuckDB v1.5.3
-(Variegata) on 2026-06-20 using in-memory tables that mirror the real envelope
-schema. Key assertions verified:
+(Variegata) on 2026-06-20 using a typed in-memory table that mirrors the real
+envelope schema (see `CREATE OR REPLACE TABLE all_deltas (...)` with explicit
+`STRUCT` column types). Four edge cases were exercised:
 
-- `val.value`, `val.writetime`, `val.expires_at` struct field access works.
-- `__range_start.ck`, `__range_start.inclusive` struct field access works.
-- LWW merge via `QUALIFY ROW_NUMBER() OVER (PARTITION BY pk,ck ORDER BY val.writetime DESC) = 1` produces the highest-writetime row.
-- `row_delete` with `del_ts >= val_writetime` correctly suppresses upsert rows.
-- `range_delete` predicate (`ck >= start.ck AND ck < end.ck` with `inclusive` checks) correctly suppresses rows in range and preserves rows outside.
-- TTL `expires_at` filter correctly suppresses expired cells.
+| Case | Input | Expected result | Confirmed |
+|------|-------|-----------------|-----------|
+| A — normal upsert | pk=1 ck='a' val_writetime=1000 + static_upsert st_writetime=900 | pk=1 val='hello' st='S1' | yes |
+| B — same-timestamp tie | Two upserts for pk=2 ck='b' at writetime=200: one live ('live'), one tombstone (NULL) | pk=2 val=NULL (tombstone wins) | yes |
+| C — partition_delete vs staggered writetimes | partition_delete __ts=500; val_writetime=600 (survives); st_writetime=400 (suppressed) | pk=3 val='survivor' st=NULL | yes |
+| D — static-only partition | static_upsert for pk=10 with no regular rows | pk=10 ck=NULL val=NULL st='only_static' | yes |
+
+Raw DuckDB output:
+
+```
+┌───────┬─────────┬──────────┬─────────────┐
+│  pk   │   ck    │   val    │     st      │
+│ int32 │ varchar │ varchar  │   varchar   │
+├───────┼─────────┼──────────┼─────────────┤
+│     1 │ a       │ hello    │ S1          │
+│     2 │ b       │ NULL     │ NULL        │
+│     3 │ c       │ survivor │ NULL        │
+│    10 │ NULL    │ NULL     │ only_static │
+└───────┴─────────┴──────────┴─────────────┘
+```
 
 All field names are verified against the Arrow schema produced by
 `cqlite-core/src/export/delta_schema.rs:build_cell_struct_field` and
 `build_range_bound_field`.
+
+### Review findings addressed (2026-06-20)
+
+**Finding 1 — producer attribution**: The sentence previously said "produced by
+`cqlite delta-export`" without context. The text now names both the
+`cqlite delta-export` subcommand (issue #705, Epic #696) and the
+`DeltaParquetWriter` Rust API so readers know exactly what emits these files.
+
+**Finding 2 — static-column deletion and static-only partitions**: The original
+`final` CTE gated `st` survival entirely on whether a regular row survived (via
+the `LEFT JOIN`). Two bugs resulted: (a) a `partition_delete` at T did not
+suppress a static cell with `st_writetime <= T` when any regular cell survived
+with `val_writetime > T`; (b) a `static_upsert` with no surviving regular row
+was silently dropped from the output. Fixed by splitting the merge into three
+additional CTEs: `st_final` (applies `partition_delete` to the static LWW value
+independently), `regular_rows` (regular rows with all suppressions applied), and
+a `UNION ALL` in `final` that adds static-only partitions. DS11 test data for
+issue #707 must cover case C (staggered writetimes) and case D (static-only
+partition).
+
+**Finding 3 — LWW tie-break determinism**: `QUALIFY ROW_NUMBER() ... ORDER BY
+writetime DESC` was non-deterministic when two cells share a writetime (e.g. a
+live value and a same-timestamp tombstone). Cassandra resolves equal-timestamp
+conflicts with tombstone winning over a live value, and among two live values the
+larger value wins. Added secondary ORDER BY terms `(val.value IS NULL) DESC,
+val.value DESC NULLS FIRST` to both `val_lww` and `st_lww` to match this rule
+deterministically. Case B above confirms tombstone correctly beats the live
+'live' value at the same writetime=200.
