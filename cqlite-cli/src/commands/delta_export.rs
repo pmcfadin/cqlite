@@ -103,7 +103,11 @@ pub async fn handle_delta_export(
 
     // Build options — this calls derive_delta_schema internally, so counter
     // tables and column collisions error here, before the output file is created.
-    // We do a dry-run schema derivation first for early error detection.
+    // We do a dry-run schema derivation first for early error detection with
+    // richer CLI error messages.  DeltaParquetWriter::new will derive it a
+    // second time internally; the double derivation is intentional: the first
+    // call gives us nicer errors before any file is created, and the second
+    // call is the writer's own internal schema build.
     {
         let schema_opts_check = DeltaSchemaOpts::with_prefix(&args.envelope_prefix);
         cqlite_core::export::delta_schema::derive_delta_schema(&schema, &schema_opts_check)
@@ -180,15 +184,17 @@ pub async fn handle_delta_export(
     })?;
 
     // -----------------------------------------------------------------------
-    // Stream records from scan_delta
+    // Stream records from scan_delta.
+    //
+    // scan_delta returns a (Receiver, ScanSummaryHandle) tuple.  The receiver
+    // streams DeltaRecords; the handle accumulates scan-level statistics
+    // (element tombstone count) and is read after the stream is drained.
     // -----------------------------------------------------------------------
-    let mut rx = scan_delta(
+    let (mut rx, summary) = scan_delta(
         args.sstable_dir.clone(),
         schema.clone(),
         /* buffer_size */ 64,
     );
-
-    let element_tombstone_warnings = 0u64;
 
     while let Some(result) = rx.recv().await {
         match result {
@@ -210,6 +216,11 @@ pub async fn handle_delta_export(
             }
         }
     }
+
+    // Stream is fully drained — read the final scan summary.
+    // element_tombstone_warnings is plumbed from the ScanSummaryHandle, not
+    // hardcoded, so the DS4 warning path is now reachable (issue #493).
+    let element_tombstone_warnings = summary.read().element_tombstones_detected;
 
     let records_written = writer.records_written();
 
