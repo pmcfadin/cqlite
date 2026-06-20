@@ -770,10 +770,22 @@ async fn run_scan_delta(
                     // generation carries a collection-level tombstone (overwrite semantics).
                     // `replaced = true` signals downstream consumers to replace rather than
                     // merge the prior collection state.  Always `false` for scalar columns.
-                    let replaced = col_complex_meta
-                        .get(col_name.as_str())
-                        .map(|ccm| ccm.has_collection_tombstone)
-                        .unwrap_or(false);
+                    //
+                    // Also: the normal read-path `cell_meta` stores `row_ts` for collection
+                    // columns (not per-element max) to keep WRITETIME(col) semantics correct.
+                    // For the delta-scan path we override writetime with the max element
+                    // writetime from ComplexColumnMeta when it is non-zero (roborev Finding 1).
+                    let (replaced, writetime) = match col_complex_meta.get(col_name.as_str()) {
+                        Some(ccm) => {
+                            let effective_wt = if ccm.max_element_writetime != 0 {
+                                ccm.max_element_writetime
+                            } else {
+                                writetime
+                            };
+                            (ccm.has_collection_tombstone, effective_wt)
+                        }
+                        None => (false, writetime),
+                    };
 
                     let cell = match value {
                         // Cell tombstone: IS_DELETED flag was set on the cell.
