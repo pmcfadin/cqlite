@@ -123,6 +123,16 @@ struct RowHeader {
     timestamp: Option<i64>,
     /// Row-level TTL (after delta decoding from min_ttl)
     ttl: Option<i32>,
+    /// Liveness local deletion time in SECONDS: absolute epoch-second expiry for a
+    /// TTL-bearing INSERT row (the `pk_liveness.ttl()` clock, from `HAS_TTL`).
+    /// This is the `expires_at` for the row liveness — distinct from
+    /// `local_deletion_time` which is the GC-grace clock for row tombstones.
+    /// `None` when `HAS_TTL` was not set.
+    /// Only read by the delta-scan emit path (`parse_block_emit_delta`); allow it
+    /// to be unused when that feature is off so non-delta builds compile under
+    /// `-D warnings`.
+    #[cfg_attr(not(feature = "delta-scan"), allow(dead_code))]
+    liveness_expires_at_seconds: Option<i32>,
     /// Row-level local deletion time in SECONDS (after delta decoding from
     /// min_local_deletion_time). This is the GC-grace clock, NOT the reconciliation
     /// timestamp; do not use it for last-write-wins comparisons.
@@ -608,7 +618,7 @@ impl V5CompressedLegacyParser {
                 RowKey,
                 HashMap<String, Value>,
                 HashMap<String, CellWriteMetadata>,
-                Option<i64>, // row-level liveness timestamp (HAS_TIMESTAMP)
+                Option<i64>, // row-level liveness timestamp (HAS_TIMESTAMP), µs
                 bool,        // is_static
                 bool,        // is_row_tombstone
                 Option<i64>, // marked_for_delete_at (row tombstone deletion time, or None)
@@ -617,6 +627,8 @@ impl V5CompressedLegacyParser {
                 bool,                                              // is_partition_tombstone
                 // --- Issue #700 DS4 collection extensions ---
                 HashMap<String, ComplexColumnMeta>, // per-column complex collection metadata
+                // --- Issue #702 TTL liveness expiry ---
+                Option<i64>, // liveness expires_at in microseconds (from HAS_TTL ldt, epoch-s * 1_000_000)
             ),
         ) -> Result<std::ops::ControlFlow<()>>,
     {
@@ -664,6 +676,7 @@ impl V5CompressedLegacyParser {
                     None,
                     true,           // is_partition_tombstone
                     HashMap::new(), // no collection metadata for tombstones
+                    None,           // no liveness TTL expiry for tombstones
                 ))? {
                     std::ops::ControlFlow::Continue(()) => {}
                     std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -758,6 +771,7 @@ impl V5CompressedLegacyParser {
                                 range_info,
                                 false,          // is_partition_tombstone
                                 HashMap::new(), // no collection metadata for tombstones
+                                None,           // no liveness TTL expiry for tombstones
                             ))? {
                                 std::ops::ControlFlow::Continue(()) => {}
                                 std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -790,6 +804,7 @@ impl V5CompressedLegacyParser {
                                     range_info,
                                     false,
                                     HashMap::new(), // no collection metadata for tombstones
+                                    None,           // no liveness TTL expiry for tombstones
                                 ))? {
                                     std::ops::ControlFlow::Continue(()) => {}
                                     std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -824,6 +839,7 @@ impl V5CompressedLegacyParser {
                                     range_info,
                                     false,
                                     HashMap::new(), // no collection metadata for tombstones
+                                    None,           // no liveness TTL expiry for tombstones
                                 ))? {
                                     std::ops::ControlFlow::Continue(()) => {}
                                     std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -862,12 +878,26 @@ impl V5CompressedLegacyParser {
                         offset = next_offset;
                         row_count += 1;
 
-                        let (row_liveness_ts, is_row_tombstone, marked_for_delete_at) =
-                            if let Some(ref h) = row_header_opt {
-                                (h.timestamp, h.is_row_tombstone(), h.marked_for_delete_at)
-                            } else {
-                                (None, false, None)
-                            };
+                        let (
+                            row_liveness_ts,
+                            is_row_tombstone,
+                            marked_for_delete_at,
+                            liveness_expires_at_micros,
+                        ) = if let Some(ref h) = row_header_opt {
+                            // Convert epoch-seconds liveness expiry to epoch-microseconds
+                            // (Issue #702: delta-scan CellMeta.expires_at).
+                            let liveness_exp = h
+                                .liveness_expires_at_seconds
+                                .map(|s| (s as i64).saturating_mul(1_000_000));
+                            (
+                                h.timestamp,
+                                h.is_row_tombstone(),
+                                h.marked_for_delete_at,
+                                liveness_exp,
+                            )
+                        } else {
+                            (None, false, None, None)
+                        };
 
                         match emit((
                             partition_key.clone(),
@@ -877,9 +907,10 @@ impl V5CompressedLegacyParser {
                             is_static,
                             is_row_tombstone,
                             marked_for_delete_at,
-                            None,         // range_info (not a range tombstone)
-                            false,        // is_partition_tombstone
-                            col_meta_map, // DS4 collection metadata
+                            None,                       // range_info (not a range tombstone)
+                            false,                      // is_partition_tombstone
+                            col_meta_map,               // DS4 collection metadata
+                            liveness_expires_at_micros, // Issue #702: TTL liveness expiry
                         ))? {
                             std::ops::ControlFlow::Continue(()) => {}
                             std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -2286,16 +2317,15 @@ impl V5CompressedLegacyParser {
 
         // Note: ttl_liveness_ldt (from HAS_TTL) is the pk_liveness local expiration time.
         // It is distinct from local_deletion_time (from HAS_DELETION, row tombstone GC clock).
-        // We consume ttl_liveness_ldt to maintain correct stream alignment (fix #630),
-        // but do not store it in RowHeader as it is not needed for current query semantics.
-        // is_row_tombstone() checks local_deletion_time (HAS_DELETION only), so TTL rows
-        // are NOT incorrectly classified as tombstones.
-        let _ = ttl_liveness_ldt;
+        // We store it in RowHeader so the delta-scan path can populate CellMeta.expires_at
+        // for TTL-bearing INSERT rows (Issue #702).  is_row_tombstone() still checks
+        // local_deletion_time (HAS_DELETION only), so TTL rows are NOT misclassified.
 
         Ok((
             RowHeader {
                 timestamp,
                 ttl,
+                liveness_expires_at_seconds: ttl_liveness_ldt,
                 local_deletion_time,
                 marked_for_delete_at,
                 header_size,
@@ -3274,6 +3304,13 @@ impl V5CompressedLegacyParser {
         // Cassandra 5.0 V5CompressedLegacy stores cells in the order defined by Statistics.db
         // serialization header (alphabetical by ColumnIdentifier/comparator), NOT CQL schema order.
         // We must iterate reader.header.columns directly to align binary layout with logical columns.
+        //
+        // Issue #702 FIX: For tables with BOTH static and regular columns, Cassandra's
+        // missing_columns_bitmap is relative to the column group of the current row kind:
+        //   - Static rows:  bitmap covers only static columns
+        //   - Regular rows: bitmap covers only regular columns
+        // Including the wrong group shifts all bitmap indices, causing columns to be
+        // silently absent or misread.  Filter columns_in_order to the matching kind.
         let columns_in_order: Vec<_> = if !reader.header.columns.is_empty() {
             // Build lookup map from schema for column details
             let schema_map: HashMap<String, &crate::schema::Column> = schema
@@ -3282,12 +3319,17 @@ impl V5CompressedLegacyParser {
                 .map(|col| (col.name.clone(), col))
                 .collect();
 
-            // Iterate serialization header columns in exact order (skipping keys)
+            // Iterate serialization header columns in exact order (skipping keys,
+            // and filtering to match the current row's static/regular kind).
             reader
                 .header
                 .columns
                 .iter()
-                .filter(|col_info| !col_info.is_primary_key && !col_info.is_clustering)
+                .filter(|col_info| {
+                    !col_info.is_primary_key
+                        && !col_info.is_clustering
+                        && col_info.is_static == is_static
+                })
                 .filter_map(|col_info| schema_map.get(&col_info.name).copied())
                 .collect()
         } else {
@@ -3299,6 +3341,7 @@ impl V5CompressedLegacyParser {
                 .filter(|col| {
                     !partition_key_names.contains(col.name.as_str())
                         && !clustering_key_names.contains(col.name.as_str())
+                        && col.is_static == is_static // Issue #702: match row kind
                 })
                 .collect()
         };
