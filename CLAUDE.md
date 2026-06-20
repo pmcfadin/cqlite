@@ -45,6 +45,7 @@ Skills in `.claude/skills/` activate automatically when relevant:
 | `rust-patterns` | Zero-copy, async I/O, memory efficiency |
 | `ci-cd-validation` | Pre-push checks, CI requirements |
 | `test-data-management` | Test SSTable generation, validation |
+| `rust-skills` | General idiomatic Rust (265 rules: ownership, errors, async, API design, anti-patterns); invoke with `/rust-skills` |
 
 ## Available Subagents
 

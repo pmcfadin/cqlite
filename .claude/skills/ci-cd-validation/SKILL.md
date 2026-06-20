@@ -22,10 +22,24 @@ See [validation-checklist.md](validation-checklist.md) for complete steps.
 
 ### Quick Validation
 
+**`scripts/agent-gate.sh` is THE canonical pre-PR gate (issue #719).** It mirrors the
+enforced CI gates plus the local smoke suite and emits a machine-checkable summary block.
+A claim that "the gate passed" must come from this script's summary (between the
+`AGENT-GATE SUMMARY` markers, ending in `RESULT: PASS`) — ad-hoc `cargo` runs do not count.
+
 ```bash
-# Run all pre-push checks
-./scripts/ci/validate-cleanup.sh
+# THE gate — run before every PR; paste its summary block when reporting validation
+scripts/agent-gate.sh
+
+# Components it runs (mirrors .github/workflows/ci.yml + ci-minimal-features.yml + smoke):
+#   fmt · clippy (-D warnings) · core-tests (cli-helpers) · integration-tests ·
+#   write-tests (write-support) · cli-tests · minimal-build · smoke
+# Debugging only (output marked PARTIAL, never counts as the gate):
+scripts/agent-gate.sh --only fmt,clippy
 ```
+
+The older `scripts/ci/validate-cleanup.sh` still exists for cleanup-specific checks, but
+`agent-gate.sh` is the authority for pre-PR validation.
 
 ### Manual Step-by-Step
 
@@ -122,32 +136,29 @@ done
 
 ## CI Pipeline
 
-### GitHub Actions Workflow
+### GitHub Actions Workflows
 
-Located: `.github/workflows/rust.yml`
+CI is split across ~20 workflows under `.github/workflows/` (there is no single
+`rust.yml`). The ones that gate merges / mirror `agent-gate.sh`:
 
-**Jobs:**
-1. **Format Check**
-   - Runs `cargo fmt -- --check`
-   - Fast fail if unformatted
+| Workflow | What it enforces |
+|----------|------------------|
+| `ci.yml` | fmt, clippy `-D warnings`, core + integration + write-support tests, build matrix |
+| `ci-minimal-features.yml` | minimal-features build (`--no-default-features --features all-compression`) |
+| `quality-gates.yml` | aggregate quality gate / pipeline summary |
+| `sstabledump-parity-gate.yml` | JSONL parity vs `sstabledump` |
+| `e2e-readback.yml` | E2E Cassandra readback (write-path validation) |
+| `cassandra-validation.yml` | dual-path Cassandra validation |
+| `smoke-tests.yml` | smoke across all tables |
+| `coverage.yml` / `coverage-baseline.yml` | coverage (informational, not a hard 90% gate) |
+| `perf-regression.yml` | benchmark regression vs `main` |
 
-2. **Clippy**
-   - Runs with `-D warnings`
-   - Zero warnings required
+Language/feature-specific: `python-ci.yml`, `node-ci.yml`, `flight-ci.yml`,
+`flight-trino-e2e.yml`, `trino-connector-ci.yml`, `m1-ci.yml`, `docs-site.yml`,
+`api-docs.yml`. Release: `release.yml`, `python-release.yml`, `node-release.yml`.
 
-3. **Build Matrix**
-   - Minimal features
-   - All features
-   - Multiple Rust versions (stable, nightly)
-
-4. **Test Matrix**
-   - Linux, macOS, Windows
-   - Unit + integration tests
-
-5. **Coverage**
-   - Generates with tarpaulin
-   - Uploads to Codecov
-   - Gates on 90% threshold
+**Locally, `scripts/agent-gate.sh` reproduces the merge-gating subset** (fmt, clippy,
+core/integration/write/cli tests, minimal build, smoke) — run it before pushing.
 
 ### Monitoring CI
 
@@ -464,9 +475,9 @@ docker run --rm -v $(pwd):/workspace -w /workspace rust:latest \
 # Check Rust version
 rustc --version
 
-# Use same as CI (check .github/workflows/rust.yml)
-rustup install 1.70.0
-rustup default 1.70.0
+# Match CI toolchain (Rust 1.85+; bindings require it). Keep stable current.
+rustup update
+rustup default stable
 ```
 
 ### Coverage Unstable
@@ -512,8 +523,9 @@ After validation passes:
 
 ## References
 
+- `scripts/agent-gate.sh` - THE canonical pre-PR gate (issue #719)
 - [validation-checklist.md](validation-checklist.md) - Complete checklist
 - [merge-process.md](merge-process.md) - Detailed merge workflow
-- `.github/workflows/rust.yml` - CI configuration
-- `scripts/ci/validate-cleanup.sh` - Validation script
+- `.github/workflows/ci.yml` + `ci-minimal-features.yml` - merge-gating CI config (see workflow table above)
+- `scripts/ci/validate-cleanup.sh` - cleanup-specific validation script
 
