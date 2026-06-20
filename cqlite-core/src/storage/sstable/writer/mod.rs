@@ -126,8 +126,12 @@ pub struct SSTableInfo {
     pub data_path: PathBuf,
     /// Path to the Index.db file
     pub index_path: PathBuf,
-    /// Path to the Filter.db file
-    pub filter_path: PathBuf,
+    /// Path to the Filter.db file. `None` when the table disables its bloom
+    /// filter (`bloom_filter_fp_chance = 1.0`, Cassandra's AlwaysPresentFilter),
+    /// in which case NO Filter.db component is emitted (Issue #852). Downstream
+    /// consumers (e.g. compaction publish/byte-accounting) must skip the filter
+    /// when this is `None`.
+    pub filter_path: Option<PathBuf>,
     /// Path to the Summary.db file
     pub summary_path: PathBuf,
     /// Path to the Statistics.db file
@@ -809,15 +813,24 @@ impl SSTableWriter {
         // A disabled bloom filter (bloom_filter_fp_chance = 1.0, Cassandra's
         // AlwaysPresentFilter) writes NO Filter.db component and must be omitted
         // from the TOC to stay byte-faithful (Issue #852).
-        let filter_path = Self::component_path(sstable_dir, self.generation, "Filter.db");
-        let filter_emitted = match self.filter_writer {
+        // `filter_path` is `Some` only when a concrete Filter.db is actually
+        // written. A disabled filter (AlwaysPresentFilter) yields `None`, so
+        // downstream consumers (compaction publish + byte accounting) skip the
+        // non-existent component instead of trying to rename a missing file.
+        let filter_path = match self.filter_writer {
             Some(filter_writer) => {
                 let emitted = !filter_writer.is_disabled();
+                let path = filter_writer.path().to_path_buf();
                 filter_writer.finish().await?;
-                emitted
+                if emitted {
+                    Some(path)
+                } else {
+                    None
+                }
             }
-            None => false,
+            None => None,
         };
+        let filter_emitted = filter_path.is_some();
 
         // 5. Write Summary.db
         let summary_path = Self::component_path(sstable_dir, self.generation, "Summary.db");
@@ -1089,7 +1102,7 @@ mod tests {
         // Verify all files were created
         assert!(info.data_path.exists());
         assert!(info.index_path.exists());
-        assert!(info.filter_path.exists());
+        assert!(info.filter_path.as_ref().is_some_and(|p| p.exists()));
         assert!(info.summary_path.exists());
         assert!(info.stats_path.exists());
         assert!(info.compression_info_path.is_none());
@@ -1138,10 +1151,11 @@ mod tests {
         assert!(info.toc_path.exists());
         assert!(info.digest_path.exists());
 
-        // Byte-parity: Cassandra writes NO Filter.db for a disabled filter.
+        // Byte-parity: Cassandra writes NO Filter.db for a disabled filter, and
+        // SSTableInfo carries `None` so compaction skips the component.
         assert!(
-            !info.filter_path.exists(),
-            "disabled bloom filter must not emit a Filter.db file"
+            info.filter_path.is_none(),
+            "disabled bloom filter must not report a Filter.db path"
         );
 
         // TOC.txt must NOT list the Filter component.
@@ -1153,6 +1167,51 @@ mod tests {
         // Sanity: other components ARE listed.
         assert!(toc.contains("Data.db"));
         assert!(toc.contains("Summary.db"));
+    }
+
+    /// Issue #852 (review finding 2): the disabled-filter behavior must work
+    /// end-to-end from CQL. Parsing `CREATE TABLE ... WITH
+    /// bloom_filter_fp_chance = 1.0` must thread the option through to the writer
+    /// so that NO Filter.db component (file or TOC entry) is emitted — not just
+    /// when `schema.comments` is hand-populated.
+    #[tokio::test]
+    async fn test_sstable_writer_disabled_filter_from_parsed_cql() {
+        use crate::schema::cql_parser::parse_cql_schema;
+
+        let temp_dir = TempDir::new().unwrap();
+        let schema = parse_cql_schema(
+            "CREATE TABLE test_ks.test_table (id int PRIMARY KEY, name text) \
+             WITH bloom_filter_fp_chance = 1.0",
+        )
+        .expect("CQL with bloom_filter_fp_chance must parse");
+
+        // The parser must have preserved the option (regression guard for the
+        // previous `comments: HashMap::new()` drop).
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("1.0")
+        );
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+        let mutation = create_test_mutation("test_ks", "test_table", 1, "Alice", 1_000_000);
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        let info = writer.finish().await.unwrap();
+
+        // No Filter.db reported, file absent, and TOC omits the component.
+        assert!(
+            info.filter_path.is_none(),
+            "parsed fp_chance=1.0 must not report a Filter.db path"
+        );
+        let toc = std::fs::read_to_string(&info.toc_path).unwrap();
+        assert!(
+            !toc.contains("Filter.db"),
+            "TOC must omit Filter.db for a parsed disabled filter, got: {toc}"
+        );
     }
 
     /// Issue #852: a normal `bloom_filter_fp_chance` (the default) still emits a
@@ -1171,7 +1230,7 @@ mod tests {
         let info = writer.finish().await.unwrap();
 
         assert!(
-            info.filter_path.exists(),
+            info.filter_path.as_ref().is_some_and(|p| p.exists()),
             "default fp_chance must emit a Filter.db file"
         );
         let toc = std::fs::read_to_string(&info.toc_path).unwrap();

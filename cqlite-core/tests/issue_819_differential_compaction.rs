@@ -775,12 +775,15 @@ fn load_path_report(
     let mut required: Vec<(&str, &Path)> = vec![
         ("Data.db", &output.data_path),
         ("Index.db", &output.index_path),
-        ("Filter.db", &output.filter_path),
         ("Summary.db", &output.summary_path),
         ("Statistics.db", &output.stats_path),
         ("Digest.crc32", &output.digest_path),
         ("TOC.txt", &output.toc_path),
     ];
+    // Filter.db is optional (disabled bloom filter omits it, Issue #852).
+    if let Some(filter) = &output.filter_path {
+        required.push(("Filter.db", filter.as_path()));
+    }
     if let Some(ci) = &output.compression_info_path {
         required.push(("CompressionInfo.db", ci.as_path()));
     }
@@ -1103,7 +1106,7 @@ fn ref_sstable_info(data_path: &Path) -> cqlite_core::storage::sstable::writer::
     cqlite_core::storage::sstable::writer::SSTableInfo {
         data_path: data_path.to_path_buf(),
         index_path: comp("Index.db"),
-        filter_path: comp("Filter.db"),
+        filter_path: opt("Filter.db"),
         summary_path: comp("Summary.db"),
         stats_path: comp("Statistics.db"),
         compression_info_path: opt("CompressionInfo.db"),

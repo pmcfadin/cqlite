@@ -539,8 +539,11 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
     let (input, _) = ws(input)?;
     let (input, _) = char(')')(input)?;
 
-    // Parse optional WITH clause
-    let (input, _options) = opt(table_options)(input)?;
+    // Parse optional WITH clause. The parsed key=value pairs (e.g.
+    // `bloom_filter_fp_chance = 1.0`) are preserved on the schema's `comments`
+    // bag so the writer can honor them (Issue #852). Keys are normalized to
+    // lowercase since CQL option names are case-insensitive.
+    let (input, with_options) = opt(table_options)(input)?;
 
     // If no primary key was found in constraints, look for inline PRIMARY KEY or use first column
     if !primary_key_found && !columns.is_empty() {
@@ -625,7 +628,11 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
                 }
             })
             .collect(),
-        comments: HashMap::new(),
+        comments: with_options
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(k, v)| (k.to_lowercase(), v))
+            .collect(),
     };
 
     Ok((input, schema))
@@ -1217,5 +1224,44 @@ mod tests {
                 cql_type
             );
         }
+    }
+
+    /// Issue #852 (review finding 2): the parser must preserve `WITH` table
+    /// options into `TableSchema.comments` so the writer can honor
+    /// `bloom_filter_fp_chance`. Previously the WITH clause was parsed and
+    /// discarded, leaving `comments` empty.
+    #[test]
+    fn test_with_bloom_filter_fp_chance_preserved_in_comments() {
+        let cql = "CREATE TABLE ks.t (id int PRIMARY KEY, name text) \
+                   WITH bloom_filter_fp_chance = 1.0";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("1.0"),
+            "WITH bloom_filter_fp_chance must be preserved into comments, got: {:?}",
+            schema.comments
+        );
+    }
+
+    /// The option name is case-insensitive and additional options coexist.
+    #[test]
+    fn test_with_multiple_options_preserved() {
+        let cql = "CREATE TABLE ks.t (id int PRIMARY KEY, name text) \
+                   WITH gc_grace_seconds = 0 AND bloom_filter_fp_chance = 0.01";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("0.01")
+        );
+        assert_eq!(
+            schema.comments.get("gc_grace_seconds").map(String::as_str),
+            Some("0")
+        );
     }
 }

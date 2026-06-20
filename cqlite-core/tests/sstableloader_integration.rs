@@ -263,7 +263,6 @@ fn validate_flushed_components(info: &SSTableInfo) -> CqliteResult<()> {
     let required = [
         &info.data_path,
         &info.index_path,
-        &info.filter_path,
         &info.summary_path,
         &info.stats_path,
         &info.toc_path,
@@ -274,6 +273,16 @@ fn validate_flushed_components(info: &SSTableInfo) -> CqliteResult<()> {
         if !path.exists() {
             return Err(Error::Storage(format!(
                 "Missing flushed SSTable component: {}",
+                path.display()
+            )));
+        }
+    }
+
+    // Filter.db is optional (disabled bloom filter omits it, Issue #852).
+    if let Some(path) = &info.filter_path {
+        if !path.exists() {
+            return Err(Error::Storage(format!(
+                "Missing flushed Filter.db: {}",
                 path.display()
             )));
         }

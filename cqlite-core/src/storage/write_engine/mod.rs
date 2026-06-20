@@ -1528,12 +1528,18 @@ impl WriteEngine {
         for src in &[
             &tmp_info.data_path,
             &tmp_info.index_path,
-            &tmp_info.filter_path,
             &tmp_info.summary_path,
             &tmp_info.stats_path,
             &tmp_info.digest_path,
         ] {
             renames.push(make_rename(src)?);
+        }
+        // Filter.db is optional: a table with a disabled bloom filter
+        // (bloom_filter_fp_chance = 1.0, AlwaysPresentFilter) emits NO Filter.db,
+        // so there is nothing to rename. Including a non-existent path here would
+        // fail the atomic publish (Issue #852).
+        if let Some(ref filter_path) = tmp_info.filter_path {
+            renames.push(make_rename(filter_path)?);
         }
         if let Some(ref ci_path) = tmp_info.compression_info_path {
             renames.push(make_rename(ci_path)?);
@@ -1619,30 +1625,32 @@ impl WriteEngine {
 
         // Compute total bytes written across ALL output SSTable components (not just Data.db).
         // We stat the final paths (post-rename) so we measure what was actually persisted.
+        let stat_final = |p: &PathBuf| -> u64 {
+            let filename = p.file_name().unwrap_or_default();
+            std::fs::metadata(sstable_dir.join(filename))
+                .map(|m| m.len())
+                .unwrap_or(0)
+        };
         let total_bytes_written: u64 = [
             &tmp_info.data_path,
             &tmp_info.index_path,
-            &tmp_info.filter_path,
             &tmp_info.summary_path,
             &tmp_info.stats_path,
             &tmp_info.digest_path,
         ]
         .iter()
-        .map(|p| {
-            let filename = p.file_name().unwrap_or_default();
-            let final_path = sstable_dir.join(filename);
-            std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0)
-        })
+        .map(|p| stat_final(p))
         .sum::<u64>()
+            // Filter.db is optional (disabled bloom filter omits it, Issue #852).
+            + tmp_info
+                .filter_path
+                .as_ref()
+                .map(stat_final)
+                .unwrap_or(0)
             + tmp_info
                 .compression_info_path
                 .as_ref()
-                .and_then(|p| {
-                    let filename = p.file_name()?;
-                    std::fs::metadata(sstable_dir.join(filename))
-                        .ok()
-                        .map(|m| m.len())
-                })
+                .map(stat_final)
                 .unwrap_or(0);
 
         // Update per-step report

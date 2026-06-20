@@ -137,10 +137,14 @@ async fn test_filter_roundtrip_via_write_engine() {
         .expect("Should return SSTableInfo");
 
     // Verify Filter.db exists
-    assert!(info.filter_path.exists(), "Filter.db should exist");
+    let filter_path = info
+        .filter_path
+        .as_ref()
+        .expect("default fp_chance must emit Filter.db");
+    assert!(filter_path.exists(), "Filter.db should exist");
 
     // Read and deserialize Filter.db
-    let filter_bytes = std::fs::read(&info.filter_path).expect("Should read Filter.db");
+    let filter_bytes = std::fs::read(filter_path).expect("Should read Filter.db");
     let filter = BloomFilter::deserialize(&filter_bytes)
         .expect("Filter.db created by WriteEngine should deserialize");
 

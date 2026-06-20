@@ -494,7 +494,11 @@ async fn test_data_cross_component_validation() {
     );
 
     // Cross-validation 3: Filter.db can be loaded
-    let filter_data = std::fs::read(&info.filter_path).expect("Should read Filter.db");
+    let filter_path = info
+        .filter_path
+        .as_ref()
+        .expect("default fp_chance must emit Filter.db");
+    let filter_data = std::fs::read(filter_path).expect("Should read Filter.db");
     let _filter = BloomFilter::deserialize(&filter_data).expect("Filter.db should deserialize");
 
     // Cross-validation 4: Summary.db has entries

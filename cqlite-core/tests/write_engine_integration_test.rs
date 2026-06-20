@@ -101,7 +101,7 @@ async fn test_write_engine_end_to_end() -> Result<()> {
     assert!(info.data_size > 0);
     assert!(info.data_path.exists());
     assert!(info.index_path.exists());
-    assert!(info.filter_path.exists());
+    assert!(info.filter_path.as_ref().is_some_and(|p| p.exists()));
     assert!(info.summary_path.exists());
     assert!(info.stats_path.exists());
     assert!(info.compression_info_path.is_none());
@@ -584,7 +584,10 @@ async fn test_stage0_write_read_roundtrip_simple_types() -> Result<()> {
     // Verify all component files were created
     assert!(info.data_path.exists(), "Data.db exists");
     assert!(info.index_path.exists(), "Index.db exists");
-    assert!(info.filter_path.exists(), "Filter.db exists");
+    assert!(
+        info.filter_path.as_ref().is_some_and(|p| p.exists()),
+        "Filter.db exists"
+    );
     assert!(info.summary_path.exists(), "Summary.db exists");
     assert!(info.stats_path.exists(), "Statistics.db exists");
     assert!(
@@ -777,7 +780,6 @@ async fn test_stage0_sstable_format_validation() -> Result<()> {
     let required_components = vec![
         ("Data.db", &info.data_path),
         ("Index.db", &info.index_path),
-        ("Filter.db", &info.filter_path),
         ("Summary.db", &info.summary_path),
         ("Statistics.db", &info.stats_path),
         ("TOC.txt", &info.toc_path),
@@ -788,6 +790,14 @@ async fn test_stage0_sstable_format_validation() -> Result<()> {
         assert!(path.exists(), "{} must exist", name);
         let metadata = std::fs::metadata(path)?;
         assert!(metadata.is_file(), "{} must be a regular file", name);
+    }
+    // Filter.db is optional (disabled bloom filter omits it, Issue #852).
+    if let Some(filter) = &info.filter_path {
+        assert!(filter.exists(), "Filter.db must exist");
+        assert!(
+            std::fs::metadata(filter)?.is_file(),
+            "Filter.db must be a regular file"
+        );
     }
 
     // 2. File naming convention (nb-{gen}-big-{Component}.db)

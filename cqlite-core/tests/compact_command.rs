@@ -181,7 +181,6 @@ fn compact_sstables_merges_explicit_inputs_with_lww() {
     for (label, path) in [
         ("Data.db", &out.data_path),
         ("Index.db", &out.index_path),
-        ("Filter.db", &out.filter_path),
         ("Summary.db", &out.summary_path),
         ("Statistics.db", &out.stats_path),
         ("Digest.crc32", &out.digest_path),
@@ -190,6 +189,13 @@ fn compact_sstables_merges_explicit_inputs_with_lww() {
         assert!(
             path.exists(),
             "output component {label} must exist at {path:?}"
+        );
+    }
+    // Filter.db is optional (disabled bloom filter omits it, Issue #852).
+    if let Some(filter) = &out.filter_path {
+        assert!(
+            filter.exists(),
+            "output component Filter.db must exist at {filter:?}"
         );
     }
     assert!(
@@ -237,6 +243,122 @@ fn compact_sstables_merges_explicit_inputs_with_lww() {
             "PK {id}: newest write (b-name-{id}) must win LWW, got {rendered}"
         );
     }
+}
+
+// ── Disabled bloom filter (#852 review finding 1) ───────────────────────────
+
+/// Same shape as `make_schema` but with `bloom_filter_fp_chance = 1.0`, which
+/// disables the bloom filter (Cassandra's AlwaysPresentFilter): the writer emits
+/// NO Filter.db component.
+fn make_disabled_filter_schema() -> TableSchema {
+    let mut schema = make_schema();
+    schema
+        .comments
+        .insert("bloom_filter_fp_chance".to_string(), "1.0".to_string());
+    schema
+}
+
+/// Regression for Issue #852 review finding 1: compacting a table whose bloom
+/// filter is disabled must succeed end to end. The compaction publish step
+/// previously included a mandatory `filter_path` in its rename list, so it tried
+/// to rename a non-existent Filter.db and failed. With `filter_path: Option`,
+/// the publish must skip the absent component and emit no Filter.db.
+#[test]
+fn compact_disabled_filter_table_succeeds_without_filter_db() {
+    let rt = tokio::runtime::Runtime::new().expect("runtime");
+    let temp = TempDir::new().unwrap();
+    let data_dir = temp.path().join("data");
+    let wal_dir = temp.path().join("wal");
+    let output_dir = temp.path().join("out");
+    let schema = make_disabled_filter_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+
+    for id in 1_i32..=10 {
+        engine
+            .write(write_row(id, &format!("a-name-{id}"), 100))
+            .expect("write A");
+    }
+    let info_a = rt
+        .block_on(engine.flush())
+        .expect("flush A")
+        .expect("info A");
+    // The flushed input itself must carry no Filter.db (sanity).
+    assert!(
+        info_a.filter_path.is_none(),
+        "disabled-filter flush must not emit Filter.db"
+    );
+
+    for id in 6_i32..=15 {
+        engine
+            .write(write_row(id, &format!("b-name-{id}"), 200))
+            .expect("write B");
+    }
+    rt.block_on(engine.flush())
+        .expect("flush B")
+        .expect("info B");
+
+    drop(engine);
+
+    let inputs = discover_inputs(&data_dir);
+    assert_eq!(inputs.len(), 2, "expected 2 input SSTables, got {inputs:?}");
+
+    let report = rt
+        .block_on(compact_sstables(
+            inputs,
+            &output_dir,
+            &schema,
+            9,
+            Some(1_700_000_000),
+            None,
+        ))
+        .expect("compaction of a disabled-filter table must succeed");
+
+    assert_eq!(report.stats.output_partitions, 15, "union of ids 1..=15");
+
+    let out = &report.output;
+    // The merged output reports no Filter.db, none was written, and the TOC
+    // omits it.
+    assert!(
+        out.filter_path.is_none(),
+        "compacted disabled-filter output must not report a Filter.db path"
+    );
+    let toc = std::fs::read_to_string(&out.toc_path).expect("read TOC");
+    assert!(
+        !toc.contains("Filter.db"),
+        "compacted output TOC must omit Filter.db, got: {toc}"
+    );
+    // No Filter.db file should exist anywhere in the output directory.
+    let filter_present = std::fs::read_dir(&output_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().ends_with("Filter.db"));
+    assert!(
+        !filter_present,
+        "no Filter.db file may be published for a disabled filter"
+    );
+
+    // The merged output must still be readable.
+    let cqlite_config = Config::default();
+    let manager = rt.block_on(async {
+        let platform = Arc::new(Platform::new(&cqlite_config).await.expect("platform"));
+        SSTableManager::new(
+            &output_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager opens the compacted output")
+    });
+    let table_id = CqlTableId::from("compact_ks.items");
+    let results = rt
+        .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
+        .expect("post-compaction scan");
+    assert_eq!(results.len(), 15, "merged output must contain 15 rows");
 }
 
 // ── Clustering-key regression (#857) ────────────────────────────────────────
