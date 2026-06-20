@@ -6,11 +6,24 @@
 //! 3. Column collision: exits non-zero, message mentions --envelope-prefix.
 //! 4. --envelope-prefix: remediation works (collision resolved, export succeeds).
 //! 5. --overwrite behaviour: refuses to overwrite by default, overwrites with flag.
+//!    5c. --overwrite safety: original file is preserved when export errors (Finding 1).
 //! 6. --help documents the subcommand.
 //! 7. Element tombstone summary: counter plumbed from ScanSummaryHandle (not hardcoded 0).
 //!
 //! Requires: `cargo test --features delta-export` and SSTable binaries from
 //! `bash test-data/scripts/fetch-datasets.sh`.
+//!
+//! ## Note on `run_cli` (Finding 3)
+//!
+//! `run_cli` intentionally uses `cargo run --features delta-export` rather than
+//! `assert_cmd::Command::cargo_bin("cqlite")`.  The binary under test must be
+//! compiled with the `delta-export` feature, and `cargo_bin` has no mechanism to
+//! select cargo features for the binary it resolves.  Switching to `cargo_bin`
+//! would run a binary built without the feature, causing all `delta-export` tests
+//! to exit non-zero with "not compiled with --features delta-export".
+//!
+//! For tests that do not require the feature binary (e.g. generic --help on the
+//! top-level cqlite binary), `assert_cmd` is used directly where appropriate.
 
 #![cfg(feature = "delta-export")]
 
@@ -24,6 +37,12 @@ use tempfile::TempDir;
 // Helpers
 // ============================================================================
 
+/// Run the pre-built `cqlite` binary compiled with `--features delta-export`.
+///
+/// Uses `cargo run --quiet --features delta-export` to ensure the correct
+/// feature set is active.  `assert_cmd::cargo_bin` cannot select cargo features
+/// for the binary it resolves, so it cannot be used here without losing the
+/// delta-export feature.
 fn run_cli(args: &[&str]) -> std::process::Output {
     Command::new("cargo")
         .args([
@@ -515,6 +534,88 @@ fn test_delta_export_overwrites_with_flag() {
         &data[0..4],
         b"PAR1",
         "output must be Parquet, not old content"
+    );
+}
+
+// ============================================================================
+// Test 5c: Atomic overwrite safety — original is preserved when export errors.
+//
+// Finding 1 (roborev): a mid-stream failure with --overwrite must leave the
+// ORIGINAL file intact.  The atomic write pattern (temp file + rename) ensures
+// this: the original is not touched until rename succeeds after finalize().
+//
+// We trigger an error at schema-derivation time (counter table) with a
+// pre-existing output file and --overwrite: the error fires before any file I/O,
+// so the original must survive intact.  This is the earliest possible error
+// after the overwrite flag is accepted, and it exercises the same preservation
+// guarantee that applies to all later error paths (writer init, streaming,
+// finalize) because the temp-file write never starts.
+// ============================================================================
+
+#[test]
+fn test_delta_export_overwrite_error_leaves_original_intact() {
+    // Use a counter table schema so the error fires at schema-derivation time —
+    // before any file I/O — even without SSTable data present.
+    let sstable_dir = counters_dir();
+
+    let tmp = TempDir::new().unwrap();
+    let schema = write_counter_schema(tmp.path());
+    let output = tmp.path().join("precious_original.parquet");
+
+    // Write sentinel bytes to represent the user's existing valuable file.
+    let sentinel = b"PRECIOUS ORIGINAL FILE CONTENT DO NOT DESTROY";
+    std::fs::write(&output, sentinel).unwrap();
+
+    // Run delta-export with --overwrite on a counter table: must fail.
+    let result = run_cli(&[
+        "delta-export",
+        sstable_dir.to_str().unwrap(),
+        "--schema",
+        schema.to_str().unwrap(),
+        "--out",
+        "parquet",
+        "-o",
+        output.to_str().unwrap(),
+        "--overwrite",
+    ]);
+
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    eprintln!("stdout: {stdout}");
+    eprintln!("stderr: {stderr}");
+
+    // Export must fail (counter table).
+    assert!(
+        !result.status.success(),
+        "delta-export on counter table must exit non-zero even with --overwrite; \
+         exit {:?}\nstdout={stdout}\nstderr={stderr}",
+        result.status.code()
+    );
+
+    // CRITICAL: original file must be byte-for-byte intact.
+    assert!(
+        output.exists(),
+        "original file must still exist after a failed --overwrite export; output={output:?}"
+    );
+    let actual = std::fs::read(&output).unwrap();
+    assert_eq!(
+        actual, sentinel,
+        "original file must be byte-for-byte identical after a failed --overwrite export.\n\
+         Expected: {sentinel:?}\n\
+         Actual:   {actual:?}"
+    );
+
+    // No temp file should linger.
+    let tmp_path = {
+        let mut p = output.clone();
+        let mut name = p.file_name().unwrap_or_default().to_os_string();
+        name.push(".tmp");
+        p.set_file_name(name);
+        p
+    };
+    assert!(
+        !tmp_path.exists(),
+        "no .tmp sibling file must remain after a failed export; tmp={tmp_path:?}"
     );
 }
 

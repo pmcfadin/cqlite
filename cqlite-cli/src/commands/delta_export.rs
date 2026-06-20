@@ -55,7 +55,7 @@ impl DeltaExportResult {
 pub async fn handle_delta_export(
     args: &crate::cli_types::DeltaExportArgs,
 ) -> Result<DeltaExportResult> {
-    use crate::cli_types::DeltaCompressionCodec;
+    use crate::cli_types::{DeltaCompressionCodec, DeltaOutFormat};
     use cqlite_core::export::delta_parquet::{
         DeltaParquetCompression, DeltaParquetOptions, DeltaParquetWriter,
     };
@@ -65,6 +65,20 @@ pub async fn handle_delta_export(
     use std::time::Instant;
 
     let start = Instant::now();
+
+    // -----------------------------------------------------------------------
+    // Validate output format (Finding 2): exhaustive match so that adding a
+    // new DeltaOutFormat variant is a compile-time error, not a silent no-op.
+    // Only Parquet is supported in v1; future variants (e.g. Arrow IPC) must
+    // add a new arm here.
+    // -----------------------------------------------------------------------
+    match args.out {
+        DeltaOutFormat::Parquet => {
+            // Parquet is the only supported format.  The match is intentionally
+            // exhaustive so the compiler flags any new variant that is added to
+            // DeltaOutFormat without a corresponding handler here.
+        }
+    }
 
     // -----------------------------------------------------------------------
     // Validate output path: refuse to overwrite unless --overwrite
@@ -139,8 +153,16 @@ pub async fn handle_delta_export(
     }
 
     // -----------------------------------------------------------------------
-    // Create output file (after all pre-flight checks pass)
+    // Atomic write via sibling temp file (Finding 1).
+    //
+    // We write to `<output>.tmp` in the same directory so that
+    // `std::fs::rename` stays on the same filesystem and is atomic.
+    // On any error we remove the temp file and leave the original untouched,
+    // closing both the TOCTOU window between the exists() check above and
+    // the actual file creation, and the data-loss scenario where a mid-stream
+    // failure with --overwrite destroys the original and leaves no replacement.
     // -----------------------------------------------------------------------
+
     // Create parent directories if needed.
     if let Some(parent) = args.output.parent() {
         if !parent.as_os_str().is_empty() {
@@ -154,17 +176,34 @@ pub async fn handle_delta_export(
         }
     }
 
-    let output_file = std::fs::File::create(&args.output).map_err(|e| {
+    // Build the sibling temp path.
+    let tmp_path = {
+        let mut p = args.output.clone();
+        let mut name = p
+            .file_name()
+            .unwrap_or_else(|| std::ffi::OsStr::new("delta_export"))
+            .to_os_string();
+        name.push(".tmp");
+        p.set_file_name(name);
+        p
+    };
+
+    // Helper: best-effort temp-file cleanup used on every error path below.
+    let remove_tmp = || {
+        let _ = std::fs::remove_file(&tmp_path);
+    };
+
+    let tmp_file = std::fs::File::create(&tmp_path).map_err(|e| {
         anyhow::anyhow!(
-            "Failed to create output file '{}': {}",
-            args.output.display(),
+            "Failed to create temporary output file '{}': {}",
+            tmp_path.display(),
             e
         )
     })?;
 
     // Use a BufWriter to batch I/O; the Parquet writer already has its own
     // internal buffering but BufWriter reduces syscall overhead on large files.
-    let buf_writer = BufWriter::new(output_file);
+    let buf_writer = BufWriter::new(tmp_file);
 
     // -----------------------------------------------------------------------
     // Create DeltaParquetWriter
@@ -177,9 +216,7 @@ pub async fn handle_delta_export(
     };
 
     let mut writer = DeltaParquetWriter::new(buf_writer, &schema, opts).map_err(|e| {
-        // If writer creation fails (schema error), the output file was created
-        // but is empty/corrupt — remove it to ensure no partial file remains.
-        let _ = std::fs::remove_file(&args.output);
+        remove_tmp();
         anyhow::anyhow!("Failed to initialise delta Parquet writer: {}", e)
     })?;
 
@@ -200,14 +237,12 @@ pub async fn handle_delta_export(
         match result {
             Ok(record) => {
                 writer.write_record(record).map_err(|e| {
-                    // On write error, remove partial output file.
-                    let _ = std::fs::remove_file(&args.output);
+                    remove_tmp();
                     anyhow::anyhow!("Error writing delta record to Parquet: {}", e)
                 })?;
             }
             Err(e) => {
-                // Hard parse error — remove partial output file and propagate.
-                let _ = std::fs::remove_file(&args.output);
+                remove_tmp();
                 return Err(anyhow::anyhow!(
                     "Error scanning SSTable '{}': {}",
                     args.sstable_dir.display(),
@@ -228,11 +263,25 @@ pub async fn handle_delta_export(
     // Finalize (writes Parquet footer + metadata)
     // -----------------------------------------------------------------------
     writer.finalize().map_err(|e| {
-        let _ = std::fs::remove_file(&args.output);
+        remove_tmp();
         anyhow::anyhow!("Failed to finalise delta Parquet file: {}", e)
     })?;
 
-    // Flush the BufWriter by dropping the file (already done when writer was finalized).
+    // -----------------------------------------------------------------------
+    // Atomic rename: temp file → final output path.
+    //
+    // Executed only after finalize() succeeds.  On rename failure the temp
+    // file is removed and the original (if any) is still intact.
+    // -----------------------------------------------------------------------
+    std::fs::rename(&tmp_path, &args.output).map_err(|e| {
+        remove_tmp();
+        anyhow::anyhow!(
+            "Failed to move temp file '{}' to '{}': {}",
+            tmp_path.display(),
+            args.output.display(),
+            e
+        )
+    })?;
 
     Ok(DeltaExportResult {
         output_path: args.output.clone(),
