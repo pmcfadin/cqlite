@@ -563,7 +563,10 @@ impl V5CompressedLegacyParser {
                 Option<i64>, // row-level liveness timestamp (HAS_TIMESTAMP)
                 bool,        // is_static
                 bool,        // is_row_tombstone
-                Option<i64>, // marked_for_delete_at (for row tombstones)
+                Option<i64>, // marked_for_delete_at (row tombstone deletion time, or None)
+                // --- Issue #699 tombstone extensions ---
+                Option<(Vec<Value>, bool, Vec<Value>, bool, i64)>, // range tombstone info: (start_values, start_inclusive, end_values, end_inclusive, deleted_at)
+                bool,                                              // is_partition_tombstone
             ),
         ) -> Result<std::ops::ControlFlow<()>>,
     {
@@ -582,8 +585,9 @@ impl V5CompressedLegacyParser {
         let mut partition_index = 0;
 
         while offset < data.len() {
-            let (partition_key, next_data_offset) =
-                self.parse_partition_header(data, offset).map_err(|e| {
+            let (partition_key, next_data_offset, partition_deletion) = self
+                .parse_partition_header_full(data, offset)
+                .map_err(|e| {
                     Error::corruption(format!(
                         "delta-scan: partition-header parse error at offset {} in {}.{}: {}",
                         offset, self.keyspace, self.table_name, e
@@ -594,6 +598,43 @@ impl V5CompressedLegacyParser {
             partition_index += 1;
             let mut row_count = 0;
 
+            // ----------------------------------------------------------------
+            // Issue #699: emit PartitionDelete if the partition header carried
+            // a tombstone (markedForDeleteAt != LIVE sentinel).
+            // ----------------------------------------------------------------
+            if let Some(deleted_at) = partition_deletion {
+                match emit((
+                    partition_key.clone(),
+                    HashMap::new(),
+                    HashMap::new(),
+                    None,
+                    false,
+                    false,
+                    Some(deleted_at),
+                    None,
+                    true, // is_partition_tombstone
+                ))? {
+                    std::ops::ControlFlow::Continue(()) => {}
+                    std::ops::ControlFlow::Break(()) => return Ok(()),
+                }
+            }
+
+            // Buffer for in-flight range tombstone start bound.
+            //
+            // A range tombstone in Cassandra SSTable format is represented as a pair of
+            // adjacent "range tombstone markers":
+            //   INCL_START_BOUND (kind 1) or EXCL_START_BOUND (kind 7)  ← start
+            //   INCL_END_BOUND   (kind 6) or EXCL_END_BOUND   (kind 0)  ← end
+            //
+            // Or as a single "boundary" marker (kind 2 or 5) that encodes both the end
+            // of the previous range and the start of the next range simultaneously (used
+            // when two ranges share a clustering-key boundary point).
+            //
+            // We buffer the start bound here and emit a RangeDelete when the end arrives.
+            //
+            // Tuple: (start_values, start_inclusive, deleted_at)
+            let mut pending_range_start: Option<(Vec<Value>, bool, i64)> = None;
+
             loop {
                 if offset < data.len() && Self::is_end_of_partition(data[offset]) {
                     offset += 1;
@@ -601,17 +642,153 @@ impl V5CompressedLegacyParser {
                 }
 
                 if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
-                    // Range tombstones are out of scope for Issue #698 (see #699).
-                    // Skip them so we can still process the upsert rows in this partition.
-                    offset = self
-                        .skip_range_tombstone_marker(data, offset, schema)
+                    // Issue #699: Decode the range tombstone marker and emit RangeDelete.
+                    let (
+                        bound_values,
+                        bound_kind,
+                        deleted_at_primary,
+                        deleted_at_secondary,
+                        next_offset,
+                    ) = self
+                        .parse_range_tombstone_marker_full(data, offset, schema)
                         .map_err(|e| {
                             Error::corruption(format!(
                                 "delta-scan: range-tombstone-marker parse error in partition {} \
-                                 at offset {} in {}.{}: {}",
+                                     at offset {} in {}.{}: {}",
                                 partition_index, offset, self.keyspace, self.table_name, e
                             ))
                         })?;
+                    offset = next_offset;
+
+                    // Decode bound kind into start/end semantics.
+                    //
+                    // ClusteringPrefix.Kind ordinals (ClusteringBoundOrBoundary.java):
+                    //   0 = EXCL_END_BOUND              → end,   exclusive  (<  ck)
+                    //   1 = INCL_START_BOUND             → start, inclusive  (>= ck)
+                    //   2 = EXCL_END_INCL_START_BOUNDARY → end excl + start incl (2 del times)
+                    //   5 = INCL_END_EXCL_START_BOUNDARY → end incl + start excl (2 del times)
+                    //   6 = INCL_END_BOUND               → end,   inclusive  (<= ck)
+                    //   7 = EXCL_START_BOUND             → start, exclusive  (>  ck)
+                    match bound_kind {
+                        1 | 7 => {
+                            // Simple start bound: buffer and wait for the matching end.
+                            let is_inclusive = bound_kind == 1; // 1=INCL_START, 7=EXCL_START
+                            pending_range_start =
+                                Some((bound_values, is_inclusive, deleted_at_primary));
+                        }
+                        0 | 6 => {
+                            // Simple end bound: pair with buffered start and emit RangeDelete.
+                            let is_end_inclusive = bound_kind == 6; // 6=INCL_END, 0=EXCL_END
+                            let (start_values, start_inclusive, _start_del) =
+                                pending_range_start.take().unwrap_or_else(|| {
+                                    // End bound with no preceding start bound — treat as
+                                    // open (unbounded) start.  Hard-error policy: we faithfully
+                                    // represent this as an open bound rather than dropping it.
+                                    (Vec::new(), false, deleted_at_primary)
+                                });
+                            // Cassandra puts the authoritative markedForDeleteAt on both
+                            // bounds of a simple range (they are the same value); use the
+                            // end bound's primary deletion time.
+                            let range_info = Some((
+                                start_values,
+                                start_inclusive,
+                                bound_values,
+                                is_end_inclusive,
+                                deleted_at_primary,
+                            ));
+                            match emit((
+                                partition_key.clone(),
+                                HashMap::new(),
+                                HashMap::new(),
+                                None,
+                                false,
+                                false,
+                                Some(deleted_at_primary),
+                                range_info,
+                                false, // is_partition_tombstone
+                            ))? {
+                                std::ops::ControlFlow::Continue(()) => {}
+                                std::ops::ControlFlow::Break(()) => return Ok(()),
+                            }
+                        }
+                        2 => {
+                            // EXCL_END_INCL_START_BOUNDARY (kind 2):
+                            //   primary   = end of the previous range, exclusive
+                            //   secondary = start of the new range, inclusive
+                            //
+                            // Close the pending range (if any) first.
+                            if let Some((start_values, start_inclusive, _)) =
+                                pending_range_start.take()
+                            {
+                                let range_info = Some((
+                                    start_values,
+                                    start_inclusive,
+                                    bound_values.clone(),
+                                    false, // EXCL_END
+                                    deleted_at_primary,
+                                ));
+                                match emit((
+                                    partition_key.clone(),
+                                    HashMap::new(),
+                                    HashMap::new(),
+                                    None,
+                                    false,
+                                    false,
+                                    Some(deleted_at_primary),
+                                    range_info,
+                                    false,
+                                ))? {
+                                    std::ops::ControlFlow::Continue(()) => {}
+                                    std::ops::ControlFlow::Break(()) => return Ok(()),
+                                }
+                            }
+                            // Open new range starting at bound_values (inclusive).
+                            let new_del_at = deleted_at_secondary.unwrap_or(deleted_at_primary);
+                            pending_range_start = Some((bound_values, true, new_del_at));
+                        }
+                        5 => {
+                            // INCL_END_EXCL_START_BOUNDARY (kind 5):
+                            //   primary   = end of the previous range, inclusive
+                            //   secondary = start of the new range, exclusive
+                            if let Some((start_values, start_inclusive, _)) =
+                                pending_range_start.take()
+                            {
+                                let range_info = Some((
+                                    start_values,
+                                    start_inclusive,
+                                    bound_values.clone(),
+                                    true, // INCL_END
+                                    deleted_at_primary,
+                                ));
+                                match emit((
+                                    partition_key.clone(),
+                                    HashMap::new(),
+                                    HashMap::new(),
+                                    None,
+                                    false,
+                                    false,
+                                    Some(deleted_at_primary),
+                                    range_info,
+                                    false,
+                                ))? {
+                                    std::ops::ControlFlow::Continue(()) => {}
+                                    std::ops::ControlFlow::Break(()) => return Ok(()),
+                                }
+                            }
+                            // Open new range starting at bound_values (exclusive).
+                            let new_del_at = deleted_at_secondary.unwrap_or(deleted_at_primary);
+                            pending_range_start = Some((bound_values, false, new_del_at));
+                        }
+                        unknown => {
+                            return Err(Error::corruption(format!(
+                                "delta-scan: unknown range tombstone bound kind {} at offset {} \
+                                 in {}.{} (partition key {:?}) — cannot represent faithfully \
+                                 (no-heuristics mandate, issue #28)",
+                                unknown, offset, self.keyspace, self.table_name, partition_key.0
+                            )));
+                        }
+                    }
+
                     continue;
                 }
 
@@ -636,6 +813,8 @@ impl V5CompressedLegacyParser {
                             is_static,
                             is_row_tombstone,
                             marked_for_delete_at,
+                            None,  // range_info (not a range tombstone)
+                            false, // is_partition_tombstone
                         ))? {
                             std::ops::ControlFlow::Continue(()) => {}
                             std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -661,6 +840,8 @@ impl V5CompressedLegacyParser {
                     }
                 }
             }
+
+            let _ = row_count; // acknowledged for logging purposes
         }
 
         Ok(())
@@ -1685,12 +1866,24 @@ impl V5CompressedLegacyParser {
         // Authority: ClusteringPrefix.Serializer.serializeValuesWithoutSize (lines 455-477):
         //   Writes VUInt header (2 bits per value, 0=present/1=empty/2=null), then value bytes.
         //
-        // We use parse_clustering_prefix to consume the VUInt header and the value bytes for
-        // the schema's clustering columns. The cluster_count from the u16 should match
-        // schema.clustering_keys.len() for well-formed data; any mismatch is handled gracefully
-        // by parse_clustering_prefix using schema as the canonical source for type info.
+        // Use a truncated schema when cluster_count < schema.clustering_keys.len() to avoid
+        // reading past the bound's bytes into the marker body (prefix bound case).
         if cluster_count > 0 {
-            let (_, new_pos) = self.parse_clustering_prefix(data, pos, schema)?;
+            let prefix_schema: crate::schema::TableSchema;
+            let effective_schema = if cluster_count < schema.clustering_keys.len() {
+                prefix_schema = crate::schema::TableSchema {
+                    keyspace: schema.keyspace.clone(),
+                    table: schema.table.clone(),
+                    partition_keys: schema.partition_keys.clone(),
+                    clustering_keys: schema.clustering_keys[..cluster_count].to_vec(),
+                    columns: schema.columns.clone(),
+                    comments: schema.comments.clone(),
+                };
+                &prefix_schema
+            } else {
+                schema
+            };
+            let (_, new_pos) = self.parse_clustering_prefix(data, pos, effective_schema)?;
             pos = new_pos;
         }
 
@@ -2040,11 +2233,28 @@ impl V5CompressedLegacyParser {
     /// # Visibility
     /// Exposed for integration testing to validate partition header parsing
     #[doc(hidden)]
-    pub fn parse_partition_header(
+    pub fn parse_partition_header(&self, data: &[u8], offset: usize) -> Result<(RowKey, usize)> {
+        let (row_key, next_offset, _deletion_time) =
+            self.parse_partition_header_full(data, offset)?;
+        Ok((row_key, next_offset))
+    }
+
+    /// Like [`parse_partition_header`] but also returns the partition-level deletion
+    /// timestamp (`markedForDeleteAt` in µs since epoch), if the partition is deleted.
+    ///
+    /// Returns `(RowKey, next_offset, Option<markedForDeleteAt_micros>)`.
+    ///
+    /// `None` means the partition is live (no partition tombstone).
+    /// `Some(ts)` means the partition carries a tombstone; `ts` is the authoritative
+    /// reconciliation timestamp in microseconds since the Unix epoch.
+    ///
+    /// Authority: DeletionTime.java (getSerializer / legacySerializer / Serializer),
+    /// BigFormat.java:409 (`hasUIntDeletionTime`).
+    pub fn parse_partition_header_full(
         &self,
         data: &[u8],
         mut offset: usize,
-    ) -> Result<(RowKey, usize)> {
+    ) -> Result<(RowKey, usize, Option<i64>)> {
         let start_offset = offset;
 
         if offset >= data.len() {
@@ -2109,6 +2319,7 @@ impl V5CompressedLegacyParser {
         //            8 bytes markedForDeleteAt (long) = 12 bytes total
         //
         // Authority: DeletionTime.java:191-219 (getSerializer / Serializer.serialize)
+        let partition_deletion: Option<i64>;
         if self.has_uint_deletion_time() {
             // oa / da format
             if offset >= data.len() {
@@ -2119,7 +2330,7 @@ impl V5CompressedLegacyParser {
             let del_flags = data[offset];
             const IS_LIVE_DELETION: u8 = 0x80; // DeletionTime.java:208
             if (del_flags & IS_LIVE_DELETION) != 0 {
-                // LIVE partition: exactly 1 byte
+                // LIVE partition: exactly 1 byte — no tombstone.
                 if del_flags != IS_LIVE_DELETION {
                     return Err(Error::corruption(format!(
                         "V5CompressedLegacy: Invalid IS_LIVE_DELETION byte 0x{:02x} at offset {} \
@@ -2128,35 +2339,278 @@ impl V5CompressedLegacyParser {
                     )));
                 }
                 offset += 1;
+                partition_deletion = None;
             } else {
-                // DELETED partition: 8 bytes markedForDeleteAt + 4 bytes localDeletionTime
+                // DELETED partition (oa): 8 bytes markedForDeleteAt (big-endian i64)
+                //                       + 4 bytes localDeletionTime (big-endian u32)
                 if offset + 12 > data.len() {
                     return Err(Error::corruption(
                         "V5CompressedLegacy: Unexpected end at oa partition deletion time (deleted)",
                     ));
                 }
-                offset += 12;
+                let mfda = i64::from_be_bytes(
+                    data[offset..offset + 8]
+                        .try_into()
+                        .map_err(|_| Error::corruption("V5CompressedLegacy: oa mfda slice"))?,
+                );
+                offset += 12; // markedForDeleteAt(8) + localDeletionTime(4)
+                partition_deletion = Some(mfda);
             }
         } else {
-            // nb format: 4 bytes localDeletionTime + 8 bytes markedForDeleteAt = 12 bytes
+            // nb format: 4 bytes localDeletionTime (big-endian i32)
+            //          + 8 bytes markedForDeleteAt (big-endian i64)
             if offset + 12 > data.len() {
                 return Err(Error::corruption(
                     "V5CompressedLegacy: Unexpected end at nb partition deletion time",
                 ));
             }
-            offset += 12;
+            // localDeletionTime is the first 4 bytes.
+            let local_deletion_time = i32::from_be_bytes(
+                data[offset..offset + 4]
+                    .try_into()
+                    .map_err(|_| Error::corruption("V5CompressedLegacy: nb ldt slice"))?,
+            );
+            offset += 4;
+            // markedForDeleteAt is next 8 bytes (big-endian i64).
+            let mfda = i64::from_be_bytes(
+                data[offset..offset + 8]
+                    .try_into()
+                    .map_err(|_| Error::corruption("V5CompressedLegacy: nb mfda slice"))?,
+            );
+            offset += 8;
+            // A live (not deleted) partition in nb format has
+            // localDeletionTime = 0x7fffffff (i32::MAX, DeletionTime.LIVE sentinel).
+            // Any other value indicates a real partition tombstone.
+            const NB_LIVE_LOCAL_DELETION_TIME: i32 = i32::MAX;
+            if local_deletion_time == NB_LIVE_LOCAL_DELETION_TIME {
+                partition_deletion = None;
+            } else {
+                partition_deletion = Some(mfda);
+            }
         }
 
         // Create RowKey from partition key bytes
         let row_key = RowKey(key_bytes);
 
         debug!(
-            "V5CompressedLegacy: Parsed partition header at offset {}, consumed {} bytes",
+            "V5CompressedLegacy: Parsed partition header at offset {}, consumed {} bytes, \
+             partition_deletion={:?}",
             start_offset,
-            offset - start_offset
+            offset - start_offset,
+            partition_deletion
         );
 
-        Ok((row_key, offset))
+        Ok((row_key, offset, partition_deletion))
+    }
+
+    /// Parse a range tombstone marker in full, returning the decoded bound values,
+    /// inclusivity flags, and deletion timestamp(s).
+    ///
+    /// This is the delta-scan counterpart to `skip_range_tombstone_marker`: instead
+    /// of discarding the clustering values and deletion time, it decodes and returns
+    /// them so the caller can emit `DeltaRecord::RangeDelete`.
+    ///
+    /// ## Return value
+    ///
+    /// `Ok((bound_values, bound_kind, deleted_at_primary, deleted_at_secondary, next_offset))`
+    ///
+    /// - `bound_values`: clustering-key prefix values for this bound (may be shorter
+    ///   than the full clustering arity — a prefix bound).
+    /// - `bound_kind`: the raw Cassandra `ClusteringPrefix.Kind` ordinal (0/1/2/5/6/7).
+    /// - `deleted_at_primary`: `markedForDeleteAt` in µs for this bound's tombstone.
+    /// - `deleted_at_secondary`: present only for boundary markers (kind 2 or 5) and
+    ///   carries the deletion time for the *other* side of the boundary.
+    /// - `next_offset`: position after this marker in `data`.
+    ///
+    /// ## Bound kind ordinals
+    ///
+    /// | ordinal | name | meaning |
+    /// |---------|------|---------|
+    /// | 0 | `EXCL_END_BOUND` | end of range, exclusive (`< ck`) |
+    /// | 1 | `INCL_START_BOUND` | start of range, inclusive (`>= ck`) |
+    /// | 2 | `EXCL_END_INCL_START_BOUNDARY` | boundary: end of prev range (exclusive) + start of new range (inclusive) |
+    /// | 5 | `INCL_END_EXCL_START_BOUNDARY` | boundary: end of prev range (inclusive) + start of new range (exclusive) |
+    /// | 6 | `INCL_END_BOUND` | end of range, inclusive (`<= ck`) |
+    /// | 7 | `EXCL_START_BOUND` | start of range, exclusive (`> ck`) |
+    ///
+    /// Boundary markers (kind 2 or 5) carry **two** deletion times; simple markers (all others)
+    /// carry **one** deletion time and `deleted_at_secondary` is `None`.
+    ///
+    /// Authority: UnfilteredSerializer.java:282-303, ClusteringBoundOrBoundary.java
+    #[allow(clippy::type_complexity)]
+    pub fn parse_range_tombstone_marker_full(
+        &self,
+        data: &[u8],
+        offset: usize,
+        schema: &TableSchema,
+    ) -> Result<(Vec<Value>, u8, i64, Option<i64>, usize)> {
+        let mut pos = offset;
+
+        if pos >= data.len() {
+            return Err(Error::corruption(
+                "V5CompressedLegacy: Unexpected end at range tombstone marker (full parse)",
+            ));
+        }
+
+        let marker_flags = data[pos];
+        pos += 1;
+
+        // Extended flags if present
+        if (marker_flags & ROW_HAS_EXTENDED_FLAGS) != 0 {
+            if pos >= data.len() {
+                return Err(Error::corruption(
+                    "V5CompressedLegacy: Unexpected end reading marker extended flags (full)",
+                ));
+            }
+            pos += 1;
+        }
+
+        // Bound kind byte.
+        if pos >= data.len() {
+            return Err(Error::corruption(
+                "V5CompressedLegacy: Unexpected end reading range tombstone bound kind (full)",
+            ));
+        }
+        let bound_kind = data[pos];
+        pos += 1;
+
+        // Cluster count (u16 big-endian).
+        if pos + 2 > data.len() {
+            return Err(Error::corruption(
+                "V5CompressedLegacy: Unexpected end reading range tombstone cluster count (full)",
+            ));
+        }
+        let cluster_count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
+        pos += 2;
+
+        // Clustering values.
+        // Build a truncated schema slice for parsing only `cluster_count` clustering
+        // columns.  Range tombstone bounds may be **prefix** bounds: the Cassandra
+        // serializer writes `cluster_count` < full-arity when a `DELETE WHERE pk=?
+        // AND ck1=?` targets all sub-rows for a given ck1 without specifying ck2.
+        //
+        // If we let `parse_clustering_prefix` iterate over the full schema, it would
+        // read past the `cluster_count` bytes into the marker body (producing garbage
+        // or invalid UTF-8 errors).  Instead we pass a synthetic schema whose
+        // `clustering_keys` vec is truncated to `cluster_count`.
+        let bound_values = if cluster_count > 0 {
+            let prefix_schema: crate::schema::TableSchema;
+            let effective_schema = if cluster_count < schema.clustering_keys.len() {
+                prefix_schema = crate::schema::TableSchema {
+                    keyspace: schema.keyspace.clone(),
+                    table: schema.table.clone(),
+                    partition_keys: schema.partition_keys.clone(),
+                    clustering_keys: schema.clustering_keys[..cluster_count].to_vec(),
+                    columns: schema.columns.clone(),
+                    comments: schema.comments.clone(),
+                };
+                &prefix_schema
+            } else {
+                schema
+            };
+            let (values, new_pos) = self.parse_clustering_prefix(data, pos, effective_schema)?;
+            pos = new_pos;
+            values
+        } else {
+            Vec::new()
+        };
+
+        // marker_body_size VUInt — size of (prev_size VUInt + deletion_time(s)).
+        let (remaining, marker_body_size) = parse_vuint(&data[pos..]).map_err(|e| {
+            Error::corruption(format!(
+                "V5CompressedLegacy: Failed to parse marker_body_size (full) at offset {}: {:?}",
+                pos, e
+            ))
+        })?;
+        let body_size_vint_len = data[pos..].len() - remaining.len();
+        pos += body_size_vint_len;
+
+        let body_start = pos;
+        let body_end = pos + marker_body_size as usize;
+        if body_end > data.len() {
+            return Err(Error::corruption(format!(
+                "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {} (full)",
+                marker_body_size,
+                pos,
+                data.len()
+            )));
+        }
+
+        // Inside the body:
+        //   [prev_unfiltered_size: VUInt]    ← skip
+        //   [markedForDeleteAt delta: VUInt]  ← delta from min_timestamp (µs)
+        //   [localDeletionTime delta: VUInt]  ← delta from min_local_deletion_time (s), skip
+        //   (repeat for second deletion time if boundary marker)
+        let (remaining2, _prev_size) = parse_vuint(&data[pos..]).map_err(|e| {
+            Error::corruption(format!(
+                "V5CompressedLegacy: Failed to parse prev_size in marker body at {}: {:?}",
+                pos, e
+            ))
+        })?;
+        pos += data[pos..].len() - remaining2.len();
+
+        // Primary deletion time.
+        let deleted_at_primary = self.parse_deletion_time_pair(data, &mut pos)?;
+
+        // Boundary markers (kind 2 = EXCL_END_INCL_START, kind 5 = INCL_END_EXCL_START)
+        // carry a second deletion time for the adjacent range.
+        let deleted_at_secondary = if bound_kind == 2 || bound_kind == 5 {
+            Some(self.parse_deletion_time_pair(data, &mut pos)?)
+        } else {
+            None
+        };
+
+        // Advance to end of body (in case the secondary parse left pos short).
+        let _ = body_start; // acknowledged
+        pos = body_end;
+
+        log::debug!(
+            "V5CompressedLegacy: Parsed range tombstone marker full: kind={} values={} \
+             deleted_at_primary={} deleted_at_secondary={:?} next_offset={}",
+            bound_kind,
+            bound_values.len(),
+            deleted_at_primary,
+            deleted_at_secondary,
+            pos
+        );
+
+        Ok((
+            bound_values,
+            bound_kind,
+            deleted_at_primary,
+            deleted_at_secondary,
+            pos,
+        ))
+    }
+
+    /// Decode one `(markedForDeleteAt delta, localDeletionTime delta)` pair from `data[*pos..]`.
+    ///
+    /// Both fields are unsigned VInts.  `markedForDeleteAt` is a delta from `min_timestamp`
+    /// (µs); `localDeletionTime` is a delta from `min_local_deletion_time` (s) and is
+    /// consumed but not returned (callers do not need the GC-clock value).
+    ///
+    /// Advances `*pos` past both fields and returns the absolute `markedForDeleteAt` in µs.
+    fn parse_deletion_time_pair(&self, data: &[u8], pos: &mut usize) -> Result<i64> {
+        // markedForDeleteAt delta (unsigned VInt, µs since epoch delta).
+        let (remaining, mfda_delta) = parse_vuint(&data[*pos..]).map_err(|e| {
+            Error::corruption(format!(
+                "V5CompressedLegacy: Failed to parse markedForDeleteAt in marker body at {}: {:?}",
+                *pos, e
+            ))
+        })?;
+        *pos += data[*pos..].len() - remaining.len();
+        let absolute_mfda = self.min_timestamp.wrapping_add(mfda_delta as i64);
+
+        // localDeletionTime delta (unsigned VInt, seconds delta) — consume, do not return.
+        let (remaining2, _ldt_delta) = parse_vuint(&data[*pos..]).map_err(|e| {
+            Error::corruption(format!(
+                "V5CompressedLegacy: Failed to parse localDeletionTime in marker body at {}: {:?}",
+                *pos, e
+            ))
+        })?;
+        *pos += data[*pos..].len() - remaining2.len();
+
+        Ok(absolute_mfda)
     }
 
     /// Parse clustering prefix section (between row header and cells)
