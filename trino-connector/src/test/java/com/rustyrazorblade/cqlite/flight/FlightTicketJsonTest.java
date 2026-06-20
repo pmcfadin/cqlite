@@ -26,6 +26,7 @@ class FlightTicketJsonTest {
                 Optional.of(-100L), Optional.of(100L), false,
                 Optional.of(List.of("id", "v")),
                 List.of(new FlightTicketJson.Predicate("v", "Gt", 10)),
+                null,
                 null);
         JsonNode node = parse(bytes);
 
@@ -60,7 +61,7 @@ class FlightTicketJsonTest {
         byte[] bytes = FlightTicketJson.build(
                 "ks", "t", "ddl",
                 Optional.empty(), Optional.empty(), Optional.empty(), false,
-                Optional.empty(), List.of(), filter);
+                Optional.empty(), List.of(), filter, null);
         JsonNode node = parse(bytes);
 
         assertEquals(2, node.get("version").asInt());
@@ -82,11 +83,58 @@ class FlightTicketJsonTest {
         byte[] bytes = FlightTicketJson.build(
                 "ks", "t", "ddl",
                 Optional.empty(), Optional.empty(), Optional.empty(), false,
-                Optional.empty(), List.of(), null);
+                Optional.empty(), List.of(), null, null);
         JsonNode node = parse(bytes);
         assertTrue(node.get("snapshot").isNull());
         assertTrue(node.get("token_start").isNull());
         assertTrue(node.get("columns").isNull());
         assertEquals(0, node.get("predicates").size());
+        // A null aggregation is omitted entirely (server's #[serde(default)] Option).
+        assertFalse(node.has("aggregation"));
+    }
+
+    @Test
+    void emitsAggregationObjectWhenPresent() throws Exception {
+        // GROUP BY c1 with count(*), count(x), sum(x), min(x), max(x).
+        var spec = new AggregationSpec(
+                List.of("c1"),
+                List.of(
+                        new AggregationSpec.Aggregate(AggregationSpec.Func.Count, null, "agg0"),
+                        new AggregationSpec.Aggregate(AggregationSpec.Func.Count, "x", "agg1"),
+                        new AggregationSpec.Aggregate(AggregationSpec.Func.Sum, "x", "agg2"),
+                        new AggregationSpec.Aggregate(AggregationSpec.Func.Min, "x", "agg3"),
+                        new AggregationSpec.Aggregate(AggregationSpec.Func.Max, "x", "agg4")));
+        byte[] bytes = FlightTicketJson.build(
+                "ks", "t", "ddl",
+                Optional.empty(), Optional.empty(), Optional.empty(), false,
+                Optional.empty(), List.of(), null, spec.toJson(MAPPER));
+        JsonNode node = parse(bytes);
+
+        JsonNode agg = node.get("aggregation");
+        assertEquals(List.of("c1"),
+                List.of(agg.get("group_by").get(0).asText()));
+
+        JsonNode aggs = agg.get("aggregates");
+        assertEquals(5, aggs.size());
+
+        // count(*) — null column, func Count, output agg0.
+        assertEquals("Count", aggs.get(0).get("func").asText());
+        assertTrue(aggs.get(0).get("column").isNull(), "count(*) has a null column");
+        assertEquals("agg0", aggs.get(0).get("output").asText());
+
+        // count(x) — column x.
+        assertEquals("Count", aggs.get(1).get("func").asText());
+        assertEquals("x", aggs.get(1).get("column").asText());
+        assertEquals("agg1", aggs.get(1).get("output").asText());
+
+        assertEquals("Sum", aggs.get(2).get("func").asText());
+        assertEquals("x", aggs.get(2).get("column").asText());
+        assertEquals("agg2", aggs.get(2).get("output").asText());
+
+        assertEquals("Min", aggs.get(3).get("func").asText());
+        assertEquals("agg3", aggs.get(3).get("output").asText());
+
+        assertEquals("Max", aggs.get(4).get("func").asText());
+        assertEquals("agg4", aggs.get(4).get("output").asText());
     }
 }

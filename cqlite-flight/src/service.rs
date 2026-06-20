@@ -54,7 +54,9 @@ impl From<ProducerError> for Status {
     fn from(e: ProducerError) -> Self {
         let msg = e.to_string();
         match e {
-            ProducerError::InvalidColumnType { .. } => Status::invalid_argument(msg),
+            ProducerError::InvalidColumnType { .. } | ProducerError::Aggregation(_) => {
+                Status::invalid_argument(msg)
+            }
             ProducerError::Discovery { source, .. }
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
@@ -105,7 +107,14 @@ impl CqliteFlightService {
     fn build_producer(&self, ticket: &FlightTicket) -> Result<MergeProducer, Status> {
         let schema = Self::parse_schema(ticket)?;
         let spec = ScanSpec::from_ticket(ticket, &schema)?;
-        Ok(MergeProducer::with_spec(schema, self.batch_size, spec)?)
+        let producer = MergeProducer::with_spec(schema, self.batch_size, spec)?;
+        // Aggregation pushdown (issue #841): when the ticket carries an
+        // aggregation spec, the producer emits PARTIAL aggregate rows under the
+        // partial schema instead of full rows.
+        match &ticket.aggregation {
+            Some(aggregation) => Ok(producer.with_aggregation(aggregation)?),
+            None => Ok(producer),
+        }
     }
 
     /// Arrow schema for a ticket (no SSTable access required).

@@ -27,7 +27,9 @@ use cqlite_core::storage::write_engine::KWayMerger;
 use cqlite_core::types::{DataType, Value};
 use cqlite_core::RowKey;
 
+use crate::agg::{AggError, AggPlan};
 use crate::filter::ScanSpec;
+use crate::ticket::Aggregation;
 
 /// Errors produced while merging SSTables into Arrow batches.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +59,9 @@ pub enum ProducerError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// The aggregation spec was invalid (bad column, Sum on non-numeric, …).
+    #[error("invalid aggregation: {0}")]
+    Aggregation(#[from] AggError),
 }
 
 /// Source of the SSTable `Data.db` files to merge for one table.
@@ -207,6 +212,12 @@ pub struct MergeProducer {
     columns: Vec<ColumnInfo>,
     batch_size: usize,
     spec: ScanSpec,
+    /// Aggregation pushdown plan (issue #841). When `Some`, the producer emits
+    /// PARTIAL aggregate rows under [`Self::partial_columns`] instead of full
+    /// rows; when `None` the row path is unchanged.
+    agg: Option<AggPlan>,
+    /// Partial-output column metadata, present iff [`Self::agg`] is `Some`.
+    partial_columns: Option<Vec<ColumnInfo>>,
 }
 
 impl MergeProducer {
@@ -231,7 +242,20 @@ impl MergeProducer {
             columns,
             batch_size: batch_size.max(1),
             spec,
+            agg: None,
+            partial_columns: None,
         })
+    }
+
+    /// Attach an aggregation spec (issue #841), validating it against the table
+    /// schema. When set, [`Self::arrow_schema`] and the produced batches switch
+    /// to the PARTIAL aggregate schema. Consumes and returns `self` for chaining.
+    pub fn with_aggregation(mut self, aggregation: &Aggregation) -> Result<Self, ProducerError> {
+        let plan = AggPlan::build(aggregation, &self.schema)?;
+        let partial = plan.partial_columns(&self.schema)?;
+        self.agg = Some(plan);
+        self.partial_columns = Some(partial);
+        Ok(self)
     }
 
     /// The Arrow schema clients should expect (for `GetFlightInfo`/`GetSchema`).
@@ -244,11 +268,14 @@ impl MergeProducer {
     /// genuine `text` by Arrow type alone. Field order, names, types, and any
     /// existing metadata (e.g. the uuid extension) are preserved.
     pub fn arrow_schema(&self) -> Result<ArrowSchema, ProducerError> {
-        let base = build_arrow_schema(&self.columns)?;
+        // With aggregation, the output is the PARTIAL schema (group-by columns
+        // then aggregate outputs); otherwise it is the projected row schema.
+        let output_columns = self.output_columns();
+        let base = build_arrow_schema(output_columns)?;
         let fields: Vec<ArrowField> = base
             .fields()
             .iter()
-            .zip(self.columns.iter())
+            .zip(output_columns.iter())
             .map(|(field, column)| {
                 let capability = column
                     .cql_type
@@ -266,9 +293,19 @@ impl MergeProducer {
         ))
     }
 
-    /// The ordered Arrow column metadata.
+    /// The ordered Arrow column metadata for the produced output: the PARTIAL
+    /// aggregate columns when aggregation is set, else the projected row columns.
     pub fn columns(&self) -> &[ColumnInfo] {
-        &self.columns
+        self.output_columns()
+    }
+
+    /// The output column set: partial aggregate columns under aggregation, else
+    /// the projected row columns.
+    fn output_columns(&self) -> &[ColumnInfo] {
+        match &self.partial_columns {
+            Some(partial) => partial,
+            None => &self.columns,
+        }
     }
 
     /// Merge `source`'s SSTables and return the resulting Arrow batches.
@@ -323,7 +360,16 @@ impl MergeProducer {
     }
 
     /// Merge the (already pruned) SSTable paths into Arrow batches.
+    ///
+    /// With an aggregation plan this branches into [`Self::aggregate_paths`],
+    /// which feeds the SAME surviving rows (token-pruned, predicate-filtered,
+    /// tombstone-suppressed, LWW-reconciled) into the accumulator and emits
+    /// PARTIAL rows. Without one, it emits full rows in `batch_size` chunks.
     fn merge_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<RecordBatch>, ProducerError> {
+        if let Some(plan) = &self.agg {
+            return self.aggregate_paths(plan, paths);
+        }
+
         let mut batches = Vec::new();
         if paths.is_empty() {
             return Ok(batches);
@@ -367,6 +413,55 @@ impl MergeProducer {
             batches.push(self.flush_buffer(&mut buffer)?);
         }
         Ok(batches)
+    }
+
+    /// Aggregate path (issue #841): stream every surviving row — through the same
+    /// token-prune + predicate filter as the row path — directly into the
+    /// accumulator state, then emit the PARTIAL batch(es) under the partial
+    /// schema. Rows are NOT buffered: only per-group accumulator state is kept,
+    /// so memory scales with the group count, not the input row count.
+    ///
+    /// A global aggregation (`group_by` empty) always emits exactly one row,
+    /// even over zero input rows. A grouped aggregation emits one row per group.
+    fn aggregate_paths(
+        &self,
+        plan: &AggPlan,
+        paths: Vec<PathBuf>,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
+        // Aggregate POST-reconciliation so partials match a SELECT's row set.
+        let mut state = plan.new_state();
+
+        if !paths.is_empty() {
+            let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+            while let MergeStep::Partition { key, rows } =
+                merger.step().map_err(ProducerError::Merge)?
+            {
+                if let Some(token) = &self.spec.token {
+                    if !token.contains(key.token) {
+                        continue;
+                    }
+                }
+                for entry in rows {
+                    let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
+                        continue;
+                    };
+                    if let Some(filter) = &self.spec.filter {
+                        if !filter.keeps(&row) {
+                            continue;
+                        }
+                    }
+                    plan.accumulate_row(&mut state, &row)?;
+                }
+            }
+        }
+
+        let partial_rows = plan.finish(state);
+        if partial_rows.is_empty() {
+            // Grouped aggregation over zero input → no rows (global always emits).
+            return Ok(Vec::new());
+        }
+        let columns = self.output_columns();
+        Ok(vec![rows_to_record_batch(columns, &partial_rows)?])
     }
 
     /// Reconstruct one full logical row from a merged entry, or `None` for a row
@@ -1443,5 +1538,348 @@ mod tests {
 
         assert_eq!(v1_ids, v2_ids, "v1 flat predicates == explicit And tree");
         assert_eq!(v1_ids, vec![2, 3], "scores 20,30 → ids 2,3");
+    }
+
+    // ---- Issue #841: aggregation pushdown over merged SSTables ----
+
+    use crate::ticket::{AggFunc, AggregateSpec, Aggregation};
+    use arrow::array::Array;
+
+    /// Build a producer carrying `aggregation` over `schema`/`spec`.
+    fn agg_producer(
+        schema: TableSchema,
+        spec: ScanSpec,
+        aggregation: Aggregation,
+    ) -> MergeProducer {
+        MergeProducer::with_spec(schema, 1024, spec)
+            .unwrap()
+            .with_aggregation(&aggregation)
+            .unwrap()
+    }
+
+    fn count_star(output: &str) -> AggregateSpec {
+        AggregateSpec {
+            func: AggFunc::Count,
+            column: None,
+            output: output.into(),
+        }
+    }
+
+    fn agg_on(func: AggFunc, column: &str, output: &str) -> AggregateSpec {
+        AggregateSpec {
+            func,
+            column: Some(column.into()),
+            output: output.into(),
+        }
+    }
+
+    fn i64_col(batch: &RecordBatch, name: &str) -> arrow::array::Int64Array {
+        batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .clone()
+    }
+
+    fn i32_col(batch: &RecordBatch, name: &str) -> arrow::array::Int32Array {
+        batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .clone()
+    }
+
+    /// Global `count(*)` over N rows → exactly one partial row, count = N.
+    #[test]
+    fn global_count_star_counts_all_rows() {
+        let schema = simple_schema();
+        let rows = (1..=7)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![count_star("agg0")],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 1, "global aggregation → one row");
+        let counts = i64_col(&batches[0], "agg0");
+        assert_eq!(counts.value(0), 7);
+        assert!(!counts.is_null(0), "Count is never null");
+    }
+
+    /// Global count(col)/sum/min/max with a NULL-score row present: count(score)
+    /// excludes the null and sum/min/max skip it.
+    #[test]
+    fn global_aggregates_skip_null_inputs() {
+        use crate::testutil::write_name_only;
+        let schema = simple_schema();
+        // scores 10,20,30 plus one row whose score is null (name only).
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "a", 10, 100),
+                write_row(2, "b", 20, 100),
+                write_row(3, "c", 30, 100),
+                write_name_only(4, "d", 100),
+            ]],
+        );
+
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![
+                count_star("agg0"),
+                agg_on(AggFunc::Count, "score", "agg1"),
+                agg_on(AggFunc::Sum, "score", "agg2"),
+                agg_on(AggFunc::Min, "score", "agg3"),
+                agg_on(AggFunc::Max, "score", "agg4"),
+            ],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 1);
+        let b = &batches[0];
+        assert_eq!(
+            i64_col(b, "agg0").value(0),
+            4,
+            "count(*) counts the null row"
+        );
+        assert_eq!(
+            i64_col(b, "agg1").value(0),
+            3,
+            "count(score) excludes the null"
+        );
+        // Sum over an int source is Int64.
+        assert_eq!(i64_col(b, "agg2").value(0), 60, "10+20+30");
+        // Min/Max keep the source (int) type → Int32.
+        assert_eq!(i32_col(b, "agg3").value(0), 10);
+        assert_eq!(i32_col(b, "agg4").value(0), 30);
+    }
+
+    /// Global aggregation over EMPTY input → one row: count = 0, sum/min/max null.
+    #[test]
+    fn global_aggregate_over_empty_input_emits_zero_row() {
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        // A token range that excludes everything: (MAX, MAX].
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                token_start: Some(i64::MAX),
+                token_end: Some(i64::MAX),
+                ..Default::default()
+            },
+        );
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![
+                count_star("agg0"),
+                agg_on(AggFunc::Count, "score", "agg1"),
+                agg_on(AggFunc::Sum, "score", "agg2"),
+                agg_on(AggFunc::Min, "score", "agg3"),
+                agg_on(AggFunc::Max, "score", "agg4"),
+            ],
+        };
+        let p = agg_producer(schema, spec, agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            total_rows(&batches),
+            1,
+            "global emits one row even on empty"
+        );
+        let b = &batches[0];
+        assert_eq!(i64_col(b, "agg0").value(0), 0, "count(*) = 0");
+        assert_eq!(i64_col(b, "agg1").value(0), 0, "count(score) = 0");
+        assert!(i64_col(b, "agg2").is_null(0), "sum null on empty");
+        assert!(i32_col(b, "agg3").is_null(0), "min null on empty");
+        assert!(i32_col(b, "agg4").is_null(0), "max null on empty");
+    }
+
+    /// GROUP BY a low-cardinality column → one row per group with correct
+    /// per-group count/sum/min/max; a NULL group key forms its own group.
+    #[test]
+    fn group_by_emits_one_row_per_group_including_null_key() {
+        use crate::testutil::write_score_only;
+        let schema = simple_schema();
+        // group "x": scores 10, 30 ; group "y": score 20 ; NULL name: score 99.
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "x", 10, 100),
+                write_row(2, "y", 20, 100),
+                write_row(3, "x", 30, 100),
+                write_score_only(4, 99, 100), // name is null → its own group
+            ]],
+        );
+
+        let agg = Aggregation {
+            group_by: vec!["name".into()],
+            aggregates: vec![
+                count_star("c"),
+                agg_on(AggFunc::Sum, "score", "s"),
+                agg_on(AggFunc::Min, "score", "mn"),
+                agg_on(AggFunc::Max, "score", "mx"),
+            ],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            total_rows(&batches),
+            3,
+            "groups: x, y, and the null-name group"
+        );
+
+        // Collect per-group results keyed by name (None = the NULL group).
+        let b = &batches[0];
+        let names = b
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap()
+            .clone();
+        let c = i64_col(b, "c");
+        let s = i64_col(b, "s");
+        let mn = i32_col(b, "mn");
+        let mx = i32_col(b, "mx");
+
+        use std::collections::HashMap;
+        let mut by_group: HashMap<Option<String>, (i64, i64, i32, i32)> = HashMap::new();
+        for i in 0..b.num_rows() {
+            let key = if names.is_null(i) {
+                None
+            } else {
+                Some(names.value(i).to_string())
+            };
+            by_group.insert(key, (c.value(i), s.value(i), mn.value(i), mx.value(i)));
+        }
+
+        assert_eq!(by_group[&Some("x".into())], (2, 40, 10, 30));
+        assert_eq!(by_group[&Some("y".into())], (1, 20, 20, 20));
+        assert_eq!(
+            by_group[&None],
+            (1, 99, 99, 99),
+            "the null-name row forms its own group"
+        );
+    }
+
+    /// Aggregation composes with a predicate filter and token pruning: only rows
+    /// surviving `score > 10` (and the split's range) feed the accumulator.
+    #[test]
+    fn aggregation_composes_with_predicate_and_token_prune() {
+        use crate::ticket::{Predicate, PredicateOp};
+        use serde_json::json;
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100)) // scores 10..50
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        // Full ring + score > 10 → scores 20,30,40,50 survive.
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                token_start: Some(i64::MIN),
+                token_end: Some(i64::MAX),
+                predicates: vec![Predicate {
+                    column: "score".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(10),
+                }],
+                ..Default::default()
+            },
+        );
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![
+                count_star("agg0"),
+                agg_on(AggFunc::Sum, "score", "agg1"),
+                agg_on(AggFunc::Min, "score", "agg2"),
+                agg_on(AggFunc::Max, "score", "agg3"),
+            ],
+        };
+        let p = agg_producer(schema, spec, agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        let b = &batches[0];
+        assert_eq!(i64_col(b, "agg0").value(0), 4, "4 rows pass > 10");
+        assert_eq!(i64_col(b, "agg1").value(0), 140, "20+30+40+50");
+        assert_eq!(i32_col(b, "agg2").value(0), 20);
+        assert_eq!(i32_col(b, "agg3").value(0), 50);
+    }
+
+    /// The partial RecordBatch schema's column names and Arrow types match the
+    /// contract: group-by columns keep their mapped type, Count→Int64,
+    /// Sum(int)→Int64, Min/Max(int)→Int32.
+    #[test]
+    fn partial_schema_matches_contract() {
+        use arrow::datatypes::DataType as ArrowDataType;
+        let schema = simple_schema();
+        let agg = Aggregation {
+            group_by: vec!["name".into()],
+            aggregates: vec![
+                count_star("agg0"),
+                agg_on(AggFunc::Sum, "score", "agg1"),
+                agg_on(AggFunc::Min, "score", "agg2"),
+                agg_on(AggFunc::Max, "score", "agg3"),
+            ],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let s = p.arrow_schema().unwrap();
+        let names: Vec<&str> = s.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["name", "agg0", "agg1", "agg2", "agg3"],
+            "group-by column then aggregate outputs in order"
+        );
+        assert_eq!(
+            s.field_with_name("name").unwrap().data_type(),
+            &ArrowDataType::Utf8
+        );
+        assert_eq!(
+            s.field_with_name("agg0").unwrap().data_type(),
+            &ArrowDataType::Int64
+        );
+        assert_eq!(
+            s.field_with_name("agg1").unwrap().data_type(),
+            &ArrowDataType::Int64
+        );
+        assert_eq!(
+            s.field_with_name("agg2").unwrap().data_type(),
+            &ArrowDataType::Int32
+        );
+        assert_eq!(
+            s.field_with_name("agg3").unwrap().data_type(),
+            &ArrowDataType::Int32
+        );
+        // Count is non-nullable; sum/min/max are nullable.
+        assert!(!s.field_with_name("agg0").unwrap().is_nullable());
+        assert!(s.field_with_name("agg1").unwrap().is_nullable());
+    }
+
+    /// Sum on a non-numeric source column is a bad spec → ProducerError.
+    #[test]
+    fn sum_on_text_column_is_rejected() {
+        let schema = simple_schema();
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![agg_on(AggFunc::Sum, "name", "agg0")],
+        };
+        let result = MergeProducer::with_spec(schema, 1024, ScanSpec::default())
+            .unwrap()
+            .with_aggregation(&agg);
+        match result {
+            Err(ProducerError::Aggregation(_)) => {}
+            other => panic!("expected Aggregation error, got {:?}", other.map(|_| ())),
+        }
     }
 }

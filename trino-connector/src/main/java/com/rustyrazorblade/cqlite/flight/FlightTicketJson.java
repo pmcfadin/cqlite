@@ -29,6 +29,9 @@ public final class FlightTicketJson {
      *               server, or {@code null} to omit it (the server's
      *               {@code #[serde(default)] Option<PredicateExpr>}). The legacy
      *               flat {@code predicates} list is independent and still emitted.
+     * @param aggregation the {@code aggregation} object (group_by + aggregates)
+     *               pushed down to the server, or {@code null} to omit it (the
+     *               server's {@code #[serde(default)] Option<Aggregation>}).
      */
     public static byte[] build(
             String keyspace,
@@ -40,7 +43,8 @@ public final class FlightTicketJson {
             boolean wraparound,
             Optional<List<String>> columns,
             List<Predicate> predicates,
-            JsonNode filter) {
+            JsonNode filter,
+            JsonNode aggregation) {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("version", TICKET_VERSION);
         root.put("keyspace", keyspace);
@@ -66,6 +70,10 @@ public final class FlightTicketJson {
         // Omit when null to match the server's #[serde(default)] Option<PredicateExpr>.
         if (filter != null) {
             root.set("filter", filter);
+        }
+        // Omit when null to match the server's #[serde(default)] Option<Aggregation>.
+        if (aggregation != null) {
+            root.set("aggregation", aggregation);
         }
         try {
             return MAPPER.writeValueAsBytes(root);

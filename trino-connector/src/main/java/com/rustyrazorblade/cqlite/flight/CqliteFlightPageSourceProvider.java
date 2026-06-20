@@ -44,11 +44,18 @@ public class CqliteFlightPageSourceProvider implements ConnectorPageSourceProvid
             Optional<ConnectorTableCredentials> credentials,
             List<ColumnHandle> columns,
             DynamicFilter dynamicFilter) {
-        CqliteFlightSplit flightSplit = (CqliteFlightSplit) split;
-        CqliteFlightTableHandle tableHandle = (CqliteFlightTableHandle) table;
         List<CqliteFlightColumnHandle> projected = columns.stream()
                 .map(CqliteFlightColumnHandle.class::cast)
                 .toList();
+
+        // Aggregated handle: the single finalize split fans out to all ranges,
+        // pulls each range's partial, merges, and emits the fully merged result.
+        if (split instanceof CqliteFlightAggregateSplit aggregateSplit) {
+            return new CqliteFlightAggregatePageSource(client, aggregateSplit, projected);
+        }
+
+        CqliteFlightSplit flightSplit = (CqliteFlightSplit) split;
+        CqliteFlightTableHandle tableHandle = (CqliteFlightTableHandle) table;
         List<String> names = projected.stream().map(CqliteFlightColumnHandle::name).toList();
 
         // Pushed-down predicate tree (if any) lives on the table handle; parse it
@@ -65,7 +72,8 @@ public class CqliteFlightPageSourceProvider implements ConnectorPageSourceProvid
                 flightSplit.wraparound(),
                 names.isEmpty() ? Optional.empty() : Optional.of(names),
                 List.of(), // legacy flat predicates unused; tree carried in filter
-                filter);
+                filter,
+                null); // non-aggregated scan: no aggregation pushed
 
         return new CqliteFlightPageSource(client, flightSplit, projected, ticket);
     }

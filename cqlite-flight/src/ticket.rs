@@ -143,6 +143,67 @@ pub enum PredicateExpr {
     },
 }
 
+/// An aggregate function pushed down to the server (issue #841).
+///
+/// `Avg` is intentionally absent: the Trino connector decomposes `avg` into
+/// `sum` + `count` before building the ticket and recombines them itself, so the
+/// server only ever computes these four primitives.
+///
+/// Serialized by its variant name (`"Count"`, `"Sum"`, `"Min"`, `"Max"`).
+///
+/// `#[non_exhaustive]`: this is a cross-language wire contract with the Java Trino
+/// connector; new functions can be added without breaking the format.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub enum AggFunc {
+    /// `count(*)` (when `column` is `None`) or `count(col)` (non-null count).
+    Count,
+    /// `sum(col)`.
+    Sum,
+    /// `min(col)`.
+    Min,
+    /// `max(col)`.
+    Max,
+}
+
+/// One aggregate to compute server-side, plus the name of the partial output
+/// column it produces (issue #841).
+///
+/// `column` is `None` only for `count(*)`. For every other function, and for
+/// `count(col)`, `column` names the source column. `output` is the name of the
+/// Arrow column the partial value is emitted under.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct AggregateSpec {
+    /// Which aggregate to compute.
+    pub func: AggFunc,
+    /// Source column, or `None` for `count(*)`.
+    #[serde(default)]
+    pub column: Option<String>,
+    /// Name of the partial output column.
+    pub output: String,
+}
+
+/// A pushed-down aggregation: an optional `GROUP BY` plus one or more aggregates
+/// (issue #841).
+///
+/// When carried on a [`FlightTicket`], the server computes PARTIAL aggregates
+/// over the surviving (token-pruned, predicate-filtered, tombstone-reconciled,
+/// LWW-resolved) rows and emits one partial row per group instead of the full
+/// row set. The connector merges partials across ranges/nodes.
+///
+/// `#[non_exhaustive]`: this is a cross-language wire contract with the Java
+/// Trino connector.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Aggregation {
+    /// Grouping columns, in output order. Empty means a single global group.
+    #[serde(default)]
+    pub group_by: Vec<String>,
+    /// Aggregates to compute, in output order.
+    pub aggregates: Vec<AggregateSpec>,
+}
+
 /// The full description of one Flight scan.
 ///
 /// `#[non_exhaustive]`: the JSON form is the contract with the Java Trino
@@ -184,6 +245,11 @@ pub struct FlightTicket {
     /// [`Self::effective_filter`].
     #[serde(default)]
     pub filter: Option<PredicateExpr>,
+    /// Aggregation pushdown (issue #841). When `Some`, the producer computes
+    /// PARTIAL aggregates over the surviving rows and emits partial rows under
+    /// the partial schema instead of full rows. `None` keeps the row path.
+    #[serde(default)]
+    pub aggregation: Option<Aggregation>,
 }
 
 impl Default for FlightTicket {
@@ -200,6 +266,7 @@ impl Default for FlightTicket {
             columns: None,
             predicates: Vec::new(),
             filter: None,
+            aggregation: None,
         }
     }
 }
@@ -348,6 +415,7 @@ mod tests {
                 value: json!(10),
             }],
             filter: None,
+            aggregation: None,
         };
         let bytes = ticket.to_bytes().expect("serialize");
         let back = FlightTicket::from_bytes(&bytes).expect("parse");
@@ -523,6 +591,85 @@ mod tests {
             Some(PredicateExpr::IsNull { column: "c".into() }),
             "filter is authoritative; predicates ignored"
         );
+    }
+
+    // ---- Issue #841: aggregation pushdown wire format ----
+
+    /// The aggregation JSON shape the Java connector emits round-trips exactly:
+    /// variant-name `func`, `column: null` for `count(*)`, and ordered outputs.
+    #[test]
+    fn aggregation_json_shape_round_trips() {
+        let agg = Aggregation {
+            group_by: vec!["c1".into()],
+            aggregates: vec![
+                AggregateSpec {
+                    func: AggFunc::Count,
+                    column: None,
+                    output: "agg0".into(),
+                },
+                AggregateSpec {
+                    func: AggFunc::Count,
+                    column: Some("x".into()),
+                    output: "agg1".into(),
+                },
+                AggregateSpec {
+                    func: AggFunc::Sum,
+                    column: Some("x".into()),
+                    output: "agg2".into(),
+                },
+                AggregateSpec {
+                    func: AggFunc::Min,
+                    column: Some("x".into()),
+                    output: "agg3".into(),
+                },
+                AggregateSpec {
+                    func: AggFunc::Max,
+                    column: Some("x".into()),
+                    output: "agg4".into(),
+                },
+            ],
+        };
+        let expected = json!({
+            "group_by": ["c1"],
+            "aggregates": [
+                {"func": "Count", "column": null, "output": "agg0"},
+                {"func": "Count", "column": "x", "output": "agg1"},
+                {"func": "Sum", "column": "x", "output": "agg2"},
+                {"func": "Min", "column": "x", "output": "agg3"},
+                {"func": "Max", "column": "x", "output": "agg4"}
+            ]
+        });
+        assert_eq!(serde_json::to_value(&agg).unwrap(), expected);
+        let back: Aggregation = serde_json::from_value(expected).unwrap();
+        assert_eq!(back, agg);
+    }
+
+    /// A full ticket carrying an aggregation parses from its JSON bytes.
+    #[test]
+    fn ticket_with_aggregation_parses() {
+        let raw = json!({
+            "keyspace": "k", "table": "t",
+            "ddl": "CREATE TABLE k.t (id int PRIMARY KEY, x int)",
+            "aggregation": {
+                "group_by": [],
+                "aggregates": [{"func": "Count", "column": null, "output": "agg0"}]
+            }
+        })
+        .to_string();
+        let t = FlightTicket::from_bytes(raw.as_bytes()).expect("parse");
+        let agg = t.aggregation.as_ref().expect("aggregation present");
+        assert!(agg.group_by.is_empty());
+        assert_eq!(agg.aggregates.len(), 1);
+        assert_eq!(agg.aggregates[0].func, AggFunc::Count);
+        assert_eq!(agg.aggregates[0].column, None);
+        assert_eq!(agg.aggregates[0].output, "agg0");
+    }
+
+    /// A ticket without an `aggregation` field defaults it to `None`.
+    #[test]
+    fn absent_aggregation_defaults_to_none() {
+        let t = FlightTicket::from_bytes(&minimal_json()).expect("parse");
+        assert_eq!(t.aggregation, None);
     }
 
     fn ticket_with_range(start: Option<i64>, end: Option<i64>, wrap: bool) -> FlightTicket {

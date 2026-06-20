@@ -1,5 +1,8 @@
 package com.rustyrazorblade.cqlite.flight;
 
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
+import io.trino.spi.connector.Assignment;
 import io.trino.spi.connector.ColumnHandle;
 import io.trino.spi.connector.ColumnMetadata;
 import io.trino.spi.connector.ConnectorMetadata;
@@ -14,7 +17,12 @@ import io.trino.spi.expression.Call;
 import io.trino.spi.expression.ConnectorExpression;
 import io.trino.spi.expression.Constant;
 import io.trino.spi.expression.StandardFunctions;
+import io.trino.spi.expression.Variable;
+import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
+import io.trino.spi.type.DoubleType;
+import io.trino.spi.type.IntegerType;
+import io.trino.spi.type.Type;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
 
@@ -100,6 +108,15 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
     public Optional<ConstraintApplicationResult<ConnectorTableHandle>> applyFilter(
             ConnectorSession session, ConnectorTableHandle handle, Constraint constraint) {
         CqliteFlightTableHandle table = (CqliteFlightTableHandle) handle;
+
+        // Never push a filter onto an already-aggregated handle: the predicate
+        // would apply to aggregate OUTPUTS (HAVING-style), which the server cannot
+        // evaluate, and rebuilding the handle here would also drop its aggregation
+        // state. Trino keeps such filters above the scan.
+        if (table.isAggregated()) {
+            return Optional.empty();
+        }
+
         ConnectorExpression expression = constraint.getExpression();
 
         PredicateTreeTranslator.Result result =
@@ -175,6 +192,258 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         return new Call(BooleanType.BOOLEAN, StandardFunctions.AND_FUNCTION_NAME, List.copyOf(residual));
     }
 
+    /**
+     * Push {@code count}/{@code sum}/{@code min}/{@code max}/{@code avg} and a
+     * simple {@code GROUP BY} down to the cqlite-flight server (issue #841).
+     *
+     * <p>Trino does NOT re-aggregate across splits: {@code PushAggregationIntoTableScan}
+     * rewrites the plan to {@code Project(TableScan)} and removes the
+     * {@code AggregationNode}. So this connector must return the FULLY MERGED result.
+     * We carry an {@link AggregationSpec} on the handle; for an aggregated handle the
+     * split manager emits ONE finalize split that fans out to all token ranges, pulls
+     * each range's PARTIAL aggregate, merges, and emits the final row(s).
+     *
+     * <p>Supported: {@code count(*)}, {@code count(col)}, {@code sum(col)},
+     * {@code min(col)}, {@code max(col)}, {@code avg(col)} — simple aggregates with a
+     * single {@link Variable} argument (or no argument for {@code count(*)}), no
+     * DISTINCT, no filter, no ordering, no expression args, exactly one grouping set,
+     * grouping columns must be plain column handles. {@code avg(x)} is decomposed
+     * into server {@code Sum(x)} + {@code Count(x)} and combined connector-side. If
+     * ANY aggregate or the grouping is unsupported, returns {@link Optional#empty()}
+     * (Trino aggregates locally — the correct fallback).
+     *
+     * <p>The returned {@link AggregationApplicationResult} follows the trino-spi 481
+     * contract: {@code projections} aligns 1:1 with the input {@code aggregates};
+     * {@code assignments} declares every new scan output (aggregate result columns
+     * and grouping columns) with its Trino result type; {@code groupingColumnMapping}
+     * maps each original grouping {@link ColumnHandle} to its new handle.
+     */
+    @Override
+    public Optional<AggregationApplicationResult<ConnectorTableHandle>> applyAggregation(
+            ConnectorSession session,
+            ConnectorTableHandle handle,
+            List<AggregateFunction> aggregates,
+            Map<String, ColumnHandle> assignments,
+            List<List<ColumnHandle>> groupingSets) {
+        CqliteFlightTableHandle table = (CqliteFlightTableHandle) handle;
+
+        // Already aggregated? Decline — we do not support stacking aggregations.
+        if (table.isAggregated()) {
+            return Optional.empty();
+        }
+
+        // Exactly one grouping set (no ROLLUP/CUBE/GROUPING SETS).
+        if (groupingSets.size() != 1) {
+            return Optional.empty();
+        }
+        List<ColumnHandle> groupingSet = groupingSets.get(0);
+
+        // Grouping columns must be plain column handles (projectable).
+        List<CqliteFlightColumnHandle> groupingColumns = new ArrayList<>();
+        java.util.Set<String> groupByNameSet = new java.util.HashSet<>();
+        for (ColumnHandle gc : groupingSet) {
+            if (!(gc instanceof CqliteFlightColumnHandle col)) {
+                return Optional.empty();
+            }
+            // Decline GROUP BY on float/double: non-finite keys (NaN/±Inf) do not
+            // have well-defined SQL grouping/round-trip semantics here, so leave
+            // such grouping to Trino. (Grouping on float is rare.)
+            if (col.type() instanceof io.trino.spi.type.RealType
+                    || col.type() instanceof DoubleType) {
+                return Optional.empty();
+            }
+            groupingColumns.add(col);
+            groupByNameSet.add(col.name());
+        }
+
+        // Translate each Trino aggregate into one or more server partial aggregates,
+        // assigning deterministic output names (agg0, agg1, ...) that are kept
+        // DISTINCT from the grouping column names — both share one Arrow partial
+        // schema and are looked up by name in the finalize plan, so a real column
+        // literally named "agg0" used in GROUP BY must not collide.
+        List<AggregationSpec.Aggregate> serverAggregates = new ArrayList<>();
+        List<Assignment> assignmentList = new ArrayList<>();
+        List<ConnectorExpression> projections = new ArrayList<>();
+        List<FinalizeAggregationPlan.OutputColumn> outputPlan = new ArrayList<>();
+        int[] outputCounter = {0};
+
+        for (AggregateFunction aggregate : aggregates) {
+            // No DISTINCT, no FILTER, no ORDER BY inside the aggregate.
+            if (aggregate.isDistinct() || aggregate.getFilter().isPresent()
+                    || !aggregate.getSortItems().isEmpty()) {
+                return Optional.empty();
+            }
+
+            String func = aggregate.getFunctionName().toLowerCase(java.util.Locale.ROOT);
+            List<ConnectorExpression> args = aggregate.getArguments();
+            Type outputType = aggregate.getOutputType();
+
+            // Resolve the single column argument (or none for count(*)).
+            Optional<CqliteFlightColumnHandle> arg = singleColumnArg(args, assignments);
+            boolean noArg = args.isEmpty();
+            if (!noArg && arg.isEmpty()) {
+                return Optional.empty(); // expression arg, multiple args, etc. — unsupported
+            }
+
+            switch (func) {
+                case "count" -> {
+                    // count(*) needs nothing (null column on the wire); count(col) is a
+                    // non-null count — the column just needs to exist.
+                    String column = noArg ? null : arg.get().name();
+                    String out = nextOutput(outputCounter, groupByNameSet);
+                    serverAggregates.add(new AggregationSpec.Aggregate(
+                            AggregationSpec.Func.Count, column, out));
+                    addResult(out, BigintType.BIGINT, assignmentList, projections);
+                    outputPlan.add(new FinalizeAggregationPlan.OutputColumn(
+                            out, FinalizeAggregationPlan.Kind.DIRECT, out, null));
+                }
+                case "sum" -> {
+                    if (arg.isEmpty() || !supportsValueAggregate(arg.get())) {
+                        return Optional.empty();
+                    }
+                    String out = nextOutput(outputCounter, groupByNameSet);
+                    serverAggregates.add(new AggregationSpec.Aggregate(
+                            AggregationSpec.Func.Sum, arg.get().name(), out));
+                    addResult(out, outputType, assignmentList, projections);
+                    outputPlan.add(new FinalizeAggregationPlan.OutputColumn(
+                            out, FinalizeAggregationPlan.Kind.DIRECT, out, null));
+                }
+                case "min", "max" -> {
+                    if (arg.isEmpty() || !supportsValueAggregate(arg.get())) {
+                        return Optional.empty();
+                    }
+                    // Decline float/double min/max: NaN ordering is subtle and must
+                    // match Trino exactly; rather than risk an order-dependent result
+                    // we leave these to Trino. Integer/text/etc. min/max still push.
+                    Type argType = arg.get().type();
+                    if (argType instanceof io.trino.spi.type.RealType
+                            || argType instanceof io.trino.spi.type.DoubleType) {
+                        return Optional.empty();
+                    }
+                    AggregationSpec.Func f = func.equals("min")
+                            ? AggregationSpec.Func.Min : AggregationSpec.Func.Max;
+                    String out = nextOutput(outputCounter, groupByNameSet);
+                    serverAggregates.add(new AggregationSpec.Aggregate(f, arg.get().name(), out));
+                    addResult(out, outputType, assignmentList, projections);
+                    outputPlan.add(new FinalizeAggregationPlan.OutputColumn(
+                            out, FinalizeAggregationPlan.Kind.DIRECT, out, null));
+                }
+                case "avg" -> {
+                    if (arg.isEmpty() || !supportsValueAggregate(arg.get())) {
+                        return Optional.empty();
+                    }
+                    // Decline avg() on integer columns: its partial Sum uses checked
+                    // i64 (to match Trino's sum(bigint) overflow), but Trino's avg
+                    // accumulates in 128-bit and never overflows — so a pushed
+                    // integer avg could fail a query Trino would answer. Float/double
+                    // avg sums in f64 (no overflow), so it still pushes. See #897.
+                    Type avgType = arg.get().type();
+                    if (avgType instanceof BigintType || avgType instanceof IntegerType
+                            || avgType instanceof io.trino.spi.type.SmallintType
+                            || avgType instanceof io.trino.spi.type.TinyintType) {
+                        return Optional.empty();
+                    }
+                    // avg(x) -> server Sum(x) + Count(x); combined connector-side as
+                    // ΣSum/ΣCount. The connector emits ONE merged DOUBLE result column
+                    // named by sumOut (the pair's first output); Trino references that.
+                    String sumOut = nextOutput(outputCounter, groupByNameSet);
+                    String countOut = nextOutput(outputCounter, groupByNameSet);
+                    serverAggregates.add(new AggregationSpec.Aggregate(
+                            AggregationSpec.Func.Sum, arg.get().name(), sumOut));
+                    serverAggregates.add(new AggregationSpec.Aggregate(
+                            AggregationSpec.Func.Count, arg.get().name(), countOut));
+                    addResult(sumOut, DoubleType.DOUBLE, assignmentList, projections);
+                    outputPlan.add(new FinalizeAggregationPlan.OutputColumn(
+                            sumOut, FinalizeAggregationPlan.Kind.AVG, sumOut, countOut));
+                }
+                default -> {
+                    return Optional.empty(); // unsupported aggregate function
+                }
+            }
+        }
+
+        // Grouping columns pass through. They are threaded ONLY via
+        // groupingColumnMapping (original handle -> new handle) — NOT added to
+        // `assignments`, which is reserved for the new aggregate-result variables.
+        // Adding a grouping column here too would make Trino's symbol<->handle
+        // BiMap see the same ColumnHandle under two symbols ("Multiple entries
+        // with same value"). The finalize page source still emits a block per
+        // grouping column via the GROUP entries in the finalize plan.
+        Map<ColumnHandle, ColumnHandle> groupingColumnMapping = new LinkedHashMap<>();
+        List<String> groupByNames = new ArrayList<>();
+        for (CqliteFlightColumnHandle col : groupingColumns) {
+            groupByNames.add(col.name());
+            // Passthrough: the grouping column's handle is unchanged in the result.
+            groupingColumnMapping.put(col, col);
+            outputPlan.add(new FinalizeAggregationPlan.OutputColumn(
+                    col.name(), FinalizeAggregationPlan.Kind.GROUP, col.name(), null));
+        }
+
+        AggregationSpec spec = new AggregationSpec(groupByNames, serverAggregates);
+        String aggregationJson = serialize(spec.toJson(MAPPER));
+        FinalizeAggregationPlan plan = new FinalizeAggregationPlan(groupByNames, outputPlan);
+        String finalizePlanJson = serialize(plan.toJson(MAPPER));
+
+        CqliteFlightTableHandle newHandle = new CqliteFlightTableHandle(
+                table.keyspace(), table.table(), table.ddl(),
+                table.filterJson(), Optional.of(aggregationJson), Optional.of(finalizePlanJson));
+
+        return Optional.of(new AggregationApplicationResult<>(
+                newHandle,
+                projections,
+                assignmentList,
+                groupingColumnMapping,
+                false));
+    }
+
+    /**
+     * Generate the next deterministic aggregate output name (agg0, agg1, ...),
+     * skipping any name that collides with a grouping column — both share the
+     * partial Arrow schema and are resolved by name in the finalize plan.
+     */
+    private static String nextOutput(int[] counter, java.util.Set<String> reserved) {
+        String name;
+        do {
+            name = "agg" + (counter[0]++);
+        } while (reserved.contains(name));
+        return name;
+    }
+
+    /**
+     * Resolve an aggregate's single {@link Variable} argument to its column handle.
+     * Returns empty if there is not exactly one argument, the argument is not a bare
+     * Variable, or the variable does not resolve to a {@link CqliteFlightColumnHandle}.
+     */
+    private static Optional<CqliteFlightColumnHandle> singleColumnArg(
+            List<ConnectorExpression> args, Map<String, ColumnHandle> assignments) {
+        if (args.size() != 1) {
+            return Optional.empty();
+        }
+        if (!(args.get(0) instanceof Variable v)) {
+            return Optional.empty();
+        }
+        ColumnHandle ch = assignments.get(v.getName());
+        if (ch instanceof CqliteFlightColumnHandle col) {
+            return Optional.of(col);
+        }
+        return Optional.empty();
+    }
+
+    /**
+     * Sum/min/max/avg need the server to compare/accumulate values, which requires a
+     * fully-pushable column (FULL capability). count only needs the column to exist.
+     */
+    private static boolean supportsValueAggregate(CqliteFlightColumnHandle col) {
+        return col.capability() == PushdownCapability.FULL;
+    }
+
+    /** Record one aggregate result column: its assignment and its projection Variable. */
+    private static void addResult(
+            String output, Type type, List<Assignment> assignments, List<ConnectorExpression> projections) {
+        assignments.add(new Assignment(output, new CqliteFlightColumnHandle(output, type), type));
+        projections.add(new Variable(output, type));
+    }
+
     @Override
     public Map<String, ColumnHandle> getColumnHandles(ConnectorSession session, ConnectorTableHandle table) {
         Schema schema = arrowSchema((CqliteFlightTableHandle) table);
@@ -213,7 +482,7 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
         byte[] ticket = FlightTicketJson.build(
                 handle.keyspace(), handle.table(), handle.ddl(),
                 Optional.empty(), Optional.empty(), Optional.empty(), false,
-                Optional.empty(), List.of(), null);
+                Optional.empty(), List.of(), null, null);
         return flight.getSchema(node.address(), config.flightPort(), ticket);
     }
 }

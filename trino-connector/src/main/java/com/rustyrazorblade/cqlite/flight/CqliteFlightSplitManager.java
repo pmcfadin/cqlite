@@ -39,9 +39,25 @@ public class CqliteFlightSplitManager implements ConnectorSplitManager {
             Constraint constraint) {
         CqliteFlightTableHandle handle = (CqliteFlightTableHandle) table;
         TokenRangeReplicasResponse replicas = sidecar.tokenRangeReplicas(handle.keyspace());
-        List<CqliteFlightSplit> splits =
+        List<CqliteFlightSplit> ranges =
                 buildSplits(handle, replicas, config.localDatacenter(), config.flightPort());
-        return new FixedSplitSource(splits);
+
+        // Aggregated handle: Trino does not re-aggregate across splits, so return
+        // ONE finalize split carrying all range→replica assignments. Its PageSource
+        // fans out, pulls each range's partial, merges, and emits the final rows.
+        if (handle.isAggregated()) {
+            CqliteFlightAggregateSplit finalize = new CqliteFlightAggregateSplit(
+                    handle.keyspace(),
+                    handle.table(),
+                    handle.ddl(),
+                    ranges,
+                    handle.filterJson(),
+                    handle.aggregationJson().orElseThrow(),
+                    handle.finalizePlanJson().orElseThrow());
+            return new FixedSplitSource(List.of(finalize));
+        }
+
+        return new FixedSplitSource(ranges);
     }
 
     /**
