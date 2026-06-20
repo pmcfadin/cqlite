@@ -1414,6 +1414,14 @@ impl KWayMerger {
             RowData::Tombstone { .. } => vec![CellOperation::DeleteRow],
         };
 
+        // NOTE (follow-up #873): the rewritten row tombstone's
+        // local_deletion_time is left None here, so the writer derives it from
+        // `entry.timestamp`. The source SSTable's localDeletionTime is not yet
+        // preserved through compaction because it is dropped upstream
+        // (`value_to_row_data` builds `RowData::Tombstone { local_deletion_time: 0 }`
+        // since `TombstoneInfo` carries no LDT). Threading it end-to-end —
+        // including a guard against negative row-tombstone LDT deltas — is
+        // tracked in #873.
         Ok(Mutation::new(
             table_id,
             partition_key,
