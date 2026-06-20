@@ -1371,7 +1371,7 @@ impl DataWriter {
         }
 
         // Write cell data for static columns only
-        self.write_static_cells(&mut body, static_ops, schema)?;
+        self.write_static_cells(&mut body, static_ops, liveness_ts, schema)?;
 
         Ok(body)
     }
@@ -1416,6 +1416,7 @@ impl DataWriter {
         &self,
         buf: &mut Vec<u8>,
         static_ops: &[StaticMergedOp],
+        liveness_ts: i64,
         schema: &TableSchema,
     ) -> Result<()> {
         // Get set of static column names for validation
@@ -1431,7 +1432,16 @@ impl DataWriter {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
                     // Only write if it's a static column
                     if static_column_names.contains(column) && !matches!(value, Value::Null) {
-                        self.write_cell(buf, column, value, mop.timestamp_micros)?;
+                        // Issue #764: mirror the regular-row path — only borrow the
+                        // row liveness timestamp (CELL_USE_ROW_TIMESTAMP) when this
+                        // op actually originated at that timestamp; otherwise write
+                        // the cell's own timestamp so an older surviving static write
+                        // is not promoted to a newer mutation's timestamp.
+                        if mop.timestamp_micros == liveness_ts {
+                            self.write_cell(buf, column, value, mop.timestamp_micros)?;
+                        } else {
+                            self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
+                        }
                     }
                 }
                 crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
