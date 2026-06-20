@@ -336,7 +336,7 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
                     // i64 (to match Trino's sum(bigint) overflow), but Trino's avg
                     // accumulates in 128-bit and never overflows — so a pushed
                     // integer avg could fail a query Trino would answer. Float/double
-                    // avg sums in f64 (no overflow), so it still pushes. See #897.
+                    // avg sums in f64 (no overflow), so it still pushes. See #902.
                     Type avgType = arg.get().type();
                     if (avgType instanceof BigintType || avgType instanceof IntegerType
                             || avgType instanceof io.trino.spi.type.SmallintType
