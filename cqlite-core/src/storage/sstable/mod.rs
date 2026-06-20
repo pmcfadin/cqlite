@@ -1037,6 +1037,135 @@ impl SSTableManager {
         Ok(merged)
     }
 
+    /// Metadata-aware sibling of [`merge_generations_for_read`](Self::merge_generations_for_read)
+    /// for the `WRITETIME(col)` / `TTL(col)` projection path (Issue #885).
+    ///
+    /// Reconciles multiple SSTable generations into the authoritative live-row set
+    /// with the same [`KWayMerger`](crate::storage::write_engine::KWayMerger)
+    /// (per-cell LWW + row/cell tombstone shadowing), and additionally surfaces the
+    /// **winning** cell's per-cell write metadata in the
+    /// [`CellWriteMetadata`](crate::types::CellWriteMetadata) shape
+    /// `scan_with_cell_metadata` returns:
+    ///
+    /// - `write_timestamp_micros` comes straight from the winning `CellData`
+    ///   (`reconcile_cluster` keeps each surviving cell's own timestamp), so it is
+    ///   the WRITETIME of the cell that actually won cross-generation LWW — not an
+    ///   arbitrary generation's.
+    /// - `expiration` (TTL) is recovered best-effort from the per-reader
+    ///   `scan_with_cell_metadata` outputs: the merger's compaction iterator does
+    ///   not carry per-cell TTL, so for each surviving `(key, column)` we take the
+    ///   newest reader-surfaced metadata and attach its expiration only when its
+    ///   timestamp matches the merge winner. Absent/mismatched ⇒ `None` (no TTL),
+    ///   which is the same answer the plain read gives for a cell without TTL.
+    ///
+    /// Requires a schema and the `write-support` feature; callers fall back to
+    /// per-reader concatenation when either is unavailable.
+    #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
+    async fn merge_generations_for_read_with_metadata(
+        &self,
+        reader_list: &[Arc<reader::SSTableReader>],
+        schema: &crate::schema::TableSchema,
+        limit: Option<usize>,
+    ) -> Result<Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>> {
+        use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
+        use crate::types::TableId as CqlTableId;
+
+        // Best-effort TTL source: gather each reader's own per-cell metadata and
+        // keep, per (row-key bytes, column), the entry with the newest write
+        // timestamp. The merger surfaces accurate WRITETIME but no TTL, so this
+        // recovers expiration for the winning cell when the reader format carries
+        // it (V5CompressedLegacy / BTI). Keyed by raw key bytes so it lines up with
+        // the merger's `DecoratedKey` partition bytes.
+        let table_id = CqlTableId::from(format!("{}.{}", schema.keyspace, schema.table).as_str());
+        let mut ttl_lookup: HashMap<(Vec<u8>, String), CellWriteMetadata> = HashMap::new();
+        for reader in reader_list {
+            let per_reader = reader
+                .scan_with_cell_metadata(&table_id, None, None, None, Some(schema))
+                .await?;
+            for (row_key, _value, meta) in per_reader {
+                for (column, cell_meta) in meta {
+                    ttl_lookup
+                        .entry((row_key.0.clone(), column))
+                        .and_modify(|existing| {
+                            if cell_meta.write_timestamp_micros > existing.write_timestamp_micros {
+                                *existing = cell_meta.clone();
+                            }
+                        })
+                        .or_insert(cell_meta);
+                }
+            }
+        }
+
+        // Drive the authoritative merge (newest → oldest), mirroring the plain
+        // `merge_generations_for_read` path, but keep each winning cell's timestamp.
+        let mut ordered: Vec<&Arc<reader::SSTableReader>> = reader_list.iter().collect();
+        ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
+        let paths: Vec<PathBuf> = ordered.iter().map(|r| r.file_path.clone()).collect();
+        let merge_schema = schema.clone();
+
+        // Returns (key bytes, Value::Map, [(column, write_timestamp_micros)]).
+        type MergedRow = (Vec<u8>, Value, Vec<(String, i64)>);
+        let merged_rows = tokio::task::spawn_blocking(move || -> Result<Vec<MergedRow>> {
+            let mut merger = KWayMerger::new(paths, &merge_schema)?;
+            let mut out = Vec::new();
+            while let MergeStep::Partition { key, rows } = merger.step()? {
+                for entry in rows {
+                    if let RowData::Live { cells } = entry.row_data {
+                        let mut map: Vec<(Value, Value)> = Vec::with_capacity(cells.len());
+                        let mut timestamps: Vec<(String, i64)> = Vec::with_capacity(cells.len());
+                        for c in cells {
+                            // Drop cell tombstones: a deleted column is absent.
+                            if matches!(c.value, Value::Tombstone(_)) {
+                                continue;
+                            }
+                            timestamps.push((c.column.clone(), c.timestamp));
+                            map.push((Value::Text(c.column), c.value));
+                        }
+                        if !map.is_empty() {
+                            out.push((key.key.clone(), Value::Map(map), timestamps));
+                        }
+                    }
+                    // Row tombstones suppress the row entirely (no emission).
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| {
+            crate::Error::Storage(format!("cross-generation metadata merge task: {e}"))
+        })??;
+
+        // Attach per-cell metadata: WRITETIME from the merge winner, TTL recovered
+        // from the reader lookup only when its timestamp matches the winner.
+        let mut results: Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)> =
+            Vec::with_capacity(merged_rows.len());
+        for (key_bytes, value, timestamps) in merged_rows {
+            let mut meta_map: HashMap<String, CellWriteMetadata> =
+                HashMap::with_capacity(timestamps.len());
+            for (column, write_ts) in timestamps {
+                let expiration = ttl_lookup
+                    .get(&(key_bytes.clone(), column.clone()))
+                    .filter(|m| m.write_timestamp_micros == write_ts)
+                    .and_then(|m| m.expiration.clone());
+                meta_map.insert(
+                    column,
+                    CellWriteMetadata {
+                        write_timestamp_micros: write_ts,
+                        expiration,
+                    },
+                );
+            }
+            results.push((RowKey(key_bytes), value, meta_map));
+        }
+
+        // Match the plain-scan contract: sort by key bytes, then apply LIMIT.
+        results.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some(limit) = limit {
+            results.truncate(limit);
+        }
+        Ok(results)
+    }
+
     /// Scan a table and return per-cell write metadata alongside row values.
     ///
     /// Used when `ProjectionFlags::include_cell_metadata` is set (issue #693 — the
@@ -1070,6 +1199,35 @@ impl SSTableManager {
         };
 
         if let Some(reader_list) = readers {
+            // Issue #885: the metadata path (WRITETIME/TTL projection) must
+            // reconcile across SSTable generations exactly like the plain `scan`
+            // path (#883) — otherwise a multi-generation directory returns
+            // duplicate rows and resurrects rows/cells deleted in a later
+            // generation. Drive the same authoritative k-way merger, then surface
+            // the WINNING cell's per-cell write timestamp / TTL (write-support
+            // only; requires schema). Single-generation reads skip this entirely.
+            #[cfg(feature = "write-support")]
+            if reader_list.len() > 1 {
+                if let Some(schema) = schema {
+                    match self
+                        .merge_generations_for_read_with_metadata(reader_list, schema, limit)
+                        .await
+                    {
+                        Ok(merged) => return Ok(merged),
+                        Err(e) => {
+                            // Never fail a read because the merge path hit an
+                            // unsupported format; fall back to concatenation.
+                            log::warn!(
+                                "SSTableManager::scan_with_cell_metadata - cross-generation merge \
+                                 failed for '{}' ({}); falling back to per-reader concatenation",
+                                table_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             let mut all_results = Vec::new();
 
             for reader in reader_list {
