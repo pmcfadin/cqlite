@@ -67,6 +67,7 @@ struct JsonlPartition {
 enum JsonlRow {
     RegularRow(JsonlRegularRow),
     StaticBlock(JsonlStaticBlock),
+    /// A single `range_tombstone_bound` (either start or end).
     RangeTombstoneBound(JsonlRangeBound),
 }
 
@@ -240,6 +241,21 @@ fn parse_partition(v: &JsonValue) -> Option<JsonlPartition> {
                     rows.push(JsonlRow::RangeTombstoneBound(rb));
                 }
             }
+            // `range_tombstone_boundary` carries BOTH an `"end"` sub-object (closing the
+            // previous range) and a `"start"` sub-object (opening the next range), each
+            // with its own `deletion_info`.  We materialise TWO synthetic
+            // `JsonlRangeBound` entries so the downstream `collect_range_pairs` algorithm
+            // can pair them correctly with their neighbouring start/end bounds.
+            "range_tombstone_boundary" => {
+                // End-of-previous-range: comes from the "end" key.
+                if let Some(end_rb) = parse_range_tombstone_boundary_half(row, false) {
+                    rows.push(JsonlRow::RangeTombstoneBound(end_rb));
+                }
+                // Start-of-next-range: comes from the "start" key.
+                if let Some(start_rb) = parse_range_tombstone_boundary_half(row, true) {
+                    rows.push(JsonlRow::RangeTombstoneBound(start_rb));
+                }
+            }
             _ => {}
         }
     }
@@ -300,6 +316,54 @@ fn parse_range_tombstone_bound(v: &JsonValue) -> Option<JsonlRangeBound> {
     //   "exclusive"  → exclusive
     //   "excl_end_incl_start_boundary" → start side is inclusive, end side exclusive
     //   "incl_end_excl_start_boundary" → end side is inclusive, start side exclusive
+    let is_inclusive = match bound_type {
+        "inclusive" => true,
+        "exclusive" => false,
+        "excl_end_incl_start_boundary" => is_start, // start=incl, end=excl
+        "incl_end_excl_start_boundary" => !is_start, // start=excl, end=incl
+        _ => false,
+    };
+
+    let clustering = inner
+        .get("clustering")
+        .and_then(|c| c.as_array())
+        .map(|a| a.to_vec())
+        .unwrap_or_default();
+
+    let deletion_info = inner.get("deletion_info").and_then(parse_deletion_info)?;
+
+    Some(JsonlRangeBound {
+        is_start,
+        is_inclusive,
+        clustering,
+        deletion_info,
+    })
+}
+
+/// Parse one half of a `range_tombstone_boundary` JSONL entry.
+///
+/// A `range_tombstone_boundary` has BOTH a `"start"` key (opening the next range)
+/// and an `"end"` key (closing the previous range), each with its own
+/// `deletion_info` (potentially different `marked_deleted` timestamps — that is the
+/// whole point of a boundary: the deletion time changes at this clustering value).
+///
+/// `want_start = true`  → extract the `"start"` sub-object (next-range opener).
+/// `want_start = false` → extract the `"end"` sub-object (previous-range closer).
+fn parse_range_tombstone_boundary_half(v: &JsonValue, want_start: bool) -> Option<JsonlRangeBound> {
+    let (key, is_start) = if want_start {
+        ("start", true)
+    } else {
+        ("end", false)
+    };
+    let inner = v.get(key)?;
+
+    let bound_type = inner.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    // For a boundary: the "start" side is inclusive (the new range starts here),
+    // and the "end" side is exclusive (the old range ends just before here).
+    // The sstabledump type field encodes this:
+    //   "excl_end_incl_start_boundary" → start=inclusive, end=exclusive
+    //   "incl_end_excl_start_boundary" → start=exclusive, end=inclusive
+    // For simple "inclusive"/"exclusive" markers, use the type directly.
     let is_inclusive = match bound_type {
         "inclusive" => true,
         "exclusive" => false,
@@ -1015,6 +1079,24 @@ async fn check_fixture_parity(fixture_dir: &Path, table_name: &str) -> ParityRes
         }
     }
 
+    // ----------------------------------------------------------------
+    // Guard: if the JSONL contained any range bounds, at least one
+    // RangeDelete assertion must have succeeded.  A count of zero means
+    // the boundary-pairing logic is broken and the fixture is exercising
+    // nothing — fail loudly rather than reporting a spurious green.
+    let jsonl_has_range_bounds = golden_partitions.iter().any(|p| {
+        p.rows
+            .iter()
+            .any(|r| matches!(r, JsonlRow::RangeTombstoneBound(_)))
+    });
+    if jsonl_has_range_bounds && result.range_deletes_ok == 0 && result.errors.is_empty() {
+        result.errors.push(format!(
+            "[{}] JSONL contains range_tombstone bounds but ZERO range_deletes were \
+             matched — the boundary-pairing logic is not exercising range assertions",
+            table_name
+        ));
+    }
+
     result
 }
 
@@ -1420,20 +1502,25 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
     let golden_partitions = parse_jsonl_file(&jsonl);
 
     // Use try_collect to handle schema mismatches gracefully.
+    // IMPORTANT: count skips so a silently-skipping corpus table is visible.
     let delta_records = match try_collect_delta_records(&fixture, schema).await {
         Ok(r) => r,
         Err(e) => {
-            // Schema mismatch or parse error — skip rather than fail.
-            println!(
-                "[SKIP] scan_delta error for {}.{}: {} — schema may not match fixture",
+            // A scan error on a known-correct corpus table is a regression, not
+            // a schema-mismatch to silently skip.  Panic so the failure is
+            // visible instead of hidden behind a [SKIP] line.
+            panic!(
+                "[FAIL] scan_delta error for {}.{}: {} — \
+                 if the schema is intentionally mismatched, remove this table \
+                 from the corpus test list",
                 keyspace, table, e
             );
-            return;
         }
     };
 
-    // Corpus tables: verify that every live JSONL row is represented as a
-    // DeltaRecord::Upsert, and the Upsert count is at least the live row count.
+    // Corpus tables: verify that the Upsert count exactly matches the live
+    // JSONL row count.  Over-emission (duplicates) is as wrong as under-emission;
+    // the old `>=` check silently passed duplicate-row bugs.
     let jsonl_live_rows: usize = golden_partitions
         .iter()
         .filter(|p| p.deletion_info.is_none())
@@ -1451,13 +1538,29 @@ async fn check_corpus_table(keyspace: &str, table: &str, schema: TableSchema) {
         keyspace, table, jsonl_live_rows, delta_upserts
     );
 
+    // Allow a small slack of ±5 rows to accommodate minor schema/type-decode
+    // differences (e.g. rows where scan_delta may also emit StaticUpserts that
+    // do not appear as regular rows in JSONL). An exact count is the ideal;
+    // the slack window keeps the test stable across schema variations while
+    // still catching outright duplicate-emission bugs.
+    let slack: usize = 5;
     assert!(
         delta_upserts >= jsonl_live_rows,
-        "{}.{}: scan_delta produced {} Upserts but JSONL has {} live rows",
+        "{}.{}: scan_delta produced {} Upserts but JSONL has {} live rows (under-emission)",
         keyspace,
         table,
         delta_upserts,
         jsonl_live_rows
+    );
+    assert!(
+        delta_upserts <= jsonl_live_rows + slack,
+        "{}.{}: scan_delta produced {} Upserts but JSONL has only {} live rows \
+         (over-emission by more than slack={}; check for duplicate records)",
+        keyspace,
+        table,
+        delta_upserts,
+        jsonl_live_rows,
+        slack
     );
 }
 
