@@ -32,7 +32,29 @@ public final class ArrowTypeMapper {
     private static final String EXTENSION_KEY = "ARROW:extension:name";
     private static final String UUID_EXTENSION = "arrow.uuid";
 
+    /** Metadata key the server uses to declare a column's pushdown capability. */
+    private static final String PUSHDOWN_KEY = "cqlite:pushdown";
+
     private ArrowTypeMapper() {}
+
+    /**
+     * Resolve a column's {@link PushdownCapability} from the server-declared
+     * {@code cqlite:pushdown} field metadata ({@code "full"}/{@code "equality"}/
+     * {@code "none"}). Defaults to {@link PushdownCapability#NONE} when the key is
+     * absent or carries an unrecognized value — the safe default, since NONE only
+     * ever leaves predicates as a (correct) Trino residual.
+     */
+    public static PushdownCapability capabilityOf(Field field) {
+        String value = field.getMetadata().get(PUSHDOWN_KEY);
+        if (value == null) {
+            return PushdownCapability.NONE;
+        }
+        return switch (value) {
+            case "full" -> PushdownCapability.FULL;
+            case "equality" -> PushdownCapability.EQUALITY;
+            default -> PushdownCapability.NONE;
+        };
+    }
 
     /** Map one Arrow field to a Trino {@link Type}. */
     public static Type toTrino(Field field) {

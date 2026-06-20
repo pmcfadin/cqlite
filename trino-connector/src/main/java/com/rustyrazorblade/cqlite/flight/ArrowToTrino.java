@@ -87,6 +87,64 @@ public final class ArrowToTrino {
         }
     }
 
+    /**
+     * Read one Arrow value as a plain Java object for connector-side aggregation
+     * merging (issue #841). The caller must have already checked {@code !isNull(i)}.
+     *
+     * <p>Returns: {@code Boolean}; {@code Long} for any integer width (so Count/Sum
+     * partials and integer group keys all share one numeric path); {@code Float}/
+     * {@code Double} for floating point; {@code String} for VARCHAR-shaped vectors
+     * (text/inet, and uuid rendered canonically); {@code byte[]} for binary;
+     * {@code Long} (epoch-day) for DATE and (epoch-milli) for TIMESTAMP. These types
+     * round-trip back through {@link #writeJavaValue}.
+     */
+    public static Object readJavaValue(FieldVector vector, int i) {
+        return switch (vector) {
+            case BitVector v -> v.get(i) != 0;
+            case TinyIntVector v -> (long) v.get(i);
+            case SmallIntVector v -> (long) v.get(i);
+            case IntVector v -> (long) v.get(i);
+            case BigIntVector v -> v.get(i);
+            case DateDayVector v -> (long) v.get(i);
+            case TimeStampVector v -> v.get(i);
+            case Float4Vector v -> v.get(i);
+            case Float8Vector v -> v.get(i);
+            case VarCharVector v -> new String(v.get(i), java.nio.charset.StandardCharsets.UTF_8);
+            case LargeVarCharVector v -> new String(v.get(i), java.nio.charset.StandardCharsets.UTF_8);
+            case FixedSizeBinaryVector v -> formatUuid(v.getObject(i));
+            case VarBinaryVector v -> v.get(i);
+            default -> throw new UnsupportedOperationException(
+                    "Cannot read Arrow vector " + vector.getClass().getSimpleName() + " for aggregation");
+        };
+    }
+
+    /**
+     * Write a merged Java value (from {@link #readJavaValue} or computed avg) into a
+     * Trino {@link BlockBuilder} of the given result {@code type}. Numeric widening
+     * is tolerated (e.g. a {@code Long} sum into a DOUBLE column for avg).
+     */
+    public static void writeJavaValue(Type type, Object value, BlockBuilder builder) {
+        switch (type) {
+            case BooleanType t -> t.writeBoolean(builder, (Boolean) value);
+            case TinyintType t -> t.writeLong(builder, ((Number) value).longValue());
+            case SmallintType t -> t.writeLong(builder, ((Number) value).longValue());
+            case IntegerType t -> t.writeLong(builder, ((Number) value).longValue());
+            case DateType t -> t.writeLong(builder, ((Number) value).longValue());
+            case BigintType t -> t.writeLong(builder, ((Number) value).longValue());
+            case RealType t -> t.writeLong(builder,
+                    Float.floatToRawIntBits(((Number) value).floatValue()));
+            case DoubleType t -> t.writeDouble(builder, ((Number) value).doubleValue());
+            case TimestampWithTimeZoneType t -> t.writeLong(builder,
+                    DateTimeEncoding.packDateTimeWithZone(((Number) value).longValue(), TimeZoneKey.UTC_KEY));
+            case VarcharType t -> t.writeSlice(builder, value instanceof byte[] b
+                    ? Slices.wrappedBuffer(b) : Slices.utf8Slice((String) value));
+            case VarbinaryType t -> t.writeSlice(builder, value instanceof byte[] b
+                    ? Slices.wrappedBuffer(b) : Slices.utf8Slice(value.toString()));
+            default -> throw new UnsupportedOperationException(
+                    "Unsupported Trino type for merged-aggregate write: " + type);
+        }
+    }
+
     /** VARBINARY may be backed by variable or fixed-size binary vectors. */
     private static io.airlift.slice.Slice binarySlice(FieldVector vector, int i) {
         if (vector instanceof VarBinaryVector v) {

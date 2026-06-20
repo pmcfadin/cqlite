@@ -1,5 +1,6 @@
 package com.rustyrazorblade.cqlite.flight;
 
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
@@ -14,14 +15,24 @@ import java.util.Optional;
  */
 public final class FlightTicketJson {
     private static final ObjectMapper MAPPER = new ObjectMapper();
-    private static final int TICKET_VERSION = 1;
+    private static final int TICKET_VERSION = 2;
 
     private FlightTicketJson() {}
 
     /** A pushed-down predicate destined for the ticket. */
     public record Predicate(String column, String op, Object value) {}
 
-    /** Build the ticket JSON bytes. */
+    /**
+     * Build the ticket JSON bytes.
+     *
+     * @param filter the recursive {@code PredicateExpr} tree pushed down to the
+     *               server, or {@code null} to omit it (the server's
+     *               {@code #[serde(default)] Option<PredicateExpr>}). The legacy
+     *               flat {@code predicates} list is independent and still emitted.
+     * @param aggregation the {@code aggregation} object (group_by + aggregates)
+     *               pushed down to the server, or {@code null} to omit it (the
+     *               server's {@code #[serde(default)] Option<Aggregation>}).
+     */
     public static byte[] build(
             String keyspace,
             String table,
@@ -31,7 +42,9 @@ public final class FlightTicketJson {
             Optional<Long> tokenEnd,
             boolean wraparound,
             Optional<List<String>> columns,
-            List<Predicate> predicates) {
+            List<Predicate> predicates,
+            JsonNode filter,
+            JsonNode aggregation) {
         ObjectNode root = MAPPER.createObjectNode();
         root.put("version", TICKET_VERSION);
         root.put("keyspace", keyspace);
@@ -53,6 +66,14 @@ public final class FlightTicketJson {
             node.put("column", p.column());
             node.put("op", p.op());
             node.set("value", MAPPER.valueToTree(p.value()));
+        }
+        // Omit when null to match the server's #[serde(default)] Option<PredicateExpr>.
+        if (filter != null) {
+            root.set("filter", filter);
+        }
+        // Omit when null to match the server's #[serde(default)] Option<Aggregation>.
+        if (aggregation != null) {
+            root.set("aggregation", aggregation);
         }
         try {
             return MAPPER.writeValueAsBytes(root);

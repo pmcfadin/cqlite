@@ -10,14 +10,29 @@ import io.trino.spi.connector.ConnectorTableHandle;
 import io.trino.spi.connector.ConnectorTransactionHandle;
 import io.trino.spi.connector.DynamicFilter;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 import java.util.List;
 import java.util.Optional;
 
 public class CqliteFlightPageSourceProvider implements ConnectorPageSourceProvider {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
     private final CqliteFlightClient client;
 
     public CqliteFlightPageSourceProvider(CqliteFlightClient client) {
         this.client = client;
+    }
+
+    private static JsonNode parseFilter(Optional<String> filterJson) {
+        if (filterJson.isEmpty()) {
+            return null;
+        }
+        try {
+            return MAPPER.readTree(filterJson.get());
+        } catch (com.fasterxml.jackson.core.JsonProcessingException e) {
+            throw new IllegalStateException("Invalid pushed-down filter JSON", e);
+        }
     }
 
     @Override
@@ -29,11 +44,23 @@ public class CqliteFlightPageSourceProvider implements ConnectorPageSourceProvid
             Optional<ConnectorTableCredentials> credentials,
             List<ColumnHandle> columns,
             DynamicFilter dynamicFilter) {
-        CqliteFlightSplit flightSplit = (CqliteFlightSplit) split;
         List<CqliteFlightColumnHandle> projected = columns.stream()
                 .map(CqliteFlightColumnHandle.class::cast)
                 .toList();
+
+        // Aggregated handle: the single finalize split fans out to all ranges,
+        // pulls each range's partial, merges, and emits the fully merged result.
+        if (split instanceof CqliteFlightAggregateSplit aggregateSplit) {
+            return new CqliteFlightAggregatePageSource(client, aggregateSplit, projected);
+        }
+
+        CqliteFlightSplit flightSplit = (CqliteFlightSplit) split;
+        CqliteFlightTableHandle tableHandle = (CqliteFlightTableHandle) table;
         List<String> names = projected.stream().map(CqliteFlightColumnHandle::name).toList();
+
+        // Pushed-down predicate tree (if any) lives on the table handle; parse it
+        // back to a JsonNode so it nests into the ticket rather than being escaped.
+        JsonNode filter = parseFilter(tableHandle.filterJson());
 
         byte[] ticket = FlightTicketJson.build(
                 flightSplit.keyspace(),
@@ -44,7 +71,9 @@ public class CqliteFlightPageSourceProvider implements ConnectorPageSourceProvid
                 Optional.of(flightSplit.tokenEnd()),
                 flightSplit.wraparound(),
                 names.isEmpty() ? Optional.empty() : Optional.of(names),
-                List.of()); // predicate pushdown wired separately
+                List.of(), // legacy flat predicates unused; tree carried in filter
+                filter,
+                null); // non-aggregated scan: no aggregation pushed
 
         return new CqliteFlightPageSource(client, flightSplit, projected, ticket);
     }
