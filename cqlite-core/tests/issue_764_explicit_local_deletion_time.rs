@@ -33,7 +33,9 @@ const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
 const ROW_HAS_COMPLEX_DELETION: u8 = 0x40;
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 const EXTENDED_IS_STATIC: u8 = 0x01;
-const CELL_IS_DELETED: u8 = 0x04;
+// Cell flags must match the writer (data_writer.rs): IS_DELETED=0x01,
+// HAS_EMPTY_VALUE=0x04, USE_ROW_TIMESTAMP=0x08.
+const CELL_IS_DELETED: u8 = 0x01;
 
 /// Single int PK, single regular text column.
 fn test_schema() -> TableSchema {
@@ -498,7 +500,7 @@ async fn explicit_local_deletion_time_preserved_for_older_static_delete() {
 }
 
 const CELL_USE_ROW_TIMESTAMP: u8 = 0x08;
-const CELL_HAS_EMPTY_VALUE: u8 = 0x02;
+const CELL_HAS_EMPTY_VALUE: u8 = 0x04;
 
 /// Decode the cell flag bytes of the two static LIVE cells (`s_new`, `s_old`).
 ///
