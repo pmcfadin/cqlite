@@ -7,11 +7,17 @@
 //! `#[cfg(test)]` module inside `merge.rs`
 //! (`mod issue_823_complex_column_merge`).
 //!
-//! This external file asserts the STRUCTURAL root cause that is observable from
-//! the public API: the public merge data model (`MergeEntry` / `RowData` /
-//! `CellData`) has NO per-path / collection-key dimension. A multi-cell column is
-//! represented as ONE `CellData` keyed only on the column name string, so per-path
-//! merge (#18) and path-scoped complex deletion (#14/#17) are not representable.
+//! This external file asserts the STRUCTURAL state observable from the public
+//! API. Originally (#823) the merge data model (`MergeEntry` / `RowData` /
+//! `CellData`) had NO per-path / collection-key dimension at all.
+//!
+//! Issue #886 (Epic #842) added the plumbing — `CellData` now carries a
+//! `cell_path` (and `local_deletion_time`) field — so per-path merge becomes
+//! REPRESENTABLE. The behavior that USES it (per-path union, path-scoped complex
+//! deletion #18/#14/#17) is NOT delivered by #886: the reader still surfaces a
+//! whole non-frozen collection as ONE `CellData` with `cell_path == None`, so the
+//! observable runtime shape below is unchanged. These tests pin both facts: the
+//! field exists, and it is still defaulted `None` from the reader path.
 //!
 //! Run with:
 //!   CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
@@ -23,32 +29,38 @@
 use cqlite_core::storage::write_engine::merge::{CellData, RowData};
 use cqlite_core::types::{UdtField, UdtValue, Value};
 
-/// `CellData` carries only `column`/`value`/`timestamp`/`ttl`. There is no
-/// `cell_path`, `collection_key`, or per-element discriminator. This is the
-/// structural reason multi-cell merge cannot be per-path: two writes to different
-/// paths of the same column are indistinguishable once they share a `column`.
+/// `CellData` now carries a `cell_path` (and `local_deletion_time`) dimension
+/// after #886, in addition to `column`/`value`/`timestamp`/`ttl`. Per-path merge
+/// is therefore REPRESENTABLE; whether it is ACTED ON is a separate followup
+/// (#18). This destructuring pins the exact public field set — if it changes
+/// again, this test must be revisited.
 #[test]
-fn celldata_has_no_path_dimension() {
+fn celldata_exposes_cell_path_dimension() {
     let cell = CellData {
         column: "tags".to_string(),
         value: Value::List(vec![Value::Text("a".to_string())]),
         timestamp: 1,
         ttl: None,
+        local_deletion_time: None,
+        cell_path: None,
     };
 
-    // The public fields are exactly these four. If a path/collection-key field is
-    // ever added, this destructuring will fail to compile and this test must be
-    // revisited (it would mean per-path merge became representable).
     let CellData {
         column,
         value,
         timestamp,
         ttl,
+        local_deletion_time,
+        cell_path,
     } = cell;
     assert_eq!(column, "tags");
     assert!(matches!(value, Value::List(_)));
     assert_eq!(timestamp, 1);
     assert_eq!(ttl, None);
+    // #886 plumbing: the path dimension exists but is defaulted None from the
+    // reader (the behavior that populates/consumes it lands in #844).
+    assert_eq!(local_deletion_time, None);
+    assert_eq!(cell_path, None);
 }
 
 /// A multi-cell collection is surfaced as a single nested `Value` under one
@@ -66,6 +78,8 @@ fn multicell_collection_is_one_nested_cell_value() {
             ]),
             timestamp: 10,
             ttl: None,
+            local_deletion_time: None,
+            cell_path: None,
         }],
     };
 
@@ -106,6 +120,8 @@ fn nonfrozen_udt_is_one_nested_cell_value() {
             }),
             timestamp: 10,
             ttl: None,
+            local_deletion_time: None,
+            cell_path: None,
         }],
     };
 
