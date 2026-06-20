@@ -2009,18 +2009,33 @@ impl DataWriter {
         let ts_delta = (timestamp_micros - self.stats.min_timestamp) as u64;
         encode_unsigned(ts_delta, buf);
 
-        // Issue #764: honor the caller-supplied local_deletion_time (explicit on
-        // the mutation when set, else timestamp-derived). Reject a negative delta
-        // the same way write_tombstone_cell does: an LDT below the baseline would
-        // otherwise wrap to a huge unsigned VInt and corrupt Data.db.
-        let deletion_time_delta =
-            (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
-        if deletion_time_delta < 0 {
+        // Issue #853: encode the localDeletionTime delta with the SAME i32 cast +
+        // wrapping behaviour that Cassandra's DeletionTime.serialize uses (and that
+        // the row-deletion / range-bound paths already use), so the encoded SIZE of
+        // this complex-deletion marker equals the bytes actually written for
+        // far-future localDeletionTime in [2^31, 2^32) (~year 2038-2106).
+        //
+        // Cassandra (c81fbae1): localDeletionTime and minLocalDeletionTime are Java
+        // `int`s; the wire delta is `writeUnsignedVInt32(localDeletionTime -
+        // minLocalDeletionTime)`, a 32-bit subtraction whose result is zero-extended
+        // into [0, 2^32). A value in [2^31, 2^32) is a negative i32 here; widening to
+        // i64 first (the previous code) both rejected it and would have produced a
+        // different byte count than the i32 form, corrupting the row-size vint.
+        //
+        // Issue #764: still reject a genuine below-baseline ordering violation, but
+        // only in normal (non-negative i32) time space; a far-future LDT (negative
+        // as i32) is a legitimate value, not corruption.
+        if local_deletion_time >= 0
+            && self.stats.min_local_deletion_time >= 0
+            && local_deletion_time < self.stats.min_local_deletion_time
+        {
             return Err(Error::InvalidInput(format!(
                 "Complex deletion: local deletion time {} is less than min_local_deletion_time {}",
                 local_deletion_time, self.stats.min_local_deletion_time
             )));
         }
+        let deletion_time_delta =
+            local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
         encode_unsigned(deletion_time_delta as u64, buf);
 
         // Zero cells
@@ -6260,6 +6275,151 @@ mod tests {
             result.is_err(),
             "LDT below baseline must be rejected to avoid VInt wrap corruption"
         );
+    }
+
+    /// Issue #853: a complex-deletion marker whose localDeletionTime lands in
+    /// [2^31, 2^32) (far future, ~2038-2106) must encode the LDT delta with the
+    /// SAME i32 cast + wrapping that Cassandra's DeletionTime.serialize uses, so the
+    /// number of bytes written equals the size the row-size vint accounts for. The
+    /// previous i64-widened path both rejected these values and would have produced
+    /// a divergent byte count.
+    #[test]
+    fn test_complex_column_deletion_far_future_ldt_size_matches_written() {
+        use crate::parser::vint::parse_vuint;
+
+        // min baseline of 0 (DeletionTime.LIVE-derived stats min), the common case.
+        let stats = create_test_stats();
+        assert_eq!(stats.min_local_deletion_time, 0);
+        let writer = DataWriter::new(stats);
+
+        // Boundary 2^31 and a high value near 2^32 - 1, both representable only as
+        // negative i32 bit patterns.
+        let far_future: [u32; 3] = [1u32 << 31, (1u32 << 31) + 12345, u32::MAX - 1];
+
+        for raw in far_future {
+            let ldt = raw as i32; // negative i32 bit pattern for [2^31, 2^32)
+            assert!(
+                ldt < 0,
+                "value {raw} must be a negative i32 in [2^31, 2^32)"
+            );
+
+            let mut buf = Vec::new();
+            writer
+                .write_complex_column_deletion(&mut buf, 1_001_000, ldt)
+                .expect("far-future complex deletion must be accepted, not rejected");
+
+            // Skip the markedForDeleteAt VInt (timestamp delta) to reach the LDT delta.
+            // parse_vuint is a nom parser: Ok((remaining, value)).
+            let (ldt_bytes, _ts_delta) =
+                parse_vuint(&buf).expect("markedForDeleteAt VInt must decode");
+
+            // The encoded LDT delta must equal the i32-wrapping u32 value Cassandra
+            // would write: localDeletionTime - minLocalDeletionTime in 32-bit space.
+            let expected_delta = ldt.wrapping_sub(0) as u32; // min = 0
+            assert_eq!(
+                expected_delta, raw,
+                "delta must equal the raw far-future value"
+            );
+
+            let (rest, decoded_delta) = parse_vuint(ldt_bytes).expect("LDT delta VInt must decode");
+            assert_eq!(
+                decoded_delta, expected_delta as u64,
+                "round-tripped LDT delta must match the i32-wrapping value for raw={raw}"
+            );
+
+            // SIZE == WRITTEN: the bytes consumed by the LDT delta VInt must equal
+            // the canonical unsigned_len of that delta (no over/under-count), and the
+            // only remaining byte is the cell_count(0).
+            let ldt_vint_len = ldt_bytes.len() - rest.len();
+            assert_eq!(
+                ldt_vint_len,
+                unsigned_len(expected_delta as u64),
+                "encoded LDT delta size must equal bytes written for raw={raw}"
+            );
+            assert_eq!(
+                rest,
+                &[0u8],
+                "trailing byte must be cell_count = 0 for raw={raw}"
+            );
+        }
+    }
+
+    /// Issue #853: the same far-future marker, written inside a full row, must keep
+    /// the row-size vint exactly equal to the row-body bytes that follow it. A
+    /// schema with no clustering key keeps the framing simple: after the row-flags
+    /// byte the next bytes are the row-size vint itself.
+    #[test]
+    fn test_complex_deletion_far_future_row_size_vint_matches_body() {
+        use crate::parser::vint::parse_vuint;
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "tags".to_string(),
+                    data_type: "set<text>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        // Boundary 2^31 and a high value near 2^32 - 1, both negative i32 patterns.
+        for raw in [1u32 << 31, u32::MAX - 1] {
+            let ldt = raw as i32;
+            let mut writer = DataWriter::new(create_test_stats());
+
+            let table_id = TableId::new("test_ks", "test_table");
+            let pk = PartitionKey::single("id", Value::Integer(1));
+            let mutation = Mutation::new(
+                table_id,
+                pk,
+                None,
+                vec![CellOperation::Delete {
+                    column: "tags".to_string(),
+                }],
+                2_000_000,
+                None,
+            )
+            .with_local_deletion_time(ldt);
+
+            writer
+                .write_row(&mutation, &schema)
+                .expect("far-future complex-deletion row must write, not error");
+            let out = writer.finish().expect("finish");
+
+            // out = [row_flags u8][row_size vint][prev_size vint][body...].
+            // (no clustering key, so nothing between flags and row_size.)
+            assert!(!out.is_empty(), "row must be written for raw={raw}");
+            let after_flags = &out[1..];
+            let (body_after_size, row_size) =
+                parse_vuint(after_flags).expect("row-size vint must decode");
+
+            // Size == written: the row-size vint must exactly account for the body
+            // bytes that follow it (a divergent far-future LDT byte count would make
+            // this mismatch and corrupt the row framing).
+            assert_eq!(
+                row_size as usize,
+                body_after_size.len(),
+                "row-size vint must equal the row-body bytes written for raw={raw}"
+            );
+        }
     }
 
     #[test]
