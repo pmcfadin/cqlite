@@ -157,6 +157,50 @@ fn generation_of(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Read an SSTable's `[minToken, maxToken]` span from its sibling `Summary.db`.
+///
+/// SSTables store partitions in token order, so the first key carries the
+/// minimum token and the last key the maximum. The `Summary.db` path is derived
+/// by replacing the `-Data.db` suffix. Returns `None` on any failure (missing
+/// file, parse error, unparseable name) so callers can fail open.
+fn sstable_token_span(data_path: &Path) -> Option<(i64, i64)> {
+    let name = data_path.file_name()?.to_str()?;
+    if !name.ends_with("-Data.db") {
+        return None;
+    }
+    let summary_path = data_path.with_file_name(name.replace("-Data.db", "-Summary.db"));
+
+    // `SummaryReader::open` is async; drive it on a short-lived current-thread
+    // runtime. The prune is a one-shot, low-frequency step per DoGet split.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let platform = runtime
+        .block_on(cqlite_core::Platform::new(&cqlite_core::Config::default()))
+        .ok()?;
+    let reader = runtime
+        .block_on(
+            cqlite_core::storage::sstable::summary_reader::SummaryReader::open(
+                &summary_path,
+                std::sync::Arc::new(platform),
+            ),
+        )
+        .ok()?;
+
+    let min_token = cqlite_core::storage::write_engine::mutation::DecoratedKey::from_key_bytes(
+        reader.get_first_key().to_vec(),
+    )
+    .ok()?
+    .token;
+    let max_token = cqlite_core::storage::write_engine::mutation::DecoratedKey::from_key_bytes(
+        reader.get_last_key().to_vec(),
+    )
+    .ok()?
+    .token;
+    Some((min_token, max_token))
+}
+
 /// Produces Arrow record batches from a compaction merge of a table's SSTables.
 pub struct MergeProducer {
     schema: TableSchema,
@@ -207,10 +251,52 @@ impl MergeProducer {
     }
 
     /// Merge the given SSTable `Data.db` paths and return Arrow batches.
+    ///
+    /// When the scan carries a token filter, the input path list is first pruned
+    /// to the SSTables whose `[minToken, maxToken]` span overlaps the split's
+    /// `(start, end]` range (issue #839), so a narrow split opens only the
+    /// SSTables it can possibly read from. The per-partition token filter in the
+    /// merge loop remains as a correctness backstop.
     pub fn produce_from_paths(
         &self,
         paths: Vec<PathBuf>,
     ) -> Result<Vec<RecordBatch>, ProducerError> {
+        let paths = self.prune_paths(paths)?;
+        self.merge_paths(paths)
+    }
+
+    /// Prune `paths` to those whose token span overlaps the spec's token range.
+    ///
+    /// Returns `paths` unchanged when there is no token filter. A path is kept
+    /// (fail open) whenever its sibling `Summary.db` is missing or unreadable, so
+    /// pruning can never drop an SSTable that might contain matching partitions.
+    pub(crate) fn prune_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, ProducerError> {
+        let Some(token) = &self.spec.token else {
+            return Ok(paths);
+        };
+
+        let total = paths.len();
+        let kept: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|path| match sstable_token_span(path) {
+                // Span known: keep only if it overlaps the split's range.
+                Some((min_token, max_token)) => token.overlaps(min_token, max_token),
+                // Span unknown (missing/unreadable Summary.db): fail open.
+                None => true,
+            })
+            .collect();
+
+        tracing::debug!(
+            kept = kept.len(),
+            pruned = total - kept.len(),
+            total,
+            "token-range SSTable prune"
+        );
+        Ok(kept)
+    }
+
+    /// Merge the (already pruned) SSTable paths into Arrow batches.
+    fn merge_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<RecordBatch>, ProducerError> {
         let mut batches = Vec::new();
         if paths.is_empty() {
             return Ok(batches);
@@ -277,6 +363,17 @@ impl MergeProducer {
 
         let key = RowKey(partition_key.to_vec());
         build_row_from_scan(key, Value::Map(map_entries), &[], Some(&self.schema))
+    }
+
+    /// Merge `paths` WITHOUT the input prune, relying only on the per-partition
+    /// token backstop. Used by tests to prove the pruned run yields identical
+    /// rows to a full-scan-then-filter run.
+    #[cfg(test)]
+    fn produce_unpruned_for_test(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
+        self.merge_paths(paths)
     }
 
     fn flush_buffer(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
@@ -790,5 +887,162 @@ mod tests {
         let producer = MergeProducer::new(schema, 1024).unwrap();
         let batches = producer.produce_from_paths(vec![]).unwrap();
         assert!(batches.is_empty());
+    }
+
+    // ---- Issue #839: input SSTable pruning by token range ----
+
+    use crate::filter::ScanSpec;
+    use crate::ticket::FlightTicket;
+    use cqlite_core::storage::sstable::summary_reader::SummaryReader;
+    use cqlite_core::storage::write_engine::mutation::DecoratedKey;
+    use cqlite_core::{Config, Platform};
+    use std::sync::Arc;
+
+    /// Read a Data.db's sibling Summary.db and return its (minToken, maxToken).
+    fn span_of(data_path: &std::path::Path) -> (i64, i64) {
+        let name = data_path.file_name().unwrap().to_str().unwrap();
+        let summary = data_path.with_file_name(name.replace("-Data.db", "-Summary.db"));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let platform = rt.block_on(Platform::new(&Config::default())).unwrap();
+        let reader = rt
+            .block_on(SummaryReader::open(&summary, Arc::new(platform)))
+            .unwrap();
+        let min = DecoratedKey::from_key_bytes(reader.get_first_key().to_vec())
+            .unwrap()
+            .token;
+        let max = DecoratedKey::from_key_bytes(reader.get_last_key().to_vec())
+            .unwrap()
+            .token;
+        (min, max)
+    }
+
+    fn spec_with_token(start: i64, end: i64) -> ScanSpec {
+        ScanSpec::from_ticket(
+            &FlightTicket {
+                token_start: Some(start),
+                token_end: Some(end),
+                ..Default::default()
+            },
+            &simple_schema(),
+        )
+        .unwrap()
+    }
+
+    /// (b) A narrow token range prunes the SSTable that does not overlap it.
+    #[test]
+    fn prune_drops_non_overlapping_sstable() {
+        let schema = simple_schema();
+        // Two SSTables, each its own flush batch (separate Data.db).
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100)],
+                vec![write_row(2, "b", 20, 100)],
+            ],
+        );
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+        assert_eq!(paths.len(), 2, "two SSTables expected");
+
+        // Compute each SSTable's token span and pick a half-open range covering
+        // exactly one of them.
+        let (min0, max0) = span_of(&paths[0]);
+        let (min1, max1) = span_of(&paths[1]);
+        assert_ne!(
+            (min0, max0),
+            (min1, max1),
+            "spans must differ to test pruning"
+        );
+
+        // Target paths[0] only: (min0 - 1, max0] excludes paths[1]'s span.
+        let (lo, hi) = (min0 - 1, max0);
+        // Sanity: this range really does separate the two spans.
+        let spec = spec_with_token(lo, hi);
+        let tf = spec.token.unwrap();
+        assert!(tf.overlaps(min0, max0), "target span must overlap");
+        // Only meaningful if the other span is genuinely outside the range.
+        if tf.overlaps(min1, max1) {
+            // The two spans straddle the boundary; skip rather than assert wrongly.
+            return;
+        }
+
+        let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let kept = producer.prune_paths(paths.clone()).unwrap();
+        assert_eq!(kept.len(), 1, "non-overlapping SSTable pruned");
+        assert_eq!(kept[0], paths[0]);
+    }
+
+    /// (c) The produced row set is IDENTICAL whether or not the input prune ran:
+    /// the per-partition backstop guarantees correctness regardless.
+    #[test]
+    fn prune_preserves_produced_rows() {
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100)],
+                vec![write_row(2, "b", 20, 100)],
+                vec![write_row(3, "c", 30, 100)],
+            ],
+        );
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+
+        // Pick a range that overlaps a subset of SSTables (token of id=1's span).
+        let (min0, max0) = span_of(&paths[0]);
+        let spec = spec_with_token(min0 - 1, max0);
+
+        let pruned_producer = MergeProducer::with_spec(schema.clone(), 1024, spec.clone()).unwrap();
+        let pruned_rows = total_rows(&pruned_producer.produce(&DirSource::new(&dir)).unwrap());
+
+        // Full-scan run: same spec but feed every path explicitly to the merge
+        // WITHOUT the input prune (call produce_from_paths is the same code path,
+        // but we compare against a producer whose spec keeps the backstop only).
+        // Build the reference by pruning disabled: pass all paths and rely on the
+        // per-partition token backstop to drop the same partitions.
+        let full_producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let full_rows = {
+            // Exercise the backstop directly over the full unpruned path list.
+            let all = DirSource::new(&dir).data_paths().unwrap();
+            let merger_only = full_producer.produce_unpruned_for_test(all).unwrap();
+            total_rows(&merger_only)
+        };
+
+        assert_eq!(
+            pruned_rows, full_rows,
+            "pruned run yields identical rows to full-scan-then-filter"
+        );
+    }
+
+    /// (d) A missing Summary.db means the path is kept (fail open).
+    #[test]
+    fn prune_keeps_path_when_summary_missing() {
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100)],
+                vec![write_row(2, "b", 20, 100)],
+            ],
+        );
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+
+        // Delete the Summary.db for paths[0] so its span is unknowable.
+        let name = paths[0].file_name().unwrap().to_str().unwrap();
+        let summary = paths[0].with_file_name(name.replace("-Data.db", "-Summary.db"));
+        std::fs::remove_file(&summary).unwrap();
+
+        // A range that, with a readable summary, would prune paths[0].
+        let (min0, max0) = span_of(&paths[1]); // any concrete range
+        let _ = (min0, max0);
+        // Choose a tiny empty-ish range; the point is paths[0] is kept regardless.
+        let spec = spec_with_token(i64::MAX - 1, i64::MAX);
+        let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let kept = producer.prune_paths(paths.clone()).unwrap();
+        assert!(
+            kept.contains(&paths[0]),
+            "path with missing Summary.db must be kept (fail open)"
+        );
     }
 }

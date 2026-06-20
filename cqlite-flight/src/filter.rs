@@ -56,6 +56,25 @@ impl TokenFilter {
     pub fn contains(&self, token: i64) -> bool {
         token_in_half_open_range(token, self.start, self.end, self.wraparound)
     }
+
+    /// True if an SSTable spanning `[min_token, max_token]` (inclusive of both
+    /// endpoints, since they are the smallest and largest partition tokens
+    /// actually present) could contain any token in this split's `(start, end]`
+    /// range.
+    ///
+    /// Half-open `(start, end]` semantics: a partition at exactly `start` is
+    /// excluded, one at exactly `end` is included. For a non-wrapping range the
+    /// spans overlap iff the SSTable reaches past `start` (`max_token > start`)
+    /// and starts at or before `end` (`min_token <= end`). A wraparound range is
+    /// `(start, MAX] ∪ [MIN, end]`, so overlap holds if the SSTable reaches past
+    /// `start` OR starts at or before `end`.
+    pub fn overlaps(&self, min_token: i64, max_token: i64) -> bool {
+        if self.wraparound {
+            max_token > self.start || min_token <= self.end
+        } else {
+            max_token > self.start && min_token <= self.end
+        }
+    }
 }
 
 /// A fully-resolved scan: what to keep and which columns to emit.
@@ -275,6 +294,54 @@ mod tests {
         assert!(tf.contains(0));
         assert!(tf.contains(10), "end inclusive");
         assert!(!tf.contains(11));
+    }
+
+    #[test]
+    fn overlaps_non_wraparound_boundaries() {
+        // Split range (0, 100].
+        let tf = TokenFilter {
+            start: 0,
+            end: 100,
+            wraparound: false,
+        };
+        // Span entirely inside.
+        assert!(tf.overlaps(10, 50));
+        // Span straddling the start (max past start, min before start).
+        assert!(tf.overlaps(-10, 10));
+        // Span entirely below: max_token == start is NOT past the exclusive start.
+        assert!(
+            !tf.overlaps(-50, 0),
+            "max_token==start excluded (half-open)"
+        );
+        assert!(!tf.overlaps(-50, -1));
+        // Span entirely above: min_token == end is inclusive (overlaps).
+        assert!(tf.overlaps(100, 200), "min_token==end included");
+        assert!(!tf.overlaps(101, 200), "min_token>end excluded");
+        // Span covering the whole range.
+        assert!(tf.overlaps(i64::MIN, i64::MAX));
+    }
+
+    #[test]
+    fn overlaps_wraparound_boundaries() {
+        // Wraparound range (100, -100] = (100, MAX] ∪ [MIN, -100].
+        let tf = TokenFilter {
+            start: 100,
+            end: -100,
+            wraparound: true,
+        };
+        // Span in the high arm (past start).
+        assert!(tf.overlaps(150, 200));
+        // Span in the low arm (at or below end).
+        assert!(tf.overlaps(-300, -200));
+        assert!(tf.overlaps(-300, -100), "max_token reaching end inclusive");
+        // Span entirely in the excluded middle gap (-99, 100].
+        assert!(!tf.overlaps(-50, 50), "middle gap excluded");
+        assert!(
+            !tf.overlaps(0, 100),
+            "max_token==start not past exclusive start"
+        );
+        // Span touching only the inclusive low end.
+        assert!(tf.overlaps(-100, -100));
     }
 
     #[test]
