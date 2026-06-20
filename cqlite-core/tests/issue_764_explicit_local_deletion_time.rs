@@ -27,6 +27,13 @@ const DERIVED_LDT: i32 = (T0 / 1_000_000) as i32;
 const EXPLICIT_LDT: i32 = 1_650_000_000; // 2022-04-15-ish, well below DERIVED_LDT
 
 const ROW_HAS_DELETION: u8 = 0x10;
+const ROW_HAS_TIMESTAMP: u8 = 0x04;
+const ROW_HAS_TTL: u8 = 0x08;
+const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
+const ROW_HAS_COMPLEX_DELETION: u8 = 0x40;
+const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
+const EXTENDED_IS_STATIC: u8 = 0x01;
+const CELL_IS_DELETED: u8 = 0x04;
 
 /// Single int PK, single regular text column.
 fn test_schema() -> TableSchema {
@@ -188,6 +195,305 @@ async fn default_none_preserves_timestamp_derived_local_deletion_time() {
     assert_eq!(
         row_ldt, DERIVED_LDT,
         "with None, Data.db row tombstone localDeletionTime must be timestamp-derived"
+    );
+}
+
+// ── Finding 1: complex/collection column deletion ──────────────────────────
+
+/// Single int PK, single regular `set<int>` column (a complex/non-frozen
+/// collection, so a column delete emits a complex-column deletion block).
+fn complex_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "issue764".to_string(),
+        table: "tc".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![Column {
+            name: "tags".to_string(),
+            data_type: "set<int>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        }],
+        comments: HashMap::new(),
+    }
+}
+
+/// Decode the complex-column-deletion localDeletionTime from a single-partition
+/// Data.db file whose only row deletes a complex (collection) column.
+///
+/// Row layout (flags = HAS_COMPLEX_DELETION only, no timestamp / no deletion):
+///   flags(1) + row_size(vint) + prev_size(vint) + columns_subset(vint)
+///   + complex_deletion( markedForDeleteAt:vint, localDeletionTime:vint )
+///   + cell_count:vint(=0)
+fn decode_complex_deletion_ldt(data: &[u8], stats_min_ldt: i32) -> i32 {
+    assert_eq!(
+        u16::from_be_bytes([data[0], data[1]]),
+        4,
+        "int partition key length"
+    );
+    let mut pos = 2 + 4;
+    assert_eq!(
+        i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]),
+        i32::MAX,
+        "partition deletion must be LIVE"
+    );
+    pos += 4 + 8; // skip partition LDT + markedForDeleteAt
+
+    let flags = data[pos];
+    assert_eq!(
+        flags & ROW_HAS_COMPLEX_DELETION,
+        ROW_HAS_COMPLEX_DELETION,
+        "row flags must include HAS_COMPLEX_DELETION (0x40)"
+    );
+    assert_eq!(flags & ROW_HAS_DELETION, 0, "must not be a row tombstone");
+    assert_eq!(
+        flags & ROW_HAS_EXTENDED_FLAGS,
+        0,
+        "must not have extended flags"
+    );
+    pos += 1;
+    let (_row_size, p) = read_vuint(data, pos);
+    pos = p;
+    let (_prev, p) = read_vuint(data, pos);
+    pos = p;
+
+    if flags & ROW_HAS_TIMESTAMP != 0 {
+        let (_ts, p) = read_vuint(data, pos);
+        pos = p;
+    }
+    assert_eq!(flags & ROW_HAS_TTL, 0, "no row TTL expected");
+    // columns subset (single regular column → present): one VInt.
+    if flags & ROW_HAS_ALL_COLUMNS == 0 {
+        let (_subset, p) = read_vuint(data, pos);
+        pos = p;
+    }
+    // complex column deletion: markedForDeleteAt delta, then localDeletionTime delta.
+    let (_mfda, p) = read_vuint(data, pos);
+    pos = p;
+    let (ldt_delta, p) = read_vuint(data, pos);
+    pos = p;
+    let (cell_count, _p) = read_vuint(data, pos);
+    assert_eq!(cell_count, 0, "complex deletion writes zero cells");
+    (stats_min_ldt as i64 + ldt_delta as i64) as i32
+}
+
+#[tokio::test]
+async fn explicit_local_deletion_time_flows_to_complex_column_deletion() {
+    let schema = complex_schema();
+    let table_id = TableId::new("issue764", "tc");
+    let pk = PartitionKey::single("id", Value::Integer(7));
+
+    // Delete the whole collection with an explicit LDT BELOW the
+    // timestamp-derived one. The explicit value becomes the stats baseline.
+    let delete_collection = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![CellOperation::Delete {
+            column: "tags".to_string(),
+        }],
+        T0,
+        None,
+    )
+    .with_local_deletion_time(EXPLICIT_LDT);
+
+    let (data, stats) = flush_mutations(&schema, vec![delete_collection]).await;
+
+    let min_ldt = stats_min_ldt(&stats);
+    assert_eq!(
+        min_ldt, EXPLICIT_LDT,
+        "Statistics.db min localDeletionTime must equal the explicit value"
+    );
+
+    let complex_ldt = decode_complex_deletion_ldt(&data, min_ldt);
+    assert_eq!(
+        complex_ldt, EXPLICIT_LDT,
+        "complex-column-deletion localDeletionTime must equal the explicit value, \
+         not the timestamp-derived one"
+    );
+    assert_ne!(complex_ldt, DERIVED_LDT, "test sanity: values must differ");
+}
+
+// ── Finding 2: static-column delete from an OLDER mutation ─────────────────
+
+/// Single int PK, two static columns (`s_old`, `s_new`), no clustering.
+fn static_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "issue764".to_string(),
+        table: "ts".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "id".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![],
+        columns: vec![
+            Column {
+                name: "s_old".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+            Column {
+                name: "s_new".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+        ],
+        comments: HashMap::new(),
+    }
+}
+
+/// Decode the two static-cell tombstone localDeletionTimes from a
+/// single-partition Data.db whose static row deletes BOTH static columns.
+///
+/// Static row layout (flags = HAS_EXTENDED_FLAGS|HAS_TIMESTAMP, extended = IS_STATIC):
+///   flags(1) + extended(1) + row_size(vint) + prev_size(vint)
+///   + liveness_ts(vint) + [columns_subset(vint) if !HAS_ALL_COLUMNS]
+///   + two tombstone cells in static-column order.
+///
+/// Static columns sort simple-before-complex then by name, so the cell order is
+/// `s_new`, then `s_old`. Each tombstone cell is:
+///   flags(=CELL_IS_DELETED|HAS_EMPTY_VALUE), ts_delta(vint), ldt_delta(vint).
+///
+/// Returns (s_new_ldt, s_old_ldt).
+fn decode_static_cell_tombstone_ldts(data: &[u8], stats_min_ldt: i32) -> (i32, i32) {
+    assert_eq!(
+        u16::from_be_bytes([data[0], data[1]]),
+        4,
+        "int partition key length"
+    );
+    let mut pos = 2 + 4;
+    assert_eq!(
+        i32::from_be_bytes([data[pos], data[pos + 1], data[pos + 2], data[pos + 3]]),
+        i32::MAX,
+        "partition deletion must be LIVE"
+    );
+    pos += 4 + 8; // skip partition LDT + markedForDeleteAt
+
+    let flags = data[pos];
+    assert_eq!(
+        flags & ROW_HAS_EXTENDED_FLAGS,
+        ROW_HAS_EXTENDED_FLAGS,
+        "static row must have extended flags"
+    );
+    assert_eq!(
+        flags & ROW_HAS_TIMESTAMP,
+        ROW_HAS_TIMESTAMP,
+        "static row carries a liveness timestamp"
+    );
+    assert_eq!(flags & ROW_HAS_DELETION, 0, "this is not a row tombstone");
+    pos += 1;
+    assert_eq!(
+        data[pos] & EXTENDED_IS_STATIC,
+        EXTENDED_IS_STATIC,
+        "extended flags must mark the row static"
+    );
+    pos += 1;
+    let (_row_size, p) = read_vuint(data, pos);
+    pos = p;
+    let (_prev, p) = read_vuint(data, pos);
+    pos = p;
+    // liveness timestamp delta
+    let (_ts, p) = read_vuint(data, pos);
+    pos = p;
+    // columns subset (both columns deleted, none "all present").
+    assert_eq!(
+        flags & ROW_HAS_ALL_COLUMNS,
+        0,
+        "two deletes must not flag HAS_ALL_COLUMNS"
+    );
+    let (_subset, p) = read_vuint(data, pos);
+    pos = p;
+
+    // Two tombstone cells, in order s_new then s_old.
+    let read_cell_ldt = |data: &[u8], mut p: usize| -> (i32, usize) {
+        let cell_flags = data[p];
+        assert_eq!(
+            cell_flags & CELL_IS_DELETED,
+            CELL_IS_DELETED,
+            "static cell must be a tombstone"
+        );
+        p += 1;
+        let (_cell_ts, q) = read_vuint(data, p);
+        p = q;
+        let (ldt_delta, q) = read_vuint(data, p);
+        p = q;
+        ((stats_min_ldt as i64 + ldt_delta as i64) as i32, p)
+    };
+    let (s_new_ldt, p) = read_cell_ldt(data, pos);
+    let (s_old_ldt, _p) = read_cell_ldt(data, p);
+    (s_new_ldt, s_old_ldt)
+}
+
+#[tokio::test]
+async fn explicit_local_deletion_time_preserved_for_older_static_delete() {
+    let schema = static_schema();
+    let table_id = TableId::new("issue764", "ts");
+    let pk = PartitionKey::single("id", Value::Integer(7));
+
+    // OLDER mutation: delete static column s_old with an explicit LDT BELOW the
+    // timestamp-derived baseline. This seeds the stats min localDeletionTime.
+    let older_delete = Mutation::new(
+        table_id.clone(),
+        pk.clone(),
+        None,
+        vec![CellOperation::Delete {
+            column: "s_old".to_string(),
+        }],
+        T0,
+        None,
+    )
+    .with_local_deletion_time(EXPLICIT_LDT);
+
+    // NEWER mutation: delete static column s_new with no explicit LDT (so its
+    // LDT is timestamp-derived, much higher than EXPLICIT_LDT). The synthetic
+    // static row historically stamped ITS LDT on ALL cells.
+    let newer_delete = Mutation::new(
+        table_id,
+        pk,
+        None,
+        vec![CellOperation::Delete {
+            column: "s_new".to_string(),
+        }],
+        T0 + 2_000_000, // 2 seconds later
+        None,
+    );
+
+    // Order: older first, then newer.
+    let (data, stats) = flush_mutations(&schema, vec![older_delete, newer_delete]).await;
+
+    let min_ldt = stats_min_ldt(&stats);
+    assert_eq!(
+        min_ldt, EXPLICIT_LDT,
+        "Statistics.db min localDeletionTime must be seeded from the older delete's explicit LDT"
+    );
+
+    let newer_derived = ((T0 + 2_000_000) / 1_000_000) as i32;
+    let (s_new_ldt, s_old_ldt) = decode_static_cell_tombstone_ldts(&data, min_ldt);
+
+    // The s_old tombstone must carry ITS OWN explicit LDT, not the newer
+    // mutation's timestamp-derived LDT.
+    assert_eq!(
+        s_old_ldt, EXPLICIT_LDT,
+        "older static-column delete must preserve its own explicit localDeletionTime"
+    );
+    assert_ne!(
+        s_old_ldt, newer_derived,
+        "must not inherit the newer mutation's timestamp-derived LDT"
+    );
+    // The s_new tombstone keeps its own timestamp-derived LDT.
+    assert_eq!(
+        s_new_ldt, newer_derived,
+        "newer static-column delete keeps its timestamp-derived localDeletionTime"
     );
 }
 

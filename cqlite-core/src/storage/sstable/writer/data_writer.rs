@@ -63,8 +63,7 @@ use crate::storage::serialization::vint::{encode_signed, encode_unsigned, unsign
 use crate::storage::sstable::writer::index_writer::{PromotedIndexBlock, COLUMN_INDEX_SIZE_BYTES};
 use crate::storage::sstable::writer::stats_writer::StatisticsMetadata;
 use crate::storage::write_engine::mutation::{
-    ClusteringBound, ClusteringKey, DecoratedKey, Mutation, PartitionKey, PartitionTombstone,
-    RangeTombstone, TableId,
+    ClusteringBound, ClusteringKey, DecoratedKey, Mutation, PartitionTombstone, RangeTombstone,
 };
 use crate::types::{ComparatorType, UdtTypeDef, Value};
 use std::io::Write;
@@ -319,10 +318,10 @@ impl DataWriter {
                 prev_unfiltered_size =
                     self.write_empty_static_row(prev_unfiltered_size, schema)? as u64;
             } else {
-                // Build a synthetic Mutation carrying the merged static ops.
-                // Use the latest timestamp seen across contributing mutations.
-                // `!merged.is_empty()` implies at least one mutation contributed
-                // an unshadowed static op, so the inner `.max()` is guaranteed `Some`.
+                // Row-level liveness timestamp: the latest timestamp seen across
+                // contributing mutations. `!merged.is_empty()` implies at least
+                // one mutation contributed an unshadowed static op, so `.max()`
+                // is guaranteed `Some`.
                 let latest_ts = mutations
                     .iter()
                     .filter(unshadowed_static)
@@ -338,40 +337,17 @@ impl DataWriter {
                     .max_by_key(|m| m.timestamp_micros)
                     .and_then(|m| m.ttl_seconds);
 
-                let synthetic = Mutation {
-                    table: mutations
-                        .first()
-                        .map(|m| m.table.clone())
-                        .unwrap_or_else(|| TableId {
-                            keyspace: schema.keyspace.clone(),
-                            table: schema.table.clone(),
-                        }),
-                    partition_key: mutations
-                        .first()
-                        .map(|m| m.partition_key.clone())
-                        .unwrap_or_else(|| PartitionKey {
-                            columns: Vec::new(),
-                        }),
-                    clustering_key: None,
-                    operations: merged,
-                    timestamp_micros: latest_ts,
-                    ttl_seconds: ttl,
-                    partition_tombstone: None,
-                    range_tombstones: Vec::new(),
-                    // Issue #764: carry an explicit local_deletion_time from the
-                    // latest static-contributing mutation that supplied one, so a
-                    // static-column delete preserves its deletion time. Falls back
-                    // to None (timestamp-derived) when none was set.
-                    local_deletion_time: mutations
-                        .iter()
-                        .filter(unshadowed_static)
-                        .max_by_key(|m| m.timestamp_micros)
-                        .and_then(|m| m.local_deletion_time),
-                };
-
-                prev_unfiltered_size =
-                    self.write_static_row_with_prev_size(&synthetic, schema, prev_unfiltered_size)?
-                        as u64;
+                // Issue #764: pass the per-op merged static ops (each carrying its
+                // own originating timestamp + local_deletion_time) so a surviving
+                // older static delete keeps its own LDT instead of inheriting the
+                // newest static mutation's value.
+                prev_unfiltered_size = self.write_static_row_with_prev_size(
+                    &merged,
+                    latest_ts,
+                    ttl,
+                    schema,
+                    prev_unfiltered_size,
+                )? as u64;
             }
         }
 
@@ -539,40 +515,14 @@ impl DataWriter {
                     .max_by_key(|m| m.timestamp_micros)
                     .and_then(|m| m.ttl_seconds);
 
-                let synthetic = Mutation {
-                    table: mutations
-                        .first()
-                        .map(|m| m.table.clone())
-                        .unwrap_or_else(|| TableId {
-                            keyspace: schema.keyspace.clone(),
-                            table: schema.table.clone(),
-                        }),
-                    partition_key: mutations
-                        .first()
-                        .map(|m| m.partition_key.clone())
-                        .unwrap_or_else(|| PartitionKey {
-                            columns: Vec::new(),
-                        }),
-                    clustering_key: None,
-                    operations: merged,
-                    timestamp_micros: latest_ts,
-                    ttl_seconds: ttl,
-                    partition_tombstone: None,
-                    range_tombstones: Vec::new(),
-                    // Issue #764: carry an explicit local_deletion_time from the
-                    // latest static-contributing mutation that supplied one, so a
-                    // static-column delete preserves its deletion time. Falls back
-                    // to None (timestamp-derived) when none was set.
-                    local_deletion_time: mutations
-                        .iter()
-                        .filter(unshadowed_static)
-                        .max_by_key(|m| m.timestamp_micros)
-                        .and_then(|m| m.local_deletion_time),
-                };
-
-                prev_unfiltered_size =
-                    self.write_static_row_with_prev_size(&synthetic, schema, prev_unfiltered_size)?
-                        as u64;
+                // Issue #764: same per-op LDT preservation as the non-indexed path.
+                prev_unfiltered_size = self.write_static_row_with_prev_size(
+                    &merged,
+                    latest_ts,
+                    ttl,
+                    schema,
+                    prev_unfiltered_size,
+                )? as u64;
             }
         }
 
@@ -1204,13 +1154,39 @@ impl DataWriter {
     /// [cell_data...]         ← Static column cells only
     /// ```
     pub fn write_static_row(&mut self, mutation: &Mutation, schema: &TableSchema) -> Result<()> {
-        self.write_static_row_with_prev_size(mutation, schema, 0)?;
+        // Legacy/test entry point: derive per-op metadata from the single
+        // mutation (each op inherits the mutation's timestamp + effective LDT).
+        let static_ops: Vec<StaticMergedOp> = mutation
+            .operations
+            .iter()
+            .map(|op| StaticMergedOp {
+                op: op.clone(),
+                timestamp_micros: mutation.timestamp_micros,
+                cell_local_deletion_time: mutation.effective_local_deletion_time(),
+            })
+            .collect();
+        self.write_static_row_with_prev_size(
+            &static_ops,
+            mutation.timestamp_micros,
+            mutation.ttl_seconds,
+            schema,
+            0,
+        )?;
         Ok(())
     }
 
+    /// Write a static row from the merged static operations of a partition.
+    ///
+    /// Issue #764: each `StaticMergedOp` carries its own originating timestamp
+    /// and local deletion time, so a surviving static-column delete from an
+    /// older mutation keeps its own LDT instead of inheriting a single
+    /// synthetic mutation-level value (which corrupted the unsigned-VInt delta
+    /// when stats were seeded from that older delete's explicit lower LDT).
     fn write_static_row_with_prev_size(
         &mut self,
-        mutation: &Mutation,
+        static_ops: &[StaticMergedOp],
+        liveness_ts: i64,
+        ttl_seconds: Option<u32>,
         schema: &TableSchema,
         prev_size: u64,
     ) -> Result<usize> {
@@ -1219,10 +1195,12 @@ impl DataWriter {
         // Build row header flags - always includes HAS_EXTENDED_FLAGS for static rows
         let mut flags = ROW_HAS_EXTENDED_FLAGS;
 
-        // Check if this is a row tombstone
-        let is_row_tombstone = mutation.operations.iter().any(|op| {
+        // Check if this is a row tombstone (only reachable via the public
+        // single-mutation entry point; `collect_static_operations` never emits
+        // a DeleteRow into the merged set).
+        let is_row_tombstone = static_ops.iter().any(|mop| {
             matches!(
-                op,
+                mop.op,
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow
             )
         });
@@ -1235,20 +1213,20 @@ impl DataWriter {
         flags |= ROW_HAS_TIMESTAMP;
 
         // TTL if present (not applicable to row tombstones)
-        if !is_row_tombstone && mutation.ttl_seconds.is_some() {
+        if !is_row_tombstone && ttl_seconds.is_some() {
             flags |= ROW_HAS_TTL;
         }
 
         // Check if all static columns are present
         if !is_row_tombstone {
-            let all_writes = mutation.operations.iter().all(|op| {
+            let all_writes = static_ops.iter().all(|mop| {
                 matches!(
-                    op,
+                    mop.op,
                     crate::storage::write_engine::mutation::CellOperation::Write { .. }
                         | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { .. }
                 )
             });
-            let has_nulls = mutation.operations.iter().any(|op| match op {
+            let has_nulls = static_ops.iter().any(|mop| match &mop.op {
                 crate::storage::write_engine::mutation::CellOperation::Write { value, .. }
                 | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
                     value,
@@ -1261,7 +1239,7 @@ impl DataWriter {
             // Count static columns only for static row
             let static_column_count = schema.columns.iter().filter(|c| c.is_static).count();
 
-            if all_writes && !has_nulls && mutation.operations.len() == static_column_count {
+            if all_writes && !has_nulls && static_ops.len() == static_column_count {
                 flags |= ROW_HAS_ALL_COLUMNS;
             }
         }
@@ -1275,7 +1253,8 @@ impl DataWriter {
         // NO clustering prefix for static rows (key difference from write_row)
 
         // Build row body
-        let row_body = self.build_static_row_body(mutation, schema, flags)?;
+        let row_body =
+            self.build_static_row_body(static_ops, liveness_ts, ttl_seconds, schema, flags)?;
 
         let prev_size_vint_len = unsigned_len(prev_size);
 
@@ -1299,7 +1278,9 @@ impl DataWriter {
     /// Similar to build_row_body but only processes static columns.
     fn build_static_row_body(
         &self,
-        mutation: &Mutation,
+        static_ops: &[StaticMergedOp],
+        liveness_ts: i64,
+        ttl_seconds: Option<u32>,
         schema: &TableSchema,
         flags: u8,
     ) -> Result<Vec<u8>> {
@@ -1310,7 +1291,7 @@ impl DataWriter {
         // Fix #644 (S6): Cassandra writes UNSIGNED VInt for all temporal deltas.
         // SerializationHeader.java:167: out.writeUnsignedVInt(timestamp - stats.minTimestamp)
         if (flags & ROW_HAS_TIMESTAMP) != 0 {
-            let timestamp_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
+            let timestamp_delta = (liveness_ts - self.stats.min_timestamp) as u64;
             encode_unsigned(timestamp_delta, &mut body);
         }
 
@@ -1320,7 +1301,7 @@ impl DataWriter {
         // SerializationHeader.java:177: out.writeUnsignedVInt32(ttl - stats.minTTL)
         // SerializationHeader.java:172: out.writeUnsignedVInt32(ldt - stats.minLocalDeletionTime)
         if (flags & ROW_HAS_TTL) != 0 {
-            if let Some(ttl) = mutation.ttl_seconds {
+            if let Some(ttl) = ttl_seconds {
                 let ttl_delta = ttl as i64 - self.stats.min_ttl as i64;
                 if ttl_delta < 0 {
                     return Err(Error::InvalidInput(format!(
@@ -1348,11 +1329,21 @@ impl DataWriter {
             // Row tombstone: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
             // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
             // Fix #644 (S6): both are UNSIGNED VInt.
-            let ts_delta = (mutation.timestamp_micros - self.stats.min_timestamp) as u64;
+            //
+            // The DeleteRow op carries the deletion timestamp + explicit LDT
+            // (Issue #764). Reachable only via the single-mutation entry point.
+            let delete_op = static_ops.iter().find(|mop| {
+                matches!(
+                    mop.op,
+                    crate::storage::write_engine::mutation::CellOperation::DeleteRow
+                )
+            });
+            let (deletion_ts, local_deletion_time) = delete_op
+                .map(|mop| (mop.timestamp_micros, mop.cell_local_deletion_time))
+                .unwrap_or((liveness_ts, (liveness_ts / 1_000_000) as i32));
+            let ts_delta = (deletion_ts - self.stats.min_timestamp) as u64;
             encode_unsigned(ts_delta, &mut body);
 
-            // Issue #764: honor the explicit local_deletion_time when supplied.
-            let local_deletion_time = mutation.effective_local_deletion_time();
             let ldt_delta =
                 local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
             encode_unsigned(ldt_delta as u64, &mut body);
@@ -1376,11 +1367,11 @@ impl DataWriter {
         // Write column bitmap (if NOT HAS_ALL_COLUMNS)
         // For static rows, bitmap only covers static columns
         if (flags & ROW_HAS_ALL_COLUMNS) == 0 {
-            self.write_static_column_bitmap(&mut body, mutation, schema)?;
+            self.write_static_column_bitmap(&mut body, static_ops, schema)?;
         }
 
         // Write cell data for static columns only
-        self.write_static_cells(&mut body, mutation, schema)?;
+        self.write_static_cells(&mut body, static_ops, schema)?;
 
         Ok(body)
     }
@@ -1392,14 +1383,13 @@ impl DataWriter {
     fn write_static_column_bitmap(
         &self,
         buf: &mut Vec<u8>,
-        mutation: &Mutation,
+        static_ops: &[StaticMergedOp],
         schema: &TableSchema,
     ) -> Result<()> {
         // Collect names of columns that are present (non-NULL writes + deletes)
-        let present_columns: std::collections::HashSet<&str> = mutation
-            .operations
+        let present_columns: std::collections::HashSet<&str> = static_ops
             .iter()
-            .filter_map(|op| match op {
+            .filter_map(|mop| match &mop.op {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value }
                 | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
                     column,
@@ -1417,11 +1407,15 @@ impl DataWriter {
         self.write_column_subset(buf, &static_columns, &present_columns)
     }
 
-    /// Write cells for static columns only
+    /// Write cells for static columns only.
+    ///
+    /// Issue #764: deletes use their ORIGINATING op's timestamp and local
+    /// deletion time (carried in `StaticMergedOp`), not a single synthetic
+    /// mutation-level value.
     fn write_static_cells(
         &self,
         buf: &mut Vec<u8>,
-        mutation: &Mutation,
+        static_ops: &[StaticMergedOp],
         schema: &TableSchema,
     ) -> Result<()> {
         // Get set of static column names for validation
@@ -1432,12 +1426,12 @@ impl DataWriter {
             .map(|c| &c.name)
             .collect();
 
-        for op in self.sorted_operations(mutation, &self.static_columns(schema)) {
-            match op {
+        for mop in self.sorted_static_ops(static_ops, schema) {
+            match &mop.op {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
                     // Only write if it's a static column
                     if static_column_names.contains(column) && !matches!(value, Value::Null) {
-                        self.write_cell(buf, column, value, mutation.timestamp_micros)?;
+                        self.write_cell(buf, column, value, mop.timestamp_micros)?;
                     }
                 }
                 crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
@@ -1451,7 +1445,7 @@ impl DataWriter {
                             buf,
                             column,
                             value,
-                            mutation.timestamp_micros,
+                            mop.timestamp_micros,
                             *ttl_seconds,
                         )?;
                     }
@@ -1459,13 +1453,12 @@ impl DataWriter {
                 crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
                     // Only process if it's a static column
                     if static_column_names.contains(column) {
-                        // Issue #764: honor explicit local_deletion_time.
-                        let local_deletion_time = mutation.effective_local_deletion_time();
+                        // Issue #764: honor the originating op's explicit LDT.
                         self.write_tombstone_cell(
                             buf,
                             column,
-                            mutation.timestamp_micros,
-                            local_deletion_time,
+                            mop.timestamp_micros,
+                            mop.cell_local_deletion_time,
                         )?;
                     }
                 }
@@ -1476,6 +1469,37 @@ impl DataWriter {
         }
 
         Ok(())
+    }
+
+    /// Sort merged static ops into Cassandra static-column serialization order
+    /// (simple columns before complex, then by name).
+    fn sorted_static_ops<'a, 'b>(
+        &self,
+        ops: &'b [StaticMergedOp],
+        schema: &'a TableSchema,
+    ) -> Vec<&'b StaticMergedOp> {
+        let columns = self.static_columns(schema);
+        let column_order: std::collections::HashMap<&str, usize> = columns
+            .iter()
+            .enumerate()
+            .map(|(idx, column)| (column.name.as_str(), idx))
+            .collect();
+
+        let mut sorted: Vec<&'b StaticMergedOp> = ops.iter().collect();
+        sorted.sort_by_key(|mop| match &mop.op {
+            crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
+            | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
+                column, ..
+            }
+            | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                column_order
+                    .get(column.as_str())
+                    .copied()
+                    .unwrap_or(usize::MAX - 1)
+            }
+            crate::storage::write_engine::mutation::CellOperation::DeleteRow => usize::MAX,
+        });
+        sorted
     }
 
     /// Build row body (everything after row_size VInt)
@@ -1855,8 +1879,14 @@ impl DataWriter {
 
                     if is_complex {
                         // Complex column deletion: write empty complex column
-                        // with active deletion time (not LIVE)
-                        self.write_complex_column_deletion(buf, mop.timestamp_micros)?;
+                        // with active deletion time (not LIVE).
+                        // Issue #764: honor the originating mutation's explicit
+                        // local_deletion_time, not a timestamp-derived value.
+                        self.write_complex_column_deletion(
+                            buf,
+                            mop.timestamp_micros,
+                            mop.cell_local_deletion_time,
+                        )?;
                     } else {
                         // Issue #764: honor explicit local_deletion_time.
                         let local_deletion_time = mop.cell_local_deletion_time;
@@ -1949,6 +1979,7 @@ impl DataWriter {
         &self,
         buf: &mut Vec<u8>,
         timestamp_micros: i64,
+        local_deletion_time: i32,
     ) -> Result<()> {
         // Active deletion: Cassandra canonical order (markedForDeleteAt first, then localDeletionTime)
         // Per SerializationHeader.writeDeletionTime(): writeTimestamp() then writeLocalDeletionTime()
@@ -1956,10 +1987,19 @@ impl DataWriter {
         let ts_delta = (timestamp_micros - self.stats.min_timestamp) as u64;
         encode_unsigned(ts_delta, buf);
 
-        // local_deletion_time = mutation timestamp as seconds (unsigned VInt delta)
-        let local_deletion_time = (timestamp_micros / 1_000_000) as i32;
-        let ldt_delta = local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
-        encode_unsigned(ldt_delta as u64, buf);
+        // Issue #764: honor the caller-supplied local_deletion_time (explicit on
+        // the mutation when set, else timestamp-derived). Reject a negative delta
+        // the same way write_tombstone_cell does: an LDT below the baseline would
+        // otherwise wrap to a huge unsigned VInt and corrupt Data.db.
+        let deletion_time_delta =
+            (local_deletion_time as i64) - (self.stats.min_local_deletion_time as i64);
+        if deletion_time_delta < 0 {
+            return Err(Error::InvalidInput(format!(
+                "Complex deletion: local deletion time {} is less than min_local_deletion_time {}",
+                local_deletion_time, self.stats.min_local_deletion_time
+            )));
+        }
+        encode_unsigned(deletion_time_delta as u64, buf);
 
         // Zero cells
         encode_unsigned(0u64, buf);
@@ -2630,34 +2670,6 @@ impl DataWriter {
         columns
     }
 
-    fn sorted_operations<'a>(
-        &self,
-        mutation: &'a Mutation,
-        columns: &[&Column],
-    ) -> Vec<&'a crate::storage::write_engine::mutation::CellOperation> {
-        let column_order: std::collections::HashMap<&str, usize> = columns
-            .iter()
-            .enumerate()
-            .map(|(idx, column)| (column.name.as_str(), idx))
-            .collect();
-
-        let mut operations: Vec<_> = mutation.operations.iter().collect();
-        operations.sort_by_key(|operation| match operation {
-            crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
-            | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                column, ..
-            }
-            | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                column_order
-                    .get(column.as_str())
-                    .copied()
-                    .unwrap_or(usize::MAX - 1)
-            }
-            crate::storage::write_engine::mutation::CellOperation::DeleteRow => usize::MAX,
-        });
-        operations
-    }
-
     /// Sort merged ops into regular-column serialization order
     /// (simple columns before complex, then by name).
     fn sorted_merged_ops<'a, 'b>(
@@ -2776,6 +2788,24 @@ struct MergedOp<'a> {
     /// Local deletion time (seconds since epoch) for a `Delete` cell tombstone,
     /// honoring the originating mutation's explicit `local_deletion_time` when
     /// present (Issue #764). Derived from the timestamp otherwise.
+    cell_local_deletion_time: i32,
+}
+
+/// A surviving static-column operation, tagged with the timestamp and explicit
+/// local deletion time of the mutation it came from.
+///
+/// Issue #764: static-column tombstones must be stamped with their ORIGINATING
+/// mutation's `local_deletion_time` (and timestamp), not a single synthetic
+/// value taken from the newest static-contributing mutation. A surviving delete
+/// from an older mutation otherwise inherits the wrong LDT — corrupting the
+/// unsigned-VInt delta when stats were seeded from that older delete's explicit
+/// (lower) LDT.
+struct StaticMergedOp {
+    op: crate::storage::write_engine::mutation::CellOperation,
+    /// Timestamp (µs) of the originating mutation.
+    timestamp_micros: i64,
+    /// Local deletion time (s) for a `Delete` tombstone, honoring the
+    /// originating mutation's explicit `local_deletion_time` when set.
     cell_local_deletion_time: i32,
 }
 
@@ -3123,17 +3153,19 @@ fn has_static_operation(mutation: &Mutation, schema: &TableSchema) -> bool {
 /// must be internally reconciled (see `DataWriter::write_partition`).
 ///
 /// Returns the merged operations in an unspecified order (the writer will
-/// sort them by schema column order when building the row body).
+/// sort them by schema column order when building the row body). Each op
+/// carries the originating mutation's timestamp and explicit local deletion
+/// time (Issue #764) so a surviving older static delete keeps its own LDT
+/// instead of inheriting the newest static mutation's value.
 fn collect_static_operations(
     mutations: &[Mutation],
     schema: &TableSchema,
     shadow_floor: Option<i64>,
-) -> Vec<crate::storage::write_engine::mutation::CellOperation> {
+) -> Vec<StaticMergedOp> {
     use std::collections::HashMap;
 
-    // Map: column_name → (timestamp, operation)
-    let mut best: HashMap<String, (i64, crate::storage::write_engine::mutation::CellOperation)> =
-        HashMap::new();
+    // Map: column_name → winning StaticMergedOp (last-write-wins by timestamp).
+    let mut best: HashMap<String, StaticMergedOp> = HashMap::new();
 
     for mutation in mutations {
         if shadow_floor.is_some_and(|floor| mutation.timestamp_micros <= floor) {
@@ -3154,14 +3186,25 @@ fn collect_static_operations(
                 }
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow => continue,
             };
-            let entry = best.entry(col_name).or_insert((i64::MIN, op.clone()));
-            if mutation.timestamp_micros >= entry.0 {
-                *entry = (mutation.timestamp_micros, op.clone());
+            let candidate = StaticMergedOp {
+                op: op.clone(),
+                timestamp_micros: mutation.timestamp_micros,
+                cell_local_deletion_time: mutation.effective_local_deletion_time(),
+            };
+            match best.entry(col_name) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(candidate);
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if candidate.timestamp_micros >= entry.get().timestamp_micros {
+                        entry.insert(candidate);
+                    }
+                }
             }
         }
     }
 
-    best.into_values().map(|(_, op)| op).collect()
+    best.into_values().collect()
 }
 
 /// Whether a range tombstone's clustering range covers the given clustering key.
@@ -5228,10 +5271,19 @@ mod tests {
         }
 
         let mutation = Mutation::new(table_id, pk, None, operations, 1001000, None);
+        let static_ops: Vec<StaticMergedOp> = mutation
+            .operations
+            .iter()
+            .map(|op| StaticMergedOp {
+                op: op.clone(),
+                timestamp_micros: mutation.timestamp_micros,
+                cell_local_deletion_time: mutation.effective_local_deletion_time(),
+            })
+            .collect();
 
         let mut buf = Vec::new();
         writer
-            .write_static_column_bitmap(&mut buf, &mutation, &schema)
+            .write_static_column_bitmap(&mut buf, &static_ops, &schema)
             .unwrap();
 
         // missing_count=1, followed by the missing column index.
@@ -6156,8 +6208,9 @@ mod tests {
         let writer = DataWriter::new(stats);
 
         let mut buf = Vec::new();
+        // Issue #764: the caller now supplies the local_deletion_time explicitly.
         writer
-            .write_complex_column_deletion(&mut buf, 1001000)
+            .write_complex_column_deletion(&mut buf, 1001000, 42)
             .unwrap();
 
         assert!(!buf.is_empty());
@@ -6168,6 +6221,22 @@ mod tests {
             buf[buf.len() - 1],
             0x00,
             "Last byte should be cell_count = 0"
+        );
+    }
+
+    #[test]
+    fn test_complex_column_deletion_rejects_ldt_below_baseline() {
+        // Issue #764: an explicit local_deletion_time below min_local_deletion_time
+        // must be rejected, not silently wrapped into a corrupt unsigned VInt.
+        let mut stats = create_test_stats();
+        stats.min_local_deletion_time = 100;
+        let writer = DataWriter::new(stats);
+
+        let mut buf = Vec::new();
+        let result = writer.write_complex_column_deletion(&mut buf, 1001000, 50);
+        assert!(
+            result.is_err(),
+            "LDT below baseline must be rejected to avoid VInt wrap corruption"
         );
     }
 
