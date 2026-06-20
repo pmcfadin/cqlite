@@ -139,3 +139,7 @@ experimental = ["cqlite-core/experimental"]
 cli-helpers = ["state_machine", "cqlite-core/cli-helpers"]
 # Issue #392: Write support (enables cqlite-core/write-support for CLI write operations)
 write-support = ["state_machine", "cqlite-core/write-support"]
+# Issue #705: Delta-export CDC subcommand (Epic #696 DS9).
+# Enables cqlite-core/delta-scan (DeltaRecord types, scan_delta API) and
+# cqlite-core/parquet (DeltaParquetWriter, arrow/parquet crates).
+delta-export = ["state_machine", "cqlite-core/delta-scan", "cqlite-core/parquet"]

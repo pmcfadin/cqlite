@@ -198,6 +198,29 @@ cargo run --package cqlite-cli --features write-support -- \
   export-sstable /tmp/export --keyspace my_ks --table my_tbl \
   --writable --write-dir /tmp/cqlite-write \
   --schema test-data/schemas/basic-types.cql
+
+# Delta-export (CDC Parquet, Issue #705 / Epic #696 DS9) - requires --features delta-export
+# Schema must be a bare CREATE TABLE statement (no CREATE KEYSPACE / USE preamble).
+cargo build --package cqlite-cli --features delta-export
+
+# Export one SSTable generation as a delta-envelope Parquet file
+cargo run --package cqlite-cli --features delta-export -- \
+  delta-export test-data/datasets/sstables/test_basic/simple_table-<uuid> \
+  --schema test-data/schemas/simple_table.cql \
+  --out parquet \
+  -o /tmp/delta.parquet
+
+# With custom envelope prefix (to resolve __op/__ts column collisions)
+cargo run --package cqlite-cli --features delta-export -- \
+  delta-export test-data/datasets/sstables/test_basic/simple_table-<uuid> \
+  --schema test-data/schemas/simple_table.cql \
+  --out parquet \
+  -o /tmp/delta.parquet \
+  --envelope-prefix _cqlite_
+
+# Run delta-export integration tests
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test --package cqlite-cli --features delta-export --test delta_export_tests
 ```
 
 ### CLI Output Format Precedence
@@ -370,6 +393,8 @@ Default (cqlite-core): `all-compression`, `state_machine`
 | `state_machine` | Query engine and discovery | Yes |
 | `cli-helpers` | CLI-specific ingestion/REPL API (Issue #249) | No |
 | `parquet` | Embeddable Parquet export writer (Epic #682) | No |
+| `delta-scan` | CDC delta-record streaming API (Epic #696) | No |
+| `delta-export` | CLI `delta-export` subcommand (Issue #705) | No |
 | `metrics` | Performance metrics collection | No |
 | `experimental` | Experimental features | No |
 

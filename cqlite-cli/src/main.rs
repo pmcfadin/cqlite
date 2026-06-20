@@ -963,6 +963,23 @@ async fn run_main() -> Result<()> {
                 ))
             }
         }
+        // Issue #705 / Epic #696 DS9: Delta-export CDC subcommand
+        Some(Commands::DeltaExport(args)) => {
+            #[cfg(feature = "delta-export")]
+            {
+                let result = commands::delta_export::handle_delta_export(&args).await?;
+                result.display();
+                Ok(())
+            }
+            #[cfg(not(feature = "delta-export"))]
+            {
+                let _ = args;
+                Err(anyhow::anyhow!(
+                    "Delta-export is not enabled in this build.\n\
+                     Rebuild with: cargo build --package cqlite-cli --features delta-export"
+                ))
+            }
+        }
         None => {
             // Default to help message for now
             println!("CQLite CLI v{}", env!("CARGO_PKG_VERSION"));
