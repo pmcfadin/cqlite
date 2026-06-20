@@ -578,6 +578,89 @@ impl SSTableReader {
         &decompressed[key_start..key_end] == expected_key
     }
 
+    /// BTI ("da") full scan: decompress the whole Data.db section and parse
+    /// every partition in token order (issue #660).
+    ///
+    /// BTI SSTables carry no Index.db/Summary.db, so a range/full scan cannot
+    /// use the index path. Instead we stitch the entire (chunk-compressed) data
+    /// section into one buffer and run [`parse_block_with_cell_metadata`], which
+    /// walks ALL partitions — the same per-partition decode the point-lookup
+    /// path uses, but without stopping at the first match.
+    ///
+    /// Returns entries with per-cell write metadata so the WRITETIME/TTL scan
+    /// (`scan_with_cell_metadata`) and the plain `scan` (which drops the metadata)
+    /// can share a single implementation. Results are filtered by the optional
+    /// `[start_key, end_key]` range and tombstone-suppressed, then sorted into
+    /// Murmur3 token order and truncated to `limit` — identical post-processing
+    /// to the V5CompressedLegacy stitched path.
+    ///
+    /// Holds `scan_mutex` for the whole operation because it advances the shared
+    /// file position and `current_chunk_index` (issue #805).
+    ///
+    /// [`parse_block_with_cell_metadata`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::parse_block_with_cell_metadata
+    async fn bti_scan_with_metadata(
+        &self,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<
+        Vec<(
+            RowKey,
+            Value,
+            std::collections::HashMap<String, CellWriteMetadata>,
+        )>,
+    > {
+        let _scan_guard = self.scan_mutex.lock().await;
+
+        // Decompress the entire data section. Precondition for stitch_all_chunks:
+        // file seeked to data-section start, current_chunk_index reset to 0.
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        self.current_chunk_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+        let whole = self.stitch_all_chunks().await?;
+
+        // Resolve schema via the four-tier strategy (provided > header > registry).
+        // V5CompressedLegacy partition decode requires a schema (cells lack names).
+        let effective_schema = self.get_table_schema(schema);
+        let parser = self.build_v5_parser();
+        let parsed =
+            parser.parse_block_with_cell_metadata(&whole, effective_schema.as_ref(), self)?;
+
+        let mut results = Vec::new();
+        for (_entry_table_id, entry_key, entry_value, cell_meta) in parsed {
+            if let Some(start) = start_key {
+                if &entry_key < start {
+                    continue;
+                }
+            }
+            if let Some(end) = end_key {
+                if &entry_key > end {
+                    continue;
+                }
+            }
+            if !self.filter_tombstone(&entry_value) {
+                continue;
+            }
+            results.push((entry_key, entry_value, cell_meta));
+        }
+
+        sort_by_token_order_with_meta(&mut results);
+        if let Some(lim) = limit {
+            results.truncate(lim);
+        }
+
+        log::debug!(
+            "SSTableReader::bti_scan_with_metadata - Returning {} results",
+            results.len()
+        );
+        Ok(results)
+    }
+
     /// Scan a range of keys
     ///
     /// # Arguments
@@ -608,6 +691,17 @@ impl SSTableReader {
             "SSTableReader::scan - Has bloom filter: {}",
             self.bloom_filter.is_some()
         );
+
+        // Issue #660: BTI ("da") readers have no Index.db/Summary.db. A full scan
+        // walks the whole (chunk-compressed) Data.db once and parses every
+        // partition — the same partition decode the point-lookup path proves
+        // correct, but emitting ALL partitions instead of stopping at the first.
+        if self.bti_partitions_db.is_some() {
+            let entries = self
+                .bti_scan_with_metadata(start_key, end_key, limit, schema)
+                .await?;
+            return Ok(entries.into_iter().map(|(k, v, _meta)| (k, v)).collect());
+        }
 
         let mut results = Vec::new();
 
@@ -718,6 +812,23 @@ impl SSTableReader {
     /// `Value::Tombstone` entries (with their authoritative deletion timestamps)
     /// so that tombstone-shadowing semantics can be applied during the merge.
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
+        // Issue #660: BTI ("da") tables have no Index.db; route through the
+        // whole-Data.db BTI scan, which resolves schema via get_table_schema
+        // (header/registry) and decodes every partition. `bti_scan_with_metadata`
+        // takes `scan_mutex` itself, so this branch runs BEFORE the lock below to
+        // avoid re-entrant deadlock.
+        if self.bti_partitions_db.is_some() {
+            let table_id = TableId::new(format!(
+                "{}.{}",
+                self.header.keyspace, self.header.table_name
+            ));
+            let entries = self.bti_scan_with_metadata(None, None, None, None).await?;
+            return Ok(entries
+                .into_iter()
+                .map(|(k, v, _meta)| (table_id.clone(), k, v))
+                .collect());
+        }
+
         // Issue #805: serialise concurrent scans (shared file position + chunk index).
         let _scan_guard = self.scan_mutex.lock().await;
 
@@ -1818,6 +1929,14 @@ impl SSTableReader {
         )>,
     > {
         log::debug!("SSTableReader::scan_with_cell_metadata - Starting");
+
+        // Issue #660: BTI ("da") metadata scan — same whole-Data.db walk as the
+        // plain BTI scan, but surfaces per-cell write metadata for WRITETIME/TTL.
+        if self.bti_partitions_db.is_some() {
+            return self
+                .bti_scan_with_metadata(start_key, end_key, limit, schema)
+                .await;
+        }
 
         let _scan_guard = self.scan_mutex.lock().await;
 

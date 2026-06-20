@@ -13,7 +13,7 @@
 #   - oa (enforced, VG4): test_oa — oa format BIG read implemented in #655
 #   - nb/deltas (skip-pending, DS5 #701): test_deltas — delete-bearing fixtures (8 tables);
 #     binaries not yet included in the published dataset asset; skipped if binaries absent
-#   - da/bti (skip-pending, BTI read epic #660): test_da
+#   - da/bti (enforced, BTI read epic #660): test_da — full trie-walk read implemented in #660
 #
 # Tables in SKIP_PENDING_KEYSPACES are discovered and listed, but not run
 # through the read-sstable command. They appear explicitly in the summary
@@ -59,18 +59,21 @@ OUTPUT_DIR="${OUTPUT_DIR:-${SCRIPT_DIR}/smoke-test-all-tables-results}"
 # Issue #656 (VG4): test_oa promoted from skip-pending to enforced (nb=33 + oa=6 = 39 tables)
 # Issue #701 (DS5): test_deltas fixtures created but kept skip-pending until its binaries are
 #   published in a new dataset asset and fetch-datasets.sh pin is bumped (DATASET_TAG etc).
-KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa")
+KEYSPACES=("test_basic" "test_collections" "test_timeseries" "test_wide_rows" "test_oa" "test_da")
 
 # Skip-pending keyspaces (Issue #654):
-#   - test_da:     da/BTI format - skip until BTI read epic #660
 #   - test_deltas: delete-bearing fixtures (#701) - skip until dataset asset includes binaries;
 #                  flip to enforced (move into KEYSPACES above) once fetch-datasets.sh pin is bumped
 # These keyspaces are discovered and listed explicitly as SKIP-PENDING,
 # but are not run through read-sstable (would produce parse errors or missing Data.db).
-SKIP_PENDING_KEYSPACES=("test_da" "test_deltas")
+#
+# Issue #660: test_da (da/BTI format) promoted to enforced — BTI end-to-end read
+# (whole-Data.db trie scan + ByteComparable decode) is implemented; read-sstable
+# resolves all 3 da tables via the header-extracted schema.
+SKIP_PENDING_KEYSPACES=("test_deltas")
 # Reason per keyspace (parallel arrays, bash 3.x compatible)
-SKIP_PENDING_KEYSPACE_NAMES=("test_da" "test_deltas")
-SKIP_PENDING_KEYSPACE_REASONS=("da/BTI-format parsing not yet implemented (see BTI read epic #660)" "binaries not in published dataset asset yet (see issue #701 — promote once fetch-datasets.sh pin is bumped)")
+SKIP_PENDING_KEYSPACE_NAMES=("test_deltas")
+SKIP_PENDING_KEYSPACE_REASONS=("binaries not in published dataset asset yet (see issue #701 — promote once fetch-datasets.sh pin is bumped)")
 
 # Get skip reason for a keyspace (bash 3.x compatible, no associative arrays)
 get_skip_reason() {
@@ -416,7 +419,7 @@ run_all_tests() {
     set -e
 
     echo ""
-    log_info "Checking skip-pending keyspaces (da/BTI - not enforced, see #660)..."
+    log_info "Checking skip-pending keyspaces (test_deltas - dataset publish pending, see #701)..."
     echo ""
     register_skip_pending_tables
 
@@ -433,7 +436,7 @@ print_summary() {
     echo "    SMOKE TEST SUMMARY - ALL TABLES"
     echo "========================================="
     echo ""
-    echo "  Total Tables Tested: ${total_tables}/39 (nb=33 + oa=6, enforced; test_deltas=8 skip-pending until dataset publish)"
+    echo "  Total Tables Tested: ${total_tables}/42 (nb=33 + oa=6 + da=3, enforced; test_deltas=8 skip-pending until dataset publish)"
     echo -e "  ${GREEN}Passed:              ${#PASSED_TABLES[@]}${NC}"
 
     if [[ ${#FAILED_TABLES[@]} -gt 0 ]]; then
@@ -443,7 +446,7 @@ print_summary() {
     fi
 
     if [[ ${#SKIPPED_PENDING_TABLES[@]} -gt 0 ]]; then
-        echo -e "  ${YELLOW}Skip-pending:        ${#SKIPPED_PENDING_TABLES[@]} (da/BTI - not enforced until BTI read epic #660)${NC}"
+        echo -e "  ${YELLOW}Skip-pending:        ${#SKIPPED_PENDING_TABLES[@]} (test_deltas - not enforced until dataset publish #701)${NC}"
     fi
 
     echo ""
@@ -472,9 +475,9 @@ print_summary() {
 
     if [[ ${#FAILED_TABLES[@]} -eq 0 ]]; then
         echo -e "${GREEN}=========================================${NC}"
-        echo -e "${GREEN}  All nb+oa tables (39) passed smoke test${NC}"
+        echo -e "${GREEN}  All nb+oa+da tables (42) passed smoke test${NC}"
+        echo -e "${GREEN}  da/BTI tables (3): enforced — BTI end-to-end read (epic #660)${NC}"
         echo -e "${GREEN}  test_deltas (8): skip-pending until dataset publish (#701)${NC}"
-        echo -e "${GREEN}  da/BTI tables present but skip-pending (BTI read epic #660)${NC}"
         echo -e "${GREEN}=========================================${NC}"
         return 0
     else
