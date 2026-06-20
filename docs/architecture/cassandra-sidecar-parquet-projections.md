@@ -4,6 +4,9 @@
 **Audience:** CQLite maintainers, integrators evaluating CQLite for lakehouse pipelines
 **Date:** 2026-06-10 (decisions recorded 2026-06-10)
 **Related:** [Apache Cassandra Sidecar](https://github.com/apache/cassandra-sidecar), `cqlite-core/src/export/parquet.rs`, `cqlite-core/src/lib.rs`
+**Delta-scan docs:**
+- [Envelope design](../plans/2026-06-10-delta-scan-envelope-design.md) — schema, API, architecture
+- [Consumer reconciliation guide](delta-scan-consumer-reconciliation.md) — DuckDB SQL reference merge, merge semantics per `__op`
 
 ## Summary
 
