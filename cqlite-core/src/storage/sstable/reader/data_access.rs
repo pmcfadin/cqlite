@@ -1501,6 +1501,8 @@ impl SSTableReader {
         // Issue #805: serialise concurrent scans (shared file position + chunk index).
         let _scan_guard = self.scan_mutex.lock().await;
 
+        let header_size = self.calculate_header_size();
+
         // For V5CompressedLegacy NB format, partitions can span chunk boundaries.
         // The block-by-block parser will miss any partition whose bytes cross a
         // chunk boundary.  Use the same stitched-buffer path that sequential_scan()
@@ -1510,7 +1512,19 @@ impl SSTableReader {
             log::debug!(
                 "scan_for_key: V5CompressedLegacy NB detected, using stitched buffer for key lookup"
             );
-            // Reset chunk index before stitching
+            // `stitch_all_chunks` reads from the CURRENT file position forward, so
+            // its precondition is "seeked to the data-section start, chunk index 0"
+            // (mirrors sequential_scan / scan_stream). A prior scan on this reader
+            // leaves the shared file position at end-of-data and the chunk index
+            // advanced; without resetting BOTH, the stitch reads zero chunks and
+            // every key falsely misses — making a get() after a scan() return None
+            // even though the partition exists (e.g. AlwaysPresentFilter tables
+            // where the bloom gate no longer short-circuits the lookup). Reset the
+            // file position too, not just the chunk index.
+            {
+                let mut file_guard = self.file.lock().await;
+                file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+            }
             self.current_chunk_index
                 .store(0, std::sync::atomic::Ordering::Relaxed);
 
@@ -1557,7 +1571,6 @@ impl SSTableReader {
             return Ok(None);
         }
 
-        let header_size = self.calculate_header_size();
         {
             let mut file_guard = self.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;

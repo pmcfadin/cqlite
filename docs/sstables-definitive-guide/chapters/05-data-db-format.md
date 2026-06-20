@@ -285,6 +285,8 @@ The complete row format, confirmed via Cassandra's `UnfilteredSerializer.java`:
 
 3. **No Trailing Field (Issue #237)**: There is NO trailing field after row data in V5CompressedLegacy format. The next partition or row starts immediately after `row_size` bytes from the position after the VInt.
 
+4. **`prev_size` is `previousUnfilteredSize`**: the `prev_size` VInt is the byte distance from the start of the *previous* unfiltered, **including that previous item's own `prev_size` VInt** (it is part of the chain). It is written by `UnfilteredSerializer` but **skipped by readers** (it exists to support backward iteration). See the dedicated subsection [previousUnfilteredSize](#previousunfilteredsize-the-prev_size-chain) below for the exact convention CQLite emits and the static-row exception.
+
 ### Clustering Prefix Format
 
 For tables with clustering keys, values are encoded between flags and row_size:
@@ -350,30 +352,91 @@ absolute_local_deletion_time   = min_local_deletion_time + local_deletion_time_d
 
 **Example**: If Statistics.db shows `min_timestamp = 1759713125983682` and row header contains `timestamp_delta = 1000`, the absolute timestamp is `1759713125984682` (microseconds since epoch).
 
+### previousUnfilteredSize (the `prev_size` chain)
+
+The `prev_size` VInt inside each row body is Cassandra's `previousUnfilteredSize`
+(`UnfilteredSerializer`). It records the serialized byte length of the *previous*
+unfiltered in the partition so a reader can iterate backwards. CQLite's reader
+parses but discards it (`v5_compressed_legacy.rs::parse_row_metadata` reads it into
+`_prev_size`); the writer must still emit the byte-correct value so the file matches
+Cassandra and round-trips through `sstabledump`.
+
+Exact convention (verified in
+`cqlite-core/src/storage/sstable/writer/data_writer.rs` —
+`write_partition` / `write_partition_with_index_blocks` — and pinned by
+`cqlite-core/tests/issue_821_writer_byte_invariants.rs`, which anchors against real
+Cassandra "nb" SSTables):
+
+- **First unfiltered in a partition**: `prev_size` = the **partition-header byte
+  size** (NOT 0). For a UUID partition key the header is `2 (u16 key length) + 16
+  (key) + 12 (deletion time) = 30`, and the first row carries `prev_size = 30`
+  (anchored against `test_basic.uncompressed_table`).
+- **Subsequent rows**: `prev_size` = the full serialized byte length of the
+  immediately preceding unfiltered, **including its own `prev_size` VInt** (the
+  measurement spans `flags + ext_flags + clustering_prefix + row_size_vint +
+  row_size_body`).
+- **Static row exception**: a static row hard-codes `prev_size = 0` AND is **not**
+  treated as the "previous unfiltered" for the chain. Its bytes still advance the
+  running in-partition position, so the first *regular* row after a static row
+  carries `prev_size = header_size + static_row_size` (= that regular row's own
+  in-partition offset), **not** the static row's size alone. Anchored against
+  `test_basic.static_columns_table` (header 30 + static 16 → regular-row
+  `prev_size = 46`).
+
+Authority: `org.apache.cassandra.db.rows.UnfilteredSerializer`
+(`previousUnfilteredSize`).
+
+### Offsets are 64-bit
+
+In-partition offsets and Data.db offsets are **64-bit** (`u64`/`i64`). A 32-bit
+narrowing of an offset past 2 GiB wraps negative and corrupts block offsets, so
+every writer-path offset encoder treats them as 64-bit (verified by
+`cqlite-core/tests/issue_821_writer_byte_invariants.rs::finding16_*`, which
+round-trips a >2 GiB offset through the Index.db data-position VInt, the BTI
+partition-leaf `SizedInts`, and the raw in-partition offset VInt).
+
+The remaining narrow integer fields are **format fields, not offsets**, and stay at
+their declared widths: the Index.db promoted-index offset array (`i32`), the
+Summary.db sample positions (`int[]`), and `DeletionTime.localDeletionTime`
+(`i32`, seconds). Do not "widen" these — see Appendix B.
+
 ### Column Bitmap
 
 When `HAS_ALL_COLUMNS` (0x20) is **NOT** set, a columns-subset field follows the metadata fields.
 Cassandra's on-disk format (`Columns.Serializer.serializeSubset`, `Columns.java:503-531`) encodes
 **missing** columns, not present columns:
 
-- **< 64 columns in superset**: write a single unsigned VInt where bit = 1 means the column at
-  that index is **absent**.
-- **≥ 64 columns**: write an unsigned VInt32 count of missing columns, then either indices of
-  present columns or missing columns (whichever is smaller set) as unsigned VInt32 deltas.
+- **< 64 columns in superset**: write a single unsigned VInt where bit `i` = 1 means the column at
+  index `i` is **absent** (set bit = MISSING). The value `0` means "all present"; Cassandra avoids
+  it by emitting `HAS_ALL_COLUMNS` instead. CQLite's writer (`write_column_subset`) *does* still
+  emit `encode_unsigned(0)` in the all-present case when it reaches the subset path without
+  `HAS_ALL_COLUMNS` set (e.g. a row carrying deletions whose every regular column is nonetheless
+  covered) — so a reader must accept a `0` subset VInt as "no columns missing", not treat it as
+  reserved/impossible.
+- **≥ 64 columns**: write the *large-subset* form — an unsigned VInt count of missing columns,
+  then either the present-column indices or the missing-column indices (whichever is the **smaller**
+  set) as **absolute** column indices, each an unsigned VInt (CQLite's `write_column_subset`
+  writes absolute indices, not deltas).
 
-The CQLite write path uses a simplified bitmap format:
+> **The `< 64` vs `≥ 64` mode boundary is DECODE-CRITICAL.** The two modes are not
+> distinguished by any flag — the reader must select the branch from the superset
+> (regular-column) count alone. A reader that always treats the subset field as a
+> single VInt mis-parses every `≥ 64`-column table: it consumes only the
+> missing-count and then mis-reads the trailing index VInts as cell data, corrupting
+> the rest of the row stream. CQLite's writer implements both modes
+> (`data_writer.rs::write_column_subset`, pinned at the 63/64/65 boundary by
+> `cqlite-core/tests/issue_824_column_subset_and_filter.rs`); the **reader currently
+> lacks the `≥ 64` large-subset branch** (it reads one VInt into a `u64` bitmap) —
+> see Appendix F.
 
-```
-[column_count: VInt]                   ← CQLite internal
-[bitmap_bytes: (column_count + 7) / 8] ← Bit = 1 means column PRESENT (CQLite convention)
-```
+Authority: `org.apache.cassandra.db.Columns.Serializer.serializeSubset`
+(`Columns.java:503-531`).
 
-> **Note**: CQLite's write-side bitmap (bit=1 = present) is the inverse of Cassandra's
-> `serializeSubset` (bit=1 = missing). Parsers reading Cassandra-produced SSTables must use
-> the authoritative subset encoding above; the CQLite bitmap is only produced by CQLite's own
-> writer and is parsed by CQLite's own reader accordingly.
+CQLite's writer (`data_writer.rs::write_column_subset`) follows this authoritative
+encoding directly — the missing-column bitmap for `< 64` columns and the large-subset
+count+index form for `≥ 64` — it does **not** use a separate "present-bit" format.
 
-**Example (Cassandra format)**: For a table with 10 columns, if columns 1 and 3 are absent:
+**Example**: For a table with 10 columns, if columns 1 and 3 are absent:
 - Bitmap VInt: bit 1 and bit 3 set = `0b00001010` = `0x0a`
 
 ### Validation
@@ -407,15 +470,26 @@ Each partition begins with:
 ```
 [key_length: u16 BE]       ← Partition key length (2 bytes, big-endian)
 [key_bytes]                ← Raw partition key bytes
-[deletion_time]            ← 1 byte 0x80 if LIVE; 12 bytes (u64 mfda + u32 ldt) if deleted
+[deletion_time: 12 bytes]  ← ALWAYS present, fixed-width: i32 localDeletionTime (4 BE)
+                              + i64 markedForDeleteAt (8 BE). A LIVE partition is the
+                              sentinel (localDeletionTime = i32::MAX = 0x7FFFFFFF,
+                              markedForDeleteAt = i64::MIN) — it is NOT a 1-byte 0x80.
 ```
+
+The partition-level `DeletionTime` here is the fixed 12-byte non-delta form (unlike the
+delta-encoded row/cell deletion in the row body). This is why the partition header is exactly
+`2 + key_length + 12` bytes — the basis for the first row's `previousUnfilteredSize` (see the
+prev_size section above, anchored to real Cassandra "nb" SSTables).
 
 Source: `SortedTablePartitionWriter.java:104-105` —
 `ByteBufferUtil.writeWithShortLength(key.getKey(), writer)` writes a 2-byte big-endian u16
 length followed by key bytes; then `DeletionTime.getSerializer(version).serialize(...)`.
 
 **There is no leading partition_flags byte and no trailing unknown_field.** The partition key
-length is a 2-byte unsigned short (max 65,535 bytes), not a 1-byte limit.
+length is a 2-byte unsigned short (max 65,535 bytes), not a 1-byte limit. For a **composite**
+(multi-column) partition key this u16 caps the *entire serialized key* — all components plus
+their inner `u16` length prefixes and separators — at 65,535 bytes, so a composite key can be
+invalid even when every individual component is itself under 65,535 bytes.
 
 **End-of-Partition Marker**: Each partition ends with a single byte 0x01 (END_OF_PARTITION) after all rows.
 
@@ -510,6 +584,16 @@ Tombstone cells have special flag requirements:
 - Expiring cell with row timestamp: `0x08 | 0x02 = 0x0a`
 
 **Critical**: Tombstones MUST NOT use ROW_USE_ROW_TIMESTAMP (0x08). Tombstones always include their own timestamp delta.
+
+**`IS_EXPIRING` (0x02) is strict and mutually exclusive with `IS_DELETED` (0x01).**
+`IS_EXPIRING` means `ttl != NO_TTL` and nothing else: it is set only for a live cell
+that actually carries a TTL, and it is **never** combined with `IS_DELETED`. A
+tombstone (`IS_DELETED`) therefore never carries a wasted TTL byte, and an expiring
+cell never sets the deletion bit. CQLite's emitter follows this: the TTL fields are
+written only on the `Some(ttl)` path
+(`data_writer.rs::write_complex_cell_header`, and the simple-cell expiring path),
+and the deletion path writes `IS_DELETED` with no TTL. Authority:
+`org.apache.cassandra.db.rows.Cell.Serializer` (`flags()`).
 
 ### NULL vs Empty Values
 
@@ -658,33 +742,16 @@ Row with clustering = (1234567890, NULL):
 
 ### Column Bitmap Encoding
 
-When ROW_HAS_ALL_COLUMNS is NOT set, a column bitmap is required:
+When `ROW_HAS_ALL_COLUMNS` (0x20) is NOT set, a columns-subset field follows — see the
+authoritative **[Column Bitmap](#column-bitmap)** section above for the exact encoding. In
+brief: it is **not** a `[column_count][bitmap_bytes]` present-bit format. For a superset of
+`< 64` columns it is a single unsigned VInt whose **set bit = column MISSING** (the inverse of a
+present-bitmap); for `≥ 64` columns it is the large-subset form (missing count + the smaller of
+{present, missing} **absolute** column indices as unsigned VInts). CQLite's writer
+(`data_writer.rs::write_column_subset`) follows this directly.
 
-```
-[column_count: VInt]               ← Total columns in schema
-[bitmap_bytes: (count + 7) / 8]    ← Bit = 1 means column present
-```
-
-**Bit Mapping**:
-- Column index determines bit position
-- Bit position = column_index (0-based)
-- Byte index = column_index / 8
-- Bit index within byte = column_index % 8
-
-**Example**: 10 columns, columns [0, 2, 5, 9] have values:
-
-```
-[0x0a]                              VInt(10) - column count
-[0b00100101, 0b00000010]           2 bytes for 10 columns
-                                    Byte 0: bits for columns 0-7
-                                    Byte 1: bits for columns 8-9
-```
-
-Bit positions:
-- Column 0: byte 0, bit 0 = SET
-- Column 2: byte 0, bit 2 = SET
-- Column 5: byte 0, bit 5 = SET
-- Column 9: byte 1, bit 1 = SET
+**Example**: 10-column table with columns 1 and 3 absent → single VInt with bits 1 and 3 set
+(`0b00001010` = `0x0a`).
 
 ### Cell Data Format
 
@@ -750,7 +817,9 @@ Complete write sequence for a partition:
       - Write clustering prefix (if present)
       - Compute row_size (body bytes only)
       - Write row_size VInt
-      - Write prev_size VInt (0 for now)
+      - Write prev_size VInt (`previousUnfilteredSize`: header size for the first row,
+        else the prior unfiltered's full byte length; `0` for a static row — see
+        [previousUnfilteredSize](#previousunfilteredsize-the-prev_size-chain))
       - Write timestamp delta (if HAS_TIMESTAMP)
       - Write TTL delta (if HAS_TTL)
       - Write column bitmap (if NOT HAS_ALL_COLUMNS)

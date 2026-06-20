@@ -171,6 +171,11 @@ Cell flags appear at the start of each cell and control cell-level metadata.
 
 **Critical distinction**:
 - **Tombstones** (`IS_DELETED`): MUST NOT set `USE_ROW_TIMESTAMP` - tombstones require explicit timestamps and local_deletion_time
+- **`IS_EXPIRING` (0x02) is strict and mutually exclusive with `IS_DELETED` (0x01)**:
+  `IS_EXPIRING` means `ttl != NO_TTL` and is set only for a live cell that carries a TTL. A
+  tombstone never also sets `IS_EXPIRING` (so no wasted TTL byte), and an expiring cell never
+  sets `IS_DELETED`. Authority: `Cell.Serializer.flags()`. Verified in CQLite's emitter
+  (`data_writer.rs` cell-flag construction: TTL fields only on the `Some(ttl)` path).
 - **Empty strings**: Use `HAS_EMPTY_VALUE` flag with zero-length value bytes (distinct from NULL)
 - **NULL values**: NOT written as cells - represented by absence in column bitmap
 
@@ -240,6 +245,59 @@ next_row_offset = (row_size_vint_start_offset + row_size_vint_byte_length) + row
 
 This matches Cassandra's `getFilePointer()` semantics where the file position after reading the VInt is used as the base for measuring `row_size`.
 
+## previousUnfilteredSize (`prev_size` VInt)
+
+Each row body opens with `prev_size` (`UnfilteredSerializer.previousUnfilteredSize`): the byte
+distance from the start of the previous unfiltered, **including that item's own `prev_size`
+VInt**. Readers parse and discard it; writers must emit it byte-correctly.
+
+| Position in partition | `prev_size` value |
+|-----------------------|-------------------|
+| First unfiltered | partition-header byte size (NOT 0) — e.g. 30 for a UUID PK (`2 + 16 + 12`) |
+| Subsequent row | full serialized byte length of the immediately preceding unfiltered |
+| Static row | hard-coded `0`; static row does **not** advance the chain |
+| First regular row after a static row | `header_size + static_row_size` (= its in-partition offset), NOT the static row size alone |
+
+Verified in `cqlite-core/src/storage/sstable/writer/data_writer.rs` and pinned (with real-nb
+anchors) by `cqlite-core/tests/issue_821_writer_byte_invariants.rs`. See Chapter 5,
+"previousUnfilteredSize". Authority: `org.apache.cassandra.db.rows.UnfilteredSerializer`.
+
+## 64-bit Offsets vs Narrow Format Fields
+
+Two kinds of integers are easy to confuse. **Offsets** are 64-bit; several **format fields**
+are deliberately narrow and must stay so.
+
+| Field | Width | Kind |
+|-------|-------|------|
+| In-partition offset / Data.db offset | `u64` / `i64` | offset — must be 64-bit |
+| Index.db data position (vint) | encodes full `u64` | offset — must be 64-bit |
+| BTI partition-leaf position (`SizedInts`) | encodes full `i64` | offset — must be 64-bit |
+| Index.db promoted-index offset array | `i32` | format field — stays 32-bit |
+| Summary.db sample positions | `int[]` | format field — stays 32-bit |
+| `DeletionTime.localDeletionTime` | `i32` (seconds) | format field — stays 32-bit |
+
+A 32-bit narrowing of an **offset** past 2 GiB wraps negative and corrupts block offsets.
+Verified by `issue_821_writer_byte_invariants.rs::finding16_*` (a >2 GiB offset round-trips
+through the Index.db vint, the BTI leaf `SizedInts`, and the raw in-partition offset vint).
+Do **not** widen the narrow format fields — their widths are part of the wire format.
+
+## Column-Subset Mode Boundary (`Columns.serializeSubset`)
+
+When `HAS_ALL_COLUMNS` (0x20) is clear, the columns-subset field encodes **missing** columns
+and its encoding is selected by the regular-column (superset) count — there is **no flag**, so
+the boundary is **decode-critical**:
+
+| Superset size | Encoding |
+|---------------|----------|
+| `< 64` | single unsigned VInt bitmap; bit `i` = 1 → column `i` MISSING. Value `0` means "none missing"; Cassandra avoids it via `HAS_ALL_COLUMNS`, but CQLite's writer can still emit `0` on the subset path (all-present without `HAS_ALL_COLUMNS`), so readers must accept it. |
+| `≥ 64` | large-subset: unsigned VInt count of missing columns, then the **smaller** of {present indices, missing indices} as **absolute** column indices (unsigned VInts, not deltas). |
+
+A reader that always reads one VInt mis-parses every `≥ 64`-column table. CQLite's writer
+implements both modes (`data_writer.rs::write_column_subset`, pinned by
+`issue_824_column_subset_and_filter.rs` at 63/64/65 columns); CQLite's reader currently lacks
+the `≥ 64` branch (see Appendix F). Authority: `Columns.Serializer.serializeSubset`
+(`Columns.java:503-531`).
+
 ## VInt Safety Limits (Issue #264)
 
 For security and memory safety, CQLite's `parse_vint_length()` enforces a maximum of **1GB** (`MAX_VINT_LENGTH = 1,073,741,824 bytes`) for any length field. This prevents:
@@ -283,6 +341,11 @@ Multi-component keys use 2-byte big-endian length prefixes with 0x00 separators 
 
 **CRITICAL**: The 0x00 separator appears after each component EXCEPT the last.
 
+**Size cap**: the whole composite key (all components + their `u16` prefixes + separators) is
+itself written behind the partition header's outer `u16` length, so the *entire serialized
+composite key* is capped at 65,535 bytes — a composite key can be invalid even when each
+individual component is under 65,535 bytes (the per-component `u16` is not the only limit).
+
 **Example 1**: `(int(42), text("hello"))` partition key
 ```
 0x00 0x04                 ← length of int component (4 bytes)
@@ -303,7 +366,10 @@ Total: 13 bytes (2 + 4 + 1 + 2 + 5)
 Total: 20 bytes (7 + 7 + 6)
 
 **Size limits**:
-- Single-component: No inherent limit (but V5CompressedLegacy partition header uses u8 length, limiting total to 255 bytes)
+- Single-component: limited to 65,535 bytes — the V5CompressedLegacy partition header
+  prefixes the whole key with a **2-byte big-endian u16** length
+  (`ByteBufferUtil.writeWithShortLength`, `SortedTablePartitionWriter.java:104-105`), NOT a
+  1-byte length. See Chapter 5, "Partition Header Format".
 - Multi-component: Each component limited to 65,535 bytes (u16 length prefix)
 
 ### Token Computation

@@ -235,12 +235,14 @@ pub struct StatisticsMetadata {
     pub row_count: u64,
     pub column_count: u64,
     pub total_rows_size: u64,
+    pub tombstone_histogram: TombstoneHistogram, // estimatedTombstoneDropTime
 }
 ```
 
 **Update methods**:
 - `update_timestamp(i64)`: Tracks min/max timestamp range
-- `update_local_deletion_time(i32)`: Tracks deletion time range for tombstones
+- `update_local_deletion_time(i32)`: Tracks the deletion time range for tombstones **and**
+  accumulates the value into the `estimatedTombstoneDropTime` histogram (see below)
 - `update_ttl(i32)`: Tracks TTL range (ignores 0 values)
 - `increment_partition_count()`: Counts partitions written
 - `increment_row_count()`: Counts rows (live + tombstones)
@@ -252,6 +254,54 @@ pub struct StatisticsMetadata {
 For the complete write-side implementation, see:
 - `cqlite-core/src/storage/sstable/writer/stats_writer.rs`: Statistics.db writer
 - `cqlite-core/src/storage/sstable/writer/data_writer.rs`: Data.db writer that uses these baselines
+
+### estimatedTombstoneDropTime histogram (STATS component)
+
+The STATS component carries `estimatedTombstoneDropTime`, the histogram of tombstone
+local-deletion-times that Cassandra uses to compute `estimatedDroppableTombstoneRatio`
+and schedule tombstone compaction. CQLite emits this histogram from its own writer
+(verified in `cqlite-core/src/storage/sstable/writer/stats_writer.rs`).
+
+Structure and algorithm:
+
+- **Bins.** A streaming histogram keyed by `local_deletion_time` (seconds since epoch),
+  each bin holding a tombstone count. CQLite mirrors Cassandra's
+  `StreamingTombstoneHistogramBuilder` with a fixed cap of **100 bins**
+  (`TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE`). When the cap is exceeded, the two **nearest**
+  bins are merged: the merged key is the count-weighted average of the two points and
+  the merged value is the sum of the counts (`merge_closest_bins`, matching Cassandra's
+  `mergeNearestBins`).
+- **Legacy (nb) serialization** — `write_tombstone_histogram`:
+
+  ```text
+  i32 BE  maxBinSize   (100 when non-empty, 0 when empty)
+  i32 BE  size         (number of bins)
+  for each bin:
+    f64 BE  point       (local-deletion-time as a double)
+    i64 BE  value       (tombstone count in this bin)
+  ```
+
+  An empty histogram serializes as 8 bytes (`maxBinSize = 0, size = 0`).
+
+- **Determinism / byte-stability (scope-limited).** Bins are stored in a
+  `BTreeMap<i64, i64>` and serialized in ascending key order, so for a **given final
+  bin set** the serialized bytes are order-stable. This is NOT a full
+  insertion-order-independence guarantee: the histogram is built by **streaming
+  insertion** (`update`), and once the input exceeds the 100-bin cap the builder
+  merges the two **nearest** bins on the fly (`merge_closest_bins`). Because the
+  merged key is the count-weighted average of whichever two bins happen to be
+  adjacent at that moment, the resulting merged bins — and thus the final byte
+  output — can differ depending on the **order** in which the same multiset of
+  deletion times was inserted. So byte-identity across different insertion orders of
+  the same deletion-time multiset is **not guaranteed**, and `stats_writer.rs` does
+  **not** assert it. What the tests in `stats_writer.rs` DO assert (issue #730) is
+  the framing: a non-empty histogram reports `maxBinSize = 100`, an empty one reports
+  `maxBinSize = 0, size = 0`, and below the cap there is one bin per distinct
+  deletion time (no byte-stability / insertion-order-independence assertion above the
+  cap).
+
+Authority: `org.apache.cassandra.utils.streamhist.StreamingTombstoneHistogramBuilder`
+and `org.apache.cassandra.io.sstable.metadata.StatsMetadata` (`estimatedTombstoneDropTime`).
 
 ### Full Cassandra TOC Structure (Not Implemented)
 
