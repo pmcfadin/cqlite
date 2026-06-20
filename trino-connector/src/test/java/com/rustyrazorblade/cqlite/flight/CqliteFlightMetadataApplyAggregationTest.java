@@ -114,7 +114,7 @@ class CqliteFlightMetadataApplyAggregationTest {
 
     @Test
     void decomposesAvgIntoSumPlusCount() throws Exception {
-        // avg over a DOUBLE column (integer avg is declined — see #897); the
+        // avg over a DOUBLE column (integer avg is declined — see #902); the
         // Sum+Count decomposition is identical.
         var result = metadata.applyAggregation(
                 null, TABLE, List.of(agg("avg", DOUBLE, new Variable("d", DOUBLE))),
