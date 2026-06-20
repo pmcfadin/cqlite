@@ -128,6 +128,10 @@ struct RowHeader {
     /// This is the `expires_at` for the row liveness — distinct from
     /// `local_deletion_time` which is the GC-grace clock for row tombstones.
     /// `None` when `HAS_TTL` was not set.
+    /// Only read by the delta-scan emit path (`parse_block_emit_delta`); allow it
+    /// to be unused when that feature is off so non-delta builds compile under
+    /// `-D warnings`.
+    #[cfg_attr(not(feature = "delta-scan"), allow(dead_code))]
     liveness_expires_at_seconds: Option<i32>,
     /// Row-level local deletion time in SECONDS (after delta decoding from
     /// min_local_deletion_time). This is the GC-grace clock, NOT the reconciliation
