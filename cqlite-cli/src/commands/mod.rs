@@ -184,6 +184,7 @@ pub mod bench;
 pub mod schema;
 pub mod write;
 
+pub mod delta_export;
 pub mod docker;
 pub mod info;
 pub mod read_sstable;

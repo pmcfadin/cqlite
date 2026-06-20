@@ -293,6 +293,12 @@ pub enum Commands {
         long_about = "One-shot, policy-free compaction over exactly the SSTables in <input-dir>, writing the merged result to --output. Unlike maintenance/export-sstable this does not use a managed write-dir and takes an explicit --gc-before for deterministic, Cassandra-matching purge decisions (used by the compaction-parity harness, issue #842). Example: cqlite compact ./inputs -o ./out --schema ks.tbl.cql --gc-before 1700000000"
     )]
     Compact(CompactArgs),
+    /// Export an SSTable generation as a delta-envelope Parquet file (Issue #705)
+    #[command(name = "delta-export")]
+    #[command(
+        long_about = "Scan a single SSTable directory as a CDC delta and write a Parquet file using the CQLite delta envelope (one record per change event). Requires the delta-export feature. Each non-key column becomes a nullable Struct{value, writetime, expires_at}. Envelope columns (__op, __ts, __range_start, __range_end) carry delete semantics. Example: cqlite delta-export ./test-data/datasets/sstables/test_basic/simple_table-xxx --schema test-data/schemas/basic-types.cql --out parquet -o /tmp/delta.parquet"
+    )]
+    DeltaExport(DeltaExportArgs),
 }
 
 #[derive(Subcommand)]
@@ -445,4 +451,52 @@ pub struct ExportSstableArgs {
     /// Skip validation after export
     #[arg(long)]
     pub skip_validate: bool,
+}
+
+// Arguments for the delta-export subcommand (Issue #705 / Epic #696 DS9)
+#[derive(Args, Debug, Clone)]
+pub struct DeltaExportArgs {
+    /// SSTable directory to scan (contains the Data.db file)
+    pub sstable_dir: PathBuf,
+    /// CQL (.cql) or JSON (.json) schema file for the table
+    #[arg(long, value_name = "FILE")]
+    pub schema: PathBuf,
+    /// Output format — only 'parquet' is supported
+    #[arg(long, value_enum, default_value = "parquet")]
+    pub out: DeltaOutFormat,
+    /// Output Parquet file path (required; binary output cannot go to stdout)
+    #[arg(short = 'o', long, value_name = "FILE")]
+    pub output: PathBuf,
+    /// Envelope column prefix (default: "__"). Change to avoid collisions with
+    /// user columns named __op, __ts, __range_start, or __range_end.
+    /// Example: --envelope-prefix "_cqlite_" gives "_cqlite_op", "_cqlite_ts", etc.
+    #[arg(long, value_name = "PREFIX", default_value = "__")]
+    pub envelope_prefix: String,
+    /// Parquet row-group size (number of records per row group). Default: 10000.
+    #[arg(long, value_name = "N", default_value = "10000")]
+    pub row_group_size: usize,
+    /// Parquet compression codec. Default: snappy.
+    #[arg(long, value_enum, default_value = "snappy")]
+    pub compression: DeltaCompressionCodec,
+    /// SSTable identity string written to the 'cqlite.delta.source' Parquet footer key.
+    /// Defaults to the SSTable directory base name.
+    #[arg(long, value_name = "ID")]
+    pub source: Option<String>,
+    /// Overwrite output file if it exists (default: error if file exists)
+    #[arg(long)]
+    pub overwrite: bool,
+}
+
+/// Output format for delta-export (only Parquet is supported in v1).
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum DeltaOutFormat {
+    Parquet,
+}
+
+/// Parquet compression codec for delta-export.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+pub enum DeltaCompressionCodec {
+    Snappy,
+    Zstd,
+    Uncompressed,
 }
