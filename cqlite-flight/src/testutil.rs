@@ -85,6 +85,22 @@ pub fn write_name_only(id: i32, name: &str, ts: i64) -> Mutation {
     )
 }
 
+/// Write only the `score` column for partition `id` (leaves `name` absent →
+/// null). Used by the nested-predicate tests that need a row with `name IS NULL`.
+pub fn write_score_only(id: i32, score: i32, ts: i64) -> Mutation {
+    Mutation::new(
+        TableId::new(KS, TBL),
+        PartitionKey::single("id", Value::Integer(id)),
+        None,
+        vec![CellOperation::Write {
+            column: "score".into(),
+            value: Value::Integer(score),
+        }],
+        ts,
+        None,
+    )
+}
+
 /// A row tombstone for partition `id`.
 pub fn delete_row(id: i32, ts: i64) -> Mutation {
     Mutation::new(

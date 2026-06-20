@@ -31,7 +31,23 @@ log "clean slate (reproducible run)"
 "${COMPOSE[@]}" --profile loadtest down -v --remove-orphans || true
 
 log "build connector plugin (JDK 25 toolchain)"
-(cd "$ROOT/trino-connector" && ./gradlew --no-daemon installPlugin)
+PLUGIN_DIR="$ROOT/trino-connector/build/plugin/cqlite_flight"
+# Prefer the host Gradle (CI runs on a JDK 21 host). When no usable host JDK is
+# present (e.g. a dev box without Java), fall back to a JDK 25 container so the
+# e2e is still runnable. A persistent volume caches the Gradle dist + deps.
+# Verify the plugin jar actually materialised — some host "java" shims exit 0
+# without running, so an exit code alone is not proof of a build.
+rm -rf "$PLUGIN_DIR"
+(cd "$ROOT/trino-connector" && ./gradlew --no-daemon installPlugin) || true
+if ! ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1; then
+  log "host Gradle produced no plugin; building in a JDK 25 container"
+  docker run --rm \
+    -v "$ROOT/trino-connector":/work -w /work \
+    -v cqlite-gradle-cache:/root/.gradle \
+    eclipse-temurin:25-jdk \
+    ./gradlew --no-daemon --console=plain installPlugin
+fi
+ls "$PLUGIN_DIR"/*.jar >/dev/null 2>&1 || { echo "plugin build failed: no jar in $PLUGIN_DIR"; exit 1; }
 
 log "bring up stack (builds cqlite-flight image; waits for healthy deps)"
 "${COMPOSE[@]}" up -d --build
@@ -62,6 +78,16 @@ assert_eq "projection + filter"     '"carol"'                               "$(t
 assert_eq "aggregate sum(score)"    '"150"'                                 "$(trino 'SELECT sum(score) FROM cqlite.analytics.events')"
 assert_eq "uuid renders as text"    '"alpha"'                               "$(trino "SELECT label FROM cqlite.analytics.typed WHERE id = '11111111-1111-1111-1111-111111111111'")"
 assert_eq "timestamp renders"       '"2024-01-01 00:00:00.000 UTC"'         "$(trino "SELECT created FROM cqlite.analytics.typed WHERE label = 'alpha'")"
+
+# Nested predicate pushdown (#834): OR / NOT / parenthesized groups must return
+# the same answer as a Trino-side filter. Rows: alice(10,t) bob(20,f) carol(30,t)
+# dave(40,f) erin(50,t).
+# (score>25 AND active) OR name='bob' -> carol, erin, bob = 3.
+assert_eq "nested (AND)-OR predicate" '"3"'                                  "$(trino "SELECT count(*) FROM cqlite.analytics.events WHERE (score > 25 AND active = true) OR name = 'bob'")"
+# NOT (score>25) -> alice, bob = 2.
+assert_eq "NOT predicate"           '"2"'                                    "$(trino 'SELECT count(*) FROM cqlite.analytics.events WHERE NOT (score > 25)')"
+# OR with IS NULL (no null actives) -> only erin(50) = 1.
+assert_eq "OR with IS NULL"         '"1"'                                    "$(trino 'SELECT count(*) FROM cqlite.analytics.events WHERE score > 45 OR active IS NULL')"
 
 # Proof it reads SSTables (not live CQL): an unflushed row must be invisible.
 log "assert SSTable semantics (memtable invisible until flush)"

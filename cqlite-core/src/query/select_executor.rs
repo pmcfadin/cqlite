@@ -202,6 +202,99 @@ fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
     ))
 }
 
+/// Three-valued (SQL Kleene) outcome of evaluating a single leaf predicate
+/// against one row.
+///
+/// `Unknown` is produced when the predicate references a column that is absent
+/// from the row or whose value is `Null` — i.e. a SQL `NULL` operand. Callers
+/// that only need pure-`AND` rejection (the historical [`evaluate_predicates`])
+/// treat `Unknown` and `False` identically; callers that evaluate `OR`/`NOT`
+/// (the Flight nested-predicate evaluator, issue #834) must distinguish them to
+/// match SQL `WHERE` semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LeafOutcome {
+    /// The predicate is definitely satisfied.
+    True,
+    /// The predicate is definitely not satisfied.
+    False,
+    /// The predicate's column is missing or `NULL` (SQL `UNKNOWN`).
+    Unknown,
+}
+
+/// Evaluate a single SSTable leaf predicate against one `QueryRow` with SQL
+/// three-valued (Kleene) semantics.
+///
+/// Returns [`LeafOutcome::Unknown`] when the predicate's column is absent from
+/// the row or its value is `Null`; otherwise a definite `True`/`False` from the
+/// typed comparison. This is the finer-grained primitive underlying both
+/// [`evaluate_predicates`] (pure AND, where `Unknown` rejects like `False`) and
+/// the Flight nested-predicate evaluator (issue #834), so all three paths share
+/// one copy of the comparison logic (`values_equal` / `compare_values_ordering`).
+///
+/// `IN` and `Prefix` follow `evaluate_predicates`: `IN` is membership over the
+/// value list, `Prefix` is a text `starts_with`. `Range` (two-bound) is included
+/// for completeness even though Flight lowers single bounds to `Gt`/`Lt`/etc.
+/// `BloomFilter` is always `True` (checked upstream).
+pub fn evaluate_leaf(row: &QueryRow, predicate: &SSTablePredicate) -> LeafOutcome {
+    use super::select_optimizer::SSTableFilterOp;
+    let column_value = match row.values.get(&predicate.column) {
+        // A SQL `NULL` operand (absent column or explicit `Null`) is `UNKNOWN`.
+        None | Some(Value::Null) => return LeafOutcome::Unknown,
+        Some(v) => v,
+    };
+    let matches = match &predicate.operation {
+        SSTableFilterOp::Equal => predicate
+            .values
+            .first()
+            .is_some_and(|v| values_equal(column_value, v)),
+        // Membership uses the same coercing equality as `Equal` so a pushed-down
+        // `IN` operand that lowers to a wider numeric type (e.g. `Integer`) still
+        // matches a narrow column value (`TinyInt`/`SmallInt`/`Float32`).
+        SSTableFilterOp::In => predicate
+            .values
+            .iter()
+            .any(|v| values_equal(column_value, v)),
+        SSTableFilterOp::Range => {
+            if predicate.values.len() < 2 {
+                false
+            } else {
+                let lo = &predicate.values[0];
+                let hi = &predicate.values[1];
+                compare_values_ordering(column_value, lo).is_ge()
+                    && compare_values_ordering(column_value, hi).is_le()
+            }
+        }
+        // Single-bound clustering inequalities (Issue #788). A missing bound
+        // rejects the row, mirroring the `Range` len-guard above.
+        SSTableFilterOp::Gt => predicate
+            .values
+            .first()
+            .is_some_and(|b| compare_values_ordering(column_value, b).is_gt()),
+        SSTableFilterOp::Gte => predicate
+            .values
+            .first()
+            .is_some_and(|b| compare_values_ordering(column_value, b).is_ge()),
+        SSTableFilterOp::Lt => predicate
+            .values
+            .first()
+            .is_some_and(|b| compare_values_ordering(column_value, b).is_lt()),
+        SSTableFilterOp::Lte => predicate
+            .values
+            .first()
+            .is_some_and(|b| compare_values_ordering(column_value, b).is_le()),
+        SSTableFilterOp::Prefix => matches!(
+            (column_value, predicate.values.first()),
+            (Value::Text(s), Some(Value::Text(p))) if s.starts_with(p)
+        ),
+        SSTableFilterOp::BloomFilter => true, // already checked upstream
+    };
+    if matches {
+        LeafOutcome::True
+    } else {
+        LeafOutcome::False
+    }
+}
+
 /// Evaluate the SSTable predicate set against a single `QueryRow`.
 ///
 /// Returns `Ok(true)` only if every predicate is satisfied. A missing column
@@ -209,53 +302,13 @@ fn try_compare_values(a: &Value, b: &Value) -> Result<std::cmp::Ordering> {
 ///
 /// Exposed publicly so the Arrow Flight server can apply identical predicate
 /// pushdown semantics to its merged rows (output parity with SELECT).
+///
+/// Implemented in terms of [`evaluate_leaf`]: under pure `AND`, both
+/// [`LeafOutcome::False`] and [`LeafOutcome::Unknown`] reject the row, so this
+/// preserves the historical "missing column → false" behaviour exactly.
 pub fn evaluate_predicates(row: &QueryRow, predicates: &[SSTablePredicate]) -> Result<bool> {
-    use super::select_optimizer::SSTableFilterOp;
     for predicate in predicates {
-        let Some(column_value) = row.values.get(&predicate.column) else {
-            return Ok(false);
-        };
-        let matches = match &predicate.operation {
-            SSTableFilterOp::Equal => predicate
-                .values
-                .first()
-                .is_some_and(|v| values_equal(column_value, v)),
-            SSTableFilterOp::In => predicate.values.contains(column_value),
-            SSTableFilterOp::Range => {
-                if predicate.values.len() < 2 {
-                    false
-                } else {
-                    let lo = &predicate.values[0];
-                    let hi = &predicate.values[1];
-                    compare_values_ordering(column_value, lo).is_ge()
-                        && compare_values_ordering(column_value, hi).is_le()
-                }
-            }
-            // Single-bound clustering inequalities (Issue #788). A missing bound
-            // rejects the row, mirroring the `Range` len-guard above.
-            SSTableFilterOp::Gt => predicate
-                .values
-                .first()
-                .is_some_and(|b| compare_values_ordering(column_value, b).is_gt()),
-            SSTableFilterOp::Gte => predicate
-                .values
-                .first()
-                .is_some_and(|b| compare_values_ordering(column_value, b).is_ge()),
-            SSTableFilterOp::Lt => predicate
-                .values
-                .first()
-                .is_some_and(|b| compare_values_ordering(column_value, b).is_lt()),
-            SSTableFilterOp::Lte => predicate
-                .values
-                .first()
-                .is_some_and(|b| compare_values_ordering(column_value, b).is_le()),
-            SSTableFilterOp::Prefix => matches!(
-                (column_value, predicate.values.first()),
-                (Value::Text(s), Some(Value::Text(p))) if s.starts_with(p)
-            ),
-            SSTableFilterOp::BloomFilter => true, // already checked upstream
-        };
-        if !matches {
+        if evaluate_leaf(row, predicate) != LeafOutcome::True {
             return Ok(false);
         }
     }
@@ -2070,6 +2123,92 @@ mod tests {
         // ck <= 200
         assert!(eval(SSTableFilterOp::Lte, 200));
         assert!(!eval(SSTableFilterOp::Lte, 201));
+    }
+
+    /// Issue #834: `evaluate_leaf` distinguishes the three SQL truth values.
+    /// A present, comparable value yields True/False; an absent column or an
+    /// explicit `Null` value yields Unknown so OR/NOT callers get SQL semantics.
+    #[test]
+    fn evaluate_leaf_is_three_valued() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let gt200 = SSTablePredicate {
+            column: "ck".to_string(),
+            operation: SSTableFilterOp::Gt,
+            values: vec![Value::Integer(200)],
+        };
+
+        // Present value → definite True/False.
+        assert_eq!(
+            evaluate_leaf(&row_with_int("ck", 201), &gt200),
+            LeafOutcome::True
+        );
+        assert_eq!(
+            evaluate_leaf(&row_with_int("ck", 200), &gt200),
+            LeafOutcome::False
+        );
+
+        // Absent column → Unknown (not False).
+        assert_eq!(
+            evaluate_leaf(&row_with_int("other", 999), &gt200),
+            LeafOutcome::Unknown
+        );
+
+        // Explicit Null value → Unknown.
+        let mut values = std::collections::HashMap::new();
+        values.insert("ck".to_string(), Value::Null);
+        let null_row = QueryRow {
+            values,
+            key: RowKey::new(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        };
+        assert_eq!(evaluate_leaf(&null_row, &gt200), LeafOutcome::Unknown);
+    }
+
+    /// Pushed-down `IN` operands lower to wide numeric types (`Integer`), but
+    /// the row value for a CQL `tinyint`/`smallint`/`float` column is a narrow
+    /// variant. Membership must coerce (like `Equal`) so the match still holds.
+    #[test]
+    fn evaluate_leaf_in_coerces_narrow_numeric_columns() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let in_pred = SSTablePredicate {
+            column: "v".to_string(),
+            operation: SSTableFilterOp::In,
+            // Operands as they arrive from a Flight ticket (wide types).
+            values: vec![Value::Integer(7), Value::Integer(9)],
+        };
+
+        let row_of = |val: Value| {
+            let mut values = std::collections::HashMap::new();
+            values.insert("v".to_string(), val);
+            QueryRow {
+                values,
+                key: RowKey::new(Vec::new()),
+                metadata: Default::default(),
+                cell_metadata: None,
+            }
+        };
+
+        // Narrow column values must still match the wide IN operands.
+        assert_eq!(
+            evaluate_leaf(&row_of(Value::TinyInt(7)), &in_pred),
+            LeafOutcome::True
+        );
+        assert_eq!(
+            evaluate_leaf(&row_of(Value::SmallInt(9)), &in_pred),
+            LeafOutcome::True
+        );
+        assert_eq!(
+            evaluate_leaf(&row_of(Value::Float32(7.0)), &in_pred),
+            LeafOutcome::True
+        );
+        // A non-member narrow value is still False (not Unknown).
+        assert_eq!(
+            evaluate_leaf(&row_of(Value::TinyInt(8)), &in_pred),
+            LeafOutcome::False
+        );
     }
 
     /// Issue #788: the `pk = ? AND ck >= 0 AND ck < 200` shape — a two-bound AND

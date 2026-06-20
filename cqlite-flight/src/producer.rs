@@ -16,11 +16,11 @@
 
 use std::path::{Path, PathBuf};
 
-use arrow::datatypes::Schema as ArrowSchema;
+use arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 
 use cqlite_core::export::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
-use cqlite_core::query::{build_row_from_scan, evaluate_predicates, ColumnInfo, QueryRow};
+use cqlite_core::query::{build_row_from_scan, ColumnInfo, QueryRow};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
@@ -235,8 +235,35 @@ impl MergeProducer {
     }
 
     /// The Arrow schema clients should expect (for `GetFlightInfo`/`GetSchema`).
+    ///
+    /// Each field is augmented with the `cqlite:pushdown` metadata key declaring
+    /// how the server can push predicates on that column (`"full"`, `"equality"`,
+    /// or `"none"`) — see [`pushdown_capability`]. The Trino connector reads this
+    /// to gate pushdown per column, since several CQL types (inet, duration,
+    /// varint, …) surface as Arrow UTF-8/other shapes indistinguishable from
+    /// genuine `text` by Arrow type alone. Field order, names, types, and any
+    /// existing metadata (e.g. the uuid extension) are preserved.
     pub fn arrow_schema(&self) -> Result<ArrowSchema, ProducerError> {
-        Ok(build_arrow_schema(&self.columns)?)
+        let base = build_arrow_schema(&self.columns)?;
+        let fields: Vec<ArrowField> = base
+            .fields()
+            .iter()
+            .zip(self.columns.iter())
+            .map(|(field, column)| {
+                let capability = column
+                    .cql_type
+                    .as_ref()
+                    .map(pushdown_capability)
+                    .unwrap_or("none");
+                let mut metadata = field.metadata().clone();
+                metadata.insert("cqlite:pushdown".to_string(), capability.to_string());
+                field.as_ref().clone().with_metadata(metadata)
+            })
+            .collect();
+        Ok(ArrowSchema::new_with_metadata(
+            fields,
+            base.metadata().clone(),
+        ))
     }
 
     /// The ordered Arrow column metadata.
@@ -321,12 +348,13 @@ impl MergeProducer {
                 let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
                     continue;
                 };
-                // Predicate pushdown: keep only rows satisfying every predicate.
-                if !self.spec.predicates.is_empty()
-                    && !evaluate_predicates(&row, &self.spec.predicates)
-                        .map_err(ProducerError::Predicate)?
-                {
-                    continue;
+                // Predicate pushdown: evaluate the nested filter tree with SQL
+                // Kleene logic and keep the row only when it is definitely True
+                // (Unknown and False both reject — WHERE semantics, issue #834).
+                if let Some(filter) = &self.spec.filter {
+                    if !filter.keeps(&row) {
+                        continue;
+                    }
                 }
                 buffer.push(row);
                 if buffer.len() >= self.batch_size {
@@ -424,6 +452,56 @@ pub(crate) fn schema_columns(schema: &TableSchema) -> Result<Vec<ColumnInfo>, Pr
     Ok(columns)
 }
 
+/// Declare how the server can push predicates on a column of this CQL type.
+///
+/// The capability is aligned EXACTLY with what
+/// [`crate::filter`]`::json_to_value` can lower a JSON operand into:
+/// - `"full"` — every operator (Equal, In, ordering Gt/Gte/Lt/Lte, Prefix) is
+///   safe. These are the types `json_to_value` parses into a directly
+///   comparable [`Value`]: the integer family (TinyInt/SmallInt/Int/BigInt),
+///   `Counter` and `Timestamp` (both lowered from a JSON integer), `Float`/
+///   `Double`, `Boolean`, and the textual family (Text/Ascii/Varchar).
+/// - `"equality"` — `json_to_value` lowers `Uuid`/`TimeUuid` to `Value::Uuid`,
+///   which only supports exact match (Equal/In/IsNull). Ordering and prefix on a
+///   uuid would compare by uuid bytes, not by the VARCHAR surface form, so they
+///   must stay a Trino residual.
+/// - `"none"` — everything else (`Inet`, `Duration`, `Varint`, `Decimal`,
+///   `Blob`, `Date`, `Time`, and the collection/tuple/UDT/custom types):
+///   `json_to_value` rejects them, so nothing can be pushed.
+///
+/// `Frozen(inner)` is unwrapped recursively (it never changes comparability).
+pub(crate) fn pushdown_capability(ty: &CqlType) -> &'static str {
+    match ty {
+        CqlType::Frozen(inner) => pushdown_capability(inner),
+        CqlType::Boolean
+        | CqlType::TinyInt
+        | CqlType::SmallInt
+        | CqlType::Int
+        | CqlType::BigInt
+        | CqlType::Counter
+        | CqlType::Float
+        | CqlType::Double
+        | CqlType::Timestamp
+        | CqlType::Text
+        | CqlType::Ascii
+        | CqlType::Varchar => "full",
+        CqlType::Uuid | CqlType::TimeUuid => "equality",
+        CqlType::Decimal
+        | CqlType::Blob
+        | CqlType::Date
+        | CqlType::Time
+        | CqlType::Inet
+        | CqlType::Duration
+        | CqlType::Varint
+        | CqlType::List(_)
+        | CqlType::Set(_)
+        | CqlType::Map(_, _)
+        | CqlType::Tuple(_)
+        | CqlType::Udt(_, _)
+        | CqlType::Custom(_) => "none",
+    }
+}
+
 /// Map a `CqlType` to the flat `DataType` fallback carried by `ColumnInfo`.
 ///
 /// The Arrow converter prefers `ColumnInfo.cql_type` (always `Some` here), so this
@@ -467,6 +545,84 @@ mod tests {
         build_sstables, delete_row, make_snapshot, simple_schema, total_rows, write_row, KS, TBL,
     };
     use cqlite_core::schema::{ClusteringColumn, Column};
+
+    #[test]
+    fn pushdown_capability_aligns_with_json_to_value() {
+        use cqlite_core::schema::CqlType;
+        // Full: ordering + equality + prefix are all safe.
+        assert_eq!(pushdown_capability(&CqlType::Text), "full");
+        assert_eq!(pushdown_capability(&CqlType::BigInt), "full");
+        // Equality-only: uuid/timeuuid lower to Value::Uuid (exact match only).
+        assert_eq!(pushdown_capability(&CqlType::Uuid), "equality");
+        // Frozen unwraps to its inner type's capability.
+        assert_eq!(
+            pushdown_capability(&CqlType::Frozen(Box::new(CqlType::Uuid))),
+            "equality"
+        );
+        // None: json_to_value rejects these, so nothing is pushable.
+        assert_eq!(pushdown_capability(&CqlType::Inet), "none");
+        assert_eq!(pushdown_capability(&CqlType::Duration), "none");
+    }
+
+    #[test]
+    fn arrow_schema_tags_each_field_with_pushdown_capability() {
+        // simple_schema: id (uuid? -> check), name (text), score (int).
+        let schema = simple_schema();
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+        let arrow_schema = producer.arrow_schema().unwrap();
+        // Every field carries the pushdown metadata key.
+        for field in arrow_schema.fields() {
+            assert!(
+                field.metadata().contains_key("cqlite:pushdown"),
+                "field {} missing pushdown metadata",
+                field.name()
+            );
+        }
+        // name (text) is full; score (int) is full.
+        assert_eq!(
+            arrow_schema
+                .field_with_name("name")
+                .unwrap()
+                .metadata()
+                .get("cqlite:pushdown")
+                .map(String::as_str),
+            Some("full")
+        );
+        assert_eq!(
+            arrow_schema
+                .field_with_name("score")
+                .unwrap()
+                .metadata()
+                .get("cqlite:pushdown")
+                .map(String::as_str),
+            Some("full")
+        );
+    }
+
+    #[test]
+    fn arrow_schema_preserves_uuid_extension_alongside_pushdown() {
+        use crate::testutil::uuid_schema;
+        let schema = uuid_schema();
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+        let arrow_schema = producer.arrow_schema().unwrap();
+        let id_field = arrow_schema.field_with_name("id").unwrap();
+        // Existing uuid extension metadata survives the augmentation...
+        assert_eq!(
+            id_field
+                .metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str),
+            Some("arrow.uuid")
+        );
+        // ...and the uuid column declares equality-only pushdown.
+        assert_eq!(
+            id_field
+                .metadata()
+                .get("cqlite:pushdown")
+                .map(String::as_str),
+            Some("equality")
+        );
+    }
 
     #[test]
     fn schema_columns_orders_pk_then_clustering_then_regular() {
@@ -1044,5 +1200,248 @@ mod tests {
             kept.contains(&paths[0]),
             "path with missing Summary.db must be kept (fail open)"
         );
+    }
+
+    // ---- Issue #834: nested predicate pushdown (OR/NOT/IS NULL) ----
+
+    /// Collect the surviving partition-key `id` values across all batches.
+    fn surviving_ids(batches: &[RecordBatch]) -> Vec<i32> {
+        let mut ids = Vec::new();
+        for b in batches {
+            let col = b
+                .column_by_name("id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            ids.extend((0..col.len()).map(|i| col.value(i)));
+        }
+        ids.sort_unstable();
+        ids
+    }
+
+    /// `(score > 10 AND name = 'x') OR name IS NULL` — asserts the EXACT
+    /// surviving rows, exercising AND, OR and IS NULL together.
+    #[test]
+    fn nested_or_with_is_null_keeps_exact_rows() {
+        use crate::testutil::write_score_only;
+        use crate::ticket::{FlightTicket, PredicateExpr, PredicateOp};
+        use serde_json::json;
+
+        let schema = simple_schema();
+        // id=1: score=20,name="x"  → left branch TRUE  → kept
+        // id=2: score=20,name="y"  → left FALSE, name present → reject
+        // id=3: score=5, name="x"  → left FALSE (score), name present → reject
+        // id=4: score=99 (no name) → left UNKNOWN(name), name IS NULL TRUE → kept
+        // id=5: score=5  (no name) → left FALSE? score<10 so AND FALSE; IS NULL TRUE → kept
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "x", 20, 100),
+                write_row(2, "y", 20, 100),
+                write_row(3, "x", 5, 100),
+                write_score_only(4, 99, 100),
+                write_score_only(5, 5, 100),
+            ]],
+        );
+
+        let filter = PredicateExpr::Or {
+            exprs: vec![
+                PredicateExpr::And {
+                    exprs: vec![
+                        PredicateExpr::Compare {
+                            column: "score".into(),
+                            op: PredicateOp::Gt,
+                            value: json!(10),
+                        },
+                        PredicateExpr::Compare {
+                            column: "name".into(),
+                            op: PredicateOp::Equal,
+                            value: json!("x"),
+                        },
+                    ],
+                },
+                PredicateExpr::IsNull {
+                    column: "name".into(),
+                },
+            ],
+        };
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                filter: Some(filter),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            surviving_ids(&batches),
+            vec![1, 4, 5],
+            "left-branch match (1) plus both name-is-null rows (4,5)"
+        );
+    }
+
+    /// `NOT (score > 10)` must NOT keep rows where `score` is NULL: `score > 10`
+    /// is UNKNOWN there, `NOT UNKNOWN` is UNKNOWN, and WHERE rejects UNKNOWN.
+    /// This is the case the old "missing column → false" logic got wrong.
+    #[test]
+    fn not_over_null_column_follows_sql_semantics() {
+        use crate::testutil::write_name_only;
+        use crate::ticket::{FlightTicket, PredicateExpr, PredicateOp};
+        use serde_json::json;
+
+        let schema = simple_schema();
+        // id=1: score=20        → score>10 TRUE  → NOT FALSE  → reject
+        // id=2: score=5         → score>10 FALSE → NOT TRUE   → keep
+        // id=3: name only, score NULL → score>10 UNKNOWN → NOT UNKNOWN → reject
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "a", 20, 100),
+                write_row(2, "b", 5, 100),
+                write_name_only(3, "c", 100),
+            ]],
+        );
+
+        let filter = PredicateExpr::Not {
+            expr: Box::new(PredicateExpr::Compare {
+                column: "score".into(),
+                op: PredicateOp::Gt,
+                value: json!(10),
+            }),
+        };
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                filter: Some(filter),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            surviving_ids(&batches),
+            vec![2],
+            "only score=5 survives; NULL-score row rejected (NOT UNKNOWN = UNKNOWN)"
+        );
+    }
+
+    /// `name IS NULL OR score > 1000` over a NULL-score row: the OR's first
+    /// disjunct is TRUE for name-null rows, so an UNKNOWN second disjunct does
+    /// not matter (True dominates). And a non-null-name row with low score is
+    /// rejected (False OR UNKNOWN = UNKNOWN → reject).
+    #[test]
+    fn or_with_null_column_matches_sql() {
+        use crate::testutil::write_score_only;
+        use crate::ticket::{FlightTicket, PredicateExpr, PredicateOp};
+        use serde_json::json;
+
+        let schema = simple_schema();
+        // id=1: score only, name NULL → name IS NULL TRUE → keep (score>1000 UNKNOWN, dominated)
+        // id=2: score only, name NULL → name IS NULL TRUE → keep
+        // id=3: name="x", score NULL  → name IS NULL FALSE, score>1000 UNKNOWN → UNKNOWN → reject
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_score_only(1, 50, 100),
+                write_score_only(2, 50, 100),
+                crate::testutil::write_name_only(3, "x", 100),
+            ]],
+        );
+
+        let filter = PredicateExpr::Or {
+            exprs: vec![
+                PredicateExpr::IsNull {
+                    column: "name".into(),
+                },
+                PredicateExpr::Compare {
+                    column: "score".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(1000),
+                },
+            ],
+        };
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                filter: Some(filter),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(surviving_ids(&batches), vec![1, 2]);
+    }
+
+    /// v1 back-compat: a flat `predicates` list (no `filter`) yields identical
+    /// results to the equivalent explicit `And` filter tree.
+    #[test]
+    fn v1_flat_predicates_match_explicit_and_tree() {
+        use crate::ticket::{FlightTicket, Predicate, PredicateExpr, PredicateOp};
+        use serde_json::json;
+
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100)) // scores 10..50
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        // v1: two flat predicates 10 < score < 40.
+        let v1 = spec_from(
+            &schema,
+            FlightTicket {
+                predicates: vec![
+                    Predicate {
+                        column: "score".into(),
+                        op: PredicateOp::Gt,
+                        value: json!(10),
+                    },
+                    Predicate {
+                        column: "score".into(),
+                        op: PredicateOp::Lt,
+                        value: json!(40),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let v1_ids = surviving_ids(
+            &MergeProducer::with_spec(schema.clone(), 1024, v1)
+                .unwrap()
+                .produce(&DirSource::new(&dir))
+                .unwrap(),
+        );
+
+        // v2: the same constraint as an explicit And tree.
+        let v2 = spec_from(
+            &schema,
+            FlightTicket {
+                filter: Some(PredicateExpr::And {
+                    exprs: vec![
+                        PredicateExpr::Compare {
+                            column: "score".into(),
+                            op: PredicateOp::Gt,
+                            value: json!(10),
+                        },
+                        PredicateExpr::Compare {
+                            column: "score".into(),
+                            op: PredicateOp::Lt,
+                            value: json!(40),
+                        },
+                    ],
+                }),
+                ..Default::default()
+            },
+        );
+        let v2_ids = surviving_ids(
+            &MergeProducer::with_spec(schema, 1024, v2)
+                .unwrap()
+                .produce(&DirSource::new(&dir))
+                .unwrap(),
+        );
+
+        assert_eq!(v1_ids, v2_ids, "v1 flat predicates == explicit And tree");
+        assert_eq!(v1_ids, vec![2, 3], "scores 20,30 → ids 2,3");
     }
 }

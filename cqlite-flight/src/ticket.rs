@@ -23,7 +23,12 @@ pub enum TicketError {
 
 /// Current ticket wire-format version. Bump when the JSON contract changes in a
 /// way the server must distinguish.
-pub const TICKET_VERSION: u8 = 1;
+///
+/// - v1: flat `predicates: Vec<Predicate>` (pure AND of leaves).
+/// - v2: adds the recursive [`PredicateExpr`] `filter` tree (issue #834). v1
+///   tickets remain accepted; see [`FlightTicket::effective_filter`] for the
+///   back-compat rule.
+pub const TICKET_VERSION: u8 = 2;
 
 fn default_ticket_version() -> u8 {
     TICKET_VERSION
@@ -67,6 +72,77 @@ pub struct Predicate {
     pub value: serde_json::Value,
 }
 
+/// A recursive boolean predicate tree, evaluated server-side with SQL Kleene
+/// three-valued logic (issue #834).
+///
+/// This supersedes the flat [`Predicate`] list, which could only express a pure
+/// conjunction of leaves. The tree can express arbitrary nesting of `AND`/`OR`/
+/// `NOT` over comparison, `IN`, and `IS NULL` leaves, so cross-column `OR`/`NOT`
+/// pushdown becomes representable.
+///
+/// # Wire format
+///
+/// Serialized as internally-tagged JSON via `#[serde(tag = "type")]`. The struct
+/// variants exist so serde can carry the tag inline (internally-tagged enums
+/// cannot represent newtype-over-`Vec`). The exact JSON shapes are:
+///
+/// ```json
+/// {"type":"And","exprs":[ ... ]}
+/// {"type":"Or","exprs":[ ... ]}
+/// {"type":"Not","expr":{ ... }}
+/// {"type":"Compare","column":"c","op":"Equal","value":<json>}
+/// {"type":"In","column":"c","values":[<json>, ...]}
+/// {"type":"IsNull","column":"c"}
+/// ```
+///
+/// Note that `IN` is its own node, NOT a `Compare` with `op = In`; `Compare`
+/// uses only `{Equal, Gt, Gte, Lt, Lte, Prefix}`.
+///
+/// `#[non_exhaustive]`: this is a cross-language wire contract with the Java
+/// Trino connector; new node kinds can be added without breaking the format.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+#[non_exhaustive]
+pub enum PredicateExpr {
+    /// Logical AND of zero or more sub-expressions. Empty AND is `TRUE`.
+    And {
+        /// Conjuncts.
+        exprs: Vec<PredicateExpr>,
+    },
+    /// Logical OR of zero or more sub-expressions. Empty OR is `FALSE`.
+    Or {
+        /// Disjuncts.
+        exprs: Vec<PredicateExpr>,
+    },
+    /// Logical negation (Kleene: `TRUE↔FALSE`, `UNKNOWN` stays `UNKNOWN`).
+    Not {
+        /// The negated sub-expression.
+        expr: Box<PredicateExpr>,
+    },
+    /// A typed comparison leaf: `column op value`.
+    Compare {
+        /// Column the comparison applies to.
+        column: String,
+        /// Comparison operator (never `In`).
+        op: PredicateOp,
+        /// Operand, carried as raw JSON until lowering.
+        value: serde_json::Value,
+    },
+    /// A membership leaf: `column IN (values)`.
+    In {
+        /// Column the membership test applies to.
+        column: String,
+        /// Candidate operands, carried as raw JSON until lowering.
+        values: Vec<serde_json::Value>,
+    },
+    /// A null-test leaf: `column IS NULL`. Always definite (`TRUE`/`FALSE`),
+    /// never `UNKNOWN`.
+    IsNull {
+        /// Column tested for null/absence.
+        column: String,
+    },
+}
+
 /// The full description of one Flight scan.
 ///
 /// `#[non_exhaustive]`: the JSON form is the contract with the Java Trino
@@ -98,9 +174,16 @@ pub struct FlightTicket {
     /// Projection: emit only these columns. `None` emits all columns.
     #[serde(default)]
     pub columns: Option<Vec<String>>,
-    /// Predicates to evaluate server-side; empty means no predicate filtering.
+    /// v1 flat predicates (pure AND of leaves). Retained for back-compat; when
+    /// [`Self::filter`] is `None` these are folded into an `And` tree. Empty
+    /// means no predicate filtering.
     #[serde(default)]
     pub predicates: Vec<Predicate>,
+    /// v2 recursive predicate tree (issue #834). When `Some`, this is the
+    /// authoritative filter and [`Self::predicates`] is ignored. See
+    /// [`Self::effective_filter`].
+    #[serde(default)]
+    pub filter: Option<PredicateExpr>,
 }
 
 impl Default for FlightTicket {
@@ -116,6 +199,7 @@ impl Default for FlightTicket {
             wraparound: false,
             columns: None,
             predicates: Vec::new(),
+            filter: None,
         }
     }
 }
@@ -129,6 +213,53 @@ impl FlightTicket {
     /// Serialize this ticket to its on-the-wire JSON bytes.
     pub fn to_bytes(&self) -> Result<Vec<u8>, TicketError> {
         Ok(serde_json::to_vec(self)?)
+    }
+
+    /// Resolve the single predicate tree the server should evaluate, reconciling
+    /// the v2 `filter` and the v1 `predicates` list.
+    ///
+    /// Back-compat rule (issue #834):
+    /// - If [`Self::filter`] is `Some`, it is authoritative and `predicates` is
+    ///   ignored.
+    /// - Otherwise, if `predicates` is non-empty, the effective filter is the
+    ///   `And` of the leaves: each v1 [`Predicate`] becomes a
+    ///   [`PredicateExpr::Compare`], EXCEPT `op == In` which becomes a
+    ///   [`PredicateExpr::In`] node. A v1 `In` operand must be a JSON array;
+    ///   `ScanSpec::from_ticket` rejects a non-array operand up-front (matching
+    ///   the original v1 error), so the singleton-wrapping fallback here is a
+    ///   defensive default a validated ticket never reaches.
+    /// - If both are empty → `None` (no filtering).
+    pub fn effective_filter(&self) -> Option<PredicateExpr> {
+        if let Some(filter) = &self.filter {
+            return Some(filter.clone());
+        }
+        if self.predicates.is_empty() {
+            return None;
+        }
+        let exprs = self
+            .predicates
+            .iter()
+            .map(|p| match p.op {
+                PredicateOp::In => {
+                    let values = match &p.value {
+                        serde_json::Value::Array(items) => items.clone(),
+                        // A non-array IN operand is treated as a singleton list,
+                        // matching how v1 evaluation would have compared it.
+                        other => vec![other.clone()],
+                    };
+                    PredicateExpr::In {
+                        column: p.column.clone(),
+                        values,
+                    }
+                }
+                op => PredicateExpr::Compare {
+                    column: p.column.clone(),
+                    op,
+                    value: p.value.clone(),
+                },
+            })
+            .collect();
+        Some(PredicateExpr::And { exprs })
     }
 
     /// Does a partition `token` fall inside this ticket's token range?
@@ -216,6 +347,7 @@ mod tests {
                 op: PredicateOp::Gt,
                 value: json!(10),
             }],
+            filter: None,
         };
         let bytes = ticket.to_bytes().expect("serialize");
         let back = FlightTicket::from_bytes(&bytes).expect("parse");
@@ -241,6 +373,156 @@ mod tests {
         assert_eq!(t.predicates.len(), 1);
         assert_eq!(t.predicates[0].op, PredicateOp::In);
         assert_eq!(t.predicates[0].value, json!([1, 2, 3]));
+    }
+
+    // ---- Issue #834: PredicateExpr tree wire format ----
+
+    /// Each `PredicateExpr` variant serializes to its EXACT internally-tagged
+    /// JSON shape and round-trips back to the same value. The Java connector is
+    /// built to this contract, so the tags and field names must not drift.
+    #[test]
+    fn predicate_expr_json_shapes_round_trip() {
+        let cases: Vec<(PredicateExpr, serde_json::Value)> = vec![
+            (
+                PredicateExpr::Compare {
+                    column: "c".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(10),
+                },
+                json!({"type": "Compare", "column": "c", "op": "Gt", "value": 10}),
+            ),
+            (
+                PredicateExpr::In {
+                    column: "c".into(),
+                    values: vec![json!(1), json!(2)],
+                },
+                json!({"type": "In", "column": "c", "values": [1, 2]}),
+            ),
+            (
+                PredicateExpr::IsNull { column: "c".into() },
+                json!({"type": "IsNull", "column": "c"}),
+            ),
+            (
+                PredicateExpr::Not {
+                    expr: Box::new(PredicateExpr::IsNull { column: "c".into() }),
+                },
+                json!({"type": "Not", "expr": {"type": "IsNull", "column": "c"}}),
+            ),
+            (
+                PredicateExpr::And {
+                    exprs: vec![PredicateExpr::IsNull { column: "a".into() }],
+                },
+                json!({"type": "And", "exprs": [{"type": "IsNull", "column": "a"}]}),
+            ),
+            (
+                PredicateExpr::Or {
+                    exprs: vec![PredicateExpr::IsNull { column: "b".into() }],
+                },
+                json!({"type": "Or", "exprs": [{"type": "IsNull", "column": "b"}]}),
+            ),
+        ];
+        for (expr, expected_json) in cases {
+            let serialized = serde_json::to_value(&expr).expect("serialize");
+            assert_eq!(serialized, expected_json, "JSON shape for {expr:?}");
+            let back: PredicateExpr = serde_json::from_value(expected_json).expect("parse");
+            assert_eq!(back, expr, "round-trip for {expr:?}");
+        }
+    }
+
+    /// A nested tree mixing AND/OR/NOT round-trips through ticket JSON bytes.
+    #[test]
+    fn v2_ticket_with_filter_parses() {
+        let raw = json!({
+            "version": 2,
+            "keyspace": "k", "table": "t",
+            "ddl": "CREATE TABLE k.t (a int PRIMARY KEY, b text)",
+            "filter": {
+                "type": "Or",
+                "exprs": [
+                    {"type": "And", "exprs": [
+                        {"type": "Compare", "column": "a", "op": "Gt", "value": 10},
+                        {"type": "Compare", "column": "b", "op": "Equal", "value": "x"}
+                    ]},
+                    {"type": "Not", "expr": {"type": "IsNull", "column": "b"}}
+                ]
+            }
+        })
+        .to_string();
+        let t = FlightTicket::from_bytes(raw.as_bytes()).expect("parse");
+        assert_eq!(t.version, 2);
+        let filter = t.filter.as_ref().expect("filter present");
+        assert!(matches!(filter, PredicateExpr::Or { exprs } if exprs.len() == 2));
+        // `effective_filter` returns the v2 tree verbatim when present.
+        assert_eq!(t.effective_filter().as_ref(), Some(filter));
+    }
+
+    /// Back-compat: a v1 flat list folds to an `And` of leaves, with `In`
+    /// becoming its own node and everything else a `Compare`.
+    #[test]
+    fn v1_predicates_fold_to_and_of_leaves() {
+        let t = FlightTicket {
+            keyspace: "k".into(),
+            table: "t".into(),
+            predicates: vec![
+                Predicate {
+                    column: "score".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(10),
+                },
+                Predicate {
+                    column: "name".into(),
+                    op: PredicateOp::In,
+                    value: json!(["a", "b"]),
+                },
+            ],
+            ..Default::default()
+        };
+        let folded = t.effective_filter().expect("non-empty predicates → Some");
+        assert_eq!(
+            folded,
+            PredicateExpr::And {
+                exprs: vec![
+                    PredicateExpr::Compare {
+                        column: "score".into(),
+                        op: PredicateOp::Gt,
+                        value: json!(10),
+                    },
+                    PredicateExpr::In {
+                        column: "name".into(),
+                        values: vec![json!("a"), json!("b")],
+                    },
+                ],
+            }
+        );
+    }
+
+    /// With neither `filter` nor `predicates`, there is no effective filter; and
+    /// when both are set, `filter` wins (predicates ignored).
+    #[test]
+    fn effective_filter_precedence_and_empty() {
+        let empty = FlightTicket {
+            keyspace: "k".into(),
+            table: "t".into(),
+            ..Default::default()
+        };
+        assert_eq!(empty.effective_filter(), None);
+
+        let both = FlightTicket {
+            keyspace: "k".into(),
+            table: "t".into(),
+            predicates: vec![Predicate {
+                column: "ignored".into(),
+                op: PredicateOp::Equal,
+                value: json!(1),
+            }],
+            filter: Some(PredicateExpr::IsNull { column: "c".into() }),
+            ..Default::default()
+        };
+        assert_eq!(
+            both.effective_filter(),
+            Some(PredicateExpr::IsNull { column: "c".into() }),
+            "filter is authoritative; predicates ignored"
+        );
     }
 
     fn ticket_with_range(start: Option<i64>, end: Option<i64>, wrap: bool) -> FlightTicket {

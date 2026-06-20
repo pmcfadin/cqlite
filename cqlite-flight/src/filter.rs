@@ -4,18 +4,26 @@
 //! applies while merging:
 //! - **token range** drops whole partitions outside the split's `(start, end]`
 //!   range (cross-replica dedup — see `PLAN.md` §2),
-//! - **predicates** are evaluated per row via cqlite-core's `evaluate_predicates`
-//!   (identical semantics to SELECT), and
+//! - **predicates** are an arbitrary nested boolean tree ([`FilterExpr`])
+//!   evaluated per row with SQL Kleene three-valued logic (issue #834), and
 //! - **projection** restricts the emitted columns.
 //!
-//! Predicate operands arrive as JSON and are converted to typed `Value`s using
-//! the column's authoritative `CqlType` (no heuristics, issue #28).
+//! The ticket's recursive [`PredicateExpr`] is *lowered* once, at
+//! [`ScanSpec::from_ticket`] time, into a [`FilterExpr`] whose comparison leaves
+//! are fully type-resolved [`SSTablePredicate`]s. Lowering resolves each leaf
+//! column's authoritative `CqlType` and parses its JSON operand, so type errors
+//! surface up-front (consistent with the prior flat-predicate behaviour) rather
+//! than per row. Leaf comparisons reuse cqlite-core's
+//! [`cqlite_core::query::evaluate_leaf`] so Flight and `SELECT` share one copy of
+//! the comparison logic (no heuristics, issue #28).
 
-use cqlite_core::query::{SSTableFilterOp, SSTablePredicate};
+use cqlite_core::query::{evaluate_leaf, LeafOutcome, QueryRow, SSTableFilterOp, SSTablePredicate};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::types::Value;
 
-use crate::ticket::{token_in_half_open_range, FlightTicket, Predicate, PredicateOp};
+use crate::ticket::{
+    token_in_half_open_range, FlightTicket, Predicate, PredicateExpr, PredicateOp,
+};
 
 /// Errors building a [`ScanSpec`] from a ticket.
 #[derive(Debug, thiserror::Error)]
@@ -77,19 +85,127 @@ impl TokenFilter {
     }
 }
 
+/// A typed, fully-resolved predicate tree, evaluated per row with SQL Kleene
+/// three-valued logic (issue #834).
+///
+/// This is the lowered form of the ticket's [`PredicateExpr`]: comparison and
+/// membership leaves carry a type-resolved [`SSTablePredicate`] (operand JSON
+/// already parsed against the column's `CqlType`), and `IsNull` carries the bare
+/// column name. Lowering happens once in [`ScanSpec::from_ticket`].
+#[derive(Debug, Clone)]
+pub enum FilterExpr {
+    /// Conjunction. Empty `And` is `TRUE`.
+    And(Vec<FilterExpr>),
+    /// Disjunction. Empty `Or` is `FALSE`.
+    Or(Vec<FilterExpr>),
+    /// Negation.
+    Not(Box<FilterExpr>),
+    /// A type-resolved comparison or membership leaf.
+    Leaf(SSTablePredicate),
+    /// `column IS NULL` (true when the column is absent or `Null`).
+    IsNull(String),
+}
+
+/// SQL three-valued (Kleene) truth value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Kleene {
+    /// Definitely true.
+    True,
+    /// Definitely false.
+    False,
+    /// Unknown (a `NULL`/missing operand).
+    Unknown,
+}
+
+impl FilterExpr {
+    /// Evaluate this tree against `row` with SQL Kleene logic.
+    ///
+    /// - `Leaf`: delegates to [`evaluate_leaf`] — a missing/`Null` column is
+    ///   `Unknown`, otherwise a definite `True`/`False`.
+    /// - `IsNull`: `True` when the column is absent or `Null`, else `False` —
+    ///   never `Unknown`.
+    /// - `Not`: `True↔False`, `Unknown` stays `Unknown`.
+    /// - `And`: `False` if any conjunct is `False`; else `Unknown` if any is
+    ///   `Unknown`; else `True` (empty `And` → `True`).
+    /// - `Or`: `True` if any disjunct is `True`; else `Unknown` if any is
+    ///   `Unknown`; else `False` (empty `Or` → `False`).
+    pub fn evaluate(&self, row: &QueryRow) -> Kleene {
+        match self {
+            FilterExpr::Leaf(predicate) => match evaluate_leaf(row, predicate) {
+                LeafOutcome::True => Kleene::True,
+                LeafOutcome::False => Kleene::False,
+                LeafOutcome::Unknown => Kleene::Unknown,
+            },
+            FilterExpr::IsNull(column) => {
+                // Absent column or an explicit Null cell are both SQL NULL.
+                match row.values.get(column) {
+                    None | Some(Value::Null) => Kleene::True,
+                    Some(_) => Kleene::False,
+                }
+            }
+            FilterExpr::Not(inner) => match inner.evaluate(row) {
+                Kleene::True => Kleene::False,
+                Kleene::False => Kleene::True,
+                Kleene::Unknown => Kleene::Unknown,
+            },
+            FilterExpr::And(exprs) => {
+                let mut saw_unknown = false;
+                for e in exprs {
+                    match e.evaluate(row) {
+                        Kleene::False => return Kleene::False,
+                        Kleene::Unknown => saw_unknown = true,
+                        Kleene::True => {}
+                    }
+                }
+                if saw_unknown {
+                    Kleene::Unknown
+                } else {
+                    Kleene::True
+                }
+            }
+            FilterExpr::Or(exprs) => {
+                let mut saw_unknown = false;
+                for e in exprs {
+                    match e.evaluate(row) {
+                        Kleene::True => return Kleene::True,
+                        Kleene::Unknown => saw_unknown = true,
+                        Kleene::False => {}
+                    }
+                }
+                if saw_unknown {
+                    Kleene::Unknown
+                } else {
+                    Kleene::False
+                }
+            }
+        }
+    }
+
+    /// A row is kept iff the top-level expression evaluates to `True`. Both
+    /// `False` and `Unknown` reject the row, matching SQL `WHERE` semantics.
+    pub fn keeps(&self, row: &QueryRow) -> bool {
+        matches!(self.evaluate(row), Kleene::True)
+    }
+}
+
 /// A fully-resolved scan: what to keep and which columns to emit.
 #[derive(Debug, Clone, Default)]
 pub struct ScanSpec {
     /// Partition-level token filter; `None` keeps every partition.
     pub token: Option<TokenFilter>,
-    /// Row-level predicates (AND-combined); empty keeps every row.
-    pub predicates: Vec<SSTablePredicate>,
+    /// Row-level predicate tree; `None` keeps every row.
+    pub filter: Option<FilterExpr>,
     /// Column projection; `None` emits all columns.
     pub projection: Option<Vec<String>>,
 }
 
 impl ScanSpec {
     /// Build a scan spec from a ticket against its table schema.
+    ///
+    /// The ticket's effective filter (v2 `filter` tree, or the v1 `predicates`
+    /// folded into an `And`; see [`FlightTicket::effective_filter`]) is lowered
+    /// to a typed [`FilterExpr`] here, so any unknown column or bad operand is
+    /// reported up-front rather than per row.
     pub fn from_ticket(ticket: &FlightTicket, schema: &TableSchema) -> Result<Self, FilterError> {
         let token = match (ticket.token_start, ticket.token_end) {
             (None, None) => None,
@@ -100,18 +216,88 @@ impl ScanSpec {
             }),
         };
 
-        let predicates = ticket
-            .predicates
-            .iter()
-            .map(|p| to_sstable_predicate(p, schema))
-            .collect::<Result<Vec<_>, _>>()?;
+        // Preserve v1 validation: a flat `IN` predicate must carry a JSON array
+        // operand. `effective_filter` folds a non-array operand into a singleton
+        // for forward-compat, so reject the malformed v1 shape here (where the v1
+        // `predicates` list is authoritative) to keep the original error.
+        if ticket.filter.is_none() {
+            for p in &ticket.predicates {
+                if matches!(p.op, PredicateOp::In) && !p.value.is_array() {
+                    return Err(FilterError::BadOperand {
+                        column: p.column.clone(),
+                        message: "IN requires a JSON array operand".into(),
+                    });
+                }
+            }
+        }
+
+        let filter = ticket
+            .effective_filter()
+            .map(|expr| lower_predicate_expr(&expr, schema))
+            .transpose()?;
 
         Ok(Self {
             token,
-            predicates,
+            filter,
             projection: ticket.columns.clone(),
         })
     }
+}
+
+/// Lower a ticket [`PredicateExpr`] into a typed [`FilterExpr`], resolving each
+/// comparison/membership leaf's column type and parsing its JSON operand.
+fn lower_predicate_expr(
+    expr: &PredicateExpr,
+    schema: &TableSchema,
+) -> Result<FilterExpr, FilterError> {
+    match expr {
+        PredicateExpr::And { exprs } => Ok(FilterExpr::And(lower_children(exprs, schema)?)),
+        PredicateExpr::Or { exprs } => Ok(FilterExpr::Or(lower_children(exprs, schema)?)),
+        PredicateExpr::Not { expr } => Ok(FilterExpr::Not(Box::new(lower_predicate_expr(
+            expr, schema,
+        )?))),
+        PredicateExpr::IsNull { column } => {
+            // Validate the column exists so a typo surfaces at build time, like
+            // every other leaf; the type itself is irrelevant to a null test.
+            column_cql_type(schema, column)?;
+            Ok(FilterExpr::IsNull(column.clone()))
+        }
+        PredicateExpr::Compare { column, op, value } => {
+            let predicate = to_sstable_predicate(
+                &Predicate {
+                    column: column.clone(),
+                    op: *op,
+                    value: value.clone(),
+                },
+                schema,
+            )?;
+            Ok(FilterExpr::Leaf(predicate))
+        }
+        PredicateExpr::In { column, values } => {
+            // An `In` node carries an explicit list; build the v1-shaped predicate
+            // (op = In, value = JSON array) and reuse the existing lowering.
+            let predicate = to_sstable_predicate(
+                &Predicate {
+                    column: column.clone(),
+                    op: PredicateOp::In,
+                    value: serde_json::Value::Array(values.clone()),
+                },
+                schema,
+            )?;
+            Ok(FilterExpr::Leaf(predicate))
+        }
+    }
+}
+
+/// Lower a list of sub-expressions.
+fn lower_children(
+    exprs: &[PredicateExpr],
+    schema: &TableSchema,
+) -> Result<Vec<FilterExpr>, FilterError> {
+    exprs
+        .iter()
+        .map(|e| lower_predicate_expr(e, schema))
+        .collect()
 }
 
 /// Resolve a column's CQL type from the schema (searches all column lists).
@@ -283,6 +469,48 @@ mod tests {
         }
     }
 
+    /// A v1 flat predicate list lowers to `And([Leaf, ...])`. Pull the resolved
+    /// `SSTablePredicate` for leaf `i` so the type/operand assertions below read
+    /// like the pre-#834 ones.
+    fn lowered_leaf(spec: &ScanSpec, i: usize) -> &SSTablePredicate {
+        match spec.filter.as_ref().expect("filter present") {
+            FilterExpr::And(exprs) => match &exprs[i] {
+                FilterExpr::Leaf(p) => p,
+                other => panic!("expected leaf, got {other:?}"),
+            },
+            other => panic!("expected And, got {other:?}"),
+        }
+    }
+
+    /// Build a row with one named column value for evaluator tests.
+    fn row_with(column: &str, value: Value) -> QueryRow {
+        let mut values = std::collections::HashMap::new();
+        values.insert(column.to_string(), value);
+        QueryRow {
+            values,
+            key: cqlite_core::RowKey(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        }
+    }
+
+    fn empty_row() -> QueryRow {
+        QueryRow {
+            values: std::collections::HashMap::new(),
+            key: cqlite_core::RowKey(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
+        }
+    }
+
+    fn score_gt(n: i64) -> FilterExpr {
+        FilterExpr::Leaf(SSTablePredicate {
+            column: "score".into(),
+            operation: SSTableFilterOp::Gt,
+            values: vec![Value::Integer(n as i32)],
+        })
+    }
+
     #[test]
     fn token_filter_built_from_bounds() {
         let mut t = ticket_with(vec![]);
@@ -358,10 +586,10 @@ mod tests {
             value: json!(10),
         }]);
         let spec = ScanSpec::from_ticket(&t, &simple_schema()).unwrap();
-        assert_eq!(spec.predicates.len(), 1);
-        assert_eq!(spec.predicates[0].column, "score");
-        assert!(matches!(spec.predicates[0].operation, SSTableFilterOp::Gt));
-        assert_eq!(spec.predicates[0].values, vec![Value::Integer(10)]);
+        let leaf = lowered_leaf(&spec, 0);
+        assert_eq!(leaf.column, "score");
+        assert!(matches!(leaf.operation, SSTableFilterOp::Gt));
+        assert_eq!(leaf.values, vec![Value::Integer(10)]);
     }
 
     #[test]
@@ -373,7 +601,7 @@ mod tests {
         }]);
         let spec = ScanSpec::from_ticket(&t, &simple_schema()).unwrap();
         assert_eq!(
-            spec.predicates[0].values,
+            lowered_leaf(&spec, 0).values,
             vec![Value::Text("a".into()), Value::Text("b".into())]
         );
     }
@@ -393,7 +621,7 @@ mod tests {
         let spec = ScanSpec::from_ticket(&t, &uuid_schema()).unwrap();
         let mut expected = [0u8; 16];
         expected[15] = 1;
-        assert_eq!(spec.predicates[0].values, vec![Value::Uuid(expected)]);
+        assert_eq!(lowered_leaf(&spec, 0).values, vec![Value::Uuid(expected)]);
     }
 
     #[test]
@@ -409,7 +637,7 @@ mod tests {
             ..Default::default()
         };
         let spec = ScanSpec::from_ticket(&t, &clustering_schema()).unwrap();
-        assert_eq!(spec.predicates[0].values, vec![Value::Text("a".into())]);
+        assert_eq!(lowered_leaf(&spec, 0).values, vec![Value::Text("a".into())]);
     }
 
     #[test]
@@ -446,6 +674,19 @@ mod tests {
     }
 
     #[test]
+    fn v1_in_with_non_array_operand_is_rejected() {
+        // A v1 flat IN predicate must carry a JSON array; a scalar operand is a
+        // malformed legacy ticket and must error (not be folded into a singleton).
+        let t = ticket_with(vec![Predicate {
+            column: "score".into(),
+            op: PredicateOp::In,
+            value: json!(5),
+        }]);
+        let err = ScanSpec::from_ticket(&t, &simple_schema()).unwrap_err();
+        assert!(matches!(err, FilterError::BadOperand { .. }));
+    }
+
+    #[test]
     fn null_operand_is_rejected() {
         let t = ticket_with(vec![Predicate {
             column: "score".into(),
@@ -468,5 +709,147 @@ mod tests {
             matches!(err, FilterError::BadOperand { .. }),
             "must error, not wrap"
         );
+    }
+
+    // ---- Issue #834: Kleene three-valued evaluator ----
+
+    /// A present, comparable leaf yields True/False; a missing or Null column
+    /// yields Unknown (the SQL UNKNOWN that NOT/OR must propagate).
+    #[test]
+    fn leaf_null_or_missing_is_unknown() {
+        let p = score_gt(10);
+        assert_eq!(
+            p.evaluate(&row_with("score", Value::Integer(20))),
+            Kleene::True
+        );
+        assert_eq!(
+            p.evaluate(&row_with("score", Value::Integer(5))),
+            Kleene::False
+        );
+        assert_eq!(
+            p.evaluate(&empty_row()),
+            Kleene::Unknown,
+            "missing → Unknown"
+        );
+        assert_eq!(
+            p.evaluate(&row_with("score", Value::Null)),
+            Kleene::Unknown,
+            "Null cell → Unknown"
+        );
+    }
+
+    /// `IS NULL` is always definite: True for absent/Null, False otherwise —
+    /// never Unknown.
+    #[test]
+    fn is_null_is_definite() {
+        let expr = FilterExpr::IsNull("score".into());
+        assert_eq!(expr.evaluate(&empty_row()), Kleene::True, "absent IS NULL");
+        assert_eq!(
+            expr.evaluate(&row_with("score", Value::Null)),
+            Kleene::True,
+            "Null IS NULL"
+        );
+        assert_eq!(
+            expr.evaluate(&row_with("score", Value::Integer(1))),
+            Kleene::False,
+            "present is not null"
+        );
+    }
+
+    /// `NOT` flips True/False and leaves Unknown unchanged.
+    #[test]
+    fn not_truth_table_propagates_unknown() {
+        let not = |k_row: QueryRow| FilterExpr::Not(Box::new(score_gt(10))).evaluate(&k_row);
+        assert_eq!(not(row_with("score", Value::Integer(20))), Kleene::False);
+        assert_eq!(not(row_with("score", Value::Integer(5))), Kleene::True);
+        assert_eq!(not(empty_row()), Kleene::Unknown, "NOT Unknown = Unknown");
+    }
+
+    /// `AND` truth table including Unknown propagation; empty AND is True.
+    #[test]
+    fn and_truth_table() {
+        let t = || score_gt(10); // True for score=20
+        let f = || {
+            FilterExpr::Leaf(SSTablePredicate {
+                column: "score".into(),
+                operation: SSTableFilterOp::Lt,
+                values: vec![Value::Integer(0)],
+            })
+        }; // False for score=20
+        let u = || FilterExpr::Leaf(score_pred_on_missing()); // Unknown
+        let row = row_with("score", Value::Integer(20));
+
+        assert_eq!(
+            FilterExpr::And(vec![]).evaluate(&row),
+            Kleene::True,
+            "empty AND"
+        );
+        assert_eq!(FilterExpr::And(vec![t(), t()]).evaluate(&row), Kleene::True);
+        assert_eq!(
+            FilterExpr::And(vec![t(), f()]).evaluate(&row),
+            Kleene::False
+        );
+        // Any False dominates, even with an Unknown present.
+        assert_eq!(
+            FilterExpr::And(vec![u(), f()]).evaluate(&row),
+            Kleene::False
+        );
+        // Unknown with no False → Unknown.
+        assert_eq!(
+            FilterExpr::And(vec![t(), u()]).evaluate(&row),
+            Kleene::Unknown
+        );
+    }
+
+    /// `OR` truth table including Unknown propagation; empty OR is False.
+    #[test]
+    fn or_truth_table() {
+        let t = || score_gt(10);
+        let f = || {
+            FilterExpr::Leaf(SSTablePredicate {
+                column: "score".into(),
+                operation: SSTableFilterOp::Lt,
+                values: vec![Value::Integer(0)],
+            })
+        };
+        let u = || FilterExpr::Leaf(score_pred_on_missing());
+        let row = row_with("score", Value::Integer(20));
+
+        assert_eq!(
+            FilterExpr::Or(vec![]).evaluate(&row),
+            Kleene::False,
+            "empty OR"
+        );
+        assert_eq!(FilterExpr::Or(vec![f(), f()]).evaluate(&row), Kleene::False);
+        assert_eq!(FilterExpr::Or(vec![f(), t()]).evaluate(&row), Kleene::True);
+        // Any True dominates, even with an Unknown present.
+        assert_eq!(FilterExpr::Or(vec![u(), t()]).evaluate(&row), Kleene::True);
+        // Unknown with no True → Unknown.
+        assert_eq!(
+            FilterExpr::Or(vec![f(), u()]).evaluate(&row),
+            Kleene::Unknown
+        );
+    }
+
+    /// `keeps` is True-only: Unknown and False both reject (WHERE semantics).
+    #[test]
+    fn keeps_only_when_true() {
+        let p = score_gt(10);
+        assert!(p.keeps(&row_with("score", Value::Integer(20))));
+        assert!(
+            !p.keeps(&row_with("score", Value::Integer(5))),
+            "False rejects"
+        );
+        assert!(!p.keeps(&empty_row()), "Unknown rejects");
+    }
+
+    /// A leaf that always evaluates Unknown because it tests a column the row
+    /// never has — used to drive the Unknown cells of the truth tables.
+    fn score_pred_on_missing() -> SSTablePredicate {
+        SSTablePredicate {
+            column: "absent_column".into(),
+            operation: SSTableFilterOp::Gt,
+            values: vec![Value::Integer(0)],
+        }
     }
 }
