@@ -221,18 +221,10 @@ pub enum RowData {
 /// To reconcile per-cell and per-element data byte-faithfully (Cassandra
 /// `Cells#reconcile`), the merge entry must carry more than a single row-level
 /// timestamp. The fields below thread that richer state from the reader toward
-/// the followup behaviors. `ttl` / `local_deletion_time` are still **carried but
-/// not yet acted on** by reconciliation (#848 tombstone-vs-expiring TTL
-/// tie-break, #845 gc_grace purge).
-///
-/// Per-cell-path collection/UDT merge (#844) is now **active**, but it keys on
-/// the elements *inside* the nested collection `value` rather than on `cell_path`:
-/// the reader surfaces a non-frozen collection / UDT as one column whose `value`
-/// is the whole `Map`/`Set`/`List`/`Udt` (frozen ones arrive as `Value::Frozen`),
-/// so `reconcile_cluster` unions disjoint elements directly. See
-/// `KWayMerger::merge_multicell_elements`. The `cell_path` field therefore stays
-/// `None` from the current reader; it remains the model for a future exploded-cell
-/// representation.
+/// the followup behaviors (#844 per-cell-path collection/UDT merge, #848
+/// tombstone-vs-expiring TTL tie-break). They are **carried but not yet acted
+/// on** by reconciliation — this struct change is plumbing only and must not
+/// alter output bytes.
 ///
 /// Where the reader does not yet surface a value the field is left `None`; the
 /// dependent issues fill it in once the reader is extended.
@@ -1399,209 +1391,6 @@ impl KWayMerger {
         )
     }
 
-    /// Returns true when a value is a **multi-cell** complex column — i.e. a
-    /// non-frozen collection (`Map`/`Set`/`List`) or non-frozen UDT.
-    ///
-    /// The reader wraps frozen collections / UDTs in [`Value::Frozen`]
-    /// (see `value_parsing.rs`), which serialize as a single opaque cell and so
-    /// must reconcile whole-cell (LWW). A *bare* `Map`/`Set`/`List`/`Udt` is the
-    /// multi-cell representation whose elements Cassandra reconciles per cell-path
-    /// (commits `0c85d26f`, `19bcffd4`). Tombstones and scalars are never
-    /// multi-cell.
-    fn is_multicell_complex(value: &crate::types::Value) -> bool {
-        use crate::types::Value;
-        matches!(
-            value,
-            Value::Map(_) | Value::Set(_) | Value::List(_) | Value::Udt(_)
-        )
-    }
-
-    /// Merge two multi-cell complex cells of the **same column** per element /
-    /// field path (issue #844), so disjoint map keys, set elements, or UDT fields
-    /// from different SSTables both survive instead of one whole cell winning.
-    ///
-    /// `winner` is the current first-seen/higher cell, `incoming` the candidate.
-    /// Per Cassandra `Cells#reconcile`, for an element present in BOTH cells the
-    /// element from the cell with the **higher cell-level timestamp** wins (the
-    /// per-element timestamp the reader does not yet surface — collection elements
-    /// arrive as plain values without their own timestamps, so the whole-cell
-    /// timestamp is the finest granularity available). For elements present in only
-    /// one cell, that element survives (disjoint union).
-    ///
-    /// The merged cell adopts the higher of the two cell timestamps so downstream
-    /// row-timestamp/shadowing logic stays correct. Returns `None` when the two
-    /// values are not the same multi-cell collection kind (caller falls back to
-    /// whole-cell LWW). UDT path ordering uses the field declaration order present
-    /// in the values; the signed-`ShortType` cell-path ordering subtlety (matters
-    /// past field index 32768) is deferred to #888.
-    fn merge_multicell_elements(winner: &CellData, incoming: &CellData) -> Option<CellData> {
-        use crate::types::{UdtField, UdtValue, Value};
-
-        // `prefer_a` is true when, for an element present in both, `a`'s element
-        // should win. The cell with the higher timestamp wins; on a tie keep the
-        // first-seen (`winner`, i.e. `a`) per the run_index tiebreak already baked
-        // into reconcile order.
-        let prefer_winner = incoming.timestamp <= winner.timestamp;
-        let merged_ts = winner.timestamp.max(incoming.timestamp);
-
-        let merged_value = match (&winner.value, &incoming.value) {
-            // Map: key on the map key; union of disjoint keys, higher-ts cell wins
-            // a shared key. Preserve first-seen key order then sort for a stable,
-            // byte-deterministic output (matches the reader's sorted emission).
-            (Value::Map(wa), Value::Map(ib)) => {
-                let mut keys_order: Vec<Value> = Vec::new();
-                let mut chosen: std::collections::HashMap<Vec<u8>, (Value, Value)> =
-                    std::collections::HashMap::new();
-                let mut push = |k: &Value, v: &Value, from_winner: bool| {
-                    let kb = Self::element_key_bytes(k);
-                    match chosen.get(&kb) {
-                        None => {
-                            keys_order.push(k.clone());
-                            chosen.insert(kb, (k.clone(), v.clone()));
-                        }
-                        Some(_) => {
-                            // Shared key: replace only if THIS side is the
-                            // preferred (higher-ts) one.
-                            if from_winner == prefer_winner {
-                                chosen.insert(kb, (k.clone(), v.clone()));
-                            }
-                        }
-                    }
-                };
-                // Insert in winner-then-incoming order so first-seen ordering is
-                // deterministic regardless of source order.
-                if prefer_winner {
-                    for (k, v) in wa {
-                        push(k, v, true);
-                    }
-                    for (k, v) in ib {
-                        push(k, v, false);
-                    }
-                } else {
-                    for (k, v) in ib {
-                        push(k, v, false);
-                    }
-                    for (k, v) in wa {
-                        push(k, v, true);
-                    }
-                }
-                let mut entries: Vec<(Value, Value)> = keys_order
-                    .into_iter()
-                    .filter_map(|k| chosen.remove(&Self::element_key_bytes(&k)))
-                    .collect();
-                entries.sort_by(|a, b| {
-                    Self::element_key_bytes(&a.0).cmp(&Self::element_key_bytes(&b.0))
-                });
-                Value::Map(entries)
-            }
-            // Set: element IS the key. Union of disjoint elements; identical
-            // elements collapse. Sorted for deterministic output.
-            (Value::Set(wa), Value::Set(ib)) => {
-                let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
-                let mut out: Vec<Value> = Vec::new();
-                for e in wa.iter().chain(ib.iter()) {
-                    if seen.insert(Self::element_key_bytes(e)) {
-                        out.push(e.clone());
-                    }
-                }
-                out.sort_by(|a, b| Self::element_key_bytes(a).cmp(&Self::element_key_bytes(b)));
-                Value::Set(out)
-            }
-            // UDT: union of fields by name. A field present in both takes the
-            // higher-ts cell's value. NOTE (#888): real Cassandra orders UDT cell
-            // paths by SIGNED ShortType field index; here we key by field NAME
-            // (match-complex-by-name, rule 3.3) and keep declaration order, which
-            // is correct for field index < 32768. Signed ordering is out of scope.
-            (Value::Udt(wa), Value::Udt(ib)) => {
-                let mut order: Vec<String> = Vec::new();
-                let mut chosen: std::collections::HashMap<String, UdtField> =
-                    std::collections::HashMap::new();
-                let mut push = |f: &UdtField, from_winner: bool| match chosen.get(&f.name) {
-                    None => {
-                        order.push(f.name.clone());
-                        chosen.insert(f.name.clone(), f.clone());
-                    }
-                    Some(_) => {
-                        if from_winner == prefer_winner {
-                            chosen.insert(f.name.clone(), f.clone());
-                        }
-                    }
-                };
-                if prefer_winner {
-                    for f in &wa.fields {
-                        push(f, true);
-                    }
-                    for f in &ib.fields {
-                        push(f, false);
-                    }
-                } else {
-                    for f in &ib.fields {
-                        push(f, false);
-                    }
-                    for f in &wa.fields {
-                        push(f, true);
-                    }
-                }
-                let fields: Vec<UdtField> = order
-                    .into_iter()
-                    .filter_map(|n| chosen.remove(&n))
-                    .collect();
-                Value::Udt(UdtValue {
-                    type_name: wa.type_name.clone(),
-                    keyspace: wa.keyspace.clone(),
-                    fields,
-                })
-            }
-            // List and any cross-kind mismatch: per-element merge is unsafe (list
-            // elements are keyed by a timeuuid cell-path the reader does not
-            // surface; merging by value would corrupt order/duplicates). Fall back
-            // to whole-cell LWW. Deferred to a later issue.
-            _ => return None,
-        };
-
-        Some(CellData {
-            column: winner.column.clone(),
-            value: merged_value,
-            timestamp: merged_ts,
-            ttl: if prefer_winner {
-                winner.ttl
-            } else {
-                incoming.ttl
-            },
-            local_deletion_time: if prefer_winner {
-                winner.local_deletion_time
-            } else {
-                incoming.local_deletion_time
-            },
-            cell_path: None,
-        })
-    }
-
-    /// Stable byte encoding of a collection element / map key used as the per-path
-    /// merge identity (issue #844). Uses a straightforward unsigned/byte ordering;
-    /// the signed-`ShortType` UDT cell-path subtlety is deferred to #888.
-    fn element_key_bytes(value: &crate::types::Value) -> Vec<u8> {
-        use crate::types::Value;
-        match value {
-            Value::Text(s) => s.as_bytes().to_vec(),
-            Value::Blob(b) | Value::Inet(b) | Value::Varint(b) => b.clone(),
-            Value::Boolean(v) => vec![*v as u8],
-            Value::TinyInt(v) => v.to_be_bytes().to_vec(),
-            Value::SmallInt(v) => v.to_be_bytes().to_vec(),
-            Value::Integer(v) => v.to_be_bytes().to_vec(),
-            Value::BigInt(v) | Value::Counter(v) | Value::Timestamp(v) | Value::Time(v) => {
-                v.to_be_bytes().to_vec()
-            }
-            Value::Float32(v) => v.to_be_bytes().to_vec(),
-            Value::Float(v) => v.to_be_bytes().to_vec(),
-            Value::Uuid(u) => u.to_vec(),
-            Value::Date(v) => v.to_be_bytes().to_vec(),
-            // Fallback: a debug encoding keeps distinct values distinct for the
-            // purposes of element identity even for nested/complex keys.
-            other => format!("{:?}", other).into_bytes(),
-        }
-    }
-
     /// Reconcile all entries for a single clustering-key group into at most one
     /// merged `MergeEntry`, applying per-cell last-write-wins plus row-tombstone
     /// shadowing (Issue #533). See [`Self::merge_partition_rows`] for the rules.
@@ -1647,27 +1436,6 @@ impl KWayMerger {
                                 winners.insert(cell.column.clone(), cell.clone());
                             }
                             Some(existing) => {
-                                // Multi-cell complex columns (non-frozen
-                                // collections / UDTs) reconcile PER element /
-                                // cell-path, not whole-cell (#844): disjoint map
-                                // keys / set elements / UDT fields from different
-                                // SSTables both survive; a shared element takes the
-                                // higher-timestamp cell's value. A cell tombstone
-                                // on the column still wins whole-cell (a complex
-                                // deletion is not an element). Strict complex-
-                                // deletion supersession is #887.
-                                if !Self::is_cell_tombstone(cell)
-                                    && !Self::is_cell_tombstone(existing)
-                                    && Self::is_multicell_complex(&cell.value)
-                                    && Self::is_multicell_complex(&existing.value)
-                                {
-                                    if let Some(merged) =
-                                        Self::merge_multicell_elements(existing, cell)
-                                    {
-                                        winners.insert(cell.column.clone(), merged);
-                                        continue;
-                                    }
-                                }
                                 // Higher timestamp wins. At EQUAL timestamp a cell
                                 // tombstone beats a live value (Issue #498 per cell).
                                 // Otherwise keep the existing (first-seen = newer
@@ -4257,127 +4025,80 @@ mod issue_823_complex_column_merge {
         MergeEntry::new(run_index, dk(1), None, row_ts, RowData::Live { cells })
     }
 
-    /// #844 — disjoint set elements from two SSTables both survive.
+    /// GATING TEST — multi-cell merge granularity.
     ///
-    /// A non-frozen set is read back as a SINGLE top-level column whose `Value` is
-    /// the whole set. Two runs that each added a different element arrive as two
-    /// `CellData` sharing `cell.column` but carrying different whole-set `Value`s.
-    /// Per-cell-path merge (#844) must UNION the disjoint elements rather than let
-    /// one whole cell win (which silently dropped data before this change).
+    /// A non-frozen collection (here: a list) is read back from an SSTable as a
+    /// SINGLE top-level column whose `Value` is the whole collection. Two SSTable
+    /// runs that each wrote different *paths* (different list positions) of the
+    /// same column therefore arrive as two `CellData` that share the same
+    /// `cell.column` string but carry different whole-collection `Value`s.
+    ///
+    /// `reconcile_cluster` keys winners on `cell.column` ONLY. This test asserts
+    /// the observed consequence: the two path-writes do NOT merge into a combined
+    /// collection; instead ONE whole cell wins by timestamp (whole-group collapse,
+    /// NOT per-path merge).
     #[test]
-    fn multicell_set_disjoint_elements_both_survive() {
-        // Newer run added "b"; older run added "a". Both must survive.
-        let mk = |run: usize, ts: i64, e: &str| {
-            live(
-                run,
-                ts,
-                vec![CellData {
-                    column: "tags".to_string(),
-                    value: Value::Set(vec![Value::Text(e.to_string())]),
-                    timestamp: ts,
-                    ttl: None,
-                    local_deletion_time: None,
-                    cell_path: None,
-                }],
-            )
+    fn multicell_collection_collapses_whole_column_not_per_path() {
+        // Newer run (run_index 0) wrote element "b"; older run wrote element "a".
+        // In real Cassandra these are two cells at paths p_b and p_a that union to
+        // [a, b]. Here each run surfaces the column as a whole list value.
+        let newer = live(
+            0,
+            200,
+            vec![CellData {
+                column: "tags".to_string(),
+                value: Value::List(vec![Value::Text("b".to_string())]),
+                timestamp: 200,
+                ttl: None,
+                local_deletion_time: None,
+                cell_path: None,
+            }],
+        );
+        let older = live(
+            1,
+            100,
+            vec![CellData {
+                column: "tags".to_string(),
+                value: Value::List(vec![Value::Text("a".to_string())]),
+                timestamp: 100,
+                ttl: None,
+                local_deletion_time: None,
+                cell_path: None,
+            }],
+        );
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![newer, older])
+            .expect("a live row must be emitted");
+
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
         };
 
-        // Assert across BOTH source orders.
-        for rows in [
-            vec![mk(0, 200, "b"), mk(1, 100, "a")],
-            vec![mk(1, 100, "a"), mk(0, 200, "b")],
-        ] {
-            let merged =
-                KWayMerger::reconcile_cluster(None, rows).expect("a live row must be emitted");
-            let cells = match merged.row_data {
-                RowData::Live { cells } => cells,
-                other => panic!("expected Live, got {:?}", other),
-            };
-            assert_eq!(cells.len(), 1, "one cell per column");
-            assert_eq!(cells[0].column, "tags");
-            assert_eq!(
-                cells[0].value,
-                Value::Set(vec![
-                    Value::Text("a".to_string()),
-                    Value::Text("b".to_string())
-                ]),
-                "disjoint set elements union (sorted), neither is dropped (#844)"
-            );
-        }
+        // ESTABLISHED BEHAVIOUR: exactly ONE cell for column "tags" survives —
+        // there is no per-path union. The newer (ts=200) whole value wins.
+        assert_eq!(
+            cells.len(),
+            1,
+            "column-name keyed merge collapses to one cell"
+        );
+        assert_eq!(cells[0].column, "tags");
+        assert_eq!(
+            cells[0].value,
+            Value::List(vec![Value::Text("b".to_string())]),
+            "winner is the higher-timestamp WHOLE collection value, not a union \
+             of [a, b] — confirms whole-group collapse, NOT per-path merge (#18)"
+        );
     }
 
-    /// #844 — disjoint map keys both survive; a shared key takes the higher-ts
-    /// cell's value. Asserted across both source orders.
-    #[test]
-    fn multicell_map_disjoint_keys_survive_shared_key_higher_ts_wins() {
-        let mk = |run: usize, ts: i64, pairs: &[(&str, &str)]| {
-            live(
-                run,
-                ts,
-                vec![CellData {
-                    column: "attrs".to_string(),
-                    value: Value::Map(
-                        pairs
-                            .iter()
-                            .map(|(k, v)| (Value::Text(k.to_string()), Value::Text(v.to_string())))
-                            .collect(),
-                    ),
-                    timestamp: ts,
-                    ttl: None,
-                    local_deletion_time: None,
-                    cell_path: None,
-                }],
-            )
-        };
-
-        // run0 (ts=200): {k1:newer, shared:winner}; run1 (ts=100): {k2:older, shared:loser}
-        for rows in [
-            vec![
-                mk(0, 200, &[("k1", "newer"), ("shared", "winner")]),
-                mk(1, 100, &[("k2", "older"), ("shared", "loser")]),
-            ],
-            vec![
-                mk(1, 100, &[("k2", "older"), ("shared", "loser")]),
-                mk(0, 200, &[("k1", "newer"), ("shared", "winner")]),
-            ],
-        ] {
-            let merged =
-                KWayMerger::reconcile_cluster(None, rows).expect("a live row must be emitted");
-            let cells = match merged.row_data {
-                RowData::Live { cells } => cells,
-                other => panic!("expected Live, got {:?}", other),
-            };
-            assert_eq!(cells.len(), 1, "one cell per column");
-            let expected = Value::Map(vec![
-                (
-                    Value::Text("k1".to_string()),
-                    Value::Text("newer".to_string()),
-                ),
-                (
-                    Value::Text("k2".to_string()),
-                    Value::Text("older".to_string()),
-                ),
-                // shared key: ts=200 cell wins.
-                (
-                    Value::Text("shared".to_string()),
-                    Value::Text("winner".to_string()),
-                ),
-            ]);
-            assert_eq!(
-                cells[0].value, expected,
-                "disjoint keys union (sorted); shared key takes higher-ts value (#844)"
-            );
-        }
-    }
-
-    /// #844 — non-frozen UDT field-level writes merge per field (union by name).
+    /// GATING TEST — non-frozen UDT field-level writes also collapse.
     ///
-    /// A non-frozen UDT is multi-cell in Cassandra (one cell per field path). The
-    /// reader surfaces it as a single `Value::Udt`. Two runs writing DIFFERENT
-    /// fields must field-merge (union) rather than collapse to one whole UDT.
-    /// (Signed-ShortType path ordering is #888; this asserts the union behaviour.)
+    /// A non-frozen UDT is multi-cell in Cassandra (one cell per field path, paths
+    /// ordered by SIGNED ShortType field index). The reader surfaces it as a single
+    /// `Value::Udt` under one column. Two runs writing different fields therefore
+    /// collide on the column name and do NOT field-merge.
     #[test]
-    fn nonfrozen_udt_fields_merge_per_field() {
+    fn nonfrozen_udt_collapses_whole_column_not_per_field() {
         let mk_udt = |field: &str, v: &str| {
             Value::Udt(UdtValue {
                 type_name: "addr".to_string(),
@@ -4388,77 +4109,52 @@ mod issue_823_complex_column_merge {
                 }],
             })
         };
-        let mk = |run: usize, ts: i64, field: &str, v: &str| {
-            live(
-                run,
-                ts,
-                vec![CellData {
-                    column: "address".to_string(),
-                    value: mk_udt(field, v),
-                    timestamp: ts,
-                    ttl: None,
-                    local_deletion_time: None,
-                    cell_path: None,
-                }],
-            )
-        };
 
-        for rows in [
-            vec![mk(0, 200, "city", "SF"), mk(1, 100, "zip", "94105")],
-            vec![mk(1, 100, "zip", "94105"), mk(0, 200, "city", "SF")],
-        ] {
-            let merged =
-                KWayMerger::reconcile_cluster(None, rows).expect("a live row must be emitted");
-            let cells = match merged.row_data {
-                RowData::Live { cells } => cells,
-                other => panic!("expected Live, got {:?}", other),
-            };
-            assert_eq!(cells.len(), 1, "one cell per column");
-            // Both fields survive; the "zip" write is NOT lost.
-            let fields = match &cells[0].value {
-                Value::Udt(u) => &u.fields,
-                other => panic!("expected Udt, got {:?}", other),
-            };
-            assert_eq!(fields.len(), 2, "both UDT fields survive the merge");
-            assert!(fields
-                .iter()
-                .any(|f| f.name == "city" && f.value == Some(Value::Text("SF".to_string()))));
-            assert!(fields
-                .iter()
-                .any(|f| f.name == "zip" && f.value == Some(Value::Text("94105".to_string()))));
-        }
-    }
+        // Newer run wrote field "city"; older run wrote field "zip".
+        let newer = live(
+            0,
+            200,
+            vec![CellData {
+                column: "address".to_string(),
+                value: mk_udt("city", "SF"),
+                timestamp: 200,
+                ttl: None,
+                local_deletion_time: None,
+                cell_path: None,
+            }],
+        );
+        let older = live(
+            1,
+            100,
+            vec![CellData {
+                column: "address".to_string(),
+                value: mk_udt("zip", "94105"),
+                timestamp: 100,
+                ttl: None,
+                local_deletion_time: None,
+                cell_path: None,
+            }],
+        );
 
-    /// #844 — frozen collections still reconcile WHOLE-cell (LWW), not per-path.
-    /// The reader wraps frozen values in `Value::Frozen`, which serialize as one
-    /// opaque cell; per-element merge must NOT apply.
-    #[test]
-    fn frozen_collection_reconciles_whole_cell() {
-        let mk = |run: usize, ts: i64, e: &str| {
-            live(
-                run,
-                ts,
-                vec![CellData {
-                    column: "frz".to_string(),
-                    value: Value::Frozen(Box::new(Value::Set(vec![Value::Text(e.to_string())]))),
-                    timestamp: ts,
-                    ttl: None,
-                    local_deletion_time: None,
-                    cell_path: None,
-                }],
-            )
-        };
-        let merged = KWayMerger::reconcile_cluster(None, vec![mk(0, 200, "b"), mk(1, 100, "a")])
+        let merged = KWayMerger::reconcile_cluster(None, vec![newer, older])
             .expect("a live row must be emitted");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {:?}", other),
         };
-        assert_eq!(cells.len(), 1);
+
+        assert_eq!(
+            cells.len(),
+            1,
+            "UDT column collapses to one whole-value cell"
+        );
+        // The "zip" write is lost: no per-field merge happens. The signed-ShortType
+        // path ordering required by #18 is therefore unreachable in this engine.
         assert_eq!(
             cells[0].value,
-            Value::Frozen(Box::new(Value::Set(vec![Value::Text("b".to_string())]))),
-            "frozen collection takes the higher-ts whole value (no per-element union)"
+            mk_udt("city", "SF"),
+            "newer whole-UDT value wins; older field write is dropped — no per-field \
+             merge, so #18 path-ordering does not apply"
         );
     }
 
