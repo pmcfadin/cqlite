@@ -716,11 +716,21 @@ impl SSTableWriter {
         // 5.25. Write Partitions.db (BTI phase 1, issue #766).
         // Only emitted for SSTableFormat::Bti; for BIG this is None and nothing
         // is written, keeping the default path byte-for-byte unchanged.
+        //
+        // An empty BTI SSTable (no partitions) produces a zero-byte trie, which
+        // the BTI reader rejects (it needs at least the 8-byte root footer). For
+        // an empty SSTable we therefore OMIT Partitions.db entirely (file and TOC
+        // entry) rather than write an unreadable component (issue #766 review
+        // finding 2).
         let partitions_path = if let Some(trie) = self.partitions_trie.take() {
-            let path = Self::component_path(sstable_dir, self.generation, "Partitions.db");
             let bytes = trie.finish()?;
-            tokio::fs::write(&path, bytes).await?;
-            Some(path)
+            if bytes.is_empty() {
+                None
+            } else {
+                let path = Self::component_path(sstable_dir, self.generation, "Partitions.db");
+                tokio::fs::write(&path, bytes).await?;
+                Some(path)
+            }
         } else {
             None
         };

@@ -262,7 +262,17 @@ fn write_node(node: &TrieBuildNode, buf: &mut Vec<u8>) -> Result<usize> {
                 let off = write_node(child, buf)?;
                 child_offsets.push((byte, off));
             }
-            write_sparse(&child_offsets, buf)
+            // A radix-1 trie node can have up to 256 children. `Sparse` encodes
+            // its child count in a single `u8` and therefore tops out at 255
+            // transitions. When fan-out reaches the full 256-byte alphabet we
+            // must emit a `Dense` node instead (the reader parses both). We keep
+            // `Sparse` for every smaller node so existing tries are byte-for-byte
+            // unchanged.
+            if child_offsets.len() == 256 {
+                write_dense(&child_offsets, buf)
+            } else {
+                write_sparse(&child_offsets, buf)
+            }
         }
     }
 }
@@ -352,6 +362,74 @@ fn write_sparse(child_offsets: &[(u8, usize)], buf: &mut Vec<u8>) -> Result<usiz
         write_be_unsigned(buf, delta, ptr_bytes);
     }
     Ok(node_offset)
+}
+
+/// Write an internal node as a `Dense` node, used when fan-out covers the full
+/// 256-byte alphabet (`Sparse` cannot, as its count field is a single `u8`).
+///
+/// Layout (full-byte-pointer Dense, matching `parser.rs` ordinals 11-14):
+/// ```text
+/// [header=(ordinal<<4)|0]   // internal nodes carry no payload
+/// [start_byte: u8]          // first transition character
+/// [range_len - 1: u8]       // so range_len = byte + 1 (256 ⇒ stored as 255)
+/// [range_len × ptr_bytes: backward deltas, big-endian]
+/// ```
+/// Each child at transition byte `b` lives at index `b - start_byte`; a delta of
+/// `0` is the reader's "no transition" sentinel. Because we only emit Dense for a
+/// full 256-child node, every slot is present and every delta is non-zero (each
+/// child is written strictly before its parent).
+fn write_dense(child_offsets: &[(u8, usize)], buf: &mut Vec<u8>) -> Result<usize> {
+    debug_assert_eq!(child_offsets.len(), 256, "write_dense expects full fan-out");
+    if child_offsets.len() != 256 {
+        return Err(Error::InvalidInput(format!(
+            "write_dense requires a full 256-child node, got {}",
+            child_offsets.len()
+        )));
+    }
+
+    // child_offsets come from a BTreeMap iterator, so they are already sorted by
+    // transition byte. A full 256-child node spans bytes 0..=255 contiguously.
+    let start_byte = child_offsets[0].0; // 0 for a full alphabet
+    let node_offset = buf.len();
+
+    let max_delta = child_offsets
+        .iter()
+        .map(|(_, child_off)| node_offset - child_off)
+        .max()
+        .unwrap_or(0);
+    let (ordinal, ptr_bytes) = dense_ordinal_for_delta(max_delta as u64)?;
+
+    // Internal nodes carry no payload, so the low nibble (payloadBits) is 0.
+    let header = ordinal << 4;
+    buf.push(header);
+    buf.push(start_byte);
+    // range_len - 1: 256 children ⇒ 255. The byte is `u8`, so 256 fits exactly.
+    buf.push((child_offsets.len() - 1) as u8);
+    // Backward-delta pointers in transition-byte order. Every slot is occupied,
+    // so there are no "no transition" (delta 0) sentinels to emit.
+    for (_, child_off) in child_offsets {
+        let delta = (node_offset - child_off) as u64;
+        write_be_unsigned(buf, delta, ptr_bytes);
+    }
+    Ok(node_offset)
+}
+
+/// Map a maximum backward delta to a full-byte-pointer Dense ordinal and its
+/// pointer width (in bytes). Mirrors `parser::pointer_bytes_for_ordinal` for the
+/// Dense ordinals (11=2B Dense16, 12=3B Dense24, 13=4B Dense32, 14=5B Dense40,
+/// 15=8B LongDense).
+fn dense_ordinal_for_delta(max_delta: u64) -> Result<(u8, usize)> {
+    if max_delta <= 0xFFFF {
+        Ok((11, 2))
+    } else if max_delta <= 0xFF_FFFF {
+        Ok((12, 3))
+    } else if max_delta <= 0xFFFF_FFFF {
+        Ok((13, 4))
+    } else if max_delta <= 0xFF_FFFF_FFFF {
+        Ok((14, 5))
+    } else {
+        Ok((15, 8))
+    }
 }
 
 /// Map a maximum backward delta to a full-byte-pointer Sparse ordinal and its
@@ -536,5 +614,66 @@ mod tests {
         w.add_partition(&[0x55u8; 16], 0);
         w.add_partition(&[0x55u8; 16], 100);
         assert!(w.finish().is_err());
+    }
+
+    /// Finding 1 (issue #766 review): an internal node whose fan-out covers all
+    /// 256 possible transition bytes must serialize (as a Dense node) and round-
+    /// trip through the reader. Previously the serializer rejected count == 256.
+    ///
+    /// We construct the trie directly so we can guarantee a full 256-byte fan-out
+    /// at one node, independent of Murmur3 token distribution.
+    #[test]
+    fn full_256_fanout_internal_node_serializes_and_roundtrips() {
+        use std::collections::BTreeMap;
+
+        // Build a two-level trie: root has one child byte 0xFF leading to an
+        // internal node with all 256 transition bytes, each pointing at a leaf.
+        let mut inner_children: BTreeMap<u8, TrieBuildNode> = BTreeMap::new();
+        for b in 0u16..=255 {
+            inner_children.insert(
+                b as u8,
+                TrieBuildNode::Leaf {
+                    hash_byte: b as u8,
+                    data_offset: (b as u64) * 17,
+                },
+            );
+        }
+        let inner = TrieBuildNode::Internal {
+            children: inner_children,
+        };
+        let mut root_children: BTreeMap<u8, TrieBuildNode> = BTreeMap::new();
+        root_children.insert(0xFF, inner);
+        let root = TrieBuildNode::Internal {
+            children: root_children,
+        };
+
+        let bytes = serialize_trie(&root).expect("256-fan-out node must serialize");
+
+        // Walk the trie via the reader's node parser for each terminal byte,
+        // following root[0xFF] then inner[b], and confirm the resolved leaf
+        // payload offset matches what we wrote.
+        for b in 0u16..=255 {
+            let key = [0xFFu8, b as u8];
+            let loc = lookup_key_in_trie(&bytes, &key)
+                .unwrap_or_else(|| panic!("byte {b} not found in 256-fan-out trie"));
+            assert_eq!(
+                loc,
+                (b as u64) * 17,
+                "byte {b}: wrong Data.db offset resolved"
+            );
+        }
+    }
+
+    /// Resolve a raw trie key (the byte-comparable bytes traversed from the
+    /// root) to its leaf's decoded Data.db offset, using the production BTI
+    /// parser/lookup path. `key` is the already-encoded trie key (no Murmur3
+    /// transform applied), so `lookup_partition_in_bti_file` walks it directly.
+    fn lookup_key_in_trie(bytes: &[u8], key: &[u8]) -> Option<u64> {
+        use crate::storage::sstable::bti::lookup_partition_in_bti_file;
+        let mut cur = Cursor::new(bytes.to_vec());
+        match lookup_partition_in_bti_file(&mut cur, key).ok()?? {
+            BtiPartitionLocation::DataOffset(o) => Some(o),
+            BtiPartitionLocation::RowsOffset(_) => None,
+        }
     }
 }

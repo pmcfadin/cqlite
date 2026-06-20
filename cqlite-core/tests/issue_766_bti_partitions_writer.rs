@@ -232,6 +232,48 @@ async fn bti_resolved_offsets_are_distinct_and_first_is_zero() {
     );
 }
 
+/// Finding 2 (issue #766 review): an empty BTI-format SSTable must NOT emit a
+/// Partitions.db (a zero-byte file is unreadable — the BTI reader rejects files
+/// smaller than the 8-byte root footer). Both the file and the TOC entry are
+/// omitted for an empty SSTable.
+#[tokio::test]
+async fn empty_bti_sstable_omits_partitions_db_and_toc_entry() {
+    let dir = TempDir::new().unwrap();
+    let schema = int_pk_schema();
+
+    // BTI format, but write zero partitions.
+    let writer =
+        SSTableWriter::with_format(dir.path().to_path_buf(), 1, &schema, 16, SSTableFormat::Bti)
+            .unwrap();
+    assert_eq!(writer.format(), SSTableFormat::Bti);
+
+    let info = writer.finish().await.unwrap();
+
+    // No Partitions.db path is reported for an empty SSTable.
+    assert!(
+        info.partitions_path.is_none(),
+        "empty BTI SSTable must not report a Partitions.db path"
+    );
+
+    // No Partitions.db file exists on disk under the table dir.
+    let table_dir = dir.path().join("test_ks").join("t");
+    let has_partitions = std::fs::read_dir(&table_dir)
+        .unwrap()
+        .flatten()
+        .any(|e| e.file_name().to_string_lossy().contains("Partitions.db"));
+    assert!(
+        !has_partitions,
+        "no Partitions.db file expected for an empty BTI SSTable"
+    );
+
+    // TOC must NOT list Partitions.db for the empty SSTable.
+    let toc = std::fs::read_to_string(&info.toc_path).unwrap();
+    assert!(
+        !toc.contains("Partitions.db"),
+        "empty BTI SSTable TOC must not list Partitions.db"
+    );
+}
+
 /// AC#4: byte-comparable transform + trie round-trip for every partition-key
 /// type in the corpus (int, bigint, text, uuid, timestamp, blob) and composites.
 ///
