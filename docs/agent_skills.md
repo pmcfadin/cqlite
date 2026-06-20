@@ -2,6 +2,13 @@
 
 _Date: 2026-06-19_
 
+> **Update 2026-06-20:** the `rust-skills` pack ([`leonardomso/rust-skills`](https://github.com/leonardomso/rust-skills)
+> v1.5.1, MIT — 265 idiomatic-Rust rules across 26 categories) was installed in
+> this same change, addressing the general-idiomatic-Rust gap. It lives under
+> `.agents/skills/rust-skills/`, is symlinked from `.claude/skills/rust-skills`,
+> pinned in `skills-lock.json`, and wired into the `CLAUDE.md` skills table.
+> It is the general layer beneath the cqlite-specific `rust-patterns` skill.
+
 This document audits the **project-local** agent tooling under `.claude/skills/`
 (each a directory with a `SKILL.md`) and `.claude/agents/` (each a `*.md` file with
 frontmatter). It does not cover global/user-level skills installed outside the repo.
