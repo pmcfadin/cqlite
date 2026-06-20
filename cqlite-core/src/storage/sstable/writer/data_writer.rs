@@ -483,9 +483,14 @@ impl DataWriter {
         schema: &TableSchema,
         partition_tombstone: Option<&PartitionTombstone>,
         range_tombstones: &[RangeTombstone],
-    ) -> Result<(u64, Vec<PromotedIndexBlock>)> {
+    ) -> Result<(u64, Vec<PromotedIndexBlock>, PartitionEmitCounts)> {
         // File offset of this partition
         let partition_offset = self.position + self.buffer.len() as u64;
+
+        // Issue #851: tally the rows/cells actually emitted below so Statistics
+        // is fed from the single source of truth (this emitter) instead of a
+        // parallel re-derivation that kept diverging from Data.db.
+        let mut emit = PartitionEmitCounts::default();
 
         // Note the absolute buffer position at the start of partition data.
         // For streaming mode this is always `self.position` (buffer is empty at start).
@@ -535,6 +540,10 @@ impl DataWriter {
                     .write_static_row_with_prev_size(&merged, latest_ts, ttl, schema, 0)?
                     as u64;
                 prev_unfiltered_size += static_size;
+                // A non-empty static prelude is one physical row whose cells are
+                // exactly the merged static ops (#851).
+                emit.rows += 1;
+                emit.columns += merged.len() as u64;
             }
         }
 
@@ -640,6 +649,11 @@ impl DataWriter {
             // Write the item
             prev_unfiltered_size = match item {
                 PartitionItem::Row(row) => {
+                    // One physical row; its cells are the reconciled `ops`, which
+                    // already exclude primary-key (partition + clustering) columns
+                    // and, in a static-bearing schema, static ops (#851).
+                    emit.rows += 1;
+                    emit.columns += row.ops.len() as u64;
                     self.write_merged_row_with_prev_size(&row, schema, prev_unfiltered_size)? as u64
                 }
                 PartitionItem::Marker {
@@ -695,7 +709,7 @@ impl DataWriter {
 
         self.flush_partition()?;
 
-        Ok((partition_offset, blocks))
+        Ok((partition_offset, blocks, emit))
     }
 
     /// Write an empty static-row prelude.
@@ -2844,6 +2858,28 @@ struct StaticMergedOp {
     /// Local deletion time (s) for a `Delete` tombstone, honoring the
     /// originating mutation's explicit `local_deletion_time` when set.
     cell_local_deletion_time: i32,
+}
+
+/// The exact rows and cells `DataWriter` emitted to Data.db for one partition.
+///
+/// Issue #851: Statistics' `totalRows` (`row_count`) and `totalColumnsSet`
+/// (`column_count`) MUST equal what is physically written. Rather than
+/// re-deriving the counts from the raw mutations in a parallel loop (which kept
+/// diverging from the emitter — rejected commit `5afce78c`), the emission code
+/// is the single source of truth: it tallies a row whenever it writes a row
+/// (static prelude or merged clustering row) and tallies cells from the same
+/// reconciled `ops` it serializes. The empty static-row prelude and range
+/// tombstone markers write no `Row`, so they contribute nothing — matching
+/// Cassandra `Row.isEmpty()` / `Row.columnCount()`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct PartitionEmitCounts {
+    /// Rows physically written to Data.db (static prelude + merged clustering
+    /// rows). Excludes the empty static prelude and range tombstone markers.
+    pub rows: u64,
+    /// Regular + static cells physically written. Primary-key (partition +
+    /// clustering) columns are encoded positionally and never counted; row
+    /// tombstones (`DeleteRow`) set no columns.
+    pub columns: u64,
 }
 
 /// One Data.db row assembled by merging every mutation of a partition that

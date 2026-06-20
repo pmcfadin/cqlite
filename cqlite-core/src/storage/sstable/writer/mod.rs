@@ -486,94 +486,16 @@ impl SSTableWriter {
                     .update_local_deletion_time(rt.local_deletion_time);
             }
 
-            // Count rows / columns the SAME way `DataWriter` decides liveness
-            // (issue #851, Cassandra `1502b0a9`). The earlier `!operations.
-            // is_empty()` guard was wrong: it suppressed every no-op mutation,
-            // but `DataWriter::merge_row_group` treats an INSERT carrying only
-            // primary-key columns (no ops, no tombstone payload) as a LIVE row
-            // (`pure_pk_insert`). Such a row must count as `row_count == 1`,
-            // `column_count == 0`; suppressing it undercounts `totalRows` while
-            // the writer still emits the row to Data.db.
-            //
-            // The ONLY row that must NOT be counted is the genuine empty
-            // static-row prelude: a partition that declares static columns but
-            // writes none. Cassandra emits that prelude for structural reasons
-            // (`Row.isEmpty()` is true) and excludes it from `totalRows` /
-            // `totalColumnsSet`.
-            //
-            // Classification mirrors `data_writer.rs`:
-            //   * A static-row mutation (no clustering key, all ops static, in a
-            //     schema with static columns) feeds the static-row prelude. With
-            //     no cell ops it is the EMPTY prelude -> not counted. With static
-            //     cell ops its columns are counted once as the static row.
-            //   * Otherwise it is a regular row. It is live (counted) if it
-            //     carries any cell op (`Write` / `WriteWithTtl` / `Delete`), a
-            //     row tombstone (`DeleteRow`), or is a pure primary-key insert
-            //     (no ops AND no partition/range tombstone payload). Only cell-
-            //     level ops count toward `totalColumnsSet`; `DeleteRow` sets no
-            //     columns (mirrors Cassandra `Row.columnCount()`). Partition /
-            //     range tombstones are partition-level deletions tracked above
-            //     via timestamp stats, not row counts.
-            let has_static_columns = self.schema.columns.iter().any(|c| c.is_static);
-            let is_static_op =
-                |op: &crate::storage::write_engine::mutation::CellOperation| -> bool {
-                    use crate::storage::write_engine::mutation::CellOperation;
-                    match op {
-                        CellOperation::Write { column, .. }
-                        | CellOperation::WriteWithTtl { column, .. }
-                        | CellOperation::Delete { column } => self
-                            .schema
-                            .columns
-                            .iter()
-                            .find(|c| c.name == *column)
-                            .map(|c| c.is_static)
-                            .unwrap_or(false),
-                        CellOperation::DeleteRow => false,
-                    }
-                };
-            // A static-row mutation: no clustering key, schema has static
-            // columns, and every op (if any) targets a static column or is a
-            // DeleteRow (mirrors `is_static_row_mutation`).
-            let is_static_row_mutation = mutation.clustering_key.is_none()
-                && has_static_columns
-                && mutation.operations.iter().all(|op| {
-                    matches!(
-                        op,
-                        crate::storage::write_engine::mutation::CellOperation::DeleteRow
-                    ) || is_static_op(op)
-                });
-
-            let cell_ops = mutation
-                .operations
-                .iter()
-                .filter(|op| {
-                    !matches!(
-                        op,
-                        crate::storage::write_engine::mutation::CellOperation::DeleteRow
-                    )
-                })
-                .count();
-
-            if is_static_row_mutation {
-                // The static-row prelude. Only count it when it actually writes
-                // static cells; the empty prelude is excluded from totalRows /
-                // totalColumnsSet (Cassandra `Row.isEmpty()`).
-                if cell_ops > 0 {
-                    self.stats.increment_row_count();
-                    self.stats.add_column_count(cell_ops as u64);
-                }
-            } else {
-                // Regular row. Live if it carries any cell op, a row tombstone,
-                // or is a pure primary-key insert (no ops, no tombstone payload).
-                let pure_pk_insert = mutation.operations.is_empty()
-                    && mutation.partition_tombstone.is_none()
-                    && mutation.range_tombstones.is_empty();
-                let row_is_live = !mutation.operations.is_empty() || pure_pk_insert;
-                if row_is_live {
-                    self.stats.increment_row_count();
-                    self.stats.add_column_count(cell_ops as u64);
-                }
-            }
+            // Issue #851: row_count (totalRows) and column_count
+            // (totalColumnsSet) are NOT re-derived per-mutation here. The two
+            // previous attempts re-grouped rows in this loop and kept diverging
+            // from `DataWriter::merge_row_group`, which is what actually emits
+            // rows/cells to Data.db (e.g. it drops partition/clustering-key
+            // columns from cells, and merges static ops from ALL mutations into
+            // a single static prelude that is a SEPARATE row from the clustering
+            // row). Instead, the emitter returns `PartitionEmitCounts` and we add
+            // them below (see the `write_partition_with_index_blocks` call) so
+            // the stats can never drift from what was physically written.
         }
 
         // Update DataWriter's stats before writing, unless baselines were
@@ -606,13 +528,22 @@ impl SSTableWriter {
         // Write partition to Data.db, collecting promoted index blocks for wide partitions.
         // Wide partitions (≥ 64 KiB of row data) get a non-zero promoted index so Cassandra
         // can seek directly to a clustering-key range without reading the full partition.
-        let (data_offset, promoted_blocks) = self.data_writer.write_partition_with_index_blocks(
-            &key,
-            &mutations,
-            &self.schema,
-            partition_tombstone,
-            &range_tombstones,
-        )?;
+        let (data_offset, promoted_blocks, emit_counts) =
+            self.data_writer.write_partition_with_index_blocks(
+                &key,
+                &mutations,
+                &self.schema,
+                partition_tombstone,
+                &range_tombstones,
+            )?;
+
+        // Issue #851: Statistics' totalRows / totalColumnsSet are fed directly
+        // from what `DataWriter` physically emitted (the single source of truth),
+        // so they cannot drift from Data.db. The empty static-row prelude and
+        // range tombstone markers are already excluded by the emitter, matching
+        // Cassandra `Row.isEmpty()` / `Row.columnCount()`.
+        self.stats.row_count += emit_counts.rows;
+        self.stats.column_count += emit_counts.columns;
 
         // Add partition to Index.db and get entry info.
         // Pass promoted blocks (writer gates on >= 2 blocks before emitting payload).
@@ -982,7 +913,9 @@ impl SSTableWriter {
 mod tests {
     use super::*;
     use crate::schema::{ClusteringColumn, Column, KeyColumn};
-    use crate::storage::write_engine::mutation::{CellOperation, PartitionKey, TableId};
+    use crate::storage::write_engine::mutation::{
+        CellOperation, ClusteringKey, PartitionKey, TableId,
+    };
     use crate::types::Value;
     use std::collections::HashMap;
     use tempfile::TempDir;
@@ -1055,6 +988,106 @@ mod tests {
                     nullable: true,
                     default: None,
                     is_static: true,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    /// A clustered schema with NO static columns: partition `id`, clustering
+    /// `ck`, regular `name`. Used to verify that a write whose only op targets a
+    /// clustering-key column produces a live row with ZERO regular cells (#851
+    /// review finding #1: `DataWriter::merge_row_group` drops clustering-key
+    /// columns from the emitted cells, but the row stays live).
+    fn create_clustered_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_clustered".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: Default::default(),
+            }],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ck".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    /// A clustered schema with BOTH a static column `s` and a regular column
+    /// `name`. Used to verify that a single clustered mutation carrying a static
+    /// write AND a regular write emits TWO rows: the static prelude plus the
+    /// clustering row (#851 review finding #2).
+    fn create_static_and_regular_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_static_regular".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: Default::default(),
+            }],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ck".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "s".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: true,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
                 },
             ],
             comments: HashMap::new(),
@@ -1511,6 +1544,139 @@ mod tests {
         assert_eq!(
             writer.stats.column_count, 0,
             "row tombstone sets no columns"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #851 review finding #1: a mutation whose ONLY op writes a
+    /// clustering-key column must count as `row_count == 1`, `column_count == 0`.
+    /// `DataWriter::merge_row_group` drops partition/clustering-key columns from
+    /// the emitted cells (they are encoded positionally in the clustering
+    /// prefix), but the write still confers row liveness. The stats are now
+    /// derived from the emitter's `PartitionEmitCounts`, so they cannot inflate
+    /// `totalColumnsSet` for a key-only write.
+    #[tokio::test]
+    async fn test_clustering_key_only_write_counts_row_zero_columns() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_clustered_schema(); // no static columns
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        // The only op writes the clustering-key column `ck`.
+        let table_id = TableId::new("test_ks", "test_clustered");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let ck = ClusteringKey::single("ck", Value::Integer(7));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            Some(ck),
+            vec![CellOperation::Write {
+                column: "ck".to_string(),
+                value: Value::Integer(7),
+            }],
+            1_000_000,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.row_count, 1,
+            "a clustering-key-only write is a live row"
+        );
+        assert_eq!(
+            writer.stats.column_count, 0,
+            "clustering-key columns are not emitted as cells, so set no columns"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #851 review finding #2: a single clustered mutation carrying BOTH a
+    /// static write and a regular write produces TWO physical rows in Data.db —
+    /// the non-empty static prelude (collected from all mutations) AND the
+    /// clustering row (emitted after skipping the static op). The stats, derived
+    /// from the emitter, must report `row_count == 2` and one column per row.
+    #[tokio::test]
+    async fn test_static_plus_regular_in_one_mutation_counts_two_rows() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_static_and_regular_schema();
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_static_regular");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let ck = ClusteringKey::single("ck", Value::Integer(7));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            Some(ck),
+            vec![
+                CellOperation::Write {
+                    column: "s".to_string(),
+                    value: Value::Text("static-val".to_string()),
+                },
+                CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("regular-val".to_string()),
+                },
+            ],
+            1_000_000,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.row_count, 2,
+            "static prelude + clustering row are two physical rows"
+        );
+        assert_eq!(
+            writer.stats.column_count, 2,
+            "one static cell + one regular cell"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #851: multiple mutations sharing one clustering key are merged into
+    /// a SINGLE row by `DataWriter::merge_row_group`. The stats must follow the
+    /// emitter and count one row, with one column per distinct surviving cell.
+    #[tokio::test]
+    async fn test_multiple_mutations_same_clustering_key_merge_to_one_row() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_clustered_schema();
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_clustered");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let make = |ts: i64, val: &str| {
+            Mutation::new(
+                table_id.clone(),
+                pk.clone(),
+                Some(ClusteringKey::single("ck", Value::Integer(7))),
+                vec![CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text(val.to_string()),
+                }],
+                ts,
+                None,
+            )
+        };
+        let m1 = make(1_000_000, "first");
+        let m2 = make(2_000_000, "second");
+        let key = m1.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![m1, m2]).unwrap();
+
+        assert_eq!(
+            writer.stats.row_count, 1,
+            "two mutations on the same clustering key merge to one row"
+        );
+        assert_eq!(
+            writer.stats.column_count, 1,
+            "both writes target the same column `name`, so one surviving cell"
         );
 
         let _info = writer.finish().await.unwrap();
