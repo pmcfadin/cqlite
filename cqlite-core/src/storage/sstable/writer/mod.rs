@@ -482,32 +482,93 @@ impl SSTableWriter {
                     .update_local_deletion_time(rt.local_deletion_time);
             }
 
-            // Mirror Cassandra's `!row.isEmpty()` guard (issue #851, Cassandra
-            // `1502b0a9`): a partition that declares static columns but writes
-            // none produces an empty row. Counting it would inflate `totalRows`
-            // / `totalColumnsSet` and diverge byte-for-byte in Statistics.db,
-            // poisoning compaction heuristics downstream.
+            // Count rows / columns the SAME way `DataWriter` decides liveness
+            // (issue #851, Cassandra `1502b0a9`). The earlier `!operations.
+            // is_empty()` guard was wrong: it suppressed every no-op mutation,
+            // but `DataWriter::merge_row_group` treats an INSERT carrying only
+            // primary-key columns (no ops, no tombstone payload) as a LIVE row
+            // (`pure_pk_insert`). Such a row must count as `row_count == 1`,
+            // `column_count == 0`; suppressing it undercounts `totalRows` while
+            // the writer still emits the row to Data.db.
             //
-            // A row is non-empty if it carries any operation: cell writes /
-            // deletes (`Write`, `WriteWithTtl`, `Delete`) or a row tombstone
-            // (`DeleteRow`). Only cell-level operations are counted toward
-            // `totalColumnsSet`; a `DeleteRow` marker sets no columns (mirrors
-            // Cassandra's `Row.columnCount()`). Partition / range tombstones are
-            // partition-level deletions tracked above via timestamp stats, not
-            // row counts.
-            if !mutation.operations.is_empty() {
-                self.stats.increment_row_count();
-                let cells_set = mutation
-                    .operations
-                    .iter()
-                    .filter(|op| {
-                        !matches!(
-                            op,
-                            crate::storage::write_engine::mutation::CellOperation::DeleteRow
-                        )
-                    })
-                    .count();
-                self.stats.add_column_count(cells_set as u64);
+            // The ONLY row that must NOT be counted is the genuine empty
+            // static-row prelude: a partition that declares static columns but
+            // writes none. Cassandra emits that prelude for structural reasons
+            // (`Row.isEmpty()` is true) and excludes it from `totalRows` /
+            // `totalColumnsSet`.
+            //
+            // Classification mirrors `data_writer.rs`:
+            //   * A static-row mutation (no clustering key, all ops static, in a
+            //     schema with static columns) feeds the static-row prelude. With
+            //     no cell ops it is the EMPTY prelude -> not counted. With static
+            //     cell ops its columns are counted once as the static row.
+            //   * Otherwise it is a regular row. It is live (counted) if it
+            //     carries any cell op (`Write` / `WriteWithTtl` / `Delete`), a
+            //     row tombstone (`DeleteRow`), or is a pure primary-key insert
+            //     (no ops AND no partition/range tombstone payload). Only cell-
+            //     level ops count toward `totalColumnsSet`; `DeleteRow` sets no
+            //     columns (mirrors Cassandra `Row.columnCount()`). Partition /
+            //     range tombstones are partition-level deletions tracked above
+            //     via timestamp stats, not row counts.
+            let has_static_columns = self.schema.columns.iter().any(|c| c.is_static);
+            let is_static_op =
+                |op: &crate::storage::write_engine::mutation::CellOperation| -> bool {
+                    use crate::storage::write_engine::mutation::CellOperation;
+                    match op {
+                        CellOperation::Write { column, .. }
+                        | CellOperation::WriteWithTtl { column, .. }
+                        | CellOperation::Delete { column } => self
+                            .schema
+                            .columns
+                            .iter()
+                            .find(|c| c.name == *column)
+                            .map(|c| c.is_static)
+                            .unwrap_or(false),
+                        CellOperation::DeleteRow => false,
+                    }
+                };
+            // A static-row mutation: no clustering key, schema has static
+            // columns, and every op (if any) targets a static column or is a
+            // DeleteRow (mirrors `is_static_row_mutation`).
+            let is_static_row_mutation = mutation.clustering_key.is_none()
+                && has_static_columns
+                && mutation.operations.iter().all(|op| {
+                    matches!(
+                        op,
+                        crate::storage::write_engine::mutation::CellOperation::DeleteRow
+                    ) || is_static_op(op)
+                });
+
+            let cell_ops = mutation
+                .operations
+                .iter()
+                .filter(|op| {
+                    !matches!(
+                        op,
+                        crate::storage::write_engine::mutation::CellOperation::DeleteRow
+                    )
+                })
+                .count();
+
+            if is_static_row_mutation {
+                // The static-row prelude. Only count it when it actually writes
+                // static cells; the empty prelude is excluded from totalRows /
+                // totalColumnsSet (Cassandra `Row.isEmpty()`).
+                if cell_ops > 0 {
+                    self.stats.increment_row_count();
+                    self.stats.add_column_count(cell_ops as u64);
+                }
+            } else {
+                // Regular row. Live if it carries any cell op, a row tombstone,
+                // or is a pure primary-key insert (no ops, no tombstone payload).
+                let pure_pk_insert = mutation.operations.is_empty()
+                    && mutation.partition_tombstone.is_none()
+                    && mutation.range_tombstones.is_empty();
+                let row_is_live = !mutation.operations.is_empty() || pure_pk_insert;
+                if row_is_live {
+                    self.stats.increment_row_count();
+                    self.stats.add_column_count(cell_ops as u64);
+                }
             }
         }
 
@@ -907,7 +968,7 @@ impl SSTableWriter {
 #[cfg(all(test, feature = "write-support"))]
 mod tests {
     use super::*;
-    use crate::schema::{Column, KeyColumn};
+    use crate::schema::{ClusteringColumn, Column, KeyColumn};
     use crate::storage::write_engine::mutation::{CellOperation, PartitionKey, TableId};
     use crate::types::Value;
     use std::collections::HashMap;
@@ -937,6 +998,50 @@ mod tests {
                     nullable: true,
                     default: None,
                     is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    /// A schema with a single static column (and a clustering key, so static
+    /// columns are meaningful). Used to exercise the empty static-row prelude.
+    fn create_static_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_static".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: Default::default(),
+            }],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ck".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "s".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: true,
                 },
             ],
             comments: HashMap::new(),
@@ -1230,34 +1335,69 @@ mod tests {
         assert!(digest_contents.parse::<u32>().is_ok());
     }
 
-    /// Issue #851 / Cassandra `1502b0a9`: a partition that declares static
-    /// columns but writes none produces an empty row. It must NOT inflate
-    /// `totalRows` (`row_count`) or `totalColumnsSet` (`column_count`).
+    /// Issue #851 review: a pure primary-key insert (a mutation with no cell
+    /// operations and no tombstone payload, in a schema with NO static columns)
+    /// is a LIVE row. `DataWriter::merge_row_group` emits it to Data.db via the
+    /// `pure_pk_insert` liveness path, so Statistics must count it as
+    /// `row_count == 1`, `column_count == 0`. Suppressing it (the rejected
+    /// `operations.is_empty()` guard) undercounted `totalRows`.
     #[tokio::test]
-    async fn test_empty_static_row_not_counted() {
+    async fn test_pure_primary_key_insert_counts_as_live_row() {
         let temp_dir = TempDir::new().unwrap();
-        let schema = create_test_schema();
+        let schema = create_test_schema(); // no static columns
 
         let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
 
-        // A partition with NO cell operations: the static-column-declared-but-
-        // empty case. The partition still exists (it has a key), but the row is
-        // empty and should not be counted toward rows/columns.
+        // INSERT of only the primary key: no cell operations, no tombstone.
         let table_id = TableId::new("test_ks", "test_table");
         let pk = PartitionKey::single("id", Value::Integer(1));
-        let empty = Mutation::new(table_id, pk, None, vec![], 1_000_000, None);
-        let key = empty.decorated_key(&schema).unwrap();
+        let pure_pk = Mutation::new(table_id, pk, None, vec![], 1_000_000, None);
+        let key = pure_pk.decorated_key(&schema).unwrap();
 
-        writer.write_partition(key, vec![empty]).unwrap();
+        writer.write_partition(key, vec![pure_pk]).unwrap();
 
-        // Empty row: no rows, no columns counted.
         assert_eq!(
-            writer.stats.row_count, 0,
-            "empty static row must not inflate totalRows"
+            writer.stats.row_count, 1,
+            "pure primary-key insert is a live row"
         );
         assert_eq!(
             writer.stats.column_count, 0,
-            "empty static row must not inflate totalColumnsSet"
+            "pure primary-key insert sets no columns"
+        );
+        assert_eq!(writer.stats.partition_count, 1);
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #851 / Cassandra `1502b0a9`: a partition that declares static
+    /// columns but writes none produces an EMPTY static-row prelude. Cassandra
+    /// emits the prelude for structural reasons but `Row.isEmpty()` is true, so
+    /// it must NOT inflate `totalRows` (`row_count`) or `totalColumnsSet`
+    /// (`column_count`). This requires a schema that actually HAS static columns;
+    /// the no-static-column schema would make this a pure-PK live row instead.
+    #[tokio::test]
+    async fn test_empty_static_row_prelude_not_counted() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_static_schema(); // has a static column `s`
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        // A static-row mutation (no clustering key) that writes NO static cells:
+        // the empty static-row prelude.
+        let table_id = TableId::new("test_ks", "test_static");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let empty_static = Mutation::new(table_id, pk, None, vec![], 1_000_000, None);
+        let key = empty_static.decorated_key(&schema).unwrap();
+
+        writer.write_partition(key, vec![empty_static]).unwrap();
+
+        assert_eq!(
+            writer.stats.row_count, 0,
+            "empty static-row prelude must not inflate totalRows"
+        );
+        assert_eq!(
+            writer.stats.column_count, 0,
+            "empty static-row prelude must not inflate totalColumnsSet"
         );
         // The partition itself is still tracked.
         assert_eq!(writer.stats.partition_count, 1);
