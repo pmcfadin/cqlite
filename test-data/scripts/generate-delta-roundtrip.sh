@@ -24,12 +24,14 @@
 #   <OUT_DIR>/
 #     sstables/
 #       roundtrip_ks/
-#         roundtrip_t-<uuid1>/    # Gen 1
-#         roundtrip_t-<uuid2>/    # Gen 2
-#         roundtrip_t-<uuid3>/    # Gen 3
-#         roundtrip_coll-<uuid1>/
-#         roundtrip_coll-<uuid2>/
-#         roundtrip_coll-<uuid3>/
+#         roundtrip_t-<uuid>/           # ONE directory (all 3 flushes share it)
+#           nb-1-big-Data.db            # Gen 1 SSTable files
+#           nb-2-big-Data.db            # Gen 2 SSTable files
+#           nb-3-big-Data.db            # Gen 3 SSTable files
+#         roundtrip_coll-<uuid>/        # ONE directory (all 3 flushes share it)
+#           nb-1-big-Data.db
+#           nb-2-big-Data.db
+#           nb-3-big-Data.db
 #     parquet/
 #       roundtrip_t/
 #         gen1.parquet
@@ -509,9 +511,14 @@ PYEOF
 }
 
 # ---------------------------------------------------------------------------
-# Flush and get SSTable paths
+# Flush SSTable generation (nodetool flush).
+#
+# Each call to nodetool flush writes the current memtable contents to a new
+# set of SSTable files (nb-N-big-*) within the table's UUID directory.
+# All three generations for a table share ONE UUID directory — Cassandra does
+# not create a new UUID directory per flush.
 # ---------------------------------------------------------------------------
-flush_and_get_paths() {
+flush_generation() {
   local gen="$1"
   log "Flushing roundtrip_ks (generation $gen)..."
   run $ENGINE exec "$CONTAINER_NAME" nodetool flush "roundtrip_ks"
@@ -695,29 +702,56 @@ Build failed or cargo picked up a stale binary. Check the build output above."
         log "  delta-export [$table gen$gen_num] $gen_name → $out_file"
 
         # Capture stderr separately so we can extract the element-tombstone count.
+        # Use an if/else so that set -e does not exit the script before we can
+        # capture the exit code and display diagnostics.
         local stderr_file
         stderr_file="$(mktemp)"
-        "$CQLITE_BIN" delta-export "$gen_staging_dir" \
+        local exit_code
+        if "$CQLITE_BIN" delta-export "$gen_staging_dir" \
           --schema "$schema_file" \
           --out parquet \
           -o "$out_file" \
           --overwrite \
           --source "$gen_name" \
-          2>"$stderr_file"
-        local exit_code=$?
+          2>"$stderr_file"; then
+          exit_code=0
+        else
+          exit_code=$?
+        fi
 
-        # Show stderr output and extract element-tombstone warnings
+        # Show stderr output and extract element-tombstone warnings.
+        # Strategy: first try the stable machine-readable key
+        #   cqlite.delta.element_tombstones=<n>
+        # If that key is not present in stderr, fall back to the human-readable
+        # warning phrase. Count from only ONE source per export run.
         if [[ -s "$stderr_file" ]]; then
           while IFS= read -r line; do
             echo "  [delta-export $table gen$gen_num stderr] $line"
-            # Count element-tombstone warnings
-            # Warning line: "warning: N collection element tombstone(s) detected..."
-            if echo "$line" | grep -q "element tombstone"; then
-              local n
-              n=$(echo "$line" | grep -oE '[0-9]+' | head -1 || echo "0")
-              total_element_tombstone_warnings=$((total_element_tombstone_warnings + ${n:-0}))
-            fi
           done < "$stderr_file"
+          # Count element-tombstone warnings from this export run.
+          # Primary: stable machine-readable key on stderr.
+          # Fallback: human-readable warning phrase.
+          # We sum only ONE source (primary preferred) to avoid double-counting.
+          # We use `grep -c` / `awk` and redirect grep's "no match" exit code
+          # with `|| true` so set -e + pipefail does not abort the script.
+          local key_count fallback_count
+          key_count=0
+          fallback_count=0
+          # Extract "cqlite.delta.element_tombstones=N" → sum N values
+          if grep -q 'cqlite\.delta\.element_tombstones=' "$stderr_file" 2>/dev/null; then
+            key_count=$(grep -oE 'cqlite\.delta\.element_tombstones=[0-9]+' "$stderr_file" 2>/dev/null \
+              | grep -oE '[0-9]+$' | awk '{s+=$1} END {print s+0}')
+          fi
+          if [[ "${key_count:-0}" -gt 0 ]]; then
+            total_element_tombstone_warnings=$((total_element_tombstone_warnings + key_count))
+          else
+            # Fallback: "N collection element tombstone(s) detected"
+            if grep -q 'collection element tombstone' "$stderr_file" 2>/dev/null; then
+              fallback_count=$(grep -oE '[0-9]+ collection element tombstone' "$stderr_file" 2>/dev/null \
+                | grep -oE '^[0-9]+' | awk '{s+=$1} END {print s+0}')
+            fi
+            total_element_tombstone_warnings=$((total_element_tombstone_warnings + ${fallback_count:-0}))
+          fi
         fi
         rm -f "$stderr_file"
 
@@ -819,13 +853,80 @@ rm -f "$CASSANDRA_SCHEMA_FILE"
 # Each flush produces a separate SSTable generation (distinct directory)
 # ---------------------------------------------------------------------------
 run_phase1
-flush_and_get_paths 1
+flush_generation 1
 
 run_phase2
-flush_and_get_paths 2
+flush_generation 2
 
 run_phase3
-flush_and_get_paths 3
+flush_generation 3
+
+# ---------------------------------------------------------------------------
+# Capture Cassandra ground truth (the canonical merged view) BEFORE cleanup.
+#
+# After all three phases and flushes, Cassandra holds the authoritative merged
+# state: tombstones are applied, LWW is resolved, range-deletes are respected.
+# We export this as JSON so the Rust test can use it as the reference answer
+# instead of CQLite SELECT * (which may not apply cross-generation tombstones).
+# ---------------------------------------------------------------------------
+capture_cassandra_ground_truth() {
+  local dest_dir="$1"
+  mkdir -p "$dest_dir"
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    echo "[dry-run] would capture Cassandra ground truth to $dest_dir"
+    return 0
+  fi
+  log "Capturing Cassandra ground truth for roundtrip_t..."
+  $ENGINE exec -i "$CONTAINER_NAME" python3 - <<PYEOF > "$dest_dir/roundtrip_t.json"
+import json, sys
+from cassandra.cluster import Cluster
+try:
+    cluster = Cluster(['127.0.0.1'])
+    session = cluster.connect('roundtrip_ks')
+    rows = list(session.execute("SELECT pk, ck, val, st FROM roundtrip_t"))
+    result = []
+    for r in rows:
+        result.append({
+            "pk": r.pk,
+            "ck": r.ck,
+            "val": r.val,
+            "st": r.st,
+        })
+    # Sort by (pk, ck) for deterministic ordering
+    result.sort(key=lambda x: (x["pk"], x["ck"] or ""))
+    print(json.dumps(result, indent=2))
+    cluster.shutdown()
+except Exception as e:
+    print(json.dumps({"error": str(e)}), file=sys.stderr)
+    sys.exit(1)
+PYEOF
+  log "Capturing Cassandra ground truth for roundtrip_coll..."
+  $ENGINE exec -i "$CONTAINER_NAME" python3 - <<PYEOF > "$dest_dir/roundtrip_coll.json"
+import json, sys
+from cassandra.cluster import Cluster
+try:
+    cluster = Cluster(['127.0.0.1'])
+    session = cluster.connect('roundtrip_ks')
+    rows = list(session.execute("SELECT pk, ck, tags FROM roundtrip_coll"))
+    result = []
+    for r in rows:
+        result.append({
+            "pk": r.pk,
+            "ck": r.ck,
+            "tags": sorted(list(r.tags)) if r.tags else None,
+        })
+    result.sort(key=lambda x: (x["pk"], x["ck"] or ""))
+    print(json.dumps(result, indent=2))
+    cluster.shutdown()
+except Exception as e:
+    print(json.dumps({"error": str(e)}), file=sys.stderr)
+    sys.exit(1)
+PYEOF
+  log "Cassandra ground truth written to $dest_dir"
+}
+
+GROUND_TRUTH_DIR="$OUT_DIR/ground_truth"
+capture_cassandra_ground_truth "$GROUND_TRUTH_DIR"
 
 # ---------------------------------------------------------------------------
 # Export all SSTables to host

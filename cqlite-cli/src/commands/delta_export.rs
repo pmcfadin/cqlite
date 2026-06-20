@@ -27,6 +27,12 @@ pub struct DeltaExportResult {
 
 impl DeltaExportResult {
     /// Print a one-line summary to stdout and warnings to stderr.
+    ///
+    /// When `element_tombstone_warnings > 0` two lines are emitted on stderr:
+    /// 1. A stable machine-readable key `cqlite.delta.element_tombstones=<n>`
+    ///    that scripts and the generation harness can parse without fragile
+    ///    free-text matching.
+    /// 2. The human-readable warning message (kept for operator visibility).
     pub fn display(&self) {
         println!(
             "delta-export: {} record(s) written to {} ({:.1}ms)",
@@ -35,6 +41,14 @@ impl DeltaExportResult {
             self.execution_time_ms,
         );
         if self.element_tombstone_warnings > 0 {
+            // Machine-readable key — parsed by generate-delta-roundtrip.sh
+            // and by any downstream consumer that needs the count without
+            // screen-scraping the human-readable message below.
+            eprintln!(
+                "cqlite.delta.element_tombstones={}",
+                self.element_tombstone_warnings
+            );
+            // Human-readable warning (preserved for operator visibility).
             eprintln!(
                 "warning: {} collection element tombstone(s) detected but not represented \
                  in v1 delta output (issue #493 — element-level fidelity is a tracked follow-up)",

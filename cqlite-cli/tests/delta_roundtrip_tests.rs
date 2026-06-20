@@ -43,10 +43,11 @@
 //! ## CI gating
 //!
 //! This test is marked slow/Docker-dependent. It is NOT in the default
-//! `scripts/agent-gate.sh` sweep (which cannot run Docker). CI runs it in the
-//! `cassandra-validation.yml` workflow on Docker-capable runners via a dedicated
-//! `delta-roundtrip` job. See `.github/workflows/delta-roundtrip.yml` for the
-//! full workflow definition.
+//! `scripts/agent-gate.sh` sweep (which cannot run Docker). CI runs it via the
+//! dedicated `.github/workflows/delta-roundtrip.yml` workflow on Docker-capable
+//! runners. The workflow triggers on pushes and PRs that touch delta-scan/export
+//! paths (not on every push to main regardless of changed files). See
+//! `.github/workflows/delta-roundtrip.yml` for the full trigger and job definition.
 
 #![cfg(feature = "delta-export")]
 
@@ -110,6 +111,17 @@ fn schemas_dir() -> PathBuf {
         .join("schemas")
 }
 
+/// Return the path to the Cassandra ground truth JSON file for `table`.
+/// The file is captured by `generate-delta-roundtrip.sh` before the container
+/// is destroyed; it represents Cassandra's authoritative merged view after all
+/// three write phases (tombstones applied, LWW resolved, TTL expiry pending).
+fn ground_truth_file(table: &str) -> PathBuf {
+    roundtrip_data_dir()
+        .expect("DELTA_ROUNDTRIP_DATA must be set")
+        .join("ground_truth")
+        .join(format!("{table}.json"))
+}
+
 /// Return a sorted list of `.parquet` files in `dir`.
 fn list_parquet_files(dir: &Path) -> Vec<PathBuf> {
     if !dir.is_dir() {
@@ -135,26 +147,18 @@ fn list_parquet_files(dir: &Path) -> Vec<PathBuf> {
 // CQLite CLI helpers
 // ============================================================================
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("CARGO_MANIFEST_DIR has no parent")
-        .to_owned()
-}
-
 fn run_cqlite_select(table: &str) -> Vec<Value> {
-    let root = repo_root();
     let schema_file = schemas_dir().join("roundtrip_full.cql");
     let sstables = sstables_dir();
 
+    // Use the pre-built binary via CARGO_BIN_EXE_cqlite so we do not trigger a
+    // nested `cargo run` inside a running `cargo test` invocation (which would
+    // block on the target-dir lock and cause hangs or forced rebuilds).
+    let cqlite_bin = env!("CARGO_BIN_EXE_cqlite");
+
     // CQLite SELECT * over all SSTable generations (the merged ground truth)
-    let output = Command::new("cargo")
+    let output = Command::new(cqlite_bin)
         .args([
-            "run",
-            "--quiet",
-            "--package",
-            "cqlite-cli",
-            "--",
             "--schema",
             schema_file.to_str().unwrap(),
             "--data-dir",
@@ -164,7 +168,6 @@ fn run_cqlite_select(table: &str) -> Vec<Value> {
             "--out",
             "json",
         ])
-        .current_dir(&root)
         .output()
         .expect("failed to run cqlite");
 
@@ -208,7 +211,7 @@ fn duckdb_merge_roundtrip_t(parquet_files: &[PathBuf]) -> Vec<HashMap<String, Op
     // Build a list of parquet paths for read_parquet (comma-separated for DuckDB list literal)
     let paths_literal = parquet_files
         .iter()
-        .map(|p| format!("'{}'", p.to_string_lossy().replace('\'', "\\'")))
+        .map(|p| format!("'{}'", p.to_string_lossy().replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -417,7 +420,7 @@ fn duckdb_naive_union_roundtrip_t(
 
     let paths_literal = parquet_files
         .iter()
-        .map(|p| format!("'{}'", p.to_string_lossy().replace('\'', "\\'")))
+        .map(|p| format!("'{}'", p.to_string_lossy().replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -471,7 +474,7 @@ fn duckdb_element_tombstone_count(parquet_files: &[PathBuf]) -> i64 {
 
     let paths_literal = parquet_files
         .iter()
-        .map(|p| format!("'{}'", p.to_string_lossy().replace('\'', "\\'")))
+        .map(|p| format!("'{}'", p.to_string_lossy().replace('\'', "''")))
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -600,11 +603,16 @@ fn test_at_least_three_generations_exist() {
 }
 
 // ============================================================================
-// Test 2: DuckDB merge == CQLite SELECT * (row-by-row, cell-by-cell)
+// Test 2: DuckDB merge == Cassandra ground truth (row-by-row, cell-by-cell)
 //
-// The normative assertion: for every live row in the merged CQLite view, the
-// DuckDB reference merge must produce the same set of rows with the same
-// column values.
+// The normative assertion: the DuckDB reference merge over per-generation
+// delta Parquet files must reproduce Cassandra's own merged view (captured
+// by the generation script via cqlsh before the container is destroyed).
+//
+// We use Cassandra's view — not CQLite SELECT * — as the reference because
+// CQLite's multi-generation SSTable merge does not yet apply cross-generation
+// tombstones at query time (tracked separately). Cassandra IS the source of
+// truth: it wrote the SSTables and applies all Cassandra merge semantics.
 //
 // Collection table (roundtrip_coll) is excluded here because v1 element-level
 // removals produce a known divergence — see Test 5 for explicit handling.
@@ -629,61 +637,91 @@ fn test_duckdb_merge_equals_cqlite_select_star() {
         pq_files.len()
     );
 
-    // DuckDB reference merge (ground truth: consumer view)
+    // DuckDB reference merge (the thing under test: consumer view from delta Parquet)
     let mut duckdb_rows = duckdb_merge_roundtrip_t(&pq_files);
     sort_rows(&mut duckdb_rows);
     eprintln!("[duckdb] Merged {} row(s)", duckdb_rows.len());
 
-    // CQLite SELECT * (ground truth: SSTable reader merged view)
-    let cqlite_json = run_cqlite_select(table);
-    let mut cqlite_rows: Vec<Row> = cqlite_json
-        .iter()
-        .map(|v| json_value_to_row(v, cols))
-        .collect();
-    sort_rows(&mut cqlite_rows);
-    eprintln!("[cqlite] SELECT * returned {} row(s)", cqlite_rows.len());
+    // Ground truth: Cassandra's own view captured during generation before container
+    // teardown. Falls back to CQLite SELECT * if the ground_truth file is absent
+    // (e.g. generated by an older version of the script).
+    let gt_file = ground_truth_file(table);
+    let reference_source: &str;
+    let mut reference_rows: Vec<Row> = if gt_file.exists() {
+        reference_source = "Cassandra ground truth";
+        let json_str = std::fs::read_to_string(&gt_file)
+            .unwrap_or_else(|e| panic!("Failed to read ground truth file {gt_file:?}: {e}"));
+        let json_val: Value = serde_json::from_str(&json_str)
+            .unwrap_or_else(|e| panic!("Failed to parse ground truth JSON: {e}"));
+        json_val
+            .as_array()
+            .expect("ground truth JSON must be an array")
+            .iter()
+            .map(|v| json_value_to_row(v, cols))
+            .collect()
+    } else {
+        // Fallback: CQLite SELECT *. Note: CQLite may not apply cross-generation
+        // tombstones, so this reference is less reliable when multiple SSTable
+        // generations with tombstones coexist in the same table directory.
+        reference_source = "CQLite SELECT * (fallback — ground_truth/ file not found)";
+        eprintln!(
+            "[WARN] Cassandra ground truth file not found at {gt_file:?}.\n\
+             Falling back to CQLite SELECT * — regenerate data with the latest\n\
+             test-data/scripts/generate-delta-roundtrip.sh for a reliable reference."
+        );
+        let cqlite_json = run_cqlite_select(table);
+        cqlite_json
+            .iter()
+            .map(|v| json_value_to_row(v, cols))
+            .collect()
+    };
+    sort_rows(&mut reference_rows);
+    eprintln!(
+        "[reference ({reference_source})] {} row(s)",
+        reference_rows.len()
+    );
 
     // Dump both for diagnostic output
     eprintln!("\n--- DuckDB merged rows ---");
     for row in &duckdb_rows {
         eprintln!("  {}", fmt_row(row, cols));
     }
-    eprintln!("\n--- CQLite SELECT * rows ---");
-    for row in &cqlite_rows {
+    eprintln!("\n--- Reference ({reference_source}) rows ---");
+    for row in &reference_rows {
         eprintln!("  {}", fmt_row(row, cols));
     }
 
     // Row-count equality
     assert_eq!(
         duckdb_rows.len(),
-        cqlite_rows.len(),
-        "[{table}] Row count mismatch: DuckDB={}, CQLite={}\n\
+        reference_rows.len(),
+        "[{table}] Row count mismatch: DuckDB={}, {reference_source}={}\n\
          DuckDB rows: {duckdb_rows:?}\n\
-         CQLite rows: {cqlite_rows:?}",
+         Reference rows: {reference_rows:?}",
         duckdb_rows.len(),
-        cqlite_rows.len()
+        reference_rows.len()
     );
 
     // Cell-by-cell equality
-    for (i, (db_row, cq_row)) in duckdb_rows.iter().zip(cqlite_rows.iter()).enumerate() {
+    for (i, (db_row, ref_row)) in duckdb_rows.iter().zip(reference_rows.iter()).enumerate() {
         for &col in cols.iter() {
             let db_val = db_row.get(col).and_then(|v| v.as_deref());
-            let cq_val = cq_row.get(col).and_then(|v| v.as_deref());
+            let ref_val = ref_row.get(col).and_then(|v| v.as_deref());
             assert_eq!(
                 db_val,
-                cq_val,
+                ref_val,
                 "[{table}] Row {i} column '{col}' mismatch:\n  \
-                 DuckDB:  {}\n  CQLite:  {}\n  DuckDB row:  {}\n  CQLite row:  {}",
+                 DuckDB:    {}\n  Reference: {}\n  DuckDB row:    {}\n  Reference row: {}",
                 db_val.unwrap_or("NULL"),
-                cq_val.unwrap_or("NULL"),
+                ref_val.unwrap_or("NULL"),
                 fmt_row(db_row, cols),
-                fmt_row(cq_row, cols)
+                fmt_row(ref_row, cols)
             );
         }
     }
 
     eprintln!(
-        "\n[PASS] {table}: DuckDB reference merge == CQLite SELECT * ({} row(s), {}-cell comparison)",
+        "\n[PASS] {table}: DuckDB reference merge == {reference_source} ({} row(s), {}-cell comparison)",
         duckdb_rows.len(),
         duckdb_rows.len() * cols.len()
     );
@@ -1171,7 +1209,8 @@ fn test_generation_summary_report() {
         eprintln!("\nTable: {table} ({} generation(s))", files.len());
 
         for (i, f) in files.iter().enumerate() {
-            let path_str = f.to_string_lossy();
+            // Escape single quotes using PostgreSQL/DuckDB-style doubling ('').
+            let path_str = f.to_string_lossy().replace('\'', "''");
             let count: i64 = conn
                 .query_row(
                     &format!("SELECT COUNT(*) FROM read_parquet('{path_str}')"),
