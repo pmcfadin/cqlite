@@ -181,6 +181,68 @@ fn primary_key_spec(input: &str) -> IResult<&str, (Vec<String>, Vec<String>)> {
     Ok((input, (partition_keys, clustering_keys.unwrap_or_default())))
 }
 
+/// Parse a CQL map (`{ ... }`) or list (`[ ... ]`) literal value, capturing it
+/// verbatim (including the delimiters). Handles nested `{}`/`[]` and single
+/// quoted strings (which may themselves contain `{`, `}`, `[`, `]`). This lets
+/// `table_options` skip past complex option values such as
+/// `compression = {'class': 'LZ4Compressor'}` and continue collecting later
+/// options (Issue #852 review finding).
+fn bracketed_value(input: &str) -> IResult<&str, String> {
+    let bytes: &[u8] = input.as_bytes();
+    // Must start with an opening brace or bracket.
+    match bytes.first() {
+        Some(b'{') | Some(b'[') => {}
+        _ => {
+            return Err(nom::Err::Error(nom::error::Error::new(
+                input,
+                nom::error::ErrorKind::Char,
+            )))
+        }
+    }
+
+    // Combined nesting depth across both `{}` and `[]`. The literal is complete
+    // when depth returns to zero. Single-quoted strings are skipped so that
+    // brackets/braces inside string contents do not affect nesting.
+    let mut depth: usize = 0;
+    let mut in_string = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == b'\'' {
+                // CQL escapes a single quote by doubling it ('').
+                if bytes.get(i + 1) == Some(&b'\'') {
+                    i += 2;
+                    continue;
+                }
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        match c {
+            b'\'' => in_string = true,
+            b'{' | b'[' => depth += 1,
+            b'}' | b']' => {
+                depth -= 1;
+                if depth == 0 {
+                    let end = i + 1;
+                    let (value, rest) = input.split_at(end);
+                    return Ok((rest, value.to_string()));
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    // Unterminated literal.
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Char,
+    )))
+}
+
 /// Parse table options (WITH clause)
 fn table_options(input: &str) -> IResult<&str, HashMap<String, String>> {
     let (input, _) = ws(input)?;
@@ -193,13 +255,22 @@ fn table_options(input: &str) -> IResult<&str, HashMap<String, String>> {
             identifier,
             tuple((ws, char('='), ws)),
             alt((
+                // Map literal: {'class': 'LZ4Compressor', ...} (possibly nested).
+                // Captured verbatim so option collection can continue past it.
+                bracketed_value,
                 // String value
-                delimited(char('\''), take_while(|c: char| c != '\''), char('\'')),
+                map(
+                    delimited(char('\''), take_while(|c: char| c != '\''), char('\'')),
+                    |s: &str| s.to_string(),
+                ),
                 // Numeric or identifier value
-                take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.'),
+                map(
+                    take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.'),
+                    |s: &str| s.to_string(),
+                ),
             )),
         ),
-        |(key, value)| (key, value.to_string()),
+        |(key, value)| (key, value),
     );
 
     let (input, options) = separated_list0(tuple((ws, keyword("and"), ws)), option_pair)(input)?;
@@ -1262,6 +1333,79 @@ mod tests {
         assert_eq!(
             schema.comments.get("gc_grace_seconds").map(String::as_str),
             Some("0")
+        );
+    }
+
+    /// Issue #852 (review finding, roborev job 741): a map-valued option such as
+    /// `compression = {'class': 'LZ4Compressor'}` appearing BEFORE the bloom
+    /// option must not stop option collection. Previously the map value failed
+    /// to parse, so `bloom_filter_fp_chance` was dropped and the writer fell
+    /// back to 0.01 (emitting Filter.db incorrectly).
+    #[test]
+    fn test_with_map_valued_option_before_bloom_preserved() {
+        let cql = "CREATE TABLE ks.t (id int PRIMARY KEY, name text) \
+                   WITH compression = {'class': 'LZ4Compressor'} \
+                   AND bloom_filter_fp_chance = 1.0";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("1.0"),
+            "bloom_filter_fp_chance must survive a preceding map-valued option, got: {:?}",
+            schema.comments
+        );
+    }
+
+    /// A multi-entry compaction map (with nested-looking comma-separated
+    /// entries) before the bloom option must also be skipped cleanly.
+    #[test]
+    fn test_with_compaction_map_before_bloom_preserved() {
+        let cql = "CREATE TABLE ks.t (id int PRIMARY KEY, name text) \
+                   WITH compaction = {'class': 'SizeTieredCompactionStrategy', 'max_threshold': '32'} \
+                   AND bloom_filter_fp_chance = 1.0";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("1.0"),
+            "bloom_filter_fp_chance must survive a preceding compaction map, got: {:?}",
+            schema.comments
+        );
+    }
+
+    /// List-valued options must also be tolerated without stopping collection.
+    #[test]
+    fn test_with_list_valued_option_before_bloom_preserved() {
+        let cql = "CREATE TABLE ks.t (id int PRIMARY KEY, name text) \
+                   WITH some_list = ['a', 'b'] \
+                   AND bloom_filter_fp_chance = 1.0";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("1.0"),
+            "bloom_filter_fp_chance must survive a preceding list-valued option, got: {:?}",
+            schema.comments
+        );
+    }
+
+    /// A map-valued option's value should be captured (round-tripped) too.
+    #[test]
+    fn test_with_map_valued_option_value_captured() {
+        let cql = "CREATE TABLE ks.t (id int PRIMARY KEY, name text) \
+                   WITH compression = {'class': 'LZ4Compressor'}";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema.comments.get("compression").map(String::as_str),
+            Some("{'class': 'LZ4Compressor'}"),
+            "map-valued option value should be preserved verbatim, got: {:?}",
+            schema.comments
         );
     }
 }
