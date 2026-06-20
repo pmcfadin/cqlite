@@ -455,7 +455,14 @@ impl DeltaRecord {
 /// ## Memory
 ///
 /// The channel is bounded by `buffer_size` records.  The parse task pauses
-/// when the consumer falls behind.  No full-table materialisation occurs.
+/// when the consumer falls behind.  Individual [`DeltaRecord`]s are bounded in
+/// size and never accumulated into a full-table collection.
+///
+/// **Caveat**: `prepare_delta_scan` → `stitch_all_chunks` fully materialises the
+/// decompressed data section of the SSTable into a single `Vec<u8>` before
+/// streaming begins.  For very large SSTables this may approach the 128 MB
+/// memory budget; callers should be aware that the stitched buffer is resident
+/// for the duration of the scan.
 ///
 /// ## Errors
 ///
@@ -503,23 +510,25 @@ async fn run_scan_delta(
             })?,
     );
 
+    // Wrap schema in Arc once — both the emit closure and parse call share the
+    // same allocation rather than cloning the struct twice.
+    let schema_arc = std::sync::Arc::new(schema);
+
     // Stitch + parse with mutex held for the stitch (issue #805), then release.
     // The parsing itself is synchronous and moves into spawn_blocking; it does
     // not need the scan mutex since we already have the full stitched buffer.
     let (stitched, parser) = {
         let _scan_guard = reader.delta_scan_mutex().lock().await;
-        reader.prepare_delta_scan(Some(&schema)).await?
+        reader.prepare_delta_scan().await?
         // _scan_guard dropped here after stitching is complete.
     };
 
-    // Build key-set lookups from schema (captured by the blocking closure below).
-    let schema_arc = std::sync::Arc::new(schema.clone());
+    let schema_for_parse = std::sync::Arc::clone(&schema_arc);
+    let reader_arc = std::sync::Arc::clone(&reader);
 
     // The parse closure is synchronous; run it on a blocking thread so it can
     // use `blocking_send` without stalling the async runtime (mirrors
     // `parse_stitched_stream` in data_access.rs, issue #790).
-    let schema_for_parse = schema.clone();
-    let reader_arc = std::sync::Arc::clone(&reader);
     let parse_result = tokio::task::spawn_blocking(move || -> crate::Result<()> {
         parser.parse_block_emit_delta(
             &stitched,
@@ -666,8 +675,12 @@ async fn run_scan_delta(
 /// Find the `Data.db` file inside an SSTable directory.
 ///
 /// Cassandra names Data.db files with a generation prefix, e.g.:
-/// `nb-1-big-Data.db` or `na-1-big-Data.db`. Returns an error if no
-/// matching file is found.
+/// `nb-1-big-Data.db` or `na-1-big-Data.db`.
+///
+/// Returns an error if no matching file is found.  If more than one `*-Data.db`
+/// file is present (which violates the single-generation contract), a warning is
+/// logged and the lexicographically smallest file name is returned so behaviour
+/// is at least deterministic rather than OS-dependent.
 fn find_data_db(dir: &std::path::Path) -> crate::Result<std::path::PathBuf> {
     if !dir.exists() {
         return Err(crate::Error::corruption(format!(
@@ -680,18 +693,36 @@ fn find_data_db(dir: &std::path::Path) -> crate::Result<std::path::PathBuf> {
         crate::Error::corruption(format!("scan_delta: cannot read directory {:?}: {e}", dir))
     })?;
 
-    for entry in entries.filter_map(|e| e.ok()) {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.ends_with("-Data.db") {
-            return Ok(entry.path());
-        }
+    let mut candidates: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.ends_with("-Data.db"))
+                .unwrap_or(false)
+        })
+        .map(|e| e.path())
+        .collect();
+
+    if candidates.is_empty() {
+        return Err(crate::Error::corruption(format!(
+            "scan_delta: no Data.db file found in {:?}",
+            dir
+        )));
     }
 
-    Err(crate::Error::corruption(format!(
-        "scan_delta: no Data.db file found in {:?}",
-        dir
-    )))
+    if candidates.len() > 1 {
+        candidates.sort();
+        log::warn!(
+            "scan_delta: {:?} contains {} Data.db files (expected 1 per generation); \
+             using lexicographically first: {:?}. Consider compacting before scanning.",
+            dir,
+            candidates.len(),
+            candidates[0]
+        );
+    }
+
+    Ok(candidates.remove(0))
 }
 
 // ---------------------------------------------------------------------------
@@ -1385,5 +1416,310 @@ mod tests {
         if checked > 0 {
             eprintln!("scan_delta writetime check: verified {} cells", checked);
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // E2E: StaticUpsert path — real SSTable (test_basic/static_columns_table)
+    // -----------------------------------------------------------------------
+
+    /// Integration test: scan_delta emits at least one `StaticUpsert` record
+    /// from `test_basic/static_columns_table`, which has a STATIC TEXT column
+    /// (`static_data`) alongside clustered rows.
+    ///
+    /// Skipped automatically when CQLITE_DATASETS_ROOT is unset or the
+    /// Data.db file is absent (run `bash test-data/scripts/fetch-datasets.sh`).
+    #[tokio::test]
+    async fn scan_delta_emits_static_upsert_from_static_columns_table() {
+        let root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(r) => std::path::PathBuf::from(r),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set — skipping StaticUpsert e2e test");
+                return;
+            }
+        };
+
+        let base = root.join("sstables/test_basic");
+        if !base.exists() {
+            eprintln!("test_basic not found — skipping StaticUpsert e2e test");
+            return;
+        }
+
+        // Find the static_columns_table directory (prefix match).
+        let table_dir = std::fs::read_dir(&base).ok().and_then(|mut it| {
+            it.find_map(|e| {
+                e.ok()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("static_columns_table"))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path())
+            })
+        });
+
+        let Some(table_dir) = table_dir else {
+            eprintln!("static_columns_table dir not found — skipping StaticUpsert e2e test");
+            return;
+        };
+
+        // Skip gracefully if Data.db is not present.
+        let has_data_db = std::fs::read_dir(&table_dir)
+            .ok()
+            .map(|it| {
+                it.filter_map(|e| e.ok()).any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if !has_data_db {
+            eprintln!("No Data.db in static_columns_table — skipping (run fetch-datasets.sh)");
+            return;
+        }
+
+        // Schema for test_basic.static_columns_table:
+        //   PRIMARY KEY (partition_key UUID, clustering_key TIMESTAMP)
+        //   static_data TEXT STATIC
+        //   row_data    TEXT
+        //   row_value   INT
+        let schema = crate::schema::TableSchema {
+            keyspace: "test_basic".to_string(),
+            table: "static_columns_table".to_string(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: "partition_key".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![crate::schema::ClusteringColumn {
+                name: "clustering_key".to_string(),
+                data_type: "timestamp".to_string(),
+                position: 0,
+                order: crate::schema::ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                crate::schema::Column {
+                    name: "static_data".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: true,
+                },
+                crate::schema::Column {
+                    name: "row_data".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "row_value".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: std::collections::HashMap::new(),
+        };
+
+        let mut rx = scan_delta(table_dir, schema, 64);
+        let mut static_upsert_count = 0_usize;
+        let mut upsert_count = 0_usize;
+
+        while let Some(result) = rx.recv().await {
+            match result {
+                Ok(DeltaRecord::StaticUpsert { ref cells, .. }) => {
+                    static_upsert_count += 1;
+                    // Each StaticUpsert must have at least one cell.
+                    assert!(
+                        !cells.is_empty(),
+                        "StaticUpsert must have at least one cell delta"
+                    );
+                }
+                Ok(DeltaRecord::Upsert { .. }) => {
+                    upsert_count += 1;
+                }
+                Ok(other) => {
+                    // Row/range/partition tombstones are not expected here and
+                    // are out of scope for Issue #698, but we don't panic —
+                    // the test_basic corpus should not contain tombstones.
+                    eprintln!(
+                        "scan_delta static_columns_table: unexpected record: {}",
+                        other.op_name()
+                    );
+                }
+                Err(e) => panic!("scan_delta error on static_columns_table: {e}"),
+            }
+        }
+
+        eprintln!(
+            "scan_delta static_columns_table: {} StaticUpserts, {} Upserts",
+            static_upsert_count, upsert_count
+        );
+        assert!(
+            static_upsert_count > 0,
+            "expected at least one StaticUpsert from static_columns_table; \
+             got {} StaticUpserts and {} Upserts",
+            static_upsert_count,
+            upsert_count
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // E2E: cell-tombstone path — real SSTable (test_deltas/cell_tombstones)
+    // -----------------------------------------------------------------------
+
+    /// Integration test: scan_delta emits at least one `CellDelta { value: None }`
+    /// from `test_deltas/cell_tombstones`, which was written by issuing
+    /// `UPDATE … SET col_b = null …` against rows that had `col_b` set.
+    ///
+    /// This test is **gated** on the presence of the `test_deltas` binary Data.db
+    /// files, which are not committed to git (they are regenerated locally via
+    /// `bash test-data/scripts/generate-deltas.sh`).  The test skips cleanly
+    /// with a message if the binary is absent, matching the project convention for
+    /// dataset-gated tests.  It will skip in CI until the test_deltas dataset
+    /// asset is published.
+    #[tokio::test]
+    async fn scan_delta_emits_cell_tombstone_from_cell_tombstones_table() {
+        let root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(r) => std::path::PathBuf::from(r),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set — skipping cell-tombstone e2e test");
+                return;
+            }
+        };
+
+        let deltas_dir = root.join("sstables/test_deltas");
+        if !deltas_dir.exists() {
+            eprintln!(
+                "test_deltas not found at {:?} — skipping cell-tombstone e2e test \
+                 (run `bash test-data/scripts/generate-deltas.sh` to regenerate)",
+                deltas_dir
+            );
+            return;
+        }
+
+        // Find the cell_tombstones directory (prefix match).
+        let table_dir = std::fs::read_dir(&deltas_dir).ok().and_then(|mut it| {
+            it.find_map(|e| {
+                e.ok()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("cell_tombstones"))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path())
+            })
+        });
+
+        let Some(table_dir) = table_dir else {
+            eprintln!("cell_tombstones dir not found — skipping cell-tombstone e2e test");
+            return;
+        };
+
+        // Skip gracefully if the binary Data.db is absent (only JSONL present).
+        let has_data_db = std::fs::read_dir(&table_dir)
+            .ok()
+            .map(|it| {
+                it.filter_map(|e| e.ok()).any(|e| {
+                    let name = e.file_name();
+                    let n = name.to_string_lossy();
+                    // Must end with -Data.db but NOT be the .jsonl reference file.
+                    n.ends_with("-Data.db") && !n.ends_with(".db.jsonl")
+                })
+            })
+            .unwrap_or(false);
+        if !has_data_db {
+            eprintln!(
+                "No binary Data.db in cell_tombstones — skipping cell-tombstone e2e test \
+                 (run `bash test-data/scripts/generate-deltas.sh` to regenerate binaries; \
+                 test_deltas binaries are not in the published dataset asset)"
+            );
+            return;
+        }
+
+        // Schema for test_deltas.cell_tombstones:
+        //   PRIMARY KEY (pk INT, ck INT)
+        //   col_a TEXT
+        //   col_b TEXT   ← this column has cell tombstones after UPDATE … SET col_b = null
+        let schema = crate::schema::TableSchema {
+            keyspace: "test_deltas".to_string(),
+            table: "cell_tombstones".to_string(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![crate::schema::ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: crate::schema::ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                crate::schema::Column {
+                    name: "col_a".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "col_b".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: std::collections::HashMap::new(),
+        };
+
+        let mut rx = scan_delta(table_dir, schema, 64);
+        let mut cell_tombstone_count = 0_usize;
+        let mut total_cells = 0_usize;
+
+        while let Some(result) = rx.recv().await {
+            match result {
+                Ok(DeltaRecord::Upsert { cells, .. }) => {
+                    for (col_id, cell) in &cells {
+                        total_cells += 1;
+                        if cell.value.is_none() {
+                            // This is a cell tombstone flowing through the real path.
+                            cell_tombstone_count += 1;
+                            eprintln!(
+                                "cell-tombstone e2e: column {:?} has CellDelta {{ value: None, writetime: {} }}",
+                                col_id.0, cell.writetime
+                            );
+                        }
+                    }
+                }
+                Ok(DeltaRecord::StaticUpsert { .. }) => {}
+                Ok(other) => {
+                    // Row/partition tombstones may appear in cell_tombstones too;
+                    // they are out of scope for #698 but we don't fail the test.
+                    eprintln!(
+                        "scan_delta cell_tombstones: got {} (out of #698 scope)",
+                        other.op_name()
+                    );
+                }
+                Err(e) => panic!("scan_delta error on cell_tombstones: {e}"),
+            }
+        }
+
+        eprintln!(
+            "scan_delta cell_tombstones e2e: {} cell tombstones out of {} total cells",
+            cell_tombstone_count, total_cells
+        );
+        assert!(
+            cell_tombstone_count > 0,
+            "expected at least one CellDelta {{ value: None }} from cell_tombstones; \
+             got {} total cells with 0 tombstones",
+            total_cells
+        );
     }
 }

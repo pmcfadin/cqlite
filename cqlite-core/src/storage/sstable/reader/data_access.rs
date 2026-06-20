@@ -1886,10 +1886,14 @@ impl SSTableReader {
     /// issue #805).  This method is gated on the `delta-scan` feature and is
     /// the only bridge between the SSTableReader internals and the
     /// `delta_scan` module, which cannot access private helpers directly.
+    ///
+    /// The `schema` parameter is not used here — it is threaded through the
+    /// caller's `parse_block_emit_delta` invocation instead.  The parser is
+    /// built via `build_v5_parser()` which handles version-gates and UDT
+    /// registry without needing the schema at construction time.
     #[cfg(feature = "delta-scan")]
     pub async fn prepare_delta_scan(
         &self,
-        schema: Option<&crate::schema::TableSchema>,
     ) -> Result<(Vec<u8>, super::parsing::V5CompressedLegacyParser)> {
         use tokio::io::AsyncSeekExt;
 
@@ -1909,7 +1913,6 @@ impl SSTableReader {
 
         // Build a parser (re-using the existing builder so version-gates and
         // UDT registry are threaded through correctly).
-        let _ = schema; // schema is threaded via the caller's parse call
         let parser = self.build_v5_parser();
 
         Ok((stitched, parser))

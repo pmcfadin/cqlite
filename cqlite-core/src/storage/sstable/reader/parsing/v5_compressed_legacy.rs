@@ -582,11 +582,13 @@ impl V5CompressedLegacyParser {
         let mut partition_index = 0;
 
         while offset < data.len() {
-            let (partition_key, next_data_offset) = match self.parse_partition_header(data, offset)
-            {
-                Ok(ph) => ph,
-                Err(_) => break,
-            };
+            let (partition_key, next_data_offset) =
+                self.parse_partition_header(data, offset).map_err(|e| {
+                    Error::corruption(format!(
+                        "delta-scan: partition-header parse error at offset {} in {}.{}: {}",
+                        offset, self.keyspace, self.table_name, e
+                    ))
+                })?;
 
             offset = next_data_offset;
             partition_index += 1;
@@ -601,13 +603,16 @@ impl V5CompressedLegacyParser {
                 if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
                     // Range tombstones are out of scope for Issue #698 (see #699).
                     // Skip them so we can still process the upsert rows in this partition.
-                    match self.skip_range_tombstone_marker(data, offset, schema) {
-                        Ok(next_offset) => {
-                            offset = next_offset;
-                            continue;
-                        }
-                        Err(_) => break,
-                    }
+                    offset = self
+                        .skip_range_tombstone_marker(data, offset, schema)
+                        .map_err(|e| {
+                            Error::corruption(format!(
+                                "delta-scan: range-tombstone-marker parse error in partition {} \
+                                 at offset {} in {}.{}: {}",
+                                partition_index, offset, self.keyspace, self.table_name, e
+                            ))
+                        })?;
+                    continue;
                 }
 
                 match self.parse_row_data_with_offset(data, offset, Some(schema), reader, true) {
@@ -649,13 +654,10 @@ impl V5CompressedLegacyParser {
                         }
                     }
                     Err(e) => {
-                        log::debug!(
-                            "V5CompressedLegacy delta-scan: Row parse error in partition {} at offset {}: {}",
-                            partition_index,
-                            offset,
-                            e
-                        );
-                        break;
+                        return Err(Error::corruption(format!(
+                            "delta-scan: row parse error in partition {} at offset {} in {}.{}: {}",
+                            partition_index, offset, self.keyspace, self.table_name, e
+                        )));
                     }
                 }
             }
