@@ -842,6 +842,28 @@ impl V5CompressedLegacyParser {
             }
 
             let _ = row_count; // acknowledged for logging purposes
+
+            // Finding 3: dangling-range guard.
+            // A well-formed SSTable always pairs every start marker with a matching
+            // end marker (or a boundary marker that closes the range) before the
+            // end-of-partition byte.  If we reach here with `pending_range_start`
+            // still set, the SSTable is corrupt — the range was opened but never
+            // closed.  Silently discarding it would violate the no-heuristics mandate
+            // (issue #28); return a corruption error naming the partition.
+            if let Some((start_vals, start_incl, start_del_at)) = pending_range_start {
+                return Err(Error::corruption(format!(
+                    "delta-scan: partition {} in {}.{} (key {:?}) has an unclosed range \
+                     tombstone start bound (values={:?}, inclusive={}, deleted_at={}) with \
+                     no matching end marker — corrupt SSTable (no-heuristics mandate, issue #28)",
+                    partition_index,
+                    self.keyspace,
+                    self.table_name,
+                    partition_key.0,
+                    start_vals,
+                    start_incl,
+                    start_del_at,
+                )));
+            }
         }
 
         Ok(())
@@ -1869,20 +1891,8 @@ impl V5CompressedLegacyParser {
         // Use a truncated schema when cluster_count < schema.clustering_keys.len() to avoid
         // reading past the bound's bytes into the marker body (prefix bound case).
         if cluster_count > 0 {
-            let prefix_schema: crate::schema::TableSchema;
-            let effective_schema = if cluster_count < schema.clustering_keys.len() {
-                prefix_schema = crate::schema::TableSchema {
-                    keyspace: schema.keyspace.clone(),
-                    table: schema.table.clone(),
-                    partition_keys: schema.partition_keys.clone(),
-                    clustering_keys: schema.clustering_keys[..cluster_count].to_vec(),
-                    columns: schema.columns.clone(),
-                    comments: schema.comments.clone(),
-                };
-                &prefix_schema
-            } else {
-                schema
-            };
+            let prefix_schema_owned = Self::clustering_prefix_schema(schema, cluster_count);
+            let effective_schema = prefix_schema_owned.as_ref().unwrap_or(schema);
             let (_, new_pos) = self.parse_clustering_prefix(data, pos, effective_schema)?;
             pos = new_pos;
         }
@@ -2494,20 +2504,8 @@ impl V5CompressedLegacyParser {
         // or invalid UTF-8 errors).  Instead we pass a synthetic schema whose
         // `clustering_keys` vec is truncated to `cluster_count`.
         let bound_values = if cluster_count > 0 {
-            let prefix_schema: crate::schema::TableSchema;
-            let effective_schema = if cluster_count < schema.clustering_keys.len() {
-                prefix_schema = crate::schema::TableSchema {
-                    keyspace: schema.keyspace.clone(),
-                    table: schema.table.clone(),
-                    partition_keys: schema.partition_keys.clone(),
-                    clustering_keys: schema.clustering_keys[..cluster_count].to_vec(),
-                    columns: schema.columns.clone(),
-                    comments: schema.comments.clone(),
-                };
-                &prefix_schema
-            } else {
-                schema
-            };
+            let prefix_schema_owned = Self::clustering_prefix_schema(schema, cluster_count);
+            let effective_schema = prefix_schema_owned.as_ref().unwrap_or(schema);
             let (values, new_pos) = self.parse_clustering_prefix(data, pos, effective_schema)?;
             pos = new_pos;
             values
@@ -2581,6 +2579,31 @@ impl V5CompressedLegacyParser {
             deleted_at_secondary,
             pos,
         ))
+    }
+
+    /// Return a schema view truncated to `n` clustering keys.
+    ///
+    /// Range-tombstone bound markers may be **prefix bounds**: the Cassandra serializer
+    /// writes only `cluster_count` clustering values when a DELETE specifies fewer
+    /// clustering components than the full key arity (e.g. `DELETE WHERE pk=? AND ck1=?`
+    /// on a table with `(ck1, ck2)` only pins the first component).
+    ///
+    /// Returns `None` (callers use the original schema) when `n >= schema.clustering_keys.len()`,
+    /// avoiding a clone in the common non-prefix case.  Returns `Some(truncated)` when a
+    /// shorter view is needed.
+    fn clustering_prefix_schema(schema: &TableSchema, n: usize) -> Option<TableSchema> {
+        if n >= schema.clustering_keys.len() {
+            None
+        } else {
+            Some(TableSchema {
+                keyspace: schema.keyspace.clone(),
+                table: schema.table.clone(),
+                partition_keys: schema.partition_keys.clone(),
+                clustering_keys: schema.clustering_keys[..n].to_vec(),
+                columns: schema.columns.clone(),
+                comments: schema.comments.clone(),
+            })
+        }
     }
 
     /// Decode one `(markedForDeleteAt delta, localDeletionTime delta)` pair from `data[*pos..]`.

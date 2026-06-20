@@ -138,3 +138,28 @@ CREATE TABLE IF NOT EXISTS partial_updates (
     col_b TEXT,
     PRIMARY KEY (pk, ck)
 ) WITH compression = {'class': 'LZ4Compressor'};
+
+-- -----------------------------------------------------------------------
+-- Table 9: adjacent_ranges
+-- Shape: Adjacent DELETE ranges that share a clustering-key boundary point.
+-- Purpose: Exercises boundary markers (kind 2 = EXCL_END_INCL_START_BOUNDARY
+--          and kind 5 = INCL_END_EXCL_START_BOUNDARY) which carry TWO deletion
+--          times and close the pending range while opening the next simultaneously.
+--
+-- Pattern (pk=1):
+--   DELETE WHERE pk=1 AND ck >= 10 AND ck < 20  (first range, ts1)
+--   DELETE WHERE pk=1 AND ck >= 20 AND ck < 30  (second range, ts2)
+--   These two ranges share ck=20 as their boundary point, producing a
+--   EXCL_END_INCL_START_BOUNDARY (kind 2) marker at ck=20.
+--
+-- Pattern (pk=2):
+--   DELETE WHERE pk=2 AND ck > 5 AND ck <= 15   (first range, ts3)
+--   DELETE WHERE pk=2 AND ck > 15 AND ck <= 25  (second range, ts4)
+--   Produces INCL_END_EXCL_START_BOUNDARY (kind 5) at ck=15.
+-- -----------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS adjacent_ranges (
+    pk  INT,
+    ck  INT,
+    val TEXT,
+    PRIMARY KEY (pk, ck)
+) WITH compression = {'class': 'LZ4Compressor'};

@@ -2,9 +2,9 @@
 
 **Comprehensive validation tracking for all test tables across the CQLite test suite**
 
-**Last Updated**: 2026-06-19 (After Issue #701 — test_deltas delete-bearing fixtures added)
+**Last Updated**: 2026-06-20 (After Issue #699 review — test_deltas adjacent_ranges table added for boundary-marker coverage)
 **Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) - Validate all 33 test tables can be loaded successfully
-**Current Status**: 39/39 PASS (100% pass rate across nb+oa corpus) — test_deltas (8 tables) skip-pending until dataset asset published (#701)
+**Current Status**: 39/39 PASS (100% pass rate across nb+oa corpus) — test_deltas (9 tables) skip-pending until dataset asset published (#701)
 
 ---
 
@@ -12,9 +12,9 @@
 
 | Metric | Value | Notes |
 |--------|-------|-------|
-| **Total Tables** | 47 | 4 nb keyspaces (33) + test_oa (6) + test_deltas (8); test_da skip-pending |
+| **Total Tables** | 48 | 4 nb keyspaces (33) + test_oa (6) + test_deltas (9); test_da skip-pending |
 | **Enforced Tables** | 39 | nb (33) + test_oa (6); test_deltas skip-pending until dataset asset published (#701) |
-| **Tables with JSONL** | 47 | 100% coverage - all tables (incl. skip-pending) have sstabledump reference files |
+| **Tables with JSONL** | 48 | 100% coverage - all tables (incl. skip-pending) have sstabledump reference files |
 | **Smoke Test Pass** | 39/39 | 100% pass rate (nb+oa enforced corpus) |
 | **Smoke Test Fail** | 0/39 | 0% failure rate |
 | **Exit Code 3 Failures** | 0 | None remaining (Issue #220 fixed) |
@@ -28,9 +28,9 @@
 | **test_collections** | 8 | 0 | 8 | 100% ✅ |
 | **test_timeseries** | 9 | 0 | 9 | 100% ✅ |
 | **test_wide_rows** | 8 | 0 | 8 | 100% ✅ |
-| **test_deltas** | — | — | 8 | SKIP-PENDING (binaries not in dataset asset yet; see #701) |
+| **test_deltas** | — | — | 9 | SKIP-PENDING (binaries not in dataset asset yet; see #701) |
 
-**Note**: All 39 enforced tables now passing. test_deltas (8 tables, Issue #701) has JSONL goldens committed but is skip-pending in smoke test until a new dataset asset containing its Data.db files is published and `fetch-datasets.sh`'s pin is bumped. At that point move `test_deltas` from `SKIP_PENDING_KEYSPACES` to `KEYSPACES` in `smoke-test-all-tables.sh`.
+**Note**: All 39 enforced tables now passing. test_deltas (9 tables: 8 from Issue #701 + `adjacent_ranges` from Issue #699 review) has JSONL goldens committed but is skip-pending in smoke test until a new dataset asset containing its Data.db files is published and `fetch-datasets.sh`'s pin is bumped. At that point move `test_deltas` from `SKIP_PENDING_KEYSPACES` to `KEYSPACES` in `smoke-test-all-tables.sh`.
 
 ### Recent Fixes (Dec 2025)
 
@@ -105,10 +105,10 @@
 | product_catalog | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 | sparse_data_table | 49 | ✅ | ✅ | ✅ | ❌ (0 tests) | **PASS** | Fixed by Issue #213 |
 
-### test_deltas (8 tables - 8 PASS / 0 FAIL) ✅ 100% — Added Issue #701
+### test_deltas (9 tables - 9 PASS / 0 FAIL) ✅ 100% — Added Issue #701 + #699 review
 
-Delete-bearing SSTable fixtures covering all eight delete/shape cases. Coordinates with issue #667.
-Format: nb (BIG, storage_compatibility_mode: CASSANDRA_4). Generated 2026-06-19.
+Delete-bearing SSTable fixtures covering all eight delete/shape cases plus adjacent-range boundary markers. Coordinates with issue #667.
+Format: nb (BIG, storage_compatibility_mode: CASSANDRA_4). Generated 2026-06-19 (tables 1-8) / 2026-06-20 (table 9).
 
 | Table | Partitions | Shape Covered | JSONL Golden | Status | Notes |
 |-------|-----------|---------------|--------------|--------|-------|
@@ -120,6 +120,7 @@ Format: nb (BIG, storage_compatibility_mode: CASSANDRA_4). Generated 2026-06-19.
 | static_with_rows | 4 | Shape 6: Static column writes alongside regular rows | ✅ | **PASS** | static_col written at partition level; per-row col present; pk=99 is static-only |
 | collection_ops | 4 | Shape 7: Collection append / overwrite / element remove | ✅ | **PASS** | pk=1: SET append; pk=2: SET overwrite; pk=3: element remove via `s - {…}` |
 | partial_updates | 3 | Shape 8: Partial UPDATE (no row liveness) vs INSERT (has liveness) | ✅ | **PASS** | ck=1 via INSERT (liveness token); ck=2 via UPDATE only (no liveness); ck=3 mixed |
+| adjacent_ranges | 2 | Shape 9: Adjacent DELETE ranges sharing a boundary point → kind 2/5 boundary markers | ✅ | **PASS** | pk=1: [10,20)+[20,30) → kind 2 boundary at ck=20; pk=2: (5,15]+(15,25] → kind 5 boundary at ck=15; two distinct deleted_at per partition |
 
 ---
 
