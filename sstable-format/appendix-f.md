@@ -720,6 +720,84 @@ let data_offset = vint_offset;  // SSTableReader adds header_size later
 
 ---
 
+## Epic #817 — Compaction-fidelity gaps (verified)
+
+These limitations were surfaced and byte-verified during Epic #817 (compaction
+fidelity). Each is grounded in CQLite's own reader/writer or a cited Cassandra
+class; where CQLite diverges from Cassandra it is called out explicitly.
+
+### Reader lacks the `≥ 64`-column large-subset decode branch (#12)
+
+**Status**: 🐛 **OPEN**
+
+When `HAS_ALL_COLUMNS` (0x20) is clear, Cassandra's `Columns.Serializer.serializeSubset`
+(`Columns.java:503-531`) selects the columns-subset encoding by superset size: a single
+unsigned-VInt bitmap for `< 64` regular columns, and a **large-subset** form (VInt count +
+smaller-of present/missing **absolute** column indices, each an unsigned VInt — not deltas) for
+`≥ 64`. CQLite's reader
+(`reader/parsing/v5_compressed_legacy.rs::parse_row_metadata`) always reads a single
+`parse_vuint` into a `u64` `missing_columns_bitmap` and has no `≥ 64` branch, so for a
+`≥ 64`-column table it consumes only the missing-count VInt and then mis-reads the trailing
+index VInts as cell data, corrupting the row stream. The reader also treats any column at
+`idx >= 64` as present regardless of the field. The **writer** implements both modes correctly
+(`data_writer.rs::write_column_subset`), pinned at the 63/64/65 boundary by
+`cqlite-core/tests/issue_824_column_subset_and_filter.rs`. **Workaround**: tables with fewer
+than 64 regular columns are unaffected (the common case).
+
+### Complex-column merge is whole-column, not per-cell-path (#14/#17/#18)
+
+**Status**: 🐛 **OPEN** (limitation)
+
+Cassandra merges complex (multi-cell collection/UDT) columns **per cell-path** using the
+column's path comparator — signed `ShortType` for a UDT field index, `TimeUUIDType` for a list
+element, the map key type for a map — applying shadow-before-purge per path. CQLite's merge
+(`storage/write_engine/merge.rs::reconcile_cluster`) reconciles by **whole column**: its
+`CellData` carries no cell-path, so per-path merge of multi-cell collections/UDTs is not yet
+representable. Authority: `org.apache.cassandra.db.rows.Cells` (per-column complex merge) and
+the column's `CellPath` comparator.
+
+### Equal-timestamp live-cell value tie-break diverges from Cassandra (#4/#21)
+
+**Status**: 🐛 **OPEN** (divergence; FIX ruled in #818, follow-up)
+
+At equal timestamp with two **live** cells (neither a tombstone), Cassandra's
+`Cells.resolveRegular` keeps the cell with the strictly-greater **raw value bytes** (unsigned
+lexicographic over the raw value, skipping the VInt length prefix). CQLite's
+`reconcile_cluster` keeps the **first-seen** cell (newest file by `run_index`) and does not
+compare value bytes — its `replace` predicate fires only for a higher timestamp or an
+equal-timestamp cell tombstone. Result: at an exact timestamp tie between two distinct live
+values, CQLite may keep a different value than Cassandra. Only PART of Cassandra's equal-ts
+hierarchy matches: a cell tombstone beats both a live and an expiring cell (rules 1–2). CQLite
+does NOT implement expiring-beats-pure-live or the `localDeletionTime`/TTL tie-breaks (rules
+3–4) — those are additional divergences (see Chapter 11). Authority:
+`org.apache.cassandra.db.rows.Cells.resolveRegular`.
+
+### Latent: RT / complex-deletion size VInt width (#25)
+
+**Status**: 🐛 **OPEN** (latent)
+
+Cassandra's `UnfilteredSerializer` writes certain marker/deletion sizes as `long` VInts where
+the corresponding read uses an `(int)` VInt (and vice versa) in places; CQLite's
+range-tombstone-marker and complex-column-deletion size fields must use the matching width or a
+large partition can mis-encode the size field. This is currently latent (small fixtures do not
+exceed the narrow width) but is a real width hazard to watch when writing large partitions.
+Authority: `org.apache.cassandra.db.rows.UnfilteredSerializer` (marker/row-body size fields).
+
+### AlwaysPresentFilter / absent `Filter.db` — handled (#23)
+
+**Status**: ✅ **HANDLED** (documented for completeness)
+
+A table created with `bloom_filter_fp_chance = 1.0` is backed by Cassandra's
+`AlwaysPresentFilter`, which serializes nothing — the SSTable has **no `Filter.db` component**.
+CQLite reads such tables correctly via **both** `scan` and `get`: the per-reader bloom gate
+(`reader/data_access.rs`) only consults `might_contain` when a filter is present, so an absent
+filter ("always maybe") never short-circuits a point lookup to `None`; `get` then falls back to
+the same stitched-chunk scan that `scan` uses. Verified by
+`cqlite-core/tests/issue_824_column_subset_and_filter.rs` (absent-`Filter.db` scan + get tests,
+which also strip the `Filter.db` TOC entry to faithfully reproduce the always-present case).
+
+---
+
 ## Validation Status
 
 ### Overall Pass Rate: 100% (33/33 tables) ✅ COMPLETE (macOS)
