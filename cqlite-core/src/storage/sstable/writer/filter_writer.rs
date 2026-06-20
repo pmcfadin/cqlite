@@ -63,8 +63,12 @@ use tokio::io::AsyncWriteExt;
 pub struct FilterWriter {
     /// Output path for Filter.db
     path: PathBuf,
-    /// Bloom filter instance
-    bloom: BloomFilter,
+    /// Bloom filter instance.
+    ///
+    /// `None` when the bloom filter is disabled (`bloom_filter_fp_chance == 1.0`),
+    /// matching Cassandra's `AlwaysPresentFilter`. In that mode `finish()` writes
+    /// no `Filter.db` component at all (see [`FilterWriter::is_disabled`]).
+    bloom: Option<BloomFilter>,
     /// Number of keys added (for validation)
     keys_added: usize,
 }
@@ -76,13 +80,26 @@ impl FilterWriter {
     ///
     /// - `path`: Output path for Filter.db file
     /// - `expected_keys`: Expected number of partition keys (for optimal sizing)
-    /// - `fp_chance`: Target false positive rate (typically 0.01 for 1%)
+    /// - `fp_chance`: Target false positive rate (typically 0.01 for 1%).
+    ///   A value of exactly `1.0` **disables** the bloom filter, matching
+    ///   Cassandra's `AlwaysPresentFilter`: no concrete filter is built and
+    ///   `finish()` writes no `Filter.db` component.
     ///
     /// # Errors
     ///
     /// Returns error if:
     /// - `expected_keys` is zero
-    /// - `fp_chance` is not in range (0.0, 1.0)
+    /// - `fp_chance` is not in range `(0.0, 1.0]`
+    ///
+    /// # Disabled bloom filter (Issue #852)
+    ///
+    /// When `fp_chance == 1.0` the bloom filter is disabled. Cassandra backs such
+    /// a table with `AlwaysPresentFilter`, which serializes nothing — the SSTable
+    /// has **no `Filter.db` component**. This writer therefore builds no concrete
+    /// filter, accepts keys as no-ops, and emits nothing from `finish()`. The
+    /// caller is responsible for omitting `Filter.db` from the TOC (see
+    /// [`FilterWriter::is_disabled`]). This matches Cassandra's BIG writer
+    /// tolerating disabled bloom filters (ref `6ab1d9c0`).
     pub fn new(path: PathBuf, expected_keys: usize, fp_chance: f64) -> Result<Self> {
         if expected_keys == 0 {
             return Err(Error::configuration(
@@ -90,13 +107,30 @@ impl FilterWriter {
             ));
         }
 
-        let bloom = BloomFilter::new(expected_keys as u64, fp_chance)?;
+        // fp_chance == 1.0 means the bloom filter is disabled
+        // (Cassandra's AlwaysPresentFilter). Do not error and do not build a
+        // concrete filter — finish() will emit no Filter.db component.
+        let bloom = if fp_chance == 1.0 {
+            None
+        } else {
+            Some(BloomFilter::new(expected_keys as u64, fp_chance)?)
+        };
 
         Ok(Self {
             path,
             bloom,
             keys_added: 0,
         })
+    }
+
+    /// Whether this writer's bloom filter is disabled
+    /// (`bloom_filter_fp_chance == 1.0`, Cassandra's `AlwaysPresentFilter`).
+    ///
+    /// When `true`, `finish()` writes no `Filter.db` file and the caller must
+    /// omit the `Filter.db` component from the TOC to stay byte-faithful to
+    /// Cassandra, which writes no such component for disabled filters.
+    pub fn is_disabled(&self) -> bool {
+        self.bloom.is_none()
     }
 
     /// Add a partition key to the Bloom filter
@@ -108,7 +142,11 @@ impl FilterWriter {
     ///
     /// - `key`: DecoratedKey containing the partition key bytes
     pub fn add_key(&mut self, key: &DecoratedKey) {
-        self.bloom.insert(&key.key);
+        // When the filter is disabled (AlwaysPresentFilter), adding a key is a
+        // no-op: there is no concrete filter to populate.
+        if let Some(bloom) = self.bloom.as_mut() {
+            bloom.insert(&key.key);
+        }
         self.keys_added += 1;
     }
 
@@ -123,8 +161,16 @@ impl FilterWriter {
     /// - File I/O fails
     /// - Serialization fails
     pub async fn finish(self) -> Result<()> {
+        // Disabled bloom filter (AlwaysPresentFilter, Issue #852): Cassandra
+        // serializes nothing and writes no Filter.db component. Emit no file so
+        // the on-disk layout matches byte-for-byte.
+        let bloom = match self.bloom {
+            Some(bloom) => bloom,
+            None => return Ok(()),
+        };
+
         // Serialize bloom filter to Cassandra format
-        let data = self.bloom.serialize()?;
+        let data = bloom.serialize()?;
 
         // Write to file atomically
         let mut file = File::create(&self.path).await?;
@@ -147,20 +193,23 @@ impl FilterWriter {
     /// Get statistics about the Bloom filter
     ///
     /// Returns metadata about the filter's configuration and current state.
-    pub fn stats(&self) -> BloomFilterStats {
-        let inner_stats = self.bloom.stats();
-        BloomFilterStats {
+    ///
+    /// Returns `None` when the bloom filter is disabled
+    /// (`bloom_filter_fp_chance == 1.0`, Cassandra's `AlwaysPresentFilter`):
+    /// there is no concrete filter to report statistics for.
+    pub fn stats(&self) -> Option<BloomFilterStats> {
+        let bloom = self.bloom.as_ref()?;
+        let inner_stats = bloom.stats();
+        Some(BloomFilterStats {
             expected_keys: inner_stats.expected_elements,
             keys_added: self.keys_added,
             bit_count: inner_stats.bit_count,
             hash_count: inner_stats.hash_count,
             target_fp_rate: inner_stats.false_positive_rate,
-            current_fp_rate: self
-                .bloom
-                .current_false_positive_rate(self.keys_added as u64),
+            current_fp_rate: bloom.current_false_positive_rate(self.keys_added as u64),
             memory_usage: inner_stats.memory_usage,
             fill_ratio: inner_stats.fill_ratio,
-        }
+        })
     }
 }
 
@@ -218,8 +267,58 @@ mod tests {
         let result = FilterWriter::new(filter_path.clone(), 100, 0.0);
         assert!(result.is_err());
 
+        // fp_chance == 1.0 disables the filter (AlwaysPresentFilter); it is NOT
+        // an error (Issue #852).
         let result = FilterWriter::new(filter_path.clone(), 100, 1.0);
-        assert!(result.is_err());
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_disabled());
+    }
+
+    #[tokio::test]
+    async fn test_filter_writer_disabled_emits_no_file() {
+        // bloom_filter_fp_chance = 1.0 -> Cassandra AlwaysPresentFilter, which
+        // serializes nothing: no Filter.db component is written (Issue #852).
+        let temp_dir = TempDir::new().unwrap();
+        let filter_path = temp_dir.path().join("nb-1-big-Filter.db");
+
+        let mut writer = FilterWriter::new(filter_path.clone(), 100, 1.0).unwrap();
+        assert!(writer.is_disabled());
+
+        // Adding keys is a no-op but still counted.
+        writer.add_key(&create_test_key(100, b"key1".to_vec()));
+        writer.add_key(&create_test_key(200, b"key2".to_vec()));
+        assert_eq!(writer.keys_added(), 2);
+
+        // No stats for a disabled filter.
+        assert!(writer.stats().is_none());
+
+        writer.finish().await.unwrap();
+
+        // Byte-parity: Cassandra writes NO Filter.db for a disabled filter.
+        assert!(
+            !filter_path.exists(),
+            "disabled bloom filter must not emit a Filter.db component"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filter_writer_normal_still_builds_concrete_filter() {
+        // A normal fp_chance must still build and emit a concrete filter.
+        let temp_dir = TempDir::new().unwrap();
+        let filter_path = temp_dir.path().join("nb-1-big-Filter.db");
+
+        let mut writer = FilterWriter::new(filter_path.clone(), 100, 0.01).unwrap();
+        assert!(!writer.is_disabled());
+        assert!(writer.stats().is_some());
+
+        let key = create_test_key(100, b"present".to_vec());
+        writer.add_key(&key);
+        writer.finish().await.unwrap();
+
+        assert!(filter_path.exists(), "normal fp_chance must emit Filter.db");
+        let data = std::fs::read(&filter_path).unwrap();
+        let bloom = BloomFilterReader::deserialize(&data).unwrap();
+        assert!(bloom.contains(&key.key));
     }
 
     #[tokio::test]
@@ -306,7 +405,7 @@ mod tests {
             writer.add_key(&create_test_key(i, key_bytes));
         }
 
-        let stats = writer.stats();
+        let stats = writer.stats().expect("concrete filter has stats");
         assert_eq!(stats.expected_keys, 50);
         assert_eq!(stats.keys_added, 25);
         assert!(stats.bit_count > 0);
@@ -336,7 +435,7 @@ mod tests {
         }
 
         // Check that current FP rate is reasonable
-        let stats = writer.stats();
+        let stats = writer.stats().expect("concrete filter has stats");
         assert!(
             stats.current_fp_rate <= target_fp_rate * 5.0,
             "FP rate {} should be close to target {}",

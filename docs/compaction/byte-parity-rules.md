@@ -90,7 +90,7 @@ test), **Gap** (not handled), **N/A** (out of scope, e.g. intentionally rejected
 | Rule | Cassandra commit | Status | Tracking |
 |------|------------------|--------|----------|
 | A complex-deletion marker's **encoded size equals the bytes written** for far-future `localDeletionTime` in `[2^31, 2^32)` (same i32 cast on both paths). | `c81fbae1` | Partial — verify size path | #853 |
-| **Disabled bloom filter** (`bloom_filter_fp_chance = 1.0`) is tolerated (always-present/empty filter). | `6ab1d9c0` | Gap — fp_chance validated to (0,1) | #852 |
+| **Disabled bloom filter** (`bloom_filter_fp_chance = 1.0`) is tolerated; Cassandra's `AlwaysPresentFilter` serializes nothing, so **no `Filter.db` component is written** (omitted from TOC). | `6ab1d9c0` | **Covered** | #852 — `filter_writer.rs` (disabled mode), `writer/mod.rs` (fp_chance threaded from schema; Filter omitted from TOC); tests in both |
 | **Primary-key columns are never written as cells** — clustering (and partition-key) values are encoded positionally (clustering prefix), not duplicated in the row body. | (baseline) | **Covered** | #857 — `merge_row_group` drops key columns from ops; tests in data_writer.rs + compaction-parity harness |
 | Index block **start offset is 64-bit** (partitions past 2 GiB). | `e1c6aed4` | **Covered** | index_writer.rs (u64) |
 | **Fail loudly** on unknown writer formats. | `673b694f` | Partial — verify | — |

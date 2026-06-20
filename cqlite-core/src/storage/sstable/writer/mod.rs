@@ -325,12 +325,18 @@ impl SSTableWriter {
         let index_path = Self::component_path(&sstable_dir, generation, "Index.db");
         let index_writer = IndexWriter::with_sink(index_path);
 
-        // Create Filter.db writer (1% false positive rate by default)
+        // Create Filter.db writer. The false-positive chance comes from the
+        // table's `bloom_filter_fp_chance` (Issue #852): thread the schema's
+        // actual value through instead of hardcoding 0.01. A value of exactly
+        // 1.0 disables the filter (Cassandra's AlwaysPresentFilter) and the
+        // FilterWriter then emits no Filter.db component; the default when the
+        // schema does not specify one remains Cassandra's 0.01.
         let filter_path = Self::component_path(&sstable_dir, generation, "Filter.db");
+        let fp_chance = Self::bloom_filter_fp_chance(schema);
         let filter_writer = Some(FilterWriter::new(
             filter_path,
             expected_partitions.max(1),
-            0.01,
+            fp_chance,
         )?);
 
         // Create Summary.db writer (sample every 128 entries per Cassandra default)
@@ -738,11 +744,19 @@ impl SSTableWriter {
         let index_path = Self::component_path(sstable_dir, self.generation, "Index.db");
         let _index_size = self.index_writer.finish_streaming()?;
 
-        // 4. Write Filter.db (path already set in constructor using sstable_dir)
+        // 4. Write Filter.db (path already set in constructor using sstable_dir).
+        // A disabled bloom filter (bloom_filter_fp_chance = 1.0, Cassandra's
+        // AlwaysPresentFilter) writes NO Filter.db component and must be omitted
+        // from the TOC to stay byte-faithful (Issue #852).
         let filter_path = Self::component_path(sstable_dir, self.generation, "Filter.db");
-        if let Some(filter_writer) = self.filter_writer {
-            filter_writer.finish().await?;
-        }
+        let filter_emitted = match self.filter_writer {
+            Some(filter_writer) => {
+                let emitted = !filter_writer.is_disabled();
+                filter_writer.finish().await?;
+                emitted
+            }
+            None => false,
+        };
 
         // 5. Write Summary.db
         let summary_path = Self::component_path(sstable_dir, self.generation, "Summary.db");
@@ -788,9 +802,15 @@ impl SSTableWriter {
         let mut components = vec![
             ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Data),
             ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Index),
-            ComponentEntry::new(
+        ];
+        // Filter.db is omitted entirely for a disabled bloom filter
+        // (AlwaysPresentFilter), matching Cassandra (Issue #852).
+        if filter_emitted {
+            components.push(ComponentEntry::new(
                 crate::storage::sstable::directory::types::SSTableComponent::Filter,
-            ),
+            ));
+        }
+        components.extend([
             ComponentEntry::new(
                 crate::storage::sstable::directory::types::SSTableComponent::Summary,
             ),
@@ -800,7 +820,7 @@ impl SSTableWriter {
             ComponentEntry::new(
                 crate::storage::sstable::directory::types::SSTableComponent::Digest,
             ),
-        ];
+        ]);
         // BTI phase 1 (issue #766): list Partitions.db in the TOC only when the
         // BTI format was selected. The BIG TOC is unchanged.
         if partitions_path.is_some() {
@@ -829,6 +849,29 @@ impl SSTableWriter {
     fn component_path(output_dir: &Path, generation: u64, component: &str) -> PathBuf {
         let filename = format!("nb-{}-big-{}", generation, component);
         output_dir.join(filename)
+    }
+
+    /// Resolve the table's `bloom_filter_fp_chance` (Issue #852).
+    ///
+    /// The value is read from `schema.comments["bloom_filter_fp_chance"]` when
+    /// present (the table-options bag carried on [`TableSchema`]). A value of
+    /// exactly `1.0` disables the bloom filter (Cassandra's
+    /// `AlwaysPresentFilter`); the [`FilterWriter`] then emits no `Filter.db`.
+    ///
+    /// When the schema does not carry a value, or it cannot be parsed, this
+    /// falls back to Cassandra's default of `0.01`. Out-of-range values
+    /// (outside `(0.0, 1.0]`) also fall back to the default so the writer never
+    /// produces an invalid filter; `FilterWriter::new` still enforces the
+    /// `(0.0, 1.0]` contract for explicitly supplied values.
+    fn bloom_filter_fp_chance(schema: &TableSchema) -> f64 {
+        const DEFAULT_FP_CHANCE: f64 = 0.01;
+        match schema.comments.get("bloom_filter_fp_chance") {
+            Some(raw) => match raw.trim().parse::<f64>() {
+                Ok(v) if v > 0.0 && v <= 1.0 => v,
+                _ => DEFAULT_FP_CHANCE,
+            },
+            None => DEFAULT_FP_CHANCE,
+        }
     }
 
     /// Compute CRC32 checksum of a file
@@ -960,6 +1003,74 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("nb-1-big-Data.db"));
+    }
+
+    /// Issue #852: a table with `bloom_filter_fp_chance = 1.0` disables the
+    /// bloom filter (Cassandra's AlwaysPresentFilter). The writer must not
+    /// panic, must emit NO Filter.db component, and must omit Filter from TOC.txt
+    /// — while every other component is still written normally.
+    #[tokio::test]
+    async fn test_sstable_writer_disabled_bloom_filter() {
+        let temp_dir = TempDir::new().unwrap();
+        let mut schema = create_test_schema();
+        schema
+            .comments
+            .insert("bloom_filter_fp_chance".to_string(), "1.0".to_string());
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let mutation = create_test_mutation("test_ks", "test_table", 1, "Alice", 1_000_000);
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        let info = writer.finish().await.unwrap();
+
+        // No panic, and the other components are still present.
+        assert!(info.data_path.exists());
+        assert!(info.index_path.exists());
+        assert!(info.summary_path.exists());
+        assert!(info.stats_path.exists());
+        assert!(info.toc_path.exists());
+        assert!(info.digest_path.exists());
+
+        // Byte-parity: Cassandra writes NO Filter.db for a disabled filter.
+        assert!(
+            !info.filter_path.exists(),
+            "disabled bloom filter must not emit a Filter.db file"
+        );
+
+        // TOC.txt must NOT list the Filter component.
+        let toc = std::fs::read_to_string(&info.toc_path).unwrap();
+        assert!(
+            !toc.contains("Filter.db"),
+            "TOC must omit Filter.db for a disabled filter, got: {toc}"
+        );
+        // Sanity: other components ARE listed.
+        assert!(toc.contains("Data.db"));
+        assert!(toc.contains("Summary.db"));
+    }
+
+    /// Issue #852: a normal `bloom_filter_fp_chance` (the default) still emits a
+    /// concrete Filter.db component and lists it in TOC.txt.
+    #[tokio::test]
+    async fn test_sstable_writer_default_bloom_filter_still_emitted() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema(); // no fp_chance -> default 0.01
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let mutation = create_test_mutation("test_ks", "test_table", 1, "Bob", 2_000_000);
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        let info = writer.finish().await.unwrap();
+
+        assert!(
+            info.filter_path.exists(),
+            "default fp_chance must emit a Filter.db file"
+        );
+        let toc = std::fs::read_to_string(&info.toc_path).unwrap();
+        assert!(toc.contains("Filter.db"), "TOC must list Filter.db");
     }
 
     #[tokio::test]
