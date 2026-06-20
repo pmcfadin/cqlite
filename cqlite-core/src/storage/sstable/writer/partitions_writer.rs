@@ -149,11 +149,18 @@ impl PartitionsTrieWriter {
 /// Compute the filter hash byte stored at the front of each partition leaf
 /// payload.
 ///
-/// Cassandra stores the high byte of the partition key's Murmur3 hash here for
-/// fast mismatch rejection. Our BTI reader does **not** verify this byte during
-/// lookup (it skips it), so round-trip correctness does not depend on its exact
-/// value; we nonetheless derive it from the same Murmur3 token the trie key
-/// uses, keeping the payload self-consistent.
+/// **Phase-1 placeholder (follow-up #872).** Cassandra's BTI partition index
+/// stores a partition-key *filter* hash byte here for fast mismatch rejection
+/// (see `PartitionIndex` / `DecoratedKey.filterHashLowerBits()`), which is a
+/// distinct quantity from the byte-comparable token. We do not yet emit the
+/// canonical value: the exact derivation must be verified against Cassandra
+/// source/fixtures before we encode it (no-heuristics mandate, issue #28), and
+/// phase-1 output is already a non-canonical hybrid (see [`super::SSTableFormat::Bti`]).
+/// Our BTI reader does **not** verify this byte during lookup (it skips it), so
+/// round-trip correctness is independent of its value; we derive it from the
+/// high byte of the same Murmur3 token the trie key uses, keeping the payload
+/// internally self-consistent. Emitting the canonical filter hash byte (with a
+/// vector test) is tracked in #872.
 fn filter_hash_byte(raw_key_bytes: &[u8]) -> u8 {
     let token = cassandra_murmur3_token(raw_key_bytes);
     let bc = (token as u64) ^ 0x8000_0000_0000_0000u64;
