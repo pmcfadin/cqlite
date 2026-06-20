@@ -233,6 +233,13 @@ The CQL parser is integrated with:
 
 ## Future-Proofing Strategy for Cassandra Evolution
 
+> **Superseded (2026-06-12):** the ANTLR planning in this section is superseded by
+> `docs/plans/2026-06-12-antlr-grammar-parser-design.md`, which records the
+> investigation findings (Cassandra's grammar is ANTLR 3 with embedded Java
+> actions and not directly consumable; a viable ANTLR4 path exists via
+> grammars-v4 cql3 + the revived antlr4rust toolchain) and the recommended
+> phased path.
+
 ### Overview
 This section outlines our comprehensive strategy for maintaining CQL parser accuracy as Apache Cassandra evolves through versions 6.x and 7.x. Based on extensive research into Cassandra's evolution patterns, official grammar sources, and parser technology trade-offs, we recommend a hybrid approach that leverages both our current nom implementation and official ANTLR grammars.
 
