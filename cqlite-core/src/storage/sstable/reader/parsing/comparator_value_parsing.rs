@@ -463,6 +463,36 @@ fn parse_udt_value(
 mod tests {
     use super::*;
 
+    /// Local signed-VInt encoder for tests — avoids depending on
+    /// `crate::storage::serialization::vint`, which is gated behind the
+    /// `write-support` feature (so the lib tests compile under minimal
+    /// feature sets, e.g. `--no-default-features --features=all-compression`).
+    /// Byte-identical to Cassandra's `VIntCoding` (zigzag + unsigned VInt),
+    /// matching the writer's `encode_signed`.
+    fn encode_signed(value: i64, buf: &mut Vec<u8>) {
+        let zigzag = ((value << 1) ^ (value >> 63)) as u64;
+        // Cassandra unsigned-VInt size: (639 - leading_zeros(v|1) * 9) >> 6
+        let magnitude = (zigzag | 1).leading_zeros();
+        let size = ((639 - magnitude * 9) >> 6) as usize;
+        if size == 1 {
+            buf.push(zigzag as u8);
+        } else if size == 9 {
+            buf.push(0xFF);
+            buf.extend_from_slice(&zigzag.to_be_bytes());
+        } else {
+            let extra_bytes = size - 1;
+            let mask: u8 = (0xFFu16 << (8 - extra_bytes)) as u8;
+            let first_byte_data_bits = 8 - extra_bytes - 1;
+            let data_shift = extra_bytes * 8;
+            let first_byte_data =
+                ((zigzag >> data_shift) & ((1u64 << first_byte_data_bits) - 1)) as u8;
+            buf.push(mask | first_byte_data);
+            for i in (0..extra_bytes).rev() {
+                buf.push(((zigzag >> (i * 8)) & 0xFF) as u8);
+            }
+        }
+    }
+
     #[test]
     fn test_parse_simple_int() {
         let data = vec![0x00, 0x00, 0x00, 0x2A]; // 42 in big-endian
@@ -492,7 +522,6 @@ mod tests {
     /// `parse_vint`. This mirrors what `data_writer::serialize_value` emits for
     /// `Value::Duration`.
     fn build_duration_bytes(months: i32, days: i32, nanos: i64) -> Vec<u8> {
-        use crate::storage::serialization::vint::encode_signed;
         let mut buf = Vec::new();
         encode_signed(months as i64, &mut buf);
         encode_signed(days as i64, &mut buf);
@@ -590,7 +619,6 @@ mod tests {
     fn test_parse_duration_months_out_of_i32_range_errors() {
         // months/days are i32 in Cassandra; an encoded value outside the i32
         // range must be rejected as corruption, not silently wrapped.
-        use crate::storage::serialization::vint::encode_signed;
         let comparator = ComparatorType::Duration;
 
         let mut over = Vec::new();
@@ -610,7 +638,6 @@ mod tests {
     fn test_parse_duration_truncated_errors() {
         // Only two VInts present where three are required -> corruption error.
         let mut data = Vec::new();
-        use crate::storage::serialization::vint::encode_signed;
         encode_signed(1, &mut data);
         encode_signed(2, &mut data);
         let comparator = ComparatorType::Duration;
