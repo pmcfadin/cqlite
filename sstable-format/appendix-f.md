@@ -303,9 +303,22 @@ The `StatisticsWriter` produces a full Cassandra 5.0 compatible Statistics.db wi
 - SERIALIZATION_HEADER component (schema-derived or minimal stub)
 
 **Known Limitations**:
-- Column bitmap encoding limited to 64 columns (VUInt bitmap format; >64 columns requires different encoding)
 - STATS component uses minimal histograms (2 buckets, empty tombstone histogram)
 - COMPACTION component uses empty HyperLogLogPlus sketch (no cardinality data)
+
+**Wide tables (>64 columns) — supported (Issue #763)**:
+The SERIALIZATION_HEADER column sets are now written exactly as Cassandra's
+`SerializationHeader.Serializer.writeColumnsWithTypes`
+(cassandra-5.0.0 `SerializationHeader.java` lines 489-497): an unsigned-VInt column
+count followed by `count` `(VInt-length name, VInt-length marshal type)` pairs. This
+path has **no** 64-column limit. A previous note here claimed a "64-column bitmap"
+cap; that was inaccurate — the 64-bit bitmap encoding belongs to
+`Columns.serializer.serializeSubset` (`Columns.java` lines 503-531), which serialises
+a per-row column *subset* against a pre-shared superset (Data.db rows / inter-node
+messaging) and is never used for the SSTable header. Tables with 65+ columns therefore
+round-trip losslessly; regression coverage lives in
+`stats_writer.rs::tests::test_serialization_header_70_columns_roundtrip` and
+`test_serialization_header_200_columns_count_is_vint`.
 
 **Impact**: Statistics.db files are fully compatible with Cassandra 5.0. Schema can be provided explicitly for richer SerializationHeader, or omitted for minimal stub format.
 
