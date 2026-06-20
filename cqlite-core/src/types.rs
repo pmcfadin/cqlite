@@ -190,10 +190,24 @@ pub enum TombstoneType {
     RowTombstone,
     /// Cell-level deletion (specific column is deleted)
     CellTombstone,
-    /// Range tombstone (a range of columns/rows is deleted)
+    /// Range tombstone (a range of clustering rows is deleted)
     RangeTombstone,
     /// TTL expiration (data expired due to TTL)
     TtlExpiration,
+    /// Partition-level deletion (`DELETE FROM t WHERE pk = ?`).
+    ///
+    /// Distinct from `RowTombstone` (which targets a single clustered row).
+    /// A partition tombstone is stored in the partition header's
+    /// `deletionInfo` field (`markedForDeleteAt` / `localDeletionTime`) and
+    /// supersedes every row and cell within the partition whose writetime is
+    /// older than the tombstone timestamp.
+    ///
+    /// In the delta-scan layer (`feature = "delta-scan"`) this maps directly
+    /// to `DeltaRecord::PartitionDelete`.  In the normal read path the reader
+    /// already parses the deletion-time bytes from the partition header (see
+    /// `version_gate::has_partition_level_deletion_presence_marker`); this
+    /// variant makes that information expressible in the shared type system.
+    PartitionTombstone,
 }
 
 impl UdtValue {
@@ -969,6 +983,7 @@ impl Value {
             TombstoneType::RowTombstone => "ROW",
             TombstoneType::CellTombstone => "CELL",
             TombstoneType::RangeTombstone => "RANGE",
+            TombstoneType::PartitionTombstone => "PARTITION",
             TombstoneType::TtlExpiration => {
                 return match info.ttl {
                     Some(ttl) => write!(f, "TOMBSTONE(TTL@{}+{})", info.deletion_time, ttl),

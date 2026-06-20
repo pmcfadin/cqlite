@@ -1,0 +1,67 @@
+SSTable: /data/test_deltas/static_with_rows-2a4299706c2a11f18135b3f5f7fa4418/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 06/19/2026 21:59:38 (1781906378608906)
+Maximum timestamp: 06/19/2026 21:59:38 (1781906378644085)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: no tombstones (9223372036854775807)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.631979695431472
+TTL min: 0
+TTL max: 0
+First token: -4215969063397837316 (99)
+Last token: 9010454139840013625 (3)
+Covered clusterings: [1, 4]
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 804492fd-a595-42f5-acf3-e161604a45a5
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1781906282655, position=74520)=CommitLogPosition(segmentId=1781906282655, position=92806)}
+totalColumnsSet: 16
+totalRows: 16
+Estimated tombstone drop times: 
+   Drop Time | Count  (%)  Histogram 
+   Percentiles
+   50th      0 
+   75th      0 
+   95th      0 
+   98th      0 
+   99th      0 
+   Min       0 
+   Max       0 
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   50 (50 B)    |     1 ( 25) OOOOOOOOOO
+   124 (124 B)  |     3 ( 75) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      124 (124 B)
+   75th      124 (124 B)
+   95th      124 (124 B)
+   98th      124 (124 B)
+   99th      124 (124 B)
+   Min       43 (43 B)
+   Max       124 (124 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   1       |     1 ( 25) OOOOOOOOOO
+   5       |     3 ( 75) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      5
+   75th      5
+   95th      5
+   98th      5
+   99th      5
+   Min       0
+   Max       5
+Local token space coverage: NaN
+Estimated cardinality: 4
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
+EncodingStats minTimestamp: 06/19/2026 21:59:38 (1781906378608906)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]
+StaticColumns: static_col:org.apache.cassandra.db.marshal.UTF8Type
+RegularColumns: row_col:org.apache.cassandra.db.marshal.UTF8Type
+IsTransient: false

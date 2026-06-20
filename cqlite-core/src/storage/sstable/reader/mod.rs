@@ -14,6 +14,10 @@ mod cache;
 mod component_loading;
 mod compression;
 mod data_access;
+/// Delta-scan record model (Epic #696, Issue #697).
+/// Only compiled when the `delta-scan` feature is enabled.
+#[cfg(feature = "delta-scan")]
+pub mod delta_scan;
 mod header;
 mod header_helpers;
 mod integrity;
