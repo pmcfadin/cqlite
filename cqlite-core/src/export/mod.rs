@@ -37,3 +37,13 @@ pub mod parquet;
 // Re-export the public arrow_convert API at the `export` module level.
 #[cfg(feature = "arrow")]
 pub use arrow_convert::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
+
+// Delta-scan Arrow schema derivation (Epic #696, Issue #703).
+// Requires both `delta-scan` (for the CDC envelope model) and `arrow` (for
+// ArrowDataType / Field / Schema).  The `parquet` feature is NOT required —
+// schema derivation is independent of writing Parquet files.
+#[cfg(all(feature = "delta-scan", feature = "arrow"))]
+pub mod delta_schema;
+
+#[cfg(all(feature = "delta-scan", feature = "arrow"))]
+pub use delta_schema::{derive_delta_schema, DeltaSchemaError, DeltaSchemaOpts};
