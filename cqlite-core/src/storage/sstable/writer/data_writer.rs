@@ -315,8 +315,16 @@ impl DataWriter {
             if merged.is_empty() {
                 // Schema declares statics but this partition writes none.
                 // Cassandra still expects the prelude; emit the minimal empty form.
-                prev_unfiltered_size =
-                    self.write_empty_static_row(prev_unfiltered_size, schema)? as u64;
+                //
+                // Issue #821 (finding #2): a static row hard-codes
+                // previousUnfilteredSize = 0 and does NOT become the "previous
+                // unfiltered" for the chain. The running value (the partition
+                // header size) is carried forward by ADDING the static row's
+                // bytes, so the first regular row sees its own offset from the
+                // partition start (verified against real Cassandra "nb"
+                // SSTables: header + static_row_size).
+                let static_size = self.write_empty_static_row(0, schema)? as u64;
+                prev_unfiltered_size += static_size;
             } else {
                 // Row-level liveness timestamp: the latest timestamp seen across
                 // contributing mutations. `!merged.is_empty()` implies at least
@@ -341,13 +349,14 @@ impl DataWriter {
                 // own originating timestamp + local_deletion_time) so a surviving
                 // older static delete keeps its own LDT instead of inheriting the
                 // newest static mutation's value.
-                prev_unfiltered_size = self.write_static_row_with_prev_size(
-                    &merged,
-                    latest_ts,
-                    ttl,
-                    schema,
-                    prev_unfiltered_size,
-                )? as u64;
+                //
+                // Issue #821 (finding #2): hard-code prev_size = 0 for the static
+                // row and carry the running chain value forward by adding the
+                // static row's serialized bytes (see comment above).
+                let static_size = self
+                    .write_static_row_with_prev_size(&merged, latest_ts, ttl, schema, 0)?
+                    as u64;
+                prev_unfiltered_size += static_size;
             }
         }
 
@@ -499,8 +508,12 @@ impl DataWriter {
             };
 
             if merged.is_empty() {
-                prev_unfiltered_size =
-                    self.write_empty_static_row(prev_unfiltered_size, schema)? as u64;
+                // Issue #821 (finding #2): static row hard-codes prev_size = 0 and
+                // is skipped by the prev-size chain; carry the running value
+                // forward by adding the static row's bytes (see the non-indexed
+                // path in `write_partition` for the rationale + Cassandra anchor).
+                let static_size = self.write_empty_static_row(0, schema)? as u64;
+                prev_unfiltered_size += static_size;
             } else {
                 let latest_ts = mutations
                     .iter()
@@ -516,13 +529,12 @@ impl DataWriter {
                     .and_then(|m| m.ttl_seconds);
 
                 // Issue #764: same per-op LDT preservation as the non-indexed path.
-                prev_unfiltered_size = self.write_static_row_with_prev_size(
-                    &merged,
-                    latest_ts,
-                    ttl,
-                    schema,
-                    prev_unfiltered_size,
-                )? as u64;
+                // Issue #821 (finding #2): prev_size = 0 for the static row; chain
+                // carries forward by adding the static row's serialized bytes.
+                let static_size = self
+                    .write_static_row_with_prev_size(&merged, latest_ts, ttl, schema, 0)?
+                    as u64;
+                prev_unfiltered_size += static_size;
             }
         }
 
