@@ -6,6 +6,14 @@
 **Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) - Validate all 33 test tables can be loaded successfully
 **Current Status**: 39/39 PASS (100% pass rate across nb+oa corpus) — test_deltas (8 tables) skip-pending until dataset asset published (#701)
 
+> **Differential compaction harness (Epic #817 / #819):** compaction fidelity is
+> validated separately by `cqlite-core/tests/issue_819_differential_compaction.rs`
+> against the three-tier #818 bar (Tier-2 logical equivalence + Tier-1 load-path
+> validity gate; Tier-3 byte diff is debug-only). See
+> [`differential-compaction-harness.md`](differential-compaction-harness.md) for
+> how to run the default (no-Cassandra) and env-gated (`CQLITE_DIFFERENTIAL_CASSANDRA=1`)
+> modes.
+
 ---
 
 ## Summary Statistics
