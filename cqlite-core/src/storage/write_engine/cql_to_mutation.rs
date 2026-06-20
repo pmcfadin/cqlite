@@ -675,6 +675,14 @@ pub(crate) fn delete_to_mutation(
         build_range_tombstones(&predicates.range_predicates, schema, timestamp_micros)?
     };
 
+    // Row/cell tombstones (DeleteRow / Delete) must carry their localDeletionTime
+    // from the wall clock, consistent with partition and range tombstones above.
+    // Otherwise the writer would derive it from `USING TIMESTAMP`, which is a
+    // logical clock and breaks gc_grace semantics for caller-supplied timestamps.
+    let has_row_or_cell_tombstone = operations
+        .iter()
+        .any(|op| matches!(op, CellOperation::DeleteRow | CellOperation::Delete { .. }));
+
     let table_id = TableId::new(schema.keyspace.clone(), schema.table.clone());
     let mut mutation = Mutation::new(
         table_id,
@@ -684,6 +692,9 @@ pub(crate) fn delete_to_mutation(
         timestamp_micros,
         None, // DELETE never has TTL
     );
+    if has_row_or_cell_tombstone {
+        mutation.local_deletion_time = Some(wall_clock_local_deletion_time());
+    }
     mutation.partition_tombstone = partition_tombstone;
     mutation.range_tombstones = range_tombstones;
     Ok(mutation)
@@ -3399,6 +3410,94 @@ mod tests {
             "local_deletion_time ({}) should be close to now ({}), not derived from logical timestamp",
             ldt,
             now_secs,
+        );
+    }
+
+    fn now_secs_for_ldt() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
+    }
+
+    // Unrealistic far-future logical timestamp (~year 33658). Any LDT derived
+    // from it would be obviously wrong vs. wall clock.
+    const FAR_FUTURE_TS_MICROS: i64 = 1_000_000_000_000_000_000_i64;
+
+    fn far_future_using() -> Option<CqlUsing> {
+        Some(CqlUsing {
+            timestamp: Some(CqlExpression::Literal(CqlLiteral::Integer(
+                FAR_FUTURE_TS_MICROS,
+            ))),
+            ttl: None,
+        })
+    }
+
+    #[test]
+    fn test_row_tombstone_local_deletion_time_is_wall_clock() {
+        // A row tombstone (DeleteRow) must carry a wall-clock localDeletionTime,
+        // not one derived from USING TIMESTAMP.
+        let schema = test_schema();
+        let delete = CqlDelete {
+            columns: vec![],
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: far_future_using(),
+            where_clause: make_where_pk_and_ck(),
+            if_condition: None,
+        };
+
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert!(matches!(mutation.operations[0], CellOperation::DeleteRow));
+        let ldt = mutation
+            .local_deletion_time
+            .expect("row tombstone must set explicit local_deletion_time") as i64;
+        assert!(
+            (ldt - now_secs_for_ldt()).abs() < 5,
+            "row tombstone local_deletion_time ({}) should be wall-clock now, not derived from USING TIMESTAMP",
+            ldt,
+        );
+    }
+
+    #[test]
+    fn test_column_tombstone_local_deletion_time_is_wall_clock() {
+        // Per-column deletes (Delete) must also carry a wall-clock LDT.
+        let schema = test_schema();
+        let delete = CqlDelete {
+            columns: vec![CqlIdentifier {
+                name: "name".into(),
+                quoted: false,
+            }],
+            table: CqlTable {
+                keyspace: None,
+                name: CqlIdentifier {
+                    name: "test_tbl".into(),
+                    quoted: false,
+                },
+            },
+            using: far_future_using(),
+            where_clause: make_where_pk_and_ck(),
+            if_condition: None,
+        };
+
+        let mutation = delete_to_mutation(&delete, &schema).unwrap();
+        assert!(matches!(
+            &mutation.operations[0],
+            CellOperation::Delete { .. }
+        ));
+        let ldt = mutation
+            .local_deletion_time
+            .expect("column tombstone must set explicit local_deletion_time")
+            as i64;
+        assert!(
+            (ldt - now_secs_for_ldt()).abs() < 5,
+            "column tombstone local_deletion_time ({}) should be wall-clock now, not derived from USING TIMESTAMP",
+            ldt,
         );
     }
 

@@ -101,6 +101,18 @@ pub enum SSTableFormat {
     /// `Index.db`/`Summary.db` so the existing reader path is unaffected; the
     /// `Partitions.db` trie is an additional component validated by the BTI
     /// reader. `Rows.db` (within-partition trie) is out of scope for phase 1.
+    ///
+    /// **Known phase-1 limitation (follow-up #872):** the output is a hybrid,
+    /// not a Cassandra-canonical BTI SSTable. Components keep the `nb-*-big-*`
+    /// descriptor, and [`crate::storage::sstable::reader::SSTableReader`]
+    /// classifies the directory as BIG from the `Data.db` name — so it does
+    /// **not** auto-discover or use the `Partitions.db` sidecar. The trie is
+    /// verified directly through the BTI reader API
+    /// (`lookup_partition_in_bti_file`). Renaming components to the `da`/`bti`
+    /// prefix here would be unsafe: the reader would then attempt to parse the
+    /// BIG-layout `Data.db` as a BTI `Data.db`. Producing a discoverable,
+    /// Cassandra-readable BTI SSTable (BTI `Data.db`, `da` prefix, dropping
+    /// `Index.db`/`Summary.db`, plus `Rows.db`) is the deferred follow-up.
     Bti,
 }
 
