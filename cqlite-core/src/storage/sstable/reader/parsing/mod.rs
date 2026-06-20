@@ -20,6 +20,9 @@ mod value_parsing;
 
 // Re-export V5CompressedLegacy parser for internal use
 pub(in crate::storage::sstable::reader) use v5_compressed_legacy::V5CompressedLegacyParser;
+// ComplexColumnMeta is used internally within v5_compressed_legacy.rs;
+// delta_scan.rs accesses it via the parse_block_emit_delta closure type
+// without needing an explicit re-export (Issue #700, DS4).
 
 // Re-export the sliding-window parse outcome enum (issue #827) so the
 // compaction-read streaming driver in data_access.rs can match on it.
