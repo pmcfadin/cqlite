@@ -33,6 +33,8 @@ pub mod filter_writer;
 #[cfg(feature = "write-support")]
 pub mod index_writer;
 #[cfg(feature = "write-support")]
+pub mod partitions_writer;
+#[cfg(feature = "write-support")]
 pub mod stats_writer;
 #[cfg(feature = "write-support")]
 pub mod summary_writer;
@@ -77,6 +79,31 @@ use crate::schema::TableSchema;
 use crate::storage::write_engine::mutation::{DecoratedKey, Mutation};
 use std::path::{Path, PathBuf};
 
+/// On-disk index format emitted by [`SSTableWriter`].
+///
+/// Issue #766 (epic #762, writer fidelity D4). The default is [`Big`], which
+/// produces the legacy `Index.db`/`Summary.db` partition index and is byte-for-byte
+/// unchanged from before this option existed. [`Bti`] additionally writes a BTI
+/// `Partitions.db` trie (phase 1) so partition lookups can resolve `Data.db`
+/// offsets via the trie reader.
+///
+/// [`Big`]: SSTableFormat::Big
+/// [`Bti`]: SSTableFormat::Bti
+#[cfg(feature = "write-support")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SSTableFormat {
+    /// Legacy BIG format: `Index.db` + `Summary.db`. **Default.**
+    #[default]
+    Big,
+    /// BTI phase 1: BIG components **plus** a `Partitions.db` partition trie.
+    ///
+    /// Phase 1 keeps `Data.db` in BIG layout and continues to emit the BIG
+    /// `Index.db`/`Summary.db` so the existing reader path is unaffected; the
+    /// `Partitions.db` trie is an additional component validated by the BTI
+    /// reader. `Rows.db` (within-partition trie) is out of scope for phase 1.
+    Bti,
+}
+
 /// Information about a written SSTable
 ///
 /// Returned by `SSTableWriter::finish()` after successfully writing all components.
@@ -95,6 +122,9 @@ pub struct SSTableInfo {
     pub stats_path: PathBuf,
     /// Path to the CompressionInfo.db file (None when data is uncompressed)
     pub compression_info_path: Option<PathBuf>,
+    /// Path to the BTI `Partitions.db` trie (Some only for [`SSTableFormat::Bti`];
+    /// None for the default BIG format). Issue #766.
+    pub partitions_path: Option<PathBuf>,
     /// Path to the TOC.txt file
     pub toc_path: PathBuf,
     /// Path to the Digest.crc32 file
@@ -193,6 +223,11 @@ pub struct SSTableWriter {
     ///
     /// Issue #729: two-pass flush baseline fix.
     baselines_locked: bool,
+    /// Index format to emit (issue #766). Defaults to [`SSTableFormat::Big`].
+    format: SSTableFormat,
+    /// BTI partition trie accumulator. Populated only when `format` is
+    /// [`SSTableFormat::Bti`]; `None` otherwise so the BIG path allocates nothing.
+    partitions_trie: Option<partitions_writer::PartitionsTrieWriter>,
 }
 
 #[cfg(feature = "write-support")]
@@ -231,6 +266,29 @@ impl SSTableWriter {
         schema: &TableSchema,
         expected_partitions: usize,
     ) -> Result<Self> {
+        Self::with_format(
+            output_dir,
+            generation,
+            schema,
+            expected_partitions,
+            SSTableFormat::default(),
+        )
+    }
+
+    /// Create a new SSTable writer selecting the on-disk index `format`
+    /// (issue #766).
+    ///
+    /// [`SSTableFormat::Big`] (the default used by [`Self::new`] and
+    /// [`Self::with_expected_partitions`]) is byte-for-byte unchanged.
+    /// [`SSTableFormat::Bti`] additionally emits a `Partitions.db` trie at
+    /// `finish()`.
+    pub fn with_format(
+        output_dir: PathBuf,
+        generation: u64,
+        schema: &TableSchema,
+        expected_partitions: usize,
+        format: SSTableFormat,
+    ) -> Result<Self> {
         // Initialize statistics metadata with sentinel values
         let mut stats = StatisticsMetadata::new();
         // Pre-set min values to reasonable defaults (will be updated during writes)
@@ -267,6 +325,13 @@ impl SSTableWriter {
         let summary_sample_interval = 128;
         let summary_writer = SummaryWriter::new(summary_sample_interval as u32);
 
+        // BTI phase 1 (issue #766): only allocate the partition-trie accumulator
+        // when the BTI format is selected, so the default BIG path is unchanged.
+        let partitions_trie = match format {
+            SSTableFormat::Big => None,
+            SSTableFormat::Bti => Some(partitions_writer::PartitionsTrieWriter::new()),
+        };
+
         Ok(Self {
             sstable_dir,
             generation,
@@ -281,7 +346,14 @@ impl SSTableWriter {
             summary_sample_counter: 0,
             summary_sample_interval,
             baselines_locked: false,
+            format,
+            partitions_trie,
         })
+    }
+
+    /// The on-disk index format this writer emits (issue #766).
+    pub fn format(&self) -> SSTableFormat {
+        self.format
     }
 
     /// Write a partition (partition key + all mutations)
@@ -445,6 +517,13 @@ impl SSTableWriter {
         // Add partition key to Filter.db
         if let Some(ref mut filter) = self.filter_writer {
             filter.add_key(&key);
+        }
+
+        // BTI phase 1 (issue #766): record this partition's raw key bytes and
+        // Data.db offset for the Partitions.db trie. Only active when the BTI
+        // format was selected (the accumulator is None for BIG).
+        if let Some(ref mut trie) = self.partitions_trie {
+            trie.add_partition(&key.key, data_offset);
         }
 
         // Track every partition for first_key / last_key / total_partition_count.
@@ -634,6 +713,18 @@ impl SSTableWriter {
         let summary_bytes = self.summary_writer.finish()?;
         tokio::fs::write(&summary_path, summary_bytes).await?;
 
+        // 5.25. Write Partitions.db (BTI phase 1, issue #766).
+        // Only emitted for SSTableFormat::Bti; for BIG this is None and nothing
+        // is written, keeping the default path byte-for-byte unchanged.
+        let partitions_path = if let Some(trie) = self.partitions_trie.take() {
+            let path = Self::component_path(sstable_dir, self.generation, "Partitions.db");
+            let bytes = trie.finish()?;
+            tokio::fs::write(&path, bytes).await?;
+            Some(path)
+        } else {
+            None
+        };
+
         // 5.5. CompressionInfo.db is omitted for uncompressed data.
         // Real Cassandra 5 SSTables do not include CompressionInfo.db when
         // data is uncompressed. The compression_info_writer module is retained
@@ -648,7 +739,7 @@ impl SSTableWriter {
         // 7. Write TOC.txt (LAST - publication barrier)
         let toc_path = Self::component_path(sstable_dir, self.generation, "TOC.txt");
         let toc_writer = TocWriter::new(toc_path.clone());
-        let components = vec![
+        let mut components = vec![
             ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Data),
             ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Index),
             ComponentEntry::new(
@@ -664,6 +755,13 @@ impl SSTableWriter {
                 crate::storage::sstable::directory::types::SSTableComponent::Digest,
             ),
         ];
+        // BTI phase 1 (issue #766): list Partitions.db in the TOC only when the
+        // BTI format was selected. The BIG TOC is unchanged.
+        if partitions_path.is_some() {
+            components.push(ComponentEntry::new(
+                crate::storage::sstable::directory::types::SSTableComponent::Partitions,
+            ));
+        }
         toc_writer.write(&components)?;
 
         Ok(SSTableInfo {
@@ -673,6 +771,7 @@ impl SSTableWriter {
             summary_path,
             stats_path,
             compression_info_path: None,
+            partitions_path,
             toc_path,
             digest_path,
             partition_count: self.partition_count,
