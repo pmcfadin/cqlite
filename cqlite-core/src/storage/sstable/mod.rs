@@ -874,6 +874,41 @@ impl SSTableManager {
                 table_id
             );
 
+            // Issue #883: when a table directory holds more than one SSTable
+            // generation, plain concatenation of each reader's live rows is wrong —
+            // it duplicates rows that exist in several generations and resurrects
+            // rows deleted in a later generation (each reader suppresses only its
+            // OWN tombstones). Reconcile across generations with the same
+            // last-write-wins + tombstone-shadowing rule compaction uses, reusing
+            // the authoritative k-way merger (write-support only; requires schema).
+            #[cfg(feature = "write-support")]
+            if reader_list.len() > 1 {
+                if let Some(schema) = schema {
+                    match self
+                        .merge_generations_for_read(reader_list, schema, limit)
+                        .await
+                    {
+                        Ok(merged) => {
+                            log::debug!(
+                                "SSTableManager::scan - cross-generation merge produced {} rows",
+                                merged.len()
+                            );
+                            return Ok(merged);
+                        }
+                        Err(e) => {
+                            // Never fail a read because the merge path hit an
+                            // unsupported format; fall back to concatenation.
+                            log::warn!(
+                                "SSTableManager::scan - cross-generation merge failed for '{}' ({}); \
+                                 falling back to per-reader concatenation",
+                                table_id,
+                                e
+                            );
+                        }
+                    }
+                }
+            }
+
             let mut all_results = Vec::new();
 
             for reader in reader_list {
@@ -924,6 +959,82 @@ impl SSTableManager {
             );
             Ok(Vec::new())
         }
+    }
+
+    /// Reconcile multiple SSTable generations of one table into the single
+    /// authoritative live-row set, matching Cassandra read semantics (Issue #883).
+    ///
+    /// Plain `scan` concatenates each reader's live rows, which is only correct
+    /// for a single generation. With several generations in a table directory
+    /// (successive flushes), the same `(partition, clustering)` row can appear in
+    /// more than one generation, and a row/cell deleted in a later generation is
+    /// suppressed only inside the generation that holds its tombstone — so the
+    /// older generation's copy leaks back into the result.
+    ///
+    /// This drives the same [`KWayMerger`](crate::storage::write_engine::KWayMerger)
+    /// the compaction path uses, so reconciliation is byte-for-byte the
+    /// last-write-wins + tombstone-shadowing logic (`merge_partition_rows`):
+    /// per-cell LWW by write timestamp, row/cell tombstones shadow older cells,
+    /// and fully-deleted rows are dropped. The merger manages its own reader
+    /// threads/runtimes internally, so it runs on a blocking task.
+    ///
+    /// Requires a schema (cells carry no column names on disk) and the
+    /// `write-support` feature (the merger lives in the write engine). Callers
+    /// fall back to concatenation when either is unavailable.
+    #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
+    async fn merge_generations_for_read(
+        &self,
+        reader_list: &[Arc<reader::SSTableReader>],
+        schema: &crate::schema::TableSchema,
+        limit: Option<usize>,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
+
+        // The merger expects inputs ordered newest → oldest (run_index 0 = newest)
+        // for its stable tie-break; the reader Vec order is discovery-dependent, so
+        // sort explicitly by generation descending.
+        let mut ordered: Vec<&Arc<reader::SSTableReader>> = reader_list.iter().collect();
+        ordered.sort_by(|a, b| b.generation.cmp(&a.generation));
+        let paths: Vec<PathBuf> = ordered.iter().map(|r| r.file_path.clone()).collect();
+        let schema = schema.clone();
+
+        let mut merged = tokio::task::spawn_blocking(move || -> Result<Vec<(RowKey, Value)>> {
+            let mut merger = KWayMerger::new(paths, &schema)?;
+            let mut out = Vec::new();
+            while let MergeStep::Partition { key, rows } = merger.step()? {
+                for entry in rows {
+                    match entry.row_data {
+                        RowData::Live { cells } => {
+                            // Drop cell tombstones: a deleted column must be
+                            // absent from the merged row, not surfaced.
+                            let map: Vec<(Value, Value)> = cells
+                                .into_iter()
+                                .filter(|c| !matches!(c.value, Value::Tombstone(_)))
+                                .map(|c| (Value::Text(c.column), c.value))
+                                .collect();
+                            if !map.is_empty() {
+                                out.push((RowKey(key.key.clone()), Value::Map(map)));
+                            }
+                        }
+                        // Row tombstone: the row is deleted across all
+                        // generations — suppress it entirely.
+                        RowData::Tombstone { .. } => {}
+                    }
+                }
+            }
+            Ok(out)
+        })
+        .await
+        .map_err(|e| crate::Error::Storage(format!("cross-generation read merge task: {e}")))??;
+
+        // Match the plain-scan contract: sort by key bytes, then apply LIMIT. The
+        // merger already emits partitions in token order with clustering rows in
+        // order within a partition; a stable sort by key preserves that grouping.
+        merged.sort_by(|a, b| a.0.cmp(&b.0));
+        if let Some(limit) = limit {
+            merged.truncate(limit);
+        }
+        Ok(merged)
     }
 
     /// Scan a table and return per-cell write metadata alongside row values.
