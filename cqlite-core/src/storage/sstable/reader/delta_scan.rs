@@ -621,6 +621,7 @@ async fn run_scan_delta(
                 range_info,       // Issue #699: Some((start_vals,start_incl,end_vals,end_incl,del_at)) for range tombstone
                 is_partition_tombstone, // Issue #699: true for partition-level tombstone
                 col_complex_meta, // Issue #700 DS4: per-column ComplexColumnMeta
+                liveness_expires_at_micros, // Issue #702: TTL liveness expiry in µs (epoch-s * 1_000_000)
             )| {
                 // ----------------------------------------------------------------
                 // Decode partition key from raw bytes.
@@ -821,7 +822,13 @@ async fn run_scan_delta(
                         cells: cell_deltas,
                     }
                 } else {
-                    let liveness = row_liveness_ts.map(CellMeta::new);
+                    // Build liveness CellMeta, carrying the TTL expiry when present (Issue #702).
+                    let liveness = row_liveness_ts.map(|ts| {
+                        match liveness_expires_at_micros {
+                            Some(exp) => CellMeta::with_ttl(ts, exp),
+                            None => CellMeta::new(ts),
+                        }
+                    });
                     DeltaRecord::Upsert {
                         keys: RowKeys::new(partition_values, clustering_values),
                         liveness,
