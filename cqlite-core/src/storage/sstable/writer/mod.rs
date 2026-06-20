@@ -476,9 +476,33 @@ impl SSTableWriter {
                     .update_local_deletion_time(rt.local_deletion_time);
             }
 
-            self.stats.increment_row_count();
-            self.stats
-                .add_column_count(mutation.operations.len() as u64);
+            // Mirror Cassandra's `!row.isEmpty()` guard (issue #851, Cassandra
+            // `1502b0a9`): a partition that declares static columns but writes
+            // none produces an empty row. Counting it would inflate `totalRows`
+            // / `totalColumnsSet` and diverge byte-for-byte in Statistics.db,
+            // poisoning compaction heuristics downstream.
+            //
+            // A row is non-empty if it carries any operation: cell writes /
+            // deletes (`Write`, `WriteWithTtl`, `Delete`) or a row tombstone
+            // (`DeleteRow`). Only cell-level operations are counted toward
+            // `totalColumnsSet`; a `DeleteRow` marker sets no columns (mirrors
+            // Cassandra's `Row.columnCount()`). Partition / range tombstones are
+            // partition-level deletions tracked above via timestamp stats, not
+            // row counts.
+            if !mutation.operations.is_empty() {
+                self.stats.increment_row_count();
+                let cells_set = mutation
+                    .operations
+                    .iter()
+                    .filter(|op| {
+                        !matches!(
+                            op,
+                            crate::storage::write_engine::mutation::CellOperation::DeleteRow
+                        )
+                    })
+                    .count();
+                self.stats.add_column_count(cells_set as u64);
+            }
         }
 
         // Update DataWriter's stats before writing, unless baselines were
@@ -1093,6 +1117,93 @@ mod tests {
         let digest_contents = std::fs::read_to_string(&info.digest_path).unwrap();
         assert!(!digest_contents.is_empty());
         assert!(digest_contents.parse::<u32>().is_ok());
+    }
+
+    /// Issue #851 / Cassandra `1502b0a9`: a partition that declares static
+    /// columns but writes none produces an empty row. It must NOT inflate
+    /// `totalRows` (`row_count`) or `totalColumnsSet` (`column_count`).
+    #[tokio::test]
+    async fn test_empty_static_row_not_counted() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        // A partition with NO cell operations: the static-column-declared-but-
+        // empty case. The partition still exists (it has a key), but the row is
+        // empty and should not be counted toward rows/columns.
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let empty = Mutation::new(table_id, pk, None, vec![], 1_000_000, None);
+        let key = empty.decorated_key(&schema).unwrap();
+
+        writer.write_partition(key, vec![empty]).unwrap();
+
+        // Empty row: no rows, no columns counted.
+        assert_eq!(
+            writer.stats.row_count, 0,
+            "empty static row must not inflate totalRows"
+        );
+        assert_eq!(
+            writer.stats.column_count, 0,
+            "empty static row must not inflate totalColumnsSet"
+        );
+        // The partition itself is still tracked.
+        assert_eq!(writer.stats.partition_count, 1);
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// A non-empty row is still counted normally after the empty-row guard.
+    #[tokio::test]
+    async fn test_non_empty_row_still_counted() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let mutation = create_test_mutation("test_ks", "test_table", 1, "Alice", 1_000_000);
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(writer.stats.row_count, 1);
+        assert_eq!(writer.stats.column_count, 1);
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// A `DeleteRow` row tombstone is a non-empty row (counted) but sets no
+    /// columns (mirrors Cassandra `Row.columnCount()`).
+    #[tokio::test]
+    async fn test_row_tombstone_counts_row_not_columns() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let row_tombstone = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::DeleteRow],
+            1_000_000,
+            None,
+        );
+        let key = row_tombstone.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![row_tombstone]).unwrap();
+
+        assert_eq!(
+            writer.stats.row_count, 1,
+            "row tombstone is a non-empty row"
+        );
+        assert_eq!(
+            writer.stats.column_count, 0,
+            "row tombstone sets no columns"
+        );
+
+        let _info = writer.finish().await.unwrap();
     }
 
     #[tokio::test]

@@ -222,8 +222,18 @@ impl StatisticsMetadata {
         Self::default()
     }
 
-    /// Update timestamp range with a new timestamp value
+    /// Update timestamp range with a new timestamp value.
+    ///
+    /// LIVE deletion markers must never enter the min/max aggregates (issue
+    /// #851, Cassandra `d5bc7fb5`). Cassandra encodes `DeletionTime.LIVE` with
+    /// `markedForDeleteAt = Long.MIN_VALUE`, and a `NO_DELETION` / absent
+    /// liveness timestamp surfaces as `Long.MAX_VALUE`. Folding either sentinel
+    /// into `minTimestamp` / `maxTimestamp` would poison the stats, so they are
+    /// skipped here at the single aggregation chokepoint.
     pub fn update_timestamp(&mut self, timestamp: i64) {
+        if Self::is_live_timestamp(timestamp) {
+            return;
+        }
         self.min_timestamp = self.min_timestamp.min(timestamp);
         self.max_timestamp = self.max_timestamp.max(timestamp);
     }
@@ -232,10 +242,33 @@ impl StatisticsMetadata {
     ///
     /// Call this for every tombstone local-deletion-time encountered while writing:
     /// cell tombstones, row deletions, range tombstones, and partition tombstones.
+    ///
+    /// A LIVE marker (`DeletionTime.LIVE.localDeletionTime == Integer.MAX_VALUE`,
+    /// the same value as `Cell.NO_DELETION_TIME`) is not a tombstone: it must not
+    /// pull `minLocalDeletionTime` down to the sentinel nor inflate the tombstone
+    /// drop-time histogram (issue #851, Cassandra `d5bc7fb5`).
     pub fn update_local_deletion_time(&mut self, deletion_time: i32) {
+        if Self::is_live_local_deletion_time(deletion_time) {
+            return;
+        }
         self.min_local_deletion_time = self.min_local_deletion_time.min(deletion_time);
         self.max_local_deletion_time = self.max_local_deletion_time.max(deletion_time);
         self.tombstone_histogram.update(deletion_time);
+    }
+
+    /// True when `timestamp` is a LIVE / `NO_DELETION` marker rather than a real
+    /// deletion timestamp. CQLite writes `DeletionTime.LIVE` as `Long.MIN_VALUE`
+    /// (see `data_writer.rs`); Cassandra's `NO_DELETION` / `NO_TIMESTAMP` sentinel
+    /// is `Long.MAX_VALUE`. Both mean "no deletion" and must be excluded from
+    /// timestamp aggregation.
+    fn is_live_timestamp(timestamp: i64) -> bool {
+        timestamp == i64::MIN || timestamp == i64::MAX
+    }
+
+    /// True when `deletion_time` is a LIVE marker (`Integer.MAX_VALUE`) rather
+    /// than a real tombstone local-deletion-time.
+    fn is_live_local_deletion_time(deletion_time: i32) -> bool {
+        deletion_time == i32::MAX
     }
 
     /// Update TTL range
@@ -987,6 +1020,72 @@ mod tests {
 
         assert_eq!(meta.min_timestamp, 500000);
         assert_eq!(meta.max_timestamp, 2000000);
+    }
+
+    /// Issue #851 / Cassandra `d5bc7fb5`: a LIVE complex-deletion / liveness
+    /// marker must not poison the timestamp aggregates. CQLite encodes
+    /// `DeletionTime.LIVE` as `Long.MIN_VALUE`; Cassandra's `NO_DELETION` /
+    /// `NO_TIMESTAMP` is `Long.MAX_VALUE`. Both must be ignored.
+    #[test]
+    fn test_update_timestamp_ignores_live_markers() {
+        let mut meta = StatisticsMetadata::new();
+        meta.update_timestamp(1_000_000);
+
+        // LIVE marker (CQLite sentinel) must not pull min down to i64::MIN.
+        meta.update_timestamp(i64::MIN);
+        // NO_DELETION / NO_TIMESTAMP (Cassandra sentinel) must not push max up.
+        meta.update_timestamp(i64::MAX);
+
+        assert_eq!(
+            meta.min_timestamp, 1_000_000,
+            "LIVE marker must not poison min_timestamp"
+        );
+        assert_eq!(
+            meta.max_timestamp, 1_000_000,
+            "NO_DELETION marker must not poison max_timestamp"
+        );
+    }
+
+    /// A LIVE complex-deletion marker (`localDeletionTime == Integer.MAX_VALUE`)
+    /// is not a tombstone: it must not lower `min_local_deletion_time` nor inflate
+    /// the tombstone drop-time histogram (issue #851, Cassandra `d5bc7fb5`).
+    #[test]
+    fn test_update_local_deletion_time_ignores_live_marker() {
+        let mut meta = StatisticsMetadata::new();
+        meta.update_local_deletion_time(1_500_000_000);
+
+        // LIVE marker: must be skipped entirely.
+        meta.update_local_deletion_time(i32::MAX);
+
+        assert_eq!(
+            meta.min_local_deletion_time, 1_500_000_000,
+            "LIVE marker must not poison min_local_deletion_time"
+        );
+        assert_eq!(meta.max_local_deletion_time, 1_500_000_000);
+        // Only the one real tombstone bin; the LIVE marker did not enter the histogram.
+        assert_eq!(
+            meta.tombstone_histogram.size(),
+            1,
+            "LIVE marker must not be counted as a tombstone in the histogram"
+        );
+    }
+
+    /// With only LIVE markers, stats remain at sentinels and `finalize()`
+    /// normalizes them to 0 (no tombstones recorded).
+    #[test]
+    fn test_only_live_markers_finalize_to_zero() {
+        let mut meta = StatisticsMetadata::new();
+        meta.update_timestamp(i64::MIN);
+        meta.update_timestamp(i64::MAX);
+        meta.update_local_deletion_time(i32::MAX);
+
+        assert!(meta.tombstone_histogram.is_empty());
+
+        meta.finalize();
+        assert_eq!(meta.min_timestamp, 0);
+        assert_eq!(meta.max_timestamp, 0);
+        assert_eq!(meta.min_local_deletion_time, 0);
+        assert_eq!(meta.max_local_deletion_time, 0);
     }
 
     #[test]
