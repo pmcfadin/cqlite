@@ -1,0 +1,252 @@
+name: "CI: Compaction Parity (differential harness)"
+
+# Runs the differential compaction-parity harness (compaction-parity/, issue #842)
+# in CI. The harness compacts the SAME input SSTables through TWO engines and
+# diffs the outputs:
+#   1. REFERENCE  — Apache Cassandra's compaction, in-JVM via CQLTester.
+#   2. CANDIDATE  — the external `cqlite compact` binary (--features write-support).
+#
+# TIER POLICY (issue #889, follow-up to #842):
+#   - LOGICAL tier (canonical sstabledump of both outputs must match) is
+#     implemented and green. It is a HARD GATE here: logical-tier failures fail
+#     this workflow.
+#   - BYTE tier (per-component `cmp`, the #842 north star) is NOT implemented in
+#     the harness yet. It is wired here as a NON-BLOCKING, opt-in step (see
+#     RUN_BYTE_TIER below) so it can be promoted to a hard gate once the
+#     divergence-fix children (#886 → #844/#887/#888/#846/#848) land. Until then
+#     the byte step never fails the build.
+#
+# TRIGGERS: PRs that touch the write/merge/compaction paths or this harness, plus
+# manual workflow_dispatch. The pinned Cassandra source build (ant jar build-test)
+# is slow, so it is cached under ~/.cache/cqlite keyed on the cassandra-5.0.2 pin
+# and the bootstrap script hash.
+
+on:
+  pull_request:
+    branches: [main, develop]
+    paths:
+      - 'cqlite-core/src/storage/write_engine/**'
+      - 'cqlite-core/src/storage/sstable/writer/**'
+      - 'compaction-parity/**'
+      - '.github/workflows/compaction-parity.yml'
+  workflow_dispatch:
+    inputs:
+      run_byte_tier:
+        description: 'Also run the (non-blocking) byte-equality tier'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+# Cancel superseded PR runs; let manual runs finish.
+concurrency:
+  group: compaction-parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # Single source of truth for the pinned Cassandra version. MUST match the pin
+  # in compaction-parity/scripts/bootstrap-cassandra.sh (CASSANDRA_REF) and the
+  # cassandra:5.0.2 image used elsewhere (issue #669).
+  CASSANDRA_REF: cassandra-5.0.2
+  # Where bootstrap-cassandra.sh fetches+builds the pinned source. The script
+  # uses $HOME/.cache/cqlite/cassandra-src/<ref>; pin the parent here for caching.
+  CQLITE_CASSANDRA_CACHE: ${{ github.workspace }}/.cqlite-cache/cassandra-src
+  # Byte-tier promotion hook: defaults to off (non-blocking). When the harness's
+  # byte tier lands and stabilises, set this to 'true' (or make the step a hard
+  # gate) to promote it. workflow_dispatch can also opt in per-run.
+  RUN_BYTE_TIER: ${{ github.event.inputs.run_byte_tier || 'false' }}
+
+jobs:
+  compaction-parity:
+    name: Differential compaction parity (logical tier)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      # ── JDK 17: drives Gradle, the test JVM, and the Cassandra source build. ──
+      # Cassandra 5.0 builds on JDK 11 or 17 (NOT 21); the harness pins the test
+      # JVM to 17 (build.gradle.kts toolchain). bootstrap-cassandra.sh reads
+      # $CASSANDRA_BUILD_JAVA_HOME to pick the build JDK — we hand it this one.
+      - name: Setup JDK 17
+        id: setup-java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Ant (required by the Cassandra source build)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ant
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Rust dependencies
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-compaction-parity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-compaction-parity-
+            ${{ runner.os }}-cargo-
+
+      # ── Cache the slow Cassandra source build. ──
+      # Keyed on the version pin + the bootstrap script hash so any change to how
+      # we build Cassandra busts the cache. The marker file (.cqlite-build-complete)
+      # inside the checkout lets bootstrap-cassandra.sh no-op on a cache hit.
+      - name: Cache pinned Cassandra build
+        id: cassandra-cache
+        uses: actions/cache@v5
+        with:
+          path: ${{ env.CQLITE_CASSANDRA_CACHE }}
+          key: ${{ runner.os }}-cassandra-${{ env.CASSANDRA_REF }}-${{ hashFiles('compaction-parity/scripts/bootstrap-cassandra.sh') }}
+
+      - name: Build pinned Cassandra source (cold cache only)
+        env:
+          # bootstrap-cassandra.sh honours these to locate the cache and pick the
+          # JDK 11/17 used for the ant build.
+          CQLITE_CASSANDRA_CACHE: ${{ env.CQLITE_CASSANDRA_CACHE }}
+          CASSANDRA_REF: ${{ env.CASSANDRA_REF }}
+          CASSANDRA_BUILD_JAVA_HOME: ${{ steps.setup-java.outputs.path }}
+        run: |
+          bash compaction-parity/scripts/bootstrap-cassandra.sh
+
+      - name: Build cqlite (write-support) candidate binary
+        run: |
+          cargo build --features write-support
+          test -x target/debug/cqlite
+
+      - name: Setup Gradle (no wrapper in compaction-parity)
+        uses: gradle/actions/setup-gradle@v4
+
+      # ── LOGICAL tier — HARD GATE. ──
+      # build.gradle.kts resolves the Cassandra src via $CQLITE_CASSANDRA_SRC and
+      # the candidate binary via $CQLITE_BIN. Failures here fail the workflow.
+      - name: Run logical-tier parity (gradle test)
+        id: logical
+        working-directory: compaction-parity
+        env:
+          CQLITE_CASSANDRA_SRC: ${{ env.CQLITE_CASSANDRA_CACHE }}/${{ env.CASSANDRA_REF }}
+          CQLITE_BIN: ${{ github.workspace }}/target/debug/cqlite
+        run: |
+          gradle --no-daemon test
+
+      # ── BYTE tier — NON-BLOCKING promotion hook (issue #842 north star). ──
+      # The harness does not yet implement a separate byte-equality tier, so this
+      # is intentionally a no-op-tolerant placeholder gated on RUN_BYTE_TIER and
+      # kept continue-on-error: it can never turn the build red today. PROMOTION:
+      # once the byte tier lands (e.g. a `byteParity` Gradle task or a JUnit
+      # category/system-property the harness honours), wire it below, default
+      # RUN_BYTE_TIER to 'true', and drop continue-on-error to make it a hard gate.
+      - name: Run byte-tier parity (non-blocking, opt-in)
+        id: byte
+        if: env.RUN_BYTE_TIER == 'true'
+        continue-on-error: true
+        working-directory: compaction-parity
+        env:
+          CQLITE_CASSANDRA_SRC: ${{ env.CQLITE_CASSANDRA_CACHE }}/${{ env.CASSANDRA_REF }}
+          CQLITE_BIN: ${{ github.workspace }}/target/debug/cqlite
+        run: |
+          echo "Byte tier is not yet implemented in the harness (issue #842)."
+          echo "This step is a documented, non-blocking promotion hook (issue #889)."
+          echo "When the byte tier lands, invoke it here, e.g.:"
+          echo "  gradle --no-daemon byteParity   # or: gradle test -Dparity.tier=byte"
+
+      # ── Surface a readable per-scenario / per-component diff on failure. ──
+      # The harness asserts on a canonical sstabledump (JSONL) of each output, so
+      # JUnit captures the exact mismatch. Print the failing test reports rather
+      # than burying the diff in the raw Gradle log.
+      - name: Surface per-scenario parity diffs (on failure)
+        if: failure()
+        working-directory: compaction-parity
+        run: |
+          echo "::group::Failed scenario reports (build/test-results)"
+          if [ -d build/test-results/test ]; then
+            for f in build/test-results/test/*.xml; do
+              [ -e "$f" ] || continue
+              echo "===== $f ====="
+              # Print the failure/error message + diff text for each failing case.
+              cat "$f"
+              echo
+            done
+          else
+            echo "no JUnit XML results found under build/test-results/test"
+          fi
+          echo "::endgroup::"
+
+          echo "::group::Captured standard output (per-scenario diffs)"
+          find build/reports/tests -name '*.txt' -print -exec cat {} \; 2>/dev/null || true
+          echo "::endgroup::"
+
+      - name: Upload parity reports and diffs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: compaction-parity-reports
+          path: |
+            compaction-parity/build/reports/tests/**
+            compaction-parity/build/test-results/**
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Parity summary
+        if: always()
+        run: |
+          {
+            echo "# Compaction Parity Results"
+            echo
+            echo "- Logical tier (HARD GATE): ${{ steps.logical.outcome }}"
+            echo "- Byte tier (non-blocking, opt-in): ${{ steps.byte.outcome || 'skipped' }}"
+            echo
+            echo "Cassandra pin: ${{ env.CASSANDRA_REF }} (cache hit: ${{ steps.cassandra-cache.outputs.cache-hit }})"
+            echo
+            echo "Byte-tier is the #842 north star and stays non-blocking until the"
+            echo "divergence-fix children land; promote it by enabling RUN_BYTE_TIER"
+            echo "and dropping continue-on-error on the byte step."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Comment on PR (failure)
+        if: failure() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const body = `## ❌ Compaction Parity (logical tier) FAILED
+
+            cqlite's compaction output diverged from Apache Cassandra's reference
+            compaction for at least one scenario.
+
+            - Logical tier (HARD GATE): \`${{ steps.logical.outcome }}\`
+
+            The per-scenario, per-component diff is in the workflow log
+            ("Surface per-scenario parity diffs") and in the
+            **compaction-parity-reports** artifact (JUnit XML + HTML reports).
+
+            Reproduce locally:
+            \`\`\`bash
+            compaction-parity/scripts/bootstrap-cassandra.sh
+            cargo build --features write-support
+            cd compaction-parity && gradle test
+            \`\`\``;
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+      - name: Fail on logical-tier divergence
+        if: always() && steps.logical.outcome != 'success'
+        run: |
+          echo "❌ Logical-tier compaction parity failed: ${{ steps.logical.outcome }}"
+          exit 1
