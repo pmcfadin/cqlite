@@ -12,8 +12,6 @@
 //!     -o <file.parquet>
 //! ```
 
-use anyhow::Result;
-
 /// Result summary from a completed delta-export run.
 #[derive(Debug)]
 pub struct DeltaExportResult {
@@ -54,7 +52,7 @@ impl DeltaExportResult {
 #[cfg(feature = "delta-export")]
 pub async fn handle_delta_export(
     args: &crate::cli_types::DeltaExportArgs,
-) -> Result<DeltaExportResult> {
+) -> anyhow::Result<DeltaExportResult> {
     use crate::cli_types::{DeltaCompressionCodec, DeltaOutFormat};
     use cqlite_core::export::delta_parquet::{
         DeltaParquetCompression, DeltaParquetOptions, DeltaParquetWriter,

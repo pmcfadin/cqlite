@@ -1,0 +1,126 @@
+name: "CI: Delta Round-Trip Test (DS11 / Issue #707)"
+
+# DS11 reconciliation round-trip test.
+#
+# This workflow is intentionally separate from the main CI (ci.yml) because it:
+#   1. Requires Docker (to run Cassandra 5.0 and generate multi-generation SSTables)
+#   2. Takes ~10-15 minutes (not suitable for every PR)
+#   3. Has an optional DELTA_ROUNDTRIP_DATA cache so re-runs skip regeneration
+#
+# GATING POLICY: This workflow runs on:
+#   - push to main (always)
+#   - pull_request that touches delta-scan/delta-export code paths
+#   - workflow_dispatch (manual trigger for issue #707 verification)
+#
+# The round-trip test (cqlite-cli/tests/delta_roundtrip_tests.rs) skips cleanly
+# when DELTA_ROUNDTRIP_DATA is unset, so it does NOT block the main CI gate.
+# The main gate (scripts/agent-gate.sh) does not run this test.
+#
+# Manual local run:
+#   bash test-data/scripts/generate-delta-roundtrip.sh --out /tmp/delta-roundtrip
+#   export DELTA_ROUNDTRIP_DATA=/tmp/delta-roundtrip
+#   cargo test --package cqlite-cli --features delta-export --test delta_roundtrip_tests -- --nocapture
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'cqlite-core/src/storage/sstable/reader/delta_scan.rs'
+      - 'cqlite-core/src/export/delta_parquet.rs'
+      - 'cqlite-core/src/export/delta_schema.rs'
+      - 'cqlite-cli/src/commands/delta_export.rs'
+      - 'cqlite-cli/tests/delta_roundtrip_tests.rs'
+      - 'test-data/scripts/generate-delta-roundtrip.sh'
+      - 'docs/architecture/delta-scan-consumer-reconciliation.md'
+      - '.github/workflows/delta-roundtrip.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cqlite-core/src/storage/sstable/reader/delta_scan.rs'
+      - 'cqlite-core/src/export/delta_parquet.rs'
+      - 'cqlite-core/src/export/delta_schema.rs'
+      - 'cqlite-cli/src/commands/delta_export.rs'
+      - 'cqlite-cli/tests/delta_roundtrip_tests.rs'
+      - 'test-data/scripts/generate-delta-roundtrip.sh'
+      - 'docs/architecture/delta-scan-consumer-reconciliation.md'
+      - '.github/workflows/delta-roundtrip.yml'
+  workflow_dispatch:
+    inputs:
+      regenerate:
+        description: 'Force regeneration of round-trip data (ignore cache)'
+        type: boolean
+        default: false
+
+env:
+  CASSANDRA_IMAGE: cassandra:5.0.2
+  DELTA_ROUNDTRIP_DATA: /tmp/delta-roundtrip
+
+permissions:
+  contents: read
+
+concurrency:
+  group: delta-roundtrip-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  delta-roundtrip:
+    name: DS11 Reconciliation Round-Trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: delta-roundtrip-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build CQLite CLI with delta-export feature
+        run: |
+          cargo build --package cqlite-cli --features delta-export --quiet
+          echo "CQLite CLI built: $(./target/debug/cqlite --version 2>&1 || true)"
+
+      - name: Check Docker available
+        run: docker info
+
+      - name: Generate multi-generation round-trip workload
+        run: |
+          echo "Generating N=3 SSTable generations for roundtrip_ks..."
+          bash test-data/scripts/generate-delta-roundtrip.sh --out "$DELTA_ROUNDTRIP_DATA"
+        env:
+          DELTA_ROUNDTRIP_DATA: ${{ env.DELTA_ROUNDTRIP_DATA }}
+
+      - name: Verify generation output
+        run: |
+          echo "=== Parquet files generated ==="
+          find "$DELTA_ROUNDTRIP_DATA/parquet" -name "*.parquet" | sort
+          echo ""
+          echo "=== SSTable Data.db files ==="
+          find "$DELTA_ROUNDTRIP_DATA/sstables" -name "*-Data.db" | sort
+          echo ""
+          echo "=== Element tombstone warnings ==="
+          cat "$DELTA_ROUNDTRIP_DATA/element_tombstone_warnings.txt" 2>/dev/null || echo "(no warning file)"
+
+      - name: Run delta round-trip tests
+        run: |
+          cargo test \
+            --package cqlite-cli \
+            --features delta-export \
+            --test delta_roundtrip_tests \
+            -- --nocapture 2>&1
+        env:
+          DELTA_ROUNDTRIP_DATA: ${{ env.DELTA_ROUNDTRIP_DATA }}
+          RUST_LOG: "warn"
+
+      - name: Run clippy on delta-export feature path
+        run: |
+          env RUSTFLAGS="-D warnings" \
+            cargo clippy \
+              --package cqlite-cli \
+              --features delta-export \
+              --tests \
+              -- -D warnings
