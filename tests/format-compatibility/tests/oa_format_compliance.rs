@@ -3,8 +3,12 @@
 //! These tests ensure 100% byte-perfect compatibility with Apache Cassandra 5+
 //! SSTable 'oa' format specification. Zero tolerance for deviations.
 
-use cqlite_core::parser::{header::*, types::*, vint::*};
-use format_validator::{format_constants::*, utils::*, ValidationError};
+use cqlite_core::parser::{header::*, vint::*};
+use format_validator::format_constants::*;
+use format_validator::utils::*;
+// `SUPPORTED_VERSION` is re-exported by both `header` and `format_constants`;
+// import it explicitly so the glob imports above do not collide.
+use format_validator::format_constants::SUPPORTED_VERSION;
 use pretty_assertions::assert_eq;
 use std::collections::HashMap;
 
@@ -45,7 +49,7 @@ fn test_oa_header_structure() {
     header_bytes.extend_from_slice(&SUPPORTED_VERSION.to_be_bytes());
 
     // Flags (4 bytes) - test various flag combinations
-    let flags = 0x0001 | 0x0100 | 0x0200; // has compression + key range + long deletion
+    let flags: u32 = 0x0001 | 0x0100 | 0x0200; // has compression + key range + long deletion
     header_bytes.extend_from_slice(&flags.to_be_bytes());
 
     // Reserved (22 bytes) - must be zero
@@ -54,7 +58,8 @@ fn test_oa_header_structure() {
     assert_eq!(header_bytes.len(), 32); // Standard header size
 
     // Parse header
-    let (remaining, version) = parse_magic_and_version(&header_bytes).unwrap();
+    let (remaining, (_cassandra_version, version)) =
+        parse_magic_and_version(&header_bytes).unwrap();
     assert_eq!(version, SUPPORTED_VERSION);
     assert_eq!(remaining.len(), 26); // 32 - 6 = 26 remaining bytes
 }
@@ -62,7 +67,7 @@ fn test_oa_header_structure() {
 #[test]
 fn test_oa_flag_encoding() {
     // Test all defined flag combinations
-    let test_cases = vec![
+    let test_cases: Vec<(u32, &str)> = vec![
         (0x0001, "has_compression"),
         (0x0002, "has_static_columns"),
         (0x0004, "has_regular_columns"),
@@ -83,19 +88,18 @@ fn test_oa_flag_encoding() {
         // Test individual flag
         let flag_bytes = flag_value.to_be_bytes();
         let parsed_flags = u32::from_be_bytes(flag_bytes);
-        assert_eq!(parsed_flags, flag_value, "Failed for flag: {}", flag_name);
+        assert_eq!(parsed_flags, flag_value, "Failed for flag: {flag_name}");
 
         // Test flag detection
         assert_ne!(
             parsed_flags & flag_value,
             0,
-            "Flag not detected: {}",
-            flag_name
+            "Flag not detected: {flag_name}"
         );
     }
 
     // Test combined flags
-    let combined = 0x0001 | 0x0100 | 0x010000; // compression + key range + LZ4
+    let combined: u32 = 0x0001 | 0x0100 | 0x010000; // compression + key range + LZ4
     let combined_bytes = combined.to_be_bytes();
     let parsed_combined = u32::from_be_bytes(combined_bytes);
 
@@ -154,77 +158,14 @@ fn test_oa_enhanced_metadata() {
         offset = token_bytes.len() - remaining.len();
 
         // Verify ranges are properly ordered
-        assert!(
-            start < end,
-            "Invalid token range {}: {} >= {}",
-            i,
-            start,
-            end
-        );
+        assert!(start < end, "Invalid token range {i}: {start} >= {end}");
     }
 }
 
-#[test]
-fn test_oa_compression_info_structure() {
-    // Test compression info structure for 'oa' format
-    let compression_info = CompressionInfo {
-        algorithm: "LZ4".to_string(),
-        chunk_size: 4096,
-        parameters: {
-            let mut params = HashMap::new();
-            params.insert("level".to_string(), "6".to_string());
-            params.insert("checksum".to_string(), "CRC32".to_string());
-            params
-        },
-    };
-
-    // Serialize compression info
-    let mut serialized = Vec::new();
-    serialize_compression_info(&mut serialized, &compression_info).unwrap();
-
-    // Parse it back
-    let (remaining, parsed_info) = parse_compression_info(&serialized).unwrap();
-    assert!(remaining.is_empty());
-
-    assert_eq!(parsed_info.algorithm, "LZ4");
-    assert_eq!(parsed_info.chunk_size, 4096);
-    assert_eq!(parsed_info.parameters.get("level"), Some(&"6".to_string()));
-    assert_eq!(
-        parsed_info.parameters.get("checksum"),
-        Some(&"CRC32".to_string())
-    );
-}
-
-#[test]
-fn test_oa_statistics_structure() {
-    // Test enhanced statistics structure for 'oa' format
-    let stats = SSTableStats {
-        row_count: 100_000,
-        min_timestamp: 1_640_995_200_000_000i64, // 2022-01-01 in microseconds
-        max_timestamp: 1_672_531_199_999_999i64, // 2022-12-31 in microseconds
-        max_deletion_time: 1_672_531_199_999_999i64, // Long deletion time
-        compression_ratio: 0.65,
-        row_size_histogram: vec![100, 500, 1000, 2000, 5000],
-    };
-
-    // Serialize statistics
-    let mut serialized = Vec::new();
-    serialize_sstable_stats(&mut serialized, &stats).unwrap();
-
-    // Parse it back
-    let (remaining, parsed_stats) = parse_sstable_stats(&serialized).unwrap();
-    assert!(remaining.is_empty());
-
-    assert_eq!(parsed_stats.row_count, 100_000);
-    assert_eq!(parsed_stats.min_timestamp, 1_640_995_200_000_000i64);
-    assert_eq!(parsed_stats.max_timestamp, 1_672_531_199_999_999i64);
-    assert_eq!(parsed_stats.max_deletion_time, 1_672_531_199_999_999i64);
-    assert!((parsed_stats.compression_ratio - 0.65).abs() < 1e-10);
-    assert_eq!(
-        parsed_stats.row_size_histogram,
-        vec![100, 500, 1000, 2000, 5000]
-    );
-}
+// NOTE: `serialize_compression_info` and `serialize_sstable_stats` were made
+// private in cqlite-core; the compression-info and statistics sub-structures are
+// now exercised end-to-end through `test_oa_complete_header_roundtrip` below,
+// which serializes/parses a full header (compression + stats included).
 
 #[test]
 fn test_oa_footer_structure() {
@@ -256,6 +197,8 @@ fn test_oa_footer_structure() {
 fn test_oa_complete_header_roundtrip() {
     // Create a complete SSTable header
     let header = SSTableHeader {
+        // 'oa' format magic (0x6F61_0000) maps to CassandraVersion::Legacy.
+        cassandra_version: CassandraVersion::Legacy,
         version: SUPPORTED_VERSION,
         table_id: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
         keyspace: "test_keyspace".to_string(),
