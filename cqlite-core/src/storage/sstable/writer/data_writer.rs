@@ -353,10 +353,9 @@ impl DataWriter {
                 // Issue #821 (finding #2): hard-code prev_size = 0 for the static
                 // row and carry the running chain value forward by adding the
                 // static row's serialized bytes (see comment above).
-                let static_size = self
-                    .write_static_row_with_prev_size(&merged, latest_ts, ttl, schema, 0)?
-                    as u64;
-                prev_unfiltered_size += static_size;
+                let (static_size, _static_cells) =
+                    self.write_static_row_with_prev_size(&merged, latest_ts, ttl, schema, 0)?;
+                prev_unfiltered_size += static_size as u64;
             }
         }
 
@@ -435,7 +434,9 @@ impl DataWriter {
         for item in items {
             prev_unfiltered_size = match item {
                 PartitionItem::Row(row) => {
-                    self.write_merged_row_with_prev_size(&row, schema, prev_unfiltered_size)? as u64
+                    let (bytes, _cells) =
+                        self.write_merged_row_with_prev_size(&row, schema, prev_unfiltered_size)?;
+                    bytes as u64
                 }
                 PartitionItem::Marker {
                     bound,
@@ -536,14 +537,16 @@ impl DataWriter {
                 // Issue #764: same per-op LDT preservation as the non-indexed path.
                 // Issue #821 (finding #2): prev_size = 0 for the static row; chain
                 // carries forward by adding the static row's serialized bytes.
-                let static_size = self
-                    .write_static_row_with_prev_size(&merged, latest_ts, ttl, schema, 0)?
-                    as u64;
-                prev_unfiltered_size += static_size;
-                // A non-empty static prelude is one physical row whose cells are
-                // exactly the merged static ops (#851).
+                let (static_size, static_cells) =
+                    self.write_static_row_with_prev_size(&merged, latest_ts, ttl, schema, 0)?;
+                prev_unfiltered_size += static_size as u64;
+                // A non-empty static prelude is one physical row. Issue #851
+                // (review): count the static cells the writer ACTUALLY serialized
+                // (returned by the write path), not `merged.len()` — a merged
+                // static null write is skipped by `write_static_cells`, so it
+                // must not be counted as an emitted column.
                 emit.rows += 1;
-                emit.columns += merged.len() as u64;
+                emit.columns += static_cells;
             }
         }
 
@@ -649,12 +652,16 @@ impl DataWriter {
             // Write the item
             prev_unfiltered_size = match item {
                 PartitionItem::Row(row) => {
-                    // One physical row; its cells are the reconciled `ops`, which
-                    // already exclude primary-key (partition + clustering) columns
-                    // and, in a static-bearing schema, static ops (#851).
+                    // One physical row. Issue #851 (review): count the cells the
+                    // writer ACTUALLY serialized (returned by the write path),
+                    // not `row.ops.len()` — `write_merged_cells` skips null-valued
+                    // writes, so a row whose only write is null contributes a live
+                    // row with zero columns, matching Data.db exactly.
                     emit.rows += 1;
-                    emit.columns += row.ops.len() as u64;
-                    self.write_merged_row_with_prev_size(&row, schema, prev_unfiltered_size)? as u64
+                    let (bytes, cells) =
+                        self.write_merged_row_with_prev_size(&row, schema, prev_unfiltered_size)?;
+                    emit.columns += cells;
+                    bytes as u64
                 }
                 PartitionItem::Marker {
                     bound,
@@ -862,7 +869,11 @@ impl DataWriter {
         prev_size: u64,
     ) -> Result<usize> {
         match Self::merge_row_group(&[mutation], schema, false, None) {
-            Some(row) => self.write_merged_row_with_prev_size(&row, schema, prev_size),
+            Some(row) => {
+                let (bytes, _cells) =
+                    self.write_merged_row_with_prev_size(&row, schema, prev_size)?;
+                Ok(bytes)
+            }
             // Nothing to write (e.g. a tombstone-carrier mutation with no ops)
             None => Ok(0),
         }
@@ -1064,12 +1075,18 @@ impl DataWriter {
     }
 
     /// Write one merged row (flags + clustering prefix + sizes + body).
+    /// Write a merged row and return `(bytes_written, cells_written)`.
+    ///
+    /// Issue #851 (review): `cells_written` is the count of cells physically
+    /// serialized for this row (from `build_merged_row_body` →
+    /// `write_merged_cells`), so the caller's emit tally equals Data.db. It is 0
+    /// for pure row tombstones and for rows whose only writes are null-valued.
     fn write_merged_row_with_prev_size(
         &mut self,
         row: &RowWrite<'_>,
         schema: &TableSchema,
         prev_size: u64,
-    ) -> Result<usize> {
+    ) -> Result<(usize, u64)> {
         use crate::storage::write_engine::mutation::CellOperation;
 
         let start_len = self.buffer.len();
@@ -1138,7 +1155,7 @@ impl DataWriter {
         }
 
         // Calculate row body size (everything after row_size VInt)
-        let row_body = self.build_merged_row_body(row, schema, flags)?;
+        let (row_body, cells_written) = self.build_merged_row_body(row, schema, flags)?;
 
         let prev_size_vint_len = unsigned_len(prev_size);
 
@@ -1155,7 +1172,7 @@ impl DataWriter {
         // Write rest of row body
         self.buffer.extend_from_slice(&row_body);
 
-        Ok(self.buffer.len() - start_len)
+        Ok((self.buffer.len() - start_len, cells_written))
     }
 
     /// Write a static row for the current partition
@@ -1201,6 +1218,8 @@ impl DataWriter {
         Ok(())
     }
 
+    // (write_static_row_with_prev_size returns (bytes, cells); see Issue #851.)
+
     /// Write a static row from the merged static operations of a partition.
     ///
     /// Issue #764: each `StaticMergedOp` carries its own originating timestamp
@@ -1208,6 +1227,10 @@ impl DataWriter {
     /// older mutation keeps its own LDT instead of inheriting a single
     /// synthetic mutation-level value (which corrupted the unsigned-VInt delta
     /// when stats were seeded from that older delete's explicit lower LDT).
+    ///
+    /// Returns `(bytes_written, cells_written)` (Issue #851, review). The cell
+    /// count is sourced from the physical static-cell write path so Statistics'
+    /// column count matches Data.db (0 for a static row tombstone).
     fn write_static_row_with_prev_size(
         &mut self,
         static_ops: &[StaticMergedOp],
@@ -1215,7 +1238,7 @@ impl DataWriter {
         ttl_seconds: Option<u32>,
         schema: &TableSchema,
         prev_size: u64,
-    ) -> Result<usize> {
+    ) -> Result<(usize, u64)> {
         let start_len = self.buffer.len();
 
         // Build row header flags - always includes HAS_EXTENDED_FLAGS for static rows
@@ -1279,7 +1302,7 @@ impl DataWriter {
         // NO clustering prefix for static rows (key difference from write_row)
 
         // Build row body
-        let row_body =
+        let (row_body, cells_written) =
             self.build_static_row_body(static_ops, liveness_ts, ttl_seconds, schema, flags)?;
 
         let prev_size_vint_len = unsigned_len(prev_size);
@@ -1296,12 +1319,16 @@ impl DataWriter {
         // Write rest of row body
         self.buffer.extend_from_slice(&row_body);
 
-        Ok(self.buffer.len() - start_len)
+        Ok((self.buffer.len() - start_len, cells_written))
     }
 
     /// Build static row body (everything after row_size VInt)
     ///
     /// Similar to build_row_body but only processes static columns.
+    ///
+    /// Returns the body bytes and the number of static cells (columns)
+    /// physically written (Issue #851, review). A static row tombstone writes no
+    /// cells (count 0); otherwise the count is sourced from `write_static_cells`.
     fn build_static_row_body(
         &self,
         static_ops: &[StaticMergedOp],
@@ -1309,7 +1336,7 @@ impl DataWriter {
         ttl_seconds: Option<u32>,
         schema: &TableSchema,
         flags: u8,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(Vec<u8>, u64)> {
         let mut body = Vec::new();
 
         // Write timestamp delta (if HAS_TIMESTAMP)
@@ -1387,7 +1414,7 @@ impl DataWriter {
             }
 
             // No cells written for row tombstones
-            return Ok(body);
+            return Ok((body, 0));
         }
 
         // Write column bitmap (if NOT HAS_ALL_COLUMNS)
@@ -1397,9 +1424,9 @@ impl DataWriter {
         }
 
         // Write cell data for static columns only
-        self.write_static_cells(&mut body, static_ops, liveness_ts, schema)?;
+        let cells_written = self.write_static_cells(&mut body, static_ops, liveness_ts, schema)?;
 
-        Ok(body)
+        Ok((body, cells_written))
     }
 
     /// Write column bitmap for static columns only.
@@ -1438,13 +1465,18 @@ impl DataWriter {
     /// Issue #764: deletes use their ORIGINATING op's timestamp and local
     /// deletion time (carried in `StaticMergedOp`), not a single synthetic
     /// mutation-level value.
+    ///
+    /// Issue #851 (review): returns the number of static cells (columns)
+    /// physically serialized — sourced from this loop, the only place that
+    /// decides whether a static cell is emitted (null writes skipped; deletes
+    /// and non-null writes written) — so Statistics cannot drift from Data.db.
     fn write_static_cells(
         &self,
         buf: &mut Vec<u8>,
         static_ops: &[StaticMergedOp],
         liveness_ts: i64,
         schema: &TableSchema,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         // Get set of static column names for validation
         let static_column_names: std::collections::HashSet<_> = schema
             .columns
@@ -1453,11 +1485,13 @@ impl DataWriter {
             .map(|c| &c.name)
             .collect();
 
+        let mut cells_written: u64 = 0;
         for mop in self.sorted_static_ops(static_ops, schema) {
             match &mop.op {
                 crate::storage::write_engine::mutation::CellOperation::Write { column, value } => {
                     // Only write if it's a static column
                     if static_column_names.contains(column) && !matches!(value, Value::Null) {
+                        cells_written += 1;
                         // Issue #764: mirror the regular-row path — only borrow the
                         // row liveness timestamp (CELL_USE_ROW_TIMESTAMP) when this
                         // op actually originated at that timestamp; otherwise write
@@ -1477,6 +1511,7 @@ impl DataWriter {
                 } => {
                     // Only write if it's a static column
                     if static_column_names.contains(column) && !matches!(value, Value::Null) {
+                        cells_written += 1;
                         self.write_cell_with_ttl(
                             buf,
                             column,
@@ -1489,6 +1524,7 @@ impl DataWriter {
                 crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
                     // Only process if it's a static column
                     if static_column_names.contains(column) {
+                        cells_written += 1;
                         // Issue #764: honor the originating op's explicit LDT.
                         self.write_tombstone_cell(
                             buf,
@@ -1504,7 +1540,7 @@ impl DataWriter {
             }
         }
 
-        Ok(())
+        Ok(cells_written)
     }
 
     /// Sort merged static ops into Cassandra static-column serialization order
@@ -1557,7 +1593,8 @@ impl DataWriter {
             row_deletion: None,
             ops: Vec::new(),
         });
-        self.build_merged_row_body(&row, schema, flags)
+        let (body, _cells) = self.build_merged_row_body(&row, schema, flags)?;
+        Ok(body)
     }
 
     /// Build a merged row body (everything after the row_size VInt, excluding
@@ -1567,12 +1604,17 @@ impl DataWriter {
     /// liveness timestamp, TTL + expiration LDT, row deletion, columns
     /// subset, then cells. Issue #717: the columns subset is written for
     /// EVERY row lacking HAS_ALL_COLUMNS — including row tombstones.
+    ///
+    /// Returns the serialized body bytes and the number of cells (columns)
+    /// physically written (Issue #851, review): the count is sourced from
+    /// `write_merged_cells`, the only place that decides whether a cell is
+    /// emitted, so Statistics' column count cannot drift from Data.db.
     fn build_merged_row_body(
         &self,
         row: &RowWrite<'_>,
         schema: &TableSchema,
         flags: u8,
-    ) -> Result<Vec<u8>> {
+    ) -> Result<(Vec<u8>, u64)> {
         let mut body = Vec::new();
 
         // Write timestamp delta (if HAS_TIMESTAMP)
@@ -1642,9 +1684,9 @@ impl DataWriter {
         }
 
         // Write cell data (none survive for pure row tombstones)
-        self.write_merged_cells(&mut body, row, schema)?;
+        let cells_written = self.write_merged_cells(&mut body, row, schema)?;
 
-        Ok(body)
+        Ok((body, cells_written))
     }
 
     /// Write clustering prefix
@@ -1800,14 +1842,24 @@ impl DataWriter {
     /// Cells whose timestamp matches the row liveness timestamp use
     /// USE_ROW_TIMESTAMP; cells merged in from other mutations (e.g. a later
     /// single-cell DELETE) carry an explicit timestamp delta.
+    /// Write the surviving cells of a merged row and return the number of cells
+    /// (columns) actually serialized.
+    ///
+    /// Issue #851 (review): Statistics' `totalColumnsSet` must equal the cells
+    /// PHYSICALLY written to Data.db, not `row.ops.len()`. This loop is the sole
+    /// place that decides whether a cell is emitted (null `Write`/`WriteWithTtl`
+    /// ops are skipped; deletes and non-null writes are written), so we return
+    /// the count from here — the caller threads it straight into the emit tally,
+    /// making the column count impossible to drift from Data.db.
     fn write_merged_cells(
         &self,
         buf: &mut Vec<u8>,
         row: &RowWrite<'_>,
         schema: &TableSchema,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         use crate::storage::write_engine::mutation::CellOperation;
 
+        let mut cells_written: u64 = 0;
         for mop in self.sorted_merged_ops(&row.ops, schema) {
             match mop.op {
                 CellOperation::Write { column, value } => {
@@ -1815,6 +1867,7 @@ impl DataWriter {
                     if matches!(value, Value::Null) {
                         continue;
                     }
+                    cells_written += 1;
                     // Check if this column is a complex column (non-frozen collection)
                     let is_complex = schema
                         .columns
@@ -1870,6 +1923,7 @@ impl DataWriter {
                     if matches!(value, Value::Null) {
                         continue;
                     }
+                    cells_written += 1;
                     let is_complex = schema
                         .columns
                         .iter()
@@ -1906,6 +1960,7 @@ impl DataWriter {
                     }
                 }
                 CellOperation::Delete { column } => {
+                    cells_written += 1;
                     let is_complex = schema
                         .columns
                         .iter()
@@ -1940,7 +1995,7 @@ impl DataWriter {
             }
         }
 
-        Ok(())
+        Ok(cells_written)
     }
 
     /// Write a complex column (non-frozen collection stored as multiple cells).

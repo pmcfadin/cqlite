@@ -1094,6 +1094,47 @@ mod tests {
         }
     }
 
+    /// A flat schema with TWO regular columns (`name`, `age`) and no clustering
+    /// or static columns. Used to verify that an INSERT mixing a non-null write
+    /// with a null-valued write counts only the cell that is physically
+    /// serialized (#851 review): `write_merged_cells` skips the null write.
+    fn create_two_regular_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_two_regular".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "name".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "age".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
     fn create_test_mutation(
         keyspace: &str,
         table: &str,
@@ -1677,6 +1718,127 @@ mod tests {
         assert_eq!(
             writer.stats.column_count, 1,
             "both writes target the same column `name`, so one surviving cell"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #851 review (this fix): an INSERT that writes one non-null column
+    /// and one null-valued column must count only the cell that is physically
+    /// serialized. `write_merged_cells` skips the null `Write`, so Statistics'
+    /// `column_count` must equal 1 (not `row.ops.len() == 2`). The row stays
+    /// live (`row_count == 1`).
+    #[tokio::test]
+    async fn test_insert_with_null_column_counts_only_non_null_cells() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_two_regular_schema();
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_two_regular");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("Alice".to_string()),
+                },
+                CellOperation::Write {
+                    column: "age".to_string(),
+                    value: Value::Null,
+                },
+            ],
+            1_000_000,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(writer.stats.row_count, 1, "the insert is a live row");
+        assert_eq!(
+            writer.stats.column_count, 1,
+            "only the non-null `name` cell is serialized; the null `age` write is skipped"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #851 review (this fix): a row whose ONLY write is null-valued
+    /// serializes no cell, yet the write still confers row liveness. Statistics
+    /// must report `row_count == 1` and `column_count == 0`, matching Data.db
+    /// (the previous `row.ops.len()` count over-reported one column).
+    #[tokio::test]
+    async fn test_row_with_only_null_write_counts_row_zero_columns() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_two_regular_schema();
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_two_regular");
+        let pk = PartitionKey::single("id", Value::Integer(2));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::Null,
+            }],
+            1_000_000,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.row_count, 1,
+            "a null-valued write is still a live row"
+        );
+        assert_eq!(
+            writer.stats.column_count, 0,
+            "the null write serializes no cell, so sets no columns"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #851 review (this fix): the static path applies the same rule. A
+    /// static null write serializes no static cell, so the non-empty static
+    /// prelude (one row) must count ZERO columns. Here one static column is
+    /// written non-null and one regular write follows, so the static prelude
+    /// contributes 1 column and the clustering row contributes 1 — but a null
+    /// static write must not be counted.
+    #[tokio::test]
+    async fn test_static_null_write_not_counted() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_static_schema(); // partition id, clustering ck, static s
+
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        // A static-only mutation (no clustering key) writing the static column
+        // `s` as NULL: the static prelude is present but serializes no cell.
+        let table_id = TableId::new("test_ks", "test_static");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "s".to_string(),
+                value: Value::Null,
+            }],
+            1_000_000,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.column_count, 0,
+            "a null static write serializes no static cell, so sets no columns"
         );
 
         let _info = writer.finish().await.unwrap();
