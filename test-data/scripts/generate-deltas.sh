@@ -362,6 +362,43 @@ try:
         )
     print("  partial_updates: done", flush=True)
 
+    # -------------------------------------------------------------------
+    # 9. adjacent_ranges
+    #    Two DELETE ranges sharing a clustering-key boundary point, producing
+    #    EXCL_END_INCL_START_BOUNDARY (kind 2) or INCL_END_EXCL_START_BOUNDARY
+    #    (kind 5) markers in the SSTable.
+    #
+    #    pk=1: [10,20) then [20,30) — adjacent at ck=20 → kind 2 boundary
+    #    pk=2: (5,15] then (15,25] — adjacent at ck=15 → kind 5 boundary
+    # -------------------------------------------------------------------
+    print("[9] adjacent_ranges", flush=True)
+    # Insert some rows so the partition exists (deletions can be standalone tombstones too,
+    # but inserting rows ensures the SSTable has clustering data around the ranges).
+    for pk in range(1, 3):
+        for ck in range(1, 31):
+            session.execute(
+                "INSERT INTO adjacent_ranges (pk, ck, val) VALUES (%s,%s,%s)",
+                (pk, ck, f"v_{pk}_{ck}")
+            )
+    # pk=1: two adjacent closed-open ranges sharing ck=20.
+    # Cassandra writes these as: START(10, incl) … BOUNDARY(20, excl_end_incl_start) … END(30, excl)
+    import time as _time
+    session.execute(
+        "DELETE FROM adjacent_ranges USING TIMESTAMP 1000000000000001 WHERE pk=1 AND ck >= 10 AND ck < 20"
+    )
+    session.execute(
+        "DELETE FROM adjacent_ranges USING TIMESTAMP 1000000000000002 WHERE pk=1 AND ck >= 20 AND ck < 30"
+    )
+    # pk=2: two adjacent open-closed ranges sharing ck=15.
+    # Cassandra writes: START(5, excl) … BOUNDARY(15, incl_end_excl_start) … END(25, incl)
+    session.execute(
+        "DELETE FROM adjacent_ranges USING TIMESTAMP 1000000000000003 WHERE pk=2 AND ck > 5 AND ck <= 15"
+    )
+    session.execute(
+        "DELETE FROM adjacent_ranges USING TIMESTAMP 1000000000000004 WHERE pk=2 AND ck > 15 AND ck <= 25"
+    )
+    print("  adjacent_ranges: done", flush=True)
+
     print("[OK] test_deltas: all rows inserted", flush=True)
     cluster.shutdown()
 
