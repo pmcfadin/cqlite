@@ -1889,6 +1889,56 @@ impl SSTableReader {
         )
         .await
     }
+
+    /// Prepare for a delta-scan pass: seek to the data-section start, reset
+    /// the chunk index, stitch all compressed chunks, and return the
+    /// decompressed buffer together with a pre-configured parser.
+    ///
+    /// The caller is responsible for holding `scan_mutex` for the lifetime of
+    /// the returned buffer (matching the existing compaction-path contract —
+    /// issue #805).  This method is gated on the `delta-scan` feature and is
+    /// the only bridge between the SSTableReader internals and the
+    /// `delta_scan` module, which cannot access private helpers directly.
+    ///
+    /// The `schema` parameter is not used here — it is threaded through the
+    /// caller's `parse_block_emit_delta` invocation instead.  The parser is
+    /// built via `build_v5_parser()` which handles version-gates and UDT
+    /// registry without needing the schema at construction time.
+    #[cfg(feature = "delta-scan")]
+    pub async fn prepare_delta_scan(
+        &self,
+    ) -> Result<(Vec<u8>, super::parsing::V5CompressedLegacyParser)> {
+        use tokio::io::AsyncSeekExt;
+
+        // Seek to the start of the data section and reset the chunk index.
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = self.file.lock().await;
+            file_guard
+                .seek(std::io::SeekFrom::Start(header_size as u64))
+                .await?;
+        }
+        self.current_chunk_index
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+
+        // Stitch all compressed chunks (bounded by uncompressed data-section size).
+        let stitched = self.stitch_all_chunks().await?;
+
+        // Build a parser (re-using the existing builder so version-gates and
+        // UDT registry are threaded through correctly).
+        let parser = self.build_v5_parser();
+
+        Ok((stitched, parser))
+    }
+
+    /// Return the `scan_mutex` guard for external callers that need to
+    /// serialise a delta-scan pass against concurrent reads.
+    ///
+    /// Gated on `delta-scan` — only the delta-scan path needs this.
+    #[cfg(feature = "delta-scan")]
+    pub fn delta_scan_mutex(&self) -> &tokio::sync::Mutex<()> {
+        &self.scan_mutex
+    }
 }
 
 #[cfg(test)]

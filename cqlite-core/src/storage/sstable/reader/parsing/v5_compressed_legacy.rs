@@ -523,6 +523,149 @@ impl V5CompressedLegacyParser {
         Ok(())
     }
 
+    /// Delta-scan variant of [`parse_block_emit_with_metadata`] (Epic #696, Issue #698).
+    ///
+    /// Identical in parsing strategy to [`parse_block_emit_with_metadata`] but emits
+    /// **static rows separately** instead of merging them into the first clustering row.
+    /// The emit closure receives five values per row:
+    ///
+    /// ```text
+    /// (partition_key, cells, cell_meta, row_liveness_ts, is_static)
+    /// ```
+    ///
+    /// - `cells`            — column-name → decoded `Value` (including clustering cols).
+    /// - `cell_meta`        — column-name → `CellWriteMetadata` (writetime + TTL).
+    /// - `row_liveness_ts`  — `Some(ts_µs)` when the row was created with `INSERT` and
+    ///   carries a primary-key liveness timestamp (`HAS_TIMESTAMP` flag).  `None` for
+    ///   `UPDATE`-only rows (no pk liveness).
+    /// - `is_static`        — `true` for static-column rows (emit as `StaticUpsert`).
+    ///
+    /// Row tombstones (rows with `HAS_DELETION`) are emitted with a non-empty `cell_meta`
+    /// and an empty `cells` map; callers must detect them via a missing row-liveness
+    /// timestamp combined with `row_header_is_deletion = true` in `cell_meta`.
+    ///
+    /// Note: Range tombstone markers are *skipped* in this version — they are emitted as
+    /// errors by the delta-scan caller per Issue #699 scope boundaries.
+    #[cfg(feature = "delta-scan")]
+    pub fn parse_block_emit_delta<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(
+            (
+                RowKey,
+                HashMap<String, Value>,
+                HashMap<String, CellWriteMetadata>,
+                Option<i64>, // row-level liveness timestamp (HAS_TIMESTAMP)
+                bool,        // is_static
+                bool,        // is_row_tombstone
+                Option<i64>, // marked_for_delete_at (for row tombstones)
+            ),
+        ) -> Result<std::ops::ControlFlow<()>>,
+    {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy delta-scan requires schema for {}.{} (cells lack column names in binary data)",
+                self.keyspace, self.table_name
+            ))
+        })?;
+
+        let mut offset = 0;
+        let mut partition_index = 0;
+
+        while offset < data.len() {
+            let (partition_key, next_data_offset) =
+                self.parse_partition_header(data, offset).map_err(|e| {
+                    Error::corruption(format!(
+                        "delta-scan: partition-header parse error at offset {} in {}.{}: {}",
+                        offset, self.keyspace, self.table_name, e
+                    ))
+                })?;
+
+            offset = next_data_offset;
+            partition_index += 1;
+            let mut row_count = 0;
+
+            loop {
+                if offset < data.len() && Self::is_end_of_partition(data[offset]) {
+                    offset += 1;
+                    break;
+                }
+
+                if offset < data.len() && Self::is_range_tombstone_marker(data[offset]) {
+                    // Range tombstones are out of scope for Issue #698 (see #699).
+                    // Skip them so we can still process the upsert rows in this partition.
+                    offset = self
+                        .skip_range_tombstone_marker(data, offset, schema)
+                        .map_err(|e| {
+                            Error::corruption(format!(
+                                "delta-scan: range-tombstone-marker parse error in partition {} \
+                                 at offset {} in {}.{}: {}",
+                                partition_index, offset, self.keyspace, self.table_name, e
+                            ))
+                        })?;
+                    continue;
+                }
+
+                match self.parse_row_data_with_offset(data, offset, Some(schema), reader, true) {
+                    Ok((cells, row_cell_meta_opt, row_header_opt, next_offset, is_static)) => {
+                        let cell_meta = row_cell_meta_opt.unwrap_or_default();
+                        offset = next_offset;
+                        row_count += 1;
+
+                        let (row_liveness_ts, is_row_tombstone, marked_for_delete_at) =
+                            if let Some(ref h) = row_header_opt {
+                                (h.timestamp, h.is_row_tombstone(), h.marked_for_delete_at)
+                            } else {
+                                (None, false, None)
+                            };
+
+                        match emit((
+                            partition_key.clone(),
+                            cells,
+                            cell_meta,
+                            row_liveness_ts,
+                            is_static,
+                            is_row_tombstone,
+                            marked_for_delete_at,
+                        ))? {
+                            std::ops::ControlFlow::Continue(()) => {}
+                            std::ops::ControlFlow::Break(()) => return Ok(()),
+                        }
+
+                        if offset >= data.len() {
+                            break;
+                        }
+
+                        if self.peek_is_partition_header(data, offset) {
+                            log::debug!(
+                                "V5CompressedLegacy delta-scan: Partition {} detected at offset {} after {} rows",
+                                partition_index + 1, offset, row_count
+                            );
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        return Err(Error::corruption(format!(
+                            "delta-scan: row parse error in partition {} at offset {} in {}.{}: {}",
+                            partition_index, offset, self.keyspace, self.table_name, e
+                        )));
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     /// Streaming variant of [`parse_block`]: invokes `emit` for each parsed
     /// `(TableId, RowKey, Value)` entry instead of collecting them into a `Vec`,
     /// so callers can forward rows into a bounded channel without materializing
