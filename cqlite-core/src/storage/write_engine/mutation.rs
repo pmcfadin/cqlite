@@ -375,32 +375,41 @@ impl ClusteringKey {
     /// Each clustering column can be ASC or DESC. This method requires
     /// schema information to determine the correct ordering.
     pub fn compare(&self, other: &Self, schema: &TableSchema) -> Result<Ordering> {
-        // Compare column by column according to schema ordering
-        for (i, ((_, a_val), (_, b_val))) in
-            self.columns.iter().zip(other.columns.iter()).enumerate()
+        // A clustering key may have *fewer* stored components than the schema
+        // defines (an absent trailing component). Cassandra treats an absent
+        // component exactly like an explicit NULL: it sorts first regardless of
+        // ASC/DESC. We therefore iterate over the schema clustering positions
+        // and read each side positionally via `.get(i)`, rather than zipping the
+        // two `columns` vectors (which would stop at the shorter key and report
+        // a falsely-Equal ordering for a genuinely absent trailing component).
+        if self.columns.len() > schema.clustering_keys.len()
+            || other.columns.len() > schema.clustering_keys.len()
         {
-            if i >= schema.clustering_keys.len() {
-                return Err(Error::Schema(format!(
-                    "Clustering key has more columns than schema: {} > {}",
-                    i + 1,
-                    schema.clustering_keys.len()
-                )));
-            }
+            return Err(Error::Schema(format!(
+                "Clustering key has more columns than schema: {} / {} > {}",
+                self.columns.len(),
+                other.columns.len(),
+                schema.clustering_keys.len()
+            )));
+        }
 
-            let cluster_col = &schema.clustering_keys[i];
+        for (i, cluster_col) in schema.clustering_keys.iter().enumerate() {
+            // Absent component (shorter key) is equivalent to an explicit NULL.
+            let a_val = self.columns.get(i).map(|(_, v)| v).unwrap_or(&Value::Null);
+            let b_val = other.columns.get(i).map(|(_, v)| v).unwrap_or(&Value::Null);
 
             // Cassandra (ref 587612cd): clustering reversal (DESC) only reverses
-            // the comparison of two *present* values. An absent (NULL) component
+            // the comparison of two *present* values. An absent/NULL component
             // sorts first regardless of ASC/DESC, so the reversal must never flip
             // null/empty-component ordering. Empty-vs-valued comparisons are
             // routed through the type (compare_values) so they reverse correctly
-            // on DESC columns, but a NULL component is not a typed value and is
-            // handled positionally here.
+            // on DESC columns, but an absent or NULL component is not a typed
+            // value and is handled positionally here.
             let final_ordering = match (a_val, b_val) {
-                // Two absent components are equal in either direction.
+                // Two absent/NULL components are equal in either direction.
                 (Value::Null, Value::Null) => Ordering::Equal,
-                // Exactly one side absent: NULL sorts first (Less) regardless of
-                // ASC/DESC. Do not apply the DESC reversal.
+                // Exactly one side absent/NULL: NULL sorts first (Less)
+                // regardless of ASC/DESC. Do not apply the DESC reversal.
                 (Value::Null, _) => Ordering::Less,
                 (_, Value::Null) => Ordering::Greater,
                 // Both present: compare through the type, then apply DESC
@@ -998,6 +1007,101 @@ mod tests {
             Ordering::Less,
             "NULL on a DESC sub-component still sorts first"
         );
+    }
+
+    #[test]
+    fn test_clustering_absent_trailing_desc_component_sorts_first() {
+        // Review (#849): an *absent* trailing component (shorter key) must be
+        // treated identically to an explicit NULL. (a=1) vs (a=1, b=5000) where
+        // b is DESC: the short key (absent b) must sort FIRST regardless of the
+        // DESC order on b. Previously the zip stopped at the shorter key and
+        // returned Equal.
+        let schema = create_test_schema(
+            vec![("id", "int")],
+            vec![
+                ("a", "int", ClusteringOrder::Asc),
+                ("b", "timestamp", ClusteringOrder::Desc),
+            ],
+        );
+
+        // Short key omits the trailing DESC component `b` entirely.
+        let absent_b = ClusteringKey::new(vec![("a".to_string(), Value::Integer(1))]);
+        let valued_b = ClusteringKey::new(vec![
+            ("a".to_string(), Value::Integer(1)),
+            ("b".to_string(), Value::Timestamp(5000)),
+        ]);
+
+        assert_eq!(
+            absent_b.compare(&valued_b, &schema).unwrap(),
+            Ordering::Less,
+            "absent trailing DESC component must sort first (null-first), not Equal"
+        );
+        assert_eq!(
+            valued_b.compare(&absent_b, &schema).unwrap(),
+            Ordering::Greater,
+            "present value must sort after an absent trailing component"
+        );
+
+        // An absent trailing component must compare equal to an explicit NULL
+        // for the same position.
+        let explicit_null_b = ClusteringKey::new(vec![
+            ("a".to_string(), Value::Integer(1)),
+            ("b".to_string(), Value::Null),
+        ]);
+        assert_eq!(
+            absent_b.compare(&explicit_null_b, &schema).unwrap(),
+            Ordering::Equal,
+            "absent trailing component == explicit NULL at the same position"
+        );
+        assert_eq!(
+            explicit_null_b.compare(&absent_b, &schema).unwrap(),
+            Ordering::Equal,
+        );
+    }
+
+    #[test]
+    fn test_clustering_absent_trailing_asc_component_sorts_first() {
+        // Same null-first rule on an ASC trailing component: the shorter key
+        // (absent component) sorts before any present value.
+        let schema = create_test_schema(
+            vec![("id", "int")],
+            vec![
+                ("a", "int", ClusteringOrder::Asc),
+                ("b", "int", ClusteringOrder::Asc),
+            ],
+        );
+
+        let absent_b = ClusteringKey::new(vec![("a".to_string(), Value::Integer(7))]);
+        let valued_b = ClusteringKey::new(vec![
+            ("a".to_string(), Value::Integer(7)),
+            ("b".to_string(), Value::Integer(0)),
+        ]);
+
+        assert_eq!(
+            absent_b.compare(&valued_b, &schema).unwrap(),
+            Ordering::Less,
+            "absent trailing ASC component must sort first"
+        );
+        assert_eq!(
+            valued_b.compare(&absent_b, &schema).unwrap(),
+            Ordering::Greater,
+        );
+    }
+
+    #[test]
+    fn test_clustering_both_absent_trailing_component_equal() {
+        // Two keys that both omit the trailing component compare Equal.
+        let schema = create_test_schema(
+            vec![("id", "int")],
+            vec![
+                ("a", "int", ClusteringOrder::Asc),
+                ("b", "timestamp", ClusteringOrder::Desc),
+            ],
+        );
+
+        let a1 = ClusteringKey::new(vec![("a".to_string(), Value::Integer(3))]);
+        let a2 = ClusteringKey::new(vec![("a".to_string(), Value::Integer(3))]);
+        assert_eq!(a1.compare(&a2, &schema).unwrap(), Ordering::Equal);
     }
 
     #[test]
