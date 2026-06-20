@@ -70,19 +70,25 @@ const MAX_UDT_FIELD_COUNT: usize = 1000;
 const MAX_TYPE_NESTING_DEPTH: usize = 10;
 
 /// Return type for `parse_row_data_with_offset`:
-/// (cells, cell_metadata, row_header, next_offset, is_static)
+/// (cells, cell_metadata, row_header, next_offset, is_static, complex_col_meta)
 ///
 /// `cell_metadata` maps column name → `CellWriteMetadata` for every live cell
 /// parsed in this row.  It is `Some(map)` only when `want_cell_metadata == true`
 /// was passed to the function; otherwise it is `None` and zero allocations are
 /// incurred on the normal read hot-path.  Used to surface per-cell timestamps /
 /// TTLs for `WRITETIME(col)` / `TTL(col)` queries (issue #693).
+///
+/// `complex_col_meta` maps column name → `ComplexColumnMeta` for every
+/// non-frozen collection column parsed in this row (Issue #700, DS4).  It is
+/// always `Some` when `want_cell_metadata == true` and the row contains
+/// collection columns; always `None` when `want_cell_metadata == false`.
 type ParsedRow = (
     HashMap<String, Value>,
     Option<HashMap<String, CellWriteMetadata>>,
     Option<RowHeader>,
     usize,
     bool,
+    Option<HashMap<String, ComplexColumnMeta>>,
 );
 
 /// Return type for [`V5CompressedLegacy::parse_block_with_cell_metadata`].
@@ -199,6 +205,38 @@ struct ComplexCellParse {
     is_deleted: bool,
     /// Offset immediately following the parsed cell.
     next_offset: usize,
+    /// Per-element writetime decoded from the cell's own timestamp field, in µs since
+    /// Unix epoch (absolute, after delta decoding from min_timestamp).  `None` when the
+    /// element inherited the row-level timestamp (USE_ROW_TIMESTAMP flag 0x08).
+    ///
+    /// Used by `parse_complex_column_inner` to compute the max element writetime
+    /// for a collection column (Issue #700, DS4).
+    element_writetime: Option<i64>,
+}
+
+/// Extra metadata produced by `parse_complex_column_inner` for delta-scan callers
+/// (Issue #700, DS4: non-frozen collection v1 semantics).
+///
+/// Returned alongside the `Value` and new offset so the emit path can set the correct
+/// `replaced` flag and `writetime` on the resulting `CellDelta`.
+///
+/// Fields are read by `parse_block_emit_delta` which is `#[cfg(feature = "delta-scan")]`;
+/// without that feature the struct is built but not consumed, hence the allow.
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(in crate::storage::sstable::reader) struct ComplexColumnMeta {
+    /// `true` when the collection generation carries a collection-level tombstone
+    /// (`s = {...}` overwrite), meaning the consumer must **replace** rather than
+    /// merge the prior collection state.
+    pub has_collection_tombstone: bool,
+    /// Maximum element writetime seen across all cells in this collection, in µs
+    /// since Unix epoch.  `0` when no element had its own explicit timestamp
+    /// (all inherited the row timestamp).
+    pub max_element_writetime: i64,
+    /// Number of element-level tombstones detected (`is_deleted` flag) in this
+    /// collection cell (Issue #493 territory).  v1 does not represent them; callers
+    /// must count and warn.
+    pub element_tombstone_count: u64,
 }
 
 // Row header flag constants
@@ -439,7 +477,14 @@ impl V5CompressedLegacyParser {
                 }
 
                 match self.parse_row_data_with_offset(data, offset, Some(schema), reader, true) {
-                    Ok((mut cells, row_cell_meta_opt, row_header_opt, next_offset, is_static)) => {
+                    Ok((
+                        mut cells,
+                        row_cell_meta_opt,
+                        row_header_opt,
+                        next_offset,
+                        is_static,
+                        _complex_meta,
+                    )) => {
                         let mut row_cell_meta = row_cell_meta_opt.unwrap_or_default();
                         offset = next_offset;
                         row_count += 1;
@@ -546,6 +591,9 @@ impl V5CompressedLegacyParser {
     ///
     /// Note: Range tombstone markers are *skipped* in this version — they are emitted as
     /// errors by the delta-scan caller per Issue #699 scope boundaries.
+    // ComplexColumnMeta is intentionally restricted to the reader module; the
+    // closure bound here is not part of the public API surface.
+    #[allow(private_bounds)]
     #[cfg(feature = "delta-scan")]
     pub fn parse_block_emit_delta<F>(
         &self,
@@ -567,6 +615,8 @@ impl V5CompressedLegacyParser {
                 // --- Issue #699 tombstone extensions ---
                 Option<(Vec<Value>, bool, Vec<Value>, bool, i64)>, // range tombstone info: (start_values, start_inclusive, end_values, end_inclusive, deleted_at)
                 bool,                                              // is_partition_tombstone
+                // --- Issue #700 DS4 collection extensions ---
+                HashMap<String, ComplexColumnMeta>, // per-column complex collection metadata
             ),
         ) -> Result<std::ops::ControlFlow<()>>,
     {
@@ -612,7 +662,8 @@ impl V5CompressedLegacyParser {
                     false,
                     Some(deleted_at),
                     None,
-                    true, // is_partition_tombstone
+                    true,           // is_partition_tombstone
+                    HashMap::new(), // no collection metadata for tombstones
                 ))? {
                     std::ops::ControlFlow::Continue(()) => {}
                     std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -705,7 +756,8 @@ impl V5CompressedLegacyParser {
                                 false,
                                 Some(deleted_at_primary),
                                 range_info,
-                                false, // is_partition_tombstone
+                                false,          // is_partition_tombstone
+                                HashMap::new(), // no collection metadata for tombstones
                             ))? {
                                 std::ops::ControlFlow::Continue(()) => {}
                                 std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -737,6 +789,7 @@ impl V5CompressedLegacyParser {
                                     Some(deleted_at_primary),
                                     range_info,
                                     false,
+                                    HashMap::new(), // no collection metadata for tombstones
                                 ))? {
                                     std::ops::ControlFlow::Continue(()) => {}
                                     std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -770,6 +823,7 @@ impl V5CompressedLegacyParser {
                                     Some(deleted_at_primary),
                                     range_info,
                                     false,
+                                    HashMap::new(), // no collection metadata for tombstones
                                 ))? {
                                     std::ops::ControlFlow::Continue(()) => {}
                                     std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -793,8 +847,18 @@ impl V5CompressedLegacyParser {
                 }
 
                 match self.parse_row_data_with_offset(data, offset, Some(schema), reader, true) {
-                    Ok((cells, row_cell_meta_opt, row_header_opt, next_offset, is_static)) => {
+                    Ok((
+                        cells,
+                        row_cell_meta_opt,
+                        row_header_opt,
+                        next_offset,
+                        is_static,
+                        complex_meta,
+                    )) => {
                         let cell_meta = row_cell_meta_opt.unwrap_or_default();
+                        // DS4 (Issue #700): pass ComplexColumnMeta to the emit closure so the
+                        // delta-scan caller can set `replaced` and surface element tombstone counts.
+                        let col_meta_map = complex_meta.unwrap_or_default();
                         offset = next_offset;
                         row_count += 1;
 
@@ -813,8 +877,9 @@ impl V5CompressedLegacyParser {
                             is_static,
                             is_row_tombstone,
                             marked_for_delete_at,
-                            None,  // range_info (not a range tombstone)
-                            false, // is_partition_tombstone
+                            None,         // range_info (not a range tombstone)
+                            false,        // is_partition_tombstone
+                            col_meta_map, // DS4 collection metadata
                         ))? {
                             std::ops::ControlFlow::Continue(()) => {}
                             std::ops::ControlFlow::Break(()) => return Ok(()),
@@ -1110,6 +1175,7 @@ impl V5CompressedLegacyParser {
                                 row_header_opt,
                                 next_offset,
                                 is_static,
+                                _complex_meta,
                             )) => {
                                 // Update offset to point to the next row or partition
                                 offset = next_offset;
@@ -1608,7 +1674,14 @@ impl V5CompressedLegacyParser {
             }
 
             match self.parse_row_data_with_offset(data, offset, Some(schema), reader, false) {
-                Ok((mut cells, _row_cell_meta, row_header_opt, next_offset, is_static)) => {
+                Ok((
+                    mut cells,
+                    _row_cell_meta,
+                    row_header_opt,
+                    next_offset,
+                    is_static,
+                    _complex_meta,
+                )) => {
                     offset = next_offset;
 
                     // For a row tombstone the authoritative timestamp is
@@ -2963,6 +3036,15 @@ impl V5CompressedLegacyParser {
             None
         };
 
+        // DS4 (Issue #700): Per-column complex collection metadata.  Only allocated when
+        // want_cell_metadata is true (same gate as cell_meta to avoid hot-path overhead).
+        let mut complex_col_meta: Option<HashMap<String, ComplexColumnMeta>> = if want_cell_metadata
+        {
+            Some(HashMap::new())
+        } else {
+            None
+        };
+
         let schema = schema.ok_or_else(|| {
             Error::schema(format!(
                 "V5CompressedLegacy: Schema required for {}.{} (cells stored without column names)",
@@ -3119,8 +3201,15 @@ impl V5CompressedLegacyParser {
                 next_offset
             );
 
-            // Return empty cells for tombstoned row (no cell metadata)
-            return Ok((cells, cell_meta, Some(row_header), next_offset, is_static));
+            // Return empty cells for tombstoned row (no cell metadata, no complex meta)
+            return Ok((
+                cells,
+                cell_meta,
+                Some(row_header),
+                next_offset,
+                is_static,
+                None,
+            ));
         }
 
         // Advance offset past row metadata to start of cell data
@@ -3280,22 +3369,32 @@ impl V5CompressedLegacyParser {
                 );
                 match self.parse_complex_column(data, offset, column, has_complex_deletion, reader)
                 {
-                    Ok((value, new_offset)) => {
+                    Ok((value, new_offset, col_meta)) => {
                         log::debug!(
                             "V5CompressedLegacy:   ✓ Complex column {} '{}' = {:?}, consumed {} bytes",
                             col_idx, column.name, value, new_offset - offset
                         );
-                        // Complex (non-frozen) collection cells inherit the row-level timestamp.
-                        // Only compute and store metadata when the caller requested it.
+                        // DS4 (Issue #700): Use the max element writetime when it was captured
+                        // from per-element timestamps; fall back to row-level liveness timestamp
+                        // when all elements used the row timestamp (max_element_writetime == 0).
                         if let Some(ref mut meta_map) = cell_meta {
                             let row_ts = row_header.timestamp.unwrap_or(0);
+                            let effective_ts = if col_meta.max_element_writetime != 0 {
+                                col_meta.max_element_writetime
+                            } else {
+                                row_ts
+                            };
                             meta_map.insert(
                                 column.name.clone(),
                                 CellWriteMetadata {
-                                    write_timestamp_micros: row_ts,
+                                    write_timestamp_micros: effective_ts,
                                     expiration: None,
                                 },
                             );
+                        }
+                        // DS4 (Issue #700): Store ComplexColumnMeta for delta-scan callers.
+                        if let Some(ref mut ccm_map) = complex_col_meta {
+                            ccm_map.insert(column.name.clone(), col_meta);
                         }
                         cells.insert(column.name.clone(), value);
                         offset = new_offset;
@@ -3411,7 +3510,14 @@ impl V5CompressedLegacyParser {
             row_size, next_offset, row_size_counted_from, is_static
         );
 
-        Ok((cells, cell_meta, Some(row_header), next_offset, is_static))
+        Ok((
+            cells,
+            cell_meta,
+            Some(row_header),
+            next_offset,
+            is_static,
+            complex_col_meta,
+        ))
     }
 
     /// Parse a single cell value WITHOUT column name (schema-order format)
@@ -5640,6 +5746,10 @@ impl V5CompressedLegacyParser {
     /// cells but is currently unused there (`_reader`).  The outer/inner split
     /// lets unit tests call `parse_complex_column_inner` without constructing a
     /// full `SSTableReader`.
+    ///
+    /// Returns `(value, new_offset, collection_meta)` where `collection_meta`
+    /// carries DS4 extra info: whether the collection carries a tombstone
+    /// (overwrite semantics), the max element writetime, and the element tombstone count.
     fn parse_complex_column(
         &self,
         data: &[u8],
@@ -5647,7 +5757,7 @@ impl V5CompressedLegacyParser {
         column: &crate::schema::Column,
         has_complex_deletion: bool,
         _reader: &super::super::types::SSTableReader,
-    ) -> Result<(Value, usize)> {
+    ) -> Result<(Value, usize, ComplexColumnMeta)> {
         self.parse_complex_column_inner(data, offset, column, has_complex_deletion)
     }
 
@@ -5657,16 +5767,25 @@ impl V5CompressedLegacyParser {
         mut offset: usize,
         column: &crate::schema::Column,
         has_complex_deletion: bool,
-    ) -> Result<(Value, usize)> {
+    ) -> Result<(Value, usize, ComplexColumnMeta)> {
         log::debug!(
             "V5CompressedLegacy: Parsing complex column '{}' type='{}' has_complex_deletion={} at offset {}",
             column.name, column.data_type, has_complex_deletion, offset
         );
 
-        // Step 1: Parse complex deletion time if flag is set
+        // Step 1: Parse complex deletion time if flag is set.
+        //
+        // DS4 (Issue #700): Capture the `markedForDeleteAt` to determine whether this
+        // generation carries a **collection-level tombstone** (`s = {...}` overwrite).
+        // Cassandra stores the LIVE sentinel as i64::MIN when there is no tombstone;
+        // any other value means the collection was overwritten (replaced, not appended).
+        //
+        // Wire format: DeletionTime = markedForDeleteAt (VInt delta from min_timestamp)
+        //                           + localDeletionTime (VInt).
+        // We treat `marked_for_delete_at != i64::MIN` as "has collection tombstone".
+        let mut has_collection_tombstone = false;
         if has_complex_deletion {
-            // DeletionTime = markedForDeleteAt (VInt) + localDeletionTime (VInt)
-            let (remaining, _marked_for_delete) = parse_vint(&data[offset..]).map_err(|e| {
+            let (remaining, mfda_delta) = parse_vint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex column '{}': failed to parse markedForDeleteAt at offset {}: {:?}",
                     column.name, offset, e
@@ -5674,6 +5793,14 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+
+            // Delta-decode to get the absolute timestamp.
+            // The LIVE sentinel in Cassandra is Long.MIN_VALUE for markedForDeleteAt.
+            let absolute_mfda = self.min_timestamp.wrapping_add(mfda_delta);
+            // Any value other than i64::MIN indicates a real collection tombstone.
+            if absolute_mfda != i64::MIN {
+                has_collection_tombstone = true;
+            }
 
             let (remaining, _local_deletion) = parse_vint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
@@ -5685,8 +5812,11 @@ impl V5CompressedLegacyParser {
             offset += bytes_consumed;
 
             log::debug!(
-                "V5CompressedLegacy: Complex column '{}' deletion time parsed, now at offset {}",
+                "V5CompressedLegacy: Complex column '{}' deletion time parsed \
+                 (absolute_mfda={} has_collection_tombstone={}), now at offset {}",
                 column.name,
+                absolute_mfda,
+                has_collection_tombstone,
                 offset
             );
         }
@@ -5724,6 +5854,21 @@ impl V5CompressedLegacyParser {
             ))
         })?;
 
+        // DS4 (Issue #700): Track max element writetime and element tombstone count
+        // across all cells in this collection.
+        let mut max_element_writetime: i64 = 0;
+        let mut element_tombstone_count: u64 = 0;
+
+        /// Helper to update max_element_writetime from a parsed cell.
+        #[inline]
+        fn update_max_writetime(max: &mut i64, cell: &ComplexCellParse) {
+            if let Some(ts) = cell.element_writetime {
+                if ts > *max {
+                    *max = ts;
+                }
+            }
+        }
+
         // Determine collection type and extract element type(s)
         let dt = column.data_type.to_lowercase();
         let value = if dt.starts_with("list<")
@@ -5738,9 +5883,20 @@ impl V5CompressedLegacyParser {
                     self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
                 offset = cell.next_offset;
 
+                // DS4: Track element timestamp before deciding to skip.
+                update_max_writetime(&mut max_element_writetime, &cell);
+
                 // Issue #493: element-level tombstones (IS_DELETED 0x01) are not live
                 // values and must not be surfaced. Skip them regardless of their path.
+                // DS4: count them for the scan-summary warning counter.
                 if cell.is_deleted {
+                    element_tombstone_count += 1;
+                    log::debug!(
+                        "V5CompressedLegacy: list element {} in column '{}' is a tombstone \
+                         (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
+                        i,
+                        column.name
+                    );
                     continue;
                 }
 
@@ -5767,6 +5923,9 @@ impl V5CompressedLegacyParser {
                     self.parse_complex_cell_value(data, offset, &element_type, column, i as u64)?;
                 offset = cell.next_offset;
 
+                // DS4: Track element timestamp before deciding to skip.
+                update_max_writetime(&mut max_element_writetime, &cell);
+
                 // Issue #493: element-level tombstones must not surface as live members.
                 // For a set, both a live element and a tombstoned element produce
                 // `cell.value == None` with non-empty `path_bytes` (the element key),
@@ -5774,11 +5933,14 @@ impl V5CompressedLegacyParser {
                 // element in the path. The authoritative IS_DELETED (0x01) flag is the
                 // ONLY signal that distinguishes them, so we consult it directly and skip
                 // tombstoned elements (no-heuristics mandate, Issue #28).
+                // DS4: count them for the scan-summary warning counter.
                 if cell.is_deleted {
+                    element_tombstone_count += 1;
                     log::debug!(
-                        "V5CompressedLegacy: skipping tombstoned set element {} (type={})",
+                        "V5CompressedLegacy: set element {} in column '{}' is a tombstone \
+                         (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
                         i,
-                        element_type
+                        column.name
                     );
                     continue;
                 }
@@ -5822,6 +5984,9 @@ impl V5CompressedLegacyParser {
                     self.parse_complex_cell_value(data, offset, &value_type, column, i as u64)?;
                 offset = cell.next_offset;
 
+                // DS4: Track element timestamp before deciding to skip.
+                update_max_writetime(&mut max_element_writetime, &cell);
+
                 // For maps, the cell path IS the key
                 // Parse the path as the key using the key type
                 // Note: Cell path keys are stored WITHOUT length prefixes (raw bytes only)
@@ -5830,6 +5995,17 @@ impl V5CompressedLegacyParser {
                 // entry already surfaces as `cell.value == None` and is emitted as
                 // (key, Value::Null), preserving existing behavior. Only set/list
                 // element tombstones are skipped.
+                // DS4: For maps with IS_DELETED entries, count them for the scan summary.
+                if cell.is_deleted {
+                    element_tombstone_count += 1;
+                    log::debug!(
+                        "V5CompressedLegacy: map entry {} in column '{}' is a tombstone \
+                         (IS_DELETED=0x01) — counted for DS4 scan summary (Issue #700/#493)",
+                        i,
+                        column.name
+                    );
+                }
+
                 if !cell.path_bytes.is_empty() {
                     log::debug!(
                         "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
@@ -5861,12 +6037,24 @@ impl V5CompressedLegacyParser {
         };
 
         log::debug!(
-            "V5CompressedLegacy: Complex column '{}' parsed, final offset {}",
+            "V5CompressedLegacy: Complex column '{}' parsed, final offset {} \
+             (has_collection_tombstone={} max_element_writetime={} element_tombstone_count={})",
             column.name,
-            offset
+            offset,
+            has_collection_tombstone,
+            max_element_writetime,
+            element_tombstone_count
         );
 
-        Ok((value, offset))
+        Ok((
+            value,
+            offset,
+            ComplexColumnMeta {
+                has_collection_tombstone,
+                max_element_writetime,
+                element_tombstone_count,
+            },
+        ))
     }
 
     /// Parse a single complex cell and extract its value.
@@ -5935,8 +6123,11 @@ impl V5CompressedLegacyParser {
         );
 
         // Step 2: Timestamp (if not using row timestamp)
+        // Capture the element-level timestamp delta for DS4 max-writetime computation.
+        // Cassandra encodes complex cell timestamps as signed VInt deltas from min_timestamp.
+        let mut element_writetime: Option<i64> = None;
         if !use_row_timestamp {
-            let (remaining, _ts) = parse_vint(&data[offset..]).map_err(|e| {
+            let (remaining, ts_delta) = parse_vint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex cell {}.{}: failed to parse timestamp at offset {}: {:?}",
                     column.name, cell_index, offset, e
@@ -5944,6 +6135,9 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+            // Delta decode: absolute_ts = min_timestamp + ts_delta
+            let absolute_ts = self.min_timestamp.wrapping_add(ts_delta);
+            element_writetime = Some(absolute_ts);
         }
 
         // Step 3: Local deletion time (if deleted/expiring and not using row TTL)
@@ -6081,6 +6275,7 @@ impl V5CompressedLegacyParser {
             path_bytes,
             is_deleted,
             next_offset: offset,
+            element_writetime,
         })
     }
 
@@ -9983,7 +10178,7 @@ mod tests {
         ];
         blob.extend_from_slice(&udt_bytes);
 
-        let (value, consumed) = parser
+        let (value, consumed, _meta) = parser
             .parse_complex_column_inner(&blob, 0, &column, false)
             .expect("parse_complex_column_inner must succeed for list<frozen<address_type>>");
         assert_eq!(consumed, blob.len(), "all bytes must be consumed");
@@ -10071,7 +10266,7 @@ mod tests {
         blob.extend(build_set_cell_bytes(hello));
         blob.extend(build_set_cell_bytes(world));
 
-        let (value, consumed) = parser
+        let (value, consumed, _meta) = parser
             .parse_complex_column_inner(&blob, 0, &column, false)
             .expect("parse_complex_column_inner should succeed");
 
@@ -10124,7 +10319,7 @@ mod tests {
         blob.extend(build_set_cell_bytes(live));
         blob.extend(build_set_tombstone_cell_bytes(dead));
 
-        let (value, consumed) = parser
+        let (value, consumed, meta) = parser
             .parse_complex_column_inner(&blob, 0, &column, false)
             .expect("parse_complex_column_inner should succeed");
 
@@ -10133,6 +10328,16 @@ mod tests {
             value,
             Value::Set(vec![Value::Text("live".to_string())]),
             "tombstoned set element must be skipped; only the live element survives"
+        );
+        // DS4 (Issue #700): element tombstone must be counted in the scan summary.
+        assert_eq!(
+            meta.element_tombstone_count, 1,
+            "the tombstoned set element must increment element_tombstone_count"
+        );
+        // Non-overwrite generation (no has_complex_deletion=false → no collection tombstone).
+        assert!(
+            !meta.has_collection_tombstone,
+            "no collection tombstone when has_complex_deletion=false"
         );
     }
 

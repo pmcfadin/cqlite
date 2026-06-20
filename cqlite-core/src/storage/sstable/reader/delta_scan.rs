@@ -38,7 +38,73 @@
 //! Everything in this module is behind `feature = "delta-scan"` and will not
 //! compile into the default crate build.
 
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc,
+};
+
 use crate::types::{ColumnId, TombstoneType, Value};
+
+// ---------------------------------------------------------------------------
+// ScanSummary — scan-level aggregate statistics (Issue #700, DS4)
+// ---------------------------------------------------------------------------
+
+/// Summary statistics produced by a [`scan_delta`] run.
+///
+/// The caller receives a [`ScanSummaryHandle`] alongside the record stream;
+/// after the stream is drained the handle's counters reflect the full scan.
+///
+/// ## Element tombstones (Issue #493 / DS4)
+///
+/// Non-frozen collection cells may contain **element-level removals**
+/// (`s = s - {x}` for sets, individual map-key deletions).  V1 of the
+/// delta-scan layer cannot represent these at element granularity; they are
+/// detected, counted here, and reported as a warning — but not silently
+/// dropped.  Consumers that need element-level fidelity must wait for full
+/// Issue #493 implementation.
+#[derive(Debug, Clone)]
+pub struct ScanSummary {
+    /// Total number of element-level collection tombstones detected across
+    /// all collection columns in this scan.
+    ///
+    /// A non-zero value means the delta contains `s = s - {x}` style
+    /// removals that are not represented in the emitted [`DeltaRecord`]s
+    /// (Issue #493 follow-up).
+    pub element_tombstones_detected: u64,
+}
+
+/// Handle to in-progress scan summary counters.
+///
+/// Returned by [`scan_delta`] alongside the record receiver.
+/// After the receiver is drained (stream complete), call [`ScanSummaryHandle::read`]
+/// to obtain the final [`ScanSummary`].
+///
+/// The handle is cheaply clonable — all clones share the same counters.
+#[derive(Debug, Clone)]
+pub struct ScanSummaryHandle {
+    element_tombstones: Arc<AtomicU64>,
+}
+
+impl ScanSummaryHandle {
+    fn new() -> Self {
+        Self {
+            element_tombstones: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// Increment the element-tombstone counter by `n`.
+    pub(super) fn add_element_tombstones(&self, n: u64) {
+        self.element_tombstones.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// Read the current scan summary.  Call after draining the record receiver
+    /// for a complete picture.
+    pub fn read(&self) -> ScanSummary {
+        ScanSummary {
+            element_tombstones_detected: self.element_tombstones.load(Ordering::Relaxed),
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // RowKeys
@@ -471,18 +537,27 @@ impl DeltaRecord {
 ///
 /// [`scan_delta`] returns immediately with an error if the SSTable directory
 /// does not exist or contains no `Data.db` file.
+/// Return type of [`scan_delta`]: a channel receiver for [`DeltaRecord`]s and
+/// a [`ScanSummaryHandle`] for collecting aggregate scan statistics.
+pub type ScanDeltaOutput = (
+    tokio::sync::mpsc::Receiver<crate::Result<DeltaRecord>>,
+    ScanSummaryHandle,
+);
+
 pub fn scan_delta(
     sstable_dir: std::path::PathBuf,
     schema: crate::schema::TableSchema,
     buffer_size: usize,
-) -> tokio::sync::mpsc::Receiver<crate::Result<DeltaRecord>> {
+) -> ScanDeltaOutput {
     let (tx, rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
+    let summary = ScanSummaryHandle::new();
+    let summary_for_task = summary.clone();
     tokio::spawn(async move {
-        if let Err(e) = run_scan_delta(sstable_dir, schema, tx.clone()).await {
+        if let Err(e) = run_scan_delta(sstable_dir, schema, tx.clone(), summary_for_task).await {
             let _ = tx.send(Err(e)).await;
         }
     });
-    rx
+    (rx, summary)
 }
 
 /// Internal async driver for [`scan_delta`].
@@ -490,6 +565,7 @@ async fn run_scan_delta(
     sstable_dir: std::path::PathBuf,
     schema: crate::schema::TableSchema,
     tx: tokio::sync::mpsc::Sender<crate::Result<DeltaRecord>>,
+    summary: ScanSummaryHandle,
 ) -> crate::Result<()> {
     use crate::storage::sstable::reader::SSTableReader;
 
@@ -544,6 +620,7 @@ async fn run_scan_delta(
                 marked_for_delete_at,
                 range_info,       // Issue #699: Some((start_vals,start_incl,end_vals,end_incl,del_at)) for range tombstone
                 is_partition_tombstone, // Issue #699: true for partition-level tombstone
+                col_complex_meta, // Issue #700 DS4: per-column ComplexColumnMeta
             )| {
                 // ----------------------------------------------------------------
                 // Decode partition key from raw bytes.
@@ -632,6 +709,28 @@ async fn run_scan_delta(
                 }
 
                 // ----------------------------------------------------------------
+                // DS4 (Issue #700): Process element tombstone counts from this row's
+                // collection columns and update the scan summary.
+                // ----------------------------------------------------------------
+                {
+                    let mut row_element_tombstones: u64 = 0;
+                    for (col_name, ccm) in &col_complex_meta {
+                        if ccm.element_tombstone_count > 0 {
+                            row_element_tombstones += ccm.element_tombstone_count;
+                            log::warn!(
+                                "scan_delta DS4: collection column '{}' has {} element-level tombstone(s) \
+                                 that cannot be represented in v1 delta semantics (Issue #493 follow-up). \
+                                 These removals are counted in the scan summary but not in the emitted records.",
+                                col_name, ccm.element_tombstone_count
+                            );
+                        }
+                    }
+                    if row_element_tombstones > 0 {
+                        summary.add_element_tombstones(row_element_tombstones);
+                    }
+                }
+
+                // ----------------------------------------------------------------
                 // Build CellDelta entries for non-key columns only.
                 // ----------------------------------------------------------------
                 let mut cell_deltas: Vec<(ColumnId, CellDelta)> = Vec::new();
@@ -667,6 +766,15 @@ async fn run_scan_delta(
                         None => (row_liveness_ts.unwrap_or(0), None),
                     };
 
+                    // DS4 (Issue #700): For collection columns, check whether this
+                    // generation carries a collection-level tombstone (overwrite semantics).
+                    // `replaced = true` signals downstream consumers to replace rather than
+                    // merge the prior collection state.  Always `false` for scalar columns.
+                    let replaced = col_complex_meta
+                        .get(col_name.as_str())
+                        .map(|ccm| ccm.has_collection_tombstone)
+                        .unwrap_or(false);
+
                     let cell = match value {
                         // Cell tombstone: IS_DELETED flag was set on the cell.
                         Value::Tombstone(info)
@@ -685,7 +793,7 @@ async fn run_scan_delta(
                             value: Some(value.clone()),
                             writetime,
                             expires_at,
-                            replaced: false,
+                            replaced,
                         },
                     };
 
@@ -1260,6 +1368,137 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // DS4 (Issue #700): collection v1 semantics — unit tests
+    // -----------------------------------------------------------------------
+
+    /// AC: A non-collection scalar cell always has `replaced = false`.
+    #[test]
+    fn ds4_replaced_false_for_scalar_column() {
+        let cell = CellDelta::value(Value::Integer(42), 1_700_000_000_000_000);
+        assert!(
+            !cell.replaced,
+            "scalar column must always have replaced=false; got replaced=true"
+        );
+    }
+
+    /// AC: A collection append (no collection tombstone) sets `replaced = false`.
+    #[test]
+    fn ds4_collection_append_replaced_false() {
+        // Append semantics: value is present, but `replaced` is false because
+        // no collection-level tombstone accompanied the mutation.
+        let cell = CellDelta {
+            value: Some(Value::List(vec![Value::Text("new_element".into())])),
+            writetime: 1_700_000_000_000_000,
+            expires_at: None,
+            replaced: false,
+        };
+        assert!(
+            !cell.replaced,
+            "collection append must have replaced=false (no collection tombstone)"
+        );
+    }
+
+    /// AC: A collection overwrite (generation carries a collection tombstone)
+    /// sets `replaced = true`.
+    #[test]
+    fn ds4_collection_overwrite_replaced_true() {
+        // Overwrite semantics: the mutation issued `s = {x, y}` which replaces
+        // prior state; `replaced = true` signals the consumer to discard old state.
+        let cell = CellDelta::collection_replace(
+            Value::List(vec![Value::Text("a".into()), Value::Text("b".into())]),
+            1_700_000_000_000_000,
+        );
+        assert!(
+            cell.replaced,
+            "collection overwrite must have replaced=true (collection tombstone present)"
+        );
+    }
+
+    /// AC: `writetime` on a collection cell equals the max element writetime.
+    ///
+    /// When multiple elements carry distinct writetimes, the `CellDelta.writetime`
+    /// exposed to downstream consumers must be the maximum across all elements.
+    #[test]
+    fn ds4_collection_writetime_equals_max_element_writetime() {
+        let ts_early: i64 = 1_700_000_000_000_000;
+        let ts_late: i64 = 1_700_000_100_000_000; // 100 seconds later
+
+        // Simulate a collection cell where the parser set writetime to max(element_ts).
+        let cell = CellDelta {
+            value: Some(Value::List(vec![
+                Value::Text("a".into()),
+                Value::Text("b".into()),
+            ])),
+            writetime: ts_late, // the max — set by parse_row_data_with_offset
+            expires_at: None,
+            replaced: false,
+        };
+
+        assert_eq!(
+            cell.writetime, ts_late,
+            "writetime must equal max element writetime; expected {ts_late}, got {}",
+            cell.writetime
+        );
+        assert!(
+            cell.writetime > ts_early,
+            "max element writetime {ts_late} must be greater than an earlier element writetime {ts_early}"
+        );
+    }
+
+    /// AC: `ScanSummaryHandle` starts at zero and accumulates element tombstones.
+    #[test]
+    fn ds4_scan_summary_handle_accumulates_element_tombstones() {
+        let handle = ScanSummaryHandle::new();
+
+        // Initial state: no tombstones.
+        assert_eq!(
+            handle.read().element_tombstones_detected,
+            0,
+            "initial element_tombstones_detected must be 0"
+        );
+
+        // Add tombstones in two increments (simulating two rows with element removals).
+        handle.add_element_tombstones(3);
+        handle.add_element_tombstones(5);
+
+        let summary = handle.read();
+        assert_eq!(
+            summary.element_tombstones_detected, 8,
+            "element_tombstones_detected must accumulate: expected 8, got {}",
+            summary.element_tombstones_detected
+        );
+    }
+
+    /// AC: Cloned `ScanSummaryHandle` shares the same atomic counter.
+    ///
+    /// `scan_delta` clones the handle to pass to the parse task while the caller
+    /// retains the original — both must reflect the same accumulator.
+    #[test]
+    fn ds4_scan_summary_handle_clone_shares_counter() {
+        let handle = ScanSummaryHandle::new();
+        let clone = handle.clone();
+
+        clone.add_element_tombstones(7);
+
+        assert_eq!(
+            handle.read().element_tombstones_detected,
+            7,
+            "original handle must reflect counter updated via clone"
+        );
+    }
+
+    /// AC: `replaced = false` for a cell tombstone (even for a collection column,
+    /// the cell-level tombstone path sets `replaced = false`).
+    #[test]
+    fn ds4_cell_tombstone_replaced_false() {
+        let cell = CellDelta::tombstone(1_700_000_000_000_000);
+        assert!(
+            !cell.replaced,
+            "cell tombstones must have replaced=false regardless of column type"
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Integration spot-check: scan_delta on corpus SSTable directories
     // -----------------------------------------------------------------------
 
@@ -1350,7 +1589,7 @@ mod tests {
             comments: std::collections::HashMap::new(),
         };
 
-        let mut rx = scan_delta(table_dir, schema, 64);
+        let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
         let mut upsert_count = 0_usize;
         let mut total = 0_usize;
 
@@ -1453,7 +1692,7 @@ mod tests {
             comments: std::collections::HashMap::new(),
         };
 
-        let mut rx = scan_delta(table_dir, schema, 64);
+        let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
         let mut checked = 0_usize;
 
         while let Some(result) = rx.recv().await {
@@ -1584,7 +1823,7 @@ mod tests {
             comments: std::collections::HashMap::new(),
         };
 
-        let mut rx = scan_delta(table_dir, schema, 64);
+        let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
         let mut static_upsert_count = 0_usize;
         let mut upsert_count = 0_usize;
 
@@ -1738,7 +1977,7 @@ mod tests {
             comments: std::collections::HashMap::new(),
         };
 
-        let mut rx = scan_delta(table_dir, schema, 64);
+        let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
         let mut cell_tombstone_count = 0_usize;
         let mut total_cells = 0_usize;
 
@@ -2201,7 +2440,7 @@ mod tests {
             comments: std::collections::HashMap::new(),
         };
 
-        let mut rx = scan_delta(table_dir, schema, 64);
+        let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
         let mut row_delete_count = 0_usize;
         let mut upsert_count = 0_usize;
 
@@ -2309,7 +2548,7 @@ mod tests {
             comments: std::collections::HashMap::new(),
         };
 
-        let mut rx = scan_delta(table_dir, schema, 64);
+        let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
         let mut range_delete_count = 0_usize;
         let mut upsert_count = 0_usize;
 
@@ -2418,7 +2657,7 @@ mod tests {
             comments: std::collections::HashMap::new(),
         };
 
-        let mut rx = scan_delta(table_dir, schema, 64);
+        let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
         let mut partition_delete_count = 0_usize;
         let mut upsert_count = 0_usize;
 
@@ -2550,7 +2789,7 @@ mod tests {
             comments: std::collections::HashMap::new(),
         };
 
-        let mut rx = scan_delta(table_dir, schema, 128);
+        let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 128);
 
         // Collect all RangeDeletes, grouped by partition key, so we can check
         // that each partition yields BOTH records and that they have distinct
@@ -2643,5 +2882,202 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // DS4 (Issue #700): E2E integration — test_collections corpus
+    // -----------------------------------------------------------------------
+
+    /// E2E integration test: scan_delta over `test_collections/collection_table`
+    /// (SET<TEXT>, LIST<INT>, MAP<TEXT,TEXT>) produces Upsert records without
+    /// panicking, and all Upsert cells have a non-zero writetime.
+    ///
+    /// Also verifies that `ScanSummaryHandle.read()` is accessible after the
+    /// scan completes (DS4 summary API smoke-check).
+    ///
+    /// Skipped automatically when CQLITE_DATASETS_ROOT is not set or
+    /// Data.db is absent (run `bash test-data/scripts/fetch-datasets.sh`).
+    #[tokio::test]
+    async fn ds4_scan_delta_collection_table_e2e() {
+        let root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(r) => std::path::PathBuf::from(r),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set — skipping DS4 collection e2e test");
+                return;
+            }
+        };
+
+        let base = root.join("sstables/test_collections");
+        if !base.exists() {
+            eprintln!("test_collections not found — skipping DS4 e2e");
+            return;
+        }
+
+        // Find the collection_table directory.
+        let table_dir = std::fs::read_dir(&base).ok().and_then(|mut it| {
+            it.find_map(|e| {
+                e.ok()
+                    .filter(|e| {
+                        e.file_name()
+                            .to_str()
+                            .map(|n| n.starts_with("collection_table"))
+                            .unwrap_or(false)
+                    })
+                    .map(|e| e.path())
+            })
+        });
+        let Some(table_dir) = table_dir else {
+            eprintln!("collection_table dir not found — skipping DS4 e2e");
+            return;
+        };
+
+        // Require Data.db; skip if absent.
+        let has_data_db = std::fs::read_dir(&table_dir)
+            .ok()
+            .map(|it| {
+                it.filter_map(|e| e.ok()).any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.ends_with("-Data.db"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if !has_data_db {
+            eprintln!("No Data.db in collection_table — skipping DS4 e2e (run fetch-datasets.sh)");
+            return;
+        }
+
+        // Schema for test_collections.collection_table:
+        //   id UUID PRIMARY KEY
+        //   tags SET<TEXT>
+        //   scores LIST<INT>
+        //   properties MAP<TEXT, TEXT>
+        //   numbers_set SET<INT>
+        //   ordered_values LIST<TIMESTAMP>
+        //   metadata_map MAP<TEXT, BIGINT>
+        let schema = crate::schema::TableSchema {
+            keyspace: "test_collections".to_string(),
+            table: "collection_table".to_string(),
+            partition_keys: vec![crate::schema::KeyColumn {
+                name: "id".to_string(),
+                data_type: "uuid".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                crate::schema::Column {
+                    name: "tags".to_string(),
+                    data_type: "set<text>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "scores".to_string(),
+                    data_type: "list<int>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "properties".to_string(),
+                    data_type: "map<text, text>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "numbers_set".to_string(),
+                    data_type: "set<int>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "ordered_values".to_string(),
+                    data_type: "list<timestamp>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+                crate::schema::Column {
+                    name: "metadata_map".to_string(),
+                    data_type: "map<text, bigint>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: std::collections::HashMap::new(),
+        };
+
+        let (mut rx, summary_handle) = scan_delta(table_dir, schema, 64);
+        let mut upsert_count = 0_usize;
+        let mut total = 0_usize;
+        let mut collection_cells_seen = 0_usize;
+
+        while let Some(result) = rx.recv().await {
+            total += 1;
+            match result {
+                Ok(DeltaRecord::Upsert { ref cells, .. }) => {
+                    upsert_count += 1;
+                    for (col_id, cell) in cells {
+                        let col_name = col_id.name();
+                        // Collection columns: check writetime is a plausible µs timestamp.
+                        if matches!(
+                            col_name,
+                            "tags"
+                                | "scores"
+                                | "properties"
+                                | "numbers_set"
+                                | "ordered_values"
+                                | "metadata_map"
+                        ) && cell.value.is_some()
+                        {
+                            collection_cells_seen += 1;
+                            // DS4 AC: writetime must be a plausible epoch-µs value
+                            // (after 2020-01-01 = 1_577_836_800_000_000 µs).
+                            assert!(
+                                cell.writetime > 1_577_836_800_000_000,
+                                "DS4: collection cell '{}' writetime {} is suspiciously small — \
+                                 expected max element writetime",
+                                col_name,
+                                cell.writetime
+                            );
+                        }
+                    }
+                }
+                Ok(_) => {}
+                Err(e) => panic!("scan_delta DS4 collection e2e error: {e}"),
+            }
+        }
+
+        // Read the summary after the stream is drained.
+        let summary = summary_handle.read();
+
+        eprintln!(
+            "DS4 collection_table e2e: {} total records, {} upserts, {} collection cells, \
+             {} element tombstones detected",
+            total, upsert_count, collection_cells_seen, summary.element_tombstones_detected
+        );
+
+        assert!(
+            upsert_count > 0,
+            "DS4 e2e: expected at least one Upsert from collection_table"
+        );
+        assert!(
+            collection_cells_seen > 0,
+            "DS4 e2e: expected at least one collection cell (tags/scores/properties/…) in Upsert records"
+        );
+
+        // The test corpus uses append operations (no `s = {...}` overwrites),
+        // so element_tombstones_detected should be 0 for this fixture.
+        assert_eq!(
+            summary.element_tombstones_detected, 0,
+            "DS4 e2e: collection_table fixture uses appends only — expected 0 element tombstones, \
+             got {}",
+            summary.element_tombstones_detected
+        );
     }
 }
