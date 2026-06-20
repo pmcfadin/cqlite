@@ -60,22 +60,31 @@ byte-level invariants apply. Status legend:
 - **WRITER** — only relevant once CQLite writes this byte sequence (some already do).
 - **N/A** — not reachable in CQLite yet (e.g. counters, BTI output, MVs).
 
-| # | Cassandra finding (source) | CQLite relevance | Status |
-|---|---|---|---|
-| #4 / #21 | **Cell tie-break at equal timestamp**: `Cells.resolveRegular` keeps the cell whose **raw value bytes** are strictly greater (unsigned lexicographic compare on the *raw* value, skipping the vint length prefix), **not** file/run order. | `merge.rs:943` `reconcile_cluster` keeps **first-seen (lower `run_index` = newer file)** on a full tie (same ts, both live). Two live cells, same timestamp, different values → CQLite and Cassandra can pick different winners, producing non-byte-identical output. | **DIVERGENT** — confirmed by reading + **verified by test** `test_real_merger_value_tiebreak_diverges_from_cassandra` (`merge.rs`, 2026-06-17): CQLite keeps `"apple"` (newer file), Cassandra would keep `"banana"` (greater raw bytes). Open decision: match Cassandra vs document as intentional. |
-| #13 / #3 | **Tombstone beats expiring at equal timestamp**; `IS_EXPIRING` strictly means `ttl != NO_TTL` (mutually exclusive with `IS_DELETED`); don't emit `IS_DELETED|IS_EXPIRING` or a wasted TTL byte. | CQLite handles equal-ts cell-tombstone-beats-live (`is_cell_tombstone`, merge.rs:943-946 / Issue #498). Need to confirm the *expiring-vs-tombstone* ordering and the strict flag semantics on the **write** side. | **VERIFY** |
-| #2 | **`previousUnfilteredSize`** is written to disk but skipped by readers; must equal the byte distance from the previous unfiltered including its own vint length; static rows hardcode 0 and don't advance the chain. Caught as 2601/5100 divergent bytes. | Applies to CQLite's `data_writer.rs` whenever it writes rows. If we write `0` or miscount, our Data.db diverges. | **WRITER / VERIFY** |
-| #10 | **DESC clustering ordering**: empty clustering values sort *after* valued ones; comparison must route empty-vs-valued through `type.isReversed()`. | `ClusteringKey::compare` (schema-aware) must honor reversed columns for empty/valued ordering. | **VERIFY** |
-| #14 / #17 | **Complex-column (multi-cell) deletion**: shadow cells using the **un-purged** deletion value, output the **purged** value; active row/range deletion *strictly* supersedes an equal-timestamp complex deletion (drop on equality). | Reachable once CQLite merges multi-cell collections/UDTs in compaction. Confirm `reconcile_cluster` handles complex deletions at all. | **VERIFY / N/A-yet** |
-| #18 | **Complex-column merge is path-ordered** using the column's *path comparator* — UDT field paths use **signed** `ShortType`, list paths use TimeUUID, map paths use the key type — **not** plain unsigned bytes. | Same multi-cell merge path as #14. Easy to get wrong by comparing raw bytes. | **VERIFY / N/A-yet** |
-| #16 | **Index-block / partition offsets must be 64-bit** (`long`), not `int` — an `int` wraps negative past 2 GiB and corrupts every block offset. | CQLite should use `u64`/`i64` for in-partition and data-file offsets throughout the writer. | **VERIFY** |
-| #12 | **Column subset encoding** (sparse rows): `<64`-column superset → single unsigned-vint bitmap (set bit = *missing* column, value 0 reserved → use `HAS_ALL_COLUMNS`); `≥64` → "large subset" with an exact mode boundary and tail-column inclusion. | Applies to CQLite read *and* write of sparse rows. Read path likely exercised; write-side boundary needs care. | **VERIFY** |
-| #5 / #6 | **BTI block boundaries**: the tail block's width includes the end-of-partition marker byte; promote to a row index only when a partition spans **>1** block (count blocks *including* the tail); single-block → `trieRoot = -1`, partition entry points direct-to-data. | Only if CQLite emits **BTI** output during compaction. CQLite currently reads BTI (guide ch.17); write path is BIG-format. | **N/A-yet (BTI write)** |
-| #22 | Header `hasStatic` and column superset come from the **merged input sstable headers**, not current schema (a dropped static column still has static rows on disk). Dropped columns filtered per-source against per-column drop horizons. | CQLite is schema-driven; must read static-ness / column sets from the sstable `SerializationHeader`, not the supplied schema, when merging. | **VERIFY** |
-| #23 | `Filter.db` may be `AlwaysPresentFilter` when `bloom_filter_fp_chance = 1.0` — guard the cast. | CQLite bloom handling on read; writer must reproduce. | **VERIFY** |
-| #24 | TTL-expiry → tombstone conversion uses `nowInSec`, **overridden to `gcBefore` for Accord-enabled tables**. | Accord is out of scope for CQLite; note the general `nowInSec`/`gcBefore` purge rule. | **N/A (Accord) / context** |
-| #25 | RT-marker / complex-deletion **body-size vint** corrupts for far-future deletions via a long-vs-`(int)` cast (upstream iterator has the *same* latent bug). | CQLite writer must size marker bodies in the long domain. | **WRITER / VERIFY** |
-| #26 | Counter merge: `CounterContext` shard merge, CASSANDRA-7346 tombstone supremacy, `Flag.LOCAL` clear, tombstone-value tie-break. | CQLite does not merge counters in compaction yet. | **N/A-yet (counters)** |
+> **Fidelity bar decided 2026-06-19 (#818):** three-tier model —
+> Tier 1 *Cassandra-readable* (validity; **shipped to live cluster**, so a real node's load
+> path must accept it), Tier 2 *resolution-equivalent* (same survivors/values → same query
+> answers), Tier 3 *byte-identical serialization is a NON-GOAL*. See
+> [`compaction-fidelity-bar-decision.md`](./compaction-fidelity-bar-decision.md) for the
+> per-finding fix-required vs document-only verdicts. The **Verdict (#818)** column below
+> carries those rulings (`FIX` / `DOCUMENT` / `DEFER` / `N/A`); **Status** records the current
+> verification state.
+
+| # | Cassandra finding (source) | CQLite relevance | Status | Verdict (#818) |
+|---|---|---|---|---|
+| #4 / #21 | **Cell tie-break at equal timestamp**: `Cells.resolveRegular` keeps the cell whose **raw value bytes** are strictly greater (unsigned lexicographic compare on the *raw* value, skipping the vint length prefix), **not** file/run order. | `reconcile_cluster` (`merge.rs`) keeps **first-seen (lower `run_index` = newer file)** on a full tie (same ts, both live). Two live cells, same timestamp, different values → CQLite and Cassandra can pick different winners. | **DIVERGENT** — confirmed by reading + **verified by test** `test_real_merger_value_tiebreak_diverges_from_cassandra` (`merge.rs`, 2026-06-17): CQLite keeps `"apple"` (newer file), Cassandra would keep `"banana"` (greater raw bytes). | **FIX** (Tier 2) — ruled 2026-06-19; match Cassandra's greater-raw-value-wins. Convergence test replaces the divergence test when the fix lands. |
+| #13 / #3 | **Tombstone beats expiring at equal timestamp**; `IS_EXPIRING` strictly means `ttl != NO_TTL` (mutually exclusive with `IS_DELETED`); don't emit `IS_DELETED|IS_EXPIRING` or a wasted TTL byte. | CQLite handles equal-ts cell-tombstone-beats-live (`is_cell_tombstone` in `reconcile_cluster`, `merge.rs` / Issue #498). Need to confirm the *expiring-vs-tombstone* ordering and the strict flag semantics on the **write** side. | **VERIFY** | **FIX** (Tier 2) |
+| #2 | **`previousUnfilteredSize`** is written to disk but skipped by readers; must equal the byte distance from the previous unfiltered including its own vint length; static rows hardcode 0 and don't advance the chain. Caught as 2601/5100 divergent bytes. | Applies to CQLite's `data_writer.rs` whenever it writes rows. If we write `0` or miscount, our Data.db diverges. | **WRITER / VERIFY** | **DOCUMENT / best-effort** (Tier 3) — promote to FIX only if a real node validates it on load. |
+| #10 | **DESC clustering ordering**: empty clustering values sort *after* valued ones; comparison must route empty-vs-valued through `type.isReversed()`. | `ClusteringKey::compare` (schema-aware) must honor reversed columns for empty/valued ordering. | **VERIFY** | **FIX** (Tier 1) |
+| #14 / #17 | **Complex-column (multi-cell) deletion**: shadow cells using the **un-purged** deletion value, output the **purged** value; active row/range deletion *strictly* supersedes an equal-timestamp complex deletion (drop on equality). | Reachable once CQLite merges multi-cell collections/UDTs in compaction. Confirm `reconcile_cluster` handles complex deletions at all. | **VERIFY / N/A-yet** | **FIX** (Tier 2) |
+| #18 | **Complex-column merge is path-ordered** using the column's *path comparator* — UDT field paths use **signed** `ShortType`, list paths use TimeUUID, map paths use the key type — **not** plain unsigned bytes. | Same multi-cell merge path as #14. Easy to get wrong by comparing raw bytes. | **VERIFY / N/A-yet** | **FIX pairing** (Tier 2); output order bytes Tier-3. |
+| #16 | **Index-block / partition offsets must be 64-bit** (`long`), not `int` — an `int` wraps negative past 2 GiB and corrupts every block offset. | CQLite should use `u64`/`i64` for in-partition and data-file offsets throughout the writer. | **VERIFY** | **FIX** (Tier 1) |
+| #12 | **Column subset encoding** (sparse rows): `<64`-column superset → single unsigned-vint bitmap (set bit = *missing* column, value 0 reserved → use `HAS_ALL_COLUMNS`); `≥64` → "large subset" with an exact mode boundary and tail-column inclusion. | Applies to CQLite read *and* write of sparse rows. Read path likely exercised; write-side boundary needs care. | **VERIFY** | **FIX correctness incl. 64-col boundary** (Tier 1/2) — mode selection is decode-critical, not Tier-3. |
+| #5 / #6 | **BTI block boundaries**: the tail block's width includes the end-of-partition marker byte; promote to a row index only when a partition spans **>1** block (count blocks *including* the tail); single-block → `trieRoot = -1`, partition entry points direct-to-data. | Only if CQLite emits **BTI** output during compaction. CQLite currently reads BTI (guide ch.17); write path is BIG-format. | **N/A-yet (BTI write)** | **DEFER** (overlaps epic #762). |
+| #22 | Header `hasStatic` and column superset come from the **merged input sstable headers**, not current schema (a dropped static column still has static rows on disk). Dropped columns filtered per-source against per-column drop horizons. | CQLite is schema-driven; must read static-ness / column sets from the sstable `SerializationHeader`, not the supplied schema, when merging. | **VERIFY** | **FIX** (Tier 2) |
+| #23 | `Filter.db` may be `AlwaysPresentFilter` when `bloom_filter_fp_chance = 1.0` — guard the cast. | CQLite bloom handling on read; writer must reproduce. | **VERIFY** | **FIX** (Tier 1) |
+| #24 | TTL-expiry → tombstone conversion uses `nowInSec`, **overridden to `gcBefore` for Accord-enabled tables**. | Accord is out of scope for CQLite; note the general `nowInSec`/`gcBefore` purge rule. | **N/A (Accord) / context** | **N/A** |
+| #25 | RT-marker / complex-deletion **body-size vint** corrupts for far-future deletions via a long-vs-`(int)` cast (upstream iterator has the *same* latent bug). | CQLite writer must size marker bodies in the long domain. | **WRITER / VERIFY** | **FIX** (Tier 1) |
+| #26 | Counter merge: `CounterContext` shard merge, CASSANDRA-7346 tombstone supremacy, `Flag.LOCAL` clear, tombstone-value tie-break. | CQLite does not merge counters in compaction yet. | **N/A-yet (counters)** | **N/A-yet** |
 
 > The plan reports **22 findings total**; not all are enumerated in the docs read here
 > (some are referenced only by count). When working from `cursor-compaction-plan.md`
@@ -87,12 +96,15 @@ byte-level invariants apply. Status legend:
 
 These are design takeaways, independent of any single finding.
 
-1. **Adopt a differential byte-identity gate for compaction output.** CQLite validates
-   *reads* against `sstabledump`, but compaction *write* output has no "byte-identical to
-   what Cassandra would produce" gate — which is exactly where every Part 1 finding bites.
-   The model: compact identical inputs with real Cassandra and with CQLite, assert byte-equal
-   `Data.db` (and `Statistics.db`). Add a **two-generation** check (re-compact CQLite's own
-   output) — the docs note write-side corruption that only the *next* merge surfaces (#2).
+1. **Adopt a differential compaction gate for write output.** CQLite validates *reads* against
+   `sstabledump`, but compaction *write* output has no differential gate — which is exactly
+   where every Part 1 finding bites. The model: compact identical inputs with real Cassandra
+   and with CQLite. Per the #818 fidelity bar, the **gate** is **logical merge equivalence**
+   (Tier 2: identical surviving cell/value/tombstone tuples) **plus real-node load-path
+   validity** (Tier 1, shipped-to-cluster). A raw-byte `diff` of `Data.db`/`Statistics.db` is
+   retained as an **optional debug-only diagnostic** (Tier 3 byte-identity is a non-goal), not a
+   pass/fail gate. Add a **two-generation** check (re-compact CQLite's own output) — the docs
+   note write-side issues that only the *next* merge surfaces (#2).
 
 2. **Cursor-native is the right Rust end-state.** Cassandra's lever — *flat bytes + reusable
    flyweights beat materialized objects* — is the natural Rust idiom (`&[u8]`, `slice::cmp`,
@@ -122,7 +134,7 @@ Cassandra source, per the provenance caveat):
 | `11-merging-tombstones-and-shadowing.md` | BTI-spec §5.2 + findings: cell reconciliation, raw-vs-wire bytes (#4/#21), tombstone>expiring (#13), complex-deletion shadow-before-purge (#14/#17), purge/GC, strict liveness. |
 | `17-bti-formats.md` | BTI-spec §3: `Partitions.db`/`Rows.db` trie layout, byte-comparable keys, `TrieIndexEntry` serialization, separators, single-block `trieRoot=-1`, partition-index "last three longs" header. |
 | `08-statistics-db.md` | Spool proposal: `estimatedTombstoneDropTime` histogram structure and consumers. |
-| `15-compaction-strategies.md` | "Two pipelines, byte-identical output" framing; adaptive index granularity (#7) and clustering front-coding (#5 in `improvements.md`) as forward-looking sidebars. |
+| `15-compaction-strategies.md` | "Two pipelines, **resolution-equivalent** output" framing (per #818: gate on logical merge equivalence + real-node load-path validity; byte-identity is a Tier-3 non-goal, used only as a diagnostic); adaptive index granularity (#7) and clustering front-coding (#5 in `improvements.md`) as forward-looking sidebars. |
 | `appendix-b-encodings-cheat-sheet.md` | Cell/unfiltered flag bits, subset bitmap, delta-encoding bases (`minTimestamp`/`minLocalDeletionTime`/`minTTL`). |
 | `appendix-f-known-limitations.md` | The latent long-vs-`(int)` size-vint bug (#25), `AlwaysPresentFilter` cast (#23). |
 
@@ -130,13 +142,16 @@ Cassandra source, per the provenance caveat):
 
 ## Part 4 — Recommended next actions (snapshot — keep current)
 
-1. **[compaction] Reconcile finding #4/#21** — divergence is now **verified** by
-   `test_real_merger_value_tiebreak_diverges_from_cassandra` (`merge.rs`). Remaining decision:
-   should `reconcile_cluster` match Cassandra's "larger raw value wins" tie-break, or do we
-   document the divergence as intentional? This determines byte-identity feasibility. If we
-   converge, that test must flip to a convergence test. *(Verified 2026-06-17; decision open.)*
+1. **[compaction] Reconcile finding #4/#21** — divergence is **verified** by
+   `test_real_merger_value_tiebreak_diverges_from_cassandra` (`merge.rs`). **Decision made
+   2026-06-19 (#818): FIX** — `reconcile_cluster` must match Cassandra's "larger raw value
+   wins" (Tier 2, resolution-equivalence). When the fix lands, that test flips to a convergence
+   test. #820 characterizes the tie-break across non-text types. *(Verified 2026-06-17; ruled
+   FIX 2026-06-19.)*
 2. **[compaction] Stand up a differential compaction gate** against real Cassandra output,
-   using `bti-sstable-specification.md` as the contract. *(Open.)*
+   using `bti-sstable-specification.md` as the contract. **Pass criterion (#818):** logical
+   merge equivalence (Tier 2) + real-node load-path validity (Tier 1, shipped-to-cluster);
+   raw-byte component diff is a debug-only secondary signal (Tier 3). *(Open — #819.)*
 3. **[guide] Verify-then-import** the Data.db (ch.05) and merge/tombstone (ch.11) detail. *(Open.)*
 
 ---
@@ -149,11 +164,12 @@ with findings. Prefer reproducing each as a test before claiming a status change
 
 1. **Tie-break divergence (#4/#21).** ✅ *Reproduced in a unit test*
    (`test_real_merger_value_tiebreak_diverges_from_cassandra`, `merge.rs`) — CQLite's
-   first-seen rule picks a different winner than Cassandra's raw-value-bytes rule. **Still
-   open:** (a) does this ever fire on *real corpora* (an end-to-end compaction diff vs real
-   Cassandra, not just a unit fixture)? (b) does it hold for non-text types where "raw value
-   bytes" ≠ UTF-8 (e.g. `int`, `decimal`, `blob`)? (c) is matching Cassandra worth it, or do
-   we document the divergence as intentional?
+   first-seen rule picks a different winner than Cassandra's raw-value-bytes rule.
+   **Decided (#818): FIX** — match Cassandra's greater-raw-value-wins (Tier 2). **Remaining
+   work:** (a) confirm it fires on *real corpora* via the #819 harness, not just the unit
+   fixture; (b) characterize across non-text types where "raw value bytes" ≠ UTF-8 (`int`,
+   `decimal`, `blob`, `uuid`) — see #820; (c) implement the fix and flip the reproduction test
+   to a convergence test.
 2. **`previousUnfilteredSize` (#2).** What does `data_writer.rs` currently write for this
    field? Is it counted correctly (including its own vint length; 0 for static rows)? Add a
    byte-level assertion.
@@ -163,9 +179,12 @@ with findings. Prefer reproducing each as a test before claiming a status change
 4. **Header-driven static/columns (#22).** Does CQLite's compaction read `hasStatic` and the
    column superset from the sstable `SerializationHeader`, or from the supplied schema? Test
    with a dropped static column whose rows still exist on disk.
-5. **Differential gate design.** What's the minimal harness to compact the same inputs through
-   Cassandra and CQLite and diff `Data.db`/`Statistics.db` byte-for-byte? Where does it live
-   relative to the existing `sstabledump` parity tooling and `test-data/`?
+5. **Differential gate design (#819).** What's the minimal harness to compact the same inputs
+   through Cassandra and CQLite and compare per the #818 bar — **gate on logical merge
+   equivalence (Tier 2) + real-node load-path validity (Tier 1)**, with a raw-byte
+   `Data.db`/`Statistics.db` diff kept as a **debug-only** secondary signal (Tier 3
+   byte-identity is a non-goal)? Where does it live relative to the existing `sstabledump`
+   parity tooling and `test-data/`?
 6. **Complex-column merge (#14/#17/#18).** Does `reconcile_cluster` merge multi-cell
    collections/UDTs at all today, or only collapse whole rows? If it does, are path ordering
    (signed UDT field index) and shadow-before-purge honored?
