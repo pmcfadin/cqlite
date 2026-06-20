@@ -4,6 +4,7 @@
 **Audience:** CQLite maintainers
 **Related:**
 - `docs/architecture/cassandra-sidecar-parquet-projections.md` (decisions this design implements)
+- `docs/architecture/delta-scan-consumer-reconciliation.md` (consumer merge recipe — DuckDB SQL reference)
 - Epic #673 (Arrow type fidelity), Epic #682 (Parquet writer in core), Epic #689 (WRITETIME/TTL in SELECT)
 - Issue #493 (set element tombstones), Issue #667 (tombstone readback coverage)
 
