@@ -39,13 +39,14 @@
 //!
 //! ## Node types emitted
 //!
-//! For maximum robustness the writer uses only two of the reader's node
-//! categories:
+//! The writer uses three of the reader's node categories:
 //!
 //! - `PayloadOnly` (ordinal 0) for leaves.
 //! - `Sparse` (ordinals 5/7/8/9, sized by the largest backward delta among the
-//!   node's children) for every internal node. `Sparse` accepts 1..=255
-//!   children, so it subsumes the single-child case too. The reader's
+//!   node's children) for internal nodes with 1..=255 children, so it subsumes
+//!   the single-child case too.
+//! - `Dense` for an internal node with full 256-byte fan-out (which `Sparse`
+//!   cannot encode — its child count is a single byte). The reader's
 //!   `parse_bti_node` + `find_child` handle exactly these encodings.
 //!
 //! ## Out of scope (recorded for the epic)
@@ -54,9 +55,9 @@
 //!   phase 1 every partition payload encodes a direct `Data.db` offset
 //!   (negative `position`), never a `RowsOffset`. Wide-partition row tries are a
 //!   follow-up (see issue #766 / epic #762).
-//! - `Dense`, `Single*`, and 12-bit packed node variants are not emitted. They
-//!   are valid and the reader parses them, but `Sparse` alone produces correct,
-//!   compact tries for phase 1.
+//! - `Single*` and 12-bit packed node variants are not emitted. They are valid
+//!   and the reader parses them, but `PayloadOnly`/`Sparse`/`Dense` cover every
+//!   trie phase 1 produces.
 
 use crate::error::{Error, Result};
 use crate::storage::sstable::bti::encode_partition_key_for_bti_trie;
