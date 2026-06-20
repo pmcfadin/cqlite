@@ -39,6 +39,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
+  issues: write
 
 # Cancel superseded PR runs; let manual runs finish.
 concurrency:
@@ -124,7 +125,7 @@ jobs:
 
       - name: Build cqlite (write-support) candidate binary
         run: |
-          cargo build --features write-support
+          cargo build --package cqlite-cli --features write-support
           test -x target/debug/cqlite
 
       - name: Setup Gradle (no wrapper in compaction-parity)
@@ -235,7 +236,7 @@ jobs:
             Reproduce locally:
             \`\`\`bash
             compaction-parity/scripts/bootstrap-cassandra.sh
-            cargo build --features write-support
+            cargo build --package cqlite-cli --features write-support
             cd compaction-parity && gradle test
             \`\`\``;
             github.rest.issues.createComment({
