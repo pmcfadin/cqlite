@@ -237,13 +237,28 @@ pub fn derive_delta_schema(
 
     // ------------------------------------------------------------------
     // 2. Fail-before-writing: check for column-name collisions
+    //
+    // The collision check must cover ALL user-visible column names, including
+    // partition-key and clustering-key columns.  Key columns are emitted as
+    // plain Arrow fields (steps 3a/3b) just like regular columns, so a key
+    // column named e.g. `__op` would produce two Arrow fields with the same
+    // name — silently malformed output rather than the intended error.
     // ------------------------------------------------------------------
     let reserved = opts.reserved_names();
-    for col in &table.columns {
+
+    // Collect all column names: partition keys + clustering keys + regular columns.
+    let all_column_names = table
+        .partition_keys
+        .iter()
+        .map(|k| &k.name)
+        .chain(table.clustering_keys.iter().map(|k| &k.name))
+        .chain(table.columns.iter().map(|c| &c.name));
+
+    for col_name in all_column_names {
         for res in &reserved {
-            if col.name == *res {
+            if col_name == res {
                 return Err(DeltaSchemaError::ColumnCollision {
-                    column: col.name.clone(),
+                    column: col_name.clone(),
                     reserved: res.clone(),
                 });
             }
@@ -335,8 +350,7 @@ fn is_counter_type(cql_type: &CqlType) -> bool {
 fn is_collection_type(cql_type: &CqlType) -> bool {
     match cql_type {
         CqlType::List(_) | CqlType::Set(_) | CqlType::Map(_, _) => true,
-        // Frozen<collection> is frozen — treated as a scalar.
-        CqlType::Frozen(_) => false,
+        // All other types, including Frozen<collection>, are treated as scalars.
         _ => false,
     }
 }
@@ -841,6 +855,102 @@ mod tests {
             matches!(err, DeltaSchemaError::ColumnCollision { .. }),
             "expected ColumnCollision"
         );
+    }
+
+    // ------------------------------------------------------------------
+    // Collision detection: key columns (partition / clustering) named __op
+    // ------------------------------------------------------------------
+
+    /// A partition key column named `__op` must trigger `ColumnCollision`.
+    ///
+    /// Before the fix, the check only iterated `table.columns`, so a key column
+    /// with a reserved name escaped detection and produced a malformed Arrow
+    /// `Schema` with two fields named `__op`.
+    #[test]
+    fn partition_key_collision_default_prefix() {
+        let table = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "pk_collision".to_string(),
+            partition_keys: vec![KeyColumn {
+                // Partition key named after the envelope discriminator.
+                name: "__op".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            // `table.columns` deliberately does NOT contain a column named `__op`
+            // (simulating a schema where keys are not duplicated in the columns
+            // list), so the pre-fix check over `table.columns` alone would have
+            // missed this collision entirely.
+            columns: vec![Column {
+                name: "__op".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        };
+
+        let err = derive_delta_schema(&table, &DeltaSchemaOpts::default())
+            .expect_err("expected ColumnCollision for partition key named __op");
+
+        match err {
+            DeltaSchemaError::ColumnCollision { column, reserved } => {
+                assert_eq!(column, "__op");
+                assert_eq!(reserved, "__op");
+            }
+            other => panic!("expected ColumnCollision, got {:?}", other),
+        }
+    }
+
+    /// A clustering key column named `__ts` must trigger `ColumnCollision`.
+    #[test]
+    fn clustering_key_collision_default_prefix() {
+        let table = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "ck_collision".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                // Clustering key named after the envelope timestamp column.
+                name: "__ts".to_string(),
+                data_type: "text".to_string(),
+                position: 0,
+                order: ClusteringOrder::Asc,
+            }],
+            columns: vec![
+                Column {
+                    name: "pk".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "__ts".to_string(),
+                    data_type: "text".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        };
+
+        let err = derive_delta_schema(&table, &DeltaSchemaOpts::default())
+            .expect_err("expected ColumnCollision for clustering key named __ts");
+
+        match err {
+            DeltaSchemaError::ColumnCollision { column, reserved } => {
+                assert_eq!(column, "__ts");
+                assert_eq!(reserved, "__ts");
+            }
+            other => panic!("expected ColumnCollision, got {:?}", other),
+        }
     }
 
     // ------------------------------------------------------------------
