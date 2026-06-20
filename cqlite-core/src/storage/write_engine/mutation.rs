@@ -388,13 +388,31 @@ impl ClusteringKey {
             }
 
             let cluster_col = &schema.clustering_keys[i];
-            let ordering = compare_values(a_val, b_val)?;
 
-            // Apply DESC ordering if specified in schema
-            let final_ordering = if cluster_col.order == ClusteringOrder::Desc {
-                ordering.reverse()
-            } else {
-                ordering
+            // Cassandra (ref 587612cd): clustering reversal (DESC) only reverses
+            // the comparison of two *present* values. An absent (NULL) component
+            // sorts first regardless of ASC/DESC, so the reversal must never flip
+            // null/empty-component ordering. Empty-vs-valued comparisons are
+            // routed through the type (compare_values) so they reverse correctly
+            // on DESC columns, but a NULL component is not a typed value and is
+            // handled positionally here.
+            let final_ordering = match (a_val, b_val) {
+                // Two absent components are equal in either direction.
+                (Value::Null, Value::Null) => Ordering::Equal,
+                // Exactly one side absent: NULL sorts first (Less) regardless of
+                // ASC/DESC. Do not apply the DESC reversal.
+                (Value::Null, _) => Ordering::Less,
+                (_, Value::Null) => Ordering::Greater,
+                // Both present: compare through the type, then apply DESC
+                // reversal so empty-vs-valued ordering matches Cassandra.
+                (_, _) => {
+                    let ordering = compare_values(a_val, b_val)?;
+                    if cluster_col.order == ClusteringOrder::Desc {
+                        ordering.reverse()
+                    } else {
+                        ordering
+                    }
+                }
             };
 
             if final_ordering != Ordering::Equal {
@@ -852,6 +870,134 @@ mod tests {
         let ordering = ck1.compare(&ck2, &schema).unwrap();
         // DESC ordering reverses the comparison
         assert_eq!(ordering, Ordering::Greater);
+    }
+
+    // --- Issue #849: clustering reversal must not flip null/empty ordering ---
+
+    #[test]
+    fn test_clustering_null_sorts_first_asc() {
+        // An absent (NULL) trailing component must sort before any valued
+        // component on an ASC clustering column.
+        let schema = create_test_schema(
+            vec![("id", "int")],
+            vec![("ts", "timestamp", ClusteringOrder::Asc)],
+        );
+
+        let null_ck = ClusteringKey::single("ts", Value::Null);
+        let valued_ck = ClusteringKey::single("ts", Value::Timestamp(1000));
+
+        assert_eq!(
+            null_ck.compare(&valued_ck, &schema).unwrap(),
+            Ordering::Less,
+            "NULL must sort before a value on ASC"
+        );
+        assert_eq!(
+            valued_ck.compare(&null_ck, &schema).unwrap(),
+            Ordering::Greater,
+            "value must sort after NULL on ASC"
+        );
+    }
+
+    #[test]
+    fn test_clustering_null_sorts_first_desc() {
+        // The blanket `ordering.reverse()` previously flipped this so that NULL
+        // sorted *after* a value on DESC columns. Cassandra sorts NULL first
+        // regardless of ASC/DESC (ref 587612cd).
+        let schema = create_test_schema(
+            vec![("id", "int")],
+            vec![("ts", "timestamp", ClusteringOrder::Desc)],
+        );
+
+        let null_ck = ClusteringKey::single("ts", Value::Null);
+        let valued_ck = ClusteringKey::single("ts", Value::Timestamp(1000));
+
+        assert_eq!(
+            null_ck.compare(&valued_ck, &schema).unwrap(),
+            Ordering::Less,
+            "NULL must sort before a value even on DESC"
+        );
+        assert_eq!(
+            valued_ck.compare(&null_ck, &schema).unwrap(),
+            Ordering::Greater,
+            "value must sort after NULL even on DESC"
+        );
+
+        // Two NULLs compare equal regardless of order.
+        let null_ck2 = ClusteringKey::single("ts", Value::Null);
+        assert_eq!(
+            null_ck.compare(&null_ck2, &schema).unwrap(),
+            Ordering::Equal
+        );
+    }
+
+    #[test]
+    fn test_clustering_empty_vs_valued_asc() {
+        // An empty (zero-length) text component routes through the type:
+        // empty < non-empty on ASC.
+        let schema = create_test_schema(
+            vec![("id", "int")],
+            vec![("c", "text", ClusteringOrder::Asc)],
+        );
+
+        let empty_ck = ClusteringKey::single("c", Value::Text(String::new()));
+        let valued_ck = ClusteringKey::single("c", Value::Text("a".to_string()));
+
+        assert_eq!(
+            empty_ck.compare(&valued_ck, &schema).unwrap(),
+            Ordering::Less,
+            "empty text must sort before non-empty on ASC"
+        );
+    }
+
+    #[test]
+    fn test_clustering_empty_vs_valued_desc() {
+        // On a DESC column the type-routed comparison is reversed for two
+        // present values: empty > non-empty.
+        let schema = create_test_schema(
+            vec![("id", "int")],
+            vec![("c", "text", ClusteringOrder::Desc)],
+        );
+
+        let empty_ck = ClusteringKey::single("c", Value::Text(String::new()));
+        let valued_ck = ClusteringKey::single("c", Value::Text("a".to_string()));
+
+        assert_eq!(
+            empty_ck.compare(&valued_ck, &schema).unwrap(),
+            Ordering::Greater,
+            "empty text must sort after non-empty on DESC (type-routed reversal)"
+        );
+        assert_eq!(
+            valued_ck.compare(&empty_ck, &schema).unwrap(),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn test_clustering_null_first_on_second_desc_component() {
+        // Multi-component: first component equal, NULL on the second (DESC)
+        // component must still sort first.
+        let schema = create_test_schema(
+            vec![("id", "int")],
+            vec![
+                ("a", "int", ClusteringOrder::Asc),
+                ("b", "timestamp", ClusteringOrder::Desc),
+            ],
+        );
+
+        let null_b = ClusteringKey::new(vec![
+            ("a".to_string(), Value::Integer(1)),
+            ("b".to_string(), Value::Null),
+        ]);
+        let valued_b = ClusteringKey::new(vec![
+            ("a".to_string(), Value::Integer(1)),
+            ("b".to_string(), Value::Timestamp(5000)),
+        ]);
+
+        assert_eq!(
+            null_b.compare(&valued_b, &schema).unwrap(),
+            Ordering::Less,
+            "NULL on a DESC sub-component still sorts first"
+        );
     }
 
     #[test]
