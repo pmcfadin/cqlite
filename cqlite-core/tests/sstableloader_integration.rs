@@ -262,9 +262,9 @@ impl LoaderHarness {
 fn validate_flushed_components(info: &SSTableInfo) -> CqliteResult<()> {
     let required = [
         &info.data_path,
-        &info.index_path,
+        info.index_path.as_ref().unwrap(),
         &info.filter_path,
-        &info.summary_path,
+        info.summary_path.as_ref().unwrap(),
         &info.stats_path,
         &info.toc_path,
         &info.digest_path,

@@ -294,4 +294,17 @@ pub struct SSTableReader {
     /// uncompressed Data.db offset for a partition key — an O(log n) point lookup
     /// instead of the sequential scan used when no index is available.
     pub(crate) bti_partitions_db: Option<Arc<Vec<u8>>>,
+    /// Raw bytes of the sibling BTI `*-Rows.db` within-partition row-index trie,
+    /// when this reader was opened on a BTI ("da") SSTable (issue #909, #910).
+    ///
+    /// `Some` for BTI SSTables (always emitted, possibly 0 bytes for a
+    /// narrow-only table), `None` for BIG-format SSTables. The BTI point-lookup
+    /// path uses this to resolve a WIDE partition: the `Partitions.db` trie
+    /// returns a positive `RowsOffset` pointing at the partition's
+    /// `TrieIndexEntry` inside `Rows.db`; [`resolve_rows_db_entry`] then recovers
+    /// the partition's uncompressed `Data.db` position (`data_position`), which is
+    /// the same offset domain a NARROW partition's direct `DataOffset` uses.
+    ///
+    /// [`resolve_rows_db_entry`]: crate::storage::sstable::bti::resolve_rows_db_entry
+    pub(crate) bti_rows_db: Option<Arc<Vec<u8>>>,
 }

@@ -107,7 +107,7 @@ async fn test_data_partitions_token_order() {
             .await
             .expect("Platform creation should succeed"),
     );
-    let index_reader = IndexReader::open(&info.index_path, platform)
+    let index_reader = IndexReader::open(info.index_path.as_ref().unwrap(), platform)
         .await
         .expect("IndexReader should open");
 
@@ -168,7 +168,7 @@ async fn test_data_index_offset_correctness() {
             .await
             .expect("Platform creation should succeed"),
     );
-    let index_reader = IndexReader::open(&info.index_path, platform)
+    let index_reader = IndexReader::open(info.index_path.as_ref().unwrap(), platform)
         .await
         .expect("IndexReader should open");
 
@@ -241,7 +241,7 @@ async fn test_data_many_partitions() {
             .await
             .expect("Platform creation should succeed"),
     );
-    let index_reader = IndexReader::open(&info.index_path, platform)
+    let index_reader = IndexReader::open(info.index_path.as_ref().unwrap(), platform)
         .await
         .expect("IndexReader should open");
 
@@ -320,7 +320,7 @@ async fn test_data_mixed_partition_sizes() {
             .await
             .expect("Platform creation should succeed"),
     );
-    let index_reader = IndexReader::open(&info.index_path, platform)
+    let index_reader = IndexReader::open(info.index_path.as_ref().unwrap(), platform)
         .await
         .expect("IndexReader should open");
 
@@ -475,7 +475,7 @@ async fn test_data_cross_component_validation() {
             .await
             .expect("Platform creation should succeed"),
     );
-    let index_reader = IndexReader::open(&info.index_path, platform.clone())
+    let index_reader = IndexReader::open(info.index_path.as_ref().unwrap(), platform.clone())
         .await
         .expect("IndexReader should open");
     assert_eq!(
@@ -498,7 +498,7 @@ async fn test_data_cross_component_validation() {
     let _filter = BloomFilter::deserialize(&filter_data).expect("Filter.db should deserialize");
 
     // Cross-validation 4: Summary.db has entries
-    let summary_reader = SummaryReader::open(&info.summary_path, platform)
+    let summary_reader = SummaryReader::open(info.summary_path.as_ref().unwrap(), platform)
         .await
         .expect("SummaryReader should open");
     assert!(
