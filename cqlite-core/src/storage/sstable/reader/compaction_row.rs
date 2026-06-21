@@ -203,4 +203,14 @@ pub struct ComplexElement {
     /// Whether this element carries the IS_DELETED (0x01) flag (an
     /// element-level tombstone).
     pub is_deleted: bool,
+    /// Whether the on-disk cell carried the HAS_EMPTY_VALUE (0x04) flag.
+    ///
+    /// `true` for a SET member (whose value lives in the `cell_path`, not the
+    /// cell value) and for any genuinely empty-value element. The compaction
+    /// writer uses THIS flag — not the decoded [`value`](Self::value) — to decide
+    /// whether to emit an on-disk value, so a SET element round-trips byte-for-
+    /// byte (its decoded member is reconstructed from `cell_path`, never written
+    /// as a cell value). Distinct from `is_deleted`: an empty-value live element
+    /// is not a tombstone.
+    pub has_empty_value: bool,
 }

@@ -149,27 +149,34 @@ impl MergeEntry {
         self
     }
 
-    /// True when this entry exists ONLY to carry complex/range deletion metadata
-    /// and has no row content the writer can emit today (#886/#899 branch-review).
+    /// True when this entry exists ONLY to carry metadata the writer CANNOT emit
+    /// today and has no row content — so routing it to the writer would create a
+    /// PHANTOM live empty (pure-PK) row at timestamp 0 (`DataWriter::merge_row_group`
+    /// treats a no-op mutation as a primary-key insert).
     ///
     /// `reconcile_cluster` emits an empty `RowData::Live { cells: vec![] }` (at
     /// timestamp 0) when a cluster has no surviving cells and no row tombstone but
-    /// still carries complex/range deletion metadata, so that metadata survives
-    /// reconciliation in the in-memory merge stream. The compaction writer does
-    /// NOT yet consume those carried deletions (deferred to #899); if such an
-    /// entry is routed to the writer it would become a PHANTOM live empty
-    /// (pure-PK) row at timestamp 0, because `DataWriter::merge_row_group` treats
-    /// a no-op mutation as a primary-key insert.
+    /// still carries deletion metadata, so that metadata survives reconciliation
+    /// in the in-memory merge stream.
     ///
-    /// The merge stream never produces a genuine empty-but-live row through this
-    /// path: an entry with empty cells, no row tombstone, AND no carried metadata
-    /// reconciles to `None` (nothing emitted). So an empty live entry that
-    /// survives reconciliation always carries deletion metadata and is purely
-    /// synthetic. The writer path must skip these to avoid phantom liveness.
+    /// Epic #899 Phase C: a COMPLEX DELETION is now consumed by the writer — the
+    /// merge→mutation step emits a real `CellOperation::ComplexDeletion` marker, so
+    /// a complex-deletion-only entry is NO LONGER a no-op and MUST reach the
+    /// SSTable (a fully-deleted-collection marker must survive). It is therefore
+    /// NOT filtered.
+    ///
+    /// A RANGE DELETION, by contrast, is still NOT consumed by the compaction
+    /// writer (deferred to #846): an entry whose only surviving state is a range
+    /// deletion (empty cells, no row tombstone, no complex deletion) would still
+    /// become a phantom live row, so it is filtered here. The merge stream never
+    /// produces a genuine empty-but-live row through this path (an entry with empty
+    /// cells, no row tombstone, AND no carried metadata reconciles to `None`), so
+    /// filtering this synthetic case is safe.
     #[must_use]
     pub fn is_metadata_only_no_op(&self) -> bool {
         matches!(&self.row_data, RowData::Live { cells } if cells.is_empty())
-            && (!self.complex_deletions.is_empty() || self.range_deletion.is_some())
+            && self.complex_deletions.is_empty()
+            && self.range_deletion.is_some()
     }
 }
 
@@ -288,10 +295,40 @@ pub struct CellData {
     /// expiring-cell tie-breaks (issue #886 substrate).
     ///
     /// For an expiring (TTL) cell this is the cell's expiration instant; for a
-    /// cell tombstone it is when the delete was applied. **Carry-only.**
-    /// Threaded for #845/#848 but not yet populated by the reader or consumed
-    /// by the merge/writer. `None` when unknown.
+    /// cell tombstone it is when the delete was applied.
+    ///
+    /// Populated for complex (collection / UDT) elements on the compaction read
+    /// path (epic #899, Phase C); `None` for simple cells whose LDT the reader
+    /// does not surface, and for live simple cells.
     pub local_deletion_time: Option<i32>,
+    /// True when this `CellData` represents a single ELEMENT of a non-frozen
+    /// complex column (a list/set member or a map entry), as opposed to a simple
+    /// single-cell column (epic #899, Phase C).
+    ///
+    /// When `true`, [`cell_path`](Self::cell_path) is the element's authoritative
+    /// on-disk path and the merge→mutation step emits a
+    /// [`CellOperation::WriteComplexElement`] (preserving per-element
+    /// ts/ttl/ldt/path) rather than a whole-column `Write`. `false` for every
+    /// simple cell (whole-column collapse no longer happens on the production
+    /// path).
+    ///
+    /// [`CellOperation::WriteComplexElement`]: crate::storage::write_engine::mutation::CellOperation::WriteComplexElement
+    pub is_complex_element: bool,
+    /// Authoritative IS_DELETED (0x01) flag for a complex element (epic #899,
+    /// Phase C). Carried verbatim from [`ComplexElement::is_deleted`] — NOT
+    /// re-derived from value/ttl/ldt shape, so an expiring SET member (empty
+    /// value, ttl + ldt set) is correctly NOT treated as a tombstone
+    /// (no-heuristics mandate). Always `false` for simple cells (a simple cell
+    /// tombstone rides in [`value`](Self::value) as `Value::Tombstone`).
+    ///
+    /// [`ComplexElement::is_deleted`]: crate::storage::sstable::reader::compaction_row::ComplexElement::is_deleted
+    pub is_deleted: bool,
+    /// On-disk HAS_EMPTY_VALUE (0x04) flag for a complex element (epic #899,
+    /// Phase C). `true` for a SET member (whose identity lives in the cell_path)
+    /// and any genuinely empty-value element, so the writer reproduces the same
+    /// on-disk emptiness rather than re-deriving it from the decoded value.
+    /// Always `false` for simple cells.
+    pub has_empty_value: bool,
 }
 
 #[cfg(feature = "write-support")]
@@ -307,6 +344,9 @@ impl CellData {
             ttl: None,
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         }
     }
 }
@@ -860,27 +900,33 @@ impl SSTableRowIteratorAdapter {
     }
 
     /// Convert a [`CompactionRowData`] into the merge `RowData` plus the row's
-    /// complex-deletion markers (epic #899, Phase A).
+    /// complex-deletion markers (epic #899, Phase C — the behavioral flip).
     ///
-    /// PHASE A IS BEHAVIOR-NEUTRAL (roborev #863). The merge OUTPUT path must
-    /// produce byte-identical Data.db to pre-Phase-A. Therefore each complex
-    /// (non-frozen collection / UDT) column becomes ONE [`CellData`] carrying the
-    /// reader's whole-collection `collapsed_value` — EXACTLY the representation
-    /// the pre-Phase-A read path threaded to the (untouched) writer (empty /
-    /// overwritten collections preserved; MAP null/tombstoned entries kept as
-    /// `(key, Null)`; SET/LIST element tombstones dropped). Simple columns become
-    /// one [`CellData`] each, as before.
+    /// Simple columns become one [`CellData`] each (cell-own ts/ttl/ldt). A
+    /// complex (non-frozen collection / UDT) column is NO LONGER collapsed to a
+    /// single whole-column value: each [`ComplexElement`] becomes its OWN
+    /// per-element [`CellData`] carrying the element's authoritative `cell_path`,
+    /// per-element `timestamp`, `ttl`, `local_deletion_time`, `is_deleted`, and
+    /// on-disk `has_empty_value`. `reconcile_cluster` keys winners on
+    /// `(column, cell_path)`, so disjoint elements of the same column written
+    /// across SSTables all survive (Cassandra `Cells#reconcile`), and the
+    /// merge→mutation step emits a [`CellOperation::WriteComplexElement`] per
+    /// element — preserving the per-element on-disk layout byte-for-byte (epic
+    /// #899 north star). The reader's whole-collection `collapsed_value` is no
+    /// longer threaded to the writer (the per-element path is now authoritative);
+    /// it remains on the reader contract for user-facing reads.
     ///
-    /// The per-element substrate (`ComplexColumn.elements`, per-element ts / ttl /
-    /// ldt / cell_path) and the first-class [`ComplexDeletion`] markers are the
-    /// Phase-A FOUNDATION: they are POPULATED on the [`CompactionRow`] and carried
-    /// onto `MergeEntry.complex_deletions`, but the writer does NOT yet consume
-    /// the per-element cells nor the complex deletion. Per-element writer emit +
-    /// complex-deletion-driven shadowing are Phase C, verified by differential
-    /// parity. Until then this collapse guarantees neutrality.
+    /// The real per-column complex deletion (`markedForDeleteAt` +
+    /// `localDeletionTime`) is surfaced on `complex_deletions` so the writer
+    /// emits a REAL deletion marker (replacing the LIVE sentinel). Applying that
+    /// marker to SHADOW covered elements (strict-supersede, gc) is deferred to
+    /// #887/#845 — Phase C carries and emits the marker but does not shadow.
+    ///
+    /// [`ComplexElement`]: crate::storage::sstable::reader::compaction_row::ComplexElement
+    /// [`CellOperation::WriteComplexElement`]: crate::storage::write_engine::mutation::CellOperation::WriteComplexElement
     fn compaction_row_data_to_row_data(
         row_data: crate::storage::sstable::reader::compaction_row::CompactionRowData,
-        row_timestamp: i64,
+        _row_timestamp: i64,
     ) -> (RowData, Vec<ComplexDeletion>) {
         use crate::storage::sstable::reader::compaction_row::CompactionRowData;
 
@@ -896,7 +942,8 @@ impl SSTableRowIteratorAdapter {
                 Vec::new(),
             ),
             CompactionRowData::Live { simple, complex } => {
-                let mut cells = Vec::with_capacity(simple.len() + complex.len());
+                let element_count: usize = complex.iter().map(|c| c.elements.len()).sum();
+                let mut cells = Vec::with_capacity(simple.len() + element_count);
                 let mut complex_deletions = Vec::new();
 
                 for sc in simple {
@@ -907,12 +954,15 @@ impl SSTableRowIteratorAdapter {
                         ttl: sc.ttl,
                         cell_path: None,
                         local_deletion_time: sc.local_deletion_time,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     });
                 }
 
                 for col in complex {
-                    // Carry the real complex deletion as the Phase-A foundation
-                    // (NOT yet consumed by the writer — Phase C).
+                    // Surface the REAL complex deletion (replacing the LIVE
+                    // sentinel) so the writer emits a genuine marker (Phase C).
                     if let Some((marked_for_delete_at, ldt)) = col.complex_deletion {
                         complex_deletions.push(ComplexDeletion {
                             column: col.column.clone(),
@@ -921,20 +971,39 @@ impl SSTableRowIteratorAdapter {
                         });
                     }
 
-                    // OUTPUT path: one whole-collection CellData per complex column
-                    // using the reader's collapsed value (byte-neutral). The row
-                    // liveness timestamp is used (pre-Phase-A semantics: complex
-                    // columns inherited the row timestamp on the compaction read
-                    // path — see the old `value_to_row_data`). cell_path None marks
-                    // it as a whole-column cell.
-                    cells.push(CellData {
-                        column: col.column,
-                        value: col.collapsed_value,
-                        timestamp: row_timestamp,
-                        ttl: None,
-                        cell_path: None,
-                        local_deletion_time: None,
-                    });
+                    // Per-element emit: one CellData per ComplexElement, keyed by
+                    // its authoritative cell_path, carrying per-element write
+                    // metadata verbatim. An element tombstone is represented with
+                    // `is_deleted = true` and a `Value::Tombstone(CellTombstone)`
+                    // value so the per-cell reconcile tie-break (tombstone beats
+                    // live at equal ts) still applies; a live element keeps its
+                    // decoded value (the reader stores the SET member decoded from
+                    // the path, but `has_empty_value` records the on-disk emptiness
+                    // so the writer reproduces it byte-for-byte).
+                    for elem in col.elements {
+                        let value = if elem.is_deleted {
+                            Value::Tombstone(crate::types::TombstoneInfo {
+                                deletion_time: elem.timestamp,
+                                tombstone_type: crate::types::TombstoneType::CellTombstone,
+                                ttl: None,
+                                range_start: None,
+                                range_end: None,
+                            })
+                        } else {
+                            elem.value.unwrap_or(Value::Null)
+                        };
+                        cells.push(CellData {
+                            column: col.column.clone(),
+                            value,
+                            timestamp: elem.timestamp,
+                            ttl: elem.ttl,
+                            cell_path: Some(elem.cell_path),
+                            local_deletion_time: elem.local_deletion_time,
+                            is_complex_element: true,
+                            is_deleted: elem.is_deleted,
+                            has_empty_value: elem.has_empty_value,
+                        });
+                    }
                 }
 
                 (RowData::Live { cells }, complex_deletions)
@@ -999,6 +1068,9 @@ impl SSTableRowIteratorAdapter {
                         ttl: None,
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     });
                 }
                 Ok(RowData::Live { cells })
@@ -1014,6 +1086,9 @@ impl SSTableRowIteratorAdapter {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             }),
         }
@@ -1744,14 +1819,22 @@ impl KWayMerger {
         })
     }
 
-    /// Convert reconciled `CellData`s into writer `CellOperation`s.
+    /// Convert reconciled `CellData`s into writer `CellOperation`s (epic #899,
+    /// Phase C).
     ///
-    /// PHASE A NEUTRALITY (roborev #863): complex (collection / UDT) columns are
-    /// threaded as ONE whole-collection `CellData` (`cell_path == None`) carrying
-    /// the reader's `collapsed_value` — see
-    /// [`Self::compaction_row_data_to_row_data`]. Every cell here therefore maps
-    /// 1:1 to a writer `CellOperation` exactly as pre-Phase-A did (no per-element
-    /// re-collapse, no promotion / drop). Per-element writer emit lands in Phase C.
+    /// A simple cell (`is_complex_element == false`) maps 1:1 to a whole-column
+    /// `Write` / `WriteWithTtl` / `Delete` exactly as before. A complex element
+    /// (`is_complex_element == true`) maps to a
+    /// [`CellOperation::WriteComplexElement`] carrying the element's authoritative
+    /// `cell_path`, per-element `timestamp` / `ttl` / `local_deletion_time`, and
+    /// — crucially, per the no-heuristics mandate — its AUTHORITATIVE `is_deleted`
+    /// flag (threaded verbatim from the reader's `ComplexElement.is_deleted`, NOT
+    /// re-derived from value/ttl shape; an expiring SET member is value-None,
+    /// ttl-Some yet not a tombstone). The element's on-disk `has_empty_value`
+    /// decides whether a value is written, so a SET member round-trips with its
+    /// member in the cell_path and no cell value.
+    ///
+    /// [`CellOperation::WriteComplexElement`]: crate::storage::write_engine::mutation::CellOperation::WriteComplexElement
     fn cells_to_cell_operations(
         cells: Vec<CellData>,
     ) -> Vec<crate::storage::write_engine::mutation::CellOperation> {
@@ -1761,7 +1844,31 @@ impl KWayMerger {
         cells
             .into_iter()
             .map(|cell| {
-                // Issue #505: cell-level tombstones are represented as
+                if cell.is_complex_element {
+                    // Per-element op. The on-disk value is present only for a live
+                    // element that is NOT empty-value and NOT deleted. A SET member
+                    // (has_empty_value) carries its identity in cell_path; a
+                    // deleted element carries no value.
+                    let value = if cell.is_deleted || cell.has_empty_value {
+                        None
+                    } else {
+                        Some(cell.value)
+                    };
+                    return CellOperation::WriteComplexElement {
+                        column: cell.column,
+                        // A complex element always has a cell_path; default to
+                        // empty rather than panicking if a future producer omits
+                        // it (no unwrap in lib code).
+                        cell_path: cell.cell_path.unwrap_or_default(),
+                        value,
+                        timestamp_micros: cell.timestamp,
+                        ttl_seconds: cell.ttl,
+                        local_deletion_time: cell.local_deletion_time,
+                        is_deleted: cell.is_deleted,
+                    };
+                }
+
+                // Issue #505: simple cell-level tombstones are represented as
                 // Value::Tombstone(CellTombstone); translate to
                 // CellOperation::Delete so the writer emits a proper cell tombstone
                 // rather than a live cell with a null value.
@@ -1801,10 +1908,28 @@ impl KWayMerger {
         let partition_key = PartitionKey::from_bytes(&entry.key.key, schema)?;
         let table_id = TableId::new(&schema.keyspace, &schema.table);
 
-        let operations = match entry.row_data {
+        let mut operations = match entry.row_data {
             RowData::Live { cells } => Self::cells_to_cell_operations(cells),
             RowData::Tombstone { .. } => vec![CellOperation::DeleteRow],
         };
+
+        // Epic #899 Phase C: emit a REAL per-column complex deletion marker for
+        // each carried `ComplexDeletion`, replacing the writer's hardcoded LIVE
+        // sentinel. The writer pairs this with the column's surviving per-element
+        // cells (WriteComplexElement ops above). Only meaningful for a live row;
+        // a row tombstone already covers the whole row. Applying the marker to
+        // SHADOW covered elements (strict-supersede / gc purge) is deferred to
+        // #887 / #845 — Phase C carries and emits the marker faithfully but does
+        // not shadow (see merge module / reconcile_cluster docs).
+        if !matches!(operations.as_slice(), [CellOperation::DeleteRow]) {
+            for cd in entry.complex_deletions {
+                operations.push(CellOperation::ComplexDeletion {
+                    column: cd.column,
+                    marked_for_delete_at: cd.marked_for_delete_at,
+                    local_deletion_time: cd.local_deletion_time,
+                });
+            }
+        }
 
         // NOTE (follow-up #873): the rewritten row tombstone's
         // local_deletion_time is left None here, so the writer derives it from
@@ -1951,6 +2076,9 @@ mod tests {
                 ttl: None,
                 cell_path: None,
                 local_deletion_time: None,
+                is_complex_element: false,
+                is_deleted: false,
+                has_empty_value: false,
             }],
         };
 
@@ -1988,6 +2116,9 @@ mod tests {
             ttl: Some(3600),
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         };
 
         assert_eq!(cell.column, "age");
@@ -2028,6 +2159,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2084,6 +2218,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2101,6 +2238,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2187,6 +2327,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2294,6 +2437,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2312,6 +2458,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2425,6 +2574,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2449,6 +2601,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2572,6 +2727,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2589,6 +2747,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2699,6 +2860,9 @@ mod tests {
                         ttl: None,
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     },
                     CellData {
                         column: "extra".to_string(),
@@ -2707,6 +2871,9 @@ mod tests {
                         ttl: None,
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     },
                 ],
             },
@@ -2725,6 +2892,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2823,6 +2993,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2849,6 +3022,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2928,6 +3104,9 @@ mod tests {
                     ttl: None,
                     cell_path: None,
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -2996,6 +3175,9 @@ mod tests {
             ttl: None,
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         };
 
         let cell2 = CellData {
@@ -3005,6 +3187,9 @@ mod tests {
             ttl: None,
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         };
 
         // Cell2 should win in last-write-wins merge
@@ -3058,6 +3243,9 @@ mod tests {
                         ttl: None,
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     },
                     CellData {
                         column: "age".to_string(),
@@ -3066,6 +3254,9 @@ mod tests {
                         ttl: Some(3600),
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     },
                 ],
             },
@@ -3694,383 +3885,389 @@ mod merge_property_tests {
     // ─── Property tests ───────────────────────────────────────────────────────
 
     proptest! {
-        #![proptest_config(ProptestConfig::with_cases(64))]
+            #![proptest_config(ProptestConfig::with_cases(64))]
 
-        // Property A: Tombstone shadowing
-        // After merging, for every (partition, clustering, column) cell slot, if
-        // the reference says Dead(ts=T) then the highest-timestamp Delete in the
-        // input stream for that slot must have timestamp T.
-        #[test]
-        fn prop_tombstone_shadowing_consistent(inputs in arb_cell_stream()) {
-            let merged = reference_merge(&inputs);
+            // Property A: Tombstone shadowing
+            // After merging, for every (partition, clustering, column) cell slot, if
+            // the reference says Dead(ts=T) then the highest-timestamp Delete in the
+            // input stream for that slot must have timestamp T.
+            #[test]
+            fn prop_tombstone_shadowing_consistent(inputs in arb_cell_stream()) {
+                let merged = reference_merge(&inputs);
 
-            for (&(pk, ck, col), cell) in &merged {
-                if let MergedCell::Dead { timestamp: dead_ts } = cell {
-                    // Find the highest-timestamp Delete for this slot in the input.
-                    let best_delete = inputs.iter()
-                        .filter(|ci| ci.partition == pk && ci.clustering == ck && ci.column == col)
-                        .filter_map(|ci| {
-                            if let CellOp::Delete { timestamp } = ci.op {
-                                Some(timestamp)
-                            } else {
-                                None
-                            }
-                        })
-                        .max();
+                for (&(pk, ck, col), cell) in &merged {
+                    if let MergedCell::Dead { timestamp: dead_ts } = cell {
+                        // Find the highest-timestamp Delete for this slot in the input.
+                        let best_delete = inputs.iter()
+                            .filter(|ci| ci.partition == pk && ci.clustering == ck && ci.column == col)
+                            .filter_map(|ci| {
+                                if let CellOp::Delete { timestamp } = ci.op {
+                                    Some(timestamp)
+                                } else {
+                                    None
+                                }
+                            })
+                            .max();
 
-                    prop_assert!(
-                        best_delete.is_some(),
-                        "Dead cell at ({},{},{}) but no Delete in inputs",
-                        pk, ck, col
-                    );
-                    prop_assert_eq!(
-                        best_delete.unwrap(),
-                        *dead_ts,
-                        "Dead cell timestamp must equal best Delete timestamp for ({},{},{})",
-                        pk, ck, col
-                    );
-                }
-            }
-        }
-
-        // Property B: TTL expiry
-        // After merging, no cell should be Live if all its Write ops are TTL-expired.
-        #[test]
-        fn prop_ttl_expiry_no_expired_live_cells(inputs in arb_cell_stream()) {
-            let merged = reference_merge(&inputs);
-
-            for (&(pk, ck, col), cell) in &merged {
-                if let MergedCell::Live { .. } = cell {
-                    // There must be at least one non-expired Write for this slot.
-                    let has_live_write = inputs.iter()
-                        .filter(|ci| ci.partition == pk && ci.clustering == ck && ci.column == col)
-                        .any(|ci| {
-                            if let CellOp::Write { local_deletion_time, .. } = &ci.op {
-                                // A live write: no TTL, or TTL not expired.
-                                local_deletion_time
-                                    .map(|ldt| ldt >= MERGE_TIME_SECS)
-                                    .unwrap_or(true)
-                            } else {
-                                false
-                            }
-                        });
-
-                    prop_assert!(
-                        has_live_write,
-                        "Live cell at ({},{},{}) but all writes are expired",
-                        pk, ck, col
-                    );
-                }
-            }
-        }
-
-        // Property C: Range tombstone application
-        // After merging, no Live cell should exist that is fully covered by a
-        // range tombstone whose marked_for_delete_at >= the cell's write timestamp.
-        #[test]
-        fn prop_range_tombstone_suppresses_covered_live_cells(inputs in arb_cell_stream()) {
-            let merged = reference_merge(&inputs);
-
-            // Collect all range tombstones from the input stream.
-            let range_tombstones: Vec<(u8, u8, u8, i64)> = inputs.iter()
-                .filter_map(|ci| {
-                    if let CellOp::RangeTombstone { start_ck, end_ck, marked_for_delete_at } = ci.op {
-                        Some((ci.partition, start_ck, end_ck, marked_for_delete_at))
-                    } else {
-                        None
+                        prop_assert!(
+                            best_delete.is_some(),
+                            "Dead cell at ({},{},{}) but no Delete in inputs",
+                            pk, ck, col
+                        );
+                        prop_assert_eq!(
+                            best_delete.unwrap(),
+                            *dead_ts,
+                            "Dead cell timestamp must equal best Delete timestamp for ({},{},{})",
+                            pk, ck, col
+                        );
                     }
-                })
-                .collect();
+                }
+            }
 
-            for (&(pk, ck, _col), cell) in &merged {
-                if let MergedCell::Live { timestamp } = cell {
-                    // Verify no range tombstone shadows this cell.
-                    for &(rt_pk, start_ck, end_ck, mfda) in &range_tombstones {
-                        if rt_pk == pk && ck >= start_ck && ck <= end_ck && mfda >= *timestamp {
-                            prop_assert!(
-                                false,
-                                "Live cell at ({},{}) ts={} should be suppressed by \
-                                 RangeTombstone(part={}, [{},{}], mfda={})",
-                                pk, ck, timestamp, rt_pk, start_ck, end_ck, mfda
-                            );
+            // Property B: TTL expiry
+            // After merging, no cell should be Live if all its Write ops are TTL-expired.
+            #[test]
+            fn prop_ttl_expiry_no_expired_live_cells(inputs in arb_cell_stream()) {
+                let merged = reference_merge(&inputs);
+
+                for (&(pk, ck, col), cell) in &merged {
+                    if let MergedCell::Live { .. } = cell {
+                        // There must be at least one non-expired Write for this slot.
+                        let has_live_write = inputs.iter()
+                            .filter(|ci| ci.partition == pk && ci.clustering == ck && ci.column == col)
+                            .any(|ci| {
+                                if let CellOp::Write { local_deletion_time, .. } = &ci.op {
+                                    // A live write: no TTL, or TTL not expired.
+                                    local_deletion_time
+                                        .map(|ldt| ldt >= MERGE_TIME_SECS)
+                                        .unwrap_or(true)
+                                } else {
+                                    false
+                                }
+                            });
+
+                        prop_assert!(
+                            has_live_write,
+                            "Live cell at ({},{},{}) but all writes are expired",
+                            pk, ck, col
+                        );
+                    }
+                }
+            }
+
+            // Property C: Range tombstone application
+            // After merging, no Live cell should exist that is fully covered by a
+            // range tombstone whose marked_for_delete_at >= the cell's write timestamp.
+            #[test]
+            fn prop_range_tombstone_suppresses_covered_live_cells(inputs in arb_cell_stream()) {
+                let merged = reference_merge(&inputs);
+
+                // Collect all range tombstones from the input stream.
+                let range_tombstones: Vec<(u8, u8, u8, i64)> = inputs.iter()
+                    .filter_map(|ci| {
+                        if let CellOp::RangeTombstone { start_ck, end_ck, marked_for_delete_at } = ci.op {
+                            Some((ci.partition, start_ck, end_ck, marked_for_delete_at))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                for (&(pk, ck, _col), cell) in &merged {
+                    if let MergedCell::Live { timestamp } = cell {
+                        // Verify no range tombstone shadows this cell.
+                        for &(rt_pk, start_ck, end_ck, mfda) in &range_tombstones {
+                            if rt_pk == pk && ck >= start_ck && ck <= end_ck && mfda >= *timestamp {
+                                prop_assert!(
+                                    false,
+                                    "Live cell at ({},{}) ts={} should be suppressed by \
+                                     RangeTombstone(part={}, [{},{}], mfda={})",
+                                    pk, ck, timestamp, rt_pk, start_ck, end_ck, mfda
+                                );
+                            }
                         }
                     }
                 }
             }
-        }
 
-        // Property D: LWW correctness
-        // Every Live cell in the merged output must have a timestamp equal to
-        // the maximum non-expired Write timestamp for that cell slot.
-        #[test]
-        fn prop_live_cell_has_max_write_timestamp(inputs in arb_cell_stream()) {
-            let merged = reference_merge(&inputs);
+            // Property D: LWW correctness
+            // Every Live cell in the merged output must have a timestamp equal to
+            // the maximum non-expired Write timestamp for that cell slot.
+            #[test]
+            fn prop_live_cell_has_max_write_timestamp(inputs in arb_cell_stream()) {
+                let merged = reference_merge(&inputs);
 
-            for (&(pk, ck, col), cell) in &merged {
-                if let MergedCell::Live { timestamp: live_ts } = cell {
-                    // Find the maximum non-expired Write timestamp for this slot.
-                    let max_ts = inputs.iter()
-                        .filter(|ci| ci.partition == pk && ci.clustering == ck && ci.column == col)
-                        .filter_map(|ci| {
-                            if let CellOp::Write { timestamp, local_deletion_time } = &ci.op {
-                                // Only include non-expired writes.
-                                let not_expired = local_deletion_time
-                                    .map(|ldt| ldt >= MERGE_TIME_SECS)
-                                    .unwrap_or(true);
-                                if not_expired { Some(*timestamp) } else { None }
-                            } else {
-                                None
+                for (&(pk, ck, col), cell) in &merged {
+                    if let MergedCell::Live { timestamp: live_ts } = cell {
+                        // Find the maximum non-expired Write timestamp for this slot.
+                        let max_ts = inputs.iter()
+                            .filter(|ci| ci.partition == pk && ci.clustering == ck && ci.column == col)
+                            .filter_map(|ci| {
+                                if let CellOp::Write { timestamp, local_deletion_time } = &ci.op {
+                                    // Only include non-expired writes.
+                                    let not_expired = local_deletion_time
+                                        .map(|ldt| ldt >= MERGE_TIME_SECS)
+                                        .unwrap_or(true);
+                                    if not_expired { Some(*timestamp) } else { None }
+                                } else {
+                                    None
+                                }
+                            })
+                            .max();
+
+                        prop_assert_eq!(
+                            max_ts,
+                            Some(*live_ts),
+                            "Live cell at ({},{},{}) must have max non-expired write timestamp",
+                            pk, ck, col
+                        );
+                    }
+                }
+            }
+
+            // Property E: Output is deterministic (idempotent reference)
+            // Calling reference_merge twice on the same input produces identical output.
+            #[test]
+            fn prop_reference_merge_is_deterministic(inputs in arb_cell_stream()) {
+                let result_a = reference_merge(&inputs);
+                let result_b = reference_merge(&inputs);
+                prop_assert_eq!(
+                    sorted_keys(&result_a),
+                    sorted_keys(&result_b),
+                    "reference_merge must be deterministic"
+                );
+            }
+
+            // Property F: Real merger LWW parity
+            // For cell streams containing only non-expired Writes (no Deletes,
+            // no RangeTombstones, no TTL), the real KWayMerger.merge_partition_rows
+            // must agree with the reference on which row wins per clustering key.
+            //
+            // We drive merge_partition_rows directly with synthetic MergeEntry inputs
+            // that represent the Write ops.
+            #[test]
+            fn prop_real_merger_lww_agrees_with_reference(
+                entries in prop::collection::vec(
+                    // (clustering_key 0..4, run_index 0..2, timestamp 1..20)
+                    (0u8..4u8, 0usize..2usize, 1i64..=20i64),
+                    2..=12usize,
+                )
+            ) {
+                use crate::schema::{Column, KeyColumn};
+                use std::collections::HashMap as SchemaMap;
+
+                let schema = TableSchema {
+                    keyspace: "prop_test_ks".to_string(),
+                    table: "prop_test_table".to_string(),
+                    partition_keys: vec![KeyColumn {
+                        name: "id".to_string(),
+                        data_type: "int".to_string(),
+                        position: 0,
+                    }],
+                    clustering_keys: vec![],
+                    columns: vec![Column {
+                        name: "value".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        default: None,
+                        is_static: false,
+                    }],
+                    comments: SchemaMap::new(),
+                };
+
+                // Build MergeEntry stream — one per (ck, run_index, timestamp) tuple.
+                // All entries share the same partition.
+                let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+                let merge_entries: Vec<MergeEntry> = entries.iter().map(|&(ck, run_index, ts)| {
+                    let ck_key = ClusteringKey {
+                        columns: vec![("ck".to_string(), Value::TinyInt(ck as i8))],
+                    };
+                    MergeEntry::new(
+                        run_index,
+                        partition_key.clone(),
+                        Some(ck_key),
+                        ts,
+                        RowData::Live {
+                            cells: vec![CellData {
+                                column: "value".to_string(),
+                                value: Value::Integer(ts as i32),
+                                timestamp: ts,
+                                ttl: None,
+                                cell_path: None,
+                                local_deletion_time: None,
+                                                        is_complex_element: false,
+                                is_deleted: false,
+                                has_empty_value: false,
+    }],
+                        },
+                    )
+                }).collect();
+
+                // Drive the real merger.
+                let merger = KWayMerger {
+                    runs: vec![],
+                    heap: std::collections::BinaryHeap::new(),
+                    current_partition: None,
+                    gc_before_secs: None,
+                    now_secs: None,
+                    schema: schema.clone(),
+                };
+                let real_merged = merger.merge_partition_rows(merge_entries.clone())
+                    .expect("merge_partition_rows must not fail");
+
+                // Build the reference result: per clustering-key int, highest timestamp wins.
+                // (run_index as tie-breaker: lower run_index wins at equal ts — same as merger)
+                let mut ref_map: HashMap<u8, (i64, usize)> = HashMap::new();
+                for &(ck, run_index, ts) in &entries {
+                    ref_map.entry(ck)
+                        .and_modify(|(best_ts, best_run)| {
+                            if ts > *best_ts || (ts == *best_ts && run_index < *best_run) {
+                                *best_ts = ts;
+                                *best_run = run_index;
                             }
                         })
-                        .max();
+                        .or_insert((ts, run_index));
+                }
 
+                // Verify each winner in the real output matches the reference.
+                prop_assert_eq!(
+                    real_merged.len(),
+                    ref_map.len(),
+                    "real merger output row count must match reference"
+                );
+
+                for entry in &real_merged {
+                    let ck_byte = match entry.clustering_key.as_ref()
+                        .and_then(|ck| ck.columns.first())
+                        .map(|(_, v)| v)
+                    {
+                        Some(Value::TinyInt(b)) => *b as u8,
+                        _ => {
+                            prop_assert!(false, "unexpected clustering key value");
+                            unreachable!()
+                        }
+                    };
+
+                    let (ref_ts, _ref_run) = ref_map[&ck_byte];
                     prop_assert_eq!(
-                        max_ts,
-                        Some(*live_ts),
-                        "Live cell at ({},{},{}) must have max non-expired write timestamp",
-                        pk, ck, col
+                        entry.timestamp,
+                        ref_ts,
+                        "real merger winner timestamp must match reference for ck={}",
+                        ck_byte
                     );
                 }
             }
-        }
 
-        // Property E: Output is deterministic (idempotent reference)
-        // Calling reference_merge twice on the same input produces identical output.
-        #[test]
-        fn prop_reference_merge_is_deterministic(inputs in arb_cell_stream()) {
-            let result_a = reference_merge(&inputs);
-            let result_b = reference_merge(&inputs);
-            prop_assert_eq!(
-                sorted_keys(&result_a),
-                sorted_keys(&result_b),
-                "reference_merge must be deterministic"
-            );
-        }
+            // Property G: Tombstone wins over live row at same clustering key in real merger
+            // When a Tombstone and a Live row have the same clustering key, the one with
+            // the higher timestamp must win — and the real merger must reflect this.
+            #[test]
+            fn prop_real_merger_tombstone_vs_live(
+                ts_write in 1i64..=10i64,
+                ts_delete in 1i64..=20i64,
+            ) {
+                use crate::schema::{Column, KeyColumn};
+                use std::collections::HashMap as SchemaMap;
 
-        // Property F: Real merger LWW parity
-        // For cell streams containing only non-expired Writes (no Deletes,
-        // no RangeTombstones, no TTL), the real KWayMerger.merge_partition_rows
-        // must agree with the reference on which row wins per clustering key.
-        //
-        // We drive merge_partition_rows directly with synthetic MergeEntry inputs
-        // that represent the Write ops.
-        #[test]
-        fn prop_real_merger_lww_agrees_with_reference(
-            entries in prop::collection::vec(
-                // (clustering_key 0..4, run_index 0..2, timestamp 1..20)
-                (0u8..4u8, 0usize..2usize, 1i64..=20i64),
-                2..=12usize,
-            )
-        ) {
-            use crate::schema::{Column, KeyColumn};
-            use std::collections::HashMap as SchemaMap;
-
-            let schema = TableSchema {
-                keyspace: "prop_test_ks".to_string(),
-                table: "prop_test_table".to_string(),
-                partition_keys: vec![KeyColumn {
-                    name: "id".to_string(),
-                    data_type: "int".to_string(),
-                    position: 0,
-                }],
-                clustering_keys: vec![],
-                columns: vec![Column {
-                    name: "value".to_string(),
-                    data_type: "text".to_string(),
-                    nullable: true,
-                    default: None,
-                    is_static: false,
-                }],
-                comments: SchemaMap::new(),
-            };
-
-            // Build MergeEntry stream — one per (ck, run_index, timestamp) tuple.
-            // All entries share the same partition.
-            let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
-            let merge_entries: Vec<MergeEntry> = entries.iter().map(|&(ck, run_index, ts)| {
-                let ck_key = ClusteringKey {
-                    columns: vec![("ck".to_string(), Value::TinyInt(ck as i8))],
+                let schema = TableSchema {
+                    keyspace: "prop_test_ks".to_string(),
+                    table: "prop_test_table".to_string(),
+                    partition_keys: vec![KeyColumn {
+                        name: "id".to_string(),
+                        data_type: "int".to_string(),
+                        position: 0,
+                    }],
+                    clustering_keys: vec![],
+                    columns: vec![Column {
+                        name: "value".to_string(),
+                        data_type: "text".to_string(),
+                        nullable: true,
+                        default: None,
+                        is_static: false,
+                    }],
+                    comments: SchemaMap::new(),
                 };
-                MergeEntry::new(
-                    run_index,
+
+                let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
+                let ck = ClusteringKey {
+                    columns: vec![("ck".to_string(), Value::TinyInt(0))],
+                };
+
+                // Deliberately give the LIVE row the NEWER file (run_index 0) and the
+                // tombstone the OLDER file (run_index 1). A run_index-only tiebreak at
+                // equal timestamp would wrongly pick the live row; the Cassandra
+                // liveness rule must pick the tombstone regardless of file recency.
+                let live_entry = MergeEntry::new(
+                    0, // run_index 0 = newer file
                     partition_key.clone(),
-                    Some(ck_key),
-                    ts,
+                    Some(ck.clone()),
+                    ts_write,
                     RowData::Live {
                         cells: vec![CellData {
                             column: "value".to_string(),
-                            value: Value::Integer(ts as i32),
-                            timestamp: ts,
+                            value: Value::Integer(42),
+                            timestamp: ts_write,
                             ttl: None,
                             cell_path: None,
                             local_deletion_time: None,
-                        }],
+                                                is_complex_element: false,
+                            is_deleted: false,
+                            has_empty_value: false,
+    }],
                     },
-                )
-            }).collect();
+                );
+                let tombstone_entry = MergeEntry::new(
+                    1, // run_index 1 = older file
+                    partition_key.clone(),
+                    Some(ck.clone()),
+                    ts_delete,
+                    RowData::Tombstone {
+                        deletion_time: ts_delete,
+                        local_deletion_time: 2000,
+                    },
+                );
 
-            // Drive the real merger.
-            let merger = KWayMerger {
-                runs: vec![],
-                heap: std::collections::BinaryHeap::new(),
-                current_partition: None,
-                gc_before_secs: None,
-                now_secs: None,
-                schema: schema.clone(),
-            };
-            let real_merged = merger.merge_partition_rows(merge_entries.clone())
-                .expect("merge_partition_rows must not fail");
-
-            // Build the reference result: per clustering-key int, highest timestamp wins.
-            // (run_index as tie-breaker: lower run_index wins at equal ts — same as merger)
-            let mut ref_map: HashMap<u8, (i64, usize)> = HashMap::new();
-            for &(ck, run_index, ts) in &entries {
-                ref_map.entry(ck)
-                    .and_modify(|(best_ts, best_run)| {
-                        if ts > *best_ts || (ts == *best_ts && run_index < *best_run) {
-                            *best_ts = ts;
-                            *best_run = run_index;
-                        }
-                    })
-                    .or_insert((ts, run_index));
-            }
-
-            // Verify each winner in the real output matches the reference.
-            prop_assert_eq!(
-                real_merged.len(),
-                ref_map.len(),
-                "real merger output row count must match reference"
-            );
-
-            for entry in &real_merged {
-                let ck_byte = match entry.clustering_key.as_ref()
-                    .and_then(|ck| ck.columns.first())
-                    .map(|(_, v)| v)
-                {
-                    Some(Value::TinyInt(b)) => *b as u8,
-                    _ => {
-                        prop_assert!(false, "unexpected clustering key value");
-                        unreachable!()
-                    }
+                let merger = KWayMerger {
+                    runs: vec![],
+                    heap: std::collections::BinaryHeap::new(),
+                    current_partition: None,
+                    gc_before_secs: None,
+                    now_secs: None,
+                    schema: schema.clone(),
                 };
+                let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
+                    .expect("merge_partition_rows must not fail");
 
-                let (ref_ts, _ref_run) = ref_map[&ck_byte];
-                prop_assert_eq!(
-                    entry.timestamp,
-                    ref_ts,
-                    "real merger winner timestamp must match reference for ck={}",
-                    ck_byte
-                );
+                prop_assert_eq!(merged.len(), 1, "one clustering key => one merged row");
+
+                let winner = &merged[0];
+                if ts_delete > ts_write {
+                    // Tombstone has higher timestamp => should win.
+                    prop_assert!(
+                        matches!(winner.row_data, RowData::Tombstone { .. }),
+                        "Tombstone(ts={}) must win over Live(ts={})",
+                        ts_delete, ts_write
+                    );
+                } else if ts_write > ts_delete {
+                    // Live write has higher timestamp => should win.
+                    prop_assert!(
+                        matches!(winner.row_data, RowData::Live { .. }),
+                        "Live(ts={}) must win over Tombstone(ts={})",
+                        ts_write, ts_delete
+                    );
+                } else {
+                    // Equal timestamps: the tombstone (Delete) ALWAYS wins, matching
+                    // Cassandra `Cells#reconcile`. This must hold regardless of file
+                    // recency — the assertion previously carved this case out, hiding
+                    // the run_index-only tiebreak bug (Issue #498).
+                    prop_assert!(
+                        matches!(winner.row_data, RowData::Tombstone { .. }),
+                        "At equal ts={}, Tombstone must win over Live (Cassandra reconcile rule)",
+                        ts_delete
+                    );
+                }
             }
         }
-
-        // Property G: Tombstone wins over live row at same clustering key in real merger
-        // When a Tombstone and a Live row have the same clustering key, the one with
-        // the higher timestamp must win — and the real merger must reflect this.
-        #[test]
-        fn prop_real_merger_tombstone_vs_live(
-            ts_write in 1i64..=10i64,
-            ts_delete in 1i64..=20i64,
-        ) {
-            use crate::schema::{Column, KeyColumn};
-            use std::collections::HashMap as SchemaMap;
-
-            let schema = TableSchema {
-                keyspace: "prop_test_ks".to_string(),
-                table: "prop_test_table".to_string(),
-                partition_keys: vec![KeyColumn {
-                    name: "id".to_string(),
-                    data_type: "int".to_string(),
-                    position: 0,
-                }],
-                clustering_keys: vec![],
-                columns: vec![Column {
-                    name: "value".to_string(),
-                    data_type: "text".to_string(),
-                    nullable: true,
-                    default: None,
-                    is_static: false,
-                }],
-                comments: SchemaMap::new(),
-            };
-
-            let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
-            let ck = ClusteringKey {
-                columns: vec![("ck".to_string(), Value::TinyInt(0))],
-            };
-
-            // Deliberately give the LIVE row the NEWER file (run_index 0) and the
-            // tombstone the OLDER file (run_index 1). A run_index-only tiebreak at
-            // equal timestamp would wrongly pick the live row; the Cassandra
-            // liveness rule must pick the tombstone regardless of file recency.
-            let live_entry = MergeEntry::new(
-                0, // run_index 0 = newer file
-                partition_key.clone(),
-                Some(ck.clone()),
-                ts_write,
-                RowData::Live {
-                    cells: vec![CellData {
-                        column: "value".to_string(),
-                        value: Value::Integer(42),
-                        timestamp: ts_write,
-                        ttl: None,
-                        cell_path: None,
-                        local_deletion_time: None,
-                    }],
-                },
-            );
-            let tombstone_entry = MergeEntry::new(
-                1, // run_index 1 = older file
-                partition_key.clone(),
-                Some(ck.clone()),
-                ts_delete,
-                RowData::Tombstone {
-                    deletion_time: ts_delete,
-                    local_deletion_time: 2000,
-                },
-            );
-
-            let merger = KWayMerger {
-                runs: vec![],
-                heap: std::collections::BinaryHeap::new(),
-                current_partition: None,
-                gc_before_secs: None,
-                now_secs: None,
-                schema: schema.clone(),
-            };
-            let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
-                .expect("merge_partition_rows must not fail");
-
-            prop_assert_eq!(merged.len(), 1, "one clustering key => one merged row");
-
-            let winner = &merged[0];
-            if ts_delete > ts_write {
-                // Tombstone has higher timestamp => should win.
-                prop_assert!(
-                    matches!(winner.row_data, RowData::Tombstone { .. }),
-                    "Tombstone(ts={}) must win over Live(ts={})",
-                    ts_delete, ts_write
-                );
-            } else if ts_write > ts_delete {
-                // Live write has higher timestamp => should win.
-                prop_assert!(
-                    matches!(winner.row_data, RowData::Live { .. }),
-                    "Live(ts={}) must win over Tombstone(ts={})",
-                    ts_write, ts_delete
-                );
-            } else {
-                // Equal timestamps: the tombstone (Delete) ALWAYS wins, matching
-                // Cassandra `Cells#reconcile`. This must hold regardless of file
-                // recency — the assertion previously carved this case out, hiding
-                // the run_index-only tiebreak bug (Issue #498).
-                prop_assert!(
-                    matches!(winner.row_data, RowData::Tombstone { .. }),
-                    "At equal ts={}, Tombstone must win over Live (Cassandra reconcile rule)",
-                    ts_delete
-                );
-            }
-        }
-    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -4385,6 +4582,9 @@ mod issue_823_complex_column_merge {
                 ttl: None,
                 cell_path: None,
                 local_deletion_time: None,
+                is_complex_element: false,
+                is_deleted: false,
+                has_empty_value: false,
             }],
         );
         let older = live(
@@ -4397,6 +4597,9 @@ mod issue_823_complex_column_merge {
                 ttl: None,
                 cell_path: None,
                 local_deletion_time: None,
+                is_complex_element: false,
+                is_deleted: false,
+                has_empty_value: false,
             }],
         );
 
@@ -4454,6 +4657,9 @@ mod issue_823_complex_column_merge {
                 ttl: None,
                 cell_path: None,
                 local_deletion_time: None,
+                is_complex_element: false,
+                is_deleted: false,
+                has_empty_value: false,
             }],
         );
         let older = live(
@@ -4466,6 +4672,9 @@ mod issue_823_complex_column_merge {
                 ttl: None,
                 cell_path: None,
                 local_deletion_time: None,
+                is_complex_element: false,
+                is_deleted: false,
+                has_empty_value: false,
             }],
         );
 
@@ -4575,6 +4784,9 @@ mod issue_823_complex_column_merge {
                 ttl: None,
                 cell_path: None,
                 local_deletion_time: None,
+                is_complex_element: false,
+                is_deleted: false,
+                has_empty_value: false,
             }],
         );
 
@@ -4637,6 +4849,9 @@ mod issue_886_merge_entry_enrichment {
             ttl: Some(3600),
             local_deletion_time: Some(1_700_000_000),
             cell_path: Some(vec![0x00, 0x01]),
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         };
         let entry = MergeEntry::new(
             0,
@@ -4954,15 +5169,15 @@ mod issue_886_merge_entry_enrichment {
         );
     }
 
-    /// Regression for the #886/#899 branch-review HIGH finding: the synthetic
-    /// metadata-only entry emitted by `reconcile_cluster` (an empty `Live` row
-    /// carrying complex/range deletion metadata, no ops, no row tombstone) MUST
-    /// be classified as a metadata-only no-op so the writer path skips it. The
-    /// writer does not yet consume the carried deletions (#899); routing this
-    /// entry through `merge_entry_to_mutation` would otherwise write a phantom
-    /// live empty (pure-PK) row at timestamp 0.
+    /// Epic #899 Phase C: a COMPLEX-DELETION-only synthetic entry (empty `Live`
+    /// row carrying a `ComplexDeletion`, no ops, no row tombstone) must NO LONGER
+    /// be skipped — the writer now emits a real complex-deletion marker for it
+    /// (`merge_entry_to_mutation` produces a `CellOperation::ComplexDeletion`), so
+    /// a fully-deleted-collection marker reaches the SSTable instead of being
+    /// dropped. A RANGE-deletion-only entry is still not consumable by the writer
+    /// (deferred to #846) and remains skippable.
     #[test]
-    fn metadata_only_entry_is_detected_and_skipped_on_writer_path() {
+    fn complex_deletion_only_entry_reaches_writer_but_range_only_is_skipped() {
         let complex = ComplexDeletion {
             column: "tags".to_string(),
             marked_for_delete_at: 4242,
@@ -4975,25 +5190,42 @@ mod issue_886_merge_entry_enrichment {
             local_deletion_time: 0,
         };
 
-        // Exactly the shape reconcile_cluster emits for a deletion-metadata-only
-        // cluster: empty Live, ts 0, carrying both deletion-metadata kinds.
-        let meta_only = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
-            .with_complex_deletions(vec![complex.clone()])
-            .with_range_deletion(range.clone());
-
+        // Complex-deletion-only: now WRITER-VISIBLE (not a no-op) — the marker
+        // must be emitted, not dropped.
+        let complex_only = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_complex_deletions(vec![complex.clone()]);
         assert!(
-            meta_only.is_metadata_only_no_op(),
-            "synthetic metadata-only entry must be detected so the writer skips it"
+            !complex_only.is_metadata_only_no_op(),
+            "Phase C: a complex-deletion-only entry must reach the writer"
         );
 
-        // It survives reconciliation (metadata preserved in the merge stream) but
-        // is filtered out before reaching the writer — proving the same entry the
-        // merge stream keeps is the one the writer path drops.
-        let reconciled = KWayMerger::reconcile_cluster(None, vec![meta_only])
-            .expect("metadata-only cluster must still emit an entry in the merge stream");
+        // Range-deletion-only (no complex deletion): still skippable — the writer
+        // does not consume range deletions yet (#846), so routing it would write a
+        // phantom pure-PK row.
+        let range_only = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_range_deletion(range.clone());
         assert!(
-            reconciled.is_metadata_only_no_op(),
-            "the reconciled metadata-only entry must be writer-skippable"
+            range_only.is_metadata_only_no_op(),
+            "range-deletion-only entry stays writer-skippable (deferred to #846)"
+        );
+
+        // Both kinds present → the complex deletion is writer-visible, so the
+        // entry is NOT skipped (the marker must survive).
+        let both = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_complex_deletions(vec![complex])
+            .with_range_deletion(range);
+        assert!(
+            !both.is_metadata_only_no_op(),
+            "a carried complex deletion keeps the entry writer-visible"
+        );
+
+        // The complex-deletion-only entry survives reconciliation AND stays
+        // writer-visible end-to-end.
+        let reconciled = KWayMerger::reconcile_cluster(None, vec![complex_only])
+            .expect("complex-deletion-only cluster must still emit an entry");
+        assert!(
+            !reconciled.is_metadata_only_no_op(),
+            "the reconciled complex-deletion entry must reach the writer"
         );
     }
 
@@ -5087,35 +5319,28 @@ mod issue_899_per_element_merge {
             ttl: None,
             local_deletion_time: None,
             is_deleted: false,
+            has_empty_value: false,
         }
     }
 
-    /// (a) FOUNDATION: a multi-cell collection surfaces N per-element
-    /// `ComplexElement`s (distinct cell_paths + per-element timestamps) on the
-    /// `CompactionRow`. NEUTRALITY: the merge producer re-collapses them into ONE
-    /// whole-collection `CellData` (cell_path None) so the writer is unchanged.
+    /// (a) PHASE C FLIP: a multi-cell collection now surfaces ONE per-element
+    /// `CellData` PER `ComplexElement` (populated cell_path + per-element
+    /// timestamp), NOT one collapsed whole-column cell. Each cell carries the
+    /// element's authoritative path/ts so per-`(column, cell_path)` reconcile and
+    /// the per-element writer emit are byte-faithful to Cassandra's multi-cell
+    /// layout.
     #[test]
-    fn multi_cell_collection_surfaces_per_element_substrate_and_neutral_output() {
+    fn multi_cell_collection_surfaces_one_celldata_per_element() {
         let elements = vec![
             element(&[0xAA], "a", 100),
             element(&[0xBB], "b", 200),
             element(&[0xCC], "c", 300),
         ];
-        // FOUNDATION: per-element substrate is present, distinct paths + ts.
         assert_eq!(elements.len(), 3);
-        let mut substrate: Vec<(Vec<u8>, i64)> = elements
-            .iter()
-            .map(|e| (e.cell_path.clone(), e.timestamp))
-            .collect();
-        substrate.sort();
-        assert_eq!(
-            substrate,
-            vec![(vec![0xAA], 100), (vec![0xBB], 200), (vec![0xCC], 300)],
-            "per-element cell_path + distinct timestamps populated (foundation)"
-        );
 
-        // NEUTRAL OUTPUT: one whole-collection CellData (cell_path None) carrying
-        // the reader's collapsed value, timestamped with the row timestamp.
+        // PHASE C: per-element emit (cell_path + per-element ts preserved); the
+        // collapsed_value is no longer threaded to the writer (kept only for the
+        // user-facing read contract).
         let row_data = CompactionRowData::Live {
             simple: vec![],
             complex: vec![ComplexColumn {
@@ -5138,25 +5363,23 @@ mod issue_899_per_element_merge {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {other:?}"),
         };
-        assert_eq!(
-            cells.len(),
-            1,
-            "one whole-collection CellData (neutral output)"
-        );
-        assert!(
-            cells[0].cell_path.is_none(),
-            "whole-collection cell has no cell_path"
-        );
-        assert_eq!(cells[0].timestamp, 999, "complex column inherits row ts");
-        assert_eq!(
-            cells[0].value,
-            Value::Set(vec![
-                Value::Text("a".to_string()),
-                Value::Text("b".to_string()),
-                Value::Text("c".to_string()),
-            ]),
-            "the writer-facing value is the reader's collapsed collection"
-        );
+        assert_eq!(cells.len(), 3, "one CellData per element (Phase C flip)");
+        for c in &cells {
+            assert_eq!(c.column, "tags");
+            assert!(c.is_complex_element, "each is a complex element");
+            assert!(!c.is_deleted, "live elements");
+            assert!(c.cell_path.is_some(), "per-element cell_path populated");
+        }
+        // The per-element cells keep their OWN timestamps (NOT promoted to the
+        // row timestamp 999) — the fidelity gain Phase C delivers.
+        let mut by_path: Vec<(Vec<u8>, i64, Value)> = cells
+            .into_iter()
+            .map(|c| (c.cell_path.expect("path"), c.timestamp, c.value))
+            .collect();
+        by_path.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(by_path[0], (vec![0xAA], 100, Value::Text("a".to_string())));
+        assert_eq!(by_path[1], (vec![0xBB], 200, Value::Text("b".to_string())));
+        assert_eq!(by_path[2], (vec![0xCC], 300, Value::Text("c".to_string())));
     }
 
     /// (b) FOUNDATION: a real complex deletion reaches `MergeEntry.complex_deletions`
@@ -5200,6 +5423,9 @@ mod issue_899_per_element_merge {
                     ttl: None,
                     cell_path: Some(vec![0xBB]),
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -5216,6 +5442,9 @@ mod issue_899_per_element_merge {
                     ttl: None,
                     cell_path: Some(vec![0xAA]),
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -5258,6 +5487,9 @@ mod issue_899_per_element_merge {
                     ttl: None,
                     cell_path: Some(vec![0x01]),
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         );
@@ -5274,6 +5506,9 @@ mod issue_899_per_element_merge {
                     ttl: None,
                     cell_path: Some(vec![0x02]),
                     local_deletion_time: None,
+                    is_complex_element: false,
+                    is_deleted: false,
+                    has_empty_value: false,
                 }],
             },
         )
@@ -5499,6 +5734,9 @@ mod issue_822_merge_ordering_semantics {
                         ttl: None,
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     }],
                 },
             )
@@ -5553,6 +5791,9 @@ mod issue_822_merge_ordering_semantics {
             ttl: None,
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         };
 
         // Expiring (TTL) live cell for column "v", in the NEWER file (run 0).
@@ -5573,6 +5814,9 @@ mod issue_822_merge_ordering_semantics {
                         ttl: Some(3600),
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     },
                 ],
             },
@@ -5600,6 +5844,9 @@ mod issue_822_merge_ordering_semantics {
                         ttl: None,
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     },
                 ],
             },
@@ -5651,6 +5898,9 @@ mod issue_822_merge_ordering_semantics {
             ttl: None,
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         };
 
         let tombstone = MergeEntry::new(
@@ -5674,6 +5924,9 @@ mod issue_822_merge_ordering_semantics {
                         ttl: None,
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     },
                 ],
             },
@@ -5694,6 +5947,9 @@ mod issue_822_merge_ordering_semantics {
                         ttl: Some(3600),
                         cell_path: None,
                         local_deletion_time: None,
+                        is_complex_element: false,
+                        is_deleted: false,
+                        has_empty_value: false,
                     },
                 ],
             },
@@ -5886,6 +6142,9 @@ mod issue_822_merge_ordering_semantics {
             ttl: None,
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         };
         assert!(KWayMerger::is_cell_tombstone(&tomb));
         assert!(
@@ -5900,6 +6159,9 @@ mod issue_822_merge_ordering_semantics {
             ttl: Some(60),
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         };
         assert!(
             !KWayMerger::is_cell_tombstone(&expiring),

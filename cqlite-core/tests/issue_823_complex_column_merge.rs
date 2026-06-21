@@ -29,28 +29,34 @@
 use cqlite_core::storage::write_engine::merge::{CellData, RowData};
 use cqlite_core::types::{UdtField, UdtValue, Value};
 
-/// Issue #886 added the carry-only `cell_path` / `local_deletion_time` substrate
-/// fields to `CellData` (defaulting to `None`), but per-path merge is still NOT
-/// wired: the reader does not yet populate `cell_path` and the merge does not yet
-/// consume it (that reader-emit + per-path reconcile work is #899). So two writes
-/// to different paths of the same column remain indistinguishable in practice —
-/// the field exists but nothing fills it in. This destructuring also pins the
-/// exact public field set — if it changes again, this test must be revisited.
+/// Issue #886 added the `cell_path` / `local_deletion_time` substrate fields to
+/// `CellData`; epic #899 Phase C added the per-element discriminator
+/// (`is_complex_element`), the authoritative `is_deleted` flag, and the on-disk
+/// `has_empty_value` flag, and FLIPPED the production path: the compaction reader
+/// now emits one per-element `CellData` (populated `cell_path` + per-element
+/// metadata) for each non-frozen-collection element instead of one collapsed
+/// whole-column cell. This structural test pins the exact public field set and
+/// demonstrates a per-element cell round-tripping through the struct; if the
+/// field set changes again it must be revisited. (The end-to-end reader-emit
+/// assertions live in the `issue_899_per_element_merge` module inside merge.rs.)
 #[test]
-fn celldata_path_dimension_is_carry_only() {
+fn celldata_carries_per_element_substrate() {
+    // A per-element cell as the Phase-C reader path now builds it: a populated
+    // cell_path, per-element timestamp/ttl/ldt, and the per-element flags.
     let cell = CellData {
         column: "tags".to_string(),
-        value: Value::List(vec![Value::Text("a".to_string())]),
+        value: Value::Text("a".to_string()),
         timestamp: 1,
-        ttl: None,
-        cell_path: None,
-        local_deletion_time: None,
+        ttl: Some(3600),
+        cell_path: Some(vec![0x00, 0x01, 0xAB]),
+        local_deletion_time: Some(1_700_000_000),
+        is_complex_element: true,
+        is_deleted: false,
+        has_empty_value: true,
     };
 
-    // The path dimension now exists structurally (#886) but is carry-only: when
-    // built from the reader it is `None`. If a later change starts POPULATING
-    // `cell_path` from the reader emit, this test should be revisited alongside
-    // the #899 per-path merge work.
+    // Destructure to pin the exact public field set (a field add/remove breaks
+    // this in lock-step with the merge→writer plumbing it feeds).
     let CellData {
         column,
         value,
@@ -58,16 +64,26 @@ fn celldata_path_dimension_is_carry_only() {
         ttl,
         cell_path,
         local_deletion_time,
+        is_complex_element,
+        is_deleted,
+        has_empty_value,
     } = cell;
     assert_eq!(column, "tags");
-    assert!(matches!(value, Value::List(_)));
+    assert!(matches!(value, Value::Text(_)));
     assert_eq!(timestamp, 1);
-    assert_eq!(ttl, None);
-    assert_eq!(cell_path, None, "carry-only: unpopulated until #899");
+    assert_eq!(ttl, Some(3600));
     assert_eq!(
-        local_deletion_time, None,
-        "carry-only: unpopulated until #899"
+        cell_path.as_deref(),
+        Some(&[0x00, 0x01, 0xAB][..]),
+        "per-element cell_path is now populated (Phase C)"
     );
+    assert_eq!(local_deletion_time, Some(1_700_000_000));
+    assert!(is_complex_element, "marks a complex element");
+    assert!(
+        !is_deleted,
+        "an empty-value live element is NOT a tombstone"
+    );
+    assert!(has_empty_value, "SET-member on-disk emptiness preserved");
 }
 
 /// A multi-cell collection is surfaced as a single nested `Value` under one
@@ -87,6 +103,9 @@ fn multicell_collection_is_one_nested_cell_value() {
             ttl: None,
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         }],
     };
 
@@ -129,6 +148,9 @@ fn nonfrozen_udt_is_one_nested_cell_value() {
             ttl: None,
             cell_path: None,
             local_deletion_time: None,
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
         }],
     };
 

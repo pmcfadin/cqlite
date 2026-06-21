@@ -231,6 +231,13 @@ struct ComplexCellParse {
     path_bytes: Vec<u8>,
     /// Whether the cell carries the IS_DELETED (0x01) flag (an element tombstone).
     is_deleted: bool,
+    /// Whether the cell carries the HAS_EMPTY_VALUE (0x04) flag (an on-disk
+    /// empty-value cell — e.g. a SET member whose identity lives entirely in the
+    /// cell_path). Surfaced so the compaction writer can reproduce the SAME
+    /// on-disk emptiness byte-for-byte rather than re-deriving it from the
+    /// decoded value (epic #899, Phase C: a SET element's decoded member is the
+    /// path bytes, NOT a cell value).
+    has_empty_value: bool,
     /// Offset immediately following the parsed cell.
     next_offset: usize,
     /// Per-element writetime decoded from the cell's own timestamp field, in µs since
@@ -6282,6 +6289,7 @@ impl V5CompressedLegacyParser {
                     ttl: cell.element_ttl,
                     local_deletion_time: cell.element_local_deletion_time,
                     is_deleted: cell.is_deleted,
+                    has_empty_value: cell.has_empty_value,
                 });
             }
         }
@@ -6894,6 +6902,7 @@ impl V5CompressedLegacyParser {
             value,
             path_bytes,
             is_deleted,
+            has_empty_value,
             next_offset: offset,
             element_writetime,
             element_ttl,
