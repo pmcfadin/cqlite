@@ -1634,7 +1634,8 @@ impl KWayMerger {
         // another column carries one (newer) row timestamp, and the dropped cell
         // can survive when it should be purged. This is byte-correct when a row's
         // cells share a timestamp (the common case); exact per-cell purging needs
-        // #886/#899 and is out of #847's scope.
+        // the per-cell-timestamp reader plumbing in #886/#899 and is tracked as
+        // follow-up #922 — out of #847's scope.
         // Apply row-tombstone shadowing first (Step 3), then dropped-column
         // filtering (Step 3b) as a second stage so we can tell whether the
         // dropped-column purge is what emptied the row of real data.

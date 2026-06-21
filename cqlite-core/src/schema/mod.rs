@@ -103,6 +103,10 @@ pub struct TableSchema {
     /// misparse. Supporting per-version types requires carrying type metadata
     /// here (or decoding from the SSTable serialization-header type) and is
     /// follow-up work alongside the element-level representation in #899.
+    ///
+    /// Filtering is also at row-timestamp granularity (the merge stream surfaces
+    /// only the row write-time per cell); exact per-cell purging is tracked as
+    /// follow-up #922.
     #[serde(default)]
     pub dropped_columns: HashMap<String, i64>,
 }
