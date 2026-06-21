@@ -266,6 +266,20 @@ impl Memtable {
             }
             CellOperation::Delete { column } => column.len() + 8,
             CellOperation::DeleteRow => 8,
+            // Epic #899: per-element complex ops. Each carries a column name,
+            // the preserved cell path, an optional value, and temporal metadata.
+            CellOperation::WriteComplexElement {
+                column,
+                cell_path,
+                value,
+                ..
+            } => {
+                column.len()
+                    + cell_path.len()
+                    + value.as_ref().map(Self::estimate_value_size).unwrap_or(0)
+                    + 16 // flags + ts/ldt/ttl deltas + length prefixes overhead
+            }
+            CellOperation::ComplexDeletion { column, .. } => column.len() + 16,
         }
     }
 

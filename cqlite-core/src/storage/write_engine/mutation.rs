@@ -230,6 +230,64 @@ pub enum CellOperation {
     },
     /// Delete entire row (row tombstone)
     DeleteRow,
+    /// Write (or tombstone) a single element of a non-frozen complex column
+    /// (a list/set member or a map entry), carrying its OWN write metadata and
+    /// its preserved source cell path (epic #899, Phase B).
+    ///
+    /// Unlike [`Write`](Self::Write)/[`WriteWithTtl`](Self::WriteWithTtl) — which
+    /// describe a whole-column value at one row timestamp — this op preserves the
+    /// per-element granularity of Cassandra's multi-cell on-disk layout so the
+    /// compaction writer can emit two elements of the same column at DIFFERENT
+    /// timestamps (explicit deltas, not one promoted row timestamp), round-trip a
+    /// LIST element's 16-byte TimeUUID cell path byte-for-byte, and emit an
+    /// element-level tombstone (`value == None`, IS_DELETED).
+    ///
+    /// PHASE B SCOPE: this variant is plumbing + writer capability only. The real
+    /// compaction pipeline (`merge_entry_to_mutation`) does NOT yet emit it — that
+    /// flip (and differential byte-parity verification) is Phase C. In Phase B it
+    /// is exercised by unit tests that hand-construct mutations.
+    WriteComplexElement {
+        /// Complex column name.
+        column: String,
+        /// Raw cell-path bytes identifying this element (the serialized element
+        /// for a SET, the serialized key for a MAP, the 16-byte TimeUUID for a
+        /// LIST). Preserved byte-for-byte from the source SSTable — never
+        /// regenerated.
+        cell_path: Vec<u8>,
+        /// Decoded element value. `None` means an element-level tombstone
+        /// (IS_DELETED) or an empty-value element (e.g. SET members store the
+        /// element in the path with an empty value).
+        value: Option<Value>,
+        /// Per-element write timestamp in microseconds. When equal to the row
+        /// liveness timestamp the writer keeps `USE_ROW_TIMESTAMP` (0x08);
+        /// otherwise it clears the flag and writes an explicit unsigned delta.
+        timestamp_micros: i64,
+        /// TTL in seconds when the element is expiring (`None` otherwise).
+        ttl_seconds: Option<u32>,
+        /// `localDeletionTime` in seconds for an expiring / deleted element
+        /// (`None` when not applicable). Far-future values in `[2^31, 2^32)` are
+        /// carried as the wrapping `as u32 as i32` representation.
+        local_deletion_time: Option<i32>,
+    },
+    /// A per-column complex deletion marker (the `markedForDeleteAt` +
+    /// `localDeletionTime` tombstone Cassandra writes ahead of a multi-cell
+    /// column's elements) covering elements written at or before
+    /// `marked_for_delete_at` (epic #899, Phase B).
+    ///
+    /// When present for a complex column, the writer emits a REAL complex
+    /// deletion marker (replacing the hardcoded `DeletionTime.LIVE` sentinel)
+    /// followed by the surviving per-element cells.
+    ///
+    /// PHASE B SCOPE: plumbing + writer capability only; not yet emitted by
+    /// `merge_entry_to_mutation` (Phase C).
+    ComplexDeletion {
+        /// Complex column name.
+        column: String,
+        /// `markedForDeleteAt` in microseconds.
+        marked_for_delete_at: i64,
+        /// `localDeletionTime` in seconds since the Unix epoch.
+        local_deletion_time: i32,
+    },
 }
 
 /// Partition key with multi-column support

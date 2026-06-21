@@ -1021,6 +1021,10 @@ impl DataWriter {
         // Per-column last-write-wins; tombstones win timestamp ties.
         let mut cells: std::collections::HashMap<&'a str, MergedOp<'a>> =
             std::collections::HashMap::new();
+        // Epic #899 (Phase B): per-element complex ops are NOT deduped per column
+        // (a column has many elements). Kept verbatim and emitted via
+        // `write_complex_column_per_element`. Empty for every existing scenario.
+        let mut complex_element_ops: Vec<MergedOp<'a>> = Vec::new();
         // Liveness: (timestamp, row-level TTL) of the newest contributing mutation
         let mut liveness: Option<(i64, Option<u32>)> = None;
 
@@ -1036,6 +1040,38 @@ impl DataWriter {
                     CellOperation::Write { column, .. }
                     | CellOperation::WriteWithTtl { column, .. }
                     | CellOperation::Delete { column } => column.as_str(),
+                    // Epic #899 (Phase B): per-element complex ops keep all
+                    // elements (no per-column dedup). A live element write
+                    // contributes row liveness; a `ComplexDeletion` marker does
+                    // not. Primary-key columns can never be complex, so no
+                    // key-column skip is needed.
+                    CellOperation::WriteComplexElement { value, .. } => {
+                        if skip_static_ops && is_static_operation(op, schema) {
+                            continue;
+                        }
+                        if value.is_some() {
+                            contributes_liveness = true;
+                        }
+                        complex_element_ops.push(MergedOp {
+                            op,
+                            timestamp_micros: m.timestamp_micros,
+                            row_ttl_seconds: m.ttl_seconds,
+                            cell_local_deletion_time: m.effective_local_deletion_time(),
+                        });
+                        continue;
+                    }
+                    CellOperation::ComplexDeletion { .. } => {
+                        if skip_static_ops && is_static_operation(op, schema) {
+                            continue;
+                        }
+                        complex_element_ops.push(MergedOp {
+                            op,
+                            timestamp_micros: m.timestamp_micros,
+                            row_ttl_seconds: m.ttl_seconds,
+                            cell_local_deletion_time: m.effective_local_deletion_time(),
+                        });
+                        continue;
+                    }
                     CellOperation::DeleteRow => continue,
                 };
                 if skip_static_ops && is_static_operation(op, schema) {
@@ -1098,7 +1134,11 @@ impl DataWriter {
         }
 
         let ops: Vec<MergedOp<'a>> = cells.into_values().collect();
-        if ops.is_empty() && row_deletion.is_none() && liveness.is_none() {
+        if ops.is_empty()
+            && complex_element_ops.is_empty()
+            && row_deletion.is_none()
+            && liveness.is_none()
+        {
             return None;
         }
 
@@ -1108,6 +1148,7 @@ impl DataWriter {
             ttl_seconds: liveness.and_then(|(_, ttl)| ttl),
             row_deletion,
             ops,
+            complex_element_ops,
         })
     }
 
@@ -1574,6 +1615,15 @@ impl DataWriter {
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
                     // Row deletion handled at row level with HAS_DELETION flag
                 }
+                // Per-element complex ops (epic #899) are never collected into the
+                // static-op set (collect_static_operations skips them); STATIC
+                // complex columns are out of scope for the Phase B capability.
+                crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+                    ..
+                }
+                | crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+                    ..
+                } => {}
             }
         }
 
@@ -1600,12 +1650,18 @@ impl DataWriter {
             | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
                 column, ..
             }
-            | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                column_order
-                    .get(column.as_str())
-                    .copied()
-                    .unwrap_or(usize::MAX - 1)
+            | crate::storage::write_engine::mutation::CellOperation::Delete { column }
+            | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+                column,
+                ..
             }
+            | crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+                column,
+                ..
+            } => column_order
+                .get(column.as_str())
+                .copied()
+                .unwrap_or(usize::MAX - 1),
             crate::storage::write_engine::mutation::CellOperation::DeleteRow => usize::MAX,
         });
         sorted
@@ -1629,6 +1685,7 @@ impl DataWriter {
             ttl_seconds: mutation.ttl_seconds,
             row_deletion: None,
             ops: Vec::new(),
+            complex_element_ops: Vec::new(),
         });
         let (body, _cells) = self.build_merged_row_body(&row, schema, flags)?;
         Ok(body)
@@ -2029,6 +2086,95 @@ impl DataWriter {
                 CellOperation::DeleteRow => {
                     // Row deletion handled at row level with HAS_DELETION flag
                 }
+                // Per-element complex ops are collected into
+                // `row.complex_element_ops`, not `row.ops`, and emitted below.
+                CellOperation::WriteComplexElement { .. }
+                | CellOperation::ComplexDeletion { .. } => {}
+            }
+        }
+
+        // Epic #899 (Phase B): emit per-element complex columns. Empty for every
+        // existing scenario (the real pipeline does not yet route ops here), so
+        // this is byte-neutral; exercised by the Phase B writer-capability unit
+        // tests via `write_complex_column_per_element` directly.
+        cells_written += self.write_complex_element_columns(buf, row, schema)?;
+
+        Ok(cells_written)
+    }
+
+    /// Group `row.complex_element_ops` by column and emit each as a per-element
+    /// complex column (real deletion marker + surviving element cells), in
+    /// regular-column serialization order. Returns the number of complex columns
+    /// physically written (one per emitted column, matching Cassandra's
+    /// `Row.columnCount()` for non-frozen collections).
+    fn write_complex_element_columns(
+        &self,
+        buf: &mut Vec<u8>,
+        row: &RowWrite<'_>,
+        schema: &TableSchema,
+    ) -> Result<u64> {
+        use crate::storage::write_engine::mutation::CellOperation;
+
+        if row.complex_element_ops.is_empty() {
+            return Ok(0);
+        }
+
+        // Group by column, preserving per-element ops and the (single) deletion.
+        // BTreeMap keeps a deterministic intermediate order; final emit order is
+        // the schema's regular-column order below.
+        let mut per_column: std::collections::BTreeMap<&str, ComplexColumnGroup> =
+            std::collections::BTreeMap::new();
+
+        for mop in &row.complex_element_ops {
+            match mop.op {
+                CellOperation::WriteComplexElement {
+                    column,
+                    cell_path,
+                    value,
+                    timestamp_micros,
+                    ttl_seconds,
+                    local_deletion_time,
+                } => {
+                    let entry = per_column.entry(column.as_str()).or_default();
+                    entry.1.push(ComplexElementWrite {
+                        cell_path: cell_path.clone(),
+                        value: value.clone(),
+                        timestamp_micros: *timestamp_micros,
+                        ttl_seconds: *ttl_seconds,
+                        local_deletion_time: *local_deletion_time,
+                        is_deleted: value.is_none() && local_deletion_time.is_some(),
+                    });
+                }
+                CellOperation::ComplexDeletion {
+                    column,
+                    marked_for_delete_at,
+                    local_deletion_time,
+                } => {
+                    let entry = per_column.entry(column.as_str()).or_default();
+                    // Keep the strongest (highest markedForDeleteAt) marker.
+                    let candidate = (*marked_for_delete_at, *local_deletion_time);
+                    entry.0 = Some(match entry.0 {
+                        Some(existing) if existing.0 >= candidate.0 => existing,
+                        _ => candidate,
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        // Emit in schema regular-column order so complex columns land in the same
+        // position the bitmap/`sorted_merged_ops` use.
+        let mut cells_written: u64 = 0;
+        for col in self.regular_columns(schema) {
+            if let Some((complex_deletion, elements)) = per_column.remove(col.name.as_str()) {
+                self.write_complex_column_per_element(
+                    buf,
+                    col,
+                    complex_deletion,
+                    &elements,
+                    row.liveness_ts.unwrap_or(0),
+                )?;
+                cells_written += 1;
             }
         }
 
@@ -2362,6 +2508,195 @@ impl DataWriter {
 
             // Cell value: serialized element
             let value_bytes = serialize_value(elem)?;
+            encode_unsigned(value_bytes.len() as u64, buf);
+            buf.extend_from_slice(&value_bytes);
+        }
+
+        Ok(())
+    }
+
+    /// Write a complex (non-frozen collection) column from per-element cells,
+    /// each carrying its OWN timestamp/ttl/local-deletion-time and its PRESERVED
+    /// source cell path (epic #899, Phase B — writer capability).
+    ///
+    /// This is the per-element counterpart of [`write_complex_column`] (which
+    /// takes a whole-column `Value` at one row timestamp). It differs in two
+    /// ways that are the whole point of epic #899:
+    ///
+    /// 1. **Real complex deletion** — when `complex_deletion` is `Some((mfda,
+    ///    ldt))` the column header is the REAL deletion marker (unsigned VInt
+    ///    deltas against the seeded baselines), not the hardcoded
+    ///    `DeletionTime.LIVE` sentinel that [`write_complex_column`] always
+    ///    writes. `None` writes the LIVE sentinel (byte-identical to the
+    ///    whole-column path).
+    /// 2. **Per-element metadata** — each element is stamped with its own
+    ///    timestamp (kept as `USE_ROW_TIMESTAMP` only when equal to `row_ts`,
+    ///    else an explicit unsigned delta), ttl, and local deletion time, and
+    ///    its source `cell_path` is written verbatim (LIST 16-byte TimeUUID
+    ///    round-trips, NOT regenerated).
+    ///
+    /// Element ORDER follows the on-disk invariant: SET/MAP are sorted by
+    /// `cell_path` bytes (the serialized element / key); LIST preserves the
+    /// caller-supplied (insertion) order — per-element timestamps must not
+    /// reorder elements.
+    ///
+    /// PHASE B: exercised by unit tests only; `merge_entry_to_mutation` does NOT
+    /// yet emit the ops that reach here (Phase C).
+    fn write_complex_column_per_element(
+        &self,
+        buf: &mut Vec<u8>,
+        column: &Column,
+        complex_deletion: Option<(i64, i32)>,
+        elements: &[ComplexElementWrite],
+        row_ts: i64,
+    ) -> Result<()> {
+        // ---- Column deletion header (markedForDeleteAt then localDeletionTime).
+        match complex_deletion {
+            None => {
+                // DeletionTime.LIVE — byte-identical to write_complex_column.
+                let ts_delta = i64::MIN.wrapping_sub(self.stats.min_timestamp) as u64;
+                encode_unsigned(ts_delta, buf);
+                let ldt_delta = i32::MAX.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+                encode_unsigned(ldt_delta as u64, buf);
+            }
+            Some((marked_for_delete_at, local_deletion_time)) => {
+                // Real deletion marker (matches write_complex_column_deletion's
+                // header encoding, but followed by surviving cells rather than 0).
+                let ts_delta = (marked_for_delete_at - self.stats.min_timestamp) as u64;
+                encode_unsigned(ts_delta, buf);
+
+                // Issue #853 / epic #899 invariant: encode the LDT delta with the
+                // same i32 wrapping cast Cassandra uses, so a far-future LDT in
+                // [2^31, 2^32) keeps the correct byte count. Reject only a genuine
+                // below-baseline ordering violation in normal (non-negative) space.
+                if local_deletion_time >= 0
+                    && self.stats.min_local_deletion_time >= 0
+                    && local_deletion_time < self.stats.min_local_deletion_time
+                {
+                    return Err(Error::InvalidInput(format!(
+                        "Complex deletion: local deletion time {} is less than min_local_deletion_time {}",
+                        local_deletion_time, self.stats.min_local_deletion_time
+                    )));
+                }
+                let ldt_delta =
+                    local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+                encode_unsigned(ldt_delta as u64, buf);
+            }
+        }
+
+        // ---- Element order: SET/MAP by cell_path bytes; LIST insertion order.
+        let is_list = {
+            let dt = column.data_type.to_lowercase();
+            dt.starts_with("list<") || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
+        };
+        let mut ordered: Vec<&ComplexElementWrite> = elements.iter().collect();
+        if !is_list {
+            ordered.sort_by(|a, b| a.cell_path.cmp(&b.cell_path));
+        }
+
+        // ---- Cell count.
+        encode_unsigned(ordered.len() as u64, buf);
+
+        // ---- Per-element cells.
+        for elem in ordered {
+            self.write_complex_element_cell(buf, elem, row_ts)?;
+        }
+
+        Ok(())
+    }
+
+    /// Write one per-element complex cell (epic #899, Phase B).
+    ///
+    /// Wire format (matching the reader's `parse_complex_cell_value`):
+    /// ```text
+    /// [flags: u8]
+    /// [timestamp_delta: unsigned VInt]   if NOT USE_ROW_TIMESTAMP
+    /// [ldt_delta: unsigned VInt]         if (IS_DELETED || IS_EXPIRING) && !USE_ROW_TTL
+    /// [ttl_delta: unsigned VInt]         if IS_EXPIRING && !USE_ROW_TTL
+    /// [path_len: unsigned VInt][path_bytes]
+    /// [value_len: unsigned VInt][value_bytes]   if NOT (IS_DELETED || HAS_EMPTY_VALUE)
+    /// ```
+    fn write_complex_element_cell(
+        &self,
+        buf: &mut Vec<u8>,
+        elem: &ComplexElementWrite,
+        row_ts: i64,
+    ) -> Result<()> {
+        // Determine flags. A SET member (and any element with no value that is
+        // NOT a tombstone) sets HAS_EMPTY_VALUE; a tombstone sets IS_DELETED.
+        let mut flags = 0u8;
+        if elem.is_deleted {
+            flags |= CELL_IS_DELETED;
+        } else if elem.value.is_none() {
+            flags |= CELL_HAS_EMPTY_VALUE;
+        }
+        if elem.ttl_seconds.is_some() {
+            flags |= CELL_IS_EXPIRING;
+        }
+        // Keep USE_ROW_TIMESTAMP only when the element's timestamp equals the row
+        // timestamp; otherwise the element carries its own explicit delta.
+        let use_row_ts = elem.timestamp_micros == row_ts;
+        if use_row_ts {
+            flags |= CELL_USE_ROW_TIMESTAMP;
+        }
+
+        buf.push(flags);
+
+        // Timestamp delta (unsigned VInt) only when not borrowing the row ts.
+        if !use_row_ts {
+            let ts_delta = (elem.timestamp_micros - self.stats.min_timestamp) as u64;
+            encode_unsigned(ts_delta, buf);
+        }
+
+        // Local deletion time delta — present for deleted or expiring cells.
+        let is_expiring = elem.ttl_seconds.is_some();
+        if elem.is_deleted || is_expiring {
+            let ldt = match elem.local_deletion_time {
+                Some(ldt) => ldt,
+                None => {
+                    return Err(Error::InvalidInput(format!(
+                        "Complex element (deleted/expiring) requires a local_deletion_time \
+                         (cell_path={:?})",
+                        elem.cell_path
+                    )));
+                }
+            };
+            // Same i32 wrapping cast as the row/range/complex-deletion paths so a
+            // far-future LDT in [2^31, 2^32) keeps the right byte count (epic #899).
+            if ldt >= 0
+                && self.stats.min_local_deletion_time >= 0
+                && ldt < self.stats.min_local_deletion_time
+            {
+                return Err(Error::InvalidInput(format!(
+                    "Complex element: local deletion time {} is less than min_local_deletion_time {}",
+                    ldt, self.stats.min_local_deletion_time
+                )));
+            }
+            let ldt_delta = ldt.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+            encode_unsigned(ldt_delta as u64, buf);
+        }
+
+        // TTL delta — present for expiring cells.
+        if is_expiring {
+            let ttl = elem.ttl_seconds.unwrap_or(0);
+            let ttl_delta = (ttl as i64) - (self.stats.min_ttl as i64);
+            if ttl_delta < 0 {
+                return Err(Error::InvalidInput(format!(
+                    "Complex element: TTL {} is less than min_ttl {}",
+                    ttl, self.stats.min_ttl
+                )));
+            }
+            encode_unsigned(ttl_delta as u64, buf);
+        }
+
+        // Cell path — PRESERVED verbatim (LIST 16-byte TimeUUID round-trips).
+        encode_unsigned(elem.cell_path.len() as u64, buf);
+        buf.extend_from_slice(&elem.cell_path);
+
+        // Value — written only for a live element with a value. Tombstones and
+        // empty-value elements (SET members) write none.
+        if let (false, Some(value)) = (elem.is_deleted, &elem.value) {
+            let value_bytes = serialize_value(value)?;
             encode_unsigned(value_bytes.len() as u64, buf);
             buf.extend_from_slice(&value_bytes);
         }
@@ -2851,12 +3186,18 @@ impl DataWriter {
             | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
                 column, ..
             }
-            | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                column_order
-                    .get(column.as_str())
-                    .copied()
-                    .unwrap_or(usize::MAX - 1)
+            | crate::storage::write_engine::mutation::CellOperation::Delete { column }
+            | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+                column,
+                ..
             }
+            | crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+                column,
+                ..
+            } => column_order
+                .get(column.as_str())
+                .copied()
+                .unwrap_or(usize::MAX - 1),
             crate::storage::write_engine::mutation::CellOperation::DeleteRow => usize::MAX,
         });
         sorted
@@ -2940,6 +3281,14 @@ fn is_complex_column(data_type: &str) -> bool {
 
 /// A surviving cell operation in a merged row, tagged with the timestamp and
 /// row-level TTL of the mutation it came from.
+///
+/// Epic #899 (Phase B): for whole-column ops (`Write`/`WriteWithTtl`/`Delete`)
+/// `timestamp_micros` is the originating mutation's row timestamp. For the
+/// per-element complex ops (`WriteComplexElement`/`ComplexDeletion`) the
+/// element's OWN timestamp/ttl/ldt/cell_path live INSIDE the op itself; the
+/// `timestamp_micros` field still carries the originating mutation's row
+/// timestamp so the writer can decide `USE_ROW_TIMESTAMP` vs an explicit delta
+/// per element.
 struct MergedOp<'a> {
     op: &'a crate::storage::write_engine::mutation::CellOperation,
     timestamp_micros: i64,
@@ -2951,6 +3300,29 @@ struct MergedOp<'a> {
     /// present (Issue #764). Derived from the timestamp otherwise.
     cell_local_deletion_time: i32,
 }
+
+/// One element to emit inside a per-element complex column (epic #899, Phase B).
+///
+/// Carries the element's OWN write metadata and its PRESERVED source cell path
+/// (never regenerated). `value == None` with `is_deleted` true is an
+/// element-level tombstone; `value == None` without `is_deleted` is an
+/// empty-value element (e.g. a SET member). The writer stamps each element with
+/// `USE_ROW_TIMESTAMP` only when `timestamp_micros` equals the row timestamp,
+/// otherwise it clears the flag and writes an explicit unsigned delta.
+#[derive(Debug, Clone)]
+struct ComplexElementWrite {
+    cell_path: Vec<u8>,
+    value: Option<Value>,
+    timestamp_micros: i64,
+    ttl_seconds: Option<u32>,
+    local_deletion_time: Option<i32>,
+    is_deleted: bool,
+}
+
+/// One complex column's reconciled contents while grouping per-element ops:
+/// `(optional complex deletion (markedForDeleteAt µs, localDeletionTime s),
+/// surviving elements)` (epic #899, Phase B).
+type ComplexColumnGroup = (Option<(i64, i32)>, Vec<ComplexElementWrite>);
 
 /// A surviving static-column operation, tagged with the timestamp and explicit
 /// local deletion time of the mutation it came from.
@@ -3004,8 +3376,16 @@ struct RowWrite<'a> {
     ttl_seconds: Option<u32>,
     /// Row deletion as (marked_for_delete_at µs, local_deletion_time s).
     row_deletion: Option<(i64, i32)>,
-    /// Surviving cell operations (already reconciled, unsorted).
+    /// Surviving WHOLE-COLUMN cell operations (already reconciled, unsorted).
+    /// `Write`/`WriteWithTtl`/`Delete` — one per column (last-write-wins).
     ops: Vec<MergedOp<'a>>,
+    /// Surviving PER-ELEMENT complex ops (epic #899, Phase B):
+    /// `WriteComplexElement` + `ComplexDeletion`. These are NOT deduped per
+    /// column (a column has many elements) and are written via
+    /// `write_complex_column_per_element`. Empty for every existing scenario —
+    /// the real pipeline (`merge_entry_to_mutation`) does not yet emit these
+    /// ops, so this stays empty until Phase C (keeping output byte-neutral).
+    complex_element_ops: Vec<MergedOp<'a>>,
 }
 
 fn column_order_key(column: &Column) -> (bool, &str) {
@@ -3275,7 +3655,14 @@ fn is_static_row_mutation(mutation: &Mutation, schema: &TableSchema) -> bool {
     mutation.operations.iter().all(|operation| match operation {
         crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
         | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { column, .. }
-        | crate::storage::write_engine::mutation::CellOperation::Delete { column } => schema
+        | crate::storage::write_engine::mutation::CellOperation::Delete { column }
+        | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+            column,
+            ..
+        }
+        | crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+            column, ..
+        } => schema
             .columns
             .iter()
             .find(|candidate| candidate.name == *column)
@@ -3293,7 +3680,14 @@ fn is_static_operation(
     match op {
         crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
         | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { column, .. }
-        | crate::storage::write_engine::mutation::CellOperation::Delete { column } => schema
+        | crate::storage::write_engine::mutation::CellOperation::Delete { column }
+        | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+            column,
+            ..
+        }
+        | crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+            column, ..
+        } => schema
             .columns
             .iter()
             .find(|c| c.name == *column)
@@ -3367,6 +3761,15 @@ fn collect_static_operations(
                 | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
                     column.clone()
                 }
+                // Per-element complex ops (epic #899) are not produced for STATIC
+                // complex columns by the (Phase B) capability — they flow through
+                // the regular-row per-element path. Skip them here defensively.
+                crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+                    ..
+                }
+                | crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+                    ..
+                } => continue,
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow => continue,
             };
             let candidate = StaticMergedOp {
@@ -3619,7 +4022,9 @@ mod tests {
             .filter_map(|m| match m.op {
                 CellOperation::Write { column, .. }
                 | CellOperation::WriteWithTtl { column, .. }
-                | CellOperation::Delete { column } => Some(column.clone()),
+                | CellOperation::Delete { column }
+                | CellOperation::WriteComplexElement { column, .. }
+                | CellOperation::ComplexDeletion { column, .. } => Some(column.clone()),
                 CellOperation::DeleteRow => None,
             })
             .collect()
@@ -7514,6 +7919,438 @@ mod tests {
         assert!(
             (max_partition_size as u64) < total,
             "largest single partition ({max_partition_size}) must be smaller than the full file ({total})"
+        );
+    }
+
+    // ===================================================================
+    // Epic #899 Phase B — per-element complex-column writer capability.
+    //
+    // These tests exercise the WRITER capability directly (the new
+    // `WriteComplexElement` / `ComplexDeletion` ops are NOT yet emitted by the
+    // real `merge_entry_to_mutation` pipeline — that flip is Phase C). They
+    // assert the writer emits CORRECT per-element bytes:
+    //   (a) two elements at DIFFERENT per-element timestamps → two cells with
+    //       explicit (non-row) timestamp deltas, not one promoted timestamp;
+    //   (b) a REAL complex deletion marker (not the LIVE sentinel) followed by
+    //       surviving per-element cells;
+    //   (c) a LIST element's source 16-byte cell path round-trips byte-for-byte.
+    // ===================================================================
+
+    /// One fully-decoded complex cell from a `write_complex_column_per_element`
+    /// output buffer, for byte-level assertions.
+    #[derive(Debug)]
+    struct DecodedComplexCell {
+        flags: u8,
+        /// Absolute timestamp delta from `min_timestamp` (only when an explicit
+        /// timestamp was written, i.e. NOT USE_ROW_TIMESTAMP).
+        ts_delta: Option<u64>,
+        /// LDT delta from `min_local_deletion_time` (only when deleted/expiring
+        /// and not USE_ROW_TTL).
+        ldt_delta: Option<u64>,
+        /// TTL delta from `min_ttl` (only when expiring and not USE_ROW_TTL).
+        ttl_delta: Option<u64>,
+        cell_path: Vec<u8>,
+        value: Option<Vec<u8>>,
+    }
+
+    /// Decode `(complex_deletion_ts_delta, complex_deletion_ldt_delta, cells)`
+    /// from a per-element complex-column buffer, walking the exact wire format
+    /// the reader (`parse_complex_cell_value`) parses.
+    fn decode_complex_column(buf: &[u8]) -> (u64, u64, Vec<DecodedComplexCell>) {
+        fn read_uvint(buf: &[u8], pos: &mut usize) -> u64 {
+            let first = buf[*pos];
+            *pos += 1;
+            if first == 0xFF {
+                let mut v = 0u64;
+                for _ in 0..8 {
+                    v = (v << 8) | buf[*pos] as u64;
+                    *pos += 1;
+                }
+                return v;
+            }
+            let extra = first.leading_ones() as usize;
+            let mask = 0xFF_u8.wrapping_shr((extra + 1) as u32);
+            let mut v = (first & mask) as u64;
+            for _ in 0..extra {
+                v = (v << 8) | buf[*pos] as u64;
+                *pos += 1;
+            }
+            v
+        }
+
+        let mut pos = 0usize;
+        let del_ts = read_uvint(buf, &mut pos);
+        let del_ldt = read_uvint(buf, &mut pos);
+        let cell_count = read_uvint(buf, &mut pos) as usize;
+
+        let mut cells = Vec::with_capacity(cell_count);
+        for _ in 0..cell_count {
+            let flags = buf[pos];
+            pos += 1;
+            let is_deleted = (flags & CELL_IS_DELETED) != 0;
+            let is_expiring = (flags & CELL_IS_EXPIRING) != 0;
+            let has_empty_value = (flags & CELL_HAS_EMPTY_VALUE) != 0;
+            let use_row_ts = (flags & CELL_USE_ROW_TIMESTAMP) != 0;
+            let use_row_ttl = (flags & CELL_USE_ROW_TTL) != 0;
+
+            let ts_delta = if !use_row_ts {
+                Some(read_uvint(buf, &mut pos))
+            } else {
+                None
+            };
+            let ldt_delta = if !use_row_ttl && (is_deleted || is_expiring) {
+                Some(read_uvint(buf, &mut pos))
+            } else {
+                None
+            };
+            let ttl_delta = if !use_row_ttl && is_expiring {
+                Some(read_uvint(buf, &mut pos))
+            } else {
+                None
+            };
+
+            let path_len = read_uvint(buf, &mut pos) as usize;
+            let cell_path = buf[pos..pos + path_len].to_vec();
+            pos += path_len;
+
+            let value = if is_deleted || has_empty_value {
+                None
+            } else {
+                let value_len = read_uvint(buf, &mut pos) as usize;
+                let v = buf[pos..pos + value_len].to_vec();
+                pos += value_len;
+                Some(v)
+            };
+
+            cells.push(DecodedComplexCell {
+                flags,
+                ts_delta,
+                ldt_delta,
+                ttl_delta,
+                cell_path,
+                value,
+            });
+        }
+        (del_ts, del_ldt, cells)
+    }
+
+    fn set_column(name: &str) -> Column {
+        Column {
+            name: name.to_string(),
+            data_type: "set<int>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        }
+    }
+
+    fn list_column(name: &str) -> Column {
+        Column {
+            name: name.to_string(),
+            data_type: "list<int>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        }
+    }
+
+    /// (a) Two elements at DIFFERENT per-element timestamps must produce two
+    /// cells, each carrying its OWN explicit timestamp delta (NOT
+    /// USE_ROW_TIMESTAMP, NOT a single promoted row timestamp).
+    #[test]
+    fn per_element_distinct_timestamps_emit_explicit_deltas() {
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 0;
+        stats.min_local_deletion_time = 0;
+        let writer = DataWriter::new(stats);
+
+        let column = set_column("tags");
+        // Row liveness timestamp differs from BOTH element timestamps, so neither
+        // element may use USE_ROW_TIMESTAMP.
+        let row_ts = 1_000_000i64;
+        let elem_a = ComplexElementWrite {
+            cell_path: serialize_collection_element(&Value::Integer(10), "SET").unwrap(),
+            value: None, // SET element: empty value
+            timestamp_micros: 1_005_000,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+        let elem_b = ComplexElementWrite {
+            cell_path: serialize_collection_element(&Value::Integer(20), "SET").unwrap(),
+            value: None,
+            timestamp_micros: 1_009_000,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(&mut buf, &column, None, &[elem_a, elem_b], row_ts)
+            .unwrap();
+
+        let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 2, "two SET elements => two cells");
+        for c in &cells {
+            assert_eq!(
+                c.flags & CELL_USE_ROW_TIMESTAMP,
+                0,
+                "element ts differs from row ts => USE_ROW_TIMESTAMP must be CLEARED, flags=0x{:02x}",
+                c.flags
+            );
+            assert!(
+                c.ts_delta.is_some(),
+                "an explicit per-element timestamp delta must be written"
+            );
+        }
+        // The two distinct timestamps must survive as two DISTINCT deltas — not
+        // collapsed/promoted to one.
+        assert_eq!(cells[0].ts_delta, Some(5_000));
+        assert_eq!(cells[1].ts_delta, Some(9_000));
+        assert_ne!(
+            cells[0].ts_delta, cells[1].ts_delta,
+            "disjoint per-element timestamps must NOT be promoted to one"
+        );
+    }
+
+    /// An element whose per-element timestamp EQUALS the row timestamp keeps
+    /// USE_ROW_TIMESTAMP (0x08) and writes no explicit delta; a sibling at a
+    /// different timestamp clears it. (Mixed case in one column.)
+    #[test]
+    fn per_element_row_timestamp_kept_only_when_equal() {
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 0;
+        stats.min_local_deletion_time = 0;
+        let writer = DataWriter::new(stats);
+
+        let column = set_column("tags");
+        let row_ts = 1_007_000i64;
+        let same = ComplexElementWrite {
+            cell_path: serialize_collection_element(&Value::Integer(10), "SET").unwrap(),
+            value: None,
+            timestamp_micros: row_ts, // equal to row ts
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+        let diff = ComplexElementWrite {
+            cell_path: serialize_collection_element(&Value::Integer(20), "SET").unwrap(),
+            value: None,
+            timestamp_micros: 1_009_000, // != row ts
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(&mut buf, &column, None, &[same, diff], row_ts)
+            .unwrap();
+
+        let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 2);
+        // Cell for element 10 (path-sorted first): equals row ts → USE_ROW_TIMESTAMP.
+        assert_ne!(cells[0].flags & CELL_USE_ROW_TIMESTAMP, 0);
+        assert_eq!(cells[0].ts_delta, None);
+        // Cell for element 20: differs → explicit delta.
+        assert_eq!(cells[1].flags & CELL_USE_ROW_TIMESTAMP, 0);
+        assert_eq!(cells[1].ts_delta, Some(9_000));
+    }
+
+    /// (b) A REAL complex deletion marker (markedForDeleteAt + localDeletionTime,
+    /// NOT the LIVE sentinel) must be written, followed by surviving cells.
+    #[test]
+    fn per_element_real_complex_deletion_then_surviving_cells() {
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 0;
+        stats.min_local_deletion_time = 1_700_000_000;
+        let writer = DataWriter::new(stats);
+
+        let column = set_column("tags");
+        let row_ts = 1_012_000i64;
+        let mfda = 1_010_000i64; // markedForDeleteAt
+        let ldt = 1_700_000_005i32; // localDeletionTime (seconds)
+
+        // One element survives the complex deletion (written after mfda).
+        let survivor = ComplexElementWrite {
+            cell_path: serialize_collection_element(&Value::Integer(30), "SET").unwrap(),
+            value: None,
+            timestamp_micros: row_ts,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(
+                &mut buf,
+                &column,
+                Some((mfda, ldt)),
+                &[survivor],
+                row_ts,
+            )
+            .unwrap();
+
+        let (del_ts, del_ldt, cells) = decode_complex_column(&buf);
+
+        // LIVE sentinel deltas (what the old hardcoded path wrote):
+        let live_ts_delta = i64::MIN.wrapping_sub(1_000_000) as u64;
+        let live_ldt_delta = i32::MAX.wrapping_sub(1_700_000_000) as u32 as u64;
+        assert_ne!(
+            del_ts, live_ts_delta,
+            "must NOT be the LIVE markedForDeleteAt sentinel"
+        );
+        assert_ne!(
+            del_ldt, live_ldt_delta,
+            "must NOT be the LIVE localDeletionTime sentinel"
+        );
+        // Real deletion deltas (unsigned VInt against seeded baselines).
+        assert_eq!(del_ts, (mfda - 1_000_000) as u64);
+        assert_eq!(del_ldt, (ldt - 1_700_000_000) as u64);
+        // The surviving element is still emitted after the marker.
+        assert_eq!(
+            cells.len(),
+            1,
+            "the surviving element must follow the marker"
+        );
+    }
+
+    /// (c) A LIST element's source 16-byte cell path must round-trip byte-for-byte
+    /// (it is the preserved TimeUUID, NOT a freshly generated one).
+    #[test]
+    fn per_element_list_cell_path_roundtrips_byte_for_byte() {
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 0;
+        stats.min_local_deletion_time = 0;
+        let writer = DataWriter::new(stats);
+
+        let column = list_column("items");
+        let row_ts = 1_003_000i64;
+
+        // A specific, recognizable 16-byte TimeUUID we must NOT regenerate.
+        let source_path: Vec<u8> = vec![
+            0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC, 0xDD, 0xEE,
+            0xFF, 0x01,
+        ];
+        let elem = ComplexElementWrite {
+            cell_path: source_path.clone(),
+            value: Some(Value::Integer(42)),
+            timestamp_micros: row_ts,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(&mut buf, &column, None, &[elem], row_ts)
+            .unwrap();
+
+        let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            cells[0].cell_path, source_path,
+            "the source 16-byte LIST cell path must round-trip byte-for-byte (not regenerated)"
+        );
+        assert_eq!(
+            cells[0].value,
+            Some(serialize_value(&Value::Integer(42)).unwrap()),
+            "LIST element value must be serialized after the preserved path"
+        );
+    }
+
+    /// An element-level tombstone (`value == None`, `is_deleted`) writes
+    /// IS_DELETED (0x01), an explicit ts (when != row ts) and an LDT, and no
+    /// value bytes.
+    #[test]
+    fn per_element_element_tombstone_writes_is_deleted_and_ldt() {
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 0;
+        stats.min_local_deletion_time = 1_700_000_000;
+        let writer = DataWriter::new(stats);
+
+        let column = list_column("items");
+        let row_ts = 1_000_000i64;
+        let elem = ComplexElementWrite {
+            cell_path: vec![0xAB; 16],
+            value: None,
+            timestamp_micros: 1_004_000,
+            ttl_seconds: None,
+            local_deletion_time: Some(1_700_000_009),
+            is_deleted: true,
+        };
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(&mut buf, &column, None, &[elem], row_ts)
+            .unwrap();
+
+        let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 1);
+        assert_ne!(
+            cells[0].flags & CELL_IS_DELETED,
+            0,
+            "IS_DELETED must be set"
+        );
+        assert_eq!(cells[0].ts_delta, Some(4_000));
+        assert_eq!(
+            cells[0].ldt_delta,
+            Some((1_700_000_009 - 1_700_000_000) as u64)
+        );
+        assert_eq!(cells[0].ttl_delta, None, "a tombstone is not expiring");
+        assert!(cells[0].value.is_none(), "tombstone writes no value bytes");
+        assert_eq!(cells[0].cell_path, vec![0xAB; 16]);
+    }
+
+    /// An expiring per-element write emits IS_EXPIRING with explicit ts + ldt +
+    /// ttl deltas (against the seeded baselines).
+    #[test]
+    fn per_element_expiring_writes_ts_ldt_ttl_deltas() {
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 100;
+        stats.min_local_deletion_time = 1_700_000_000;
+        let writer = DataWriter::new(stats);
+
+        let column = list_column("items");
+        let row_ts = 1_000_000i64;
+        let elem = ComplexElementWrite {
+            cell_path: vec![0xCD; 16],
+            value: Some(Value::Integer(7)),
+            timestamp_micros: 1_006_000,
+            ttl_seconds: Some(3_600),
+            local_deletion_time: Some(1_700_003_600),
+            is_deleted: false,
+        };
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(&mut buf, &column, None, &[elem], row_ts)
+            .unwrap();
+
+        let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 1);
+        assert_ne!(
+            cells[0].flags & CELL_IS_EXPIRING,
+            0,
+            "IS_EXPIRING must be set"
+        );
+        assert_eq!(cells[0].ts_delta, Some(6_000));
+        assert_eq!(
+            cells[0].ldt_delta,
+            Some((1_700_003_600 - 1_700_000_000) as u64)
+        );
+        assert_eq!(cells[0].ttl_delta, Some((3_600 - 100) as u64));
+        assert_eq!(
+            cells[0].value,
+            Some(serialize_value(&Value::Integer(7)).unwrap())
         );
     }
 }
