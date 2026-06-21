@@ -7,9 +7,10 @@
 //!    (`da-<gen>-bti-<Component>`), parsed back via `SsTableDescriptor`.
 //! 2. A BTI SSTable has `Data.db` + `Partitions.db` and a TOC, but **no**
 //!    `Index.db` and **no** `Summary.db`.
-//! 3. `TOC.txt` lists exactly the BTI component set (Data, Partitions, Filter,
-//!    Statistics, Digest, TOC) — no Index/Summary, no Rows yet (#910) — and
-//!    self-references TOC.txt.
+//! 3. `TOC.txt` lists exactly the BTI component set (Data, Partitions, Rows,
+//!    Filter, Statistics, Digest, TOC) — no Index/Summary — and self-references
+//!    TOC.txt. Rows.db is now emitted (#910), even when 0 bytes for a
+//!    narrow-only table (matching the real `da` fixtures).
 //! 4. The default BIG writer is unchanged (still `nb-*-big-*` with Index/Summary).
 //!
 //! All tests require the `write-support` feature.
@@ -136,12 +137,14 @@ async fn bti_components_use_da_bti_descriptor_and_omit_big_index() {
     // Required BTI components exist with the canonical names.
     assert!(names.iter().any(|n| n == "da-1-bti-Data.db"));
     assert!(names.iter().any(|n| n == "da-1-bti-Partitions.db"));
+    assert!(names.iter().any(|n| n == "da-1-bti-Rows.db"));
     assert!(names.iter().any(|n| n == "da-1-bti-Filter.db"));
     assert!(names.iter().any(|n| n == "da-1-bti-Statistics.db"));
     assert!(names.iter().any(|n| n == "da-1-bti-Digest.crc32"));
     assert!(names.iter().any(|n| n == "da-1-bti-TOC.txt"));
 
-    // No BIG-only components, and no Rows.db (deferred to #910).
+    // No BIG-only components. Rows.db IS now emitted (#910); for this narrow
+    // table it is a 0-byte component, matching the real `da` fixtures.
     assert!(
         !names.iter().any(|n| n.contains("Index.db")),
         "BTI must not emit Index.db, got {names:?}"
@@ -149,10 +152,6 @@ async fn bti_components_use_da_bti_descriptor_and_omit_big_index() {
     assert!(
         !names.iter().any(|n| n.contains("Summary.db")),
         "BTI must not emit Summary.db, got {names:?}"
-    );
-    assert!(
-        !names.iter().any(|n| n.contains("Rows.db")),
-        "Rows.db is deferred to #910, got {names:?}"
     );
 
     // SSTableInfo reflects the omission.
@@ -167,6 +166,10 @@ async fn bti_components_use_da_bti_descriptor_and_omit_big_index() {
     assert!(
         info.partitions_path.is_some(),
         "BTI SSTableInfo.partitions_path must be Some"
+    );
+    assert!(
+        info.rows_path.is_some(),
+        "BTI SSTableInfo.rows_path must be Some (#910)"
     );
     // Reported paths use the canonical descriptor.
     assert_eq!(
@@ -195,6 +198,7 @@ async fn bti_toc_lists_exact_component_set() {
     let expected: std::collections::BTreeSet<&str> = [
         "Data.db",
         "Partitions.db",
+        "Rows.db",
         "Filter.db",
         "Statistics.db",
         "Digest.crc32",
@@ -205,13 +209,14 @@ async fn bti_toc_lists_exact_component_set() {
 
     assert_eq!(
         listed, expected,
-        "BTI TOC must list exactly the canonical component set (no Index/Summary/Rows)"
+        "BTI TOC must list exactly the canonical component set (Data, Partitions, Rows, \
+         Filter, Statistics, Digest, TOC) — no Index/Summary"
     );
-    // Explicit self-reference + explicit exclusions.
+    // Explicit self-reference + explicit exclusions/inclusions.
     assert!(toc.contains("TOC.txt"), "TOC must self-reference");
     assert!(!toc.contains("Index.db"), "TOC must not list Index.db");
     assert!(!toc.contains("Summary.db"), "TOC must not list Summary.db");
-    assert!(!toc.contains("Rows.db"), "TOC must not list Rows.db (#910)");
+    assert!(toc.contains("Rows.db"), "TOC must list Rows.db (#910)");
 }
 
 /// AC#4: the default BIG writer is unchanged — `nb-*-big-*` with Index/Summary,
@@ -256,4 +261,233 @@ async fn big_default_format_unchanged() {
     assert!(toc.contains("Index.db"));
     assert!(toc.contains("Summary.db"));
     assert!(!toc.contains("Partitions.db"));
+    assert!(!toc.contains("Rows.db"), "BIG must not list Rows.db");
+    assert!(info.rows_path.is_none(), "BIG must report no Rows.db path");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Issue #910: Rows.db within-partition row-index roundtrip + empty-table handling
+// ─────────────────────────────────────────────────────────────────────────────
+
+use cqlite_core::schema::{ClusteringColumn, ClusteringOrder};
+use cqlite_core::storage::sstable::bti::{
+    iterate_rows_in_bti_trie, lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
+    BtiPartitionLocation,
+};
+use std::io::Cursor;
+
+/// Schema: wide(pk int, ck int, payload text, PRIMARY KEY (pk, ck)).
+fn wide_schema() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "wide".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                nullable: false,
+                default: None,
+                is_static: false,
+            },
+            Column {
+                name: "payload".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+    }
+}
+
+/// One row of a wide partition: pk/ck ints + a ~2 KiB payload so a few hundred
+/// rows comfortably exceed two 64 KiB column-index blocks.
+fn wide_row(pk: i32, ck: i32, ts: i64) -> Mutation {
+    let payload = "x".repeat(2048);
+    Mutation::new(
+        TableId::new("test_ks", "wide"),
+        PartitionKey::single("pk", Value::Integer(pk)),
+        Some(
+            cqlite_core::storage::write_engine::mutation::ClusteringKey::single(
+                "ck",
+                Value::Integer(ck),
+            ),
+        ),
+        vec![CellOperation::Write {
+            column: "payload".to_string(),
+            value: Value::Text(payload),
+        }],
+        ts,
+        None,
+    )
+}
+
+/// AC (#910): a BTI SSTable with a WIDE partition emits a non-empty Rows.db; the
+/// wide partition resolves through Partitions.db → RowsOffset → resolve_rows_db_entry
+/// → iterate_rows_in_bti_trie, while a NARROW partition stays a direct DataOffset.
+#[tokio::test]
+async fn bti_wide_partition_resolves_through_rows_db() {
+    let dir = TempDir::new().unwrap();
+    let schema = wide_schema();
+    let mut writer =
+        SSTableWriter::with_format(dir.path().to_path_buf(), 1, &schema, 16, SSTableFormat::Bti)
+            .unwrap();
+
+    // pk=1: WIDE (200 rows × ~2 KiB ≈ 400 KiB → >= 2 blocks).
+    // pk=2: NARROW (1 small row → 1 block → direct DataOffset).
+    let mut partitions: Vec<(i32, Vec<i32>)> = vec![(1, (0..200).collect()), (2, vec![0])];
+
+    // Determine token order for the two partition keys.
+    partitions.sort_by_key(|(pk, _)| {
+        let m = wide_row(*pk, 0, 1_000_000);
+        m.decorated_key(&schema).unwrap().token
+    });
+
+    for (pk, cks) in &partitions {
+        let mut muts: Vec<Mutation> = cks
+            .iter()
+            .map(|ck| wide_row(*pk, *ck, 1_000_000 + *ck as i64))
+            .collect();
+        // All mutations share the partition key; write_partition takes one key.
+        let key = muts[0].decorated_key(&schema).unwrap();
+        // Sort by ck for clustering order (writer also sorts, but be explicit).
+        muts.sort_by_key(|m| match &m.clustering_key {
+            Some(ck) => match &ck.columns[0].1 {
+                Value::Integer(v) => *v,
+                _ => 0,
+            },
+            None => 0,
+        });
+        writer.write_partition(key, muts).unwrap();
+    }
+
+    let info = writer.finish().await.unwrap();
+
+    // Rows.db must exist and be NON-empty (pk=1 is wide).
+    let rows_path = info.rows_path.clone().expect("Rows.db path");
+    let rows_db = std::fs::read(&rows_path).unwrap();
+    assert!(
+        !rows_db.is_empty(),
+        "a wide partition must produce a non-empty Rows.db"
+    );
+
+    let partitions_db = std::fs::read(info.partitions_path.clone().unwrap()).unwrap();
+
+    // pk=1 (wide) → RowsOffset; resolve + traverse yields >= 2 ascending blocks.
+    let raw_pk1 = 1i32.to_be_bytes().to_vec();
+    let mut cur = Cursor::new(partitions_db.clone());
+    let loc1 = lookup_raw_key_in_bti_partitions_db(&mut cur, &raw_pk1)
+        .unwrap()
+        .expect("pk=1 found");
+    let rows_offset = match loc1 {
+        BtiPartitionLocation::RowsOffset(o) => o as usize,
+        BtiPartitionLocation::DataOffset(o) => {
+            panic!("pk=1 must be wide (RowsOffset); got DataOffset({o})")
+        }
+    };
+    let header = resolve_rows_db_entry(&rows_db, rows_offset).expect("resolve pk=1 entry");
+    assert!(
+        header.block_count >= 2,
+        "wide partition must span >= 2 blocks; got {}",
+        header.block_count
+    );
+    let entries =
+        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse pk=1 row index");
+    assert_eq!(
+        entries.len() as u32,
+        header.block_count,
+        "traversal must yield block_count blocks"
+    );
+    // Separators ascending; block offsets strictly increasing.
+    for w in entries.windows(2) {
+        assert!(w[0].0 <= w[1].0, "separators must be ascending");
+        assert!(
+            w[0].1.data_offset < w[1].1.data_offset,
+            "block offsets must be strictly increasing"
+        );
+    }
+    // First block separator is ck=0 (OSS50 sign-flipped int = 0x8000_0000).
+    assert_eq!(
+        entries[0].0,
+        0x8000_0000u32.to_be_bytes().to_vec(),
+        "first separator must be ck=0"
+    );
+
+    // pk=2 (narrow) → DataOffset, NOT a RowsOffset.
+    let raw_pk2 = 2i32.to_be_bytes().to_vec();
+    let mut cur2 = Cursor::new(partitions_db);
+    let loc2 = lookup_raw_key_in_bti_partitions_db(&mut cur2, &raw_pk2)
+        .unwrap()
+        .expect("pk=2 found");
+    assert!(
+        matches!(loc2, BtiPartitionLocation::DataOffset(_)),
+        "narrow partition pk=2 must resolve to a direct DataOffset, got {loc2:?}"
+    );
+
+    // TOC lists Rows.db.
+    let toc = std::fs::read_to_string(&info.toc_path).unwrap();
+    assert!(toc.contains("Rows.db"), "TOC must list Rows.db");
+}
+
+/// Finding 2 (roborev #908): an EMPTY BTI SSTable (no partitions) cannot produce
+/// a readable Partitions.db (no 8-byte root footer) — the writer must REFUSE to
+/// publish it with a clear error rather than emit an unreadable `da` artifact.
+#[tokio::test]
+async fn bti_empty_sstable_is_refused() {
+    let dir = TempDir::new().unwrap();
+    let schema = int_pk_schema();
+    let writer =
+        SSTableWriter::with_format(dir.path().to_path_buf(), 1, &schema, 16, SSTableFormat::Bti)
+            .unwrap();
+    // No partitions written.
+    let result = writer.finish().await;
+    assert!(
+        result.is_err(),
+        "an empty BTI SSTable must be refused (unreadable Partitions.db otherwise)"
+    );
+    let msg = format!("{}", result.err().unwrap());
+    assert!(
+        msg.contains("empty BTI SSTable"),
+        "error must explain the empty-BTI refusal; got: {msg}"
+    );
+}
+
+/// A narrow-only BTI SSTable still publishes (valid Partitions.db) and emits a
+/// 0-byte Rows.db listed in the TOC — exactly matching the real
+/// `simple_table`/`collection_table`/`ttl_table` `da-2-bti-Rows.db` fixtures.
+#[tokio::test]
+async fn bti_narrow_only_emits_zero_byte_rows_db() {
+    let dir = TempDir::new().unwrap();
+    let info = write_bti(dir.path(), 3).await;
+    let rows_path = info.rows_path.clone().expect("Rows.db path");
+    let rows_db = std::fs::read(&rows_path).unwrap();
+    assert!(
+        rows_db.is_empty(),
+        "a narrow-only BTI SSTable must emit a 0-byte Rows.db; got {} bytes",
+        rows_db.len()
+    );
+    let toc = std::fs::read_to_string(&info.toc_path).unwrap();
+    assert!(
+        toc.contains("Rows.db"),
+        "0-byte Rows.db must still be in TOC"
+    );
 }

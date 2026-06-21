@@ -1112,6 +1112,7 @@ fn ref_sstable_info(data_path: &Path) -> cqlite_core::storage::sstable::writer::
         stats_path: comp("Statistics.db"),
         compression_info_path: opt("CompressionInfo.db"),
         partitions_path: opt("Partitions.db"),
+        rows_path: opt("Rows.db"),
         toc_path: comp("TOC.txt"),
         digest_path: comp("Digest.crc32"),
         partition_count: 0,

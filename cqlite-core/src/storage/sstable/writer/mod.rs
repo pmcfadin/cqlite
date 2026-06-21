@@ -105,16 +105,21 @@ pub enum SSTableFormat {
     ///   `Data.db` as a *common component retained*). The bytes are therefore the
     ///   same as BIG; only the filename descriptor changes.
     /// - `Partitions.db` — partition trie (replaces `Index.db`/`Summary.db`).
+    /// - `Rows.db` — within-partition row-index trie (issue #910). WIDE
+    ///   partitions (`>= 2` × 64 KiB column-index blocks) get a per-partition
+    ///   row index and a positive `RowsOffset` in their partition-trie leaf;
+    ///   NARROW partitions keep a direct (negative) `Data.db` offset. `Rows.db`
+    ///   is always emitted for a BTI SSTable — possibly 0 bytes when no partition
+    ///   is wide, matching the real `da` fixtures.
     /// - `Statistics.db`, `Filter.db`, `Digest.crc32`, `TOC.txt`.
     ///
     /// **No `Index.db` and no `Summary.db`** — those are BIG-only components; BTI
     /// resolves partitions through the trie. All components use the `da` version
     /// letter and `bti` format segment.
     ///
-    /// **Not yet emitted (follow-up #910):** `Rows.db` (the within-partition
-    /// clustering trie for wide partitions). Until then each partition's trie
-    /// payload is a direct `Data.db` offset, which the BTI reader resolves as a
-    /// point lookup.
+    /// An **empty** BTI SSTable (zero partitions) is refused by `finish()`: a
+    /// `da` SSTable requires a readable `Partitions.db` (8-byte root footer),
+    /// which has no valid zero-partition form.
     Bti,
 }
 
@@ -145,6 +150,10 @@ pub struct SSTableInfo {
     /// Path to the BTI `Partitions.db` trie (Some only for [`SSTableFormat::Bti`];
     /// None for the default BIG format). Issue #766.
     pub partitions_path: Option<PathBuf>,
+    /// Path to the BTI `Rows.db` within-partition row-index trie (Some only for
+    /// [`SSTableFormat::Bti`]; None for BIG). Always present for a non-empty BTI
+    /// SSTable, even when 0 bytes (no wide partitions). Issue #910.
+    pub rows_path: Option<PathBuf>,
     /// Path to the TOC.txt file
     pub toc_path: PathBuf,
     /// Path to the Digest.crc32 file
@@ -248,6 +257,43 @@ pub struct SSTableWriter {
     /// BTI partition trie accumulator. Populated only when `format` is
     /// [`SSTableFormat::Bti`]; `None` otherwise so the BIG path allocates nothing.
     partitions_trie: Option<partitions_writer::PartitionsTrieWriter>,
+    /// BTI per-partition pending payloads (issue #910). Populated only for
+    /// [`SSTableFormat::Bti`]. The partition-trie leaf payload (direct
+    /// `Data.db` offset vs `Rows.db` `RowsOffset`) cannot be finalized until
+    /// `Rows.db` is serialized in [`Self::finish`] (the `RowsOffset` is the
+    /// `TrieIndexEntry` position), so we defer the decision: each entry records
+    /// the partition's raw key, its `Data.db` offset, and — for WIDE partitions
+    /// (>= 2 column-index blocks) — the row-index blocks. `None` for BIG so that
+    /// path allocates nothing.
+    bti_pending: Option<Vec<PendingBtiPartition>>,
+}
+
+/// A deferred BTI partition payload (issue #910).
+///
+/// Narrow partitions (`row_index` is `None`) get a direct `Data.db` offset in
+/// the partition trie; wide partitions get a `Rows.db` `TrieIndexEntry` and a
+/// positive `RowsOffset` once `Rows.db` is serialized.
+#[cfg(feature = "write-support")]
+#[derive(Debug)]
+struct PendingBtiPartition {
+    /// Raw on-disk partition-key bytes.
+    raw_key: Vec<u8>,
+    /// Partition's absolute `Data.db` start offset.
+    data_offset: u64,
+    /// `Some` for a wide partition: its row-index blocks + partition deletion.
+    /// `None` for a narrow partition (direct `Data.db` offset).
+    row_index: Option<PendingRowIndex>,
+}
+
+/// The row-index payload of a wide BTI partition, queued for `Rows.db`.
+#[cfg(feature = "write-support")]
+#[derive(Debug)]
+struct PendingRowIndex {
+    /// Per-block OSS50 separators + within-partition offsets.
+    blocks: Vec<partitions_writer::RowIndexBlock>,
+    /// Partition-level deletion `(local_deletion_time, marked_for_delete_at)`,
+    /// or `None` for LIVE.
+    partition_deletion: Option<(i32, i64)>,
 }
 
 #[cfg(feature = "write-support")]
@@ -370,6 +416,11 @@ impl SSTableWriter {
             SSTableFormat::Big => None,
             SSTableFormat::Bti => Some(partitions_writer::PartitionsTrieWriter::new()),
         };
+        // BTI (issue #910): defer partition-trie payloads until Rows.db is built.
+        let bti_pending = match format {
+            SSTableFormat::Big => None,
+            SSTableFormat::Bti => Some(Vec::new()),
+        };
 
         Ok(Self {
             sstable_dir,
@@ -387,6 +438,7 @@ impl SSTableWriter {
             baselines_locked: false,
             format,
             partitions_trie,
+            bti_pending,
         })
     }
 
@@ -558,11 +610,61 @@ impl SSTableWriter {
             filter.add_key(&key);
         }
 
-        // BTI phase 1 (issue #766): record this partition's raw key bytes and
-        // Data.db offset for the Partitions.db trie. Only active when the BTI
-        // format was selected (the accumulator is None for BIG).
-        if let Some(ref mut trie) = self.partitions_trie {
-            trie.add_partition(&key.key, data_offset);
+        // BTI (issue #766 / #910): defer this partition's Partitions.db trie
+        // payload. The payload is a direct `Data.db` offset for a NARROW
+        // partition (< 2 column-index blocks) or a `Rows.db` `RowsOffset` for a
+        // WIDE partition (>= 2 blocks). The `RowsOffset` is only known after
+        // `Rows.db` is serialized in `finish()`, so we record the raw key, the
+        // Data.db offset, and — for wide partitions — the OSS50 row-index
+        // separators here, and finalize both tries at `finish()`. The wide gate
+        // (>= 2 blocks) mirrors `RowIndexEntry.create()` /
+        // `IndexWriter::add_partition_with_promoted` and guide ch.17.
+        if let Some(ref mut pending) = self.bti_pending {
+            let row_index = if promoted_blocks.len() >= 2 {
+                // Build OSS50-separator row-index blocks. A block lacking an
+                // OSS50 separator (marker-led, or no clustering key) cannot be
+                // placed in the trie; if ANY block lacks one we fall back to a
+                // direct Data.db offset for the whole partition rather than emit
+                // an unreadable separator (no-heuristics: never guess bytes).
+                let mut blocks = Vec::with_capacity(promoted_blocks.len());
+                let mut all_have_sep = true;
+                for b in &promoted_blocks {
+                    match &b.oss50_separator {
+                        Some(sep) if !sep.is_empty() => {
+                            blocks.push(partitions_writer::RowIndexBlock {
+                                separator_key: sep.clone(),
+                                block_offset: b.offset,
+                                open_marker: None,
+                            });
+                        }
+                        _ => {
+                            all_have_sep = false;
+                            break;
+                        }
+                    }
+                }
+                // Separators must be strictly ascending and unique for the trie.
+                let strictly_ascending = blocks
+                    .windows(2)
+                    .all(|w| w[0].separator_key < w[1].separator_key);
+                if all_have_sep && strictly_ascending && !blocks.is_empty() {
+                    let partition_deletion =
+                        partition_tombstone.map(|pt| (pt.local_deletion_time, pt.deletion_time));
+                    Some(PendingRowIndex {
+                        blocks,
+                        partition_deletion,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            pending.push(PendingBtiPartition {
+                raw_key: key.key.clone(),
+                data_offset,
+                row_index,
+            });
         }
 
         // Track every partition for first_key / last_key / total_partition_count.
@@ -778,26 +880,84 @@ impl SSTableWriter {
             Some(path)
         };
 
-        // 5.25. Write Partitions.db (BTI, issue #766 / #908).
-        // Only emitted for SSTableFormat::Bti; for BIG this is None and nothing
+        // 5.25. Write Rows.db + Partitions.db (BTI, issue #766 / #908 / #910).
+        // Only emitted for SSTableFormat::Bti; for BIG both are None and nothing
         // is written, keeping the default path byte-for-byte unchanged.
         //
-        // An empty BTI SSTable (no partitions) produces a zero-byte trie, which
-        // the BTI reader rejects (it needs at least the 8-byte root footer). For
-        // an empty SSTable we therefore OMIT Partitions.db entirely (file and TOC
-        // entry) rather than write an unreadable component (issue #766 review
-        // finding 2).
-        let partitions_path = if let Some(trie) = self.partitions_trie.take() {
-            let bytes = trie.finish()?;
-            if bytes.is_empty() {
-                None
-            } else {
-                let path = cpath("Partitions.db");
-                tokio::fs::write(&path, bytes).await?;
-                Some(path)
+        // Order matters: `Rows.db` is serialized FIRST so each wide partition's
+        // `TrieIndexEntry` offset (`RowsOffset`) is known, then the partition
+        // trie leaves store either that positive `RowsOffset` (wide) or the
+        // negative direct `Data.db` offset (narrow). Cassandra always emits a
+        // `Rows.db` component for a BTI SSTable, even a 0-byte one when no
+        // partition is wide (verified against the real
+        // `simple_table`/`collection_table`/`ttl_table` `da-2-bti-Rows.db`
+        // fixtures, all 0 bytes yet listed in the TOC).
+        //
+        // Finding 2 (roborev #908): an EMPTY BTI SSTable (no partitions) cannot
+        // produce a readable `Partitions.db` — a zero-byte trie has no 8-byte
+        // root footer, so the BTI reader rejects it, and a `da` SSTable that
+        // omits `Partitions.db` is unreadable. Rather than publish an
+        // unreadable artifact we REFUSE to finish an empty BTI SSTable with a
+        // clear error. (A narrow non-empty table still publishes a valid trie +
+        // a 0-byte `Rows.db`, matching Cassandra.)
+        let (partitions_path, rows_path) = if let Some(pending) = self.bti_pending.take() {
+            if pending.is_empty() {
+                return Err(Error::InvalidInput(
+                    "cannot publish an empty BTI SSTable: a `da` SSTable requires a readable \
+                     Partitions.db trie (with an 8-byte root footer), which has no valid \
+                     zero-partition form. Write at least one partition, or use the BIG format \
+                     for empty SSTables."
+                        .to_string(),
+                ));
             }
+
+            // 1. Serialize Rows.db from the wide partitions, recovering each
+            //    wide partition's RowsOffset (in pending-order of wide entries).
+            let mut rows_writer = partitions_writer::RowsTrieWriter::new();
+            for p in &pending {
+                if let Some(ri) = &p.row_index {
+                    rows_writer.add_partition_row_index(
+                        &p.raw_key,
+                        p.data_offset,
+                        ri.blocks.clone(),
+                        ri.partition_deletion,
+                    );
+                }
+            }
+            let (rows_bytes, rows_offsets) = rows_writer.finish()?;
+
+            // 2. Build the partition trie: wide partitions get their positive
+            //    RowsOffset, narrow partitions keep the negative DataOffset.
+            let mut trie = self.partitions_trie.take().unwrap_or_default();
+            let mut wide_idx = 0usize;
+            for p in &pending {
+                if p.row_index.is_some() {
+                    let rows_offset = rows_offsets[wide_idx];
+                    wide_idx += 1;
+                    trie.add_partition_with_payload(
+                        &p.raw_key,
+                        partitions_writer::PartitionPayload::RowsOffset(rows_offset),
+                    );
+                } else {
+                    trie.add_partition_with_payload(
+                        &p.raw_key,
+                        partitions_writer::PartitionPayload::DataOffset(p.data_offset),
+                    );
+                }
+            }
+            let partitions_bytes = trie.finish()?;
+
+            // Partitions.db must be non-empty here (pending is non-empty).
+            let part_path = cpath("Partitions.db");
+            tokio::fs::write(&part_path, partitions_bytes).await?;
+
+            // Rows.db is ALWAYS emitted for BTI (possibly 0 bytes).
+            let rows_path = cpath("Rows.db");
+            tokio::fs::write(&rows_path, rows_bytes).await?;
+
+            (Some(part_path), Some(rows_path))
         } else {
-            None
+            (None, None)
         };
 
         // 5.5. CompressionInfo.db is omitted for uncompressed data.
@@ -814,9 +974,10 @@ impl SSTableWriter {
         // 7. Write TOC.txt (LAST - publication barrier).
         //
         // The TOC lists exactly the component set actually written. BIG lists
-        // Index.db + Summary.db; BTI (issue #908) omits both and lists
-        // Partitions.db instead. `Rows.db` is a follow-up (#910) and is NOT
-        // emitted yet, so it is not listed. TocWriter self-references TOC.txt.
+        // Index.db + Summary.db; BTI (issue #908 / #910) omits both and lists
+        // Partitions.db AND Rows.db instead (matching the real `da` fixtures,
+        // which list Rows.db even when it is 0 bytes). TocWriter self-references
+        // TOC.txt.
         use crate::storage::sstable::directory::types::SSTableComponent;
         let toc_path = cpath("TOC.txt");
         let toc_writer = TocWriter::new(toc_path.clone());
@@ -836,6 +997,10 @@ impl SSTableWriter {
         if partitions_path.is_some() {
             components.push(ComponentEntry::new(SSTableComponent::Partitions));
         }
+        // BTI (issue #910): list Rows.db when emitted (always for BTI).
+        if rows_path.is_some() {
+            components.push(ComponentEntry::new(SSTableComponent::Rows));
+        }
         toc_writer.write(&components)?;
 
         Ok(SSTableInfo {
@@ -846,6 +1011,7 @@ impl SSTableWriter {
             stats_path,
             compression_info_path: None,
             partitions_path,
+            rows_path,
             toc_path,
             digest_path,
             partition_count: self.partition_count,

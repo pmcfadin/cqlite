@@ -49,21 +49,51 @@
 //!   cannot encode — its child count is a single byte). The reader's
 //!   `parse_bti_node` + `find_child` handle exactly these encodings.
 //!
+//! ## Rows.db (within-partition row-index trie) — issue #910
+//!
+//! [`RowsTrieWriter`] (this module) serializes `Rows.db`: one independent
+//! per-partition row-index trie + `TrieIndexEntry` for each WIDE partition
+//! (`>= 2` column-index blocks). A wide partition's `Partitions.db` leaf then
+//! stores a **positive** `RowsOffset` ([`PartitionPayload::RowsOffset`])
+//! pointing at its `TrieIndexEntry`; narrow partitions keep the **negative**
+//! direct `Data.db` offset ([`PartitionPayload::DataOffset`]). The leaf payloads
+//! and entry layout match the reader exactly
+//! ([`crate::storage::sstable::bti::parser::decode_bti_row_payload`] /
+//! [`resolve_rows_db_entry`](crate::storage::sstable::bti::resolve_rows_db_entry)).
+//!
 //! ## Out of scope (recorded for the epic)
 //!
-//! - `Rows.db` (within-partition clustering trie) is **not** written here. For
-//!   phase 1 every partition payload encodes a direct `Data.db` offset
-//!   (negative `position`), never a `RowsOffset`. Wide-partition row tries are a
-//!   follow-up (see issue #766 / epic #762).
 //! - `Single*` and 12-bit packed node variants are not emitted. They are valid
 //!   and the reader parses them, but `PayloadOnly`/`Sparse`/`Dense` cover every
-//!   trie phase 1 produces.
+//!   trie this writer produces.
+//! - Per-block **open range-tombstone markers** are supported on the wire
+//!   ([`RowIndexBlock::open_marker`]) but the `SSTableWriter` BTI path does not
+//!   yet derive them from Data.db range-tombstone state; it passes `None`
+//!   (the common case). Partition-level deletions ARE wired through.
 
 use crate::error::{Error, Result};
 use crate::storage::sstable::bti::encode_partition_key_for_bti_trie;
 use crate::storage::sstable::bti::parser::FLAG_HAS_HASH_BYTE;
 use crate::util::cassandra_murmur3::cassandra_partition_filter_hash_lower_bits;
 use std::collections::BTreeMap;
+
+/// Where a partition leaf payload points (issue #910).
+///
+/// Mirrors `BtiPartitionLocation` on the read side and Cassandra's
+/// `PartitionIndex` position-sign convention: a **direct** `Data.db` offset is
+/// stored as a *negative* `position = ~data_offset`; a **row-index** offset is
+/// stored as a *non-negative* `position = rows_offset` that points at the
+/// partition's `TrieIndexEntry` in `Rows.db`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PartitionPayload {
+    /// Direct `Data.db` byte offset (narrow partition; `< 2` column-index
+    /// blocks). Encoded as `position = ~data_offset` (negative).
+    DataOffset(u64),
+    /// Offset of this partition's `TrieIndexEntry` in `Rows.db` (wide partition;
+    /// `>= 2` column-index blocks). Encoded as `position = rows_offset`
+    /// (non-negative).
+    RowsOffset(u64),
+}
 
 /// One partition's entry in the partition trie.
 #[derive(Debug, Clone)]
@@ -73,8 +103,8 @@ pub struct PartitionTrieEntry {
     key: [u8; 9],
     /// Filter hash byte (lowest 8 bits of the partition-key filter hash).
     hash_byte: u8,
-    /// `Data.db` byte offset where this partition begins.
-    data_offset: u64,
+    /// Where this partition's leaf payload points (`Data.db` or `Rows.db`).
+    payload: PartitionPayload,
 }
 
 /// Builder that accumulates partition entries and serializes the BTI
@@ -104,16 +134,29 @@ impl PartitionsTrieWriter {
 
     /// Record a partition: its raw on-disk key bytes and its `Data.db` offset.
     ///
+    /// Convenience wrapper for a **narrow** partition whose leaf points directly
+    /// into `Data.db` (the common, `< 2` column-index-block case).
+    ///
     /// The byte-comparable trie key and the filter hash byte are derived here
     /// from the raw partition-key bytes via the same `Murmur3Partitioner`
     /// encoding the reader expects.
     pub fn add_partition(&mut self, raw_key_bytes: &[u8], data_offset: u64) {
+        self.add_partition_with_payload(raw_key_bytes, PartitionPayload::DataOffset(data_offset));
+    }
+
+    /// Record a partition with an explicit payload target (issue #910).
+    ///
+    /// Use [`PartitionPayload::RowsOffset`] for a **wide** partition whose leaf
+    /// must point at its `TrieIndexEntry` in `Rows.db` (positive position), or
+    /// [`PartitionPayload::DataOffset`] for a narrow partition (negative
+    /// position, direct `Data.db` offset).
+    pub fn add_partition_with_payload(&mut self, raw_key_bytes: &[u8], payload: PartitionPayload) {
         let key = encode_partition_key_for_bti_trie(raw_key_bytes);
         let hash_byte = filter_hash_byte(raw_key_bytes);
         self.entries.push(PartitionTrieEntry {
             key,
             hash_byte,
-            data_offset,
+            payload,
         });
     }
 
@@ -174,7 +217,10 @@ fn filter_hash_byte(raw_key_bytes: &[u8]) -> u8 {
 /// An in-memory trie node prior to serialization.
 enum TrieBuildNode {
     /// Leaf: a single partition's payload.
-    Leaf { hash_byte: u8, data_offset: u64 },
+    Leaf {
+        hash_byte: u8,
+        payload: PartitionPayload,
+    },
     /// Internal node keyed by the next byte of each child's key.
     Internal {
         children: BTreeMap<u8, TrieBuildNode>,
@@ -191,12 +237,12 @@ fn build_trie(entries: &[PartitionTrieEntry]) -> TrieBuildNode {
         children: BTreeMap::new(),
     };
     for entry in entries {
-        insert(&mut root, &entry.key, entry.hash_byte, entry.data_offset);
+        insert(&mut root, &entry.key, entry.hash_byte, entry.payload);
     }
     root
 }
 
-fn insert(node: &mut TrieBuildNode, key: &[u8], hash_byte: u8, data_offset: u64) {
+fn insert(node: &mut TrieBuildNode, key: &[u8], hash_byte: u8, payload: PartitionPayload) {
     match node {
         TrieBuildNode::Internal { children } => {
             if key.is_empty() {
@@ -205,29 +251,22 @@ fn insert(node: &mut TrieBuildNode, key: &[u8], hash_byte: u8, data_offset: u64)
                 // an internal node would mean a key was a prefix of another. This
                 // branch is unreachable for valid 9-byte keys, but handle it
                 // defensively by inserting a sentinel leaf under byte 0.
-                children.entry(0).or_insert(TrieBuildNode::Leaf {
-                    hash_byte,
-                    data_offset,
-                });
+                children
+                    .entry(0)
+                    .or_insert(TrieBuildNode::Leaf { hash_byte, payload });
                 return;
             }
             let first = key[0];
             let rest = &key[1..];
             if rest.is_empty() {
-                children.insert(
-                    first,
-                    TrieBuildNode::Leaf {
-                        hash_byte,
-                        data_offset,
-                    },
-                );
+                children.insert(first, TrieBuildNode::Leaf { hash_byte, payload });
             } else {
                 let child = children
                     .entry(first)
                     .or_insert_with(|| TrieBuildNode::Internal {
                         children: BTreeMap::new(),
                     });
-                insert(child, rest, hash_byte, data_offset);
+                insert(child, rest, hash_byte, payload);
             }
         }
         TrieBuildNode::Leaf { .. } => {
@@ -257,10 +296,7 @@ fn serialize_trie(root: &TrieBuildNode) -> Result<Vec<u8>> {
 /// absolute offset at which this node's header byte was written.
 fn write_node(node: &TrieBuildNode, buf: &mut Vec<u8>) -> Result<usize> {
     match node {
-        TrieBuildNode::Leaf {
-            hash_byte,
-            data_offset,
-        } => write_leaf(*hash_byte, *data_offset, buf),
+        TrieBuildNode::Leaf { hash_byte, payload } => write_leaf(*hash_byte, *payload, buf),
         TrieBuildNode::Internal { children } => {
             // Post-order: write every child first so we know its offset.
             let mut child_offsets: Vec<(u8, usize)> = Vec::with_capacity(children.len());
@@ -286,17 +322,33 @@ fn write_node(node: &TrieBuildNode, buf: &mut Vec<u8>) -> Result<usize> {
 /// Write a `PayloadOnly` (ordinal 0) leaf node.
 ///
 /// Layout: `[header=(0<<4)|payloadBits] ++ [hash_byte] ++ SizedInts(position)`
-/// where `position = !data_offset` and
-/// `payloadBits = FLAG_HAS_HASH_BYTE + (position_bytes − 1)`.
-fn write_leaf(hash_byte: u8, data_offset: u64, buf: &mut Vec<u8>) -> Result<usize> {
-    // Negative `position` ⇒ direct Data.db offset (PartitionIndex sign convention).
-    // `~data_offset` as i64. Guard against offsets that would overflow i64.
-    if data_offset > i64::MAX as u64 {
-        return Err(Error::InvalidInput(format!(
-            "Data.db offset {data_offset} too large to encode as a signed BTI position"
-        )));
-    }
-    let position: i64 = !(data_offset as i64);
+/// where `payloadBits = FLAG_HAS_HASH_BYTE + (position_bytes − 1)` and the
+/// signed `position` encodes the payload target per the `PartitionIndex` sign
+/// convention:
+/// - [`PartitionPayload::DataOffset`] ⇒ `position = ~data_offset` (negative).
+/// - [`PartitionPayload::RowsOffset`] ⇒ `position = rows_offset` (non-negative;
+///   a `Rows.db` `TrieIndexEntry` offset, issue #910).
+fn write_leaf(hash_byte: u8, payload: PartitionPayload, buf: &mut Vec<u8>) -> Result<usize> {
+    let position: i64 = match payload {
+        // Negative `position` ⇒ direct Data.db offset.
+        PartitionPayload::DataOffset(data_offset) => {
+            if data_offset > i64::MAX as u64 {
+                return Err(Error::InvalidInput(format!(
+                    "Data.db offset {data_offset} too large to encode as a signed BTI position"
+                )));
+            }
+            !(data_offset as i64)
+        }
+        // Non-negative `position` ⇒ Rows.db TrieIndexEntry offset.
+        PartitionPayload::RowsOffset(rows_offset) => {
+            if rows_offset > i64::MAX as u64 {
+                return Err(Error::InvalidInput(format!(
+                    "Rows.db offset {rows_offset} too large to encode as a signed BTI position"
+                )));
+            }
+            rows_offset as i64
+        }
+    };
     let position_bytes = sized_ints_non_zero_size(position);
     debug_assert!((1..=8).contains(&position_bytes));
 
@@ -486,6 +538,437 @@ fn write_be_unsigned(buf: &mut Vec<u8>, value: u64, bytes: usize) {
     let all = value.to_be_bytes();
     // Take the last `bytes` bytes (the least-significant ones in big-endian).
     buf.extend_from_slice(&all[8 - bytes..]);
+}
+
+// ===========================================================================
+// Rows.db within-partition row-index trie writer (issue #910)
+// ===========================================================================
+//
+// `Rows.db` is a concatenation of independent per-partition structures.  For
+// each WIDE partition (one that spans >= 2 column-index blocks, mirroring
+// `RowIndexEntry.create()` / `IndexWriter::add_partition_with_promoted`) we
+// write, in order:
+//
+//   1. The row-index trie body (children before parents, backward deltas),
+//      whose leaves are `PayloadOnly` nodes carrying a `RowIndexReader.IndexInfo`
+//      payload: `[SizedInts(block_offset)] [optional DeletionTime]`.  The low
+//      nibble (payloadBits) is `offset_bytes | FLAG_OPEN_MARKER`.  This is the
+//      EXACT format `parser::decode_bti_row_payload` consumes.
+//   2. The partition's `TrieIndexEntry` at offset `RowsOffset`:
+//        [u16 key_length][key bytes]
+//        [data position : unsigned vint]
+//        [trieRoot - base : SIGNED vint]   (base = RowsOffset + key_length)
+//        [block count : unsigned vint]
+//        [partition DeletionTime]          (0x80 LIVE sentinel, else 12 bytes)
+//      consumed by `parser::resolve_rows_db_entry`.
+//
+// The returned `RowsOffset` for each partition is the offset of its
+// `TrieIndexEntry` (step 2), which is stored as the POSITIVE position in that
+// partition's `Partitions.db` leaf payload.
+//
+// References: cassandra-5.0.0 `RowIndexWriter.java`, `TrieIndexEntry.java`,
+// `RowIndexReader.java`; docs/sstables-definitive-guide chapter 17.
+
+/// One row-index block separator for a wide partition's `Rows.db` trie.
+///
+/// Mirrors the read-side `BtiRowIndexEntry` plus its byte-comparable separator
+/// key.  `separator_key` is the OSS50 byte-comparable clustering prefix the
+/// reader reconstructs during DFS (e.g. `ck=8 → 80 00 00 08` for an `int`
+/// clustering); `block_offset` is the block's offset RELATIVE to the partition
+/// start in `Data.db`.
+#[derive(Debug, Clone)]
+pub struct RowIndexBlock {
+    /// OSS50 byte-comparable separator key for this block (ascending order).
+    pub separator_key: Vec<u8>,
+    /// Block offset relative to the partition's `Data.db` start.
+    pub block_offset: u64,
+    /// Optional open-deletion `(local_deletion_time, marked_for_delete_at)` for
+    /// a range-tombstone that spans this block boundary; `None` for the common
+    /// no-open-marker case.
+    pub open_marker: Option<(i32, i64)>,
+}
+
+/// One wide partition's row index, queued for serialization into `Rows.db`.
+#[derive(Debug, Clone)]
+struct PartitionRowIndex {
+    /// Raw partition-key bytes (length-prefixed into the `TrieIndexEntry`).
+    partition_key: Vec<u8>,
+    /// Absolute `Data.db` byte position of the partition start.
+    data_position: u64,
+    /// Per-block separators (ascending, de-duplicated).
+    blocks: Vec<RowIndexBlock>,
+    /// Partition-level deletion `(local_deletion_time, marked_for_delete_at)`;
+    /// `None` ⇒ the LIVE `0x80` sentinel is written.
+    partition_deletion: Option<(i32, i64)>,
+}
+
+/// Builder that accumulates wide-partition row indexes and serializes `Rows.db`.
+///
+/// Narrow partitions are NOT added here; they keep a direct
+/// [`PartitionPayload::DataOffset`] in `Partitions.db`.  Call
+/// [`RowsTrieWriter::add_partition_row_index`] for each wide partition (in the
+/// same ascending token order partitions are written), then
+/// [`RowsTrieWriter::finish`] to obtain the `Rows.db` bytes plus each
+/// partition's `RowsOffset` (the `TrieIndexEntry` position to store in the
+/// partition leaf).
+#[derive(Debug, Default)]
+pub struct RowsTrieWriter {
+    partitions: Vec<PartitionRowIndex>,
+}
+
+impl RowsTrieWriter {
+    /// Create an empty `Rows.db` writer.
+    pub fn new() -> Self {
+        Self {
+            partitions: Vec::new(),
+        }
+    }
+
+    /// Number of wide-partition row indexes accumulated.
+    pub fn len(&self) -> usize {
+        self.partitions.len()
+    }
+
+    /// Whether any wide-partition row indexes have been accumulated.
+    pub fn is_empty(&self) -> bool {
+        self.partitions.is_empty()
+    }
+
+    /// Queue a wide partition's row index.
+    ///
+    /// `partition_key` is the raw on-disk partition-key bytes; `data_position`
+    /// is the partition's absolute `Data.db` start offset; `blocks` are the
+    /// per-block separators (ascending); `partition_deletion` is the
+    /// partition-level deletion (or `None` for LIVE).
+    ///
+    /// The caller must supply at least one block (a wide partition always has
+    /// >= 2 column-index blocks); zero blocks is rejected at [`Self::finish`].
+    pub fn add_partition_row_index(
+        &mut self,
+        partition_key: &[u8],
+        data_position: u64,
+        blocks: Vec<RowIndexBlock>,
+        partition_deletion: Option<(i32, i64)>,
+    ) {
+        self.partitions.push(PartitionRowIndex {
+            partition_key: partition_key.to_vec(),
+            data_position,
+            blocks,
+            partition_deletion,
+        });
+    }
+
+    /// Serialize all accumulated row indexes into the `Rows.db` bytes.
+    ///
+    /// Returns `(bytes, rows_offsets)` where `rows_offsets[i]` is the
+    /// `TrieIndexEntry` offset for the i-th partition added (the POSITIVE
+    /// position to store in that partition's `Partitions.db` leaf).
+    ///
+    /// An empty writer returns `(empty bytes, empty offsets)` — Cassandra emits
+    /// a 0-byte `Rows.db` component when no partition is wide (verified against
+    /// the real `simple_table`/`collection_table`/`ttl_table` `da-2-bti-Rows.db`
+    /// fixtures), and the reader's `iterate_rows_in_bti_file` accepts it.
+    pub fn finish(self) -> Result<(Vec<u8>, Vec<u64>)> {
+        let mut buf = Vec::new();
+        let mut rows_offsets = Vec::with_capacity(self.partitions.len());
+
+        for part in &self.partitions {
+            if part.blocks.is_empty() {
+                return Err(Error::InvalidInput(
+                    "Rows.db: wide partition must have at least one row-index block".to_string(),
+                ));
+            }
+            // Validate ascending, unique separator keys (a trie cannot encode a
+            // key that is a prefix of another, and DFS expects strict order).
+            for w in part.blocks.windows(2) {
+                if w[0].separator_key >= w[1].separator_key {
+                    return Err(Error::InvalidInput(
+                        "Rows.db: row-index separators must be strictly ascending".to_string(),
+                    ));
+                }
+            }
+
+            // 1. Serialize the row-index trie body. Its root offset is recorded
+            //    for the SIGNED root delta in the TrieIndexEntry.
+            let root = build_row_trie(&part.blocks);
+            let trie_root = write_row_node(&root, &mut buf)?;
+
+            // 2. Serialize this partition's TrieIndexEntry. `RowsOffset` is the
+            //    offset of the key-length prefix (the entry start).
+            let rows_offset = buf.len();
+            write_trie_index_entry(
+                &mut buf,
+                &part.partition_key,
+                part.data_position,
+                trie_root,
+                part.blocks.len() as u64,
+                part.partition_deletion,
+            )?;
+
+            rows_offsets.push(rows_offset as u64);
+        }
+
+        Ok((buf, rows_offsets))
+    }
+}
+
+/// In-memory row-index trie node prior to serialization.
+enum RowTrieBuildNode {
+    /// Leaf: a single block's `IndexInfo` payload.
+    Leaf {
+        block_offset: u64,
+        open_marker: Option<(i32, i64)>,
+    },
+    /// Internal node keyed by the next byte of each child's separator.
+    Internal {
+        children: BTreeMap<u8, RowTrieBuildNode>,
+    },
+}
+
+/// Build the radix-1 row-index trie from ascending block separators.
+fn build_row_trie(blocks: &[RowIndexBlock]) -> RowTrieBuildNode {
+    let mut root = RowTrieBuildNode::Internal {
+        children: BTreeMap::new(),
+    };
+    for b in blocks {
+        insert_row(&mut root, &b.separator_key, b.block_offset, b.open_marker);
+    }
+    root
+}
+
+fn insert_row(
+    node: &mut RowTrieBuildNode,
+    key: &[u8],
+    block_offset: u64,
+    open_marker: Option<(i32, i64)>,
+) {
+    match node {
+        RowTrieBuildNode::Internal { children } => {
+            if key.is_empty() {
+                // A zero-length separator collides with the trie root; the
+                // shortest real separator is at least one byte. Defensive: place
+                // the leaf under byte 0 (unreachable for valid OSS50 keys, which
+                // are weakly prefix-free and non-empty).
+                children.entry(0).or_insert(RowTrieBuildNode::Leaf {
+                    block_offset,
+                    open_marker,
+                });
+                return;
+            }
+            let first = key[0];
+            let rest = &key[1..];
+            if rest.is_empty() {
+                children.insert(
+                    first,
+                    RowTrieBuildNode::Leaf {
+                        block_offset,
+                        open_marker,
+                    },
+                );
+            } else {
+                let child = children
+                    .entry(first)
+                    .or_insert_with(|| RowTrieBuildNode::Internal {
+                        children: BTreeMap::new(),
+                    });
+                insert_row(child, rest, block_offset, open_marker);
+            }
+        }
+        RowTrieBuildNode::Leaf { .. } => {
+            // Unreachable for unique separators (validated in `finish`).
+        }
+    }
+}
+
+/// Write one row-index trie node (and its subtree), returning the absolute
+/// offset of its header byte. Internal nodes reuse the shared
+/// `write_sparse`/`write_dense` serializers (they are leaf-type agnostic).
+fn write_row_node(node: &RowTrieBuildNode, buf: &mut Vec<u8>) -> Result<usize> {
+    match node {
+        RowTrieBuildNode::Leaf {
+            block_offset,
+            open_marker,
+        } => write_row_leaf(*block_offset, *open_marker, buf),
+        RowTrieBuildNode::Internal { children } => {
+            let mut child_offsets: Vec<(u8, usize)> = Vec::with_capacity(children.len());
+            for (&byte, child) in children.iter() {
+                let off = write_row_node(child, buf)?;
+                child_offsets.push((byte, off));
+            }
+            if child_offsets.len() == 256 {
+                write_dense(&child_offsets, buf)
+            } else {
+                write_sparse(&child_offsets, buf)
+            }
+        }
+    }
+}
+
+/// Write a `PayloadOnly` (ordinal 0) row-index leaf node carrying a
+/// `RowIndexReader.IndexInfo` payload.
+///
+/// Layout: `[header=(0<<4)|payloadBits] ++ SizedInts(block_offset) ++ [DeletionTime?]`
+/// where `payloadBits = SizedInts.nonZeroSize(block_offset) | (FLAG_OPEN_MARKER
+/// if open_marker)`.  This is exactly what `decode_bti_row_payload` reads:
+/// `offset_bytes = payloadBits & !FLAG_OPEN_MARKER` (must be 1..=7), and an open
+/// `DeletionTime` follows when `FLAG_OPEN_MARKER` is set.
+fn write_row_leaf(
+    block_offset: u64,
+    open_marker: Option<(i32, i64)>,
+    buf: &mut Vec<u8>,
+) -> Result<usize> {
+    if block_offset > i64::MAX as u64 {
+        return Err(Error::InvalidInput(format!(
+            "Rows.db block offset {block_offset} too large to encode as SizedInts"
+        )));
+    }
+    // Block offsets are non-negative; size them as an unsigned magnitude so the
+    // high bit (which SizedInts.read sign-extends) is never set for a value that
+    // fits in (bytes*8 - 1) bits. `sized_ints_non_zero_size` already reserves the
+    // sign bit, so a non-negative value never round-trips to a negative.
+    let offset_bytes = sized_ints_non_zero_size(block_offset as i64);
+    // The reader rejects offset_bytes == 0 or > 7 (RowIndexWriter asserts < 8).
+    if !(1..=7).contains(&offset_bytes) {
+        return Err(Error::InvalidInput(format!(
+            "Rows.db block offset {block_offset} needs {offset_bytes} SizedInts bytes; \
+             expected 1..=7"
+        )));
+    }
+
+    let mut payload_bits = offset_bytes as u8;
+    if open_marker.is_some() {
+        payload_bits |= crate::storage::sstable::bti::parser::FLAG_OPEN_MARKER;
+    }
+
+    let offset = buf.len();
+    // PayloadOnly ordinal 0: high nibble 0, low nibble = payloadBits.
+    buf.push(payload_bits & 0x0F);
+    write_sized_int_be(buf, block_offset as i64, offset_bytes);
+    if let Some((ldt, mfda)) = open_marker {
+        write_da_deletion_time(buf, Some((ldt, mfda)));
+    }
+    Ok(offset)
+}
+
+/// Serialize a per-partition `TrieIndexEntry` (Cassandra `TrieIndexEntry.serialize`).
+///
+/// Layout (consumed by `parser::resolve_rows_db_entry`):
+/// ```text
+/// [u16 key_length][partition key bytes]
+/// [data position : unsigned vint]
+/// [trieRoot - base : SIGNED vint]      (base = entry_start + key_length)
+/// [block count : unsigned vint]
+/// [partition DeletionTime]
+/// ```
+/// `entry_start` is the current `buf.len()` (the `RowsOffset` of this entry).
+fn write_trie_index_entry(
+    buf: &mut Vec<u8>,
+    partition_key: &[u8],
+    data_position: u64,
+    trie_root: usize,
+    block_count: u64,
+    partition_deletion: Option<(i32, i64)>,
+) -> Result<()> {
+    let entry_start = buf.len();
+    let key_length = partition_key.len();
+    let key_length_u16 = u16::try_from(key_length).map_err(|_| {
+        Error::InvalidInput(format!(
+            "Rows.db TrieIndexEntry: partition key length {key_length} exceeds u16"
+        ))
+    })?;
+
+    // [u16 key_length][key bytes]
+    buf.extend_from_slice(&key_length_u16.to_be_bytes());
+    buf.extend_from_slice(partition_key);
+
+    // [data position : unsigned vint]
+    write_unsigned_vint(buf, data_position);
+
+    // [trieRoot - base : SIGNED vint]. base = RowsOffset + key_length = the
+    // position immediately after the length-prefixed key (entry_start + 2 +
+    // key_length) MINUS 2; `resolve_rows_db_entry` computes
+    // base = rows_offset + key_length, so root_delta = trie_root - base.
+    let base = entry_start + key_length;
+    let root_delta = trie_root as i64 - base as i64;
+    write_signed_vint(buf, root_delta);
+
+    // [block count : unsigned vint]
+    write_unsigned_vint(buf, block_count);
+
+    // [partition DeletionTime]
+    write_da_deletion_time(buf, partition_deletion);
+
+    Ok(())
+}
+
+/// Write an unsigned VInt in Cassandra's count-leading-ones encoding
+/// (`DataOutputPlus.writeUnsignedVInt`); the inverse of
+/// `parser::read_unsigned_vint_from_slice`.
+fn write_unsigned_vint(buf: &mut Vec<u8>, value: u64) {
+    // extra_bytes = number of bytes after the first; determined by magnitude.
+    // The first byte holds `extra_bytes` leading 1-bits, then a 0 separator,
+    // then the top data bits; remaining bytes are big-endian.
+    let extra_bytes = if value == 0 {
+        0
+    } else {
+        let significant_bits = 64 - value.leading_zeros() as usize;
+        // Each extra byte carries 8 data bits; the first byte carries
+        // (7 - extra_bytes) data bits. Find the smallest extra_bytes such that
+        // (7 - extra_bytes) + 8*extra_bytes >= significant_bits.
+        let mut n = 0usize;
+        while n < 8 && (7 - n) + 8 * n < significant_bits {
+            n += 1;
+        }
+        n
+    };
+
+    if extra_bytes == 0 {
+        buf.push(value as u8);
+        return;
+    }
+    if extra_bytes >= 8 {
+        // 8 extra bytes: first byte is all ones, value spans the full 8 bytes.
+        buf.push(0xFF);
+        buf.extend_from_slice(&value.to_be_bytes());
+        return;
+    }
+
+    let data_bits_first = 7 - extra_bytes;
+    // Leading 1-bits mask (extra_bytes ones) in the high bits of the first byte.
+    let leading_ones: u8 = (!0u8) << (8 - extra_bytes);
+    let total_bytes = extra_bytes + 1;
+    let mut bytes = value.to_be_bytes().to_vec();
+    // Keep only the low `total_bytes` of the big-endian representation.
+    let tail = bytes.split_off(8 - total_bytes);
+    // tail[0] holds the most-significant data byte; its low `data_bits_first`
+    // bits go into the first output byte, OR'd with the leading-ones prefix.
+    let first = leading_ones | (tail[0] & ((1u8 << data_bits_first) - 1));
+    buf.push(first);
+    buf.extend_from_slice(&tail[1..]);
+}
+
+/// Write a signed VInt (Cassandra ZigZag) — the inverse of
+/// `parser::read_signed_vint_from_slice`.
+fn write_signed_vint(buf: &mut Vec<u8>, value: i64) {
+    // ZigZag encode: (n << 1) ^ (n >> 63)
+    let zigzag = ((value << 1) ^ (value >> 63)) as u64;
+    write_unsigned_vint(buf, zigzag);
+}
+
+/// Write a modern (DA/BTI) `DeletionTime` — the inverse of
+/// `parser::decode_da_deletion_time`.
+///
+/// `None` ⇒ the single `0x80` LIVE sentinel. `Some((ldt, mfda))` ⇒ the 12-byte
+/// body `[markedForDeleteAt : i64 BE][localDeletionTime : u32 BE]` (note the
+/// modern field order/width).
+fn write_da_deletion_time(buf: &mut Vec<u8>, deletion: Option<(i32, i64)>) {
+    match deletion {
+        None => buf.push(0x80),
+        Some((local_deletion_time, marked_for_delete_at)) => {
+            buf.extend_from_slice(&marked_for_delete_at.to_be_bytes());
+            buf.extend_from_slice(&(local_deletion_time as u32).to_be_bytes());
+        }
+    }
 }
 
 #[cfg(test)]
@@ -708,7 +1191,7 @@ mod tests {
                 b as u8,
                 TrieBuildNode::Leaf {
                     hash_byte: b as u8,
-                    data_offset: (b as u64) * 17,
+                    payload: PartitionPayload::DataOffset((b as u64) * 17),
                 },
             );
         }
@@ -748,6 +1231,281 @@ mod tests {
         match lookup_partition_in_bti_file(&mut cur, key).ok()?? {
             BtiPartitionLocation::DataOffset(o) => Some(o),
             BtiPartitionLocation::RowsOffset(_) => None,
+        }
+    }
+
+    // ── Rows.db writer (#910) ────────────────────────────────────────────
+
+    /// The unsigned-VInt writer must be the exact inverse of the reader's
+    /// `read_unsigned_vint_from_slice` for a wide spread of values, including
+    /// the 1-/2-/.../9-byte boundaries.
+    #[test]
+    fn unsigned_vint_roundtrips_through_reader() {
+        use crate::storage::sstable::bti::parser::read_unsigned_vint_from_slice_for_test as read_u;
+        let values: [u64; 20] = [
+            0,
+            1,
+            63,
+            64,
+            127,
+            128,
+            255,
+            256,
+            16_383,
+            16_384,
+            65_535,
+            65_536,
+            1_000_000,
+            300_000_000_000,
+            (1u64 << 35) - 1,
+            1u64 << 35,
+            (1u64 << 49) - 1,
+            1u64 << 49,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+        for v in values {
+            let mut buf = Vec::new();
+            write_unsigned_vint(&mut buf, v);
+            let (got, n) = read_u(&buf).expect("read");
+            assert_eq!(got, v, "unsigned vint roundtrip failed for {v}: {buf:02x?}");
+            assert_eq!(n, buf.len(), "consumed all bytes for {v}");
+        }
+    }
+
+    /// The signed-VInt (ZigZag) writer must be the exact inverse of the reader's
+    /// `read_signed_vint_from_slice` for positive, negative and zero deltas.
+    #[test]
+    fn signed_vint_roundtrips_through_reader() {
+        use crate::storage::sstable::bti::parser::read_signed_vint_from_slice_for_test as read_s;
+        for v in [
+            0i64,
+            1,
+            -1,
+            10,
+            -10,
+            127,
+            -128,
+            1000,
+            -1000,
+            i32::MIN as i64,
+            i64::MAX,
+            i64::MIN,
+        ] {
+            let mut buf = Vec::new();
+            write_signed_vint(&mut buf, v);
+            let (got, _n) = read_s(&buf).expect("read");
+            assert_eq!(got, v, "signed vint roundtrip failed for {v}: {buf:02x?}");
+        }
+    }
+
+    /// A wide partition's Rows.db trie must round-trip through the production
+    /// reader: `resolve_rows_db_entry` recovers the trie root + metadata, and
+    /// `iterate_rows_in_bti_trie` yields the exact separators + block offsets we
+    /// wrote, in ascending order.
+    #[test]
+    fn rows_db_single_wide_partition_roundtrips() {
+        use crate::storage::sstable::bti::{iterate_rows_in_bti_trie, resolve_rows_db_entry};
+
+        // int clustering separators ck = 8,16,24 → OSS50 sign-flipped 4 bytes.
+        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
+        let blocks = vec![
+            RowIndexBlock {
+                separator_key: sep(8),
+                block_offset: 16_512,
+                open_marker: None,
+            },
+            RowIndexBlock {
+                separator_key: sep(16),
+                block_offset: 33_024,
+                open_marker: None,
+            },
+            RowIndexBlock {
+                separator_key: sep(24),
+                block_offset: 49_536,
+                open_marker: None,
+            },
+        ];
+
+        let raw_pk = 1i32.to_be_bytes().to_vec();
+        let mut w = RowsTrieWriter::new();
+        w.add_partition_row_index(&raw_pk, 0, blocks.clone(), None);
+        let (rows_db, offsets) = w.finish().expect("finish Rows.db");
+        assert_eq!(offsets.len(), 1);
+        let rows_offset = offsets[0] as usize;
+
+        // Feeding RowsOffset directly as a trie root must FAIL (it is the entry).
+        assert!(
+            iterate_rows_in_bti_trie(&rows_db, rows_offset).is_err(),
+            "RowsOffset is a TrieIndexEntry, not a trie root"
+        );
+
+        // resolve_rows_db_entry recovers the header.
+        let header = resolve_rows_db_entry(&rows_db, rows_offset).expect("resolve entry");
+        assert_eq!(header.data_position, 0);
+        assert_eq!(header.block_count, blocks.len() as u32);
+        assert_eq!(header.partition_deletion, None, "LIVE sentinel → None");
+
+        // Traversal from the recovered root yields our separators + offsets.
+        let entries =
+            iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse from root");
+        assert_eq!(entries.len(), blocks.len());
+        for (got, expected) in entries.iter().zip(blocks.iter()) {
+            assert_eq!(got.0, expected.separator_key, "separator key");
+            assert_eq!(got.1.data_offset, expected.block_offset, "block offset");
+            assert_eq!(got.1.open_marker, None);
+        }
+    }
+
+    /// Multiple wide partitions concatenate in Rows.db; each RowsOffset resolves
+    /// to its OWN trie root and metadata (no cross-talk between partitions).
+    #[test]
+    fn rows_db_multiple_wide_partitions_roundtrip() {
+        use crate::storage::sstable::bti::{iterate_rows_in_bti_trie, resolve_rows_db_entry};
+
+        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
+        let mk = |base: u64| {
+            vec![
+                RowIndexBlock {
+                    separator_key: sep(8),
+                    block_offset: base + 16_512,
+                    open_marker: None,
+                },
+                RowIndexBlock {
+                    separator_key: sep(16),
+                    block_offset: base + 33_024,
+                    open_marker: None,
+                },
+            ]
+        };
+
+        let mut w = RowsTrieWriter::new();
+        w.add_partition_row_index(&1i32.to_be_bytes(), 0, mk(0), None);
+        w.add_partition_row_index(&2i32.to_be_bytes(), 700_000, mk(0), None);
+        w.add_partition_row_index(&3i32.to_be_bytes(), 1_400_000, mk(0), None);
+        let (rows_db, offsets) = w.finish().expect("finish");
+        assert_eq!(offsets.len(), 3);
+
+        let data_positions = [0u64, 700_000, 1_400_000];
+        for (i, &ro) in offsets.iter().enumerate() {
+            let header = resolve_rows_db_entry(&rows_db, ro as usize).expect("resolve");
+            assert_eq!(
+                header.data_position, data_positions[i],
+                "partition {i} data position"
+            );
+            assert_eq!(header.block_count, 2);
+            let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse");
+            assert_eq!(entries.len(), 2, "partition {i} block count");
+            assert_eq!(entries[0].0, sep(8));
+            assert_eq!(entries[1].0, sep(16));
+        }
+    }
+
+    /// An empty RowsTrieWriter yields 0-byte Rows.db with no offsets — exactly
+    /// what Cassandra emits for a narrow-only BTI SSTable (verified against the
+    /// real `simple_table`/`collection_table`/`ttl_table` 0-byte `da-2-bti-Rows.db`
+    /// fixtures), and the reader accepts it.
+    #[test]
+    fn rows_db_empty_writer_is_zero_bytes() {
+        let w = RowsTrieWriter::new();
+        let (bytes, offsets) = w.finish().expect("finish empty");
+        assert!(bytes.is_empty(), "empty Rows.db must be 0 bytes");
+        assert!(offsets.is_empty());
+    }
+
+    /// A wide partition with an open-marker block round-trips the DeletionTime.
+    #[test]
+    fn rows_db_open_marker_roundtrips() {
+        use crate::storage::sstable::bti::{iterate_rows_in_bti_trie, resolve_rows_db_entry};
+        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
+        let blocks = vec![
+            RowIndexBlock {
+                separator_key: sep(8),
+                block_offset: 16_512,
+                open_marker: Some((1_700_000_000, 1_700_000_000_000_000)),
+            },
+            RowIndexBlock {
+                separator_key: sep(16),
+                block_offset: 33_024,
+                open_marker: None,
+            },
+        ];
+        let mut w = RowsTrieWriter::new();
+        w.add_partition_row_index(&7i32.to_be_bytes(), 0, blocks.clone(), None);
+        let (rows_db, offsets) = w.finish().expect("finish");
+        let header = resolve_rows_db_entry(&rows_db, offsets[0] as usize).expect("resolve");
+        let entries = iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse");
+        assert_eq!(
+            entries[0].1.open_marker,
+            Some((1_700_000_000, 1_700_000_000_000_000))
+        );
+        assert_eq!(entries[1].1.open_marker, None);
+    }
+
+    /// Partition-level deletion (non-LIVE) round-trips through the TrieIndexEntry.
+    #[test]
+    fn rows_db_partition_deletion_roundtrips() {
+        use crate::storage::sstable::bti::resolve_rows_db_entry;
+        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
+        let blocks = vec![
+            RowIndexBlock {
+                separator_key: sep(8),
+                block_offset: 16_512,
+                open_marker: None,
+            },
+            RowIndexBlock {
+                separator_key: sep(16),
+                block_offset: 33_024,
+                open_marker: None,
+            },
+        ];
+        let mut w = RowsTrieWriter::new();
+        w.add_partition_row_index(&9i32.to_be_bytes(), 0, blocks, Some((1234, 5678)));
+        let (rows_db, offsets) = w.finish().expect("finish");
+        let header = resolve_rows_db_entry(&rows_db, offsets[0] as usize).expect("resolve");
+        assert_eq!(header.partition_deletion, Some((1234, 5678)));
+    }
+
+    /// A non-ascending separator set is rejected (the trie cannot encode it and
+    /// DFS expects strict order).
+    #[test]
+    fn rows_db_rejects_non_ascending_separators() {
+        let sep = |ck: i32| ((ck as u32) ^ 0x8000_0000).to_be_bytes().to_vec();
+        let blocks = vec![
+            RowIndexBlock {
+                separator_key: sep(16),
+                block_offset: 16_512,
+                open_marker: None,
+            },
+            RowIndexBlock {
+                separator_key: sep(8),
+                block_offset: 33_024,
+                open_marker: None,
+            },
+        ];
+        let mut w = RowsTrieWriter::new();
+        w.add_partition_row_index(&1i32.to_be_bytes(), 0, blocks, None);
+        assert!(w.finish().is_err());
+    }
+
+    /// A partition leaf with a positive RowsOffset payload decodes back to the
+    /// SAME RowsOffset via the reader (`BtiPartitionLocation::RowsOffset`).
+    #[test]
+    fn partition_leaf_rows_offset_roundtrips() {
+        let raw_key = vec![0x11u8; 16];
+        let mut w = PartitionsTrieWriter::new();
+        w.add_partition_with_payload(&raw_key, PartitionPayload::RowsOffset(242));
+        let bytes = w.finish().expect("finish");
+
+        let mut cur = Cursor::new(bytes);
+        let loc = lookup_raw_key_in_bti_partitions_db(&mut cur, &raw_key)
+            .expect("lookup")
+            .expect("found");
+        match loc {
+            BtiPartitionLocation::RowsOffset(o) => assert_eq!(o, 242),
+            BtiPartitionLocation::DataOffset(o) => {
+                panic!("expected RowsOffset(242), got DataOffset({o})")
+            }
         }
     }
 }

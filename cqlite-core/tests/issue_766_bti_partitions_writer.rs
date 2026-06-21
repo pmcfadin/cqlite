@@ -252,12 +252,18 @@ async fn bti_resolved_offsets_are_distinct_and_first_is_zero() {
     );
 }
 
-/// Finding 2 (issue #766 review): an empty BTI-format SSTable must NOT emit a
-/// Partitions.db (a zero-byte file is unreadable — the BTI reader rejects files
-/// smaller than the 8-byte root footer). Both the file and the TOC entry are
-/// omitted for an empty SSTable.
+/// Finding 2 (roborev #908, resolved in #910): an empty BTI-format SSTable
+/// cannot be published.
+///
+/// The earlier #766 behavior OMITTED `Partitions.db` for an empty SSTable, but
+/// that still produced a `da-*-bti-*` artifact with no `Partitions.db` — which
+/// the BTI reader requires for every `da` SSTable (it needs the 8-byte trie root
+/// footer), making the artifact unreadable. A zero-partition trie has no valid
+/// canonical form. Rather than emit an unreadable SSTable we now REFUSE to
+/// finish an empty BTI write with a clear error. (Cassandra never flushes an
+/// empty BTI SSTable; every real `da` fixture has >= 1 partition.)
 #[tokio::test]
-async fn empty_bti_sstable_omits_partitions_db_and_toc_entry() {
+async fn empty_bti_sstable_is_refused() {
     let dir = TempDir::new().unwrap();
     let schema = int_pk_schema();
 
@@ -267,30 +273,15 @@ async fn empty_bti_sstable_omits_partitions_db_and_toc_entry() {
             .unwrap();
     assert_eq!(writer.format(), SSTableFormat::Bti);
 
-    let info = writer.finish().await.unwrap();
-
-    // No Partitions.db path is reported for an empty SSTable.
+    let result = writer.finish().await;
     assert!(
-        info.partitions_path.is_none(),
-        "empty BTI SSTable must not report a Partitions.db path"
+        result.is_err(),
+        "an empty BTI SSTable must be refused (no readable Partitions.db form)"
     );
-
-    // No Partitions.db file exists on disk under the table dir.
-    let table_dir = dir.path().join("test_ks").join("t");
-    let has_partitions = std::fs::read_dir(&table_dir)
-        .unwrap()
-        .flatten()
-        .any(|e| e.file_name().to_string_lossy().contains("Partitions.db"));
+    let msg = format!("{}", result.err().unwrap());
     assert!(
-        !has_partitions,
-        "no Partitions.db file expected for an empty BTI SSTable"
-    );
-
-    // TOC must NOT list Partitions.db for the empty SSTable.
-    let toc = std::fs::read_to_string(&info.toc_path).unwrap();
-    assert!(
-        !toc.contains("Partitions.db"),
-        "empty BTI SSTable TOC must not list Partitions.db"
+        msg.contains("empty BTI SSTable"),
+        "error must explain the empty-BTI refusal; got: {msg}"
     );
 }
 

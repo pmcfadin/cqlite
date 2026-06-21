@@ -1652,6 +1652,21 @@ fn read_signed_vint_from_slice(data: &[u8]) -> BtiResult<(i64, usize)> {
     Ok((value, n))
 }
 
+/// Test-only re-export of [`read_unsigned_vint_from_slice`] so the BTI `Rows.db`
+/// writer (`writer::partitions_writer`) can assert its unsigned-VInt encoder is
+/// the exact inverse of this reader decoder.
+#[doc(hidden)]
+pub fn read_unsigned_vint_from_slice_for_test(data: &[u8]) -> BtiResult<(u64, usize)> {
+    read_unsigned_vint_from_slice(data)
+}
+
+/// Test-only re-export of [`read_signed_vint_from_slice`] (see
+/// [`read_unsigned_vint_from_slice_for_test`]).
+#[doc(hidden)]
+pub fn read_signed_vint_from_slice_for_test(data: &[u8]) -> BtiResult<(i64, usize)> {
+    read_signed_vint_from_slice(data)
+}
+
 /// Resolve a partition's row-index entry in `Rows.db`, given the `RowsOffset`
 /// from a `Partitions.db` lookup ([`BtiPartitionLocation::RowsOffset`]).
 ///
@@ -1854,7 +1869,7 @@ fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiRes
 /// encodings separated by [`OSS50_NEXT_COMPONENT`] (`ByteSource.NEXT_COMPONENT`,
 /// per `ClusteringComparator.asByteComparable`), with no leading/trailing frame
 /// so a prefix bound sorts before any longer key sharing it.
-fn encode_clustering_bound_oss50(values: &[Value]) -> BtiResult<Vec<u8>> {
+pub fn encode_clustering_bound_oss50(values: &[Value]) -> BtiResult<Vec<u8>> {
     let mut out = Vec::new();
     for (i, v) in values.iter().enumerate() {
         if i > 0 {

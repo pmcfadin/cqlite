@@ -98,7 +98,7 @@ pub const INDEX_INFO_WIDTH_BASE: u64 = 64 * 1024;
 /// Cassandra emits one block per `column_index_size` (64 KiB) boundary crossed.
 /// A promoted index is only written when there are **two or more** blocks
 /// (`RowIndexEntry.create()` lines 227-239).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct PromotedIndexBlock {
     /// Serialized `ClusteringPrefix` for the first unfiltered in this block.
     ///
@@ -116,6 +116,15 @@ pub struct PromotedIndexBlock {
 
     /// Total width (bytes) of this block's data.
     pub width: u64,
+
+    /// OSS50 byte-comparable separator key for this block (the first unfiltered's
+    /// clustering prefix), used by the BTI `Rows.db` row-index trie (issue #910).
+    ///
+    /// `None` for the BIG `Index.db` path (which uses `first_name`/`last_name`
+    /// Data.db `ClusteringPrefix` bytes instead) and for tables without a
+    /// clustering key. This is a separate, byte-comparable encoding that the BTI
+    /// reader reconstructs during DFS; it is NOT the `first_name` form.
+    pub oss50_separator: Option<Vec<u8>>,
 }
 
 /// Index.db component writer
@@ -958,6 +967,7 @@ mod tests {
             last_name: vec![0x00],
             offset: 0,
             width: 70_000,
+            oss50_separator: None,
         };
         let info = writer
             .add_partition_with_promoted(&key, 0, &[block])
@@ -988,12 +998,14 @@ mod tests {
             last_name: ck_prefix.clone(),
             offset: 0,
             width: 65_536, // exactly 64 KiB → delta = 0
+            oss50_separator: None,
         };
         let block2 = PromotedIndexBlock {
             first_name: ck_prefix.clone(),
             last_name: ck_prefix.clone(),
             offset: 65_536,
             width: 65_536,
+            oss50_separator: None,
         };
 
         let info = writer
@@ -1030,6 +1042,7 @@ mod tests {
             last_name: ck_prefix.clone(),
             offset: off,
             width: w,
+            oss50_separator: None,
         };
 
         let blocks = vec![
@@ -1098,12 +1111,14 @@ mod tests {
             last_name: vec![0x00],
             offset: COLUMN_INDEX_SIZE_BYTES,
             width: COLUMN_INDEX_SIZE_BYTES,
+            oss50_separator: None,
         };
         let block_below = PromotedIndexBlock {
             first_name: vec![0x00],
             last_name: vec![0x00],
             offset: 0,
             width: COLUMN_INDEX_SIZE_BYTES,
+            oss50_separator: None,
         };
 
         // Use a 4-byte raw key for a fixed, predictable headerLength = 2 + 4 + 12 = 18.
@@ -1135,12 +1150,14 @@ mod tests {
             last_name: vec![0x00],
             offset: 0,
             width: INDEX_INFO_WIDTH_BASE, // 64 KiB
+            oss50_separator: None,
         };
         let block2 = PromotedIndexBlock {
             first_name: vec![0x00],
             last_name: vec![0x00],
             offset: INDEX_INFO_WIDTH_BASE,
             width: INDEX_INFO_WIDTH_BASE,
+            oss50_separator: None,
         };
 
         let mut info_bytes: Vec<u8> = Vec::new();
@@ -1166,6 +1183,7 @@ mod tests {
             last_name: last_name.clone(),
             offset: 0,
             width: 100_000,
+            oss50_separator: None,
         };
         let mut info_bytes: Vec<u8> = Vec::new();
         serialize_index_info(&mut info_bytes, &block1);
@@ -1258,6 +1276,7 @@ mod tests {
             last_name: ck_prefix.clone(),
             offset: off,
             width: w,
+            oss50_separator: None,
         };
         let blocks = vec![
             make_block(0, 70_000),
@@ -1431,6 +1450,7 @@ mod tests {
             last_name: ck_prefix.clone(),
             offset: off,
             width: w,
+            oss50_separator: None,
         };
         let blocks = vec![
             make_block(0, 70_000),
