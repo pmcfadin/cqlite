@@ -164,9 +164,28 @@ impl FilterWriter {
         // Disabled bloom filter (AlwaysPresentFilter, Issue #852): Cassandra
         // serializes nothing and writes no Filter.db component. Emit no file so
         // the on-disk layout matches byte-for-byte.
+        //
+        // Branch-review (#852): a stale Filter.db left over from a previous write
+        // at this path/generation would otherwise survive. The reader probes the
+        // sibling Filter.db directly (not via the TOC), so a leftover filter could
+        // still affect reads despite the TOC omitting it. Remove any existing file,
+        // ignoring not-found.
         let bloom = match self.bloom {
             Some(bloom) => bloom,
-            None => return Ok(()),
+            None => {
+                match std::fs::remove_file(&self.path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => {
+                        return Err(Error::Storage(format!(
+                            "Failed to remove stale Filter.db at {}: {}",
+                            self.path.display(),
+                            e
+                        )))
+                    }
+                }
+                return Ok(());
+            }
         };
 
         // Serialize bloom filter to Cassandra format
@@ -298,6 +317,31 @@ mod tests {
         assert!(
             !filter_path.exists(),
             "disabled bloom filter must not emit a Filter.db component"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_filter_writer_disabled_removes_stale_file() {
+        // Branch-review (#852): if a Filter.db already exists at the output path
+        // (e.g. a prior write or a reused generation), a disabled filter must
+        // remove it so the reader cannot probe a stale sibling component.
+        let temp_dir = TempDir::new().unwrap();
+        let filter_path = temp_dir.path().join("nb-1-big-Filter.db");
+
+        // Simulate a stale Filter.db left over from a previous write.
+        std::fs::write(&filter_path, b"stale bloom filter bytes").unwrap();
+        assert!(filter_path.exists());
+
+        let mut writer = FilterWriter::new(filter_path.clone(), 100, 1.0).unwrap();
+        assert!(writer.is_disabled());
+        writer.add_key(&create_test_key(100, b"key1".to_vec()));
+
+        writer.finish().await.unwrap();
+
+        // The disabled filter must have removed the stale component.
+        assert!(
+            !filter_path.exists(),
+            "disabled bloom filter must remove a pre-existing stale Filter.db"
         );
     }
 

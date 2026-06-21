@@ -136,6 +136,12 @@ jobs:
 
       - name: Setup Gradle (no wrapper in compaction-parity)
         uses: gradle/actions/setup-gradle@v4
+        with:
+          # The harness has no Gradle wrapper, so the action must provision a
+          # `gradle` binary itself (the hard-gate step below invokes `gradle`
+          # directly). 8.x is compatible with the build's plain `java` plugin and
+          # JDK 17 toolchain (build.gradle.kts).
+          gradle-version: "8.10.2"
 
       # ── LOGICAL tier — HARD GATE. ──
       # build.gradle.kts resolves the Cassandra src via $CQLITE_CASSANDRA_SRC and

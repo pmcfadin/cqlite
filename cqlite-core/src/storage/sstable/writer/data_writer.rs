@@ -2721,12 +2721,30 @@ impl DataWriter {
 
         // Deletion time: Cassandra canonical order (markedForDeleteAt first,
         // then localDeletionTime), both UNSIGNED VInt deltas.
+        //
+        // Issue #853 / #889: localDeletionTime and minLocalDeletionTime are Java
+        // `int`s; Cassandra's DeletionTime.serialize emits
+        // `writeUnsignedVInt32(localDeletionTime - minLocalDeletionTime)`, a 32-bit
+        // subtraction zero-extended into [0, 2^32). A far-future LDT in [2^31, 2^32)
+        // is a negative i32 here; widening to i64 first (the previous code) produced
+        // a 64-bit wrapped delta with a different byte length than Cassandra's i32
+        // form, corrupting both the bytes and the marker_body_size vint. Reject only
+        // a genuine below-baseline ordering violation in normal (non-negative i32)
+        // time space; a far-future LDT (negative as i32) is legitimate.
+        if local_deletion_time >= 0
+            && self.stats.min_local_deletion_time >= 0
+            && local_deletion_time < self.stats.min_local_deletion_time
+        {
+            return Err(Error::InvalidInput(format!(
+                "Range tombstone: local deletion time {} is less than min_local_deletion_time {}",
+                local_deletion_time, self.stats.min_local_deletion_time
+            )));
+        }
         let mut deletion = Vec::new();
         let ts_delta = (deletion_time - self.stats.min_timestamp) as u64;
         encode_unsigned(ts_delta, &mut deletion);
-        let ldt_delta =
-            (local_deletion_time as i64 - self.stats.min_local_deletion_time as i64) as u64;
-        encode_unsigned(ldt_delta, &mut deletion);
+        let ldt_delta = local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
+        encode_unsigned(ldt_delta as u64, &mut deletion);
 
         // marker_body_size covers the prev_size VInt + deletion times (same
         // convention as row_size for rows).
@@ -6431,6 +6449,99 @@ mod tests {
                 rest,
                 &[0u8],
                 "trailing byte must be cell_count = 0 for raw={raw}"
+            );
+        }
+    }
+
+    /// Branch-review (#853/#889): a range-tombstone marker whose localDeletionTime
+    /// lands in [2^31, 2^32) (far future, ~2038-2106) must encode the LDT delta with
+    /// the SAME i32 cast + wrapping that Cassandra's DeletionTime.serialize uses, so
+    /// the bytes written equal the size the marker_body_size vint accounts for. The
+    /// previous i64-widened path produced a 64-bit wrapped delta with a divergent
+    /// byte count (and a corrupted body_size vint).
+    #[test]
+    fn test_range_tombstone_far_future_ldt_size_matches_written() {
+        use crate::parser::vint::parse_vuint;
+
+        // min baseline of 0 (DeletionTime.LIVE-derived stats min), the common case.
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 0;
+        stats.min_local_deletion_time = 0;
+        assert_eq!(stats.min_local_deletion_time, 0);
+        let schema = create_test_schema();
+
+        // Boundary 2^31 and a high value near 2^32 - 1, both representable only as
+        // negative i32 bit patterns.
+        let far_future: [u32; 3] = [1u32 << 31, (1u32 << 31) + 12345, u32::MAX - 1];
+
+        for raw in far_future {
+            let ldt = raw as i32; // negative i32 bit pattern for [2^31, 2^32)
+            assert!(
+                ldt < 0,
+                "value {raw} must be a negative i32 in [2^31, 2^32)"
+            );
+
+            let mut writer = DataWriter::new(stats.clone());
+            // Bottom bound: an inclusive start with zero clustering values, keeping
+            // the marker framing minimal.
+            let prev_size = 0u64;
+            let written = writer
+                .write_range_bound(
+                    &ClusteringBound::Bottom,
+                    /* is_open */ true,
+                    /* deletion_time */ 1_001_000,
+                    ldt,
+                    &schema,
+                    prev_size,
+                )
+                .expect("far-future range tombstone must be accepted, not rejected");
+
+            // SIZE == WRITTEN: the returned marker size must equal the buffer growth.
+            assert_eq!(
+                written,
+                writer.buffer.len(),
+                "returned marker size must equal bytes written for raw={raw}"
+            );
+
+            // Walk the marker layout to reach the deletion-time VInts:
+            //   [IS_MARKER][bound_kind][cluster_count u16=0][body_size vuint]
+            //   [prev_size vuint][ts_delta vuint][ldt_delta vuint]
+            let buf = &writer.buffer;
+            assert_eq!(buf[0], IS_MARKER, "first byte must be IS_MARKER");
+            assert_eq!(buf[1], INCL_START_BOUND, "Bottom open bound kind");
+            assert_eq!(&buf[2..4], &[0u8, 0u8], "cluster_count u16 = 0 for Bottom");
+
+            let after_count = &buf[4..];
+            let (after_body_size, body_size) =
+                parse_vuint(after_count).expect("body_size VInt must decode");
+            let body_start_remaining = after_body_size.len();
+            let (after_prev, _prev) =
+                parse_vuint(after_body_size).expect("prev_size VInt must decode");
+            let (after_ts, _ts_delta) =
+                parse_vuint(after_prev).expect("markedForDeleteAt VInt must decode");
+            let (rest, decoded_ldt) = parse_vuint(after_ts).expect("LDT delta VInt must decode");
+
+            // The encoded LDT delta must equal the i32-wrapping u32 value Cassandra
+            // would write: localDeletionTime - minLocalDeletionTime in 32-bit space.
+            let expected_delta = ldt.wrapping_sub(0) as u32; // min = 0
+            assert_eq!(
+                expected_delta, raw,
+                "delta must equal the raw far-future value for raw={raw}"
+            );
+            assert_eq!(
+                decoded_ldt, expected_delta as u64,
+                "round-tripped LDT delta must match the i32-wrapping value for raw={raw}"
+            );
+
+            // body_size must exactly account for prev_size + ts_delta + ldt_delta:
+            // the bytes from the start of prev_size to the end of the marker.
+            assert!(
+                rest.is_empty(),
+                "marker must end after LDT delta for raw={raw}"
+            );
+            assert_eq!(
+                body_size as usize, body_start_remaining,
+                "body_size vint must equal bytes of (prev_size + deletion times) for raw={raw}"
             );
         }
     }
