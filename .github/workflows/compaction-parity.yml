@@ -27,6 +27,12 @@ on:
     paths:
       - 'cqlite-core/src/storage/write_engine/**'
       - 'cqlite-core/src/storage/sstable/writer/**'
+      # The harness drives the external `cqlite compact` CLI command, so CLI
+      # changes can regress compaction output; gate on them too (#852/#889).
+      - 'cqlite-cli/**'
+      # The CQL schema parser feeds the harness's table definitions; parser
+      # regressions can alter compaction output, so include it in the gate.
+      - 'cqlite-core/src/schema/**'
       - 'compaction-parity/**'
       - '.github/workflows/compaction-parity.yml'
   workflow_dispatch:

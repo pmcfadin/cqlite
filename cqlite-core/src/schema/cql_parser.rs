@@ -310,11 +310,16 @@ fn clustering_order_item(input: &str) -> IResult<&str, (String, String)> {
     let (input, _) = keyword("by")(input)?;
     let (input, _) = ws(input)?;
 
-    // Capture the parenthesized column-ordering list verbatim. The contents are
-    // simple (identifiers + ASC/DESC + commas) and never contain nested parens
-    // or strings, so a single-level paren scan is sufficient.
+    // Capture the parenthesized column-ordering list verbatim, stopping at the
+    // matching close paren. A naive `take_while(|c| c != ')')` truncates the body
+    // at the first `)`, but a quoted clustering identifier may itself contain a
+    // `)` (e.g. `CLUSTERING ORDER BY ("C)k" DESC)`). Treating that inner `)` as
+    // the clause terminator would drop the DESC direction and silently fall back
+    // to ASC (Issue #852 branch-review finding). The scan below skips over single-
+    // and double-quoted identifiers (honoring CQL's doubled-quote escaping) so a
+    // `)` inside a quoted name is not mistaken for the clause terminator.
     let (input, _) = char('(')(input)?;
-    let (input, body) = take_while(|c: char| c != ')')(input)?;
+    let (input, body) = clustering_order_body_scan(input)?;
     let (input, _) = char(')')(input)?;
 
     Ok((
@@ -324,6 +329,50 @@ fn clustering_order_item(input: &str) -> IResult<&str, (String, String)> {
             format!("({})", body.trim()),
         ),
     ))
+}
+
+/// Scan the body of a `CLUSTERING ORDER BY (...)` clause up to (but not
+/// including) its matching close paren, treating `)` inside single- or
+/// double-quoted identifiers as literal content rather than the terminator.
+///
+/// CQL escapes a quote inside a quoted identifier/string by doubling it (`""`
+/// for double-quoted identifiers, `''` for single-quoted strings), so a doubled
+/// quote is consumed as content and does not close the quoted span.
+fn clustering_order_body_scan(input: &str) -> IResult<&str, &str> {
+    let bytes = input.as_bytes();
+    let mut i = 0usize;
+    // The active quote character when inside a quoted span (`'` or `"`).
+    let mut quote: Option<u8> = None;
+    while i < bytes.len() {
+        let c = bytes[i];
+        match quote {
+            Some(q) => {
+                if c == q {
+                    // Doubled quote is an escaped literal quote, not the close.
+                    if bytes.get(i + 1) == Some(&q) {
+                        i += 2;
+                        continue;
+                    }
+                    quote = None;
+                }
+            }
+            None => match c {
+                b'\'' | b'"' => quote = Some(c),
+                b')' => {
+                    let (body, rest) = input.split_at(i);
+                    return Ok((rest, body));
+                }
+                _ => {}
+            },
+        }
+        i += 1;
+    }
+
+    // No (unquoted) close paren found — unterminated clause body.
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Char,
+    )))
 }
 
 /// Parse the body of a `CLUSTERING ORDER BY (...)` clause (the text captured
@@ -1715,6 +1764,31 @@ mod tests {
             ck.order,
             ClusteringOrder::Desc,
             "quoted \"C,k\" (with embedded comma) must carry DESC ordering, got: {:?}",
+            schema.clustering_keys
+        );
+    }
+
+    /// #852 (branch review, roborev job 816): a QUOTED clustering identifier that
+    /// itself CONTAINS a close-paren (e.g. `"C)k"`) must not terminate the
+    /// `CLUSTERING ORDER BY (...)` clause body early. The clause-body scan in
+    /// `clustering_order_item` previously stopped at the first `)`, truncating the
+    /// body to `("C` and silently dropping the DESC direction (the column fell
+    /// back to its default ASC). A quote-aware scan keeps the quoted name intact
+    /// so its DESC is applied.
+    #[test]
+    fn test_clustering_order_quoted_identifier_with_close_paren_applied() {
+        let cql = "CREATE TABLE ks.t (pk int, \"C)k\" int, v int, PRIMARY KEY (pk, \"C)k\")) \
+                   WITH CLUSTERING ORDER BY (\"C)k\" DESC)";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        let ck = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "C)k")
+            .expect("\"C)k\" clustering column must exist");
+        assert_eq!(
+            ck.order,
+            ClusteringOrder::Desc,
+            "quoted \"C)k\" (with embedded close-paren) must carry DESC ordering, got: {:?}",
             schema.clustering_keys
         );
     }
