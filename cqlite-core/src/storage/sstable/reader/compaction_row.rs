@@ -60,6 +60,12 @@ impl CompactionRow {
                 CompactionRowData::Tombstone {
                     deletion_time: info.deletion_time,
                     local_deletion_time: 0,
+                    // The legacy collapsed-value fallback has no clustering capture
+                    // (the clustering prefix is not surfaced on this path), so the
+                    // tombstone lands in the partition's `None` clustering bucket
+                    // exactly as before (#912 carries clustering only on the V5
+                    // per-element path).
+                    clustering: Vec::new(),
                 }
             }
             Value::Map(entries) => {
@@ -116,6 +122,14 @@ pub enum CompactionRowData {
         deletion_time: i64,
         /// `localDeletionTime` in seconds (GC-grace clock).
         local_deletion_time: i32,
+        /// Clustering columns `(name, value)` in schema order identifying which
+        /// clustering row this tombstone deletes (#912). On disk a row tombstone
+        /// still carries its clustering prefix; capturing it here lets the merge
+        /// route the tombstone into its own clustering bucket instead of
+        /// collapsing every row tombstone (and the static row) into the single
+        /// `None` bucket. Empty for an unclustered table (the partition's single
+        /// row) and for the legacy collapsed-value fallback.
+        clustering: Vec<(String, Value)>,
     },
     /// Live row: simple (single-cell) columns plus complex (multi-cell)
     /// columns with their per-element cells and optional complex deletion.

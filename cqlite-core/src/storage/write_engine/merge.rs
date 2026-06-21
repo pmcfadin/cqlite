@@ -838,9 +838,15 @@ impl SSTableRowIteratorAdapter {
             row_data,
         } = compaction_row;
         let decorated_key = DecoratedKey::from_key_bytes(key.0)?;
+        // #912: derive the clustering identity from the per-element compaction row
+        // BEFORE collapsing it to `RowData`. A row tombstone carries no cells in
+        // `RowData::Tombstone`, so its clustering key must come from the
+        // tombstone's captured clustering prefix; otherwise it would collapse into
+        // the partition's `None` bucket and mis-reconcile against the static row
+        // and against other clustering-row tombstones.
+        let clustering_key = Self::extract_clustering_key_from_compaction(&row_data, schema);
         let (row_data, complex_deletions) =
             Self::compaction_row_data_to_row_data(row_data, row_timestamp);
-        let clustering_key = Self::extract_clustering_key(&row_data, schema);
         let entry = MergeEntry::new(
             run_index,
             decorated_key,
@@ -866,37 +872,64 @@ impl SSTableRowIteratorAdapter {
     ///
     /// The clustering columns are intentionally left inside the cells so the
     /// downstream read-back path can still find them.
-    fn extract_clustering_key(row_data: &RowData, schema: &TableSchema) -> Option<ClusteringKey> {
+    fn extract_clustering_key_from_compaction(
+        row_data: &crate::storage::sstable::reader::compaction_row::CompactionRowData,
+        schema: &TableSchema,
+    ) -> Option<ClusteringKey> {
+        use crate::storage::sstable::reader::compaction_row::CompactionRowData;
+
         if schema.clustering_keys.is_empty() {
             return None;
         }
 
-        let cells = match row_data {
-            RowData::Live { cells } => cells,
-            RowData::Tombstone { .. } => return None,
-        };
-
-        // Build the clustering key columns in schema order.
-        let mut ck_columns: Vec<(String, Value)> = Vec::with_capacity(schema.clustering_keys.len());
-
-        for ck_col in &schema.clustering_keys {
-            let found = cells
-                .iter()
-                .find(|cell| cell.column == ck_col.name)
-                .map(|cell| (ck_col.name.clone(), cell.value.clone()));
-
-            match found {
-                Some(pair) => ck_columns.push(pair),
-                // If any clustering column is missing, we cannot form a valid
-                // ClusteringKey — return None so the row falls into the None
-                // bucket (treated as an unclustered row).
-                None => return None,
+        match row_data {
+            // A live row surfaces its clustering columns as simple cells (#229).
+            CompactionRowData::Live { simple, .. } => {
+                let mut ck_columns: Vec<(String, Value)> =
+                    Vec::with_capacity(schema.clustering_keys.len());
+                for ck_col in &schema.clustering_keys {
+                    match simple
+                        .iter()
+                        .find(|c| c.column == ck_col.name)
+                        .map(|c| (ck_col.name.clone(), c.value.clone()))
+                    {
+                        Some(pair) => ck_columns.push(pair),
+                        // A missing clustering column means we cannot form a valid
+                        // key — fall into the `None` bucket (unclustered row).
+                        None => return None,
+                    }
+                }
+                Some(ClusteringKey {
+                    columns: ck_columns,
+                })
+            }
+            // #912: a row tombstone carries its own clustering prefix so it
+            // reconciles in its own bucket instead of collapsing into `None`.
+            // An empty `clustering` (unclustered table / partial prefix) keeps the
+            // pre-#912 `None`-bucket behavior.
+            CompactionRowData::Tombstone { clustering, .. } => {
+                if clustering.is_empty() {
+                    return None;
+                }
+                // Reorder defensively into schema order; bail to `None` if any
+                // declared clustering column is absent.
+                let mut ck_columns: Vec<(String, Value)> =
+                    Vec::with_capacity(schema.clustering_keys.len());
+                for ck_col in &schema.clustering_keys {
+                    match clustering
+                        .iter()
+                        .find(|(name, _)| name == &ck_col.name)
+                        .map(|(name, v)| (name.clone(), v.clone()))
+                    {
+                        Some(pair) => ck_columns.push(pair),
+                        None => return None,
+                    }
+                }
+                Some(ClusteringKey {
+                    columns: ck_columns,
+                })
             }
         }
-
-        Some(ClusteringKey {
-            columns: ck_columns,
-        })
     }
 
     /// Convert a [`CompactionRowData`] into the merge `RowData` plus the row's
@@ -934,6 +967,10 @@ impl SSTableRowIteratorAdapter {
             CompactionRowData::Tombstone {
                 deletion_time,
                 local_deletion_time,
+                // Clustering identity is consumed by
+                // `extract_clustering_key_from_compaction` before this conversion
+                // (#912); `RowData::Tombstone` itself carries only the timestamps.
+                clustering: _,
             } => (
                 RowData::Tombstone {
                     deletion_time,
@@ -6826,6 +6863,189 @@ mod issue_886_empty_partition_skip {
         assert_eq!(
             info.partition_count, 1,
             "a normal partition must still be written"
+        );
+    }
+}
+
+/// Issue #912: clustering-row tombstones must carry their clustering identity
+/// through the compaction stream so they reconcile in their OWN clustering bucket
+/// instead of collapsing into the partition's single `None` bucket (where they
+/// would mis-reconcile against each other and against the static row).
+#[cfg(all(test, feature = "write-support"))]
+mod issue_912_row_tombstone_clustering_identity {
+    use super::*;
+    use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+    use crate::storage::sstable::reader::compaction_row::{
+        CompactionRow, CompactionRowData, SimpleCell,
+    };
+    use crate::types::RowKey;
+    use std::collections::HashMap;
+
+    fn clustered_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "ks912".to_string(),
+            table: "t912".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: Default::default(),
+            }],
+            columns: vec![Column {
+                name: "v".to_string(),
+                data_type: "int".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        }
+    }
+
+    fn row_tombstone(ck: i64) -> CompactionRowData {
+        CompactionRowData::Tombstone {
+            deletion_time: 1_000 + ck,
+            local_deletion_time: 42,
+            clustering: vec![("ck".to_string(), Value::Integer(ck as i32))],
+        }
+    }
+
+    /// Core fix: a row tombstone's captured clustering prefix yields a concrete
+    /// `ClusteringKey`, and two tombstones at distinct clustering keys produce
+    /// DISTINCT keys (pre-#912 both returned `None`).
+    #[test]
+    fn tombstone_clustering_identity_is_distinct() {
+        let schema = clustered_schema();
+
+        let ck5 = SSTableRowIteratorAdapter::extract_clustering_key_from_compaction(
+            &row_tombstone(5),
+            &schema,
+        );
+        let ck9 = SSTableRowIteratorAdapter::extract_clustering_key_from_compaction(
+            &row_tombstone(9),
+            &schema,
+        );
+
+        assert_eq!(
+            ck5,
+            Some(ClusteringKey {
+                columns: vec![("ck".to_string(), Value::Integer(5))],
+            }),
+            "row tombstone must carry its clustering identity (#912)"
+        );
+        assert_ne!(
+            ck5, ck9,
+            "distinct clustering-row tombstones must not share a bucket"
+        );
+    }
+
+    /// A tombstone with no captured clustering (unclustered table / partial
+    /// prefix) keeps the pre-#912 `None`-bucket behavior.
+    #[test]
+    fn tombstone_without_clustering_falls_into_none_bucket() {
+        let schema = clustered_schema();
+        let bare = CompactionRowData::Tombstone {
+            deletion_time: 1,
+            local_deletion_time: 0,
+            clustering: Vec::new(),
+        };
+        assert_eq!(
+            SSTableRowIteratorAdapter::extract_clustering_key_from_compaction(&bare, &schema),
+            None
+        );
+    }
+
+    /// A live clustering row still resolves its clustering key from its surfaced
+    /// simple cells (unchanged path), matching the tombstone's key for the same
+    /// `ck` so they share a reconcile bucket.
+    #[test]
+    fn live_and_tombstone_same_ck_share_bucket() {
+        let schema = clustered_schema();
+        let live = CompactionRowData::Live {
+            simple: vec![SimpleCell {
+                column: "ck".to_string(),
+                value: Value::Integer(5),
+                timestamp: 10,
+                ttl: None,
+                local_deletion_time: None,
+            }],
+            complex: Vec::new(),
+        };
+        let live_ck =
+            SSTableRowIteratorAdapter::extract_clustering_key_from_compaction(&live, &schema);
+        let tomb_ck = SSTableRowIteratorAdapter::extract_clustering_key_from_compaction(
+            &row_tombstone(5),
+            &schema,
+        );
+        assert_eq!(
+            live_ck, tomb_ck,
+            "same ck => same bucket for live row and its tombstone"
+        );
+        assert!(live_ck.is_some());
+    }
+
+    /// End-to-end through `build_merge_entry`: two row-tombstone `CompactionRow`s
+    /// in one partition produce two MergeEntries in DISTINCT clustering buckets, so
+    /// `merge_partition_rows` keeps BOTH tombstones. Pre-#912 both collapsed into
+    /// the `None` bucket and only one survived.
+    #[test]
+    fn two_row_tombstones_do_not_collapse_in_merge() {
+        let schema = clustered_schema();
+        let pk = RowKey(vec![0, 0, 0, 7]);
+
+        let e5 = SSTableRowIteratorAdapter::build_merge_entry(
+            0,
+            CompactionRow {
+                key: pk.clone(),
+                row_timestamp: 1_005,
+                row_data: row_tombstone(5),
+            },
+            &schema,
+        )
+        .expect("build_merge_entry");
+        let e9 = SSTableRowIteratorAdapter::build_merge_entry(
+            1,
+            CompactionRow {
+                key: pk.clone(),
+                row_timestamp: 1_009,
+                row_data: row_tombstone(9),
+            },
+            &schema,
+        )
+        .expect("build_merge_entry");
+
+        assert_ne!(
+            e5.clustering_key, e9.clustering_key,
+            "two distinct row tombstones must land in distinct buckets (#912)"
+        );
+
+        let merger = KWayMerger {
+            runs: vec![],
+            heap: std::collections::BinaryHeap::new(),
+            current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
+            schema: schema.clone(),
+        };
+        let merged = merger
+            .merge_partition_rows(vec![e5, e9])
+            .expect("merge_partition_rows");
+
+        assert_eq!(
+            merged.len(),
+            2,
+            "both clustering-row tombstones must survive; pre-#912 they collapsed to one"
+        );
+        assert!(
+            merged
+                .iter()
+                .all(|m| matches!(m.row_data, RowData::Tombstone { .. })),
+            "both surviving entries must be row tombstones"
         );
     }
 }
