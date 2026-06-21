@@ -71,10 +71,50 @@ fixtures, same seeded RNG, so two profile runs are comparable:
 - `write/ingest_wal_off` (CPU-bound, strictly gated), `write/ingest_wal_on`
   (fsync-bound, advisory), `write/flush` — the write engine.
 - `partition_lookup/*` — Index.db lookup micro-benches.
+- `concurrent_scan/{buffered,mmap}/n{1,2,4,8}` — aggregate throughput of N
+  concurrent full scans on a *single* `SSTableReader` (Issue #917). Documents
+  the read-path concurrency scaling unlocked by #815; **not** part of the
+  perf-regression gate (see below).
 
 The heap harness (`examples/heap_profile.rs`) runs the `full_scan` and
 `type_heavy` workloads under dhat and verdicts peak heap against the 128 MiB
 budget.
+
+### Concurrent-scan scaling (Issue #917, follow-up to #815)
+
+#815 removed the `scan_mutex` full-scan serialization and gave each scan its own
+`ScanCursor`, so N concurrent full scans on one `SSTableReader` now run in
+parallel. The `concurrent_scan` bench quantifies the resulting aggregate
+throughput (rows/sec across all N scans) versus the N=1 baseline, on both
+backends. Measured on an 8-worker tokio runtime over `test_basic.simple_table`
+(local Apple-silicon dev machine — absolute numbers are machine-specific; the
+*shape* of the curve is the durable result):
+
+| N | buffered median | buffered scaling | mmap median | mmap scaling |
+|---|-----------------|------------------|-------------|--------------|
+| 1 | 7.93 ms | 1.00× | 4.62 ms | 1.00× |
+| 2 | 10.06 ms | 1.58× | 5.23 ms | 1.77× |
+| 4 | 18.97 ms | 1.67× | 5.91 ms | 3.13× |
+| 8 | 31.81 ms | 1.99× | 7.69 ms | 4.81× |
+
+("scaling" = aggregate rows/sec at N ÷ rows/sec at N=1.)
+
+Findings:
+
+- Both backends scale **>1×** — the headline regression guard. If #815's
+  de-serialization were ever reverted, every column here would collapse back to
+  ~1.00× and this bench would show it.
+- **mmap** scales near-linearly (3.1× at N=4, 4.8× at N=8): truly parallel page
+  access, no shared read cursor in the hot path.
+- **buffered** plateaus around ~2×: the positioned-read path through the shared
+  file handle is the remaining serialization point, so added scans mostly queue
+  on I/O rather than overlap. This is the natural baseline the #816 io_uring
+  spike aims to lift.
+
+This bench is intentionally **excluded from `perf-gate.json`**: concurrent
+scaling is IO/scheduler-bound and noisy on shared CI runners, so it documents
+the curve and guards against re-serialization locally (via `./scripts/profile.sh`)
+without wiring a flaky timing threshold into CI.
 
 ---
 

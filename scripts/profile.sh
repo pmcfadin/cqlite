@@ -28,7 +28,7 @@ FEATURES="cli-helpers,write-support"
 # The bench targets that make up the profiling surface. m1_performance and
 # fixtures_smoke exist but are not part of the gated loop; profile them
 # explicitly with `cargo bench` if needed.
-BENCH_TARGETS=(--bench read --bench write --bench partition_lookup)
+BENCH_TARGETS=(--bench read --bench write --bench partition_lookup --bench concurrent_scan)
 
 require_fixtures() {
     if ! compgen -G "$CQLITE_DATASETS_ROOT/sstables/test_basic/simple_table-*/nb-1-big-Data.db" > /dev/null; then
