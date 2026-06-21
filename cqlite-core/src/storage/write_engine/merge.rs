@@ -1290,9 +1290,18 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
 /// Complex deletions (roborev High, #847): `reconcile_cluster` purges complex
 /// deletions on dropped columns with the SAME boundary as cells
 /// (`marked_for_delete_at > drop_time` survives), so any complex deletion still
-/// present on a reconciled entry is a genuine post-drop survivor and must keep
-/// its column in the output schema — otherwise the writer would emit a
-/// `CellOperation::ComplexDeletion` for a column absent from the output header.
+/// present on a reconciled entry is a genuine post-drop survivor. BUT the write
+/// pass only emits that marker for rows whose `merge_entry_to_mutation` does NOT
+/// reduce to a bare `[CellOperation::DeleteRow]` — i.e. NOT a `RowData::Tombstone`
+/// row (see [`entry_emits_complex_deletions`]). A complex-deletion marker carried
+/// on a reconciled row tombstone is suppressed by the writer, so the pre-pass must
+/// likewise NOT retain its column — otherwise the output header would gain a
+/// column for which no cell or complex deletion is ever written, reintroducing the
+/// header/schema divergence #847 set out to fix.
+///
+/// `compact_sstables` keeps exactly the columns this returns in the output writer
+/// schema; the rest are stripped from the output header. Stops early once every
+/// dropped column has been observed surviving.
 fn compute_surviving_dropped_columns(
     input_paths: Vec<PathBuf>,
     schema: &TableSchema,
@@ -1307,20 +1316,8 @@ fn compute_surviving_dropped_columns(
             MergeStep::Complete => break,
             MergeStep::Partition { rows, .. } => {
                 for row in &rows {
-                    if let RowData::Live { cells } = &row.row_data {
-                        for cell in cells {
-                            if schema.dropped_columns.contains_key(&cell.column) {
-                                surviving.insert(cell.column.clone());
-                            }
-                        }
-                    }
-                    // A retained complex-deletion marker is a post-drop survivor
-                    // (already filtered by `reconcile_cluster`), so its dropped
-                    // column must stay in the output schema (#847).
-                    for cd in &row.complex_deletions {
-                        if schema.dropped_columns.contains_key(&cd.column) {
-                            surviving.insert(cd.column.clone());
-                        }
+                    for column in surviving_dropped_columns_in_row(row, &schema.dropped_columns) {
+                        surviving.insert(column.to_string());
                     }
                 }
                 if surviving.len() == total {
@@ -1330,6 +1327,54 @@ fn compute_surviving_dropped_columns(
         }
     }
     Ok(surviving)
+}
+
+/// Mirror of the write pass's complex-deletion emit guard.
+///
+/// `merge_entry_to_mutation` builds `operations` as `[CellOperation::DeleteRow]`
+/// for a `RowData::Tombstone` row and the per-cell ops otherwise, then pushes
+/// `CellOperation::ComplexDeletion` markers ONLY when
+/// `!matches!(operations.as_slice(), [CellOperation::DeleteRow])`. The bare
+/// `[DeleteRow]` shape arises exactly from `RowData::Tombstone`, so the writer
+/// emits carried complex deletions iff the row is `RowData::Live`. The pre-pass
+/// uses this same predicate so the two passes agree on which complex deletions
+/// reach the writer (roborev High, #847).
+#[inline]
+fn entry_emits_complex_deletions(row_data: &RowData) -> bool {
+    matches!(row_data, RowData::Live { .. })
+}
+
+/// Dropped columns this merged row keeps alive in the output schema, applying the
+/// SAME emit rules as the write pass:
+///
+/// * a surviving `Live` cell on a dropped column (the writer emits a real cell), and
+/// * a carried complex-deletion marker on a dropped column — but ONLY when the
+///   writer would actually emit it (see [`entry_emits_complex_deletions`]); a
+///   marker on a `RowData::Tombstone` row is suppressed by the writer and must NOT
+///   retain its column (roborev High, #847).
+fn surviving_dropped_columns_in_row<'a>(
+    row: &'a MergeEntry,
+    dropped_columns: &std::collections::HashMap<String, i64>,
+) -> Vec<&'a str> {
+    let mut columns: Vec<&'a str> = Vec::new();
+    if let RowData::Live { cells } = &row.row_data {
+        for cell in cells {
+            if dropped_columns.contains_key(&cell.column) {
+                columns.push(cell.column.as_str());
+            }
+        }
+    }
+    // A retained complex-deletion marker is a post-drop survivor (already filtered
+    // by `reconcile_cluster`), but it only keeps its column when the write pass
+    // would actually emit it — i.e. not on a row tombstone (#847).
+    if entry_emits_complex_deletions(&row.row_data) {
+        for cd in &row.complex_deletions {
+            if dropped_columns.contains_key(&cd.column) {
+                columns.push(cd.column.as_str());
+            }
+        }
+    }
+    columns
 }
 
 pub async fn compact_sstables(
@@ -6961,5 +7006,101 @@ mod issue_886_empty_partition_skip {
             info.partition_count, 1,
             "a normal partition must still be written"
         );
+    }
+
+    /// #847 (roborev High follow-up): the pre-pass that picks which dropped
+    /// columns stay in the output header must count a carried complex-deletion
+    /// marker as "surviving" ONLY when the write pass would actually emit it.
+    /// `merge_entry_to_mutation` suppresses `CellOperation::ComplexDeletion`
+    /// markers on a `RowData::Tombstone` row (its `operations` reduce to a bare
+    /// `[DeleteRow]`), so a marker on a row tombstone must NOT retain its column —
+    /// otherwise the output gains a header column for which no cell or complex
+    /// deletion is ever written.
+    #[test]
+    fn test_surviving_dropped_columns_skips_complex_deletion_on_row_tombstone() {
+        let mut dropped_columns = std::collections::HashMap::new();
+        // Dropped at t=100 (micros); the marker below is post-drop (200 > 100), so
+        // it survives `reconcile_cluster` — the only reason it could be retained is
+        // emission, which the writer suppresses on a row tombstone.
+        dropped_columns.insert("dropped_coll".to_string(), 100);
+
+        let tombstone_with_marker = MergeEntry::new(
+            0,
+            DecoratedKey::new(1, vec![1, 2, 3]),
+            None,
+            200,
+            RowData::Tombstone {
+                deletion_time: 200,
+                local_deletion_time: 0,
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "dropped_coll".to_string(),
+            marked_for_delete_at: 200,
+            local_deletion_time: 0,
+        }]);
+
+        let survivors = surviving_dropped_columns_in_row(&tombstone_with_marker, &dropped_columns);
+        assert!(
+            survivors.is_empty(),
+            "a complex-deletion marker on a row tombstone is suppressed by the \
+             writer, so its dropped column must NOT be retained (got {survivors:?})"
+        );
+    }
+
+    /// Companion to the row-tombstone case: a post-drop complex-deletion marker on
+    /// a `RowData::Live` row IS emitted by `merge_entry_to_mutation`, so the
+    /// pre-pass must retain its dropped column (the original #847 retain case must
+    /// stay GREEN).
+    #[test]
+    fn test_surviving_dropped_columns_retains_complex_deletion_on_live_row() {
+        let mut dropped_columns = std::collections::HashMap::new();
+        dropped_columns.insert("dropped_coll".to_string(), 100);
+
+        let live_with_marker = MergeEntry::new(
+            0,
+            DecoratedKey::new(1, vec![1, 2, 3]),
+            None,
+            200,
+            RowData::Live { cells: vec![] },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "dropped_coll".to_string(),
+            marked_for_delete_at: 200,
+            local_deletion_time: 0,
+        }]);
+
+        let survivors = surviving_dropped_columns_in_row(&live_with_marker, &dropped_columns);
+        assert_eq!(
+            survivors,
+            vec!["dropped_coll"],
+            "a complex-deletion marker on a live row IS emitted by the writer, so \
+             its dropped column must be retained in the output header"
+        );
+    }
+
+    /// A surviving `Live` cell on a dropped column retains its column regardless of
+    /// any complex-deletion marker (the writer emits a real cell for it).
+    #[test]
+    fn test_surviving_dropped_columns_retains_live_cell() {
+        let mut dropped_columns = std::collections::HashMap::new();
+        dropped_columns.insert("readded".to_string(), 100);
+
+        let live_cell = MergeEntry::new(
+            0,
+            DecoratedKey::new(1, vec![1, 2, 3]),
+            None,
+            200,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "readded".to_string(),
+                    Value::Text("post-drop".to_string()),
+                    200,
+                )],
+            },
+        );
+
+        let survivors = surviving_dropped_columns_in_row(&live_cell, &dropped_columns);
+        assert_eq!(survivors, vec!["readded"]);
     }
 }
