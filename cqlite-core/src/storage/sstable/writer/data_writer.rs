@@ -2652,19 +2652,37 @@ impl DataWriter {
     /// [ldt_delta: unsigned VInt]         if (IS_DELETED || IS_EXPIRING) && !USE_ROW_TTL
     /// [ttl_delta: unsigned VInt]         if IS_EXPIRING && !USE_ROW_TTL
     /// [path_len: unsigned VInt][path_bytes]
-    /// [value_len: unsigned VInt][value_bytes]   if NOT (IS_DELETED || HAS_EMPTY_VALUE)
+    /// [value_len: unsigned VInt][value_bytes]   if NOT HAS_EMPTY_VALUE
     /// ```
+    ///
+    /// A tombstone (`is_deleted`) carries no value bytes, so it sets
+    /// HAS_EMPTY_VALUE (0x04) alongside IS_DELETED (0x01) — final flags 0x05 —
+    /// matching Cassandra's Cell.Serializer (`hasValue = !flag(HAS_EMPTY_VALUE)`).
     fn write_complex_element_cell(
         &self,
         buf: &mut Vec<u8>,
         elem: &ComplexElementWrite,
         row_ts: i64,
     ) -> Result<()> {
-        // Determine flags. A SET member (and any element with no value that is
-        // NOT a tombstone) sets HAS_EMPTY_VALUE; a tombstone sets IS_DELETED.
+        // Determine flags.
+        //
+        // Cassandra's Cell.Serializer (BufferCell) derives value presence from the
+        // HAS_EMPTY_VALUE (0x04) bit alone: `hasValue = !flag(HAS_EMPTY_VALUE_MASK)`.
+        // A cell that carries NO value bytes on disk MUST set 0x04, otherwise a
+        // strict reader will attempt to read a value-length VInt that is not present
+        // and desynchronize. Two cases carry no value bytes here:
+        //   1. A tombstone (IS_DELETED 0x01) — a deleted element holds no value.
+        //   2. A live empty-value element (e.g. a SET member, whose datum lives in
+        //      the cell_path rather than a value).
+        // Both therefore set HAS_EMPTY_VALUE. A tombstone serializes with
+        // IS_DELETED | HAS_EMPTY_VALUE = 0x05; a live SET member with 0x04. A live
+        // MAP/LIST element that carries a value sets neither, so a value-length VInt
+        // and value bytes follow.
         let mut flags = 0u8;
         if elem.is_deleted {
-            flags |= CELL_IS_DELETED;
+            // IS_DELETED implies no value bytes; pair it with HAS_EMPTY_VALUE so
+            // Cassandra/strict readers do not look for a value length.
+            flags |= CELL_IS_DELETED | CELL_HAS_EMPTY_VALUE;
         } else if elem.value.is_none() {
             flags |= CELL_HAS_EMPTY_VALUE;
         }
@@ -2731,12 +2749,19 @@ impl DataWriter {
         encode_unsigned(elem.cell_path.len() as u64, buf);
         buf.extend_from_slice(&elem.cell_path);
 
-        // Value — written only for a live element with a value. Tombstones and
-        // empty-value elements (SET members) write none.
-        if let (false, Some(value)) = (elem.is_deleted, &elem.value) {
-            let value_bytes = serialize_value(value)?;
-            encode_unsigned(value_bytes.len() as u64, buf);
-            buf.extend_from_slice(&value_bytes);
+        // Value — written iff HAS_EMPTY_VALUE is clear (Cassandra:
+        // `hasValue = !flag(HAS_EMPTY_VALUE_MASK)`). 0x04 is set above for both
+        // tombstones and live empty-value elements, so this writes value bytes only
+        // for a live MAP/LIST element that actually carries one. Keying off the flag
+        // (not is_deleted directly) keeps the wire byte-for-byte consistent with the
+        // header: a value length VInt is emitted only when a reader will read it.
+        let has_empty_value = (flags & CELL_HAS_EMPTY_VALUE) != 0;
+        if !has_empty_value {
+            if let Some(value) = &elem.value {
+                let value_bytes = serialize_value(value)?;
+                encode_unsigned(value_bytes.len() as u64, buf);
+                buf.extend_from_slice(&value_bytes);
+            }
         }
 
         Ok(())
@@ -8337,6 +8362,14 @@ mod tests {
             0,
             "IS_DELETED must be set"
         );
+        // roborev #897: a tombstone carries no value bytes, so it MUST also set
+        // HAS_EMPTY_VALUE (0x04). Cassandra's Cell.Serializer derives value
+        // presence from that bit alone.
+        assert_ne!(
+            cells[0].flags & CELL_HAS_EMPTY_VALUE,
+            0,
+            "tombstone must set HAS_EMPTY_VALUE so strict readers read no value length"
+        );
         assert_eq!(cells[0].ts_delta, Some(4_000));
         assert_eq!(
             cells[0].ldt_delta,
@@ -8389,6 +8422,149 @@ mod tests {
         assert_eq!(
             cells[0].value,
             Some(serialize_value(&Value::Integer(7)).unwrap())
+        );
+    }
+
+    /// roborev #897 — BYTE-LEVEL regression on the HAS_EMPTY_VALUE (0x04) bit of a
+    /// per-element complex cell. Cassandra's Cell.Serializer derives value presence
+    /// from 0x04 alone (`hasValue = !flag(HAS_EMPTY_VALUE_MASK)`); a cell with no
+    /// value bytes MUST set 0x04 or a strict reader desynchronizes trying to read a
+    /// value length that is not there.
+    ///
+    /// Asserts the EXACT flags byte for three element shapes, that no value bytes
+    /// follow whenever 0x04 is set, and that the bytes round-trip through the wire
+    /// walk. The assertions read the raw flags byte directly (not via the
+    /// `is_deleted || has_empty_value` value gate), so the test FAILS if 0x04 is
+    /// dropped for the tombstone — the exact regression being guarded.
+    #[test]
+    fn per_element_tombstone_sets_has_empty_value_byte_level() {
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 0;
+        stats.min_local_deletion_time = 1_700_000_000;
+        let writer = DataWriter::new(stats);
+        let row_ts = 1_000_000i64;
+
+        // Case 1: deleted element (tombstone) — flags MUST be IS_DELETED |
+        // HAS_EMPTY_VALUE | USE_ROW_TIMESTAMP. (ts == row_ts so USE_ROW_TIMESTAMP is
+        // set; ts_delta is therefore absent. The deletion bits are what matters.)
+        let tombstone = ComplexElementWrite {
+            cell_path: vec![0x01; 16],
+            value: None,
+            timestamp_micros: row_ts,
+            ttl_seconds: None,
+            local_deletion_time: Some(1_700_000_005),
+            is_deleted: true,
+        };
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(
+                &mut buf,
+                &list_column("items"),
+                None,
+                &[tombstone],
+                row_ts,
+            )
+            .unwrap();
+        let (_d0, _d1, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 1);
+        let expected_tombstone_flags =
+            CELL_IS_DELETED | CELL_HAS_EMPTY_VALUE | CELL_USE_ROW_TIMESTAMP;
+        assert_eq!(
+            cells[0].flags, expected_tombstone_flags,
+            "tombstone flags must be 0x{:02x} (IS_DELETED|HAS_EMPTY_VALUE|USE_ROW_TIMESTAMP); got 0x{:02x}",
+            expected_tombstone_flags, cells[0].flags
+        );
+        // Sensitivity anchors: the two bits the finding is about.
+        assert_ne!(
+            cells[0].flags & CELL_HAS_EMPTY_VALUE,
+            0,
+            "tombstone MUST set HAS_EMPTY_VALUE (0x04)"
+        );
+        assert_eq!(
+            cells[0].flags & (CELL_IS_DELETED | CELL_HAS_EMPTY_VALUE),
+            0x05,
+            "deleted complex element must serialize with IS_DELETED|HAS_EMPTY_VALUE == 0x05"
+        );
+        assert!(
+            cells[0].value.is_none(),
+            "tombstone carries zero value bytes"
+        );
+
+        // Case 2: live SET member (value None, not deleted) — flags MUST set
+        // HAS_EMPTY_VALUE (+ USE_ROW_TIMESTAMP here) and carry no value bytes; the
+        // datum lives in the cell_path.
+        let set_member = ComplexElementWrite {
+            cell_path: vec![0x02; 4],
+            value: None,
+            timestamp_micros: row_ts,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(
+                &mut buf,
+                &set_column("tags"),
+                None,
+                &[set_member],
+                row_ts,
+            )
+            .unwrap();
+        let (_d0, _d1, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 1);
+        assert_ne!(
+            cells[0].flags & CELL_HAS_EMPTY_VALUE,
+            0,
+            "live SET member MUST set HAS_EMPTY_VALUE (0x04)"
+        );
+        assert_eq!(
+            cells[0].flags & CELL_IS_DELETED,
+            0,
+            "a live SET member is NOT a tombstone"
+        );
+        assert!(
+            cells[0].value.is_none(),
+            "SET member carries no value bytes (HAS_EMPTY_VALUE set)"
+        );
+
+        // Case 3: live MAP/LIST element (value Some, not deleted) — flags MUST NOT
+        // set HAS_EMPTY_VALUE; a value-length VInt and value bytes follow.
+        let list_elem = ComplexElementWrite {
+            cell_path: vec![0x03; 16],
+            value: Some(Value::Integer(99)),
+            timestamp_micros: row_ts,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(
+                &mut buf,
+                &list_column("items"),
+                None,
+                &[list_elem],
+                row_ts,
+            )
+            .unwrap();
+        let (_d0, _d1, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 1);
+        assert_eq!(
+            cells[0].flags & CELL_HAS_EMPTY_VALUE,
+            0,
+            "a live MAP/LIST element with a value MUST NOT set HAS_EMPTY_VALUE"
+        );
+        assert_eq!(
+            cells[0].flags & CELL_IS_DELETED,
+            0,
+            "a live MAP/LIST element is NOT a tombstone"
+        );
+        assert_eq!(
+            cells[0].value,
+            Some(serialize_value(&Value::Integer(99)).unwrap()),
+            "live MAP/LIST element round-trips its value bytes"
         );
     }
 
