@@ -90,11 +90,17 @@ assert_eq "NOT predicate"           '"2"'                                    "$(
 assert_eq "OR with IS NULL"         '"1"'                                    "$(trino 'SELECT count(*) FROM cqlite.analytics.events WHERE score > 45 OR active IS NULL')"
 
 # Aggregation pushdown (#841): global count/sum already asserted above; add
-# min/max/avg (avg exercises the Sum+Count decomposition) and GROUP BY (the
+# min/max/avg (avg exercises the SumDouble+Count decomposition) and GROUP BY (the
 # single-finalize-split path). Scores: 10,20,30,40,50.
 assert_eq "aggregate min(score)"    '"10"'                                   "$(trino 'SELECT min(score) FROM cqlite.analytics.events')"
 assert_eq "aggregate max(score)"    '"50"'                                   "$(trino 'SELECT max(score) FROM cqlite.analytics.events')"
+# Integer avg now pushes via SumDouble (no i64 overflow, matches Trino) — #902.
 assert_eq "aggregate avg(score)"    '"30.0"'                                 "$(trino 'SELECT avg(score) FROM cqlite.analytics.events')"
+# Float/double min/max/avg push too (#896): NaN ordering matches Trino. ratios:
+# 1.5,2.5,3.5,4.5,5.5 -> min 1.5, max 5.5, avg 3.5.
+assert_eq "aggregate min(ratio)"    '"1.5"'                                  "$(trino 'SELECT min(ratio) FROM cqlite.analytics.events')"
+assert_eq "aggregate max(ratio)"    '"5.5"'                                  "$(trino 'SELECT max(ratio) FROM cqlite.analytics.events')"
+assert_eq "aggregate avg(ratio)"    '"3.5"'                                  "$(trino 'SELECT avg(ratio) FROM cqlite.analytics.events')"
 # GROUP BY active -> two groups; assert the group count is 2 (deterministic scalar).
 assert_eq "group-by group count"    '"2"'                                    "$(trino 'SELECT count(*) FROM (SELECT active FROM cqlite.analytics.events GROUP BY active)')"
 # Aggregation + predicate: sum(score) WHERE score > 25 -> 30+40+50 = 120.

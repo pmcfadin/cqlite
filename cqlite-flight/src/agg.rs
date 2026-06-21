@@ -19,7 +19,11 @@
 //!   Counter), `Float64` for Float/Double; null when the group has no non-null
 //!   inputs. Any other source type is a [`AggError`] (the connector never pushes
 //!   `Sum` on them).
+//! - `SumDouble` → always `Float64`, widening integer inputs so the running sum
+//!   never overflows; the numerator of a pushed `avg(col)` (issue #902). Null
+//!   when the group has no non-null inputs.
 //! - `Min`/`Max` → the source column's Arrow type; null when no non-null inputs.
+//!   Float/double extremes order `NaN` greatest (matches Trino, issue #896).
 //!
 //! # Row semantics
 //!
@@ -45,7 +49,7 @@ pub enum AggError {
     /// A group_by or aggregate referenced a column not in the schema.
     #[error("aggregation references unknown column '{0}'")]
     UnknownColumn(String),
-    /// `Sum`/`Min`/`Max` named no source column (only `Count` may omit it).
+    /// `Sum`/`SumDouble`/`Min`/`Max` named no source column (only `Count` may omit it).
     #[error("aggregate '{output}' ({func:?}) requires a source column")]
     MissingColumn {
         /// The offending output column name.
@@ -53,7 +57,7 @@ pub enum AggError {
         /// The function that needs a column.
         func: AggFunc,
     },
-    /// `Sum` was requested on a non-numeric source column.
+    /// `Sum`/`SumDouble` was requested on a non-numeric source column.
     #[error("sum('{column}') unsupported: source type {cql_type:?} is not numeric")]
     SumNotNumeric {
         /// Source column name.
@@ -66,14 +70,6 @@ pub enum AggError {
     /// instead of silently returning a wrong value.
     #[error("sum('{column}') overflowed i64")]
     SumOverflow {
-        /// Source column name.
-        column: String,
-    },
-    /// `Min`/`Max` on a float/double column is not pushed: NaN ordering must match
-    /// Trino exactly (tracked in a follow-up). The connector already declines this,
-    /// so this guards a hand-crafted ticket and keeps the server consistent.
-    #[error("min/max('{column}') unsupported: float/double NaN ordering is not pushed")]
-    MinMaxFloatUnsupported {
         /// Source column name.
         column: String,
     },
@@ -194,23 +190,18 @@ impl AggPlan {
             }
             (func, Some(column)) => {
                 let ty = column_type(schema, column)?;
-                let kind = if matches!(func, AggFunc::Sum) {
+                // Both Sum and SumDouble need a numeric source. Sum carries the
+                // numeric family (Int64 vs Float64 output); SumDouble always sums
+                // in f64, so it only needs numeric-ness, not the family.
+                let kind = if matches!(func, AggFunc::Sum | AggFunc::SumDouble) {
                     let kind = sum_kind_of(&ty).ok_or_else(|| AggError::SumNotNumeric {
                         column: column.clone(),
                         cql_type: ty.clone(),
                     })?;
-                    Some(kind)
+                    matches!(func, AggFunc::Sum).then_some(kind)
                 } else {
                     None
                 };
-                // Float/double min/max is not pushed (NaN ordering, see #896).
-                if matches!(func, AggFunc::Min | AggFunc::Max)
-                    && matches!(unwrap_frozen(&ty), CqlType::Float | CqlType::Double)
-                {
-                    return Err(AggError::MinMaxFloatUnsupported {
-                        column: column.clone(),
-                    });
-                }
                 (Some(ty), kind)
             }
         };
@@ -273,6 +264,8 @@ impl AggPlan {
                 // Integer family (or, defensively, missing kind) → Int64.
                 _ => CqlType::BigInt,
             },
+            // SumDouble (avg numerator) → always Float64.
+            AggFunc::SumDouble => CqlType::Double,
             // Min/Max keep the source column's type.
             AggFunc::Min | AggFunc::Max => planned.source_type.clone().unwrap_or(CqlType::BigInt),
         }
@@ -466,6 +459,9 @@ enum Accumulator {
     SumInt(Option<i64>),
     /// `sum` over a float family — `None` until a first non-null input.
     SumFloat(Option<f64>),
+    /// `SumDouble` (avg numerator): any numeric input widened to `f64`, never
+    /// overflowing — `None` until a first non-null input.
+    SumDouble(Option<f64>),
     /// `min`/`max` over the source type — holds the current extreme `Value`.
     Extreme(Option<Value>),
 }
@@ -478,6 +474,7 @@ impl Accumulator {
                 Some(SumKind::Float) => Accumulator::SumFloat(None),
                 _ => Accumulator::SumInt(None),
             },
+            AggFunc::SumDouble => Accumulator::SumDouble(None),
             AggFunc::Min | AggFunc::Max => Accumulator::Extreme(None),
         }
     }
@@ -520,6 +517,16 @@ impl Accumulator {
                     }
                 }
             }
+            Accumulator::SumDouble(acc) => {
+                if let Some(value) = non_null(&planned.column, row) {
+                    // Widen any numeric (integer OR float) to f64 — the avg
+                    // numerator never overflows, so an integer total exceeding i64
+                    // is fine here (it would error under a checked-i64 `Sum`).
+                    if let Some(f) = as_f64_widening(value) {
+                        *acc = Some(acc.unwrap_or(0.0) + f);
+                    }
+                }
+            }
             Accumulator::Extreme(current) => {
                 if let Some(value) = non_null(&planned.column, row) {
                     let take = match current {
@@ -551,6 +558,7 @@ impl Accumulator {
             Accumulator::Count(n) => Some(Value::BigInt(n)),
             Accumulator::SumInt(acc) => acc.map(Value::BigInt),
             Accumulator::SumFloat(acc) => acc.map(Value::Float),
+            Accumulator::SumDouble(acc) => acc.map(Value::Float),
             Accumulator::Extreme(v) => v,
         }
     }
@@ -590,14 +598,54 @@ fn as_f64(value: &Value) -> Option<f64> {
     }
 }
 
+/// Widen any numeric `Value` (integer OR float family) to `f64`. Used by the
+/// `SumDouble` accumulator (avg numerator), which must total integer columns in
+/// f64 so the running sum cannot overflow (issue #902).
+fn as_f64_widening(value: &Value) -> Option<f64> {
+    as_i64(value).map(|n| n as f64).or_else(|| as_f64(value))
+}
+
+/// Total order over two `f64`s matching Java's `Double.compare` (and therefore
+/// Trino's `REAL`/`DOUBLE` `min`/`max`): every `NaN` sorts as the LARGEST value
+/// (greater than `+Infinity`), and all `NaN`s are mutually equal. This makes the
+/// Rust accumulator order-independent and identical to the Java
+/// `PartialAggregateMerger`, which compares via `Double.compare` (issue #896).
+///
+/// `max(col)` therefore yields `NaN` when any input is `NaN`; `min(col)` yields
+/// the smallest non-`NaN` (returning `NaN` only when every input is `NaN`).
+fn cmp_f64_trino(a: f64, b: f64) -> std::cmp::Ordering {
+    use std::cmp::Ordering;
+    if a < b {
+        Ordering::Less
+    } else if a > b {
+        Ordering::Greater
+    } else {
+        // Equal under `<`/`>` (covers ±0.0 and the all-finite-equal case) or one
+        // side is NaN. Replicate Double.compare's canonical-bits tiebreak: all
+        // NaN canonicalize to one pattern that, as a signed i64, exceeds every
+        // finite/Infinity bit pattern, so NaN sorts greatest.
+        canonical_bits(a).cmp(&canonical_bits(b))
+    }
+}
+
+/// Java `Double.doubleToLongBits` canonicalization viewed as a signed `i64`:
+/// every `NaN` maps to the single quiet-NaN pattern (`0x7ff8…`), which is the
+/// largest positive long, so NaN compares greater than all finite values.
+fn canonical_bits(d: f64) -> i64 {
+    if d.is_nan() {
+        0x7ff8_0000_0000_0000_u64 as i64
+    } else {
+        d.to_bits() as i64
+    }
+}
+
 /// Total order over the `Value` variants that Min/Max can see (the source
 /// column's type). Returns `None` for variants that are not mutually
 /// comparable, in which case the accumulator keeps its current extreme.
 ///
-/// Floats compare via `partial_cmp` falling back to `Equal`, so a `NaN` never
-/// displaces the running extreme (matches "keep current on incomparable").
+/// Floats use [`cmp_f64_trino`] (NaN sorts greatest, matching Trino and the Java
+/// merger), so the result is independent of input row order (issue #896).
 fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
-    use std::cmp::Ordering;
     match (a, b) {
         (Value::Boolean(x), Value::Boolean(y)) => Some(x.cmp(y)),
         (Value::TinyInt(x), Value::TinyInt(y)) => Some(x.cmp(y)),
@@ -608,8 +656,8 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         | (Value::Timestamp(x), Value::Timestamp(y))
         | (Value::Time(x), Value::Time(y)) => Some(x.cmp(y)),
         (Value::Date(x), Value::Date(y)) => Some(x.cmp(y)),
-        (Value::Float(x), Value::Float(y)) => Some(x.partial_cmp(y).unwrap_or(Ordering::Equal)),
-        (Value::Float32(x), Value::Float32(y)) => Some(x.partial_cmp(y).unwrap_or(Ordering::Equal)),
+        (Value::Float(x), Value::Float(y)) => Some(cmp_f64_trino(*x, *y)),
+        (Value::Float32(x), Value::Float32(y)) => Some(cmp_f64_trino(*x as f64, *y as f64)),
         (Value::Text(x), Value::Text(y)) => Some(x.cmp(y)),
         (Value::Blob(x), Value::Blob(y)) => Some(x.cmp(y)),
         (Value::Uuid(x), Value::Uuid(y)) => Some(x.cmp(y)),
@@ -617,7 +665,7 @@ fn compare_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         (lhs, rhs) => match (as_i64(lhs), as_i64(rhs)) {
             (Some(x), Some(y)) => Some(x.cmp(&y)),
             _ => match (as_f64(lhs), as_f64(rhs)) {
-                (Some(x), Some(y)) => Some(x.partial_cmp(&y).unwrap_or(Ordering::Equal)),
+                (Some(x), Some(y)) => Some(cmp_f64_trino(x, y)),
                 _ => None,
             },
         },
@@ -695,8 +743,16 @@ mod tests {
     }
 
     #[test]
-    fn float_min_max_is_rejected_at_build() {
-        // The schema's `v` is bigint; add a double column to test float min/max.
+    fn integer_sum_without_overflow_succeeds() {
+        let plan = sum_v_plan();
+        let rows = vec![row_bigint(10), row_bigint(32)];
+        let out = plan.aggregate(&rows).expect("no overflow");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].values.get("agg0"), Some(&Value::BigInt(42)));
+    }
+
+    /// Schema with a double column `d` for float-aggregate tests.
+    fn double_schema() -> TableSchema {
         let mut schema = bigint_schema();
         schema.columns.push(Column {
             name: "d".into(),
@@ -705,26 +761,91 @@ mod tests {
             default: None,
             is_static: false,
         });
-        for func in [AggFunc::Min, AggFunc::Max] {
-            let agg = Aggregation {
-                group_by: vec![],
-                aggregates: vec![AggregateSpec {
-                    func,
-                    column: Some("d".into()),
-                    output: "agg0".into(),
-                }],
-            };
-            let err = AggPlan::build(&agg, &schema).expect_err("float min/max must be rejected");
-            assert!(matches!(err, AggError::MinMaxFloatUnsupported { column } if column == "d"));
+        schema
+    }
+
+    fn row_double(d: f64) -> QueryRow {
+        let mut values = HashMap::new();
+        values.insert("d".to_string(), Value::Float(d));
+        QueryRow {
+            values,
+            key: RowKey(Vec::new()),
+            metadata: Default::default(),
+            cell_metadata: None,
         }
     }
 
+    fn min_max_d_plan() -> AggPlan {
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![
+                AggregateSpec {
+                    func: AggFunc::Min,
+                    column: Some("d".into()),
+                    output: "agg_min".into(),
+                },
+                AggregateSpec {
+                    func: AggFunc::Max,
+                    column: Some("d".into()),
+                    output: "agg_max".into(),
+                },
+            ],
+        };
+        AggPlan::build(&agg, &double_schema()).expect("plan")
+    }
+
+    /// #896: float min/max now pushes; `NaN` orders greatest, so `max` returns
+    /// `NaN` and `min` ignores it — independent of input row order.
     #[test]
-    fn integer_sum_without_overflow_succeeds() {
-        let plan = sum_v_plan();
-        let rows = vec![row_bigint(10), row_bigint(32)];
-        let out = plan.aggregate(&rows).expect("no overflow");
+    fn float_min_max_nan_orders_greatest_and_is_order_independent() {
+        let nan_first = vec![row_double(f64::NAN), row_double(1.0), row_double(3.0)];
+        let nan_last = vec![row_double(1.0), row_double(3.0), row_double(f64::NAN)];
+        for rows in [nan_first, nan_last] {
+            let out = min_max_d_plan()
+                .aggregate(&rows)
+                .expect("float min/max pushes");
+            assert_eq!(out.len(), 1);
+            // min ignores NaN -> 1.0
+            assert_eq!(out[0].values.get("agg_min"), Some(&Value::Float(1.0)));
+            // max -> NaN (NaN is the largest value)
+            match out[0].values.get("agg_max") {
+                Some(Value::Float(v)) => assert!(v.is_nan(), "max over a NaN input must be NaN"),
+                other => panic!("expected NaN max, got {other:?}"),
+            }
+        }
+    }
+
+    /// #896: when every input is `NaN`, both `min` and `max` are `NaN`.
+    #[test]
+    fn float_min_max_all_nan_is_nan() {
+        let rows = vec![row_double(f64::NAN), row_double(f64::NAN)];
+        let out = min_max_d_plan().aggregate(&rows).expect("plan");
+        for col in ["agg_min", "agg_max"] {
+            match out[0].values.get(col) {
+                Some(Value::Float(v)) => assert!(v.is_nan(), "{col} over all-NaN must be NaN"),
+                other => panic!("expected NaN for {col}, got {other:?}"),
+            }
+        }
+    }
+
+    /// #902: `SumDouble` (avg numerator) widens integers to f64 and never
+    /// overflows, where a checked-i64 `Sum` over the same data errors.
+    #[test]
+    fn sum_double_does_not_overflow_on_large_integer_total() {
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![AggregateSpec {
+                func: AggFunc::SumDouble,
+                column: Some("v".into()),
+                output: "agg0".into(),
+            }],
+        };
+        let plan = AggPlan::build(&agg, &bigint_schema()).expect("plan");
+        // A total exceeding i64 (i64::MAX + 1 + 1) would error under checked Sum.
+        let rows = vec![row_bigint(i64::MAX), row_bigint(1), row_bigint(1)];
+        let out = plan.aggregate(&rows).expect("SumDouble must not overflow");
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0].values.get("agg0"), Some(&Value::BigInt(42)));
+        let expected = i64::MAX as f64 + 1.0 + 1.0;
+        assert_eq!(out[0].values.get("agg0"), Some(&Value::Float(expected)));
     }
 }

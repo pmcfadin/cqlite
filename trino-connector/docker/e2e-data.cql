@@ -5,14 +5,15 @@ CREATE TABLE IF NOT EXISTS analytics.events (
   id int PRIMARY KEY,
   name text,
   score int,
+  ratio double,
   active boolean
 );
 
-INSERT INTO analytics.events (id, name, score, active) VALUES (1, 'alice', 10, true);
-INSERT INTO analytics.events (id, name, score, active) VALUES (2, 'bob',   20, false);
-INSERT INTO analytics.events (id, name, score, active) VALUES (3, 'carol', 30, true);
-INSERT INTO analytics.events (id, name, score, active) VALUES (4, 'dave',  40, false);
-INSERT INTO analytics.events (id, name, score, active) VALUES (5, 'erin',  50, true);
+INSERT INTO analytics.events (id, name, score, ratio, active) VALUES (1, 'alice', 10, 1.5, true);
+INSERT INTO analytics.events (id, name, score, ratio, active) VALUES (2, 'bob',   20, 2.5, false);
+INSERT INTO analytics.events (id, name, score, ratio, active) VALUES (3, 'carol', 30, 3.5, true);
+INSERT INTO analytics.events (id, name, score, ratio, active) VALUES (4, 'dave',  40, 4.5, false);
+INSERT INTO analytics.events (id, name, score, ratio, active) VALUES (5, 'erin',  50, 5.5, true);
 
 -- Diverse-type table to exercise uuid + timestamp conversion end-to-end.
 CREATE TABLE IF NOT EXISTS analytics.typed (

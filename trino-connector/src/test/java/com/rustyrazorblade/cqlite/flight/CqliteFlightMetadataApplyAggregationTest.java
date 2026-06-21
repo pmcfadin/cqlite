@@ -113,19 +113,20 @@ class CqliteFlightMetadataApplyAggregationTest {
     }
 
     @Test
-    void decomposesAvgIntoSumPlusCount() throws Exception {
-        // avg over a DOUBLE column (integer avg is declined — see #902); the
-        // Sum+Count decomposition is identical.
+    void decomposesAvgIntoSumDoublePlusCount() throws Exception {
+        // avg(x) -> SumDouble(x) + Count(x) on the wire. SumDouble totals in f64 so
+        // an integer avg cannot overflow (issue #902); the decomposition is the
+        // same for double columns.
         var result = metadata.applyAggregation(
-                null, TABLE, List.of(agg("avg", DOUBLE, new Variable("d", DOUBLE))),
+                null, TABLE, List.of(agg("avg", DOUBLE, new Variable("x", BIGINT))),
                 ASSIGN, List.of(List.of())).orElseThrow();
 
         JsonNode aggs = aggSpec((CqliteFlightTableHandle) result.getHandle()).get("aggregates");
-        assertEquals(2, aggs.size(), "avg(d) -> Sum(d) + Count(d) on the wire");
-        assertEquals("Sum", aggs.get(0).get("func").asText());
-        assertEquals("d", aggs.get(0).get("column").asText());
+        assertEquals(2, aggs.size(), "avg(x) -> SumDouble(x) + Count(x) on the wire");
+        assertEquals("SumDouble", aggs.get(0).get("func").asText());
+        assertEquals("x", aggs.get(0).get("column").asText());
         assertEquals("Count", aggs.get(1).get("func").asText());
-        assertEquals("d", aggs.get(1).get("column").asText());
+        assertEquals("x", aggs.get(1).get("column").asText());
 
         // But Trino sees ONE projection (the merged DOUBLE avg result).
         assertEquals(1, result.getProjections().size());
@@ -210,15 +211,22 @@ class CqliteFlightMetadataApplyAggregationTest {
     }
 
     @Test
-    void declinesAvgOnIntegerButPushesAvgOnDouble() {
-        // avg(bigint) is declined (its checked-i64 partial sum could overflow where
-        // Trino's 128-bit avg would not). avg(double) sums in f64 — still pushes.
-        assertTrue(metadata.applyAggregation(
+    void pushesAvgOnIntegerAndDouble() throws Exception {
+        // avg(bigint) now pushes via SumDouble (issue #902): the f64 numerator
+        // cannot overflow, matching Trino's 128-bit avg. avg(double) pushes too.
+        var intResult = metadata.applyAggregation(
                 null, TABLE, List.of(agg("avg", DOUBLE, new Variable("x", BIGINT))),
-                ASSIGN, List.of(List.of())).isEmpty(), "avg(bigint) is not pushed");
-        assertTrue(metadata.applyAggregation(
+                ASSIGN, List.of(List.of())).orElseThrow();
+        JsonNode intAggs = aggSpec((CqliteFlightTableHandle) intResult.getHandle()).get("aggregates");
+        assertEquals("SumDouble", intAggs.get(0).get("func").asText(),
+                "integer avg's sum partial must be SumDouble (non-overflowing)");
+        assertEquals("Count", intAggs.get(1).get("func").asText());
+
+        var doubleResult = metadata.applyAggregation(
                 null, TABLE, List.of(agg("avg", DOUBLE, new Variable("d", DOUBLE))),
-                ASSIGN, List.of(List.of())).isPresent(), "avg(double) still pushes");
+                ASSIGN, List.of(List.of())).orElseThrow();
+        JsonNode dblAggs = aggSpec((CqliteFlightTableHandle) doubleResult.getHandle()).get("aggregates");
+        assertEquals("SumDouble", dblAggs.get(0).get("func").asText());
     }
 
     @Test
@@ -230,15 +238,25 @@ class CqliteFlightMetadataApplyAggregationTest {
     }
 
     @Test
-    void declinesMinMaxOnDoubleColumn() {
-        // Float/double min/max is left to Trino (NaN ordering must match exactly).
-        assertTrue(metadata.applyAggregation(
+    void pushesMinMaxOnDoubleColumn() throws Exception {
+        // Float/double min/max now pushes (issue #896): the Rust accumulator and
+        // the Java merger both order NaN as the largest value (Double.compare),
+        // matching Trino and making the result order-independent.
+        var minResult = metadata.applyAggregation(
                 null, TABLE, List.of(agg("min", DOUBLE, new Variable("d", DOUBLE))),
-                ASSIGN, List.of(List.of())).isEmpty(), "min(double) is not pushed");
-        assertTrue(metadata.applyAggregation(
+                ASSIGN, List.of(List.of())).orElseThrow();
+        assertEquals("Min",
+                aggSpec((CqliteFlightTableHandle) minResult.getHandle())
+                        .get("aggregates").get(0).get("func").asText());
+
+        var maxResult = metadata.applyAggregation(
                 null, TABLE, List.of(agg("max", DOUBLE, new Variable("d", DOUBLE))),
-                ASSIGN, List.of(List.of())).isEmpty(), "max(double) is not pushed");
-        // But sum(double) and avg(double) still push (NaN propagates identically).
+                ASSIGN, List.of(List.of())).orElseThrow();
+        assertEquals("Max",
+                aggSpec((CqliteFlightTableHandle) maxResult.getHandle())
+                        .get("aggregates").get(0).get("func").asText());
+
+        // sum(double) still pushes too (NaN propagates identically through f64 sum).
         assertTrue(metadata.applyAggregation(
                 null, TABLE, List.of(agg("sum", DOUBLE, new Variable("d", DOUBLE))),
                 ASSIGN, List.of(List.of())).isPresent(), "sum(double) still pushes");
