@@ -614,4 +614,76 @@ mod tests {
 
         Ok(())
     }
+
+    /// Issue #815: concurrent full scans on a *single* `SSTableReader` must
+    /// return identical, correct results. Before #815 each scan held
+    /// `scan_mutex` for its whole lifetime (correct but fully serialized); the
+    /// per-scan cursor lets them run in parallel. This stress test would surface
+    /// the #805 corruption (interleaved seeks / chunk-index advances producing
+    /// `Column not found` errors or short/garbled results) if the scans shared a
+    /// mutable cursor again. Run against both the buffered and mmap backends.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn test_concurrent_scans_single_reader_are_consistent() -> crate::Result<()> {
+        use super::super::SSTableReader;
+        use crate::{Config, Platform};
+        use std::path::Path;
+        use std::sync::Arc;
+
+        let test_dir = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => Path::new(&root)
+                .join("sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9"),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+                return Ok(());
+            }
+        };
+        let data_file = test_dir.join("nb-1-big-Data.db");
+        if !data_file.exists() {
+            eprintln!("Test data file not found at {:?}, skipping test", data_file);
+            return Ok(());
+        }
+
+        for use_mmap in [false, true] {
+            let mut config = Config::default();
+            config.storage.use_mmap = use_mmap;
+            let platform = Arc::new(Platform::new(&config).await?);
+            let reader = Arc::new(SSTableReader::open(&data_file, &config, platform).await?);
+
+            // Reference result from an uncontended scan.
+            let reference = reader.get_all_entries().await?;
+            assert!(
+                !reference.is_empty(),
+                "expected non-empty reference scan (mmap={use_mmap})"
+            );
+            let mut reference_keys: Vec<_> = reference.iter().map(|(_, k, _)| k.clone()).collect();
+            reference_keys.sort();
+
+            // Fan out many concurrent scans on the SAME reader and confirm each
+            // returns exactly the reference set of partition keys.
+            let mut handles = Vec::new();
+            for _ in 0..16 {
+                let reader = Arc::clone(&reader);
+                handles.push(tokio::spawn(async move { reader.get_all_entries().await }));
+            }
+            for handle in handles {
+                let entries = handle
+                    .await
+                    .expect("scan task panicked")
+                    .expect("concurrent scan failed");
+                assert_eq!(
+                    entries.len(),
+                    reference.len(),
+                    "concurrent scan returned a different row count (mmap={use_mmap})"
+                );
+                let mut keys: Vec<_> = entries.iter().map(|(_, k, _)| k.clone()).collect();
+                keys.sort();
+                assert_eq!(
+                    keys, reference_keys,
+                    "concurrent scan returned different keys (mmap={use_mmap})"
+                );
+            }
+        }
+
+        Ok(())
+    }
 }

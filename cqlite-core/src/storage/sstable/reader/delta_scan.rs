@@ -590,14 +590,10 @@ async fn run_scan_delta(
     // same allocation rather than cloning the struct twice.
     let schema_arc = std::sync::Arc::new(schema);
 
-    // Stitch + parse with mutex held for the stitch (issue #805), then release.
-    // The parsing itself is synchronous and moves into spawn_blocking; it does
-    // not need the scan mutex since we already have the full stitched buffer.
-    let (stitched, parser) = {
-        let _scan_guard = reader.delta_scan_mutex().lock().await;
-        reader.prepare_delta_scan().await?
-        // _scan_guard dropped here after stitching is complete.
-    };
+    // Stitch + parse using a private per-scan cursor (issue #815): no scan-wide
+    // mutex needed because the cursor owns its own file position / chunk index.
+    // The parsing itself is synchronous and moves into spawn_blocking.
+    let (stitched, parser) = reader.prepare_delta_scan().await?;
 
     let schema_for_parse = std::sync::Arc::clone(&schema_arc);
     let reader_arc = std::sync::Arc::clone(&reader);

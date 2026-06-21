@@ -23,13 +23,18 @@
 //! poll methods always complete synchronously (`Poll::Ready`).
 
 use std::io::{self, SeekFrom};
+use std::path::Path;
 use std::pin::Pin;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
 use memmap2::Mmap;
 use tokio::fs::File;
 use tokio::io::{AsyncRead, AsyncSeek, BufReader, ReadBuf};
+use tokio::sync::Mutex;
+
+use crate::Result;
 
 /// A seekable byte source backing an [`SSTableReader`](super::types::SSTableReader).
 ///
@@ -56,6 +61,55 @@ impl BlockSource {
     #[cfg(test)]
     pub(crate) fn is_mmap(&self) -> bool {
         matches!(self, BlockSource::Mapped(_))
+    }
+}
+
+/// Template for minting fresh, independent [`BlockSource`]s — one per scan.
+///
+/// Issue #815: concurrent scans on a single `SSTableReader` must not share a
+/// mutable file position or chunk index, otherwise their seeks interleave and
+/// corrupt each other's reads (the bug #805 fixed by serializing with a mutex).
+/// Instead of serializing, each scan now opens its own [`ScanCursor`] from this
+/// template, so they run in parallel while staying correct. SSTable files are
+/// immutable, so minting extra views is always safe.
+pub(crate) enum ScanSource {
+    /// Reopen the file for each scan, giving it its own OS file handle and seek
+    /// position. The per-handle cost is a small buffered reader.
+    Buffered,
+    /// Share the underlying read-only memory map; each scan gets its own cursor
+    /// position over the same mapped bytes (just an `Arc` clone, no new mapping).
+    Mapped(Arc<Mmap>),
+}
+
+impl ScanSource {
+    /// Mint a fresh, independent [`BlockSource`] for one scan.
+    pub(crate) async fn open(&self, path: &Path) -> Result<BlockSource> {
+        Ok(match self {
+            ScanSource::Buffered => BlockSource::buffered(File::open(path).await?),
+            ScanSource::Mapped(mmap) => BlockSource::mapped(mmap.clone()),
+        })
+    }
+}
+
+/// An independent read cursor for a single scan.
+///
+/// Bundles a private file handle (uncontended `Arc<Mutex<BlockSource>>`) with a
+/// private `chunk_index`, so concurrent scans on the same `SSTableReader` never
+/// touch shared mutable I/O state (issue #815). The mutex is per-scan and so is
+/// effectively uncontended — it only exists because the block-I/O helpers need
+/// `&mut` access to seek/read the source.
+pub(crate) struct ScanCursor {
+    pub(crate) file: Arc<Mutex<BlockSource>>,
+    pub(crate) chunk_index: AtomicUsize,
+}
+
+impl ScanCursor {
+    /// Wrap a freshly-minted source as a scan cursor positioned at chunk 0.
+    pub(crate) fn new(source: BlockSource) -> Self {
+        Self {
+            file: Arc::new(Mutex::new(source)),
+            chunk_index: AtomicUsize::new(0),
+        }
     }
 }
 
