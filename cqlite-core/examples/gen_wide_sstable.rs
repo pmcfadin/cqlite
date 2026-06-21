@@ -60,6 +60,7 @@ async fn main() -> cqlite_core::error::Result<()> {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let config = WriteEngineConfig::new(out.join("data"), out.join("wal"), schema.clone());

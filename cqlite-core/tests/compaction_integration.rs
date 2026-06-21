@@ -101,6 +101,7 @@ fn make_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -1187,6 +1188,7 @@ fn clustering_key_rows_survive_compaction() {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     // Helper: build a mutation for (pk, ck, val).

@@ -172,6 +172,7 @@ fn test_row_cell_state_machine_no_blob_fallback_modern() {
             },
         ],
         comments: std::collections::HashMap::new(),
+        dropped_columns: std::collections::HashMap::new(),
     };
 
     // Test BIG v5 format

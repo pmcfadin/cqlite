@@ -922,6 +922,7 @@ impl CqlPerformanceBenchmarkSuite {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         })
     }
 

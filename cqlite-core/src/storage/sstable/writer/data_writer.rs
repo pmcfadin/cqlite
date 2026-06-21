@@ -3559,6 +3559,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -3610,6 +3611,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -3900,6 +3902,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -5370,6 +5373,7 @@ mod tests {
             clustering_keys: vec![],
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let table_id = TableId::new("test_ks", "test_table");
@@ -5436,6 +5440,7 @@ mod tests {
             }],
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let table_id = TableId::new("test_ks", "test_table");
@@ -5500,6 +5505,7 @@ mod tests {
             clustering_keys: vec![],
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let table_id = TableId::new("test_ks", "test_table");
@@ -5564,6 +5570,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let ordered = writer.regular_columns(&schema);
@@ -5615,6 +5622,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let ordered = writer.static_columns(&schema);
@@ -5652,6 +5660,7 @@ mod tests {
             clustering_keys: vec![],
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let table_id = TableId::new("test_ks", "test_table");
@@ -6149,6 +6158,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let stats = create_test_stats();
@@ -6213,6 +6223,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let stats = create_test_stats();
@@ -6617,6 +6628,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         // Boundary 2^31 and a high value near 2^32 - 1, both negative i32 patterns.
@@ -6681,6 +6693,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let stats = create_test_stats();
@@ -6739,6 +6752,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let stats = create_test_stats();
@@ -6792,6 +6806,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let stats = create_test_stats();
@@ -7264,6 +7279,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let stats = create_test_stats();
@@ -7334,6 +7350,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let stats = create_test_stats();

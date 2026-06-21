@@ -1602,6 +1602,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -1762,6 +1763,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -2720,6 +2722,7 @@ mod tests {
                 },
             ],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let delete = CqlDelete {
@@ -2904,6 +2907,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -3085,6 +3089,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 

@@ -731,6 +731,7 @@ impl SchemaAggregator {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         schema.validate()?;
@@ -808,6 +809,7 @@ impl SchemaAggregator {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         schema.validate()?;

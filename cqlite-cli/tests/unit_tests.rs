@@ -607,6 +607,7 @@ mod test_helpers {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 

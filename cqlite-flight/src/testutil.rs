@@ -36,6 +36,7 @@ pub fn simple_schema() -> TableSchema {
             col("score", "int", true),
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -138,6 +139,7 @@ pub fn clustering_schema() -> TableSchema {
             col("val", "int", true),
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -172,6 +174,7 @@ pub fn uuid_schema() -> TableSchema {
         clustering_keys: vec![],
         columns: vec![col("id", "uuid", false), col("name", "text", true)],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

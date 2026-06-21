@@ -518,6 +518,7 @@ async fn test_summary_via_write_engine() -> CqliteResult<()> {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let config = WriteEngineConfig::new(

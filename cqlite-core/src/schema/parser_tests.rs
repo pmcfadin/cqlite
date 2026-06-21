@@ -65,6 +65,7 @@ mod parser_tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -376,6 +377,7 @@ mod parser_tests {
                 clustering_keys: vec![],
                 columns: vec![],
                 comments: HashMap::new(),
+                dropped_columns: HashMap::new(),
             },
             partition_comparators: vec![],
             clustering_comparators: vec![],
@@ -460,6 +462,7 @@ mod parser_tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let mut column_comparators = HashMap::new();

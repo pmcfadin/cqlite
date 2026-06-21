@@ -188,6 +188,7 @@ fn test_uuid_row_key_bytes_match_partition_key_to_bytes() {
         clustering_keys: vec![],
         columns: vec![],
         comments: Default::default(),
+        dropped_columns: Default::default(),
     };
 
     let pk = PartitionKey::single("id", Value::Uuid(uuid_bytes));
@@ -247,6 +248,7 @@ fn test_composite_uuid_key_framing_matches_partition_key_to_bytes() {
         clustering_keys: vec![],
         columns: vec![],
         comments: Default::default(),
+        dropped_columns: Default::default(),
     };
 
     let pk = PartitionKey::new(vec![

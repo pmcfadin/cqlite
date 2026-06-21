@@ -1949,6 +1949,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let writer = StatisticsWriter::new(PathBuf::from("test.db"));
@@ -2031,6 +2032,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let writer = StatisticsWriter::new(PathBuf::from("test.db"));
@@ -2362,6 +2364,7 @@ mod tests {
             clustering_keys: vec![],
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 

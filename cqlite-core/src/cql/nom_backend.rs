@@ -305,6 +305,7 @@ impl NomParser {
                 .iter()
                 .map(|(k, v)| (k.clone(), format!("{:?}", v)))
                 .collect(),
+            dropped_columns: std::collections::HashMap::new(),
         }
     }
 

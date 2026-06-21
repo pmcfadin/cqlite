@@ -161,6 +161,7 @@ impl ComponentIntegrationTestFixture {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         })
     }
 }

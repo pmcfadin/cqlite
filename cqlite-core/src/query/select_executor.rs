@@ -1994,6 +1994,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         }
     }
 

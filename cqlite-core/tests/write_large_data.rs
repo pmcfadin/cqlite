@@ -61,6 +61,7 @@ fn simple_schema(keyspace: &str, table: &str, columns: Vec<(&str, &str)>, pk: &s
         clustering_keys: vec![],
         columns: col_structs,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -109,6 +110,7 @@ fn simple_schema_with_clustering(
         }],
         columns: col_structs,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -421,6 +423,7 @@ async fn test_500_columns_roundtrip() -> cqlite_core::error::Result<()> {
         clustering_keys: vec![],
         columns: col_structs,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let mut engine = create_engine(&temp_dir, schema);

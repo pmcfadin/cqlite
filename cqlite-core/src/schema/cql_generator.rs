@@ -752,6 +752,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let result = generator.generate_from_table_schema(&schema).unwrap();
@@ -806,6 +807,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let result = generator.generate_from_table_schema(&schema).unwrap();
@@ -844,6 +846,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let result = generator.generate_from_table_schema(&schema).unwrap();

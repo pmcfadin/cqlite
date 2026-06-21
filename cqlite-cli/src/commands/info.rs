@@ -436,6 +436,7 @@ fn parse_json_schema(schema_content: &str) -> Result<TableSchema> {
         partition_keys: Vec::new(),
         clustering_keys: Vec::new(),
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     })
 }
 

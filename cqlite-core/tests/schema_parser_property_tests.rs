@@ -23,6 +23,7 @@ fn create_test_context(columns: Vec<Column>) -> ParsingContext {
         clustering_keys: vec![],
         columns,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     ParsingContext {
@@ -314,6 +315,7 @@ fn test_null_handling_in_row() {
             clustering_keys: vec![],
             columns: columns.clone(),
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         },
         partition_comparators: vec![ComparatorType::Int],
         clustering_comparators: vec![],

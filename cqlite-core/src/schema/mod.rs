@@ -83,6 +83,18 @@ pub struct TableSchema {
     /// Optional metadata
     #[serde(default)]
     pub comments: HashMap<String, String>,
+
+    /// Dropped-column drop times in microseconds (column name → drop_time_micros).
+    ///
+    /// Populated from the schema-loading surface (JSON `dropped_columns`, or set
+    /// programmatically) since drop times are assigned at DDL-execution by the
+    /// cluster catalog (`system_schema.dropped_columns`) and are not recorded in
+    /// local SSTable files or the CQL `DROP COLUMN` text. Used during compaction
+    /// to discard cells of a dropped column whose timestamp ≤ the drop time
+    /// (Cassandra `cb34ad47`). See issues #904 (this plumbing) and #847 (the
+    /// merge-side filter).
+    #[serde(default)]
+    pub dropped_columns: HashMap<String, i64>,
 }
 
 /// Partition key column definition
@@ -668,6 +680,7 @@ impl TableSchema {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         schema.validate()?;
@@ -1053,6 +1066,7 @@ impl TableSchema {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 }
@@ -1471,6 +1485,7 @@ impl SchemaManager {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -1660,6 +1675,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 

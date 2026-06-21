@@ -2146,6 +2146,7 @@ fn create_simple_schema(table_name: &str) -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -2188,6 +2189,7 @@ fn create_clustered_schema(table_name: &str) -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -2265,6 +2267,7 @@ fn create_types_schema(table_name: &str) -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -2553,6 +2556,7 @@ fn build_schema(
         clustering_keys,
         columns,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

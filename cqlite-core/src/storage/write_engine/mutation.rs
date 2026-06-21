@@ -711,6 +711,7 @@ mod tests {
                 .collect(),
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -1486,6 +1487,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let original = PartitionKey::single("id", Value::Integer(42));
@@ -1507,6 +1509,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let uuid_bytes = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16];
@@ -1529,6 +1532,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let original = PartitionKey::single("name", Value::Text("hello".to_string()));
@@ -1557,6 +1561,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let original = PartitionKey::new(vec![
@@ -1581,6 +1586,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         assert!(PartitionKey::from_bytes(&[], &schema).is_err());

@@ -509,6 +509,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -678,6 +679,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let schema =
@@ -748,6 +750,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let schema =
@@ -804,6 +807,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let err = derive_delta_schema(&table, &DeltaSchemaOpts::default())
@@ -846,6 +850,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let err = derive_delta_schema(&table, &DeltaSchemaOpts::default())
@@ -890,6 +895,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let err = derive_delta_schema(&table, &DeltaSchemaOpts::default())
@@ -939,6 +945,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let err = derive_delta_schema(&table, &DeltaSchemaOpts::default())
@@ -987,6 +994,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         // Default prefix → collision.
@@ -1046,6 +1054,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let opts = DeltaSchemaOpts::with_prefix("_cqlite_");
@@ -1091,6 +1100,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let err = derive_delta_schema(&table, &DeltaSchemaOpts::default())
@@ -1176,6 +1186,7 @@ mod tests {
                     },
                 ],
                 comments: HashMap::new(),
+                dropped_columns: HashMap::new(),
             };
 
             let schema = derive_delta_schema(&table, &DeltaSchemaOpts::default())
@@ -1224,6 +1235,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let schema =
@@ -1296,6 +1308,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let schema =
@@ -1353,6 +1366,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let schema =
@@ -1402,6 +1416,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let schema =

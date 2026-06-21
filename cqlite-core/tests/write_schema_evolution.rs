@@ -57,6 +57,7 @@ fn build_schema(
         clustering_keys: clustering,
         columns: col_defs,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

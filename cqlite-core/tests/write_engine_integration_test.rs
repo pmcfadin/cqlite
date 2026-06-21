@@ -48,6 +48,7 @@ fn create_test_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -502,6 +503,7 @@ fn create_comprehensive_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -1029,6 +1031,7 @@ async fn test_stage0_various_data_types() -> Result<()> {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     // === WRITE PHASE ===

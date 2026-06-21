@@ -68,6 +68,7 @@ impl SchemaParityTestFixture {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         self.registry
@@ -128,6 +129,7 @@ impl SchemaParityTestFixture {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         self.registry
@@ -220,6 +222,7 @@ impl SchemaParityTestFixture {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         self.registry

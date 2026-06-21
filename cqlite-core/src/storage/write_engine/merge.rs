@@ -1404,7 +1404,9 @@ impl KWayMerger {
 
         let mut merged = Vec::new();
         for (ck, cluster_rows) in clustered_rows {
-            if let Some(entry) = Self::reconcile_cluster(ck, cluster_rows) {
+            if let Some(entry) =
+                Self::reconcile_cluster(ck, cluster_rows, &self.schema.dropped_columns)
+            {
                 merged.push(entry);
             }
         }
@@ -1453,6 +1455,7 @@ impl KWayMerger {
     fn reconcile_cluster(
         clustering_key: Option<ClusteringKey>,
         cluster_rows: Vec<MergeEntry>,
+        dropped_columns: &std::collections::HashMap<String, i64>,
     ) -> Option<MergeEntry> {
         use std::collections::HashMap;
 
@@ -1541,11 +1544,24 @@ impl KWayMerger {
         // ts<=T (real Cassandra semantics). Note this is INTENTIONALLY stricter than
         // the `reference_merge` model, whose range-tombstone path only suppresses
         // live cells — `reconcile_cluster` is the authoritative behavior here.
+        //
+        // Step 3b: dropped-column filtering (Cassandra `cb34ad47`,
+        // `compaction.purge`). A column dropped at drop_time discards every cell
+        // whose `timestamp <= drop_time`; a cell written strictly after the drop
+        // (the column was re-added) survives. This mirrors row-tombstone shadowing
+        // but is scoped per column via the `dropped_columns` map (#904 plumbing,
+        // #847 filter). Byte-correct for scalar columns at row-timestamp
+        // granularity; element-level collection/UDT filtering additionally needs
+        // per-cell timestamps (#899) and is out of scope here.
         let surviving: Vec<CellData> = order
             .into_iter()
             .filter_map(|col| winners.remove(&col))
             .filter(|cell| match row_del {
                 Some(d) => cell.timestamp > d,
+                None => true,
+            })
+            .filter(|cell| match dropped_columns.get(&cell.column) {
+                Some(drop_time) => cell.timestamp > *drop_time,
                 None => true,
             })
             .collect();
@@ -1915,6 +1931,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let result = KWayMerger::new(vec![], &schema);
@@ -2027,6 +2044,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         const EQUAL_TS: i64 = 1_700_000_000_000_000;
@@ -2133,6 +2151,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
@@ -2264,6 +2283,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
@@ -2397,6 +2417,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         const EQUAL_TS: i64 = 1_700_000_000_000_000;
@@ -2541,6 +2562,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
@@ -2666,6 +2688,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let pk = DecoratedKey::new(100, vec![0, 0, 0, 1]);
@@ -2771,6 +2794,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let pk = DecoratedKey::new(100, vec![0, 0, 0, 1]);
@@ -2899,6 +2923,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         // Encode key as 4-byte big-endian int (42)
@@ -2971,6 +2996,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         let key_bytes = 7i32.to_be_bytes().to_vec();
@@ -3742,6 +3768,7 @@ mod merge_property_tests {
                     is_static: false,
                 }],
                 comments: SchemaMap::new(),
+                dropped_columns: SchemaMap::new(),
             };
 
             // Build MergeEntry stream — one per (ck, run_index, timestamp) tuple.
@@ -3852,6 +3879,7 @@ mod merge_property_tests {
                     is_static: false,
                 }],
                 comments: SchemaMap::new(),
+                dropped_columns: SchemaMap::new(),
             };
 
             let partition_key = DecoratedKey::new(100, vec![0, 0, 0, 1]);
@@ -4038,6 +4066,7 @@ mod streaming_tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         // Two sources with disjoint tokens:
@@ -4218,6 +4247,123 @@ mod issue_823_complex_column_merge {
         MergeEntry::new(run_index, dk(1), None, row_ts, RowData::Live { cells })
     }
 
+    fn scalar_cell(column: &str, value: &str, ts: i64) -> CellData {
+        CellData {
+            column: column.to_string(),
+            value: Value::Text(value.to_string()),
+            timestamp: ts,
+            ttl: None,
+            cell_path: None,
+            local_deletion_time: None,
+        }
+    }
+
+    // ── Issue #847: dropped-column cell filtering during compaction ──────────
+    // Cassandra `cb34ad47` / `compaction.purge`: a column dropped at drop_time
+    // discards every cell whose timestamp <= drop_time. The drop time comes from
+    // the `dropped_columns` map plumbed in #904. Byte-correct for scalar columns
+    // at row-timestamp granularity; element-level collection/UDT filtering needs
+    // per-cell timestamps (#899) and is out of scope.
+
+    /// A cell of a dropped column written AT OR BEFORE the drop time is discarded;
+    /// a sibling column with no drop entry is untouched.
+    #[test]
+    fn dropped_column_cell_at_or_before_drop_time_is_filtered() {
+        let row = live(
+            0,
+            200,
+            vec![
+                scalar_cell("name", "alice", 100),
+                scalar_cell("legacy", "stale", 100),
+            ],
+        );
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("legacy".to_string(), 150); // dropped at T=150, cell ts=100 <= 150
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped)
+            .expect("a live row must be emitted (name survives)");
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
+        };
+
+        assert_eq!(cells.len(), 1, "the dropped-column cell must be discarded");
+        assert_eq!(cells[0].column, "name");
+    }
+
+    /// A cell written STRICTLY AFTER the drop time survives (the column was
+    /// re-added after being dropped).
+    #[test]
+    fn dropped_column_cell_after_drop_time_survives() {
+        let row = live(0, 200, vec![scalar_cell("legacy", "fresh", 200)]);
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("legacy".to_string(), 150); // cell ts=200 > 150
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped)
+            .expect("a live row must be emitted (cell post-dates the drop)");
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
+        };
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].column, "legacy");
+        assert_eq!(cells[0].value, Value::Text("fresh".to_string()));
+    }
+
+    /// Equal timestamp (cell ts == drop_time) is discarded — the `<=` boundary,
+    /// matching the row-tombstone `<=` shadowing rule.
+    #[test]
+    fn dropped_column_cell_at_exact_drop_time_is_filtered() {
+        let row = live(0, 150, vec![scalar_cell("legacy", "edge", 150)]);
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("legacy".to_string(), 150);
+
+        assert!(
+            KWayMerger::reconcile_cluster(None, vec![row], &dropped).is_none(),
+            "cell at exactly drop_time must be discarded, leaving no surviving cells"
+        );
+    }
+
+    /// When ALL cells belong to dropped columns and all are at/before drop time,
+    /// the row produces no output (no spurious empty Live entry).
+    #[test]
+    fn all_cells_dropped_yields_no_row() {
+        let row = live(
+            0,
+            120,
+            vec![scalar_cell("a", "x", 100), scalar_cell("b", "y", 110)],
+        );
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("a".to_string(), 200);
+        dropped.insert("b".to_string(), 200);
+
+        assert!(
+            KWayMerger::reconcile_cluster(None, vec![row], &dropped).is_none(),
+            "a row whose every cell is a dropped-column cell emits nothing"
+        );
+    }
+
+    /// An empty `dropped_columns` map is a no-op: all cells survive.
+    #[test]
+    fn empty_dropped_map_is_noop() {
+        let row = live(
+            0,
+            200,
+            vec![
+                scalar_cell("name", "alice", 100),
+                scalar_cell("legacy", "stale", 100),
+            ],
+        );
+        let merged =
+            KWayMerger::reconcile_cluster(None, vec![row], &::std::collections::HashMap::new())
+                .expect("a live row must be emitted");
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
+        };
+        assert_eq!(cells.len(), 2, "no drops configured → every cell survives");
+    }
+
     /// GATING TEST — multi-cell merge granularity.
     ///
     /// A non-frozen collection (here: a list) is read back from an SSTable as a
@@ -4260,8 +4406,12 @@ mod issue_823_complex_column_merge {
             }],
         );
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![newer, older])
-            .expect("a live row must be emitted");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![newer, older],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("a live row must be emitted");
 
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
@@ -4329,8 +4479,12 @@ mod issue_823_complex_column_merge {
             }],
         );
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![newer, older])
-            .expect("a live row must be emitted");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![newer, older],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("a live row must be emitted");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {:?}", other),
@@ -4438,8 +4592,12 @@ mod issue_823_complex_column_merge {
             }],
         );
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![row_tomb, cell_tomb])
-            .expect("row tombstone keeps the row shadowed");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![row_tomb, cell_tomb],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("row tombstone keeps the row shadowed");
 
         // Equal-ts row deletion wins: no surviving cell, row stays a tombstone.
         match merged.row_data {
@@ -4578,7 +4736,8 @@ mod issue_886_merge_entry_enrichment {
                 local_deletion_time: 1_700_000_000,
             }]);
         let merged =
-            KWayMerger::reconcile_cluster(None, vec![live]).expect("live row must be emitted");
+            KWayMerger::reconcile_cluster(None, vec![live], &::std::collections::HashMap::new())
+                .expect("live row must be emitted");
         match merged.row_data {
             RowData::Live { cells } => {
                 assert_eq!(
@@ -4613,7 +4772,8 @@ mod issue_886_merge_entry_enrichment {
         // Plumbing-only: the covered cell (ts=1000 < range ts=5000) STILL
         // survives reconcile because range deletions are not yet applied.
         let merged =
-            KWayMerger::reconcile_cluster(None, vec![entry]).expect("live row must be emitted");
+            KWayMerger::reconcile_cluster(None, vec![entry], &::std::collections::HashMap::new())
+                .expect("live row must be emitted");
         match merged.row_data {
             RowData::Live { cells } => {
                 assert_eq!(
@@ -4681,8 +4841,12 @@ mod issue_886_merge_entry_enrichment {
         .with_complex_deletions(vec![complex_a.clone(), complex_b.clone()])
         .with_range_deletion(range_high.clone());
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![row0, row1])
-            .expect("live row must be emitted");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![row0, row1],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("live row must be emitted");
 
         // complex_deletions: union, first-seen order, deduplicated.
         assert_eq!(
@@ -4717,8 +4881,12 @@ mod issue_886_merge_entry_enrichment {
                 cells: vec![CellData::new("w".to_string(), Value::Integer(1), 1000)],
             },
         );
-        let plain = KWayMerger::reconcile_cluster(None, vec![plain0, plain1])
-            .expect("live row must be emitted");
+        let plain = KWayMerger::reconcile_cluster(
+            None,
+            vec![plain0, plain1],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("live row must be emitted");
         assert_eq!(
             merged.row_data, plain.row_data,
             "carrying deletion metadata must not change surviving-cell output"
@@ -4750,7 +4918,8 @@ mod issue_886_merge_entry_enrichment {
         .with_complex_deletions(vec![complex.clone()]);
 
         let merged =
-            KWayMerger::reconcile_cluster(None, vec![row]).expect("row tombstone must be emitted");
+            KWayMerger::reconcile_cluster(None, vec![row], &::std::collections::HashMap::new())
+                .expect("row tombstone must be emitted");
         assert!(matches!(merged.row_data, RowData::Tombstone { .. }));
         assert_eq!(merged.complex_deletions, vec![complex]);
     }
@@ -4781,8 +4950,9 @@ mod issue_886_merge_entry_enrichment {
             .with_complex_deletions(vec![complex.clone()])
             .with_range_deletion(range.clone());
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![row])
-            .expect("metadata-only cluster must still emit an entry");
+        let merged =
+            KWayMerger::reconcile_cluster(None, vec![row], &::std::collections::HashMap::new())
+                .expect("metadata-only cluster must still emit an entry");
 
         // The emitted entry carries the metadata and has no live cells.
         match &merged.row_data {
@@ -4806,7 +4976,8 @@ mod issue_886_merge_entry_enrichment {
     fn reconcile_cluster_empty_live_without_metadata_yields_none() {
         let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] });
         assert!(
-            KWayMerger::reconcile_cluster(None, vec![row]).is_none(),
+            KWayMerger::reconcile_cluster(None, vec![row], &::std::collections::HashMap::new())
+                .is_none(),
             "empty live row with no metadata must not emit an entry"
         );
     }
@@ -4846,8 +5017,12 @@ mod issue_886_merge_entry_enrichment {
         // It survives reconciliation (metadata preserved in the merge stream) but
         // is filtered out before reaching the writer — proving the same entry the
         // merge stream keeps is the one the writer path drops.
-        let reconciled = KWayMerger::reconcile_cluster(None, vec![meta_only])
-            .expect("metadata-only cluster must still emit an entry in the merge stream");
+        let reconciled = KWayMerger::reconcile_cluster(
+            None,
+            vec![meta_only],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("metadata-only cluster must still emit an entry in the merge stream");
         assert!(
             reconciled.is_metadata_only_no_op(),
             "the reconciled metadata-only entry must be writer-skippable"
@@ -5009,6 +5184,7 @@ mod issue_822_merge_ordering_semantics {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -5354,6 +5530,7 @@ mod issue_822_merge_ordering_semantics {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         const TS: i64 = 2_000_000;
@@ -5571,6 +5748,7 @@ mod issue_822_merge_ordering_semantics {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         // Same table after the static column was DROPPED from the schema. On a real
@@ -5746,6 +5924,7 @@ mod issue_886_empty_partition_skip {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 

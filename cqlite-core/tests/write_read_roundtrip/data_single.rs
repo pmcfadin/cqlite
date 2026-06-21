@@ -219,6 +219,7 @@ async fn test_data_single_partition_column_types() {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let config = WriteEngineConfig::new(

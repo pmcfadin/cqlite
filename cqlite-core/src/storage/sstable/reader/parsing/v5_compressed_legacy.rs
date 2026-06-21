@@ -2705,6 +2705,7 @@ impl V5CompressedLegacyParser {
                 clustering_keys: schema.clustering_keys[..n].to_vec(),
                 columns: schema.columns.clone(),
                 comments: schema.comments.clone(),
+                dropped_columns: schema.dropped_columns.clone(),
             })
         }
     }

@@ -1757,6 +1757,7 @@ fn parse_json_schema(json: &serde_json::Value) -> Result<TableSchema> {
         partition_keys,
         clustering_keys: clustering_columns,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     })
 }
 

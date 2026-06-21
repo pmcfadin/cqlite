@@ -48,6 +48,7 @@ fn main() -> cqlite_core::error::Result<()> {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     // 2. Create the write engine. `data_dir` holds flushed SSTables; `wal_dir`
