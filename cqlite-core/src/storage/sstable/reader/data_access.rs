@@ -189,19 +189,25 @@ impl SSTableReader {
 
     /// Get a value by key from the SSTable
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // Issue #831 / #909: BTI ("da") readers resolve partitions via the
+        // Partitions.db trie (O(log n)), never via Index.db (absent for BTI) or
+        // the sequential scan. The trie is the AUTHORITATIVE presence oracle for a
+        // BTI SSTable — it answers present/absent definitively — so we branch here
+        // BEFORE the bloom-filter pre-check. Skipping the bloom filter for BTI is
+        // both correct (the trie is authoritative; bloom is only an optimization)
+        // and necessary: a writer-produced Filter.db whose hashing does not match
+        // the reader's would otherwise cause false negatives and drop live
+        // partitions (the writer→reader roundtrip #909 must read back). It also
+        // guarantees a BTI get() can never fall through to scan_for_key.
+        if self.bti_partitions_db.is_some() {
+            return self.bti_point_lookup(table_id, key).await;
+        }
+
         // First check bloom filter if available
         if let Some(bloom_filter) = &self.bloom_filter {
             if !bloom_filter.might_contain(key.as_bytes()) {
                 return Ok(None);
             }
-        }
-
-        // Issue #831: BTI ("da") readers resolve partitions via the Partitions.db
-        // trie (O(log n)), never via Index.db (absent for BTI) or the sequential
-        // scan. Branch BEFORE the Index.db block so a BTI get() can never fall
-        // through to scan_for_key.
-        if self.bti_partitions_db.is_some() {
-            return self.bti_point_lookup(table_id, key).await;
         }
 
         // Use index for efficient lookup if available

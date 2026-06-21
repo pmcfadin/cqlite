@@ -181,41 +181,65 @@ impl SSTableReader {
             }
         });
 
-        // VG5 / Issue #831: BTI ("da") read support.
+        // VG5 / Issue #831 / #909: BTI ("da") read support.
         //
-        // BTI SSTables use a Partitions.db trie (and optional Rows.db) instead of
-        // Index.db/Summary.db. We load the (tiny) Partitions.db trie fully into
-        // memory here so the point-lookup path (`lookup_partition_via_bti_trie` /
-        // `bti_point_lookup`) can walk it for O(log n) partition resolution.
+        // BTI SSTables use a Partitions.db trie + Rows.db row index instead of
+        // Index.db/Summary.db. We load BOTH (tiny) tries fully into memory here so
+        // the point-lookup path (`lookup_partition_via_bti_trie` /
+        // `bti_point_lookup`) can walk them for O(log n) partition resolution:
+        //   - Partitions.db resolves a partition key to either a direct Data.db
+        //     offset (NARROW partition) or a positive RowsOffset (WIDE partition).
+        //   - Rows.db, indexed by that RowsOffset, recovers the wide partition's
+        //     Data.db position (issue #909/#910).
         //
-        // Loading Partitions.db is the ONLY BTI-specific step in open(): the rest
-        // of the flow (header / compression / Statistics-driven schema) tolerates
-        // the absent Index.db/Summary.db gracefully (those loaders return None).
-        let bti_partitions_db: Option<Arc<Vec<u8>>> =
-            if matches!(*version_gates, VersionGates::Bti(_)) {
-                let base = extract_sstable_base_name(path).ok_or_else(|| {
-                    Error::unsupported_format(format!(
-                        "BTI (da) SSTable '{}' has a non-standard filename; cannot derive the \
+        // Loading Partitions.db + Rows.db is the ONLY BTI-specific step in open():
+        // the rest of the flow (header / compression / Statistics-driven schema)
+        // tolerates the absent Index.db/Summary.db gracefully (those loaders
+        // return None).
+        let (bti_partitions_db, bti_rows_db) = if matches!(*version_gates, VersionGates::Bti(_)) {
+            let base = extract_sstable_base_name(path).ok_or_else(|| {
+                Error::unsupported_format(format!(
+                    "BTI (da) SSTable '{}' has a non-standard filename; cannot derive the \
                          sibling Partitions.db name required for trie point lookup (#831).",
-                        path.display()
-                    ))
-                })?;
-                let parent = path.parent().unwrap_or_else(|| Path::new("."));
-                let partitions_path = parent.join(format!("{}-Partitions.db", base));
-                let bytes = tokio::fs::read(&partitions_path).await.map_err(|e| {
-                    Error::unsupported_format(format!(
-                        "BTI (da) SSTable '{}' is missing its sibling Partitions.db trie \
+                    path.display()
+                ))
+            })?;
+            let parent = path.parent().unwrap_or_else(|| Path::new("."));
+            let partitions_path = parent.join(format!("{}-Partitions.db", base));
+            let partitions_bytes = tokio::fs::read(&partitions_path).await.map_err(|e| {
+                Error::unsupported_format(format!(
+                    "BTI (da) SSTable '{}' is missing its sibling Partitions.db trie \
                          (expected '{}'): {}. BTI read support requires Partitions.db for \
                          partition-key point lookup (#831).",
-                        path.display(),
-                        partitions_path.display(),
-                        e
-                    ))
-                })?;
-                Some(Arc::new(bytes))
-            } else {
-                None
-            };
+                    path.display(),
+                    partitions_path.display(),
+                    e
+                ))
+            })?;
+
+            // Rows.db carries the within-partition row index for WIDE
+            // partitions (issue #909/#910). It is ALWAYS emitted for a BTI
+            // SSTable (possibly 0 bytes for a narrow-only table), so a missing
+            // Rows.db is a structural error. A 0-byte file is valid: no
+            // partition resolved to a positive RowsOffset, so the point-lookup
+            // path never indexes into it.
+            let rows_path = parent.join(format!("{}-Rows.db", base));
+            let rows_bytes = tokio::fs::read(&rows_path).await.map_err(|e| {
+                Error::unsupported_format(format!(
+                    "BTI (da) SSTable '{}' is missing its sibling Rows.db row-index trie \
+                         (expected '{}'): {}. BTI read support requires Rows.db to resolve \
+                         wide-partition point lookups (#909/#910).",
+                    path.display(),
+                    rows_path.display(),
+                    e
+                ))
+            })?;
+
+            (Some(Arc::new(partitions_bytes)), Some(Arc::new(rows_bytes)))
+        } else {
+            let none: Option<Arc<Vec<u8>>> = None;
+            (none.clone(), none)
+        };
 
         let config = crate::cql::config::ParserConfig::default();
         let parser = SSTableParser::new(config)?;
@@ -398,6 +422,7 @@ impl SSTableReader {
             scan_mutex: tokio::sync::Mutex::new(()),
             version_gates,
             bti_partitions_db,
+            bti_rows_db,
         })
     }
 

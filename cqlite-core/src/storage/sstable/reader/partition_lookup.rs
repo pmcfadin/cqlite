@@ -56,21 +56,30 @@ impl SSTableReader {
     /// trie to resolve the partition's location. Returns:
     ///
     /// - `Ok(Some(offset))` — the UNCOMPRESSED Data.db byte offset of the
-    ///   partition (`BtiPartitionLocation::DataOffset`). INVARIANT: this offset
-    ///   indexes into the DECOMPRESSED data section, never raw file bytes.
+    ///   partition. INVARIANT: this offset indexes into the DECOMPRESSED data
+    ///   section, never raw file bytes. The offset is resolved in one of two ways:
+    ///     - **NARROW** partition (`BtiPartitionLocation::DataOffset`) — the trie
+    ///       returns the Data.db offset directly.
+    ///     - **WIDE** partition (`BtiPartitionLocation::RowsOffset`) — the trie
+    ///       returns a positive offset into `Rows.db`; we deserialize that
+    ///       partition's `TrieIndexEntry` via [`resolve_rows_db_entry`] and use its
+    ///       recovered `data_position` (issue #909/#910). Both forms share the same
+    ///       uncompressed Data.db offset domain, so the caller treats them
+    ///       identically.
     /// - `Ok(None)` — the reader is not BTI, or the key has no trie path (the
     ///   partition is definitely absent from this SSTable).
-    /// - `Err(_)` — a structural trie parse error, or a `RowsOffset` result (the
-    ///   Rows.db read path is not yet implemented; narrow tables like
-    ///   `simple_table` always resolve to `DataOffset`).
+    /// - `Err(_)` — a structural trie parse error, or a `RowsOffset` was returned
+    ///   without an accompanying `Rows.db` (a structurally invalid BTI SSTable).
     ///
     /// Because the BTI trie uses path compression, a returned offset may be a
     /// candidate for a *prefix-colliding* key. The caller (`bti_point_lookup`)
     /// MUST verify the partition-key bytes at the resolved offset equal the
     /// queried key before returning rows.
+    ///
+    /// [`resolve_rows_db_entry`]: crate::storage::sstable::bti::resolve_rows_db_entry
     pub fn lookup_partition_via_bti_trie(&self, partition_key: &[u8]) -> Result<Option<u64>> {
         use crate::storage::sstable::bti::{
-            lookup_raw_key_in_bti_partitions_db, BtiPartitionLocation,
+            lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry, BtiPartitionLocation,
         };
 
         let Some(partitions_db) = &self.bti_partitions_db else {
@@ -88,19 +97,49 @@ impl SSTableReader {
         })? {
             Some(BtiPartitionLocation::DataOffset(off)) => {
                 debug!(
-                    "BTI trie resolved partition (key len={}) to Data.db offset {}",
+                    "BTI trie resolved NARROW partition (key len={}) to Data.db offset {}",
                     partition_key.len(),
                     off
                 );
                 Ok(Some(off))
             }
-            Some(BtiPartitionLocation::RowsOffset(off)) => Err(Error::unsupported_format(format!(
-                "BTI Rows.db read path not yet implemented (trie returned RowsOffset({}) \
-                 for partition key len={}). Wide-partition BTI tables are out of scope for \
-                 issue #831.",
-                off,
-                partition_key.len()
-            ))),
+            Some(BtiPartitionLocation::RowsOffset(rows_offset)) => {
+                // WIDE partition: the trie pointed at this partition's
+                // TrieIndexEntry inside Rows.db. Deserialize it to recover the
+                // partition's Data.db start position (`data_position`), which lives
+                // in the SAME uncompressed-offset domain the narrow path uses, so
+                // the caller can decode the partition identically (#909/#910).
+                let rows_db = self.bti_rows_db.as_ref().ok_or_else(|| {
+                    Error::corruption(format!(
+                        "BTI Partitions.db trie returned RowsOffset({}) for partition key \
+                         (len={}) but this reader has no Rows.db loaded; the SSTable is \
+                         structurally invalid (Rows.db is required for wide partitions).",
+                        rows_offset,
+                        partition_key.len()
+                    ))
+                })?;
+
+                let header = resolve_rows_db_entry(rows_db.as_slice(), rows_offset as usize)
+                    .map_err(|e| {
+                        Error::corruption(format!(
+                            "BTI Rows.db row-index entry at RowsOffset({}) is unreadable for \
+                             partition key (len={}): {}",
+                            rows_offset,
+                            partition_key.len(),
+                            e
+                        ))
+                    })?;
+
+                debug!(
+                    "BTI trie resolved WIDE partition (key len={}) via RowsOffset {} -> Data.db \
+                     position {} ({} row-index blocks)",
+                    partition_key.len(),
+                    rows_offset,
+                    header.data_position,
+                    header.block_count
+                );
+                Ok(Some(header.data_position))
+            }
             None => Ok(None),
         }
     }
