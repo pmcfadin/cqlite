@@ -882,15 +882,27 @@ impl StatisticsWriter {
         let min_ts_delta = min_ts.wrapping_sub(TIMESTAMP_EPOCH as u64);
         buffer.write_all(&encode_vuint(min_ts_delta))?;
 
-        // minLocalDeletionTime delta from epoch
+        // minLocalDeletionTime delta from epoch.
+        //
+        // Cassandra: `EncodingStats.Serializer.serialize` writes the local-deletion
+        // baseline with `writeUnsignedVInt32(minLocalDeletionTime - DELETION_TIME_EPOCH)`
+        // (EncodingStats.java:274). Both operands are Java `int`s, so the subtraction
+        // wraps in 32-bit two's-complement and is then written as an UNSIGNED 32-bit
+        // VInt. Far-future LDTs in [2^31, 2^32) are stored as negative i32 bit patterns
+        // here (legitimate after #853 / range-tombstone fixes), so we MUST compute the
+        // delta in i32 wrapping space and re-interpret the bits as u32 — exactly the
+        // i32→u32 path DataWriter uses for the per-row deletion-delta encodings
+        // (`local_deletion_time.wrapping_sub(min) as u32`). Casting the i32 to u64
+        // first would sign-extend the far-future bit pattern into a 64-bit-wide VInt,
+        // diverging from `writeUnsignedVInt32`.
         let min_ldt = if metadata.min_local_deletion_time == i32::MAX {
             // No deletions: use Integer.MAX_VALUE as baseline (DeletionTime.LIVE)
-            i32::MAX as u64
+            i32::MAX
         } else {
-            metadata.min_local_deletion_time as u64
+            metadata.min_local_deletion_time
         };
-        let min_del_delta = min_ldt.wrapping_sub(DELETION_TIME_EPOCH as u64);
-        buffer.write_all(&encode_vuint(min_del_delta))?;
+        let min_del_delta = min_ldt.wrapping_sub(DELETION_TIME_EPOCH) as u32;
+        buffer.write_all(&encode_vuint(min_del_delta as u64))?;
 
         // minTTL delta from TTL_EPOCH (TTL_EPOCH=0)
         let min_ttl = if metadata.min_ttl == i32::MAX {
@@ -2103,5 +2115,57 @@ mod tests {
         let (regulars, tail) = parse_columns_with_types(rest);
         assert!(tail.is_empty());
         assert_eq!(regulars.len(), 200, "all 200 columns must be encoded");
+    }
+
+    /// Regression (#853/#886 branch-review, Finding 1): a far-future
+    /// `min_local_deletion_time` baseline in [2^31, 2^32) — stored as a negative
+    /// i32 bit pattern but legitimate — must be encoded in the SerializationHeader
+    /// through Cassandra's 32-bit unsigned local-deletion-time path
+    /// (`writeUnsignedVInt32(minLocalDeletionTime - DELETION_TIME_EPOCH)`,
+    /// EncodingStats.java:274), NOT sign-extended through `as u64`.
+    ///
+    /// The buggy `as u64` path sign-extends the negative i32 into a ~9-byte 64-bit
+    /// VInt; the correct i32→u32 path yields a small in-range delta matching the
+    /// DataWriter per-row deltas (`local_deletion_time.wrapping_sub(min) as u32`).
+    #[test]
+    fn test_serialization_header_far_future_ldt_baseline_uses_u32_path() {
+        use crate::parser::vint::parse_vuint;
+
+        // Far-future LDT in [2^31, 2^32): pick 2^31 + 5. As an i32 this is the
+        // negative bit pattern 0x80000005.
+        let far_future: u32 = (1u32 << 31) + 5;
+        let mut meta = StatisticsMetadata::new();
+        meta.min_local_deletion_time = far_future as i32;
+        assert!(
+            meta.min_local_deletion_time < 0,
+            "sanity: far-future LDT is a negative i32 bit pattern"
+        );
+
+        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+        let bytes = writer
+            .build_serialization_header_component(None, &meta)
+            .expect("build header with far-future LDT baseline");
+
+        // Decode the three EncodingStats deltas.
+        let (rest, _min_ts_delta) = parse_vuint(&bytes).expect("minTimestamp delta");
+        let (_rest, min_ldt_delta) = parse_vuint(rest).expect("minLocalDeletionTime delta");
+
+        // Expected: i32-wrapping subtraction, then reinterpret bits as u32 — the
+        // same path DataWriter uses for per-row deltas.
+        let expected_delta = (meta
+            .min_local_deletion_time
+            .wrapping_sub(DELETION_TIME_EPOCH)) as u32 as u64;
+        assert_eq!(
+            min_ldt_delta, expected_delta,
+            "far-future LDT baseline must encode via the i32->u32 (writeUnsignedVInt32) path"
+        );
+
+        // The correct delta must fit in 32 bits — proving we did NOT sign-extend
+        // into a 64-bit-wide value. The buggy `as u64` path would produce a delta
+        // far above u32::MAX.
+        assert!(
+            min_ldt_delta <= u32::MAX as u64,
+            "delta must be a 32-bit unsigned value, got {min_ldt_delta:#x}"
+        );
     }
 }

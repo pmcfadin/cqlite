@@ -1014,13 +1014,28 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
             Ok((_, sstable_stats)) => {
                 let ts_stats = &sstable_stats.timestamp_stats;
                 baseline_min_ts = baseline_min_ts.min(ts_stats.min_timestamp);
-                // min_deletion_time of 0 is the normalized "no tombstones" sentinel
-                // (StatisticsMetadata::finalize() maps i32::MAX→0). We include 0 so the
+                // Local-deletion-time baseline seeding (#853/#886 branch-review,
+                // Finding 2). The parser reconstructs LDT as
+                // `readUnsignedVInt32() + DELETION_TIME_EPOCH` (EncodingStats.java:289),
+                // so a far-future LDT in [2^31, 2^32) surfaces here as an i64 ABOVE
+                // i32::MAX (e.g. 2^31+5). These are legitimate after the deletion-marker
+                // fixes (#853 / range tombstones): they are negative i32 BIT PATTERNS,
+                // not "bad" values, and Cassandra's `EncodingStats.merge` mins over the
+                // signed int. Normalize as UNSIGNED 32-bit and reinterpret the bits as
+                // i32 so the seeded baseline matches the final Statistics.db baseline
+                // (DataWriter encodes per-row deltas as
+                // `local_deletion_time.wrapping_sub(min) as u32`). Casting the raw i64
+                // straight to i32 would also work for the bits, but the explicit
+                // `as u32 as i32` documents the 32-bit unsigned normalization.
+                //
+                // 0 is the normalized "no tombstones" sentinel
+                // (StatisticsMetadata::finalize() maps i32::MAX→0); include it so the
                 // baseline stays safe for merger tombstones that also use
-                // local_deletion_time=0. Exclude negatives and the raw i32::MAX sentinel.
-                let ldt = ts_stats.min_deletion_time;
-                if ldt >= 0 && ldt < i32::MAX as i64 {
-                    baseline_min_ldt = baseline_min_ldt.min(ldt as i32);
+                // local_deletion_time=0. SKIP only the live/no-deletion sentinel
+                // (i32::MAX, DeletionTime.LIVE), which must never lower the baseline.
+                let ldt_bits = ts_stats.min_deletion_time as u32 as i32;
+                if ldt_bits != i32::MAX {
+                    baseline_min_ldt = baseline_min_ldt.min(ldt_bits);
                 }
                 if let Some(min_ttl) = ts_stats.min_ttl {
                     if min_ttl > 0 && min_ttl < i32::MAX as i64 {
@@ -1504,6 +1519,11 @@ impl KWayMerger {
         // Attach the carried deletion metadata to whichever entry is emitted so it
         // is not dropped by reconciliation (#886 plumbing preservation). This is
         // behavior-neutral: the writer does not yet consume these fields.
+        // Whether any carried deletion metadata exists that would otherwise be
+        // lost if no row/tombstone entry is produced (#853/#886 branch-review,
+        // Finding 3).
+        let has_carried_metadata = !complex_deletions.is_empty() || range_deletion.is_some();
+
         let built = match surviving.iter().map(|c| c.timestamp).max() {
             Some(row_ts) => Some(MergeEntry::new(
                 run_index,
@@ -1514,9 +1534,8 @@ impl KWayMerger {
             )),
             // No surviving cells. If a row tombstone exists, keep the row shadowed
             // so downstream still emits the deletion (preserves #505/#498 absence).
-            // Otherwise the row is empty/absent.
-            None => row_del.map(|deletion_time| {
-                MergeEntry::new(
+            None => match row_del {
+                Some(deletion_time) => Some(MergeEntry::new(
                     run_index,
                     key,
                     clustering_key,
@@ -1525,8 +1544,30 @@ impl KWayMerger {
                         deletion_time,
                         local_deletion_time: 0,
                     },
-                )
-            }),
+                )),
+                // No surviving cells AND no row tombstone, but the cluster still
+                // carries complex/range deletion metadata. Emit a metadata-only
+                // entry (an empty `Live` row) so the carried deletion metadata
+                // survives reconciliation and reaches downstream consumers
+                // (#844/#846/#899). Without this the `built.map(...)` preservation
+                // below never runs and the metadata is silently dropped.
+                //
+                // Behavior-neutral for existing cases: this only adds an entry when
+                // metadata exists that would otherwise be lost. An empty-cell `Live`
+                // produces no live cells, and the writer does not yet consume the
+                // carried metadata fields, so existing output/tests are unaffected.
+                None if has_carried_metadata => Some(MergeEntry::new(
+                    run_index,
+                    key,
+                    clustering_key,
+                    // No row/cell timestamp applies; use 0 (the carried metadata
+                    // holds its own deletion timestamps).
+                    0,
+                    RowData::Live { cells: vec![] },
+                )),
+                // Truly empty/absent row.
+                None => None,
+            },
         };
 
         built.map(|entry| {
@@ -2915,6 +2956,79 @@ mod tests {
         assert!(
             matches!(mutation.operations[0], CellOperation::DeleteRow),
             "Expected DeleteRow operation for tombstone entry"
+        );
+    }
+
+    /// Regression (#853/#886 branch-review, Finding 2): compaction baseline
+    /// seeding must NOT discard a far-future local-deletion-time in [2^31, 2^32).
+    /// Such LDTs are legitimate (negative i32 bit patterns) after the deletion
+    /// marker fixes (#853 / range tombstones). The parser reconstructs them as i64
+    /// values ABOVE i32::MAX, and the old `ldt < i32::MAX` guard dropped them, so
+    /// the seeded `DataWriter` baseline diverged from the final Statistics.db
+    /// baseline. The fix normalizes as unsigned-32 and reinterprets the bits as
+    /// i32.
+    ///
+    /// End-to-end: write a Statistics.db whose `min_local_deletion_time` is a
+    /// far-future value, then assert `compute_baseline_min` seeds that exact i32
+    /// bit pattern (round-tripping through both the writer's i32->u32 header
+    /// encoding and the parser).
+    #[test]
+    fn compute_baseline_min_keeps_far_future_ldt() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        // compute_baseline_min derives the Statistics.db path from a Data.db path.
+        let data_path = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&data_path, b"").expect("touch Data.db");
+        let stats_path = tmp.path().join("nb-1-big-Statistics.db");
+
+        // Far-future LDT in [2^31, 2^32): 2^31 + 5, a negative i32 bit pattern.
+        let far_future_bits: i32 = ((1u32 << 31) + 5) as i32;
+        assert!(
+            far_future_bits < 0,
+            "sanity: far-future LDT is negative i32"
+        );
+
+        let mut meta = StatisticsMetadata::new();
+        meta.min_local_deletion_time = far_future_bits;
+        meta.max_local_deletion_time = far_future_bits;
+        StatisticsWriter::new(stats_path)
+            .write(&meta, None)
+            .expect("write Statistics.db with far-future LDT");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[data_path]);
+        assert_eq!(
+            baseline_ldt, far_future_bits,
+            "far-future LDT baseline must round-trip as its i32 bit pattern, not be dropped"
+        );
+    }
+
+    /// The live/no-deletion sentinel (i32::MAX, DeletionTime.LIVE) must NOT lower
+    /// the seeded baseline: a Statistics.db with no tombstones leaves the baseline
+    /// at i32::MAX.
+    #[test]
+    fn compute_baseline_min_skips_live_sentinel() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let data_path = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&data_path, b"").expect("touch Data.db");
+        let stats_path = tmp.path().join("nb-1-big-Statistics.db");
+
+        // i32::MAX = no deletions (DeletionTime.LIVE sentinel).
+        let mut meta = StatisticsMetadata::new();
+        meta.min_local_deletion_time = i32::MAX;
+        StatisticsWriter::new(stats_path)
+            .write(&meta, None)
+            .expect("write Statistics.db with LIVE sentinel");
+
+        let (_ts, baseline_ldt, _ttl) = compute_baseline_min(&[data_path]);
+        assert_eq!(
+            baseline_ldt,
+            i32::MAX,
+            "live/no-deletion sentinel must not lower the seeded baseline"
         );
     }
 }
@@ -4610,6 +4724,65 @@ mod issue_886_merge_entry_enrichment {
             KWayMerger::reconcile_cluster(None, vec![row]).expect("row tombstone must be emitted");
         assert!(matches!(merged.row_data, RowData::Tombstone { .. }));
         assert_eq!(merged.complex_deletions, vec![complex]);
+    }
+
+    /// Regression (#853/#886 branch-review, Finding 3): a cluster carrying complex
+    /// and/or range deletion metadata but with NO surviving cells and NO row
+    /// tombstone must STILL emit a metadata-only entry so the carried deletion
+    /// metadata survives reconciliation. Previously `built` was `None` for this
+    /// case and the metadata was silently dropped before the preservation logic
+    /// could run.
+    #[test]
+    fn reconcile_cluster_emits_metadata_only_entry_when_no_row_produced() {
+        let complex = ComplexDeletion {
+            column: "tags".to_string(),
+            deletion_time: 4242,
+            local_deletion_time: 1_700_000_000,
+        };
+        let range = RangeDeletion {
+            tombstone: TombstoneInfo {
+                deletion_time: 8888,
+                tombstone_type: TombstoneType::RangeTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            },
+        };
+
+        // Empty Live row (no cells), no row tombstone, but carrying both kinds of
+        // deletion metadata.
+        let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_complex_deletions(vec![complex.clone()])
+            .with_range_deletion(range.clone());
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![row])
+            .expect("metadata-only cluster must still emit an entry");
+
+        // The emitted entry carries the metadata and has no live cells.
+        match &merged.row_data {
+            RowData::Live { cells } => {
+                assert!(
+                    cells.is_empty(),
+                    "metadata-only entry must have no live cells"
+                );
+            }
+            other => panic!("expected empty Live, got {other:?}"),
+        }
+        assert_eq!(merged.complex_deletions, vec![complex]);
+        assert_eq!(merged.range_deletion, Some(range));
+    }
+
+    /// Behavior-neutral guard for Finding 3: an empty `Live` cluster with NO
+    /// carried metadata and NO row tombstone must STILL collapse to `None`
+    /// (nothing is emitted). The metadata-only path only adds an entry when
+    /// deletion metadata would otherwise be lost.
+    #[test]
+    fn reconcile_cluster_empty_live_without_metadata_yields_none() {
+        let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] });
+        assert!(
+            KWayMerger::reconcile_cluster(None, vec![row]).is_none(),
+            "empty live row with no metadata must not emit an entry"
+        );
     }
 
     /// Equality of two default merge entries is unaffected by the new carried
