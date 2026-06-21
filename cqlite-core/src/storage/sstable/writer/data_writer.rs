@@ -649,8 +649,24 @@ impl DataWriter {
                         .map(|ck| ck.columns.iter().map(|(_, v)| v.clone()).collect()),
                     PartitionItem::Marker { .. } => None,
                 };
+                // Per-column clustering ORDER (ASC/DESC). For a DESC column the
+                // OSS50 separator bytes must be the REVERSED byte-comparable form
+                // (Cassandra `ReversedType`/`ByteSource.invert`: complement every
+                // byte) so that descending value order maps to ascending byte
+                // order — otherwise the strict-ascending separator check rejects
+                // the trie and the wide partition silently falls back to a direct
+                // Data.db offset (roborev MEDIUM, issue #910 follow-up).
+                let is_reversed: Vec<bool> = schema
+                    .clustering_keys
+                    .iter()
+                    .map(|c| c.order == crate::schema::ClusteringOrder::Desc)
+                    .collect();
                 current_block_oss50 = Some(ck_values.and_then(|vals| {
-                    crate::storage::sstable::bti::encode_clustering_bound_oss50(&vals).ok()
+                    crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order(
+                        &vals,
+                        &is_reversed,
+                    )
+                    .ok()
                 }));
             }
             current_block_last_ck = Some(ck_bytes.clone());

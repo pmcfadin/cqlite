@@ -471,6 +471,244 @@ async fn bti_empty_sstable_is_refused() {
     );
 }
 
+/// Schema: wide(pk int, ck int, payload text, PRIMARY KEY (pk, ck)) with the
+/// clustering column's order set by `order` (ASC or DESC). Used by the reversed
+/// byte-comparable separator regression below.
+fn wide_schema_with_order(order: ClusteringOrder) -> TableSchema {
+    let mut s = wide_schema();
+    s.clustering_keys[0].order = order;
+    s
+}
+
+/// Schema: wide2(pk int, ck1 int ASC, ck2 int DESC, payload text). Exercises a
+/// MIXED-order clustering key (the 0x40 framing byte stays un-inverted while the
+/// DESC component's bytes are complemented).
+fn wide_mixed_schema() -> TableSchema {
+    let mut s = wide_schema();
+    s.table = "wide2".to_string();
+    s.clustering_keys = vec![
+        ClusteringColumn {
+            name: "ck1".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        },
+        ClusteringColumn {
+            name: "ck2".to_string(),
+            data_type: "int".to_string(),
+            position: 1,
+            order: ClusteringOrder::Desc,
+        },
+    ];
+    s.columns = vec![
+        Column {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            nullable: false,
+            default: None,
+            is_static: false,
+        },
+        Column {
+            name: "ck1".to_string(),
+            data_type: "int".to_string(),
+            nullable: false,
+            default: None,
+            is_static: false,
+        },
+        Column {
+            name: "ck2".to_string(),
+            data_type: "int".to_string(),
+            nullable: false,
+            default: None,
+            is_static: false,
+        },
+        Column {
+            name: "payload".to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        },
+    ];
+    s
+}
+
+/// One wide-partition row carrying a single-component clustering `ck` against an
+/// explicit `table`/schema (mirrors `wide_row` but lets the table name vary).
+fn wide_row_for(table: &str, pk: i32, ck: i32, ts: i64) -> Mutation {
+    let payload = "x".repeat(2048);
+    Mutation::new(
+        TableId::new("test_ks", table),
+        PartitionKey::single("pk", Value::Integer(pk)),
+        Some(
+            cqlite_core::storage::write_engine::mutation::ClusteringKey::single(
+                "ck",
+                Value::Integer(ck),
+            ),
+        ),
+        vec![CellOperation::Write {
+            column: "payload".to_string(),
+            value: Value::Text(payload),
+        }],
+        ts,
+        None,
+    )
+}
+
+/// Regression for the roborev MEDIUM finding: a WIDE partition on a `CLUSTERING
+/// ORDER BY (ck DESC)` table must produce ASCENDING OSS50 separator bytes (via
+/// the reversed byte-comparable transform) so the Rows.db row-index trie is
+/// emitted and the partition resolves through a positive `RowsOffset` — it must
+/// NOT silently fall back to a direct `DataOffset`.
+#[tokio::test]
+async fn bti_wide_desc_partition_resolves_through_rows_db() {
+    let dir = TempDir::new().unwrap();
+    let schema = wide_schema_with_order(ClusteringOrder::Desc);
+    let mut writer =
+        SSTableWriter::with_format(dir.path().to_path_buf(), 1, &schema, 16, SSTableFormat::Bti)
+            .unwrap();
+
+    // Single wide partition pk=1 with 200 rows × ~2 KiB => >= 2 column-index
+    // blocks. The writer sorts rows into clustering (DESC) order internally.
+    let cks: Vec<i32> = (0..200).collect();
+    let muts: Vec<Mutation> = cks
+        .iter()
+        .map(|ck| wide_row_for("wide", 1, *ck, 1_000_000 + *ck as i64))
+        .collect();
+    let key = muts[0].decorated_key(&schema).unwrap();
+    writer.write_partition(key, muts).unwrap();
+
+    let info = writer.finish().await.unwrap();
+
+    let rows_db = std::fs::read(info.rows_path.clone().expect("Rows.db path")).unwrap();
+    assert!(
+        !rows_db.is_empty(),
+        "a wide DESC partition must produce a non-empty Rows.db (no DataOffset fallback)"
+    );
+
+    let partitions_db = std::fs::read(info.partitions_path.clone().unwrap()).unwrap();
+    let raw_pk1 = 1i32.to_be_bytes().to_vec();
+    let mut cur = Cursor::new(partitions_db);
+    let loc = lookup_raw_key_in_bti_partitions_db(&mut cur, &raw_pk1)
+        .unwrap()
+        .expect("pk=1 found");
+    let rows_offset = match loc {
+        BtiPartitionLocation::RowsOffset(o) => o as usize,
+        BtiPartitionLocation::DataOffset(o) => panic!(
+            "wide DESC partition MUST resolve through RowsOffset, not DataOffset({o}) \
+             (reversed byte-comparable separators were rejected -> silent fallback)"
+        ),
+    };
+
+    let header = resolve_rows_db_entry(&rows_db, rows_offset).expect("resolve DESC entry");
+    assert!(
+        header.block_count >= 2,
+        "wide partition must span >= 2 blocks; got {}",
+        header.block_count
+    );
+    let entries =
+        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse DESC row index");
+    assert_eq!(entries.len() as u32, header.block_count);
+
+    // Separators ascending (trie requirement) AND block offsets strictly
+    // increasing (physical write order). The DESC encoding makes these agree.
+    for w in entries.windows(2) {
+        assert!(
+            w[0].0 < w[1].0,
+            "DESC separators must be strictly ascending bytes; got {:02x?} then {:02x?}",
+            w[0].0,
+            w[1].0
+        );
+        assert!(
+            w[0].1.data_offset < w[1].1.data_offset,
+            "block offsets must be strictly increasing"
+        );
+    }
+
+    // First block's first row is the LARGEST ck (DESC writes descending). For
+    // ck in 0..200, that is ck=199 => reversed byte-comparable of (sign-flip
+    // int 199) = complement(80 00 00 C7) = 7F FF FF 38.
+    let expected_first = (0x8000_0000u32 ^ 199)
+        .to_be_bytes()
+        .iter()
+        .map(|b| 0xFF ^ *b)
+        .collect::<Vec<u8>>();
+    assert_eq!(
+        entries[0].0, expected_first,
+        "first DESC separator must be reversed byte-comparable of the largest ck (199)"
+    );
+}
+
+/// Mixed ASC/DESC clustering: a wide partition on (ck1 int ASC, ck2 int DESC)
+/// must still resolve through `RowsOffset` with ascending separator bytes.
+#[tokio::test]
+async fn bti_wide_mixed_order_partition_resolves_through_rows_db() {
+    let dir = TempDir::new().unwrap();
+    let schema = wide_mixed_schema();
+    let mut writer =
+        SSTableWriter::with_format(dir.path().to_path_buf(), 1, &schema, 16, SSTableFormat::Bti)
+            .unwrap();
+
+    // Single wide partition pk=1: vary ck1 across a handful of values, ck2 across
+    // many, with ~2 KiB payloads so total >> 2 blocks.
+    let payload = "y".repeat(2048);
+    let mut muts: Vec<Mutation> = Vec::new();
+    for ck1 in 0..4i32 {
+        for ck2 in 0..60i32 {
+            muts.push(Mutation::new(
+                TableId::new("test_ks", "wide2"),
+                PartitionKey::single("pk", Value::Integer(1)),
+                Some(
+                    cqlite_core::storage::write_engine::mutation::ClusteringKey::new(vec![
+                        ("ck1".to_string(), Value::Integer(ck1)),
+                        ("ck2".to_string(), Value::Integer(ck2)),
+                    ]),
+                ),
+                vec![CellOperation::Write {
+                    column: "payload".to_string(),
+                    value: Value::Text(payload.clone()),
+                }],
+                1_000_000,
+                None,
+            ));
+        }
+    }
+    let key = muts[0].decorated_key(&schema).unwrap();
+    writer.write_partition(key, muts).unwrap();
+
+    let info = writer.finish().await.unwrap();
+    let rows_db = std::fs::read(info.rows_path.clone().expect("Rows.db path")).unwrap();
+    assert!(
+        !rows_db.is_empty(),
+        "wide mixed-order partition must produce a non-empty Rows.db"
+    );
+
+    let partitions_db = std::fs::read(info.partitions_path.clone().unwrap()).unwrap();
+    let raw_pk1 = 1i32.to_be_bytes().to_vec();
+    let mut cur = Cursor::new(partitions_db);
+    let loc = lookup_raw_key_in_bti_partitions_db(&mut cur, &raw_pk1)
+        .unwrap()
+        .expect("pk=1 found");
+    let rows_offset = match loc {
+        BtiPartitionLocation::RowsOffset(o) => o as usize,
+        BtiPartitionLocation::DataOffset(o) => {
+            panic!(
+                "mixed-order wide partition MUST resolve through RowsOffset, got DataOffset({o})"
+            )
+        }
+    };
+    let header = resolve_rows_db_entry(&rows_db, rows_offset).expect("resolve mixed entry");
+    assert!(header.block_count >= 2);
+    let entries =
+        iterate_rows_in_bti_trie(&rows_db, header.trie_root).expect("traverse mixed row index");
+    for w in entries.windows(2) {
+        assert!(
+            w[0].0 < w[1].0,
+            "mixed-order separators must be strictly ascending bytes"
+        );
+    }
+}
+
 /// A narrow-only BTI SSTable still publishes (valid Partitions.db) and emits a
 /// 0-byte Rows.db listed in the TOC — exactly matching the real
 /// `simple_table`/`collection_table`/`ttl_table` `da-2-bti-Rows.db` fixtures.

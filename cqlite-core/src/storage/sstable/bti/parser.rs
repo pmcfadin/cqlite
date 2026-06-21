@@ -1870,12 +1870,68 @@ fn encode_clustering_component_oss50(value: &Value, out: &mut Vec<u8>) -> BtiRes
 /// per `ClusteringComparator.asByteComparable`), with no leading/trailing frame
 /// so a prefix bound sorts before any longer key sharing it.
 pub fn encode_clustering_bound_oss50(values: &[Value]) -> BtiResult<Vec<u8>> {
+    // All-ascending convenience: every component uses its base byte-comparable
+    // form. Equivalent to `encode_clustering_bound_oss50_with_order` with all
+    // `is_reversed = false`.
     let mut out = Vec::new();
     for (i, v) in values.iter().enumerate() {
         if i > 0 {
             out.push(OSS50_NEXT_COMPONENT);
         }
         encode_clustering_component_oss50(v, &mut out)?;
+    }
+    Ok(out)
+}
+
+/// Encode a multi-component clustering bound applying each column's clustering
+/// **ORDER** (ASC/DESC), producing Cassandra OSS50 byte-comparable separators
+/// that sort in the SAME order the rows are physically written.
+///
+/// ## Why DESC must invert the component bytes
+///
+/// Cassandra wraps a `CLUSTERING ORDER BY (c DESC)` column's type in
+/// `ReversedType`. `ReversedType.asComparableBytes` delegates to the base type's
+/// byte-comparable production and then inverts the resulting [`ByteSource`] via
+/// `ByteSource.invert(...)`, which complements every emitted data byte
+/// (`b -> 0xFF ^ b`). Complementing every byte of a (weakly prefix-free)
+/// byte-comparable encoding reverses its lexicographic order, so a DESCENDING
+/// value order maps to an ASCENDING byte order. This is exactly what a `Rows.db`
+/// row-index trie needs: separators are always stored in ascending *byte* order,
+/// while the underlying clustering values run descending for a DESC column.
+/// (cassandra-5.0.0 `org.apache.cassandra.db.marshal.ReversedType.asComparableBytes`
+/// + `org.apache.cassandra.utils.bytecomparable.ByteSource.invert`.)
+///
+/// The inter-component framing byte ([`OSS50_NEXT_COMPONENT`], `0x40`) is emitted
+/// by the *comparator* (`ClusteringComparator.asByteComparable`), NOT by a
+/// component's type, so it is **not** inverted even when neighbouring components
+/// are DESC — only the per-component byte-comparable bytes are complemented. This
+/// matches Cassandra, where each `subtype(i)` (possibly a `ReversedType`) emits
+/// its own (already inverted) byte source and the comparator separates them with
+/// the un-inverted `NEXT_COMPONENT` byte.
+///
+/// `is_reversed[i]` MUST correspond positionally to `values[i]` (i.e. the schema
+/// clustering-key order). A short `is_reversed` slice treats missing entries as
+/// ascending (`false`).
+pub fn encode_clustering_bound_oss50_with_order(
+    values: &[Value],
+    is_reversed: &[bool],
+) -> BtiResult<Vec<u8>> {
+    let mut out = Vec::new();
+    for (i, v) in values.iter().enumerate() {
+        if i > 0 {
+            out.push(OSS50_NEXT_COMPONENT);
+        }
+        if is_reversed.get(i).copied().unwrap_or(false) {
+            // Encode the base component into a scratch buffer, then complement
+            // every byte (ReversedType / ByteSource.invert).
+            let mut scratch = Vec::new();
+            encode_clustering_component_oss50(v, &mut scratch)?;
+            for b in &scratch {
+                out.push(0xFF ^ *b);
+            }
+        } else {
+            encode_clustering_component_oss50(v, &mut out)?;
+        }
     }
     Ok(out)
 }
@@ -2423,6 +2479,34 @@ impl<R: Read + Seek> RowsParser<R> {
             return Ok(Vec::new());
         }
         let (_, blocks) = self.range_query_encoded(rows_offset, &encoded_start, &encoded_end)?;
+        Ok(blocks)
+    }
+
+    /// Order-aware typed clustering range query: the read-side counterpart to the
+    /// writer's [`encode_clustering_bound_oss50_with_order`]. The trie stores
+    /// DESC columns' separators in REVERSED byte-comparable form (complemented
+    /// bytes), so a lookup MUST encode its bounds with the SAME per-column order
+    /// and then compare in the trie's ascending BYTE order.
+    ///
+    /// `is_reversed[i]` matches `start_key[i]`/`end_key[i]` positionally (schema
+    /// clustering order). For a DESC leading column the value bound `lo` encodes
+    /// to LARGER bytes than `hi`, so after encoding we take the min/max of the
+    /// two encoded byte sequences as the ascending byte range handed to
+    /// [`select_row_index_blocks_for_range`]. This keeps writer↔reader
+    /// consistent: both sides agree the on-disk separators are reversed bytes for
+    /// DESC, and block selection always operates in ascending byte space.
+    pub fn range_query_with_order(
+        &mut self,
+        rows_offset: usize,
+        start_key: &[Value],
+        end_key: &[Value],
+        is_reversed: &[bool],
+    ) -> BtiResult<Vec<BtiRowIndexEntry>> {
+        let a = encode_clustering_bound_oss50_with_order(start_key, is_reversed)?;
+        let b = encode_clustering_bound_oss50_with_order(end_key, is_reversed)?;
+        // Map the value range to the ascending BYTE range the trie is keyed on.
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let (_, blocks) = self.range_query_encoded(rows_offset, &lo, &hi)?;
         Ok(blocks)
     }
 
@@ -4228,6 +4312,73 @@ mod tests {
 
         // Unsupported clustering type errors out explicitly.
         assert!(encode_clustering_bound_oss50(&[Value::Float(1.0)]).is_err());
+    }
+
+    /// Order-aware OSS50 encoder (DESC clustering): a `CLUSTERING ORDER BY DESC`
+    /// column wraps in Cassandra `ReversedType`, whose `asComparableBytes`
+    /// complements every byte of the base byte-comparable form
+    /// (`ByteSource.invert`). The result: DESCENDING value order maps to
+    /// ASCENDING byte order, so a `Rows.db` row-index trie can store the
+    /// separators (which must be strictly ascending bytes).
+    #[test]
+    fn oss50_clustering_encoder_reversed_order() {
+        // DESC int(8): base 80 00 00 08, complemented -> 7F FF FF F7.
+        assert_eq!(
+            encode_clustering_bound_oss50_with_order(&[Value::Integer(8)], &[true]).unwrap(),
+            vec![0x7F, 0xFF, 0xFF, 0xF7]
+        );
+        // ASC path is identical to the plain encoder.
+        assert_eq!(
+            encode_clustering_bound_oss50_with_order(&[Value::Integer(8)], &[false]).unwrap(),
+            encode_clustering_bound_oss50(&[Value::Integer(8)]).unwrap()
+        );
+
+        // The decisive property: for DESC, larger VALUE => smaller BYTES, i.e.
+        // writing rows in descending value order yields ascending separator
+        // bytes. Take values 0,1,..,5 (the physical DESC write order is 5..0).
+        let enc = |v: i32| {
+            encode_clustering_bound_oss50_with_order(&[Value::Integer(v)], &[true]).unwrap()
+        };
+        // Physical write order for DESC: 5,4,3,2,1,0. Their separator bytes must
+        // be strictly ASCENDING in that same sequence.
+        let write_order = [5, 4, 3, 2, 1, 0];
+        for w in write_order.windows(2) {
+            assert!(
+                enc(w[0]) < enc(w[1]),
+                "DESC: value {} written before {} must yield smaller separator bytes",
+                w[0],
+                w[1]
+            );
+        }
+
+        // Mixed ASC/DESC: first column ASC int, second column DESC int. The
+        // NEXT_COMPONENT (0x40) framing byte is NOT inverted; only the DESC
+        // component's bytes are complemented.
+        let mixed = encode_clustering_bound_oss50_with_order(
+            &[Value::Integer(1), Value::Integer(8)],
+            &[false, true],
+        )
+        .unwrap();
+        assert_eq!(
+            mixed,
+            vec![0x80, 0x00, 0x00, 0x01, 0x40, 0x7F, 0xFF, 0xFF, 0xF7],
+            "ASC component bare, 0x40 framing un-inverted, DESC component complemented"
+        );
+
+        // Mixed-order monotonicity: for equal leading ASC component, the trailing
+        // DESC component must reverse the byte order (descending value second
+        // component => ascending bytes).
+        let m = |a: i32, b: i32| {
+            encode_clustering_bound_oss50_with_order(
+                &[Value::Integer(a), Value::Integer(b)],
+                &[false, true],
+            )
+            .unwrap()
+        };
+        // Same first key (1), second key descending 9,8,7 -> ascending bytes.
+        assert!(m(1, 9) < m(1, 8) && m(1, 8) < m(1, 7));
+        // Different first key dominates regardless of second (ASC leading).
+        assert!(m(1, 0) < m(2, 9));
     }
 
     /// Multi-byte unsigned vint decode (count-leading-ones, NOT zigzag).
