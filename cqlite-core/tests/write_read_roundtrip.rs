@@ -103,6 +103,7 @@ pub fn create_simple_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -146,6 +147,7 @@ pub fn create_clustering_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -211,6 +213,7 @@ pub fn create_comprehensive_schema() -> TableSchema {
             col("frozen_col", "frozen<list<int>>"),
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

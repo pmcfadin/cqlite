@@ -265,6 +265,7 @@ impl SSTableReader {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         })
     }
 

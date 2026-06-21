@@ -160,6 +160,7 @@ fn wide_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -367,6 +368,7 @@ async fn bti_narrow_only_writer_output_reads_under_cassandra5_sstabledump() {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let dir = TempDir::new().unwrap();

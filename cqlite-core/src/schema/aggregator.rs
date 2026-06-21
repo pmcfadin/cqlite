@@ -136,6 +136,10 @@ struct MinimalTableSchema {
     primary_key: Vec<String>, // Synonym for partition_keys when no clustering
     #[serde(default)]
     clustering_keys: Vec<JsonClusteringKey>,
+    /// Dropped-column drop times (column → drop_time_micros), used for
+    /// dropped-column filtering during compaction (#904/#847).
+    #[serde(default)]
+    dropped_columns: HashMap<String, i64>,
 }
 
 /// Full JSON schema format (multiple tables + UDTs)
@@ -160,6 +164,10 @@ struct JsonTable {
     primary_key: Vec<String>,
     #[serde(default)]
     clustering_keys: Vec<JsonClusteringKey>,
+    /// Dropped-column drop times (column → drop_time_micros), used for
+    /// dropped-column filtering during compaction (#904/#847).
+    #[serde(default)]
+    dropped_columns: HashMap<String, i64>,
 }
 
 /// JSON column definition
@@ -731,6 +739,7 @@ impl SchemaAggregator {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: minimal.dropped_columns,
         };
 
         schema.validate()?;
@@ -808,6 +817,7 @@ impl SchemaAggregator {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: table_json.dropped_columns,
         };
 
         schema.validate()?;
@@ -1008,6 +1018,40 @@ mod tests {
         assert_eq!(result.schemas_loaded, 1);
         assert_eq!(result.udts_loaded, 0);
         assert!(result.errors.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_minimal_json_preserves_dropped_columns() {
+        // A JSON schema may carry dropped-column drop times (#904/#847). The
+        // dropped column stays declared in `columns` (decode contract) and is
+        // listed in `dropped_columns` with its drop time in micros.
+        let (aggregator, _temp_dir) = setup_test_aggregator().await;
+
+        let json_content = r#"
+        {
+            "keyspace": "test_ks",
+            "table": "events",
+            "columns": [
+                {"name": "id", "type": "uuid"},
+                {"name": "legacy", "type": "int"}
+            ],
+            "partition_keys": ["id"],
+            "clustering_keys": [],
+            "dropped_columns": {"legacy": 1700000000000000}
+        }
+        "#;
+
+        let minimal: MinimalTableSchema =
+            serde_json::from_str(json_content).expect("minimal schema parses");
+        let schema = aggregator
+            .convert_minimal_to_table_schema(minimal)
+            .expect("conversion succeeds");
+
+        assert_eq!(
+            schema.dropped_columns.get("legacy"),
+            Some(&1_700_000_000_000_000_i64),
+            "dropped_columns drop time must survive JSON loading"
+        );
     }
 
     #[tokio::test]

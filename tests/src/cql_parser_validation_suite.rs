@@ -1019,6 +1019,7 @@ impl CqlParserValidationSuite {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         })
     }
 
@@ -1300,6 +1301,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         assert!(suite.table_name_matches(&schema, "users"));

@@ -55,6 +55,7 @@ fn int_pk_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -316,6 +317,7 @@ fn wide_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

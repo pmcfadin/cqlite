@@ -1039,6 +1039,7 @@ impl CqlVisitor<TableSchema> for SchemaBuilderVisitor {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         })
     }
 

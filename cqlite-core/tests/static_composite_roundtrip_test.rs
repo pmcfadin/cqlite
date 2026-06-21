@@ -66,6 +66,7 @@ fn create_schema_with_static() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -255,6 +256,7 @@ fn create_composite_key_schema() -> TableSchema {
             is_static: false,
         }],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -296,6 +298,7 @@ fn create_composite_partition_with_clustering_schema() -> TableSchema {
             is_static: false,
         }],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -369,6 +372,7 @@ fn test_single_component_no_separator() {
         clustering_keys: vec![],
         columns: vec![],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let pk = PartitionKey::single("id", Value::Integer(42));
@@ -398,6 +402,7 @@ fn test_composite_key_with_text() {
         clustering_keys: vec![],
         columns: vec![],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let pk = PartitionKey::new(vec![
@@ -584,6 +589,7 @@ fn create_static_columns_table_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

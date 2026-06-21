@@ -83,6 +83,32 @@ pub struct TableSchema {
     /// Optional metadata
     #[serde(default)]
     pub comments: HashMap<String, String>,
+
+    /// Dropped-column drop times in microseconds (column name → drop_time_micros).
+    ///
+    /// Populated from the schema-loading surface (JSON `dropped_columns`, or set
+    /// programmatically) since drop times are assigned at DDL-execution by the
+    /// cluster catalog (`system_schema.dropped_columns`) and are not recorded in
+    /// local SSTable files or the CQL `DROP COLUMN` text. Used during compaction
+    /// to discard cells of a dropped column whose timestamp ≤ the drop time
+    /// (Cassandra `cb34ad47`). See issues #904 (this plumbing) and #847 (the
+    /// merge-side filter).
+    ///
+    /// Scope (#847): this map carries only the drop time, so the dropped column's
+    /// pre-drop cells are decoded using its CURRENT type in [`Self::columns`] (the
+    /// decode contract enforced by [`Self::validate_dropped_columns`]). That is
+    /// byte-correct when the column's type is unchanged — the common case. A
+    /// column dropped and later RE-ADDED with a DIFFERENT type is out of scope:
+    /// the historical cells would be decoded with the new type and could
+    /// misparse. Supporting per-version types requires carrying type metadata
+    /// here (or decoding from the SSTable serialization-header type) and is
+    /// follow-up work alongside the element-level representation in #899.
+    ///
+    /// Filtering is also at row-timestamp granularity (the merge stream surfaces
+    /// only the row write-time per cell); exact per-cell purging is tracked as
+    /// follow-up #922.
+    #[serde(default)]
+    pub dropped_columns: HashMap<String, i64>,
 }
 
 /// Partition key column definition
@@ -668,6 +694,7 @@ impl TableSchema {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         schema.validate()?;
@@ -779,6 +806,84 @@ impl TableSchema {
             }
         }
 
+        self.validate_dropped_columns()?;
+
+        Ok(())
+    }
+
+    /// The **post-drop** schema that compaction uses to *write* its output.
+    ///
+    /// The decode schema retains dropped columns (carrying their type) so input
+    /// cells can be parsed and then purged by the merge filter (see
+    /// [`Self::validate_dropped_columns`]). The compaction *output* must keep its
+    /// serialization header / row column bitmap consistent with the cells that
+    /// actually survive the merge:
+    ///
+    /// - A dropped column with **no surviving cells** (all cells were at or
+    ///   before its drop time) is removed from `columns` so it does not appear in
+    ///   the output header. This lets a natural post-drop reader schema (which
+    ///   omits the column) read the output without the header-column /
+    ///   bitmap-index misalignment that retaining it would cause (roborev #847).
+    /// - A dropped column with **surviving cells** (re-added: cells written after
+    ///   `drop_time`) is RETAINED in `columns`, because the merge still emits
+    ///   those cells and the writer needs a matching header column — otherwise
+    ///   the cell would be serialized with no header entry and corrupt the row.
+    ///
+    /// `retained` is the set of dropped-column names that had surviving cells
+    /// (computed by `compact_sstables` from a merge pre-pass). The returned
+    /// schema carries an empty `dropped_columns` map: the purge has already
+    /// happened, so the output must not re-purge the surviving cells on a later
+    /// compaction.
+    pub fn for_compaction_output(
+        &self,
+        retained: &std::collections::HashSet<String>,
+    ) -> TableSchema {
+        TableSchema {
+            keyspace: self.keyspace.clone(),
+            table: self.table.clone(),
+            partition_keys: self.partition_keys.clone(),
+            clustering_keys: self.clustering_keys.clone(),
+            columns: self
+                .columns
+                .iter()
+                .filter(|c| {
+                    // Keep a column unless it is a dropped column with no
+                    // surviving cells.
+                    !self.dropped_columns.contains_key(&c.name) || retained.contains(&c.name)
+                })
+                .cloned()
+                .collect(),
+            comments: self.comments.clone(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    /// Validate the dropped-column decode contract (#904/#847).
+    ///
+    /// Dropped-column filtering during compaction discards a dropped column's
+    /// cells *after they are decoded*. The schema-driven reader only decodes a
+    /// column whose name is present in [`Self::columns`] (it intersects the
+    /// on-disk serialization-header columns with the schema); a column absent
+    /// from `columns` is skipped without consuming its bytes, so its cells would
+    /// never reach the filter and surrounding columns could misalign.
+    ///
+    /// Therefore every column named in `dropped_columns` MUST remain declared in
+    /// `columns` (carrying its type) so its cells decode and can be purged. This
+    /// mirrors Cassandra retaining a dropped column's type in
+    /// `system_schema.dropped_columns`. Decoding a dropped column that is absent
+    /// from `columns` (purely from header type metadata) is follow-up work
+    /// related to #899 and intentionally out of scope here.
+    pub fn validate_dropped_columns(&self) -> Result<()> {
+        for name in self.dropped_columns.keys() {
+            if !self.columns.iter().any(|c| &c.name == name) {
+                return Err(Error::schema(format!(
+                    "dropped column '{}' must remain declared in `columns` (with its type) so \
+                     its cells can be decoded and purged during compaction; a dropped column \
+                     present only in `dropped_columns` cannot be decoded (see #904/#847)",
+                    name
+                )));
+            }
+        }
         Ok(())
     }
 
@@ -1053,6 +1158,7 @@ impl TableSchema {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 }
@@ -1471,6 +1577,7 @@ impl SchemaManager {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -1660,6 +1767,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 

@@ -631,6 +631,7 @@ mod integration_tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         // Test getting column comparator
@@ -701,6 +702,7 @@ mod integration_tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         // Test non-existent column

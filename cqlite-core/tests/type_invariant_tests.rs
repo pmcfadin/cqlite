@@ -124,6 +124,7 @@ fn create_empty_collections_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -184,6 +185,7 @@ fn create_frozen_collections_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -260,6 +262,7 @@ fn create_typed_collections_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

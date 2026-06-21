@@ -67,6 +67,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -213,6 +214,7 @@ mod tests {
                 clustering_keys: vec![],
                 columns: vec![],
                 comments: HashMap::new(),
+                dropped_columns: HashMap::new(),
             };
 
             registry
@@ -324,6 +326,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         };
 
         registry

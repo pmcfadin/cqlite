@@ -592,6 +592,7 @@ fn schema_for_table(table: &str) -> Option<TableSchema> {
         clustering_keys: ck_cols,
         columns: regular_cols,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     })
 }
 
@@ -1593,6 +1594,7 @@ fn simple_table_schema() -> TableSchema {
             col("work_time", "time", false),
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -1612,6 +1614,7 @@ fn collection_table_schema() -> TableSchema {
             col("tags", "set<text>", false),
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -1631,6 +1634,7 @@ fn sensor_data_schema() -> TableSchema {
             col("temperature", "float", false),
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -1653,6 +1657,7 @@ fn wide_partition_schema() -> TableSchema {
             col("json_column", "text", false),
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

@@ -130,6 +130,7 @@ impl SchemaIntegrationFixture {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -229,6 +230,7 @@ impl SchemaIntegrationFixture {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
@@ -354,6 +356,7 @@ impl SchemaIntegrationFixture {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 }

@@ -97,6 +97,7 @@ fn create_simple_table_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -135,6 +136,7 @@ fn create_nested_collections_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -273,6 +275,7 @@ fn test_schema_validation_acceptance_criteria() {
         clustering_keys: vec![],
         columns: vec![],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let result = SchemaAwareReader::validate_schema_completeness(&incomplete_schema);

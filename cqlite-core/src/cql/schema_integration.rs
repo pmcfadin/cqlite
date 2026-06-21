@@ -299,6 +299,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         assert!(table_name_matches_enhanced(&schema, "test_table"));

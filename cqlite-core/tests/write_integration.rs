@@ -57,6 +57,7 @@ fn create_simple_schema(keyspace: &str, table: &str) -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -100,6 +101,7 @@ fn create_clustering_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -308,6 +310,7 @@ async fn test_collection_types() -> Result<()> {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let config = WriteEngineConfig::new(

@@ -124,6 +124,7 @@ async fn test_sstable_reader_index_operations(reader: &SSTableReader) {
         clustering_keys: vec![],
         columns: vec![],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let parsing_context = ParsingContext {

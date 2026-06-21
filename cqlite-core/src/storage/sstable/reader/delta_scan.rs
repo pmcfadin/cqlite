@@ -1602,6 +1602,7 @@ mod tests {
                 },
             ],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
@@ -1705,6 +1706,7 @@ mod tests {
                 },
             ],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
@@ -1836,6 +1838,7 @@ mod tests {
                 },
             ],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
@@ -1990,6 +1993,7 @@ mod tests {
                 },
             ],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
@@ -2208,6 +2212,7 @@ mod tests {
             clustering_keys: vec![],
             columns: vec![],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         // Crafted range tombstone marker with bound_kind = 99 (unrecognised).
@@ -2453,6 +2458,7 @@ mod tests {
                 is_static: false,
             }],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
@@ -2561,6 +2567,7 @@ mod tests {
                 is_static: false,
             }],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
@@ -2670,6 +2677,7 @@ mod tests {
                 is_static: false,
             }],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 64);
@@ -2802,6 +2810,7 @@ mod tests {
                 is_static: false,
             }],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, _scan_summary) = scan_delta(table_dir, schema, 128);
@@ -3025,6 +3034,7 @@ mod tests {
                 },
             ],
             comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
         };
 
         let (mut rx, summary_handle) = scan_delta(table_dir, schema, 64);

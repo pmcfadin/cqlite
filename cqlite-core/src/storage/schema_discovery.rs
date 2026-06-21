@@ -373,6 +373,7 @@ impl SchemaDiscovery {
             clustering_keys: vec![],
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         })
     }
 

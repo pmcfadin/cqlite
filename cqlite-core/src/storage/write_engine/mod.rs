@@ -1874,6 +1874,7 @@ mod tests {
                 },
             ],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 

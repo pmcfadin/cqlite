@@ -114,6 +114,7 @@ fn mixed_static_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -308,6 +309,7 @@ fn pure_regular_schema_unaffected_by_static_filter() {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let header = vec![

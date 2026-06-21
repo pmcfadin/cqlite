@@ -448,6 +448,7 @@ fn parse_cql_ddl(cql_content: &str) -> Result<TableSchema> {
         clustering_keys,
         columns,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     // Validate the parsed schema

@@ -1017,6 +1017,7 @@ impl SchemaRegistry {
             clustering_keys,
             columns,
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         })
     }
 
@@ -1486,6 +1487,7 @@ mod tests {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 

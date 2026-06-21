@@ -56,6 +56,7 @@ fn create_type_test_schema(col_name: &str, col_type: &str) -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

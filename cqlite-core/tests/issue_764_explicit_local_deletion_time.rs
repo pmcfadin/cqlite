@@ -56,6 +56,7 @@ fn test_schema() -> TableSchema {
             is_static: false,
         }],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -222,6 +223,7 @@ fn complex_schema() -> TableSchema {
             is_static: false,
         }],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -351,6 +353,7 @@ fn static_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 

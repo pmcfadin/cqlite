@@ -894,6 +894,7 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
             .into_iter()
             .map(|(k, v)| (k.to_lowercase(), v))
             .collect(),
+        dropped_columns: std::collections::HashMap::new(),
     };
 
     Ok((input, schema))

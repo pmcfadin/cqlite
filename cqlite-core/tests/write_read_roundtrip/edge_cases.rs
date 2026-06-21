@@ -82,6 +82,7 @@ fn create_edge_case_schema() -> TableSchema {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
@@ -576,6 +577,7 @@ async fn test_edge_single_byte_values() {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let config = WriteEngineConfig::new(
@@ -1062,6 +1064,7 @@ async fn test_frozen_list_clustering_key_uniqueness() {
             },
         ],
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     };
 
     let pk = Value::Uuid([0u8; 16]);

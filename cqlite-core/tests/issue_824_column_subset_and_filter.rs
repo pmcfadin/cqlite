@@ -88,6 +88,7 @@ fn schema_with_n_columns(n: usize) -> TableSchema {
         clustering_keys: vec![], // no clustering: row body starts right after flags
         columns,
         comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
     }
 }
 
