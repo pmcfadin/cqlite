@@ -798,7 +798,8 @@ impl SSTableRowIteratorAdapter {
             row_data,
         } = compaction_row;
         let decorated_key = DecoratedKey::from_key_bytes(key.0)?;
-        let (row_data, complex_deletions) = Self::compaction_row_data_to_row_data(row_data);
+        let (row_data, complex_deletions) =
+            Self::compaction_row_data_to_row_data(row_data, row_timestamp);
         let clustering_key = Self::extract_clustering_key(&row_data, schema);
         let entry = MergeEntry::new(
             run_index,
@@ -858,22 +859,30 @@ impl SSTableRowIteratorAdapter {
         })
     }
 
-    /// Convert a per-element [`CompactionRowData`] into the merge `RowData` plus
-    /// the row's complex-deletion markers (epic #899, Phase A).
+    /// Convert a [`CompactionRowData`] into the merge `RowData` plus the row's
+    /// complex-deletion markers (epic #899, Phase A).
     ///
-    /// Each simple column becomes one [`CellData`] (cell_path `None`). Each
-    /// complex element becomes its OWN [`CellData`] keyed by `(column,
-    /// cell_path)` with the element's per-element timestamp, ttl, and
-    /// local-deletion-time. A tombstoned element is surfaced as a
-    /// `Value::Tombstone(CellTombstone)` so per-`(column, cell_path)` reconcile
-    /// resolves it (tombstone beats live at equal ts). A real complex deletion
-    /// is returned as a [`ComplexDeletion`] so `MergeEntry.complex_deletions`
-    /// can carry it (NOT a boolean).
+    /// PHASE A IS BEHAVIOR-NEUTRAL (roborev #863). The merge OUTPUT path must
+    /// produce byte-identical Data.db to pre-Phase-A. Therefore each complex
+    /// (non-frozen collection / UDT) column becomes ONE [`CellData`] carrying the
+    /// reader's whole-collection `collapsed_value` — EXACTLY the representation
+    /// the pre-Phase-A read path threaded to the (untouched) writer (empty /
+    /// overwritten collections preserved; MAP null/tombstoned entries kept as
+    /// `(key, Null)`; SET/LIST element tombstones dropped). Simple columns become
+    /// one [`CellData`] each, as before.
+    ///
+    /// The per-element substrate (`ComplexColumn.elements`, per-element ts / ttl /
+    /// ldt / cell_path) and the first-class [`ComplexDeletion`] markers are the
+    /// Phase-A FOUNDATION: they are POPULATED on the [`CompactionRow`] and carried
+    /// onto `MergeEntry.complex_deletions`, but the writer does NOT yet consume
+    /// the per-element cells nor the complex deletion. Per-element writer emit +
+    /// complex-deletion-driven shadowing are Phase C, verified by differential
+    /// parity. Until then this collapse guarantees neutrality.
     fn compaction_row_data_to_row_data(
         row_data: crate::storage::sstable::reader::compaction_row::CompactionRowData,
+        row_timestamp: i64,
     ) -> (RowData, Vec<ComplexDeletion>) {
         use crate::storage::sstable::reader::compaction_row::CompactionRowData;
-        use crate::types::{TombstoneInfo, TombstoneType, Value};
 
         match row_data {
             CompactionRowData::Tombstone {
@@ -902,6 +911,8 @@ impl SSTableRowIteratorAdapter {
                 }
 
                 for col in complex {
+                    // Carry the real complex deletion as the Phase-A foundation
+                    // (NOT yet consumed by the writer — Phase C).
                     if let Some((marked_for_delete_at, ldt)) = col.complex_deletion {
                         complex_deletions.push(ComplexDeletion {
                             column: col.column.clone(),
@@ -909,36 +920,21 @@ impl SSTableRowIteratorAdapter {
                             local_deletion_time: ldt,
                         });
                     }
-                    for el in col.elements {
-                        // A tombstoned element is represented as a cell tombstone
-                        // (carrying its own timestamp) so per-(column, cell_path)
-                        // reconcile applies the tombstone-beats-live rule.
-                        let value = if el.is_deleted {
-                            Value::Tombstone(TombstoneInfo {
-                                deletion_time: el.timestamp,
-                                tombstone_type: TombstoneType::CellTombstone,
-                                ttl: None,
-                                range_start: None,
-                                range_end: None,
-                            })
-                        } else if let Some(key) = el.decoded_key {
-                            // MAP element: wrap as a single-entry `Value::Map` so
-                            // the writer-facing mutation can reassemble the whole
-                            // map by flattening surviving entries (Phase A bridge).
-                            Value::Map(vec![(key, el.value.unwrap_or(Value::Null))])
-                        } else {
-                            // LIST / SET element: the element value itself.
-                            el.value.unwrap_or(Value::Null)
-                        };
-                        cells.push(CellData {
-                            column: col.column.clone(),
-                            value,
-                            timestamp: el.timestamp,
-                            ttl: el.ttl,
-                            cell_path: Some(el.cell_path),
-                            local_deletion_time: el.local_deletion_time,
-                        });
-                    }
+
+                    // OUTPUT path: one whole-collection CellData per complex column
+                    // using the reader's collapsed value (byte-neutral). The row
+                    // liveness timestamp is used (pre-Phase-A semantics: complex
+                    // columns inherited the row timestamp on the compaction read
+                    // path — see the old `value_to_row_data`). cell_path None marks
+                    // it as a whole-column cell.
+                    cells.push(CellData {
+                        column: col.column,
+                        value: col.collapsed_value,
+                        timestamp: row_timestamp,
+                        ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
+                    });
                 }
 
                 (RowData::Live { cells }, complex_deletions)
@@ -1586,11 +1582,17 @@ impl KWayMerger {
         let mut order: Vec<CellKey> = Vec::new();
         let mut winners: HashMap<CellKey, CellData> = HashMap::new();
 
-        // Per-column complex deletion: keep the marker with the highest
-        // `marked_for_delete_at` (strict-supersede, Cassandra commit bd244649),
-        // and only emit it downstream if it actually supersedes the active state.
-        // Keyed by column name.
-        let mut complex_deletion_by_col: HashMap<String, ComplexDeletion> = HashMap::new();
+        // Carried complex deletions (epic #899 substrate). PHASE A IS
+        // BEHAVIOR-NEUTRAL: we POPULATE `complex_deletions` (the foundation the
+        // writer will consume in Phase C) but reconcile MUST NOT act on them —
+        // no element shadowing, no strict-supersede filtering. Acting on them now
+        // would drop collection tombstones / element survivors and change the
+        // emitted bytes vs pre-Phase-A (roborev #863, Finding 2). The shadowing
+        // rule + writing the complex-deletion marker is deferred to Phase C
+        // (where the writer consumes it and differential parity verifies it).
+        // Accumulate as the pre-Phase-A simple union: first-seen order,
+        // de-duplicated.
+        let mut complex_deletions: Vec<ComplexDeletion> = Vec::new();
         let mut range_deletion: Option<RangeTombstone> = None;
 
         for entry in &cluster_rows {
@@ -1600,16 +1602,9 @@ impl KWayMerger {
             run_index = run_index.min(entry.run_index);
 
             for cd in &entry.complex_deletions {
-                complex_deletion_by_col
-                    .entry(cd.column.clone())
-                    .and_modify(|existing| {
-                        // Strictly supersede: replace only when the candidate's
-                        // markedForDeleteAt is strictly greater.
-                        if cd.marked_for_delete_at > existing.marked_for_delete_at {
-                            *existing = cd.clone();
-                        }
-                    })
-                    .or_insert_with(|| cd.clone());
+                if !complex_deletions.contains(cd) {
+                    complex_deletions.push(cd.clone());
+                }
             }
             if let Some(rd) = &entry.range_deletion {
                 let replace = match &range_deletion {
@@ -1655,13 +1650,6 @@ impl KWayMerger {
 
         let key = key?; // empty group => nothing to emit
 
-        // The set of complex deletions kept (one per column) as a Vec for
-        // downstream carry. Drop entries equal to the LIVE sentinel implicitly:
-        // only real deletions are present in `complex_deletion_by_col`.
-        let mut complex_deletions: Vec<ComplexDeletion> =
-            complex_deletion_by_col.values().cloned().collect();
-        complex_deletions.sort_by(|a, b| a.column.cmp(&b.column));
-
         // Step 3: apply row-tombstone shadowing per cell. A cell whose timestamp is
         // <= row_del is shadowed (`<=` lets the tombstone win at equal ts, #498).
         // Cells written strictly after row_del survive. This shadowing applies to
@@ -1669,25 +1657,20 @@ impl KWayMerger {
         // ts<=T (real Cassandra semantics). Note this is INTENTIONALLY stricter than
         // the `reference_merge` model, whose range-tombstone path only suppresses
         // live cells — `reconcile_cluster` is the authoritative behavior here.
+        //
+        // PHASE A NEUTRALITY (roborev #863, Finding 2): row-tombstone shadowing is
+        // pre-existing and unchanged. COMPLEX-DELETION shadowing (dropping elements
+        // covered by a collection `markedForDeleteAt`) is INTENTIONALLY NOT applied
+        // here — it is deferred to Phase C alongside writing the complex-deletion
+        // marker. Applying it now would filter shadowed/metadata-only elements out
+        // before the writer runs, dropping collection tombstones and risking data
+        // resurrection, and would diverge from pre-Phase-A output bytes.
         let surviving: Vec<CellData> = order
             .into_iter()
             .filter_map(|cell_key| winners.remove(&cell_key))
             .filter(|cell| match row_del {
                 Some(d) => cell.timestamp > d,
                 None => true,
-            })
-            // Epic #899: complex-deletion shadowing per element. A complex
-            // deletion at `markedForDeleteAt = M` for a column shadows every
-            // element of that column written at or before `M` (`<=`, tombstone
-            // wins at equal ts). Simple cells (cell_path None) are unaffected.
-            .filter(|cell| {
-                if cell.cell_path.is_none() {
-                    return true;
-                }
-                match complex_deletion_by_col.get(&cell.column) {
-                    Some(cd) => cell.timestamp > cd.marked_for_delete_at,
-                    None => true,
-                }
             })
             .collect();
 
@@ -1763,119 +1746,47 @@ impl KWayMerger {
 
     /// Convert reconciled `CellData`s into writer `CellOperation`s.
     ///
-    /// Epic #899 (Phase A bridge): per-element complex cells (`cell_path ==
-    /// Some`) are reconciled per `(column, cell_path)` in `reconcile_cluster`,
-    /// but the Phase-A writer still consumes whole-column collection `Value`s.
-    /// This re-collapses the surviving element cells back into a single
-    /// whole-column `Value` per complex column (LIST/SET from element values,
-    /// MAP from the per-element single-entry maps) so the output bytes are
-    /// unchanged while reconcile gained per-element granularity. The per-element
-    /// emit (one cell per element with its own ts/ttl/path) lands in Phase C.
+    /// PHASE A NEUTRALITY (roborev #863): complex (collection / UDT) columns are
+    /// threaded as ONE whole-collection `CellData` (`cell_path == None`) carrying
+    /// the reader's `collapsed_value` — see
+    /// [`Self::compaction_row_data_to_row_data`]. Every cell here therefore maps
+    /// 1:1 to a writer `CellOperation` exactly as pre-Phase-A did (no per-element
+    /// re-collapse, no promotion / drop). Per-element writer emit lands in Phase C.
     fn cells_to_cell_operations(
         cells: Vec<CellData>,
-        schema: &TableSchema,
     ) -> Vec<crate::storage::write_engine::mutation::CellOperation> {
         use crate::storage::write_engine::mutation::CellOperation;
         use crate::types::{TombstoneType, Value};
 
-        let mut operations = Vec::new();
-        // Preserve first-seen column order for complex columns; collect their
-        // elements in surviving order.
-        let mut complex_order: Vec<String> = Vec::new();
-        let mut complex_groups: std::collections::HashMap<String, Vec<CellData>> =
-            std::collections::HashMap::new();
-
-        for cell in cells {
-            if cell.cell_path.is_some() {
-                if !complex_groups.contains_key(&cell.column) {
-                    complex_order.push(cell.column.clone());
-                }
-                complex_groups
-                    .entry(cell.column.clone())
-                    .or_default()
-                    .push(cell);
-                continue;
-            }
-
-            // Simple cell. Issue #505: cell-level tombstones are represented as
-            // Value::Tombstone(CellTombstone); translate to CellOperation::Delete.
-            if matches!(
-                cell.value,
-                Value::Tombstone(ref info)
-                    if info.tombstone_type == TombstoneType::CellTombstone
-            ) {
-                operations.push(CellOperation::Delete {
-                    column: cell.column,
-                });
-            } else if let Some(ttl) = cell.ttl {
-                operations.push(CellOperation::WriteWithTtl {
-                    column: cell.column,
-                    value: cell.value,
-                    ttl_seconds: ttl,
-                });
-            } else {
-                operations.push(CellOperation::Write {
-                    column: cell.column,
-                    value: cell.value,
-                });
-            }
-        }
-
-        // Reassemble each complex column's whole-collection value from its
-        // surviving element cells (Phase A bridge).
-        for column in complex_order {
-            let group = match complex_groups.remove(&column) {
-                Some(g) => g,
-                None => continue,
-            };
-            let data_type = schema
-                .columns
-                .iter()
-                .find(|c| c.name == column)
-                .map(|c| c.data_type.to_lowercase())
-                .unwrap_or_default();
-
-            let is_map = data_type.starts_with("map<")
-                || data_type.starts_with("org.apache.cassandra.db.marshal.maptype(");
-            let is_set = data_type.starts_with("set<")
-                || data_type.starts_with("org.apache.cassandra.db.marshal.settype(");
-
-            // Drop element tombstones from the rebuilt live value (they shadow
-            // their path but do not contribute a live member). The complex
-            // deletion / element-tombstone re-emit is Phase C.
-            let live: Vec<CellData> = group
-                .into_iter()
-                .filter(|c| {
-                    !matches!(
-                        c.value,
-                        Value::Tombstone(ref info)
-                            if info.tombstone_type == TombstoneType::CellTombstone
-                    )
-                })
-                .collect();
-
-            let collection_value = if is_map {
-                let mut entries = Vec::with_capacity(live.len());
-                for c in live {
-                    if let Value::Map(mut kvs) = c.value {
-                        entries.append(&mut kvs);
+        cells
+            .into_iter()
+            .map(|cell| {
+                // Issue #505: cell-level tombstones are represented as
+                // Value::Tombstone(CellTombstone); translate to
+                // CellOperation::Delete so the writer emits a proper cell tombstone
+                // rather than a live cell with a null value.
+                if matches!(
+                    cell.value,
+                    Value::Tombstone(ref info)
+                        if info.tombstone_type == TombstoneType::CellTombstone
+                ) {
+                    CellOperation::Delete {
+                        column: cell.column,
+                    }
+                } else if let Some(ttl) = cell.ttl {
+                    CellOperation::WriteWithTtl {
+                        column: cell.column,
+                        value: cell.value,
+                        ttl_seconds: ttl,
+                    }
+                } else {
+                    CellOperation::Write {
+                        column: cell.column,
+                        value: cell.value,
                     }
                 }
-                Value::Map(entries)
-            } else if is_set {
-                Value::Set(live.into_iter().map(|c| c.value).collect())
-            } else {
-                // Default to a list for list<> (and any other multi-cell type).
-                Value::List(live.into_iter().map(|c| c.value).collect())
-            };
-
-            operations.push(CellOperation::Write {
-                column,
-                value: collection_value,
-            });
-        }
-
-        operations
+            })
+            .collect()
     }
 
     /// Convert a MergeEntry back to Mutation for writing
@@ -1891,7 +1802,7 @@ impl KWayMerger {
         let table_id = TableId::new(&schema.keyspace, &schema.table);
 
         let operations = match entry.row_data {
-            RowData::Live { cells } => Self::cells_to_cell_operations(cells, schema),
+            RowData::Live { cells } => Self::cells_to_cell_operations(cells),
             RowData::Tombstone { .. } => vec![CellOperation::DeleteRow],
         };
 
@@ -4913,13 +4824,14 @@ mod issue_886_merge_entry_enrichment {
         let merged = KWayMerger::reconcile_cluster(None, vec![row0, row1])
             .expect("live row must be emitted");
 
-        // complex_deletions: one per column (strict-supersede by
-        // markedForDeleteAt), emitted sorted by column name (#899). Here the two
-        // columns "notes" and "tags" each survive once; "notes" sorts first.
+        // complex_deletions: PHASE A NEUTRALITY (roborev #863) — accumulated as a
+        // simple first-seen union, deduplicated. reconcile does NOT act on them
+        // (no strict-supersede, no shadowing); that is Phase C. row0 contributes
+        // "tags" first, then row1 adds "notes" (its "tags" is a dup).
         assert_eq!(
             merged.complex_deletions,
-            vec![complex_b.clone(), complex_a.clone()],
-            "complex deletions kept one-per-column, sorted by column name"
+            vec![complex_a.clone(), complex_b.clone()],
+            "complex deletions: first-seen union, deduplicated (Phase A neutral)"
         );
         // range_deletion: the highest deletion timestamp wins.
         assert_eq!(
@@ -5147,10 +5059,13 @@ mod issue_886_merge_entry_enrichment {
     }
 }
 
-/// Epic #899, Phase A: the reader→merge per-element contract is now POPULATED and
-/// CONSUMED (no longer carry-only). These tests drive the real
-/// `compaction_row_data_to_row_data` producer and `reconcile_cluster` consumer
-/// against per-element complex data.
+/// Epic #899, Phase A (roborev #863): the reader→merge per-element substrate is
+/// POPULATED (the foundation), but Phase A is BEHAVIOR-NEUTRAL: the merge OUTPUT
+/// path emits one whole-collection `CellData` per complex column (byte-identical
+/// to pre-Phase-A) while the per-element data rides alongside on the
+/// `CompactionRow` and `MergeEntry.complex_deletions` for Phase C. These tests
+/// pin both the substrate and the neutral output, and the per-`(column,
+/// cell_path)` reconcile CAPABILITY that Phase C will use.
 #[cfg(all(test, feature = "write-support"))]
 mod issue_899_per_element_merge {
     use super::*;
@@ -5175,52 +5090,78 @@ mod issue_899_per_element_merge {
         }
     }
 
-    /// (a) A multi-cell collection with disjoint per-element timestamps surfaces
-    /// N CellData with distinct timestamps + cell_paths through the producer.
+    /// (a) FOUNDATION: a multi-cell collection surfaces N per-element
+    /// `ComplexElement`s (distinct cell_paths + per-element timestamps) on the
+    /// `CompactionRow`. NEUTRALITY: the merge producer re-collapses them into ONE
+    /// whole-collection `CellData` (cell_path None) so the writer is unchanged.
     #[test]
-    fn multi_cell_collection_surfaces_per_element_celldata() {
+    fn multi_cell_collection_surfaces_per_element_substrate_and_neutral_output() {
+        let elements = vec![
+            element(&[0xAA], "a", 100),
+            element(&[0xBB], "b", 200),
+            element(&[0xCC], "c", 300),
+        ];
+        // FOUNDATION: per-element substrate is present, distinct paths + ts.
+        assert_eq!(elements.len(), 3);
+        let mut substrate: Vec<(Vec<u8>, i64)> = elements
+            .iter()
+            .map(|e| (e.cell_path.clone(), e.timestamp))
+            .collect();
+        substrate.sort();
+        assert_eq!(
+            substrate,
+            vec![(vec![0xAA], 100), (vec![0xBB], 200), (vec![0xCC], 300)],
+            "per-element cell_path + distinct timestamps populated (foundation)"
+        );
+
+        // NEUTRAL OUTPUT: one whole-collection CellData (cell_path None) carrying
+        // the reader's collapsed value, timestamped with the row timestamp.
         let row_data = CompactionRowData::Live {
             simple: vec![],
             complex: vec![ComplexColumn {
                 column: "tags".to_string(),
                 complex_deletion: None,
-                elements: vec![
-                    element(&[0xAA], "a", 100),
-                    element(&[0xBB], "b", 200),
-                    element(&[0xCC], "c", 300),
-                ],
+                elements,
+                collapsed_value: Value::Set(vec![
+                    Value::Text("a".to_string()),
+                    Value::Text("b".to_string()),
+                    Value::Text("c".to_string()),
+                ]),
             }],
         };
 
         let (row, complex_deletions) =
-            SSTableRowIteratorAdapter::compaction_row_data_to_row_data(row_data);
+            SSTableRowIteratorAdapter::compaction_row_data_to_row_data(row_data, 999);
         assert!(complex_deletions.is_empty(), "no complex deletion present");
 
         let cells = match row {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {other:?}"),
         };
-        assert_eq!(cells.len(), 3, "one CellData per element");
-        // Each cell carries its OWN cell_path and per-element timestamp.
-        let mut by_path: Vec<(Vec<u8>, i64)> = cells
-            .iter()
-            .map(|c| {
-                (
-                    c.cell_path.clone().expect("cell_path populated"),
-                    c.timestamp,
-                )
-            })
-            .collect();
-        by_path.sort();
         assert_eq!(
-            by_path,
-            vec![(vec![0xAA], 100), (vec![0xBB], 200), (vec![0xCC], 300)],
-            "per-element cell_path + distinct timestamps preserved"
+            cells.len(),
+            1,
+            "one whole-collection CellData (neutral output)"
+        );
+        assert!(
+            cells[0].cell_path.is_none(),
+            "whole-collection cell has no cell_path"
+        );
+        assert_eq!(cells[0].timestamp, 999, "complex column inherits row ts");
+        assert_eq!(
+            cells[0].value,
+            Value::Set(vec![
+                Value::Text("a".to_string()),
+                Value::Text("b".to_string()),
+                Value::Text("c".to_string()),
+            ]),
+            "the writer-facing value is the reader's collapsed collection"
         );
     }
 
-    /// (b) A real complex deletion reaches `MergeEntry.complex_deletions` as a
-    /// first-class `ComplexDeletion` (not a boolean).
+    /// (b) FOUNDATION: a real complex deletion reaches `MergeEntry.complex_deletions`
+    /// as a first-class `ComplexDeletion` (not a boolean), carried but not yet
+    /// consumed by the writer (Phase C).
     #[test]
     fn complex_deletion_reaches_merge_entry_complex_deletions() {
         let row_data = CompactionRowData::Live {
@@ -5229,11 +5170,12 @@ mod issue_899_per_element_merge {
                 column: "tags".to_string(),
                 complex_deletion: Some((12_345, 1_700_000_000)),
                 elements: vec![element(&[0xAB], "x", 20_000)],
+                collapsed_value: Value::Set(vec![Value::Text("x".to_string())]),
             }],
         };
 
         let (_row, complex_deletions) =
-            SSTableRowIteratorAdapter::compaction_row_data_to_row_data(row_data);
+            SSTableRowIteratorAdapter::compaction_row_data_to_row_data(row_data, 20_000);
         assert_eq!(complex_deletions.len(), 1);
         assert_eq!(complex_deletions[0].column, "tags");
         assert_eq!(complex_deletions[0].marked_for_delete_at, 12_345);
@@ -5295,10 +5237,14 @@ mod issue_899_per_element_merge {
         assert_eq!(paths, vec![vec![0xAA], vec![0xBB]]);
     }
 
-    /// A complex deletion strictly shadows elements written at or before its
-    /// `markedForDeleteAt`, while a later element survives (#899 consume path).
+    /// PHASE A NEUTRALITY (roborev #863, Finding 2): a complex deletion is
+    /// CARRIED on the MergeEntry but reconcile does NOT act on it — it does NOT
+    /// shadow elements written at or before its `markedForDeleteAt`. Both
+    /// elements survive in Phase A; the complex-deletion marker rides along on
+    /// `MergeEntry.complex_deletions` for Phase C, where the writer consumes it
+    /// (shadowing + marker emit) under differential parity.
     #[test]
-    fn complex_deletion_shadows_older_elements_only() {
+    fn complex_deletion_is_carried_but_does_not_shadow_in_phase_a() {
         let old_el = MergeEntry::new(
             1,
             dk(1),
@@ -5339,13 +5285,34 @@ mod issue_899_per_element_merge {
 
         let merged = KWayMerger::reconcile_cluster(None, vec![new_el, old_el])
             .expect("a live row must be emitted");
+
+        // The complex deletion is carried (foundation for Phase C)...
+        assert_eq!(
+            merged.complex_deletions,
+            vec![ComplexDeletion {
+                column: "tags".to_string(),
+                marked_for_delete_at: 200,
+                local_deletion_time: 1_700_000_000,
+            }],
+            "complex deletion is carried on the MergeEntry"
+        );
+
+        // ...but reconcile does NOT shadow on it: both elements survive in Phase A.
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {other:?}"),
         };
-        assert_eq!(cells.len(), 1, "the pre-deletion element is shadowed");
-        assert_eq!(cells[0].cell_path.as_deref(), Some(&[0x02][..]));
-        assert_eq!(cells[0].value, Value::Text("new".to_string()));
+        assert_eq!(
+            cells.len(),
+            2,
+            "Phase A does NOT apply complex-deletion shadowing (deferred to Phase C)"
+        );
+        let mut paths: Vec<Vec<u8>> = cells
+            .iter()
+            .map(|c| c.cell_path.clone().expect("cell_path"))
+            .collect();
+        paths.sort();
+        assert_eq!(paths, vec![vec![0x01], vec![0x02]]);
     }
 }
 

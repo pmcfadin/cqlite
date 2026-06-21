@@ -108,6 +108,9 @@ type CompactionComplexColumns = HashMap<
     (
         Option<(i64, i32)>,
         Vec<crate::storage::sstable::reader::compaction_row::ComplexElement>,
+        // The whole-collection collapsed `Value` (epic #899 Phase A neutrality:
+        // the merge OUTPUT path replays this byte-identically to pre-Phase-A).
+        Value,
     ),
 >;
 
@@ -1861,11 +1864,14 @@ impl V5CompressedLegacyParser {
         // the collapsed-value path's column ordering).
         let mut complex_cols: Vec<ComplexColumn> = complex
             .into_iter()
-            .map(|(column, (complex_deletion, elements))| ComplexColumn {
-                column,
-                complex_deletion,
-                elements,
-            })
+            .map(
+                |(column, (complex_deletion, elements, collapsed_value))| ComplexColumn {
+                    column,
+                    complex_deletion,
+                    elements,
+                    collapsed_value,
+                },
+            )
             .collect();
         complex_cols.sort_by(|a, b| a.column.cmp(&b.column));
 
@@ -3826,9 +3832,11 @@ impl V5CompressedLegacyParser {
                     )
                     .map(|(value, new_offset, col_meta)| {
                         if let Some(ref mut out) = compaction_complex_out {
+                            // Capture the whole-collection collapsed value for the
+                            // byte-neutral Phase A output path (roborev #863).
                             out.insert(
                                 column.name.clone(),
-                                (col_meta.complex_deletion, element_buf),
+                                (col_meta.complex_deletion, element_buf, value.clone()),
                             );
                         }
                         (value, new_offset, col_meta)
@@ -6298,7 +6306,15 @@ impl V5CompressedLegacyParser {
         // sentinel (no overwrite).
         let mut complex_deletion: Option<(i64, i32)> = None;
         if has_complex_deletion {
-            let (remaining, mfda_delta) = parse_vint(&data[offset..]).map_err(|e| {
+            // Cassandra (SerializationHeader.writeDeletionTime ->
+            // writeUnsignedVInt) encodes the markedForDeleteAt delta from
+            // min_timestamp as an UNSIGNED VInt — matching the row-deletion path
+            // (see parse_row_metadata, ~line 2585) and the writer
+            // (write_complex_column_deletion, encode_unsigned). The earlier
+            // parse_vint (ZigZag/signed) here mis-decoded any delta whose top
+            // data bit was set, while still consuming the same number of bytes
+            // (both variants are driven by leading-ones). Fix (roborev #863).
+            let (remaining, mfda_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex column '{}': failed to parse markedForDeleteAt at offset {}: {:?}",
                     column.name, offset, e
@@ -6309,13 +6325,17 @@ impl V5CompressedLegacyParser {
 
             // Delta-decode to get the absolute timestamp.
             // The LIVE sentinel in Cassandra is Long.MIN_VALUE for markedForDeleteAt.
-            let absolute_mfda = self.min_timestamp.wrapping_add(mfda_delta);
+            let absolute_mfda = self.min_timestamp.wrapping_add(mfda_delta as i64);
             // Any value other than i64::MIN indicates a real collection tombstone.
             if absolute_mfda != i64::MIN {
                 has_collection_tombstone = true;
             }
 
-            let (remaining, local_deletion_delta) = parse_vint(&data[offset..]).map_err(|e| {
+            // localDeletionTime is also an UNSIGNED VInt delta from
+            // min_local_deletion_time (writer: encode_unsigned). Use the SAME
+            // i32 wrapping/cast as the row/range deletion paths so far-future
+            // LDTs in [2^31, 2^32) round-trip via `as u32 as i32`.
+            let (remaining, local_deletion_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex column '{}': failed to parse localDeletionTime at offset {}: {:?}",
                     column.name, offset, e
@@ -6332,7 +6352,7 @@ impl V5CompressedLegacyParser {
             if absolute_mfda != i64::MIN {
                 let absolute_ldt = self
                     .min_local_deletion_time
-                    .wrapping_add(local_deletion_delta);
+                    .wrapping_add(local_deletion_delta as i64);
                 complex_deletion = Some((absolute_mfda, absolute_ldt as u32 as i32));
             }
 
@@ -6706,10 +6726,14 @@ impl V5CompressedLegacyParser {
 
         // Step 2: Timestamp (if not using row timestamp)
         // Capture the element-level timestamp delta for DS4 max-writetime computation.
-        // Cassandra encodes complex cell timestamps as signed VInt deltas from min_timestamp.
+        // Cassandra encodes complex cell timestamps as UNSIGNED VInt deltas from
+        // min_timestamp (SerializationHeader.writeUnsignedVInt; writer:
+        // write_complex_cell_header, encode_unsigned). The earlier parse_vint
+        // (ZigZag/signed) mis-decoded deltas with the top data bit set while
+        // consuming the same byte count. Fix (roborev #863).
         let mut element_writetime: Option<i64> = None;
         if !use_row_timestamp {
-            let (remaining, ts_delta) = parse_vint(&data[offset..]).map_err(|e| {
+            let (remaining, ts_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex cell {}.{}: failed to parse timestamp at offset {}: {:?}",
                     column.name, cell_index, offset, e
@@ -6718,7 +6742,7 @@ impl V5CompressedLegacyParser {
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
             // Delta decode: absolute_ts = min_timestamp + ts_delta
-            let absolute_ts = self.min_timestamp.wrapping_add(ts_delta);
+            let absolute_ts = self.min_timestamp.wrapping_add(ts_delta as i64);
             element_writetime = Some(absolute_ts);
         }
 
@@ -6945,8 +6969,11 @@ impl V5CompressedLegacyParser {
         );
 
         // Step 2: Timestamp (if not using row timestamp)
+        // Skip-only: byte advancement is identical for vint/vuint, but use the
+        // UNSIGNED variant to match the writer encoding and the decoding sites
+        // (roborev #863).
         if !use_row_timestamp {
-            let (remaining, _ts) = parse_vint(&data[offset..]).map_err(|e| {
+            let (remaining, _ts) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex cell {}.{}: failed to parse timestamp at offset {}: {:?}",
                     column_name, cell_index, offset, e
@@ -9371,9 +9398,11 @@ impl V5CompressedLegacyParser {
         let use_row_timestamp = (flags & CELL_USE_ROW_TIMESTAMP) != 0;
         let use_row_ttl = (flags & CELL_USE_ROW_TTL) != 0;
 
-        // Step 1: skip timestamp VInt if not using row timestamp
+        // Step 1: skip timestamp VInt if not using row timestamp.
+        // Skip-only: byte advancement is identical for vint/vuint, but use the
+        // UNSIGNED variant to match the writer encoding (roborev #863).
         if !use_row_timestamp {
-            let (remaining, _ts_delta) = parse_vint(&data[offset..]).map_err(|e| {
+            let (remaining, _ts_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "cell_header_end_offset: failed to parse timestamp VInt: {:?}",
                     e
@@ -11546,9 +11575,10 @@ mod tests {
     /// and a real `markedForDeleteAt` timestamp (not the i64::MIN sentinel) must set
     /// `ComplexColumnMeta.has_collection_tombstone = true`.
     ///
-    /// Wire layout (min_timestamp = 0, so absolute_mfda = 0 + 1 = 1 ≠ i64::MIN):
-    ///   [mfda_delta: VInt(1) = ZigZag(1) = 0x02]
-    ///   [localDeletionTime: VInt(0) = 0x00]
+    /// Wire layout (min_timestamp = 0; complex-deletion deltas are UNSIGNED
+    /// VInts per the writer, roborev #863):
+    ///   [mfda_delta: VUInt(2) = 0x02]  → absolute_mfda = 0 + 2 = 2 ≠ i64::MIN
+    ///   [localDeletionTime: VUInt(0) = 0x00]
     ///   [cell_count: VUInt(0) = 0x00]  ← zero cells for simplicity
     ///
     /// The parser uses `min_timestamp = 0` (default from `V5CompressedLegacyParser::new`).
@@ -11564,10 +11594,10 @@ mod tests {
             is_static: false,
         };
 
-        // Wire bytes:
-        //   0x02 = ZigZag VInt(1), decoded as mfda_delta=1; absolute_mfda = 0+1 = 1 ≠ i64::MIN
-        //   0x00 = ZigZag VInt(0), decoded as localDeletionTime delta = 0
-        //   0x00 = VUInt(0), decoded as cell_count = 0 (empty collection after overwrite)
+        // Wire bytes (unsigned-VInt complex-deletion deltas, roborev #863):
+        //   0x02 = VUInt(2), mfda_delta=2; absolute_mfda = 0+2 = 2 ≠ i64::MIN
+        //   0x00 = VUInt(0), localDeletionTime delta = 0
+        //   0x00 = VUInt(0), cell_count = 0 (empty collection after overwrite)
         let blob: Vec<u8> = vec![0x02, 0x00, 0x00];
 
         let (value, consumed, meta) = parser
@@ -11624,6 +11654,99 @@ mod tests {
         assert!(
             absolute_mfda_live != i64::MIN,
             "non-sentinel absolute_mfda must produce has_collection_tombstone=true"
+        );
+    }
+
+    /// Regression (roborev #863, Finding 1): complex-deletion `markedForDeleteAt`
+    /// and `localDeletionTime` deltas, plus an explicit per-element complex-cell
+    /// timestamp, are UNSIGNED VInts (writer: `encode_unsigned`). The earlier
+    /// reader used `parse_vint` (ZigZag), which halves any delta whose top data
+    /// bit is set. This test seeds NON-ZERO deltas (chosen so ZigZag vs unsigned
+    /// disagree) and proves the reader now round-trips the writer encoding: the
+    /// surfaced complex deletion equals the seeded `(mfda, ldt)`, and the
+    /// surfaced per-element timestamp equals the seeded value.
+    #[test]
+    fn finding1_complex_deletion_and_element_ts_are_unsigned_vint_roundtrip() {
+        let min_timestamp: i64 = 1_000_000;
+        let min_local_deletion_time: i32 = 1_700_000_000;
+        let parser = V5CompressedLegacyParser::new(
+            "ks".to_string(),
+            "tbl".to_string(),
+            min_timestamp,
+            min_local_deletion_time as i64,
+            None,
+        );
+        let column = crate::schema::Column {
+            name: "tags".to_string(),
+            data_type: "set<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Seed deltas large enough that unsigned VInt and ZigZag VInt disagree
+        // (the high data bit is set, so ZigZag would halve them).
+        let mfda_delta: u64 = 1000; // unsigned [0x83,0xE8]; ZigZag would read 500
+        let ldt_delta: u64 = 1234;
+        let element_ts_delta: u64 = 4321;
+
+        let abs_mfda = min_timestamp + mfda_delta as i64;
+        let abs_ldt = min_local_deletion_time + ldt_delta as i32;
+        let abs_element_ts = min_timestamp + element_ts_delta as i64;
+
+        // Build the on-disk complex column with one live SET element:
+        //   complex deletion: mfda_delta, ldt_delta            (UNSIGNED)
+        //   cell_count: 1
+        //   element: flags=HAS_EMPTY_VALUE(0x04) + explicit ts (UNSIGNED),
+        //            path_len=1, path=[0x41]
+        let mut blob: Vec<u8> = Vec::new();
+        encode_unsigned(mfda_delta, &mut blob);
+        encode_unsigned(ldt_delta, &mut blob);
+        encode_unsigned(1, &mut blob); // cell_count
+        blob.push(0x04); // CELL_HAS_EMPTY_VALUE, no USE_ROW_TIMESTAMP
+        encode_unsigned(element_ts_delta, &mut blob); // explicit element ts (UNSIGNED)
+        encode_unsigned(1, &mut blob); // path_len
+        blob.push(0x41); // path bytes ("A")
+
+        let mut elements: Vec<crate::storage::sstable::reader::compaction_row::ComplexElement> =
+            Vec::new();
+        let (_value, consumed, meta) = parser
+            .parse_complex_column_inner(
+                &blob,
+                0,
+                &column,
+                true, // has_complex_deletion
+                min_timestamp,
+                Some(&mut elements),
+            )
+            .expect("parse must succeed");
+
+        assert_eq!(consumed, blob.len(), "all bytes consumed");
+        assert!(
+            meta.has_collection_tombstone,
+            "non-sentinel mfda must set has_collection_tombstone"
+        );
+
+        // Per-element timestamp must decode via UNSIGNED VInt (not halved).
+        assert_eq!(elements.len(), 1, "one live element surfaced");
+        assert_eq!(
+            elements[0].timestamp,
+            abs_element_ts,
+            "per-element timestamp must round-trip the UNSIGNED writer encoding \
+             (ZigZag decode would yield {})",
+            min_timestamp + (element_ts_delta as i64 / 2)
+        );
+
+        // The complex deletion (mfda, ldt) is surfaced via ComplexColumnMeta and
+        // must decode via UNSIGNED VInt. ZigZag would yield mfda_delta=500,
+        // ldt_delta=617 — both wrong.
+        assert_eq!(
+            meta.complex_deletion,
+            Some((abs_mfda, abs_ldt)),
+            "complex deletion (mfda, ldt) must round-trip the UNSIGNED writer \
+             encoding; ZigZag decode would yield ({}, {})",
+            min_timestamp + 500,
+            min_local_deletion_time + 617
         );
     }
 }

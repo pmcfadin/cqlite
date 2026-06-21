@@ -159,8 +159,20 @@ pub struct ComplexColumn {
     /// `Some((markedForDeleteAt µs, localDeletionTime s))` when a real complex
     /// deletion is present; `None` for the `LIVE` sentinel (no overwrite).
     pub complex_deletion: Option<(i64, i32)>,
-    /// Per-element cells in on-disk order.
+    /// Per-element cells in on-disk order (epic #899 substrate / contract).
     pub elements: Vec<ComplexElement>,
+    /// The whole-collection `Value` the reader collapses this column into
+    /// (`Value::List` / `Value::Set` / `Value::Map`), EXACTLY as the
+    /// pre-Phase-A read path produced it (SET/LIST element tombstones dropped,
+    /// MAP null/tombstoned entries kept as `(key, Null)`, empty/overwritten
+    /// collections kept as the empty collection).
+    ///
+    /// PHASE A NEUTRALITY (roborev #863, Finding 3): the merge OUTPUT path uses
+    /// this collapsed value so the (untouched) writer emits byte-identical bytes
+    /// to pre-Phase-A. The per-element `elements` ride alongside as the Phase-C
+    /// foundation and are asserted by the reader-contract tests; per-element
+    /// writer emit is Phase C.
+    pub collapsed_value: Value,
 }
 
 /// A single element of a complex column (a list/set member, or a map entry).

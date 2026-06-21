@@ -36,8 +36,21 @@ pub struct ComplexElement { pub cell_path: Vec<u8>, pub value: Option<Value>, pu
 ```
 - Reader: stop collapsing in `parse_complex_column_inner`; surface per-element + complex deletion.
 - Update all compaction stream callers + `merge.rs` producer thread (748-761) / `build_merge_entry` (780).
-- Merge: emit one `CellData` per element (populated `cell_path`/`ttl`/`local_deletion_time`/per-element `timestamp`); populate `MergeEntry.complex_deletions`. Re-key reconcile winners to `(String, Option<Vec<u8>>)`. Apply per-(column,cell_path) tie-break (tombstone beats live at equal ts, then value bytes). Drop complex deletion unless it strictly supersedes.
+- Merge: emit one `CellData` per element (populated `cell_path`/`ttl`/`local_deletion_time`/per-element `timestamp`); populate `MergeEntry.complex_deletions`. Re-key reconcile winners to `(String, Option<Vec<u8>>)`. Apply per-(column,cell_path) tie-break (tombstone beats live at equal ts, then value bytes).
 - Fix `estimate_entry_size` for cell_path bytes (#827 128MiB bound).
+
+> **Phase A is behavior-NEUTRAL (roborev #863).** Emitted compaction Data.db bytes
+> must be byte-identical to pre-Phase-A (commit `2e5941b4`) for every existing
+> scenario. Therefore reconcile POPULATES `MergeEntry.complex_deletions` (the
+> Phase-C foundation) but DOES NOT act on them: **no complex-deletion element
+> shadowing and no strict-supersede filtering in Phase A** — those (plus writing
+> the complex-deletion marker) are **deferred to Phase C**, where the writer
+> consumes them and differential parity verifies the bytes. `complex_deletions`
+> is accumulated as the pre-Phase-A simple first-seen union. The per-element
+> `CellData` reconcile output is an internal contract (unit-tested); the writer
+> output path (`cells_to_cell_operations`) re-collapses surviving elements back
+> into whole-column `Value`s so the (untouched) writer emits byte-identical
+> output until Phase C.
 
 ## Phase B (WI-3) — CellOperation model + merge_entry_to_mutation  [blockedBy A]
 ```rust
