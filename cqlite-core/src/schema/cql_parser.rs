@@ -335,25 +335,37 @@ fn clustering_order_item(input: &str) -> IResult<&str, (String, String)> {
 /// with an unrecognized/absent direction default to ASC (per
 /// [`ClusteringOrder::from`]).
 fn parse_clustering_order_body(body: &str) -> HashMap<String, ClusteringOrder> {
-    let mut map = HashMap::new();
     // Strip the surrounding parens that `clustering_order_item` re-added, if present.
     let inner = body.trim().trim_start_matches('(').trim_end_matches(')');
-    for entry in inner.split(',') {
-        let entry = entry.trim();
-        // Parse the column identifier with the canonical identifier parser so
-        // quoted names are unquoted exactly as the schema's clustering columns
-        // were. Skip entries whose column name fails to parse.
-        let Ok((rest, col)) = identifier(entry) else {
-            continue;
-        };
-        // The remaining text holds an optional ASC/DESC direction.
-        let direction = rest.split_whitespace().next();
-        let order = direction
-            .map(crate::schema::ClusteringOrder::from)
-            .unwrap_or(crate::schema::ClusteringOrder::Asc);
-        map.insert(col, order);
+
+    // Parse the comma-separated list with nom rather than `inner.split(',')`,
+    // because a quoted clustering identifier may itself contain a comma
+    // (e.g. `"C,k" DESC`). Splitting on raw commas would break such a name
+    // into two entries and silently leave the column at its default ASC
+    // (Issue #852 branch-review finding). The shared `identifier` parser
+    // already handles quoted identifiers (including embedded commas), so a
+    // `separated_list0` over `clustering_order_entry` parses each entry
+    // correctly while keeping behavior identical for all normal cases.
+    let entries = separated_list0(tuple((ws, char(','), ws)), clustering_order_entry);
+    match delimited(ws, entries, ws)(inner) {
+        Ok((_, items)) => items.into_iter().collect(),
+        Err(_) => HashMap::new(),
     }
-    map
+}
+
+/// Parse a single `CLUSTERING ORDER BY` entry: a column identifier followed by
+/// an optional `ASC`/`DESC` direction (defaulting to ASC). The column name is
+/// parsed with the canonical [`identifier`] parser so quoted names are unquoted
+/// exactly as the schema's clustering columns were, and quoted names containing
+/// a comma are kept intact.
+fn clustering_order_entry(input: &str) -> IResult<&str, (String, ClusteringOrder)> {
+    let (input, col) = identifier(input)?;
+    // Optional whitespace + direction keyword. Absent/unrecognized → ASC.
+    let (input, direction) = opt(preceded(ws1, alt((keyword("asc"), keyword("desc")))))(input)?;
+    let order = direction
+        .map(crate::schema::ClusteringOrder::from)
+        .unwrap_or(crate::schema::ClusteringOrder::Asc);
+    Ok((input, (col, order)))
 }
 
 /// Parse table options (WITH clause)
@@ -1681,6 +1693,30 @@ mod tests {
             .expect("Ck must exist");
         assert_eq!(c1.order, ClusteringOrder::Asc, "c1 should be ASC");
         assert_eq!(ck.order, ClusteringOrder::Desc, "Ck should be DESC");
+    }
+
+    /// #852 (branch review, roborev job 797): a QUOTED clustering identifier that
+    /// itself CONTAINS a comma (e.g. `"C,k"`) must not be split on the embedded
+    /// comma. `parse_clustering_order_body` previously used `inner.split(',')`,
+    /// which broke `"C,k" DESC` into two bogus entries and silently left the
+    /// column at its default ASC. Parsing the list with nom + the shared
+    /// `identifier` parser keeps the quoted name intact and applies its DESC.
+    #[test]
+    fn test_clustering_order_quoted_identifier_with_comma_applied() {
+        let cql = "CREATE TABLE ks.t (pk int, \"C,k\" int, v int, PRIMARY KEY (pk, \"C,k\")) \
+                   WITH CLUSTERING ORDER BY (\"C,k\" DESC)";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        let ck = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "C,k")
+            .expect("\"C,k\" clustering column must exist");
+        assert_eq!(
+            ck.order,
+            ClusteringOrder::Desc,
+            "quoted \"C,k\" (with embedded comma) must carry DESC ordering, got: {:?}",
+            schema.clustering_keys
+        );
     }
 
     /// Issue #852 (branch review, roborev job 775): a string option value with a
