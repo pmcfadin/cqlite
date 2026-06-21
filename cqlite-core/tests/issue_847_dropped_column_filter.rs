@@ -145,8 +145,23 @@ fn compact(inputs: Vec<PathBuf>, out_dir: &Path, schema: &TableSchema) -> PathBu
 /// with NO drop map so the reader does not re-apply the filter. This reflects what
 /// was physically written by compaction.
 fn surviving_columns(data_path: PathBuf) -> Vec<(String, Value)> {
-    let plain = schema_with_drops(HashMap::new());
-    let mut merger = KWayMerger::new(vec![data_path], &plain).expect("merger over output");
+    surviving_columns_with(data_path, &schema_with_drops(HashMap::new()))
+}
+
+/// Schema describing the table AFTER `name` was dropped: it omits `name`
+/// entirely (the natural post-drop schema a reader would use). `name` sorts
+/// before `score` in the alphabetical serialization-header order, so reading the
+/// compacted output with this schema proves the dropped column is absent from
+/// the output header/bitmap and `score` is not misparsed.
+fn post_drop_schema_without_name() -> TableSchema {
+    let mut s = schema_with_drops(HashMap::new());
+    s.columns.retain(|c| c.name != "name");
+    s
+}
+
+/// Read surviving (column, value) cells out of `data_path` using `read_schema`.
+fn surviving_columns_with(data_path: PathBuf, read_schema: &TableSchema) -> Vec<(String, Value)> {
+    let mut merger = KWayMerger::new(vec![data_path], read_schema).expect("merger over output");
     let mut cells = Vec::new();
     loop {
         match merger.step().expect("step") {
@@ -194,6 +209,42 @@ fn dropped_column_cells_discarded_from_compaction_output() {
     assert!(
         cols.iter().any(|(c, _)| c == "name"),
         "the non-dropped `name` column must survive"
+    );
+}
+
+/// Output-header cleanliness (roborev #847 review): when a dropped column sorts
+/// BEFORE a surviving column in the serialization-header order, the compacted
+/// output must not encode the dropped column in its header/bitmap — otherwise a
+/// post-drop reader schema (omitting the dropped column) misaligns and misparses
+/// the surviving column. Here `name` (dropped) sorts before `score` (surviving).
+#[test]
+fn dropped_column_before_surviving_is_absent_from_output_header() {
+    let temp = TempDir::new().expect("tempdir");
+    let (inputs, _) = build_input(&temp, 100); // name + score cells at ts=100
+
+    // Drop `name` (sorts before `score`) at T=150 (>= the cells' ts=100).
+    let mut dropped = HashMap::new();
+    dropped.insert("name".to_string(), 150_i64);
+    let drop_schema = schema_with_drops(dropped);
+
+    let out_dir = temp.path().join("out");
+    let data_path = compact(inputs, &out_dir, &drop_schema);
+
+    // Read the output with a POST-DROP schema that omits `name` entirely.
+    let cols = surviving_columns_with(data_path, &post_drop_schema_without_name());
+
+    assert!(
+        cols.iter().all(|(c, _)| c != "name"),
+        "the dropped column must not appear in the output, got: {:?}",
+        cols.iter().map(|(c, _)| c).collect::<Vec<_>>()
+    );
+    // `score` must still decode correctly (as an integer) — proving the header
+    // did not carry the dropped `name` column and misalign `score`.
+    assert!(
+        cols.iter()
+            .any(|(c, v)| c == "score" && matches!(v, Value::Integer(_))),
+        "surviving `score` must parse correctly under a post-drop reader schema, got: {:?}",
+        cols
     );
 }
 

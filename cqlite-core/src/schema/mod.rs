@@ -797,6 +797,45 @@ impl TableSchema {
         Ok(())
     }
 
+    /// The **post-drop** schema that compaction uses to *write* its output.
+    ///
+    /// The decode schema retains dropped columns (carrying their type) so input
+    /// cells can be parsed and then purged by the merge filter (see
+    /// [`Self::validate_dropped_columns`]). The compaction *output*, however,
+    /// must NOT encode dropped columns in its serialization header / row column
+    /// bitmap: a reader using a natural post-drop schema (one that omits the
+    /// dropped column) intersects the on-disk header with its `columns` and would
+    /// drop that header column *before* applying bitmap indices, misaligning the
+    /// surviving columns that sort after it (roborev #847 review).
+    ///
+    /// Because the merge filter has already purged the dropped columns' cells,
+    /// this returns a schema with those columns removed from `columns` and an
+    /// empty `dropped_columns` map — so the output header reflects the live,
+    /// post-drop column set and is readable by any matching schema.
+    ///
+    /// Scope note: a column re-added after its drop (cells with `ts > drop_time`)
+    /// is treated as dropped here and is not retained in the output, consistent
+    /// with the scalar / row-timestamp granularity of dropped-column filtering
+    /// (#847); element-level retention is follow-up work (#899).
+    pub fn for_compaction_output(&self) -> TableSchema {
+        let dropped: std::collections::HashSet<&str> =
+            self.dropped_columns.keys().map(String::as_str).collect();
+        TableSchema {
+            keyspace: self.keyspace.clone(),
+            table: self.table.clone(),
+            partition_keys: self.partition_keys.clone(),
+            clustering_keys: self.clustering_keys.clone(),
+            columns: self
+                .columns
+                .iter()
+                .filter(|c| !dropped.contains(c.name.as_str()))
+                .cloned()
+                .collect(),
+            comments: self.comments.clone(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
     /// Validate the dropped-column decode contract (#904/#847).
     ///
     /// Dropped-column filtering during compaction discards a dropped column's

@@ -1109,10 +1109,16 @@ pub async fn compact_sstables(
 
     let merger = KWayMerger::new_with_gc(input_paths.clone(), schema, gc_before_secs, now_secs)?;
 
+    // Decode with `schema` (which retains dropped columns so their input cells
+    // parse and can be purged), but WRITE with the post-drop schema: dropped
+    // columns are excluded from the output serialization header / row column
+    // bitmap so the compacted output is readable by a natural post-drop schema
+    // (#847 review). The merge filter has already purged those columns' cells.
+    let write_schema = schema.for_compaction_output();
     let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
         output_dir.to_path_buf(),
         generation,
-        schema,
+        &write_schema,
     )?;
 
     // Two-pass compaction (issue #729): seed the output's encoding baselines from
