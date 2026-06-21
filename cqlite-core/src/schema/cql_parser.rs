@@ -328,22 +328,30 @@ fn clustering_order_item(input: &str) -> IResult<&str, (String, String)> {
 
 /// Parse the body of a `CLUSTERING ORDER BY (...)` clause (the text captured
 /// between the parentheses, e.g. `ck DESC` or `c1 ASC, c2 DESC`) into a map of
-/// column name -> [`ClusteringOrder`]. Column names are preserved verbatim so
-/// they can be matched against the schema's clustering columns; entries with an
-/// unrecognized/absent direction default to ASC (per [`ClusteringOrder::from`]).
+/// column name -> [`ClusteringOrder`]. Each entry's column name is parsed with
+/// the same [`identifier`] parser used for column and primary-key names, so
+/// quoted identifiers (e.g. `"Ck"`) have their surrounding quotes stripped and
+/// therefore match the clustering column names stored in the schema. Entries
+/// with an unrecognized/absent direction default to ASC (per
+/// [`ClusteringOrder::from`]).
 fn parse_clustering_order_body(body: &str) -> HashMap<String, ClusteringOrder> {
     let mut map = HashMap::new();
     // Strip the surrounding parens that `clustering_order_item` re-added, if present.
     let inner = body.trim().trim_start_matches('(').trim_end_matches(')');
     for entry in inner.split(',') {
-        let mut parts = entry.split_whitespace();
-        if let Some(col) = parts.next() {
-            let order = parts
-                .next()
-                .map(crate::schema::ClusteringOrder::from)
-                .unwrap_or(crate::schema::ClusteringOrder::Asc);
-            map.insert(col.to_string(), order);
-        }
+        let entry = entry.trim();
+        // Parse the column identifier with the canonical identifier parser so
+        // quoted names are unquoted exactly as the schema's clustering columns
+        // were. Skip entries whose column name fails to parse.
+        let Ok((rest, col)) = identifier(entry) else {
+            continue;
+        };
+        // The remaining text holds an optional ASC/DESC direction.
+        let direction = rest.split_whitespace().next();
+        let order = direction
+            .map(crate::schema::ClusteringOrder::from)
+            .unwrap_or(crate::schema::ClusteringOrder::Asc);
+        map.insert(col, order);
     }
     map
 }
@@ -1629,6 +1637,50 @@ mod tests {
             ClusteringOrder::Asc,
             "ck must default to ASC without a CLUSTERING ORDER BY clause"
         );
+    }
+
+    /// #852 (branch review, roborev job 788): a QUOTED clustering identifier in
+    /// `CLUSTERING ORDER BY (...)` must match the clustering column name (which is
+    /// stored unquoted by `identifier()`), so its DESC direction is applied rather
+    /// than silently defaulting to ASC.
+    #[test]
+    fn test_clustering_order_quoted_identifier_applied() {
+        let cql = "CREATE TABLE ks.t (pk int, \"Ck\" int, v int, PRIMARY KEY (pk, \"Ck\")) \
+                   WITH CLUSTERING ORDER BY (\"Ck\" DESC)";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        let ck = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "Ck")
+            .expect("Ck clustering column must exist");
+        assert_eq!(
+            ck.order,
+            ClusteringOrder::Desc,
+            "quoted \"Ck\" must carry DESC ordering, got: {:?}",
+            schema.clustering_keys
+        );
+    }
+
+    /// #852 (job 788): a mixed clustering order mixing a quoted DESC column with
+    /// an unquoted ASC column must apply each direction to the correct column.
+    #[test]
+    fn test_clustering_order_mixed_quoted_and_unquoted() {
+        let cql =
+            "CREATE TABLE ks.t (pk int, c1 int, \"Ck\" int, v int, PRIMARY KEY (pk, c1, \"Ck\")) \
+                   WITH CLUSTERING ORDER BY (c1 ASC, \"Ck\" DESC)";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        let c1 = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "c1")
+            .expect("c1 must exist");
+        let ck = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "Ck")
+            .expect("Ck must exist");
+        assert_eq!(c1.order, ClusteringOrder::Asc, "c1 should be ASC");
+        assert_eq!(ck.order, ClusteringOrder::Desc, "Ck should be DESC");
     }
 
     /// Issue #852 (branch review, roborev job 775): a string option value with a
