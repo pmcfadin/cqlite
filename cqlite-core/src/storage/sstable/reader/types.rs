@@ -2,11 +2,11 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-use super::source::BlockSource;
+use super::source::{BlockSource, ScanSource};
 
 use crate::{
     parser::SSTableHeader,
@@ -207,8 +207,17 @@ pub struct CachedBlock {
 pub struct SSTableReader {
     /// Path to the SSTable file
     pub(crate) file_path: PathBuf,
-    /// Backing byte source for reading (buffered file I/O or memory map)
+    /// Backing byte source for point reads (buffered file I/O or memory map).
+    ///
+    /// Used only by positioned point-read helpers (`get_cached_data`,
+    /// integrity checks) that lock, seek, read, and unlock atomically. Full
+    /// scans no longer use this shared cursor — they mint their own
+    /// [`ScanCursor`](super::source::ScanCursor) via [`Self::scan_source`] so
+    /// they run in parallel (issue #815).
     pub(crate) file: Arc<Mutex<BlockSource>>,
+    /// Template for minting fresh per-scan [`BlockSource`]s so concurrent scans
+    /// never share a mutable file position or chunk index (issue #815).
+    pub(crate) scan_source: ScanSource,
     /// SSTable header information
     pub(crate) header: SSTableHeader,
     /// Parser for SSTable format
@@ -259,21 +268,6 @@ pub struct SSTableReader {
     pub(crate) udt_registry: Option<UdtRegistry>,
     /// CompressionInfo metadata for chunked decompression (if compressed)
     pub compression_info: Option<Arc<CompressionInfo>>,
-    /// Current chunk index for sequential chunk reading.
-    ///
-    /// IMPORTANT: This field is shared across all callers of `read_next_block`.
-    /// Concurrent callers MUST hold `scan_mutex` for the full lifetime of their
-    /// scan to prevent interleaving of file-position advances and chunk-index
-    /// increments (issue #805).
-    pub(super) current_chunk_index: AtomicUsize,
-    /// Serialises concurrent sequential scans on this reader.
-    ///
-    /// SSTable files are immutable, but `sequential_scan`, `scan_for_key`, and
-    /// `stitch_all_chunks` share both the underlying file's seek-position and the
-    /// `current_chunk_index` counter. Two concurrent callers advancing those
-    /// fields simultaneously corrupt each other's reads (issue #805). Acquiring
-    /// this mutex for the full duration of a scan prevents interleaving.
-    pub(super) scan_mutex: tokio::sync::Mutex<()>,
     /// Version-feature gates derived from the SSTable filename.
     ///
     /// Computed once in `SSTableReader::open` via `VersionGates::from_path` and

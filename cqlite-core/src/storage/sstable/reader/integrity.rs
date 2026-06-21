@@ -62,21 +62,18 @@ impl SSTableReader {
             overall_status: IntegrityStatus::Healthy,
         };
 
-        // Save current position
-        let original_position = {
-            let mut file_guard = self.file.lock().await;
-            file_guard.stream_position().await.unwrap_or(0)
-        };
-
-        // Reset to data section
+        // Read through a private per-scan cursor (issue #815) so the integrity
+        // check never mutates the shared point-read cursor and can run alongside
+        // concurrent reads.
+        let cursor = self.new_scan_cursor().await?;
         let header_size = self.calculate_header_size();
         {
-            let mut file_guard = self.file.lock().await;
+            let mut file_guard = cursor.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
 
         // Check each block
-        while let Some(block_data) = self.read_next_block().await.ok().flatten() {
+        while let Some(block_data) = self.read_next_block(&cursor).await.ok().flatten() {
             result.total_blocks_checked += 1;
 
             // Try to parse block entries
@@ -96,12 +93,6 @@ impl SSTableReader {
             if result.total_blocks_checked % 100 == 0 {
                 tokio::task::yield_now().await;
             }
-        }
-
-        // Restore original position
-        {
-            let mut file_guard = self.file.lock().await;
-            file_guard.seek(SeekFrom::Start(original_position)).await?;
         }
 
         // Determine overall status

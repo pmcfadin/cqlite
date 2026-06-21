@@ -51,13 +51,13 @@ use header::{
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, AtomicUsize};
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::Mutex;
 
-use source::BlockSource;
+use source::{BlockSource, ScanSource};
 
 use crate::{
     parser::{header::CassandraVersion, SSTableHeader, SSTableParser},
@@ -121,7 +121,11 @@ impl SSTableReader {
         let use_mmap = reader_config.use_mmap
             && file_size > 0
             && file_size >= reader_config.mmap_min_size_bytes as u64;
-        let source = if use_mmap {
+        // Build both the shared point-read source and the per-scan factory from
+        // the same backend decision so concurrent scans get independent cursors
+        // (issue #815). `ScanSource::Mapped` shares the same `Arc<Mmap>` so no
+        // extra mapping is created per scan.
+        let (source, scan_source) = if use_mmap {
             match Self::map_file(path) {
                 Ok(mmap) => {
                     log::debug!(
@@ -129,7 +133,8 @@ impl SSTableReader {
                         path.display(),
                         file_size
                     );
-                    BlockSource::mapped(Arc::new(mmap))
+                    let mmap = Arc::new(mmap);
+                    (BlockSource::mapped(mmap.clone()), ScanSource::Mapped(mmap))
                 }
                 Err(e) => {
                     // Memory mapping can fail on some filesystems (e.g. certain
@@ -140,11 +145,17 @@ impl SSTableReader {
                         path.display(),
                         e
                     );
-                    BlockSource::buffered(File::open(path).await?)
+                    (
+                        BlockSource::buffered(File::open(path).await?),
+                        ScanSource::Buffered,
+                    )
                 }
             }
         } else {
-            BlockSource::buffered(File::open(path).await?)
+            (
+                BlockSource::buffered(File::open(path).await?),
+                ScanSource::Buffered,
+            )
         };
         let file = Arc::new(Mutex::new(source));
 
@@ -371,6 +382,7 @@ impl SSTableReader {
         Ok(Self {
             file_path: path.to_path_buf(),
             file,
+            scan_source,
             header,
             parser,
             index,
@@ -394,8 +406,6 @@ impl SSTableReader {
             schema,
             udt_registry: None, // Will be set when available for UDT-aware parsing
             compression_info: compression_info.map(Arc::new),
-            current_chunk_index: AtomicUsize::new(0),
-            scan_mutex: tokio::sync::Mutex::new(()),
             version_gates,
             bti_partitions_db,
         })
