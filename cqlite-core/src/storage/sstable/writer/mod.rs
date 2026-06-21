@@ -487,6 +487,12 @@ impl SSTableWriter {
         }
         self.last_token = Some(key.token);
 
+        // Record the SSTable key range (lowest = first seen, highest = last) for
+        // the `da`-format StatsMetadata `hasKeyRange` fields. Partitions arrive in
+        // ascending token order (validated above), so first/last fall out for
+        // free. Harmless for BIG (the legacy STATS body ignores these fields).
+        self.stats.update_key_range(&key.key);
+
         // Sort mutations by clustering key (Cassandra requires sorted rows within partitions)
         let mut mutations = mutations;
         mutations.sort_by(|a, b| match (&a.clustering_key, &b.clustering_key) {
@@ -827,9 +833,17 @@ impl SSTableWriter {
         let cpath =
             |component: &str| Self::component_path_for(sstable_dir, generation, format, component);
 
-        // 1. Write Statistics.db (FIRST - provides delta baseline)
+        // 1. Write Statistics.db (FIRST - provides delta baseline).
+        // BTI (`da`) requires the BtiFormat `StatsMetadata` layout (covered
+        // clustering Slice, uint deletion times, key range, token-space coverage)
+        // — Cassandra's sstabledump/sstablemetadata reject the legacy `nb` layout
+        // on a `da` descriptor (issue #911). BIG keeps the legacy layout.
         let stats_path = cpath("Statistics.db");
-        let stats_writer = StatisticsWriter::new(stats_path.clone());
+        let stats_writer = if is_bti {
+            StatisticsWriter::new_bti(stats_path.clone())
+        } else {
+            StatisticsWriter::new(stats_path.clone())
+        };
         stats_writer.write(&self.stats, Some(&self.schema))?;
 
         // 2. Finalize Data.db (Issue #492)

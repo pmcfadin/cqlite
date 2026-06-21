@@ -196,6 +196,14 @@ pub struct StatisticsMetadata {
     /// tombstone compaction.  Uses the same streaming builder algorithm as
     /// Cassandra's `StreamingTombstoneHistogramBuilder` (max 100 bins).
     pub tombstone_histogram: TombstoneHistogram,
+    /// First (lowest-token) decorated partition-key bytes written to this
+    /// SSTable, or `None` if no partition has been written. Serialised as the
+    /// `da`-format `StatsMetadata.firstKey` (BtiFormat `hasKeyRange`); tracked in
+    /// token order by `SSTableWriter::write_partition`.
+    pub first_key: Option<Vec<u8>>,
+    /// Last (highest-token) decorated partition-key bytes written to this
+    /// SSTable. Serialised as the `da`-format `StatsMetadata.lastKey`.
+    pub last_key: Option<Vec<u8>>,
 }
 
 impl Default for StatisticsMetadata {
@@ -212,6 +220,8 @@ impl Default for StatisticsMetadata {
             column_count: 0,
             total_rows_size: 0,
             tombstone_histogram: TombstoneHistogram::new(),
+            first_key: None,
+            last_key: None,
         }
     }
 }
@@ -249,6 +259,20 @@ impl StatisticsMetadata {
     /// Increment partition count
     pub fn increment_partition_count(&mut self) {
         self.partition_count += 1;
+    }
+
+    /// Record a partition key in the SSTable key range.
+    ///
+    /// Partitions are written in ascending token order (enforced by
+    /// `SSTableWriter::write_partition`), so the FIRST key seen is the lowest and
+    /// the LAST is the highest. Used to populate the `da`-format
+    /// `StatsMetadata.firstKey`/`lastKey` (`hasKeyRange`). The clone is bounded by
+    /// the partition-key size (typically tens of bytes), not the partition data.
+    pub fn update_key_range(&mut self, key: &[u8]) {
+        if self.first_key.is_none() {
+            self.first_key = Some(key.to_vec());
+        }
+        self.last_key = Some(key.to_vec());
     }
 
     /// Increment row count
@@ -417,15 +441,36 @@ fn split_cql_type_args(s: &str) -> Vec<&str> {
 pub struct StatisticsWriter {
     /// Path to the Statistics.db file to write
     path: PathBuf,
+    /// Emit the Cassandra-canonical `da` (BtiFormat) `StatsMetadata` layout
+    /// instead of the legacy `nb` layout.
+    ///
+    /// The `da` STATS component differs from `nb` in the fields gated by the
+    /// BtiFormat version flags (all true for `da` except `hasLegacyMinMax`):
+    /// `hasUIntDeletionTime`, `hasImprovedMinMax` (clusteringTypes + a covered
+    /// `Slice` instead of legacy min/max value lists), `hasIsTransient`,
+    /// `hasOriginatingHostId`, `hasPartitionLevelDeletionsPresenceMarker`,
+    /// `hasKeyRange` (first/last key) and `hasTokenSpaceCoverage`. Cassandra's
+    /// `sstabledump`/`sstablemetadata` deserialize a `da`-descriptor
+    /// Statistics.db with this layout and reject the `nb` layout (a
+    /// `Slice.<init>` assertion fires while reading `coveredClustering`).
+    /// Authority: cassandra-5.0.0 `StatsMetadata.StatsMetadataSerializer` +
+    /// `BtiFormat.BtiVersion` version flags.
+    bti: bool,
 }
 
 impl StatisticsWriter {
-    /// Create a new Statistics.db writer
+    /// Create a new Statistics.db writer for the legacy `nb`/`oa` BIG layout.
     ///
     /// # Arguments
     /// * `path` - Path where Statistics.db will be written
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self { path, bti: false }
+    }
+
+    /// Create a new Statistics.db writer that emits the Cassandra-canonical `da`
+    /// (BtiFormat) `StatsMetadata` layout.
+    pub fn new_bti(path: PathBuf) -> Self {
+        Self { path, bti: true }
     }
 
     /// Write Statistics.db file with the given metadata
@@ -452,7 +497,15 @@ impl StatisticsWriter {
         // Build component data
         let validation_data = self.build_validation_component()?;
         let compaction_data = self.build_compaction_component()?;
-        let stats_data = self.build_stats_component(&meta)?;
+        // The STATS body is version-gated: BTI (`da`) emits the BtiFormat
+        // `StatsMetadata` layout (covered-clustering Slice, uint deletion times,
+        // key range, token-space coverage); BIG (`nb`/`oa`) emits the legacy
+        // layout. `schema` is needed for the `da` clustering-type list.
+        let stats_data = if self.bti {
+            self.build_stats_component_da(&meta, schema)?
+        } else {
+            self.build_stats_component(&meta)?
+        };
         // Use pre-finalize metadata for the SerializationHeader EncodingStats.
         // The baselines in the header MUST match those used by the DataWriter for
         // delta encoding. The DataWriter uses the raw (pre-finalize) metadata values.
@@ -738,6 +791,157 @@ impl StatisticsWriter {
 
         // 25. byte originatingHostId (0 = null)
         buffer.write_all(&[0x00])?;
+
+        Ok(buffer)
+    }
+
+    /// Build the STATS component for the Cassandra-canonical `da` (BtiFormat)
+    /// layout.
+    ///
+    /// Field order and gating follow cassandra-5.0.0
+    /// `StatsMetadata.StatsMetadataSerializer.serialize` evaluated for
+    /// `BtiFormat.BtiVersion` (all version flags `true` except `hasLegacyMinMax`,
+    /// which is `false`):
+    ///
+    /// 1.  estimatedPartitionSize (EstimatedHistogram)
+    /// 2.  estimatedCellPerPartitionCount (EstimatedHistogram)
+    /// 3.  commitLogUpperBound (CommitLogPosition)
+    /// 4.  minTimestamp, maxTimestamp (long)
+    /// 5.  min/maxLocalDeletionTime as **unsigned int** (`hasUIntDeletionTime`);
+    ///     `NO_DELETION_TIME` (Long.MAX) maps to `0xFFFFFFFF`.
+    /// 6.  minTTL, maxTTL (int)
+    /// 7.  compressionRatio (double)
+    /// 8.  estimatedTombstoneDropTime (TombstoneHistogram)
+    /// 9.  sstableLevel (int), repairedAt (long)
+    /// 10. improvedMinMax (`!hasLegacyMinMax && hasImprovedMinMax`):
+    ///     clusteringTypes list + coveredClustering `Slice`. We emit
+    ///     `Slice.ALL` (BOTTOM..TOP) — a valid, conservative covering slice that
+    ///     Cassandra accepts and that matches the `Covered clusterings: [, ]`
+    ///     shown by `sstablemetadata` on the real `da` fixtures.
+    /// 11. hasLegacyCounterShards (bool)
+    /// 12. totalColumnsSet, totalRows (long)
+    /// 13. commitLogLowerBound (CommitLogPosition), commitLogIntervals (IntervalSet)
+    /// 14. pendingRepair (byte 0 = null)
+    /// 15. isTransient (bool)
+    /// 16. originatingHostId (byte 0 = null)
+    /// 17. hasPartitionLevelDeletions (bool)
+    /// 18. firstKey, lastKey (vint-length ByteBuffer) — `hasKeyRange`
+    /// 19. tokenSpaceCoverage (double) — `hasTokenSpaceCoverage`
+    fn build_stats_component_da(
+        &self,
+        metadata: &StatisticsMetadata,
+        schema: Option<&TableSchema>,
+    ) -> Result<Vec<u8>> {
+        let mut buffer = Vec::new();
+
+        // 1-2. EstimatedHistogram estimatedPartitionSize / estimatedCellPerPartitionCount
+        self.write_estimated_histogram(&mut buffer)?;
+        self.write_estimated_histogram(&mut buffer)?;
+
+        // 3. CommitLogPosition commitLogUpperBound (NONE)
+        buffer.write_all(&(-1i64).to_be_bytes())?; // segmentId
+        buffer.write_all(&0i32.to_be_bytes())?; // position
+
+        // 4. minTimestamp, maxTimestamp
+        buffer.write_all(&metadata.min_timestamp.to_be_bytes())?;
+        buffer.write_all(&metadata.max_timestamp.to_be_bytes())?;
+
+        // 5. min/maxLocalDeletionTime — unsigned int (hasUIntDeletionTime).
+        // No tombstones (sentinel) → NO_DELETION_TIME_UNSIGNED_INTEGER = 0xFFFFFFFF;
+        // otherwise the low 32 bits of the (seconds-since-epoch) deletion time
+        // (Cassandra `CassandraUInt.fromLong` == `(int) value`).
+        let min_ldt_uint: u32 = if metadata.min_local_deletion_time == 0 {
+            0xFFFF_FFFF
+        } else {
+            metadata.min_local_deletion_time as u32
+        };
+        let max_ldt_uint: u32 = if metadata.max_local_deletion_time == 0 {
+            0xFFFF_FFFF
+        } else {
+            metadata.max_local_deletion_time as u32
+        };
+        buffer.write_all(&min_ldt_uint.to_be_bytes())?;
+        buffer.write_all(&max_ldt_uint.to_be_bytes())?;
+
+        // 6. minTTL, maxTTL
+        buffer.write_all(&metadata.min_ttl.to_be_bytes())?;
+        buffer.write_all(&metadata.max_ttl.to_be_bytes())?;
+
+        // 7. compressionRatio (-1.0 = unknown)
+        buffer.write_all(&(-1.0f64).to_be_bytes())?;
+
+        // 8. TombstoneHistogram estimatedTombstoneDropTime
+        self.write_tombstone_histogram(&mut buffer, &metadata.tombstone_histogram)?;
+
+        // 9. sstableLevel, repairedAt
+        buffer.write_all(&0i32.to_be_bytes())?;
+        buffer.write_all(&0i64.to_be_bytes())?;
+
+        // 10. improvedMinMax: clusteringTypes list + coveredClustering Slice.
+        //
+        // AbstractTypeSerializer.serializeList: unsigned-VInt count, then each
+        // type as an unsigned-VInt-length-prefixed UTF-8 marshal-class string —
+        // the exact encoding used for the SERIALIZATION_HEADER clusteringTypes.
+        let clustering_types: Vec<String> = schema
+            .map(|s| {
+                s.clustering_keys
+                    .iter()
+                    .map(|ck| cql_type_to_marshal_type(&ck.data_type))
+                    .collect()
+            })
+            .unwrap_or_default();
+        buffer.write_all(&encode_vuint(clustering_types.len() as u64))?;
+        for ty in &clustering_types {
+            buffer.write_all(&encode_vuint(ty.len() as u64))?;
+            buffer.write_all(ty.as_bytes())?;
+        }
+        // coveredClustering = Slice.ALL = (BOTTOM, TOP). A ClusteringBound
+        // serialises as `[byte kind ordinal][short size][values...]`; BOTTOM and
+        // TOP are empty bounds (size 0). Kind ordinals (ClusteringPrefix.Kind):
+        // INCL_START_BOUND = 1 (BOTTOM), INCL_END_BOUND = 6 (TOP).
+        const KIND_INCL_START_BOUND: u8 = 1;
+        const KIND_INCL_END_BOUND: u8 = 6;
+        buffer.write_all(&[KIND_INCL_START_BOUND])?;
+        buffer.write_all(&0u16.to_be_bytes())?; // start size = 0
+        buffer.write_all(&[KIND_INCL_END_BOUND])?;
+        buffer.write_all(&0u16.to_be_bytes())?; // end size = 0
+
+        // 11. hasLegacyCounterShards
+        buffer.write_all(&[0x00])?;
+
+        // 12. totalColumnsSet, totalRows
+        buffer.write_all(&metadata.column_count.to_be_bytes())?;
+        buffer.write_all(&metadata.row_count.to_be_bytes())?;
+
+        // 13. commitLogLowerBound (NONE) + commitLogIntervals (empty IntervalSet)
+        buffer.write_all(&(-1i64).to_be_bytes())?; // segmentId
+        buffer.write_all(&0i32.to_be_bytes())?; // position
+        buffer.write_all(&0i32.to_be_bytes())?; // interval set size = 0
+
+        // 14. pendingRepair (null)
+        buffer.write_all(&[0x00])?;
+
+        // 15. isTransient
+        buffer.write_all(&[0x00])?;
+
+        // 16. originatingHostId (null)
+        buffer.write_all(&[0x00])?;
+
+        // 17. hasPartitionLevelDeletions
+        buffer.write_all(&[0x00])?;
+
+        // 18. firstKey, lastKey (ByteBufferUtil.writeWithVIntLength:
+        // unsigned-VInt length then the raw key bytes). Empty when no partitions.
+        let first = metadata.first_key.as_deref().unwrap_or(&[]);
+        let last = metadata.last_key.as_deref().unwrap_or(&[]);
+        buffer.write_all(&encode_vuint(first.len() as u64))?;
+        buffer.write_all(first)?;
+        buffer.write_all(&encode_vuint(last.len() as u64))?;
+        buffer.write_all(last)?;
+
+        // 19. tokenSpaceCoverage (double). Cassandra writes NaN when not computed
+        // (sstablemetadata renders this as "Local token space coverage: NaN").
+        buffer.write_all(&f64::NAN.to_be_bytes())?;
 
         Ok(buffer)
     }

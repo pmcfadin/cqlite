@@ -105,6 +105,11 @@ pub struct PartitionTrieEntry {
     hash_byte: u8,
     /// Where this partition's leaf payload points (`Data.db` or `Rows.db`).
     payload: PartitionPayload,
+    /// Raw on-disk partition-key bytes. Retained so `finish` can write the
+    /// Cassandra `PartitionIndex` first/last-key region (the lowest- and
+    /// highest-token keys after the trie-key sort). Bounded by the partition-key
+    /// size, not the partition data.
+    raw_key: Vec<u8>,
 }
 
 /// Builder that accumulates partition entries and serializes the BTI
@@ -157,11 +162,28 @@ impl PartitionsTrieWriter {
             key,
             hash_byte,
             payload,
+            raw_key: raw_key_bytes.to_vec(),
         });
     }
 
-    /// Serialize the accumulated entries into the on-disk `Partitions.db`
-    /// trie bytes (including the 8-byte big-endian root-offset footer).
+    /// Serialize the accumulated entries into the on-disk `Partitions.db` bytes
+    /// in Cassandra's canonical `PartitionIndex` layout (issue #911):
+    ///
+    /// ```text
+    /// [ trie nodes ............ ]   root node at absolute offset `root`
+    /// [ firstKey  (u16 len + bytes) ]   at absolute offset `firstPos`
+    /// [ lastKey   (u16 len + bytes) ]
+    /// [ footer: i64 firstPos | i64 keyCount | i64 root ]   last 24 bytes
+    /// ```
+    ///
+    /// `PartitionIndex.load` (cassandra-5.0.0) reads the 24-byte footer from
+    /// `dataLength() - 24`, seeks to `firstPos`, then reads the first and last
+    /// decorated keys via `ByteBufferUtil.readWithShortLength`. The trie node
+    /// encoding is unchanged (already Cassandra-`TrieNode`-compatible and verified
+    /// against the real `da` fixtures); only this footer + first/last-key region
+    /// is added so `sstabledump`/`sstablemetadata` and a live node can open the
+    /// index. The final 8 bytes remain `root`, so CQLite's own footer-based reader
+    /// (which reads `root` from the last 8 bytes) is unaffected.
     ///
     /// Returns an empty `Vec` if no partitions were recorded (an empty
     /// `Partitions.db`, mirroring an empty SSTable).
@@ -184,9 +206,51 @@ impl PartitionsTrieWriter {
             }
         }
 
+        // First/last decorated key (lowest/highest token after the trie-key sort).
+        // Bounded copies (partition-key sized); entries is non-empty here.
+        let first_key = entries
+            .first()
+            .map(|e| e.raw_key.clone())
+            .unwrap_or_default();
+        let last_key = entries
+            .last()
+            .map(|e| e.raw_key.clone())
+            .unwrap_or_default();
+        let key_count = entries.len() as i64;
+
+        // 1. Serialize the trie nodes; `root` is the absolute offset of the root
+        //    node within the buffer (post-order write, backward-delta pointers).
         let root = build_trie(&entries);
-        serialize_trie(&root)
+        let mut buf = Vec::new();
+        let root_offset = write_node(&root, &mut buf)?;
+
+        // 2. firstPos marks the start of the first/last-key region.
+        let first_pos = buf.len() as i64;
+        write_with_short_length(&mut buf, &first_key)?;
+        write_with_short_length(&mut buf, &last_key)?;
+
+        // 3. 24-byte footer: firstPos, keyCount, root (each i64 BE). The last 8
+        //    bytes stay `root` so CQLite's existing footer reader is unaffected.
+        buf.extend_from_slice(&first_pos.to_be_bytes());
+        buf.extend_from_slice(&key_count.to_be_bytes());
+        buf.extend_from_slice(&(root_offset as i64).to_be_bytes());
+        Ok(buf)
     }
+}
+
+/// Write a byte slice with a 2-byte big-endian unsigned-short length prefix
+/// (Cassandra `ByteBufferUtil.writeWithShortLength`). Keys longer than
+/// `u16::MAX` are rejected — a partition key cannot exceed 64 KiB in Cassandra.
+fn write_with_short_length(buf: &mut Vec<u8>, bytes: &[u8]) -> Result<()> {
+    if bytes.len() > u16::MAX as usize {
+        return Err(Error::InvalidInput(format!(
+            "partition key too long for Partitions.db short-length prefix: {} bytes",
+            bytes.len()
+        )));
+    }
+    buf.extend_from_slice(&(bytes.len() as u16).to_be_bytes());
+    buf.extend_from_slice(bytes);
+    Ok(())
 }
 
 /// Compute the canonical filter hash byte stored at the front of each partition
@@ -279,12 +343,16 @@ fn insert(node: &mut TrieBuildNode, key: &[u8], hash_byte: u8, payload: Partitio
 // Trie serialization (bottom-up, backward-delta pointers)
 // ---------------------------------------------------------------------------
 
-/// Serialize the trie into `Partitions.db` bytes.
+/// Serialize the trie into bytes with a legacy 8-byte big-endian root-offset
+/// footer (NOT the canonical Cassandra `PartitionIndex` `[firstPos|keyCount|root]`
+/// footer that [`PartitionsTrieWriter::finish`] now emits).
 ///
 /// Performs a post-order traversal so each child is fully written (and its
 /// absolute offset known) before its parent. Child pointers are encoded as
-/// backward deltas `parent_pos − child_pos`, matching the reader. The final 8
-/// bytes are the big-endian absolute offset of the root node.
+/// backward deltas `parent_pos − child_pos`, matching the reader. Retained as a
+/// trie-node-encoding helper for the unit tests that walk a node tree via the
+/// footer-based reader; production `Partitions.db` is written by `finish`.
+#[cfg(test)]
 fn serialize_trie(root: &TrieBuildNode) -> Result<Vec<u8>> {
     let mut buf = Vec::new();
     let root_offset = write_node(root, &mut buf)?;
