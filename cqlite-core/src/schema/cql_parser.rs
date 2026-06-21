@@ -243,6 +243,89 @@ fn bracketed_value(input: &str) -> IResult<&str, String> {
     )))
 }
 
+/// Parse a single-quoted CQL string literal, returning the un-escaped contents.
+///
+/// CQL escapes a single quote inside a single-quoted string by doubling it
+/// (`''`). The naive `delimited(char('\''), take_while(|c| c != '\''), char('\''))`
+/// stops at the first inner quote, which corrupts later parsing (e.g.
+/// `comment = 'Bob''s table' AND ...` would leave `s table' AND ...`
+/// unconsumed and silently drop subsequent options). This parser walks the
+/// full literal, collapses each `''` to a single `'`, and consumes through the
+/// terminating quote (Issue #852 branch-review finding).
+fn single_quoted_string(input: &str) -> IResult<&str, String> {
+    let bytes = input.as_bytes();
+    if bytes.first() != Some(&b'\'') {
+        return Err(nom::Err::Error(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Char,
+        )));
+    }
+
+    let mut value = String::new();
+    let mut i = 1usize; // skip opening quote
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            // Doubled single-quote ('') is an escaped literal quote.
+            if bytes.get(i + 1) == Some(&b'\'') {
+                value.push('\'');
+                i += 2;
+                continue;
+            }
+            // Terminating quote.
+            let rest = &input[i + 1..];
+            return Ok((rest, value));
+        }
+        // Push the next UTF-8 char starting at byte index `i`. Slicing on a
+        // char boundary is safe because the only multi-byte handling we do is
+        // ASCII single-quote detection above.
+        let ch_str = &input[i..];
+        if let Some(ch) = ch_str.chars().next() {
+            value.push(ch);
+            i += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+
+    // Unterminated string literal.
+    Err(nom::Err::Error(nom::error::Error::new(
+        input,
+        nom::error::ErrorKind::Char,
+    )))
+}
+
+/// Parse (and skip) a `CLUSTERING ORDER BY (col ASC|DESC, ...)` WITH item.
+///
+/// This item is not a `key = value` pair, so it must be matched explicitly;
+/// otherwise the generic option parser fails on it, `separated_list0` returns
+/// early, and any later `AND`-separated options (e.g. `bloom_filter_fp_chance`)
+/// are silently dropped (Issue #852 branch-review finding). The clustering
+/// order itself is captured for completeness so it is not lost, but the
+/// per-column ordering is already tracked via the schema's clustering columns.
+fn clustering_order_item(input: &str) -> IResult<&str, (String, String)> {
+    let (input, _) = keyword("clustering")(input)?;
+    let (input, _) = ws1(input)?;
+    let (input, _) = keyword("order")(input)?;
+    let (input, _) = ws1(input)?;
+    let (input, _) = keyword("by")(input)?;
+    let (input, _) = ws(input)?;
+
+    // Capture the parenthesized column-ordering list verbatim. The contents are
+    // simple (identifiers + ASC/DESC + commas) and never contain nested parens
+    // or strings, so a single-level paren scan is sufficient.
+    let (input, _) = char('(')(input)?;
+    let (input, body) = take_while(|c: char| c != ')')(input)?;
+    let (input, _) = char(')')(input)?;
+
+    Ok((
+        input,
+        (
+            "clustering order by".to_string(),
+            format!("({})", body.trim()),
+        ),
+    ))
+}
+
 /// Parse table options (WITH clause)
 fn table_options(input: &str) -> IResult<&str, HashMap<String, String>> {
     let (input, _) = ws(input)?;
@@ -258,11 +341,8 @@ fn table_options(input: &str) -> IResult<&str, HashMap<String, String>> {
                 // Map literal: {'class': 'LZ4Compressor', ...} (possibly nested).
                 // Captured verbatim so option collection can continue past it.
                 bracketed_value,
-                // String value
-                map(
-                    delimited(char('\''), take_while(|c: char| c != '\''), char('\'')),
-                    |s: &str| s.to_string(),
-                ),
+                // String value (handles doubled-single-quote `''` escaping).
+                single_quoted_string,
                 // Numeric or identifier value
                 map(
                     take_while1(|c: char| c.is_alphanumeric() || c == '_' || c == '.'),
@@ -273,7 +353,12 @@ fn table_options(input: &str) -> IResult<&str, HashMap<String, String>> {
         |(key, value)| (key, value),
     );
 
-    let (input, options) = separated_list0(tuple((ws, keyword("and"), ws)), option_pair)(input)?;
+    // A WITH item is either `CLUSTERING ORDER BY (...)` or a `key = value` pair.
+    // Both must be matched so a non-`key=value` item never stops collection and
+    // silently drops later `AND`-separated options (Issue #852).
+    let with_item = alt((clustering_order_item, option_pair));
+
+    let (input, options) = separated_list0(tuple((ws, keyword("and"), ws)), with_item)(input)?;
 
     Ok((input, options.into_iter().collect()))
 }
@@ -1405,6 +1490,77 @@ mod tests {
             schema.comments.get("compression").map(String::as_str),
             Some("{'class': 'LZ4Compressor'}"),
             "map-valued option value should be preserved verbatim, got: {:?}",
+            schema.comments
+        );
+    }
+
+    /// Issue #852 (branch review, roborev job 775): a `CLUSTERING ORDER BY (...)`
+    /// WITH item appearing BEFORE the bloom option must not stop option
+    /// collection. Previously `option_pair` could not parse the non-`key=value`
+    /// CLUSTERING item, so `separated_list0` returned early and the trailing
+    /// `AND bloom_filter_fp_chance = 1.0` was silently dropped (the writer then
+    /// fell back to 0.01 and emitted Filter.db despite the CQL disabling it).
+    #[test]
+    fn test_with_clustering_order_before_bloom_preserved() {
+        let cql = "CREATE TABLE ks.t (id int, ck int, name text, PRIMARY KEY (id, ck)) \
+                   WITH CLUSTERING ORDER BY (ck DESC) AND bloom_filter_fp_chance = 1.0";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("1.0"),
+            "bloom_filter_fp_chance must survive a preceding CLUSTERING ORDER BY, got: {:?}",
+            schema.comments
+        );
+    }
+
+    /// A `CLUSTERING ORDER BY (...)` with multiple columns and mixed
+    /// ASC/DESC ordering must also be skipped cleanly.
+    #[test]
+    fn test_with_clustering_order_multi_column_before_bloom_preserved() {
+        let cql =
+            "CREATE TABLE ks.t (id int, c1 int, c2 int, name text, PRIMARY KEY (id, c1, c2)) \
+                   WITH CLUSTERING ORDER BY (c1 ASC, c2 DESC) AND bloom_filter_fp_chance = 1.0";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("1.0"),
+            "bloom_filter_fp_chance must survive a multi-column CLUSTERING ORDER BY, got: {:?}",
+            schema.comments
+        );
+    }
+
+    /// Issue #852 (branch review, roborev job 775): a string option value with a
+    /// doubled single-quote escape (`''`) must be parsed in full so a later
+    /// `AND`-separated option survives. Previously the string parser stopped at
+    /// the first inner `'`, leaving `s table' AND ...` unconsumed and dropping
+    /// the bloom option.
+    ///
+    /// The captured comment value uses the CQL convention of un-escaping the
+    /// doubled quote, i.e. `Bob's table`.
+    #[test]
+    fn test_with_quote_escaped_comment_before_bloom_preserved() {
+        let cql = "CREATE TABLE ks.t (id int PRIMARY KEY, name text) \
+                   WITH comment = 'Bob''s table' AND bloom_filter_fp_chance = 1.0";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        assert_eq!(
+            schema
+                .comments
+                .get("bloom_filter_fp_chance")
+                .map(String::as_str),
+            Some("1.0"),
+            "bloom_filter_fp_chance must survive a quote-escaped comment, got: {:?}",
+            schema.comments
+        );
+        assert_eq!(
+            schema.comments.get("comment").map(String::as_str),
+            Some("Bob's table"),
+            "doubled single-quote must be un-escaped in the captured comment, got: {:?}",
             schema.comments
         );
     }
