@@ -93,6 +93,16 @@ pub struct TableSchema {
     /// to discard cells of a dropped column whose timestamp ≤ the drop time
     /// (Cassandra `cb34ad47`). See issues #904 (this plumbing) and #847 (the
     /// merge-side filter).
+    ///
+    /// Scope (#847): this map carries only the drop time, so the dropped column's
+    /// pre-drop cells are decoded using its CURRENT type in [`Self::columns`] (the
+    /// decode contract enforced by [`Self::validate_dropped_columns`]). That is
+    /// byte-correct when the column's type is unchanged — the common case. A
+    /// column dropped and later RE-ADDED with a DIFFERENT type is out of scope:
+    /// the historical cells would be decoded with the new type and could
+    /// misparse. Supporting per-version types requires carrying type metadata
+    /// here (or decoding from the SSTable serialization-header type) and is
+    /// follow-up work alongside the element-level representation in #899.
     #[serde(default)]
     pub dropped_columns: HashMap<String, i64>,
 }

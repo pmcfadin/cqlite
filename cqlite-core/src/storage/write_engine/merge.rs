@@ -1626,18 +1626,45 @@ impl KWayMerger {
         // `TableSchema::for_compaction_output`. Byte-correct for scalar columns at
         // row-timestamp granularity; element-level collection/UDT filtering needs
         // per-cell timestamps (#899) and is out of scope.
-        let surviving: Vec<CellData> = order
+        // Apply row-tombstone shadowing first (Step 3), then dropped-column
+        // filtering (Step 3b) as a second stage so we can tell whether the
+        // dropped-column purge is what emptied the row of real data.
+        let after_row_del: Vec<CellData> = order
             .into_iter()
             .filter_map(|col| winners.remove(&col))
             .filter(|cell| match row_del {
                 Some(d) => cell.timestamp > d,
                 None => true,
             })
+            .collect();
+
+        let surviving: Vec<CellData> = after_row_del
+            .iter()
             .filter(|cell| match dropped_columns.get(&cell.column) {
                 Some(drop_time) => cell.timestamp > *drop_time,
                 None => true,
             })
+            .cloned()
             .collect();
+
+        // Phantom-row guard (#847 review): clustering-key columns are intentionally
+        // left in the cell list (see `extract_clustering_key`) so read-back can
+        // recover them. If a clustered row's only real (non-key) data is a dropped
+        // column, the dropped-column filter removes it but the clustering-key
+        // pseudo-cells remain — which would otherwise emit a phantom live row with
+        // a key but no data, and the writer (whose schema excludes the dropped
+        // column) would serialize a key-only empty row. Suppress that: when the
+        // row HAD non-key data before the dropped-column purge and has none after,
+        // treat it as data-less. A row that was always key-only (a genuine row
+        // marker) is preserved.
+        let ck_names: std::collections::HashSet<&str> = clustering_key
+            .as_ref()
+            .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
+            .unwrap_or_default();
+        let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
+        let had_data_before = after_row_del.iter().any(is_data_cell);
+        let has_data_after = surviving.iter().any(is_data_cell);
+        let purged_to_empty = had_data_before && !has_data_after;
 
         // Step 4: build the merged result. `max()` is `Some` exactly when `surviving`
         // is non-empty, so this match needs no unreachable fallback timestamp.
@@ -1650,50 +1677,60 @@ impl KWayMerger {
         // Finding 3).
         let has_carried_metadata = !complex_deletions.is_empty() || range_deletion.is_some();
 
-        let built = match surviving.iter().map(|c| c.timestamp).max() {
-            Some(row_ts) => Some(MergeEntry::new(
+        // Emit a live row only when real data survives. `surviving` is non-empty
+        // for an ordinary live row; `!purged_to_empty` additionally suppresses a
+        // clustered row whose only data was a dropped column (phantom key-only
+        // row, see above). A row that was always key-only (genuine row marker)
+        // has `had_data_before == false`, so `purged_to_empty` is false and it is
+        // preserved.
+        let built = if !surviving.is_empty() && !purged_to_empty {
+            // `surviving` is non-empty, so `max()` is `Some`; `unwrap_or(0)` only
+            // guards the type and never triggers.
+            let row_ts = surviving.iter().map(|c| c.timestamp).max().unwrap_or(0);
+            Some(MergeEntry::new(
                 run_index,
                 key,
                 clustering_key,
                 row_ts,
                 RowData::Live { cells: surviving },
-            )),
-            // No surviving cells. If a row tombstone exists, keep the row shadowed
+            ))
+        } else if let Some(deletion_time) = row_del {
+            // No surviving data. If a row tombstone exists, keep the row shadowed
             // so downstream still emits the deletion (preserves #505/#498 absence).
-            None => match row_del {
-                Some(deletion_time) => Some(MergeEntry::new(
-                    run_index,
-                    key,
-                    clustering_key,
+            Some(MergeEntry::new(
+                run_index,
+                key,
+                clustering_key,
+                deletion_time,
+                RowData::Tombstone {
                     deletion_time,
-                    RowData::Tombstone {
-                        deletion_time,
-                        local_deletion_time: 0,
-                    },
-                )),
-                // No surviving cells AND no row tombstone, but the cluster still
-                // carries complex/range deletion metadata. Emit a metadata-only
-                // entry (an empty `Live` row) so the carried deletion metadata
-                // survives reconciliation and reaches downstream consumers
-                // (#844/#846/#899). Without this the `built.map(...)` preservation
-                // below never runs and the metadata is silently dropped.
-                //
-                // Behavior-neutral for existing cases: this only adds an entry when
-                // metadata exists that would otherwise be lost. An empty-cell `Live`
-                // produces no live cells, and the writer does not yet consume the
-                // carried metadata fields, so existing output/tests are unaffected.
-                None if has_carried_metadata => Some(MergeEntry::new(
-                    run_index,
-                    key,
-                    clustering_key,
-                    // No row/cell timestamp applies; use 0 (the carried metadata
-                    // holds its own deletion timestamps).
-                    0,
-                    RowData::Live { cells: vec![] },
-                )),
-                // Truly empty/absent row.
-                None => None,
-            },
+                    local_deletion_time: 0,
+                },
+            ))
+        } else if has_carried_metadata {
+            // No surviving data AND no row tombstone, but the cluster still carries
+            // complex/range deletion metadata. Emit a metadata-only entry (an empty
+            // `Live` row) so the carried deletion metadata survives reconciliation
+            // and reaches downstream consumers (#844/#846/#899). Without this the
+            // `built.map(...)` preservation below never runs and the metadata is
+            // silently dropped.
+            //
+            // Behavior-neutral for existing cases: this only adds an entry when
+            // metadata exists that would otherwise be lost. An empty-cell `Live`
+            // produces no live cells, and the writer does not yet consume the
+            // carried metadata fields, so existing output/tests are unaffected.
+            Some(MergeEntry::new(
+                run_index,
+                key,
+                clustering_key,
+                // No row/cell timestamp applies; use 0 (the carried metadata holds
+                // its own deletion timestamps).
+                0,
+                RowData::Live { cells: vec![] },
+            ))
+        } else {
+            // Truly empty/absent row.
+            None
         };
 
         built.map(|entry| {

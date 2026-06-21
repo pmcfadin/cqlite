@@ -311,6 +311,34 @@ fn dropped_column_cell_after_drop_time_survives_in_output() {
     );
 }
 
+/// Phantom-row guard (roborev #847 review): clustering-key columns are kept in
+/// the cell list for read-back, so a clustered row whose ONLY regular data is
+/// dropped must not emit a phantom key-only live row. Here both regular columns
+/// (`name`, `score`) are dropped, so every row's data is purged and the output
+/// must contain no rows (not key-only empties).
+#[test]
+fn clustered_row_with_all_regular_columns_dropped_emits_no_phantom_row() {
+    let temp = TempDir::new().expect("tempdir");
+    let (inputs, _) = build_input(&temp, 100); // rows id=1, ck=0..=2, name+score
+
+    let mut dropped = HashMap::new();
+    dropped.insert("name".to_string(), 150_i64);
+    dropped.insert("score".to_string(), 150_i64);
+    let drop_schema = schema_with_drops(dropped);
+
+    let out_dir = temp.path().join("out");
+    let data_path = compact(inputs, &out_dir, &drop_schema);
+
+    // Every row's only data was dropped, so the merge emits no rows at all — not
+    // even key-only phantom rows. The compacted Data.db is therefore empty.
+    let len = std::fs::metadata(&data_path).map(|m| m.len()).unwrap_or(0);
+    assert_eq!(
+        len, 0,
+        "all-purged compaction must write no rows (no key-only phantom rows); \
+         Data.db is {len} bytes"
+    );
+}
+
 /// Control: with no drop configured, `score` cells survive compaction unchanged.
 #[test]
 fn no_drop_keeps_all_columns() {
