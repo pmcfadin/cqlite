@@ -1181,6 +1181,16 @@ impl WriteEngine {
                         .map(|entry| self.merge_entry_to_mutation(entry))
                         .collect::<Result<Vec<_>>>()?;
 
+                    // If every merged row was metadata-only, the partition has no
+                    // writer-emittable content. Skip `write_partition` to avoid a
+                    // phantom EMPTY partition (header/end marker + Index/Filter/
+                    // Summary/statistics registration) in the output SSTable, and
+                    // do not count it as an output partition or row (#886
+                    // branch-review).
+                    if mutations.is_empty() {
+                        continue;
+                    }
+
                     // Count rows actually written (skipped metadata-only entries
                     // produce no row, so they must not inflate the stats).
                     let row_count = mutations.len() as u64;

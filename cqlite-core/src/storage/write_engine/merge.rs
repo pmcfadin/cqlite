@@ -1235,8 +1235,6 @@ impl KWayMerger {
         };
 
         while let MergeStep::Partition { key, rows } = self.step()? {
-            stats.output_partitions += 1;
-
             // Skip metadata-only entries on the writer path (#886/#899
             // branch-review). They exist only to carry complex/range deletion
             // metadata through the in-memory merge stream; the writer does not
@@ -1249,6 +1247,17 @@ impl KWayMerger {
                 .map(|entry| Self::merge_entry_to_mutation(entry, &self.schema))
                 .collect::<Result<Vec<_>>>()?;
 
+            // If every merged row was metadata-only, the partition has no
+            // writer-emittable content. Skipping `write_partition` here avoids a
+            // phantom EMPTY partition (header/end marker + Index/Filter/Summary/
+            // statistics registration) in the output SSTable. Such a partition
+            // must not be counted as an output partition or row (#886
+            // branch-review).
+            if mutations.is_empty() {
+                continue;
+            }
+
+            stats.output_partitions += 1;
             stats.output_rows += mutations.len() as u64;
 
             output_writer.write_partition(key, mutations)?;
@@ -5716,5 +5725,202 @@ mod issue_822_merge_ordering_semantics {
         // is referenced to keep the wire-format mirror complete and avoid an
         // unused-const warning under -D warnings.
         let _ = ROW_HAS_DELETION;
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #886 (Epic #842) branch-review: phantom EMPTY partition on the writer path
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A partition whose ONLY merged row is a metadata-only no-op (empty Live cells
+// carrying complex/range deletion metadata) must NOT produce a partition in the
+// output SSTable. After filtering those entries the `mutations` Vec is empty;
+// calling `SSTableWriter::write_partition` with no mutations would still emit a
+// partition header/end marker and register the key in Index/Filter/Summary/
+// statistics — a PHANTOM empty partition. The writer path must skip such
+// partitions entirely and not count them in the output partition/row stats.
+#[cfg(all(test, feature = "write-support"))]
+mod issue_886_empty_partition_skip {
+    use super::*;
+    use crate::schema::{KeyColumn, TableSchema};
+    use crate::storage::write_engine::mutation::{DecoratedKey, PartitionKey};
+    use crate::types::{TombstoneInfo, TombstoneType};
+    use std::collections::HashMap;
+
+    /// Single-column `int` partition-key schema with one regular `name` column.
+    fn schema() -> TableSchema {
+        TableSchema {
+            keyspace: "i886".to_string(),
+            table: "phantom".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![crate::schema::Column {
+                name: "name".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+        }
+    }
+
+    /// Valid on-disk partition-key bytes for `id = n` under [`schema`], built
+    /// through the shared codec so the merge→writer path can decode them.
+    fn pk_bytes(schema: &TableSchema, n: i32) -> Vec<u8> {
+        PartitionKey::single("id", Value::Integer(n))
+            .to_bytes(schema)
+            .expect("encode int partition key")
+    }
+
+    /// A range deletion so an empty Live entry classifies as metadata-only.
+    fn range_deletion() -> RangeDeletion {
+        RangeDeletion {
+            tombstone: TombstoneInfo {
+                deletion_time: 8888,
+                tombstone_type: TombstoneType::RangeTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            },
+        }
+    }
+
+    /// An in-memory run yielding a fixed list of `MergeEntry`s in order.
+    struct VecIterator(std::vec::IntoIter<MergeEntry>);
+    impl SSTableRowIterator for VecIterator {
+        fn next(&mut self) -> Option<Result<MergeEntry>> {
+            self.0.next().map(Ok)
+        }
+    }
+
+    fn merger_over(entries: Vec<MergeEntry>, schema: TableSchema) -> KWayMerger {
+        KWayMerger {
+            runs: vec![RunReader::new(Box::new(VecIterator(entries.into_iter())))],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
+            schema,
+        }
+    }
+
+    /// END-TO-END writer-path test (#886): a partition whose ONLY merged row is a
+    /// metadata-only no-op must produce NO partition in the output SSTable, must
+    /// not be counted in `MergeStats.output_partitions`/`output_rows`, and must
+    /// not register a key in Index/Filter/Summary/statistics — proven by the
+    /// writer's authoritative on-disk `SSTableInfo.partition_count`. A sibling
+    /// NORMAL partition in the same merge must still be written unchanged.
+    #[tokio::test]
+    async fn empty_partition_is_skipped_on_writer_path() {
+        let schema = schema();
+
+        // Partition token 1: ONLY a metadata-only no-op (empty Live + range
+        // deletion). After filtering, this partition's mutations are empty.
+        let meta_only = MergeEntry::new(
+            0,
+            DecoratedKey::new(1, pk_bytes(&schema, 1)),
+            None,
+            0,
+            RowData::Live { cells: vec![] },
+        )
+        .with_range_deletion(range_deletion());
+        assert!(
+            meta_only.is_metadata_only_no_op(),
+            "test precondition: the token-1 entry must be a metadata-only no-op"
+        );
+
+        // Partition token 2: a NORMAL live row with a real cell — must be written.
+        let live = MergeEntry::new(
+            0,
+            DecoratedKey::new(2, pk_bytes(&schema, 2)),
+            None,
+            100,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "name".to_string(),
+                    Value::Text("survivor".to_string()),
+                    100,
+                )],
+            },
+        );
+
+        let merger = merger_over(vec![meta_only, live], schema.clone());
+
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
+            temp_dir.path().to_path_buf(),
+            1,
+            &schema,
+        )
+        .expect("create writer");
+
+        let stats = merger.merge(&mut writer).expect("merge must succeed");
+
+        // The metadata-only partition contributes nothing to the output stats.
+        assert_eq!(
+            stats.output_partitions, 1,
+            "only the normal partition counts as an output partition (no phantom)"
+        );
+        assert_eq!(
+            stats.output_rows, 1,
+            "only the normal partition's single live row counts toward output rows"
+        );
+
+        // The writer's on-disk partition counter is incremented exactly once per
+        // `write_partition` call. If the phantom partition had been written it
+        // would be 2; the skip keeps it at 1.
+        let info = writer.finish().await.expect("finish must succeed");
+        assert_eq!(
+            info.partition_count, 1,
+            "the output SSTable must contain exactly ONE partition; a phantom EMPTY \
+             partition for the metadata-only-only key would make this 2"
+        );
+    }
+
+    /// Guard: a partition with real content is unaffected — both a normal live
+    /// partition AND a metadata-only no-op coexisting in the SAME partition (the
+    /// live row survives) still writes that one partition.
+    #[tokio::test]
+    async fn partition_with_real_content_is_still_written() {
+        let schema = schema();
+
+        let live = MergeEntry::new(
+            0,
+            DecoratedKey::new(7, pk_bytes(&schema, 7)),
+            None,
+            200,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "name".to_string(),
+                    Value::Text("keep-me".to_string()),
+                    200,
+                )],
+            },
+        );
+
+        let merger = merger_over(vec![live], schema.clone());
+
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
+            temp_dir.path().to_path_buf(),
+            1,
+            &schema,
+        )
+        .expect("create writer");
+
+        let stats = merger.merge(&mut writer).expect("merge must succeed");
+        assert_eq!(stats.output_partitions, 1);
+        assert_eq!(stats.output_rows, 1);
+
+        let info = writer.finish().await.expect("finish must succeed");
+        assert_eq!(
+            info.partition_count, 1,
+            "a normal partition must still be written"
+        );
     }
 }
