@@ -1280,11 +1280,19 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
 ///
 /// Runs a merge pre-pass with the decode `schema` (so the dropped-column filter
 /// applies identically to the write pass) and collects the names of
-/// `dropped_columns` that appear in at least one surviving `Live` cell — i.e.
-/// columns re-added with writes after their drop time. `compact_sstables` keeps
-/// exactly these dropped columns in the output writer schema; the rest are
+/// `dropped_columns` that appear in at least one surviving `Live` cell OR a
+/// surviving (post-drop) complex-deletion marker — i.e. columns re-added with
+/// writes (or a collection deletion) after their drop time. `compact_sstables`
+/// keeps exactly these dropped columns in the output writer schema; the rest are
 /// stripped from the output header. Stops early once every dropped column has
 /// been observed surviving.
+///
+/// Complex deletions (roborev High, #847): `reconcile_cluster` purges complex
+/// deletions on dropped columns with the SAME boundary as cells
+/// (`marked_for_delete_at > drop_time` survives), so any complex deletion still
+/// present on a reconciled entry is a genuine post-drop survivor and must keep
+/// its column in the output schema — otherwise the writer would emit a
+/// `CellOperation::ComplexDeletion` for a column absent from the output header.
 fn compute_surviving_dropped_columns(
     input_paths: Vec<PathBuf>,
     schema: &TableSchema,
@@ -1304,6 +1312,14 @@ fn compute_surviving_dropped_columns(
                             if schema.dropped_columns.contains_key(&cell.column) {
                                 surviving.insert(cell.column.clone());
                             }
+                        }
+                    }
+                    // A retained complex-deletion marker is a post-drop survivor
+                    // (already filtered by `reconcile_cluster`), so its dropped
+                    // column must stay in the output schema (#847).
+                    for cd in &row.complex_deletions {
+                        if schema.dropped_columns.contains_key(&cd.column) {
+                            surviving.insert(cd.column.clone());
                         }
                     }
                 }
@@ -1860,6 +1876,22 @@ impl KWayMerger {
         let had_data_before = after_row_del.iter().any(is_data_cell);
         let has_data_after = surviving.iter().any(is_data_cell);
         let purged_to_empty = had_data_before && !has_data_after;
+
+        // Step 3c: dropped-column filtering for COMPLEX DELETIONS (roborev High,
+        // #847). Complex-deletion metadata is writer-visible (a dropped collection's
+        // pre-drop marker would otherwise emit a `CellOperation::ComplexDeletion` for
+        // a column the output schema no longer carries → header divergence). Apply
+        // the SAME boundary used for cells: a marker whose `marked_for_delete_at`
+        // is strictly AFTER the column's `drop_time` survives (the column was
+        // re-added), while `<= drop_time` is purged. This MUST run before computing
+        // `has_carried_metadata` so a column whose only survivor is a purged complex
+        // deletion does not emit a phantom metadata-only entry, and a column whose
+        // only survivor is a post-drop complex deletion is correctly retained (and
+        // matched by `compute_surviving_dropped_columns`, which mirrors this rule).
+        complex_deletions.retain(|cd| match dropped_columns.get(&cd.column) {
+            Some(drop_time) => cd.marked_for_delete_at > *drop_time,
+            None => true,
+        });
 
         // Step 4: build the merged result.
         //
@@ -5542,6 +5574,108 @@ mod issue_886_merge_entry_enrichment {
         assert_eq!(a, b);
         assert!(a.complex_deletions.is_empty());
         assert_eq!(a.range_deletion, None);
+    }
+
+    /// Regression (roborev High, #847): a DROPPED complex column carrying ONLY a
+    /// PRE-drop complex-deletion marker (`marked_for_delete_at <= drop_time`) must
+    /// be purged by the dropped-column filter — exactly like a pre-drop cell. With
+    /// no other surviving data, no row tombstone, and the purged complex deletion,
+    /// reconciliation must NOT emit a metadata-only entry: the column is stripped
+    /// from the output schema, so a metadata-only marker for it would diverge from
+    /// the output header.
+    #[test]
+    fn reconcile_cluster_purges_pre_drop_complex_deletion_under_dropped_column() {
+        let complex = ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: 100, // <= drop_time → purged
+            local_deletion_time: 1_700_000_000,
+        };
+        let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_complex_deletions(vec![complex]);
+
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("tags".to_string(), 150_i64); // drop_time=150 >= marker ts=100
+
+        assert!(
+            KWayMerger::reconcile_cluster(None, vec![row], &dropped).is_none(),
+            "a pre-drop complex deletion on a dropped column must be purged, \
+             leaving nothing to emit (no metadata-only entry for a stripped column)"
+        );
+    }
+
+    /// Regression (roborev High, #847): a DROPPED complex column carrying a
+    /// POST-drop complex-deletion marker (`marked_for_delete_at > drop_time`) must
+    /// SURVIVE — the column was re-added after the drop. Reconciliation emits a
+    /// metadata-only entry carrying exactly the surviving marker, and the column
+    /// is retained in the output schema (see the pre-pass test below).
+    #[test]
+    fn reconcile_cluster_retains_post_drop_complex_deletion_under_dropped_column() {
+        let complex = ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: 300, // > drop_time → retained
+            local_deletion_time: 1_700_000_000,
+        };
+        let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_complex_deletions(vec![complex.clone()]);
+
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("tags".to_string(), 150_i64); // drop_time=150 < marker ts=300
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped)
+            .expect("a post-drop complex deletion must survive as a metadata-only entry");
+        assert_eq!(
+            merged.complex_deletions,
+            vec![complex],
+            "the surviving post-drop complex deletion must be carried through"
+        );
+        match &merged.row_data {
+            RowData::Live { cells } => assert!(cells.is_empty()),
+            other => panic!("expected empty Live, got {other:?}"),
+        }
+    }
+
+    /// Boundary mirror (roborev High, #847): the complex-deletion drop boundary
+    /// must match the cell boundary EXACTLY — `marked_for_delete_at == drop_time`
+    /// is PURGED (`<=` is purged, only `>` survives), identical to a cell whose
+    /// `timestamp == drop_time`.
+    #[test]
+    fn reconcile_cluster_complex_deletion_at_drop_time_is_purged() {
+        let complex = ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: 150, // == drop_time → purged (boundary is <=)
+            local_deletion_time: 1_700_000_000,
+        };
+        let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_complex_deletions(vec![complex]);
+
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("tags".to_string(), 150_i64);
+
+        assert!(
+            KWayMerger::reconcile_cluster(None, vec![row], &dropped).is_none(),
+            "marked_for_delete_at == drop_time must be purged (mirrors cell ts == drop_time)"
+        );
+    }
+
+    /// A complex deletion on a column that is NOT dropped is never filtered,
+    /// regardless of its `marked_for_delete_at`.
+    #[test]
+    fn reconcile_cluster_complex_deletion_on_undropped_column_is_kept() {
+        let complex = ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: 100,
+            local_deletion_time: 1_700_000_000,
+        };
+        let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_complex_deletions(vec![complex.clone()]);
+
+        // drop map covers a DIFFERENT column.
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("other".to_string(), 1_000_000_i64);
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped)
+            .expect("undropped complex deletion must survive");
+        assert_eq!(merged.complex_deletions, vec![complex]);
     }
 }
 
