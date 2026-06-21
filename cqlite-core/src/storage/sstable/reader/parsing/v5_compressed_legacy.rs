@@ -1853,17 +1853,38 @@ impl V5CompressedLegacyParser {
         complex: CompactionComplexColumns,
         row_header_opt: &Option<RowHeader>,
         row_ts: i64,
+        schema: &TableSchema,
     ) -> crate::storage::sstable::reader::compaction_row::CompactionRowData {
         use crate::storage::sstable::reader::compaction_row::{
             CompactionRowData, ComplexColumn, SimpleCell,
         };
 
         if let Some(h) = row_header_opt.as_ref().filter(|h| h.is_row_tombstone()) {
+            // #912: capture the clustering prefix that the parser surfaced into
+            // `cells` (see `parse_row_data_with_offset_impl`, Issue #229). Without
+            // it every clustering-row tombstone — and the partition's static row —
+            // would collapse into the single `None` clustering bucket during merge,
+            // mis-reconciling against each other. Build the columns in schema
+            // order; a clustering column missing from `cells` (partial/range
+            // boundary) yields an empty vec → the `None` bucket, the previous
+            // behavior.
+            let mut clustering: Vec<(String, Value)> =
+                Vec::with_capacity(schema.clustering_keys.len());
+            for ck in &schema.clustering_keys {
+                match cells.get(&ck.name) {
+                    Some(v) => clustering.push((ck.name.clone(), v.clone())),
+                    None => {
+                        clustering.clear();
+                        break;
+                    }
+                }
+            }
             return CompactionRowData::Tombstone {
                 deletion_time: h.row_tombstone_deletion_time(),
                 // localDeletionTime in SECONDS (GC-grace clock). Preserve the
                 // far-future [2^31, 2^32) encoding via wrapping `as u32 as i32`.
                 local_deletion_time: h.local_deletion_time.unwrap_or(0),
+                clustering,
             };
         }
 
@@ -2160,6 +2181,7 @@ impl V5CompressedLegacyParser {
                             complex_capture,
                             &row_header_opt,
                             row_ts,
+                            schema,
                         );
 
                         pending.push(CompactionRow {
