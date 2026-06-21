@@ -160,7 +160,7 @@ pub struct PartitionTombstone {
 ///
 /// Stored as markers within the partition data and shadows all rows
 /// in the specified clustering key range.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RangeTombstone {
     /// Start bound (inclusive or exclusive)
     pub start: ClusteringBound,
@@ -176,7 +176,7 @@ pub struct RangeTombstone {
 ///
 /// Defines the boundary of a range deletion. Can be inclusive or exclusive,
 /// or represent the minimum/maximum possible clustering key.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ClusteringBound {
     /// Inclusive bound (clustering key is part of the deletion range)
     Inclusive(ClusteringKey),

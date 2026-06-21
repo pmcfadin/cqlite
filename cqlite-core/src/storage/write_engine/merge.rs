@@ -57,7 +57,7 @@ use crate::error::{Error, Result};
 #[cfg(feature = "write-support")]
 use crate::schema::TableSchema;
 #[cfg(feature = "write-support")]
-use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey};
+use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey, RangeTombstone};
 #[cfg(feature = "write-support")]
 use crate::types::Value;
 
@@ -87,10 +87,33 @@ pub struct MergeEntry {
     pub timestamp: i64,
     /// Row data (live cells or tombstone)
     pub row_data: RowData,
+    /// Complex-deletion markers for the multi-cell columns of this row
+    /// (issue #886 substrate).
+    ///
+    /// **Carry-only.** Threaded so per-path merge (#844) and
+    /// shadow-before-purge (#887) can preserve collection/UDT deletion
+    /// timestamps, but nothing populates or applies it yet — the reader still
+    /// reduces complex deletions to a boolean upstream. Population lands in
+    /// #899. Empty for rows with no complex deletions.
+    pub complex_deletions: Vec<ComplexDeletion>,
+    /// Range-deletion marker covering a span of clustering keys (issue #886
+    /// substrate).
+    ///
+    /// **Carry-only.** A first-class slot so range tombstones can flow through
+    /// the merge stream instead of being skipped by the parser; applying them
+    /// to shadow covered cells is the follow-up #846. `None` when this entry
+    /// carries no range deletion.
+    pub range_deletion: Option<RangeTombstone>,
 }
 
 impl MergeEntry {
-    /// Create a new merge entry
+    /// Create a new merge entry.
+    ///
+    /// The carry-only #886 substrate fields (`complex_deletions`,
+    /// `range_deletion`) default to empty/`None`; populate them with
+    /// [`with_complex_deletions`](Self::with_complex_deletions) /
+    /// [`with_range_deletion`](Self::with_range_deletion) once the reader emit
+    /// surfaces them (#899).
     pub fn new(
         run_index: usize,
         key: DecoratedKey,
@@ -104,7 +127,21 @@ impl MergeEntry {
             clustering_key,
             timestamp,
             row_data,
+            complex_deletions: Vec::new(),
+            range_deletion: None,
         }
+    }
+
+    /// Attach complex-deletion markers (issue #886 substrate; carry-only).
+    pub fn with_complex_deletions(mut self, complex_deletions: Vec<ComplexDeletion>) -> Self {
+        self.complex_deletions = complex_deletions;
+        self
+    }
+
+    /// Attach a range-deletion marker (issue #886 substrate; carry-only).
+    pub fn with_range_deletion(mut self, range_deletion: RangeTombstone) -> Self {
+        self.range_deletion = Some(range_deletion);
+        self
     }
 }
 
@@ -194,6 +231,46 @@ pub struct CellData {
     pub timestamp: i64,
     /// TTL in seconds (None = no expiration)
     pub ttl: Option<u32>,
+    /// Cell path for a complex (collection / non-frozen UDT) element — the
+    /// serialized element key/index that distinguishes one element of a
+    /// multi-cell column from another (issue #886 substrate).
+    ///
+    /// **Carry-only.** This field is threaded through the merge entry so that
+    /// per-element reconciliation can become byte-faithful, but nothing
+    /// populates or consumes it yet: the reader still collapses collections to
+    /// a single whole-column [`CellData`] and the writer does not read this
+    /// field. Population (per-element reader emit) and consumption (per-path
+    /// merge) land in the follow-up #899. `None` for simple cells.
+    pub cell_path: Option<Vec<u8>>,
+    /// Local deletion time in **seconds** since the Unix epoch for this cell
+    /// (the on-disk `localDeletionTime`), used by gc_grace purging and
+    /// expiring-cell tie-breaks (issue #886 substrate).
+    ///
+    /// **Carry-only.** Threaded for #845/#848 but not yet populated by the
+    /// reader or consumed by the merge/writer. `None` when unknown.
+    pub local_deletion_time: Option<i32>,
+}
+
+/// Complex (collection / non-frozen UDT) deletion marker for one column
+/// (issue #886 substrate).
+///
+/// Cassandra writes a complex-deletion marker ahead of a multi-cell column's
+/// elements to delete every element written at or before `marked_for_delete_at`.
+/// CQLite currently reduces this to a boolean and discards the timestamps; this
+/// first-class entity preserves them so per-path merge (#844) and
+/// shadow-before-purge (#887) can be byte-faithful.
+///
+/// **Carry-only.** Carried on [`MergeEntry`] but not yet populated by the reader
+/// or applied during the merge — that is the follow-up #899/#887.
+#[cfg(feature = "write-support")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComplexDeletion {
+    /// Name of the complex column this deletion covers.
+    pub column: String,
+    /// Deletion timestamp (`markedForDeleteAt`) in microseconds since the epoch.
+    pub marked_for_delete_at: i64,
+    /// Local deletion time in seconds since the epoch.
+    pub local_deletion_time: i32,
 }
 
 /// Result of a merge step (incremental merge)
@@ -742,6 +819,8 @@ impl SSTableRowIteratorAdapter {
                         value: val.clone(),
                         timestamp: cell_ts,
                         ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
                     });
                 }
                 Ok(RowData::Live { cells })
@@ -753,6 +832,8 @@ impl SSTableRowIteratorAdapter {
                     value: other.clone(),
                     timestamp: row_timestamp,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             }),
         }
@@ -1557,6 +1638,8 @@ mod tests {
                 value: Value::Text("Alice".to_string()),
                 timestamp: 1000,
                 ttl: None,
+                cell_path: None,
+                local_deletion_time: None,
             }],
         };
 
@@ -1592,6 +1675,8 @@ mod tests {
             value: Value::Integer(30),
             timestamp: 1234567890,
             ttl: Some(3600),
+            cell_path: None,
+            local_deletion_time: None,
         };
 
         assert_eq!(cell.column, "age");
@@ -1630,6 +1715,8 @@ mod tests {
                     value: Value::Text("Alice".to_string()),
                     timestamp: 1000,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -1684,6 +1771,8 @@ mod tests {
                     value: Value::Text("Newer".to_string()),
                     timestamp: 1000,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -1699,6 +1788,8 @@ mod tests {
                     value: Value::Text("Older".to_string()),
                     timestamp: 1000,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -1783,6 +1874,8 @@ mod tests {
                     value: Value::Text("survivor-if-buggy".to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -1888,6 +1981,8 @@ mod tests {
                     value: Value::Text("alice".to_string()),
                     timestamp: 100,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -1904,6 +1999,8 @@ mod tests {
                     value: Value::Integer(42),
                     timestamp: 200,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2015,6 +2112,8 @@ mod tests {
                     value: Value::Integer(42),
                     timestamp: 100,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2037,6 +2136,8 @@ mod tests {
                     }),
                     timestamp: 100,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2158,6 +2259,8 @@ mod tests {
                     value: Value::Text(newer_file_value.to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2173,6 +2276,8 @@ mod tests {
                     value: Value::Text(older_file_value.to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2281,12 +2386,16 @@ mod tests {
                         value: Value::Text("old".to_string()),
                         timestamp: 100,
                         ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
                     },
                     CellData {
                         column: "extra".to_string(),
                         value: Value::Text("a-only".to_string()),
                         timestamp: 100,
                         ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -2303,6 +2412,8 @@ mod tests {
                     value: Value::Text("new".to_string()),
                     timestamp: 200,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2399,6 +2510,8 @@ mod tests {
                     value: Value::Text("old".to_string()),
                     timestamp: 100,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2423,6 +2536,8 @@ mod tests {
                     value: Value::Integer(7),
                     timestamp: 300,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2500,6 +2615,8 @@ mod tests {
                     value: Value::Text("doomed".to_string()),
                     timestamp: 100,
                     ttl: None,
+                    cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2566,6 +2683,8 @@ mod tests {
             value: Value::Text("Old".to_string()),
             timestamp: 1000,
             ttl: None,
+            cell_path: None,
+            local_deletion_time: None,
         };
 
         let cell2 = CellData {
@@ -2573,6 +2692,8 @@ mod tests {
             value: Value::Text("New".to_string()),
             timestamp: 2000, // Higher timestamp wins
             ttl: None,
+            cell_path: None,
+            local_deletion_time: None,
         };
 
         // Cell2 should win in last-write-wins merge
@@ -2624,12 +2745,16 @@ mod tests {
                         value: Value::Text("Alice".to_string()),
                         timestamp: 999_000_000,
                         ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
                     },
                     CellData {
                         column: "age".to_string(),
                         value: Value::Integer(30),
                         timestamp: 999_000_000,
                         ttl: Some(3600),
+                        cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -3393,6 +3518,8 @@ mod merge_property_tests {
                             value: Value::Integer(ts as i32),
                             timestamp: ts,
                             ttl: None,
+                            cell_path: None,
+                            local_deletion_time: None,
                         }],
                     },
                 )
@@ -3503,6 +3630,8 @@ mod merge_property_tests {
                         value: Value::Integer(42),
                         timestamp: ts_write,
                         ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
                     }],
                 },
             );
@@ -3870,6 +3999,8 @@ mod issue_823_complex_column_merge {
                 value: Value::List(vec![Value::Text("b".to_string())]),
                 timestamp: 200,
                 ttl: None,
+                cell_path: None,
+                local_deletion_time: None,
             }],
         );
         let older = live(
@@ -3880,6 +4011,8 @@ mod issue_823_complex_column_merge {
                 value: Value::List(vec![Value::Text("a".to_string())]),
                 timestamp: 100,
                 ttl: None,
+                cell_path: None,
+                local_deletion_time: None,
             }],
         );
 
@@ -3935,6 +4068,8 @@ mod issue_823_complex_column_merge {
                 value: mk_udt("city", "SF"),
                 timestamp: 200,
                 ttl: None,
+                cell_path: None,
+                local_deletion_time: None,
             }],
         );
         let older = live(
@@ -3945,6 +4080,8 @@ mod issue_823_complex_column_merge {
                 value: mk_udt("zip", "94105"),
                 timestamp: 100,
                 ttl: None,
+                cell_path: None,
+                local_deletion_time: None,
             }],
         );
 
@@ -4052,6 +4189,8 @@ mod issue_823_complex_column_merge {
                 }),
                 timestamp: 100,
                 ttl: None,
+                cell_path: None,
+                local_deletion_time: None,
             }],
         );
 
@@ -4251,6 +4390,8 @@ mod issue_822_merge_ordering_semantics {
                         value: Value::Text(format!("row-{ck}")),
                         timestamp: TS,
                         ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
                     }],
                 },
             )
@@ -4303,6 +4444,8 @@ mod issue_822_merge_ordering_semantics {
             value: Value::Text("c".to_string()),
             timestamp: TS,
             ttl: None,
+            cell_path: None,
+            local_deletion_time: None,
         };
 
         // Expiring (TTL) live cell for column "v", in the NEWER file (run 0).
@@ -4321,6 +4464,8 @@ mod issue_822_merge_ordering_semantics {
                         value: Value::Text("expiring-if-buggy".to_string()),
                         timestamp: TS,
                         ttl: Some(3600),
+                        cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -4346,6 +4491,8 @@ mod issue_822_merge_ordering_semantics {
                         }),
                         timestamp: TS,
                         ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -4395,6 +4542,8 @@ mod issue_822_merge_ordering_semantics {
             value: Value::Text("c".to_string()),
             timestamp: TS,
             ttl: None,
+            cell_path: None,
+            local_deletion_time: None,
         };
 
         let tombstone = MergeEntry::new(
@@ -4416,6 +4565,8 @@ mod issue_822_merge_ordering_semantics {
                         }),
                         timestamp: TS,
                         ttl: None,
+                        cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -4434,6 +4585,8 @@ mod issue_822_merge_ordering_semantics {
                         value: Value::Text("expiring-if-buggy".to_string()),
                         timestamp: TS,
                         ttl: Some(3600),
+                        cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -4624,6 +4777,8 @@ mod issue_822_merge_ordering_semantics {
             }),
             timestamp: 1,
             ttl: None,
+            cell_path: None,
+            local_deletion_time: None,
         };
         assert!(KWayMerger::is_cell_tombstone(&tomb));
         assert!(
@@ -4636,6 +4791,8 @@ mod issue_822_merge_ordering_semantics {
             value: Value::Text("x".to_string()),
             timestamp: 1,
             ttl: Some(60),
+            cell_path: None,
+            local_deletion_time: None,
         };
         assert!(
             !KWayMerger::is_cell_tombstone(&expiring),
