@@ -11,6 +11,8 @@
 // Submodules
 mod block_io;
 mod cache;
+/// Per-element / per-cell compaction read contract (epic #899, Phase A).
+pub mod compaction_row;
 mod component_loading;
 mod compression;
 mod data_access;
@@ -33,6 +35,11 @@ mod types;
 pub use types::{
     BlockMeta, CachedBlock, IntegrityCheckResult, IntegrityStatus, SSTableReader,
     SSTableReaderConfig, SSTableReaderHealthMetrics, SSTableReaderStats,
+};
+
+// Re-export the per-element compaction read contract (epic #899, Phase A).
+pub use compaction_row::{
+    CompactionRow, CompactionRowData, ComplexColumn, ComplexElement, SimpleCell,
 };
 
 // Re-export V5CompressedLegacyParser for integration testing (Issue #166 regression tests)

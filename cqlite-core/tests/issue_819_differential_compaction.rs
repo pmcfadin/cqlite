@@ -6,15 +6,14 @@
 //!
 //! * **Tier 2 — logical merge equivalence (THE GATE).** Walk both compaction
 //!   outputs partition-by-partition / cell-by-cell and assert the surviving
-//!   tuples are identical. The tuple carries all OBSERVABLE merge-affecting
-//!   metadata the read model surfaces, not just the value: partition key,
-//!   clustering key (+ row vs row-tombstone kind), column id, raw value bytes,
-//!   write timestamp, TTL presence, cell/row deletion info, and the row
-//!   tombstone's local-deletion-time. It does NOT carry an expiring cell's
-//!   local-deletion-time or a complex (collection/UDT) cell's per-path layout:
-//!   those are NOT observable from the merge read model (finding #823), so they
-//!   are downgraded to OBSERVABLE-ONLY (detected via [`ObservabilityCaveats`])
-//!   rather than asserted. See [`CanonicalTuple`].
+//!   tuples are identical over EVERY merge-affecting field: partition key,
+//!   clustering key (+ row vs row-tombstone kind), the row tombstone's deletion
+//!   time + local-deletion-time, and per-cell column id, `cell_path`, raw value
+//!   bytes, write timestamp, TTL, local-deletion-time, and is_deleted. Epic #899
+//!   Phase C flipped the compaction read→merge→write path to per-element emit, so
+//!   the previous OBSERVABLE-ONLY downgrade (per-cell writetime, expiring-cell
+//!   LDT, and complex/collection per-path layout were not surfaced — finding #823)
+//!   is REMOVED and the gate is now STRICT over all of them. See [`CanonicalTuple`].
 //!
 //! * **Tier 1 — real-node load-path validity (THE GATE).** The output is shaped
 //!   so a live Cassandra 5.0 node can load it: generation/file naming, TOC.txt
@@ -98,56 +97,56 @@ enum RowKind {
 
 /// A single merge-affecting cell within a surviving row.
 ///
-/// This is the column-level unit of the Tier-2 tuple. It carries the cell fields
-/// the CQLite merge READ MODEL surfaces: column id, raw value bytes, and the
-/// (row-level) timestamp/TTL slots described below.
+/// This is the column-level unit of the Tier-2 tuple. It carries EVERY
+/// merge-affecting field the CQLite compaction read model now surfaces.
 ///
-/// HONEST SCOPE (finding #823, issue #819 reviewer notes D-1 / the timestamp+TTL
-/// note): the merge read model (`CellData` in merge.rs) is lossy about per-cell
-/// liveness. Specifically, `SSTableRowIteratorAdapter::value_to_row_data`:
-/// - sets every live cell's `ttl` to `None` (TTL is **not surfaced** at all), and
-/// - makes live cells **inherit the ROW timestamp** (Issue #533) — so `timestamp`
-///   here is the row write-time, NOT each cell's own writetime.
-///
-/// It also has **no per-cell local-deletion-time** and **no complex-cell path**.
-///
-/// Consequence: this tuple cannot — and does not pretend to — gate differences that
-/// live only in **per-cell writetime**, **TTL / expiring-cell LDT**, or **complex
-/// per-path layout**: two outputs differing ONLY in those would compare EQUAL here.
-/// We therefore do NOT claim unqualified "Tier-2 equivalence" over rows whose cells
-/// carry such metadata; [`observability_caveats`] detects them (expiring/TTL cells
-/// and complex collection/UDT cells) and the equivalence assertion downgrades to
-/// "observable-metadata equivalence only", refusing to over-claim a gate it cannot
-/// enforce. Cell-tombstone deletion time IS compared (it rides in `value_bytes`).
-/// If the merge stream gains real per-cell writetime / TTL / LDT / complex-path
-/// fields, extend this struct and [`CanonicalTuple::from_partition`] in lock-step,
-/// surface them in [`observability_caveats`], and tighten the claim.
+/// EPIC #899 PHASE C: the previous "honest scope" caveat (the read model was
+/// lossy about per-cell writetime / TTL / per-cell LDT / complex per-path layout)
+/// no longer holds for the compaction read path. The reader surfaces the per-cell
+/// `write_timestamp_micros`, the per-cell `ttl` and expiring-cell
+/// `local_deletion_time` (from `cell_meta`), and — for non-frozen collections —
+/// one per-element cell carrying its own `cell_path` and per-element ts/ttl/ldt.
+/// So this struct captures all of them and the equivalence assertion is STRICT
+/// over every field (no observable-only downgrade). Cell-tombstone deletion time
+/// rides in `value_bytes`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CanonicalCell {
     /// Column identifier (name in the CQLite model).
     column: String,
+    /// For a complex (collection / non-frozen UDT) element: the element's
+    /// authoritative on-disk `cell_path` (None for a simple, single-cell column).
+    /// Two writes to different paths of the same column are now distinct cells
+    /// (Phase C per-element emit), so this participates in identity/ordering.
+    cell_path: Option<Vec<u8>>,
     /// Raw value bytes — the merge-affecting payload, compared byte-for-byte
     /// rather than by rendered string so encoding regressions are visible. For a
     /// cell tombstone (`Value::Tombstone`) these bytes include the cell's own
     /// `deletion_time` + tombstone type (via the Debug catch-all in
-    /// [`value_to_bytes`]), so cell-tombstone deletion time IS compared; what is
-    /// NOT observable is an EXPIRING cell's local-deletion-time (see scope note).
+    /// [`value_to_bytes`]).
     value_bytes: Vec<u8>,
     /// Write timestamp (microseconds). Drives last-write-wins reconciliation.
+    /// For a complex element this is the PER-ELEMENT timestamp (Phase C); for a
+    /// simple cell it is the cell-own writetime surfaced from `cell_meta`.
     timestamp: i64,
-    /// TTL in seconds (None = no expiry). NOTE: TTL presence is observable, but the
-    /// resulting per-cell local-deletion-time is NOT surfaced by the read model.
+    /// TTL in seconds (None = no expiry).
     ttl: Option<u32>,
+    /// Per-cell `localDeletionTime` in seconds for an expiring / deleted cell
+    /// (None when not applicable). Now surfaced by the read model (Phase C), so
+    /// two outputs differing only in expiring-cell LDT no longer compare equal.
+    local_deletion_time: Option<i32>,
+    /// Authoritative per-element IS_DELETED flag (always false for simple cells;
+    /// a simple cell tombstone rides in `value_bytes`).
+    is_deleted: bool,
 }
 
-/// One surviving tuple after a merge: the OBSERVABLE read/merge-affecting state
-/// for a (partition, clustering) coordinate (not the full state — an expiring
-/// cell's local-deletion-time and a complex cell's per-path layout are not
-/// observable from the merge read model; finding #823, see [`CanonicalCell`] and
-/// [`ObservabilityCaveats`]).
+/// One surviving tuple after a merge: the full read/merge-affecting state for a
+/// (partition, clustering) coordinate. Epic #899 Phase C surfaces per-cell
+/// writetime/ttl/ldt and per-element collection `cell_path`s, so this captures
+/// the complete merge-affecting state (see [`CanonicalCell`]) — no observable-only
+/// blind spot remains.
 ///
-/// Two compaction outputs are Tier-2 equivalent over the OBSERVABLE fields iff
-/// their ordered lists of these tuples are byte-identical. The ordering key
+/// Two compaction outputs are Tier-2 equivalent iff their ordered lists of these
+/// tuples are byte-identical over every field. The ordering key
 /// (token, key bytes, clustering bytes, kind) is also the Cassandra
 /// partition+clustering order, so a stable sort here doubles as a
 /// correct-ordering assertion input for Tier 1.
@@ -232,9 +231,12 @@ fn canonical_clustering_bytes(ck: &ClusteringKey) -> Vec<u8> {
 fn canonical_cell(cell: &CellData) -> CanonicalCell {
     CanonicalCell {
         column: cell.column.clone(),
+        cell_path: cell.cell_path.clone(),
         value_bytes: value_to_bytes(&cell.value),
         timestamp: cell.timestamp,
         ttl: cell.ttl,
+        local_deletion_time: cell.local_deletion_time,
+        is_deleted: cell.is_deleted,
     }
 }
 
@@ -375,91 +377,18 @@ fn diff_tuples(a: &[CanonicalTuple], b: &[CanonicalTuple]) -> Vec<TupleDiff> {
     diffs
 }
 
-/// What the canonical tuple CANNOT observe for a given set of tuples.
-///
-/// The merge read model does not surface an expiring cell's local-deletion-time
-/// nor a complex (collection / non-frozen UDT) cell's per-path layout (finding
-/// #823). When a comparison touches such cells, the harness must NOT claim full
-/// Tier-2 equivalence over them — it can only claim equivalence over the
-/// observable metadata. This struct enumerates the un-observable risks present so
-/// callers can downgrade the claim honestly (and, where the brief asks, SKIP a
-/// case rather than assert a gate they cannot enforce).
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct ObservabilityCaveats {
-    /// At least one surviving cell carries a TTL → its local-deletion-time is not
-    /// observable from the read model, so two outputs differing only in that LDT
-    /// would compare equal here.
-    expiring_cells_ldt_unobservable: bool,
-    /// At least one surviving cell value is a complex type (List/Set/Map/Udt/
-    /// Tuple) → its per-path / per-field cell layout is collapsed to one whole
-    /// value by the reader, so per-path differences are not observable.
-    complex_cell_path_unobservable: bool,
-}
-
-impl ObservabilityCaveats {
-    fn any(&self) -> bool {
-        self.expiring_cells_ldt_unobservable || self.complex_cell_path_unobservable
-    }
-}
-
-/// Detect a complex (collection / non-frozen UDT / tuple) cell whose per-path
-/// layout the read model collapses to one whole value.
-///
-/// [`value_to_bytes`] gives every primitive an explicit tag and routes all other
-/// variants through the `0xff` Debug catch-all, where the payload is the value's
-/// `Debug` string. A cell TOMBSTONE (`Value::Tombstone`) also uses `0xff`, but its
-/// deletion time IS encoded in those bytes and IS therefore compared — it is NOT
-/// an un-observable complex cell. We distinguish the two by the Debug prefix: a
-/// tombstone renders as `Tombstone(...)`, a complex value as `List/Set/Map/Udt/
-/// Tuple(...)`. Anything `0xff` that is not a tombstone is treated as complex
-/// (conservative: if a future variant is added, it downgrades rather than
-/// over-claims).
-fn cell_is_unobservable_complex(cell: &CanonicalCell) -> bool {
-    // `value_to_bytes` routes every non-explicitly-tagged Value through the `0xff`
-    // catch-all, and the payload after the tag is the value's `Debug` string. That
-    // catch-all covers GENUINELY complex multi-cell types (List/Set/Map/Tuple/Udt/
-    // Frozen) AND several scalars (Date, Time, Varint, Decimal, Duration, Inet,
-    // Json, ...). Only the former have an unobservable per-path layout, so match on
-    // the actual complex `Value` Debug prefixes — not "any 0xff that isn't a
-    // tombstone" (which false-flagged those scalars).
-    match cell.value_bytes.first() {
-        Some(0xff) => {
-            let debug = String::from_utf8_lossy(&cell.value_bytes[1..]);
-            const COMPLEX_PREFIXES: [&str; 6] = ["List", "Set", "Map", "Tuple", "Udt", "Frozen"];
-            COMPLEX_PREFIXES.iter().any(|p| debug.starts_with(p))
-        }
-        _ => false,
-    }
-}
-
-/// Scan canonical tuples for cells whose merge-affecting metadata the read model
-/// cannot fully surface (expiring-cell LDT, complex-cell path).
-fn observability_caveats(tuples: &[CanonicalTuple]) -> ObservabilityCaveats {
-    let mut c = ObservabilityCaveats::default();
-    for t in tuples {
-        for cell in &t.cells {
-            if cell.ttl.is_some() {
-                c.expiring_cells_ldt_unobservable = true;
-            }
-            if cell_is_unobservable_complex(cell) {
-                c.complex_cell_path_unobservable = true;
-            }
-        }
-    }
-    c
-}
-
 /// Assert Tier-2 logical equivalence, panicking with a localized report on
 /// failure. `label` identifies which comparison (e.g. "gen1-vs-gen2").
 ///
-/// HONEST GATE (D-1): the assertion compares EVERY merge-affecting field the read
-/// model surfaces (partition key, clustering key, row-vs-tombstone kind, row-
-/// tombstone deletion time + local-deletion-time, and per-cell column/value-bytes/
-/// timestamp/ttl). It does NOT — and explicitly does not claim to — compare an
-/// expiring cell's local-deletion-time or a complex cell's per-path layout, which
-/// the read model does not surface (finding #823). When such cells are present in
-/// EITHER side, the success message is downgraded to "observable-metadata
-/// equivalence only" so the harness never over-claims a gate it cannot enforce.
+/// STRICT GATE (epic #899 Phase C): the assertion compares EVERY merge-affecting
+/// field the compaction read model now surfaces — partition key, clustering key,
+/// row-vs-tombstone kind, row-tombstone deletion time + local-deletion-time, and
+/// per-cell column / `cell_path` / value-bytes / timestamp / ttl /
+/// local-deletion-time / is_deleted. The previous "observable-only" downgrade
+/// (the read model could not surface per-cell writetime, expiring-cell LDT, or a
+/// complex cell's per-path layout — finding #823) is REMOVED because Phase C
+/// flipped the pipeline to per-element emit and the reader now surfaces all of
+/// these. A difference in any of them is now a hard failure.
 fn assert_tier2_equivalent(label: &str, a: &[CanonicalTuple], b: &[CanonicalTuple]) {
     let diffs = diff_tuples(a, b);
     if !diffs.is_empty() {
@@ -479,39 +408,13 @@ fn assert_tier2_equivalent(label: &str, a: &[CanonicalTuple], b: &[CanonicalTupl
         panic!("{msg}");
     }
 
-    // The observable fields matched. Report honestly — and never advertise full
-    // Tier-2 equivalence, because the merge read model has PERMANENT blind spots
-    // that hold on EVERY run, not just when we can detect them:
-    //   - per-cell writetime: live cells inherit the ROW timestamp (Issue #533),
-    //     so a difference in individual cell writetimes within a row is invisible;
-    //   - TTL / expiring-cell local-deletion-time: `value_to_row_data` sets
-    //     `ttl = None` for all cells, so expiring cells are not even detectable
-    //     here (the `ttl.is_some()` caveat below can therefore never fire — it is
-    //     kept only to light up automatically if the read model ever surfaces TTL).
-    // What IS gated: partition/clustering key, row kind, raw value bytes, row
-    // deletion incl. its LDT, and cell-tombstone deletion time (rides in
-    // value_bytes). Complex collection/UDT per-path layout is additionally flagged
-    // when present (value-bytes heuristic).
-    let caveats = {
-        let mut c = observability_caveats(a);
-        let cb = observability_caveats(b);
-        c.expiring_cells_ldt_unobservable |= cb.expiring_cells_ldt_unobservable;
-        c.complex_cell_path_unobservable |= cb.complex_cell_path_unobservable;
-        c
-    };
-    let mut not_gated = vec![
-        "per-cell writetime (cells inherit row timestamp)",
-        "TTL / expiring-cell local-deletion-time (read model sets ttl=None)",
-    ];
-    if caveats.complex_cell_path_unobservable {
-        not_gated.push("complex-cell (collection/UDT) per-path layout [detected on this input]");
-    }
     eprintln!(
-        "[tier2 OBSERVABLE-ONLY] {label}: {} surviving tuples have identical OBSERVABLE \
-         metadata (key+clustering+kind+value-bytes+row-deletion incl. LDT + cell-tombstone \
-         deletion time). NOT gated (merge read model does not surface it, finding #823): {}.",
-        a.len(),
-        not_gated.join(", ")
+        "[tier2 STRICT] {label}: {} surviving tuples are identical over EVERY \
+         merge-affecting field (key + clustering + kind + row-deletion incl. LDT, \
+         and per-cell column + cell_path + value-bytes + timestamp + ttl + \
+         local-deletion-time + is_deleted). Per-element collection metadata and \
+         per-cell writetime/TTL/LDT are now surfaced and gated (epic #899 Phase C).",
+        a.len()
     );
 }
 
@@ -1606,15 +1509,9 @@ fn differential_input_merge_vs_output_fidelity_live_cells() {
         "fixture must produce surviving tuples to compare"
     );
 
-    // This fixture writes only plain live, non-expiring, non-complex cells, so the
-    // comparison has NO un-observable caveats: every cell field is observable,
-    // making this a full observable-field equivalence gate (not a downgraded one).
-    let caveats = observability_caveats(&merged_from_inputs);
-    assert!(
-        !caveats.any(),
-        "live-cell fixture must have no un-observable cell metadata (got {caveats:?}); \
-         otherwise this fidelity gate would silently downgrade"
-    );
+    // This fixture writes only plain live, non-expiring, non-complex cells. Every
+    // cell field is now surfaced and gated strictly (epic #899 Phase C removed the
+    // observable-only downgrade), so the assertion below is a full per-field gate.
 
     // Compact, Tier-1 validate, read back, and assert input-merge == output.
     let g1_dir = TempDir::new().expect("g1 dir");

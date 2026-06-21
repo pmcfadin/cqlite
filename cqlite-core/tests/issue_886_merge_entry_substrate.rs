@@ -37,6 +37,9 @@ fn celldata_carries_cell_path_and_local_deletion_time() {
         ttl: None,
         cell_path: None,
         local_deletion_time: None,
+        is_complex_element: false,
+        is_deleted: false,
+        has_empty_value: false,
     };
     assert_eq!(simple.cell_path, None);
     assert_eq!(simple.local_deletion_time, None);
@@ -50,6 +53,9 @@ fn celldata_carries_cell_path_and_local_deletion_time() {
         ttl: Some(3600),
         cell_path: Some(vec![0x00, 0x01, 0xAB]),
         local_deletion_time: Some(1_700_000_000),
+        is_complex_element: false,
+        is_deleted: false,
+        has_empty_value: false,
     };
     assert_eq!(element.cell_path.as_deref(), Some(&[0x00, 0x01, 0xAB][..]));
     assert_eq!(element.local_deletion_time, Some(1_700_000_000));

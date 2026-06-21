@@ -141,6 +141,10 @@ harness = false
 name = "write"
 harness = false
 
+[[bench]]
+name = "concurrent_scan"
+harness = false
+
 [features]
 # M2+ production defaults: Full query engine + write path enabled.
 # write-support is a pure first-party code-gating flag (no extra dependencies),

@@ -1182,7 +1182,7 @@ impl SSTableReader {
         &self,
         cursor: &ScanCursor,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(TableId, RowKey, Value, i64)>> {
+    ) -> Result<Vec<super::compaction_row::CompactionRow>> {
         log::debug!("stitch_and_parse_all_chunks_for_compaction: stitching chunks");
 
         let mut stitched_buffer = Vec::with_capacity(2_500_000);
@@ -1249,7 +1249,7 @@ impl SSTableReader {
             reader_schema.as_ref()
         };
 
-        let entries = parser.parse_block_with_timestamps(&stitched_buffer, table_schema, self)?;
+        let entries = parser.parse_block_for_compaction(&stitched_buffer, table_schema, self)?;
         log::debug!(
             "stitch_and_parse_all_chunks_for_compaction: parsed {} entries",
             entries.len()
@@ -1277,7 +1277,7 @@ impl SSTableReader {
     pub async fn iterate_all_partitions_for_compaction(
         &self,
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value, i64)>> {
+    ) -> Result<Vec<super::compaction_row::CompactionRow>> {
         // Only the V5CompressedLegacy NB chunk-stitching path is supported here
         // (that is the format the WriteEngine produces).  For other formats, fall
         // back to iterate_all_partitions and attach timestamp 0 as a conservative
@@ -1303,17 +1303,16 @@ impl SSTableReader {
                 .stitch_and_parse_all_chunks_for_compaction(&cursor, owned_schema.as_ref())
                 .await?;
 
-            return Ok(entries
-                .into_iter()
-                .map(|(_tid, key, value, ts)| (key, value, ts))
-                .collect());
+            return Ok(entries);
         }
 
         // Non-stitching fallback: use iterate_all_partitions and attach ts=0.
         let entries = self.iterate_all_partitions().await?;
         Ok(entries
             .into_iter()
-            .map(|(key, value)| (key, value, 0))
+            .map(|(key, value)| {
+                super::compaction_row::CompactionRow::from_legacy_value(key, value, 0)
+            })
             .collect())
     }
 
@@ -1348,7 +1347,7 @@ impl SSTableReader {
         mut emit: F,
     ) -> Result<()>
     where
-        F: FnMut(RowKey, Value, i64) -> Result<std::ops::ControlFlow<()>>,
+        F: FnMut(super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
     {
         // Reset chunk reader to the start of the data section (mirrors
         // iterate_all_partitions_for_compaction) using an own per-scan cursor.
@@ -1364,7 +1363,8 @@ impl SSTableReader {
         if !self.requires_chunk_stitching() {
             let entries = self.iterate_all_partitions().await?;
             for (key, value) in entries {
-                match emit(key, value, 0)? {
+                let row = super::compaction_row::CompactionRow::from_legacy_value(key, value, 0);
+                match emit(row)? {
                     std::ops::ControlFlow::Continue(()) => {}
                     std::ops::ControlFlow::Break(()) => return Ok(()),
                 }
@@ -1448,7 +1448,7 @@ impl SSTableReader {
         broke: &mut bool,
     ) -> Result<()>
     where
-        F: FnMut(RowKey, Value, i64) -> Result<std::ops::ControlFlow<()>>,
+        F: FnMut(super::compaction_row::CompactionRow) -> Result<std::ops::ControlFlow<()>>,
     {
         use crate::storage::sstable::reader::parsing::ParseStep;
         loop {
@@ -1456,14 +1456,12 @@ impl SSTableReader {
                 return Ok(());
             }
             let mut local_break = false;
-            let step = parser.parse_one_partition_with_timestamps(
+            let step = parser.parse_one_partition_for_compaction(
                 window.as_slice(),
                 schema,
                 self,
                 at_final_chunk,
-                &mut |(_tid, key, value, ts): (TableId, RowKey, Value, i64)| match emit(
-                    key, value, ts,
-                )? {
+                &mut |row: super::compaction_row::CompactionRow| match emit(row)? {
                     std::ops::ControlFlow::Continue(()) => Ok(std::ops::ControlFlow::Continue(())),
                     std::ops::ControlFlow::Break(()) => {
                         local_break = true;
