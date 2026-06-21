@@ -1560,13 +1560,22 @@ impl KWayMerger {
         // live cells — `reconcile_cluster` is the authoritative behavior here.
         //
         // Step 3b: dropped-column filtering (Cassandra `cb34ad47`,
-        // `compaction.purge`). A column dropped at drop_time discards every cell
-        // whose `timestamp <= drop_time`; a cell written strictly after the drop
-        // (the column was re-added) survives. This mirrors row-tombstone shadowing
-        // but is scoped per column via the `dropped_columns` map (#904 plumbing,
-        // #847 filter). Byte-correct for scalar columns at row-timestamp
-        // granularity; element-level collection/UDT filtering additionally needs
-        // per-cell timestamps (#899) and is out of scope here.
+        // `compaction.purge`). A column dropped at `drop_time` discards its cells:
+        // for well-formed input every cell of a dropped column predates the drop
+        // (you cannot write to a dropped column), so `timestamp <= drop_time`
+        // holds for all of them and this equals Cassandra's purge.
+        //
+        // The column is purged WHOLESALE here — `drop_time` bounds the cells in
+        // practice, but the predicate keys on column membership so the merge
+        // output stays consistent with the post-drop *writer* schema
+        // (`TableSchema::for_compaction_output`, which removes dropped columns
+        // from the serialization header / row column bitmap). If the filter kept
+        // a `timestamp > drop_time` cell (an anomalous post-drop / re-added
+        // write) while the writer omitted the column, that cell would be
+        // serialized with no matching header column and corrupt the row. Keeping
+        // re-added cells therefore requires a column re-added into the live set
+        // and is element-level / per-timestamp follow-up (#899); it is out of the
+        // scalar, row-timestamp scope of #847.
         let surviving: Vec<CellData> = order
             .into_iter()
             .filter_map(|col| winners.remove(&col))
@@ -1574,10 +1583,7 @@ impl KWayMerger {
                 Some(d) => cell.timestamp > d,
                 None => true,
             })
-            .filter(|cell| match dropped_columns.get(&cell.column) {
-                Some(drop_time) => cell.timestamp > *drop_time,
-                None => true,
-            })
+            .filter(|cell| !dropped_columns.contains_key(&cell.column))
             .collect();
 
         // Step 4: build the merged result. `max()` is `Some` exactly when `surviving`
@@ -4305,23 +4311,33 @@ mod issue_823_complex_column_merge {
         assert_eq!(cells[0].column, "name");
     }
 
-    /// A cell written STRICTLY AFTER the drop time survives (the column was
-    /// re-added after being dropped).
+    /// A dropped column is purged WHOLESALE from the compaction output, including
+    /// an anomalous cell written after `drop_time`. This keeps the merge output
+    /// consistent with the post-drop writer schema (the column is absent from the
+    /// output serialization header), avoiding an orphaned cell that would corrupt
+    /// the row. Retaining a re-added column's post-drop cells is #899 follow-up
+    /// (out of the scalar / row-timestamp scope of #847).
     #[test]
-    fn dropped_column_cell_after_drop_time_survives() {
-        let row = live(0, 200, vec![scalar_cell("legacy", "fresh", 200)]);
+    fn dropped_column_cell_after_drop_time_is_also_purged() {
+        let row = live(
+            0,
+            200,
+            vec![
+                scalar_cell("name", "keep", 200),
+                scalar_cell("legacy", "anomalous", 200), // ts=200 > drop_time=150
+            ],
+        );
         let mut dropped = ::std::collections::HashMap::new();
-        dropped.insert("legacy".to_string(), 150); // cell ts=200 > 150
+        dropped.insert("legacy".to_string(), 150);
 
         let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped)
-            .expect("a live row must be emitted (cell post-dates the drop)");
+            .expect("a live row must be emitted (name survives)");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {:?}", other),
         };
-        assert_eq!(cells.len(), 1);
-        assert_eq!(cells[0].column, "legacy");
-        assert_eq!(cells[0].value, Value::Text("fresh".to_string()));
+        assert_eq!(cells.len(), 1, "the dropped column is purged wholesale");
+        assert_eq!(cells[0].column, "name");
     }
 
     /// Equal timestamp (cell ts == drop_time) is discarded — the `<=` boundary,
