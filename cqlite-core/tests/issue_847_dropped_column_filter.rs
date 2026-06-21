@@ -197,6 +197,39 @@ fn dropped_column_cells_discarded_from_compaction_output() {
     );
 }
 
+/// Decode-contract guard (roborev High, #904/#847): a dropped column that is
+/// ABSENT from `columns` cannot be decoded by the schema-driven reader, so its
+/// cells would never reach the filter and surrounding columns could misalign.
+/// Compaction must reject this configuration with a clear error rather than
+/// silently mis-decoding.
+#[test]
+fn dropped_column_absent_from_columns_is_rejected() {
+    let temp = TempDir::new().expect("tempdir");
+    let (inputs, _) = build_input(&temp, 100);
+
+    // Build a schema that drops `score` but OMITS it from `columns` entirely.
+    let mut schema = schema_with_drops({
+        let mut m = HashMap::new();
+        m.insert("score".to_string(), 150_i64);
+        m
+    });
+    schema.columns.retain(|c| c.name != "score");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let out_dir = temp.path().join("out");
+    let result = rt.block_on(compact_sstables(inputs, &out_dir, &schema, 902, None, None));
+
+    let err = result.expect_err("compaction must reject a dropped column absent from `columns`");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("score") && msg.contains("columns"),
+        "error must name the offending column and the contract, got: {msg}"
+    );
+}
+
 /// Control: with no drop configured, `score` cells survive compaction unchanged.
 #[test]
 fn no_drop_keeps_all_columns() {

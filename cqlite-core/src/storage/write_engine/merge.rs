@@ -1183,6 +1183,14 @@ impl KWayMerger {
             ));
         }
 
+        // Enforce the dropped-column decode contract (#904/#847): every column
+        // named in `dropped_columns` must still be declared in `columns` so its
+        // cells decode and can be purged. A schema built programmatically may
+        // bypass `validate()`, so guard here at the authoritative compaction
+        // entry too — converting a silent "cells never decoded / misaligned"
+        // bug into a clear error.
+        schema.validate_dropped_columns()?;
+
         // Create run readers for each input SSTable (ordered newest to oldest)
         let mut runs = Vec::with_capacity(input_paths.len());
         for (run_index, path) in input_paths.iter().enumerate() {

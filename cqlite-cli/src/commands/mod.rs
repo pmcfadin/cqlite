@@ -1750,6 +1750,21 @@ fn parse_json_schema(json: &serde_json::Value) -> Result<TableSchema> {
         schema_columns.push(column);
     }
 
+    // Optional dropped-column drop times (column → drop_time_micros) used for
+    // dropped-column filtering during compaction (#904/#847). Absent → empty.
+    let mut dropped_columns = HashMap::new();
+    if let Some(dropped) = json.get("dropped_columns").and_then(|v| v.as_object()) {
+        for (name, ts) in dropped {
+            let drop_time = ts.as_i64().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "dropped_columns['{}'] must be an integer drop time in microseconds",
+                    name
+                )
+            })?;
+            dropped_columns.insert(name.clone(), drop_time);
+        }
+    }
+
     Ok(TableSchema {
         keyspace: keyspace.to_string(),
         table: table.to_string(),
@@ -1757,7 +1772,7 @@ fn parse_json_schema(json: &serde_json::Value) -> Result<TableSchema> {
         partition_keys,
         clustering_keys: clustering_columns,
         comments: HashMap::new(),
-        dropped_columns: HashMap::new(),
+        dropped_columns,
     })
 }
 
@@ -2894,5 +2909,56 @@ async fn benchmark_query_operation(
             }
         }
         Err(_) => Ok(0),
+    }
+}
+
+#[cfg(test)]
+mod dropped_column_json_tests {
+    use super::*;
+
+    /// The CLI JSON schema loader must carry `dropped_columns` into the
+    /// `TableSchema` so `cqlite compact --schema x.json` can supply drop times
+    /// for dropped-column filtering (#904/#847). The dropped column stays in
+    /// `columns` (decode contract).
+    #[test]
+    fn parse_json_schema_preserves_dropped_columns() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "keyspace": "ks",
+                "table": "t",
+                "columns": {
+                    "id": {"type": "uuid", "kind": "PartitionKey"},
+                    "legacy": {"type": "int", "kind": "Regular"}
+                },
+                "dropped_columns": {"legacy": 1700000000000000}
+            }"#,
+        )
+        .expect("json parses");
+
+        let schema = parse_json_schema(&json).expect("schema parses");
+        assert_eq!(
+            schema.dropped_columns.get("legacy"),
+            Some(&1_700_000_000_000_000_i64),
+            "CLI JSON loader must preserve dropped_columns drop time"
+        );
+    }
+
+    /// A non-integer drop time is a clear error rather than a silent drop.
+    #[test]
+    fn parse_json_schema_rejects_non_integer_drop_time() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "keyspace": "ks",
+                "table": "t",
+                "columns": {"id": {"type": "uuid", "kind": "PartitionKey"}},
+                "dropped_columns": {"legacy": "not-a-number"}
+            }"#,
+        )
+        .expect("json parses");
+
+        assert!(
+            parse_json_schema(&json).is_err(),
+            "a non-integer drop time must be rejected"
+        );
     }
 }

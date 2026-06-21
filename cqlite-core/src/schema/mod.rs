@@ -792,6 +792,37 @@ impl TableSchema {
             }
         }
 
+        self.validate_dropped_columns()?;
+
+        Ok(())
+    }
+
+    /// Validate the dropped-column decode contract (#904/#847).
+    ///
+    /// Dropped-column filtering during compaction discards a dropped column's
+    /// cells *after they are decoded*. The schema-driven reader only decodes a
+    /// column whose name is present in [`Self::columns`] (it intersects the
+    /// on-disk serialization-header columns with the schema); a column absent
+    /// from `columns` is skipped without consuming its bytes, so its cells would
+    /// never reach the filter and surrounding columns could misalign.
+    ///
+    /// Therefore every column named in `dropped_columns` MUST remain declared in
+    /// `columns` (carrying its type) so its cells decode and can be purged. This
+    /// mirrors Cassandra retaining a dropped column's type in
+    /// `system_schema.dropped_columns`. Decoding a dropped column that is absent
+    /// from `columns` (purely from header type metadata) is follow-up work
+    /// related to #899 and intentionally out of scope here.
+    pub fn validate_dropped_columns(&self) -> Result<()> {
+        for name in self.dropped_columns.keys() {
+            if !self.columns.iter().any(|c| &c.name == name) {
+                return Err(Error::schema(format!(
+                    "dropped column '{}' must remain declared in `columns` (with its type) so \
+                     its cells can be decoded and purged during compaction; a dropped column \
+                     present only in `dropped_columns` cannot be decoded (see #904/#847)",
+                    name
+                )));
+            }
+        }
         Ok(())
     }
 
