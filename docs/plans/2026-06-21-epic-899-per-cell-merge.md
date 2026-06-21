@@ -55,10 +55,11 @@ pub struct ComplexElement { pub cell_path: Vec<u8>, pub value: Option<Value>, pu
 ## Phase B (WI-3) — CellOperation model + merge_entry_to_mutation  [blockedBy A]
 ```rust
 // add to CellOperation
-WriteComplexElement { column: String, cell_path: Vec<u8>, value: Option<Value>, timestamp_micros: i64, ttl_seconds: Option<u32>, local_deletion_time: Option<i32> },
+WriteComplexElement { column: String, cell_path: Vec<u8>, value: Option<Value>, timestamp_micros: i64, ttl_seconds: Option<u32>, local_deletion_time: Option<i32>, is_deleted: bool },
 ComplexDeletion { column: String, marked_for_delete_at: i64, local_deletion_time: i32 },
 ```
-- Rewrite `merge_entry_to_mutation`: group surviving `CellData` by `(column, cell_path)`, emit per-element ops + a `ComplexDeletion` op when `MergeEntry.complex_deletions` present.
+- `is_deleted` (roborev #885, Finding 2) is the AUTHORITATIVE per-element IS_DELETED flag carried verbatim from `ComplexElement.is_deleted` — NOT re-derived from value/ttl/ldt shape (an expiring SET member has value None + ttl Some + ldt Some but is_deleted false). Phase C's `merge_entry_to_mutation` MUST set it from the reconciled element's `is_deleted`.
+- Rewrite `merge_entry_to_mutation`: group surviving `CellData` by `(column, cell_path)`, emit per-element ops (threading the element's `is_deleted`) + a `ComplexDeletion` op when `MergeEntry.complex_deletions` present.
 - Re-evaluate `is_metadata_only_no_op` filter (1244): fully-deleted-collection deletions must now survive.
 
 ## Phase C (WI-4) — writer per-element emit + real complex deletion  [blockedBy B]

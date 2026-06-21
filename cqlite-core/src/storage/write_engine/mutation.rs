@@ -256,7 +256,8 @@ pub enum CellOperation {
         cell_path: Vec<u8>,
         /// Decoded element value. `None` means an element-level tombstone
         /// (IS_DELETED) or an empty-value element (e.g. SET members store the
-        /// element in the path with an empty value).
+        /// element in the path with an empty value). Use `is_deleted` — NOT the
+        /// shape of this field — to distinguish the two.
         value: Option<Value>,
         /// Per-element write timestamp in microseconds. When equal to the row
         /// liveness timestamp the writer keeps `USE_ROW_TIMESTAMP` (0x08);
@@ -268,6 +269,18 @@ pub enum CellOperation {
         /// (`None` when not applicable). Far-future values in `[2^31, 2^32)` are
         /// carried as the wrapping `as u32 as i32` representation.
         local_deletion_time: Option<i32>,
+        /// Authoritative per-element IS_DELETED (0x01) flag, carried verbatim
+        /// from the reader's [`ComplexElement::is_deleted`] (the source of
+        /// truth). The writer emits `CELL_IS_DELETED` iff this is `true`.
+        ///
+        /// This is NOT re-derived from `value`/`ttl_seconds`/`local_deletion_time`
+        /// (no-heuristics mandate, CLAUDE.md): an expiring SET member legitimately
+        /// has `value == None`, `ttl_seconds == Some`, `local_deletion_time ==
+        /// Some` while `is_deleted == false` — re-deriving would misclassify it as
+        /// a tombstone (roborev #885, Finding 2).
+        ///
+        /// [`ComplexElement::is_deleted`]: crate::storage::sstable::reader::compaction_row::ComplexElement::is_deleted
+        is_deleted: bool,
     },
     /// A per-column complex deletion marker (the `markedForDeleteAt` +
     /// `localDeletionTime` tombstone Cassandra writes ahead of a multi-cell

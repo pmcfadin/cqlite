@@ -1203,7 +1203,21 @@ impl DataWriter {
             }
         }
 
-        // Check if any operation targets a complex column (non-frozen collection)
+        // Check if any operation targets a complex column (non-frozen
+        // collection). roborev #885 (Finding 1): a column may be present ONLY
+        // via `complex_element_ops` (the per-element path), so it must be
+        // considered here too — otherwise a row whose only ops are
+        // WriteComplexElement/ComplexDeletion would NOT set
+        // ROW_HAS_COMPLEX_DELETION and the reader would parse the column with the
+        // wrong (simple-cell) layout.
+        let op_targets_complex = |col_name: &str| {
+            schema
+                .columns
+                .iter()
+                .find(|c| c.name == col_name)
+                .map(|c| is_complex_column(&c.data_type))
+                .unwrap_or(false)
+        };
         let has_complex = row.ops.iter().any(|mop| {
             let col_name = match mop.op {
                 CellOperation::Write { column, .. }
@@ -1211,14 +1225,14 @@ impl DataWriter {
                 | CellOperation::Delete { column } => Some(column.as_str()),
                 _ => None,
             };
-            col_name.is_some_and(|name| {
-                schema
-                    .columns
-                    .iter()
-                    .find(|c| c.name == name)
-                    .map(|c| is_complex_column(&c.data_type))
-                    .unwrap_or(false)
-            })
+            col_name.is_some_and(op_targets_complex)
+        }) || row.complex_element_ops.iter().any(|mop| {
+            let col_name = match mop.op {
+                CellOperation::WriteComplexElement { column, .. }
+                | CellOperation::ComplexDeletion { column, .. } => Some(column.as_str()),
+                _ => None,
+            };
+            col_name.is_some_and(op_targets_complex)
         });
         if has_complex {
             flags |= ROW_HAS_COMPLEX_DELETION;
@@ -1774,7 +1788,7 @@ impl DataWriter {
         // Issue #717: this is written even for row tombstones — Cassandra's
         // deserializer reads the subset right after the deletion times.
         if (flags & ROW_HAS_ALL_COLUMNS) == 0 {
-            self.write_merged_column_bitmap(&mut body, &row.ops, schema)?;
+            self.write_merged_column_bitmap(&mut body, row, schema)?;
         }
 
         // Write cell data (none survive for pure row tombstones)
@@ -1885,12 +1899,13 @@ impl DataWriter {
     fn write_merged_column_bitmap(
         &self,
         buf: &mut Vec<u8>,
-        ops: &[MergedOp<'_>],
+        row: &RowWrite<'_>,
         schema: &TableSchema,
     ) -> Result<()> {
         use crate::storage::write_engine::mutation::CellOperation;
 
-        let present_columns: std::collections::HashSet<&str> = ops
+        let mut present_columns: std::collections::HashSet<&str> = row
+            .ops
             .iter()
             .filter_map(|mop| match mop.op {
                 CellOperation::Write { column, value }
@@ -1903,6 +1918,23 @@ impl DataWriter {
                 _ => None,
             })
             .collect();
+
+        // roborev #885 (Finding 1): a complex column present ONLY via the
+        // per-element path (`complex_element_ops`) must also be marked present in
+        // the bitmap. `write_complex_element_columns` emits a cell for it
+        // (surviving elements and/or a real complex deletion marker), so omitting
+        // it from the bitmap would make the reader skip the column entirely or
+        // mis-parse the following cell. A `ComplexDeletion`-only column (all
+        // elements deleted) still emits a marker, so it counts as present.
+        for mop in &row.complex_element_ops {
+            match mop.op {
+                CellOperation::WriteComplexElement { column, .. }
+                | CellOperation::ComplexDeletion { column, .. } => {
+                    present_columns.insert(column.as_str());
+                }
+                _ => {}
+            }
+        }
 
         let regular_columns = self.regular_columns(schema);
         self.write_column_subset(buf, &regular_columns, &present_columns)
@@ -2134,6 +2166,7 @@ impl DataWriter {
                     timestamp_micros,
                     ttl_seconds,
                     local_deletion_time,
+                    is_deleted,
                 } => {
                     let entry = per_column.entry(column.as_str()).or_default();
                     entry.1.push(ComplexElementWrite {
@@ -2142,7 +2175,12 @@ impl DataWriter {
                         timestamp_micros: *timestamp_micros,
                         ttl_seconds: *ttl_seconds,
                         local_deletion_time: *local_deletion_time,
-                        is_deleted: value.is_none() && local_deletion_time.is_some(),
+                        // No-heuristics (roborev #885, Finding 2): carry the
+                        // reader's authoritative IS_DELETED flag verbatim. An
+                        // expiring SET member (value None, ttl Some, ldt Some) is
+                        // NOT a tombstone — re-deriving from value/ldt shape would
+                        // misclassify it as IS_DELETED.
+                        is_deleted: *is_deleted,
                     });
                 }
                 CellOperation::ComplexDeletion {
@@ -8352,5 +8390,347 @@ mod tests {
             cells[0].value,
             Some(serialize_value(&Value::Integer(7)).unwrap())
         );
+    }
+
+    // ===================================================================
+    // roborev #885 — ROW-PATH round-trip for a mutation whose ONLY ops are
+    // per-element complex ops. The earlier Phase B tests decoded just the
+    // complex-column fragment; this drives the REAL row path
+    // (`merge_row_group` -> `write_merged_row_with_prev_size`) and parses the
+    // produced row bytes back, covering the two High findings:
+    //   Finding 1 — the column present ONLY via complex_element_ops must be
+    //     marked present in the bitmap AND set ROW_HAS_COMPLEX_DELETION;
+    //   Finding 2 — an expiring SET member (value None, ttl Some, ldt Some,
+    //     is_deleted false) must round-trip as IS_EXPIRING (NOT IS_DELETED),
+    //     while a genuine element tombstone (is_deleted true) is IS_DELETED.
+    // ===================================================================
+
+    /// Schema: id (pk int) / tags (regular non-frozen set<int>). The single
+    /// regular column is complex, so the bitmap is a 1-column subset.
+    fn complex_only_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "tags".to_string(),
+                    data_type: "set<int>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+        }
+    }
+
+    /// Walk a serialized merged-row body for `complex_only_schema` (one regular
+    /// complex column, no clustering) far enough to assert Finding 1 + 2. Returns
+    /// `(row_flags, column_present, complex_deletion_decoded, cells)`.
+    fn parse_complex_only_row(
+        body: &[u8],
+        flags: u8,
+        stats: &StatisticsMetadata,
+    ) -> (bool, Option<(u64, u64)>, Vec<DecodedComplexCell>) {
+        // The merged-row body layout written by `build_merged_row_body` (after the
+        // outer row_size + prev_size, which we strip in the caller):
+        //   [timestamp delta]  if HAS_TIMESTAMP
+        //   [ttl + ldt deltas] if HAS_TTL
+        //   [deletion 2 vints] if HAS_DELETION
+        //   [column bitmap]    if NOT HAS_ALL_COLUMNS
+        //   [complex column: complex_deletion(2 vints) + cell_count + cells...]
+        fn read_uvint(buf: &[u8], pos: &mut usize) -> u64 {
+            let first = buf[*pos];
+            *pos += 1;
+            if first == 0xFF {
+                let mut v = 0u64;
+                for _ in 0..8 {
+                    v = (v << 8) | buf[*pos] as u64;
+                    *pos += 1;
+                }
+                return v;
+            }
+            let extra = first.leading_ones() as usize;
+            let mask = 0xFF_u8.wrapping_shr((extra + 1) as u32);
+            let mut v = (first & mask) as u64;
+            for _ in 0..extra {
+                v = (v << 8) | buf[*pos] as u64;
+                *pos += 1;
+            }
+            v
+        }
+
+        let _ = stats;
+        let mut pos = 0usize;
+
+        if (flags & ROW_HAS_TIMESTAMP) != 0 {
+            let _ts = read_uvint(body, &mut pos);
+        }
+        if (flags & ROW_HAS_TTL) != 0 {
+            let _ttl = read_uvint(body, &mut pos);
+            let _ldt = read_uvint(body, &mut pos);
+        }
+        if (flags & ROW_HAS_DELETION) != 0 {
+            let _dts = read_uvint(body, &mut pos);
+            let _dldt = read_uvint(body, &mut pos);
+        }
+
+        // Column bitmap: for the single regular complex column, bit 0 == 1 means
+        // the column is MISSING. HAS_ALL_COLUMNS (which we never expect for a
+        // single complex column) would skip the bitmap entirely.
+        let column_present = if (flags & ROW_HAS_ALL_COLUMNS) == 0 {
+            let bitmap = read_uvint(body, &mut pos);
+            (bitmap & 0x1) == 0
+        } else {
+            true
+        };
+
+        // Complex column: deletion header then cells (reusing the fragment walk).
+        let del_ts = read_uvint(body, &mut pos);
+        let del_ldt = read_uvint(body, &mut pos);
+        let cell_count = read_uvint(body, &mut pos) as usize;
+
+        let mut cells = Vec::with_capacity(cell_count);
+        for _ in 0..cell_count {
+            let cell_flags = body[pos];
+            pos += 1;
+            let is_deleted = (cell_flags & CELL_IS_DELETED) != 0;
+            let is_expiring = (cell_flags & CELL_IS_EXPIRING) != 0;
+            let has_empty_value = (cell_flags & CELL_HAS_EMPTY_VALUE) != 0;
+            let use_row_ts = (cell_flags & CELL_USE_ROW_TIMESTAMP) != 0;
+            let use_row_ttl = (cell_flags & CELL_USE_ROW_TTL) != 0;
+
+            let ts_delta = if !use_row_ts {
+                Some(read_uvint(body, &mut pos))
+            } else {
+                None
+            };
+            let ldt_delta = if !use_row_ttl && (is_deleted || is_expiring) {
+                Some(read_uvint(body, &mut pos))
+            } else {
+                None
+            };
+            let ttl_delta = if !use_row_ttl && is_expiring {
+                Some(read_uvint(body, &mut pos))
+            } else {
+                None
+            };
+
+            let path_len = read_uvint(body, &mut pos) as usize;
+            let cell_path = body[pos..pos + path_len].to_vec();
+            pos += path_len;
+
+            let value = if is_deleted || has_empty_value {
+                None
+            } else {
+                let value_len = read_uvint(body, &mut pos) as usize;
+                let v = body[pos..pos + value_len].to_vec();
+                pos += value_len;
+                Some(v)
+            };
+
+            cells.push(DecodedComplexCell {
+                flags: cell_flags,
+                ts_delta,
+                ldt_delta,
+                ttl_delta,
+                cell_path,
+                value,
+            });
+        }
+
+        (column_present, Some((del_ts, del_ldt)), cells)
+    }
+
+    #[test]
+    fn row_path_complex_element_only_mutation_round_trips() {
+        let schema = complex_only_schema();
+
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 0;
+        stats.min_local_deletion_time = 1_700_000_000;
+
+        let row_ts = 2_000_000i64;
+
+        // cell paths for two distinct SET members (serialized int).
+        let path_keep = serialize_collection_element(&Value::Integer(10), "SET").unwrap();
+        let path_dead = serialize_collection_element(&Value::Integer(20), "SET").unwrap();
+
+        // The mutation's ONLY ops are per-element complex ops:
+        //   - a real per-column complex deletion marker,
+        //   - an EXPIRING SET member (value None, ttl Some, ldt Some, NOT deleted),
+        //   - a genuine element tombstone (value None, is_deleted true).
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: 1_500_000,
+                    local_deletion_time: 1_700_000_005,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: path_keep.clone(),
+                    value: None,
+                    timestamp_micros: 2_000_000,
+                    ttl_seconds: Some(3_600),
+                    local_deletion_time: Some(1_700_003_600),
+                    // EXPIRING set member — authoritatively NOT a tombstone.
+                    is_deleted: false,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: path_dead.clone(),
+                    value: None,
+                    timestamp_micros: 2_000_000,
+                    ttl_seconds: None,
+                    local_deletion_time: Some(1_700_000_009),
+                    // Genuine element tombstone.
+                    is_deleted: true,
+                },
+            ],
+            row_ts,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("merge_row_group should produce a row for complex_element_ops");
+        assert!(
+            row.ops.is_empty(),
+            "all ops are per-element complex ops; row.ops (whole-column) must be empty"
+        );
+        assert_eq!(
+            row.complex_element_ops.len(),
+            3,
+            "the deletion marker + two element writes survive as complex_element_ops"
+        );
+
+        let mut writer = DataWriter::new(stats.clone());
+        let (_bytes, cells_written) = writer
+            .write_merged_row_with_prev_size(&row, &schema, 0)
+            .expect("row path write should succeed");
+        assert_eq!(
+            cells_written, 1,
+            "one complex column emitted => one column counted"
+        );
+
+        // ---- Strip the row prefix to reach the body the parser walks.
+        // Layout: [row_flags u8][row_size vint][prev_size vint][body...].
+        let out = writer.buffer.clone();
+        let mut pos = 0usize;
+        let row_flags = out[pos];
+        pos += 1;
+
+        // FINDING 1: a row whose only ops are complex element ops MUST set
+        // ROW_HAS_COMPLEX_DELETION (computed from complex_element_ops, not ops).
+        assert_ne!(
+            row_flags & ROW_HAS_COMPLEX_DELETION,
+            0,
+            "ROW_HAS_COMPLEX_DELETION must be set for a complex-element-only row, flags=0x{:02x}",
+            row_flags
+        );
+        assert_eq!(
+            row_flags & ROW_HAS_ALL_COLUMNS,
+            0,
+            "a single present complex column is a subset, not HAS_ALL_COLUMNS"
+        );
+
+        // Skip row_size + prev_size vints.
+        fn skip_uvint(buf: &[u8], pos: &mut usize) {
+            let first = buf[*pos];
+            let extra = if first == 0xFF {
+                8
+            } else {
+                first.leading_ones() as usize
+            };
+            *pos += 1 + extra;
+        }
+        skip_uvint(&out, &mut pos); // row_size
+        skip_uvint(&out, &mut pos); // prev_size
+
+        let body = &out[pos..];
+        let (column_present, complex_deletion, cells) =
+            parse_complex_only_row(body, row_flags, &stats);
+
+        // FINDING 1: the column present only via complex_element_ops must be
+        // marked PRESENT in the bitmap (bit 0 == 0).
+        assert!(
+            column_present,
+            "the complex column present only via complex_element_ops must be marked present"
+        );
+
+        // FINDING 1: the real complex deletion marker must decode (NOT the LIVE
+        // sentinel) — markedForDeleteAt delta = 1_500_000 - 1_000_000 = 500_000;
+        // localDeletionTime delta = 1_700_000_005 - 1_700_000_000 = 5.
+        let (del_ts, del_ldt) = complex_deletion.expect("complex deletion header present");
+        assert_eq!(
+            del_ts, 500_000,
+            "real complex-deletion markedForDeleteAt delta"
+        );
+        assert_eq!(del_ldt, 5, "real complex-deletion localDeletionTime delta");
+
+        assert_eq!(cells.len(), 2, "two surviving element cells");
+        // SET cells are emitted sorted by cell_path bytes; locate by path.
+        let keep = cells
+            .iter()
+            .find(|c| c.cell_path == path_keep)
+            .expect("expiring element cell present");
+        let dead = cells
+            .iter()
+            .find(|c| c.cell_path == path_dead)
+            .expect("tombstone element cell present");
+
+        // FINDING 2: the EXPIRING SET member round-trips as IS_EXPIRING set,
+        // IS_DELETED CLEAR, no value bytes, ts/ldt/ttl deltas present.
+        assert_ne!(
+            keep.flags & CELL_IS_EXPIRING,
+            0,
+            "expiring set member must set IS_EXPIRING, flags=0x{:02x}",
+            keep.flags
+        );
+        assert_eq!(
+            keep.flags & CELL_IS_DELETED,
+            0,
+            "expiring set member must NOT be classified as a tombstone, flags=0x{:02x}",
+            keep.flags
+        );
+        assert!(
+            keep.value.is_none(),
+            "set member carries the element in the path, no value bytes"
+        );
+        assert_eq!(keep.ttl_delta, Some(3_600));
+        assert_eq!(keep.ldt_delta, Some((1_700_003_600 - 1_700_000_000) as u64));
+
+        // FINDING 2: the genuine tombstone round-trips as IS_DELETED.
+        assert_ne!(
+            dead.flags & CELL_IS_DELETED,
+            0,
+            "genuine element tombstone must set IS_DELETED, flags=0x{:02x}",
+            dead.flags
+        );
+        assert_eq!(
+            dead.flags & CELL_IS_EXPIRING,
+            0,
+            "a tombstone is not expiring, flags=0x{:02x}",
+            dead.flags
+        );
+        assert!(dead.value.is_none(), "tombstone writes no value bytes");
+        assert_eq!(dead.ldt_delta, Some((1_700_000_009 - 1_700_000_000) as u64));
     }
 }
