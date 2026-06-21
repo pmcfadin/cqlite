@@ -7,7 +7,7 @@
 use crate::cql::{CqlCreateTable, CqlDataType};
 use crate::error::{Error, Result};
 use crate::parser::types::CqlTypeId;
-use crate::schema::{ClusteringColumn, Column, KeyColumn, TableSchema};
+use crate::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
 use nom::{
     branch::alt,
     bytes::complete::{tag_no_case, take_while, take_while1},
@@ -324,6 +324,28 @@ fn clustering_order_item(input: &str) -> IResult<&str, (String, String)> {
             format!("({})", body.trim()),
         ),
     ))
+}
+
+/// Parse the body of a `CLUSTERING ORDER BY (...)` clause (the text captured
+/// between the parentheses, e.g. `ck DESC` or `c1 ASC, c2 DESC`) into a map of
+/// column name -> [`ClusteringOrder`]. Column names are preserved verbatim so
+/// they can be matched against the schema's clustering columns; entries with an
+/// unrecognized/absent direction default to ASC (per [`ClusteringOrder::from`]).
+fn parse_clustering_order_body(body: &str) -> HashMap<String, ClusteringOrder> {
+    let mut map = HashMap::new();
+    // Strip the surrounding parens that `clustering_order_item` re-added, if present.
+    let inner = body.trim().trim_start_matches('(').trim_end_matches(')');
+    for entry in inner.split(',') {
+        let mut parts = entry.split_whitespace();
+        if let Some(col) = parts.next() {
+            let order = parts
+                .next()
+                .map(crate::schema::ClusteringOrder::from)
+                .unwrap_or(crate::schema::ClusteringOrder::Asc);
+            map.insert(col.to_string(), order);
+        }
+    }
+    map
 }
 
 /// Parse table options (WITH clause)
@@ -701,6 +723,15 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
     // lowercase since CQL option names are case-insensitive.
     let (input, with_options) = opt(table_options)(input)?;
 
+    // Extract per-column clustering order from the captured `CLUSTERING ORDER BY
+    // (...)` option so it can be applied to each clustering column below. Columns
+    // not named in the clause default to ASC (#849/#852 branch-review).
+    let clustering_order_map: HashMap<String, ClusteringOrder> = with_options
+        .as_ref()
+        .and_then(|opts| opts.get("clustering order by"))
+        .map(|body| parse_clustering_order_body(body))
+        .unwrap_or_default();
+
     // If no primary key was found in constraints, look for inline PRIMARY KEY or use first column
     if !primary_key_found && !columns.is_empty() {
         // Check if any column has "PRIMARY KEY" in its type (inline definition)
@@ -750,11 +781,16 @@ pub fn parse_create_table(input: &str) -> IResult<&str, TableSchema> {
                     .map(|(_, dt, _)| dt.clone())
                     .unwrap_or_else(|| "text".to_string());
 
+                let order = clustering_order_map
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or(crate::schema::ClusteringOrder::Asc);
+
                 ClusteringColumn {
                     name,
                     data_type,
                     position: pos,
-                    order: crate::schema::ClusteringOrder::Asc,
+                    order,
                 }
             })
             .collect(),
@@ -1532,6 +1568,66 @@ mod tests {
             Some("1.0"),
             "bloom_filter_fp_chance must survive a multi-column CLUSTERING ORDER BY, got: {:?}",
             schema.comments
+        );
+    }
+
+    /// #849/#852 (branch review, roborev job 777): a single DESC clustering
+    /// column must be applied to `clustering_keys` so DESC write/merge ordering
+    /// is honored for CQL-parsed schemas.
+    #[test]
+    fn test_clustering_order_desc_applied_to_clustering_keys() {
+        let cql = "CREATE TABLE ks.t (pk int, ck int, v int, PRIMARY KEY (pk, ck)) \
+                   WITH CLUSTERING ORDER BY (ck DESC)";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        let ck = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "ck")
+            .expect("ck clustering column must exist");
+        assert_eq!(
+            ck.order,
+            ClusteringOrder::Desc,
+            "ck must carry DESC ordering, got: {:?}",
+            schema.clustering_keys
+        );
+    }
+
+    /// #849/#852: a mixed multi-column clustering order must apply each column's
+    /// direction independently (one ASC, one DESC).
+    #[test]
+    fn test_clustering_order_mixed_applied_per_column() {
+        let cql = "CREATE TABLE ks.t (pk int, c1 int, c2 int, v int, PRIMARY KEY (pk, c1, c2)) \
+                   WITH CLUSTERING ORDER BY (c1 ASC, c2 DESC)";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        let c1 = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "c1")
+            .expect("c1 must exist");
+        let c2 = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "c2")
+            .expect("c2 must exist");
+        assert_eq!(c1.order, ClusteringOrder::Asc, "c1 should be ASC");
+        assert_eq!(c2.order, ClusteringOrder::Desc, "c2 should be DESC");
+    }
+
+    /// #849/#852: with no CLUSTERING ORDER BY clause, clustering columns default
+    /// to ASC.
+    #[test]
+    fn test_clustering_order_defaults_to_asc_without_clause() {
+        let cql = "CREATE TABLE ks.t (pk int, ck int, v int, PRIMARY KEY (pk, ck))";
+        let schema = parse_cql_schema(cql).expect("schema should parse");
+        let ck = schema
+            .clustering_keys
+            .iter()
+            .find(|c| c.name == "ck")
+            .expect("ck must exist");
+        assert_eq!(
+            ck.order,
+            ClusteringOrder::Asc,
+            "ck must default to ASC without a CLUSTERING ORDER BY clause"
         );
     }
 
