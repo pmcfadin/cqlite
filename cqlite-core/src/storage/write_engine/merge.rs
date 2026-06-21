@@ -1418,11 +1418,37 @@ impl KWayMerger {
         let mut order: Vec<String> = Vec::new();
         let mut winners: HashMap<String, CellData> = HashMap::new();
 
+        // Carried deletion metadata (#886 plumbing). Accumulated but NOT consulted
+        // by reconciliation here — preserved so downstream consumers (#899/#844/
+        // #846) see it after a normal row reconcile. Behavior-neutral for current
+        // output since the writer does not yet read these fields.
+        //   - complex_deletions: union across the cluster's input rows (first-seen
+        //     order preserved for determinism).
+        //   - range_deletion: carried through; if multiple, keep the one with the
+        //     highest deletion timestamp.
+        let mut complex_deletions: Vec<ComplexDeletion> = Vec::new();
+        let mut range_deletion: Option<RangeDeletion> = None;
+
         for entry in &cluster_rows {
             if key.is_none() {
                 key = Some(entry.key.clone());
             }
             run_index = run_index.min(entry.run_index);
+
+            for cd in &entry.complex_deletions {
+                if !complex_deletions.contains(cd) {
+                    complex_deletions.push(cd.clone());
+                }
+            }
+            if let Some(rd) = &entry.range_deletion {
+                let replace = match &range_deletion {
+                    None => true,
+                    Some(current) => rd.tombstone.deletion_time > current.tombstone.deletion_time,
+                };
+                if replace {
+                    range_deletion = Some(rd.clone());
+                }
+            }
 
             match &entry.row_data {
                 RowData::Tombstone { deletion_time, .. } => {
@@ -1474,7 +1500,11 @@ impl KWayMerger {
 
         // Step 4: build the merged result. `max()` is `Some` exactly when `surviving`
         // is non-empty, so this match needs no unreachable fallback timestamp.
-        match surviving.iter().map(|c| c.timestamp).max() {
+        //
+        // Attach the carried deletion metadata to whichever entry is emitted so it
+        // is not dropped by reconciliation (#886 plumbing preservation). This is
+        // behavior-neutral: the writer does not yet consume these fields.
+        let built = match surviving.iter().map(|c| c.timestamp).max() {
             Some(row_ts) => Some(MergeEntry::new(
                 run_index,
                 key,
@@ -1497,7 +1527,19 @@ impl KWayMerger {
                     },
                 )
             }),
-        }
+        };
+
+        built.map(|entry| {
+            let entry = if complex_deletions.is_empty() {
+                entry
+            } else {
+                entry.with_complex_deletions(complex_deletions)
+            };
+            match range_deletion {
+                Some(rd) => entry.with_range_deletion(rd),
+                None => entry,
+            }
+        })
     }
 
     /// Convert a MergeEntry back to Mutation for writing
@@ -4433,6 +4475,141 @@ mod issue_886_merge_entry_enrichment {
             }
             other => panic!("expected Live, got {other:?}"),
         }
+    }
+
+    /// `reconcile_cluster` must PRESERVE the carried complex/range deletion
+    /// metadata from its input rows onto the returned entry (#886 plumbing
+    /// preservation). Without this, the metadata threaded by the reader is
+    /// silently dropped before downstream consumers (#899) can see it. The
+    /// preservation is behavior-neutral: the surviving cells (normal reconcile
+    /// output) are identical to the no-metadata case.
+    #[test]
+    fn reconcile_cluster_preserves_carried_deletion_metadata() {
+        let complex_a = ComplexDeletion {
+            column: "tags".to_string(),
+            deletion_time: 1234,
+            local_deletion_time: 1_700_000_000,
+        };
+        let complex_b = ComplexDeletion {
+            column: "notes".to_string(),
+            deletion_time: 999,
+            local_deletion_time: 1_700_000_001,
+        };
+        let range_low = RangeDeletion {
+            tombstone: TombstoneInfo {
+                deletion_time: 3000,
+                tombstone_type: TombstoneType::RangeTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            },
+        };
+        let range_high = RangeDeletion {
+            tombstone: TombstoneInfo {
+                deletion_time: 7000,
+                tombstone_type: TombstoneType::RangeTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            },
+        };
+
+        // Two input rows in the same cluster, each carrying distinct metadata.
+        let row0 = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            2000,
+            RowData::Live {
+                cells: vec![CellData::new("v".to_string(), Value::Integer(2), 2000)],
+            },
+        )
+        .with_complex_deletions(vec![complex_a.clone()])
+        .with_range_deletion(range_low.clone());
+        let row1 = MergeEntry::new(
+            1,
+            dk(1),
+            None,
+            1000,
+            RowData::Live {
+                cells: vec![CellData::new("w".to_string(), Value::Integer(1), 1000)],
+            },
+        )
+        .with_complex_deletions(vec![complex_a.clone(), complex_b.clone()])
+        .with_range_deletion(range_high.clone());
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![row0, row1])
+            .expect("live row must be emitted");
+
+        // complex_deletions: union, first-seen order, deduplicated.
+        assert_eq!(
+            merged.complex_deletions,
+            vec![complex_a, complex_b],
+            "complex deletions must be union-preserved without duplicates"
+        );
+        // range_deletion: the highest deletion timestamp wins.
+        assert_eq!(
+            merged.range_deletion,
+            Some(range_high),
+            "range deletion with the highest deletion timestamp must be carried"
+        );
+
+        // Behavior-neutral: normal reconcile output (surviving cells) is unchanged
+        // versus the same inputs with NO carried metadata.
+        let plain0 = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            2000,
+            RowData::Live {
+                cells: vec![CellData::new("v".to_string(), Value::Integer(2), 2000)],
+            },
+        );
+        let plain1 = MergeEntry::new(
+            1,
+            dk(1),
+            None,
+            1000,
+            RowData::Live {
+                cells: vec![CellData::new("w".to_string(), Value::Integer(1), 1000)],
+            },
+        );
+        let plain = KWayMerger::reconcile_cluster(None, vec![plain0, plain1])
+            .expect("live row must be emitted");
+        assert_eq!(
+            merged.row_data, plain.row_data,
+            "carrying deletion metadata must not change surviving-cell output"
+        );
+        assert_eq!(merged.timestamp, plain.timestamp);
+        assert!(plain.complex_deletions.is_empty());
+        assert_eq!(plain.range_deletion, None);
+    }
+
+    /// A row-tombstone-only cluster (no surviving cells) must still carry the
+    /// metadata onto the emitted tombstone entry.
+    #[test]
+    fn reconcile_cluster_preserves_metadata_on_tombstone_entry() {
+        let complex = ComplexDeletion {
+            column: "tags".to_string(),
+            deletion_time: 10,
+            local_deletion_time: 1_700_000_000,
+        };
+        let row = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            500,
+            RowData::Tombstone {
+                deletion_time: 500,
+                local_deletion_time: 0,
+            },
+        )
+        .with_complex_deletions(vec![complex.clone()]);
+
+        let merged =
+            KWayMerger::reconcile_cluster(None, vec![row]).expect("row tombstone must be emitted");
+        assert!(matches!(merged.row_data, RowData::Tombstone { .. }));
+        assert_eq!(merged.complex_deletions, vec![complex]);
     }
 
     /// Equality of two default merge entries is unaffected by the new carried
