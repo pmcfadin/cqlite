@@ -150,6 +150,12 @@ struct ActiveMerge {
     bytes_read: u64,
     /// When this merge started
     started_at: Instant,
+    /// Effective compaction schema (#850): the configured schema augmented with
+    /// any static columns that appear in the input SSTables' SerializationHeaders
+    /// but were dropped from the current schema. Used to convert merged entries to
+    /// mutations so the writer still emits the static-row prelude (static-column
+    /// presence is read from the input headers, not the current schema only).
+    effective_schema: TableSchema,
 }
 
 /// WAL durability mode for the write engine.
@@ -1175,10 +1181,22 @@ impl WriteEngine {
                     // stream but have no writer-emittable content yet, so writing
                     // them would produce a phantom live empty (pure-PK) row at
                     // timestamp 0. See `MergeEntry::is_metadata_only_no_op`.
+                    // #850: convert with the effective compaction schema so any
+                    // static column re-added from the input headers is preserved
+                    // (partition-key decoding is identical; only static columns
+                    // differ). Falls back to the config schema if (impossibly) no
+                    // active merge is present.
+                    let conversion_schema = self
+                        .active_merge
+                        .as_ref()
+                        .map(|m| m.effective_schema.clone())
+                        .unwrap_or_else(|| self.config.schema.clone());
                     let mutations = entries_vec
                         .into_iter()
                         .filter(|entry| !entry.is_metadata_only_no_op())
-                        .map(|entry| self.merge_entry_to_mutation(entry))
+                        .map(|entry| {
+                            merge::KWayMerger::merge_entry_to_mutation(entry, &conversion_schema)
+                        })
                         .collect::<Result<Vec<_>>>()?;
 
                     // If every merged row was metadata-only, the partition has no
@@ -1422,15 +1440,24 @@ impl WriteEngine {
             ))
         })?;
 
+        // #850: derive the effective compaction schema by reading static-row
+        // presence from the input SSTable headers. If a static column was dropped
+        // from the current schema but an input still carries it, re-add it so the
+        // merger decodes the static cells and the writer emits the static prelude
+        // (header-driven static presence). Byte-identical to `config.schema` when
+        // no such column exists.
+        let effective_schema =
+            merge::effective_compaction_schema(&self.config.schema, &input_paths);
+
         // Create K-way merger
-        let merger = KWayMerger::new(input_paths.clone(), &self.config.schema)?;
+        let merger = KWayMerger::new(input_paths.clone(), &effective_schema)?;
 
         // Point the SSTableWriter at the tmp root; it will write to
         // tmp_dir/keyspace/table/nb-{gen}-big-*.db
         let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
             tmp_dir.clone(),
             output_generation,
-            &self.config.schema,
+            &effective_schema,
         )?;
 
         // Two-pass compaction (issue #729): compute output FINAL encoding baselines
@@ -1452,6 +1479,7 @@ impl WriteEngine {
             rows_merged: 0,
             bytes_read,
             started_at: Instant::now(),
+            effective_schema,
         });
 
         Ok(())
@@ -1801,16 +1829,6 @@ impl WriteEngine {
                 failures.join("; ")
             )))
         }
-    }
-
-    /// Convert MergeEntry to Mutation (M5.2 helper)
-    ///
-    /// Delegates to `KWayMerger::merge_entry_to_mutation` to avoid duplication.
-    fn merge_entry_to_mutation(
-        &self,
-        entry: merge::MergeEntry,
-    ) -> Result<crate::storage::write_engine::mutation::Mutation> {
-        merge::KWayMerger::merge_entry_to_mutation(entry, &self.config.schema)
     }
 }
 

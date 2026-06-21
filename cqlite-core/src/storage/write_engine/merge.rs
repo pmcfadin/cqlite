@@ -1296,6 +1296,113 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
     (baseline_min_ts, baseline_min_ldt, baseline_min_ttl)
 }
 
+/// Build the effective compaction schema (#850): `schema` augmented with any
+/// static columns that the input SSTables' SerializationHeaders declare but the
+/// current schema no longer does (e.g. a static column dropped from the table).
+///
+/// Cassandra reads static-row PRESENCE from each input SSTable's
+/// SerializationHeader, not from the current table metadata. After the last
+/// static column is dropped, an older SSTable that still carries static rows must
+/// keep its static-row prelude through compaction — otherwise the prelude (and
+/// any surviving static data) is dropped, diverging from Cassandra. Re-adding the
+/// dropped static column to the schema handed to the merger and writer restores
+/// that: the reader decodes the static cells and the writer emits the static
+/// prelude, exactly as a header-driven compaction would.
+///
+/// Returns `schema` unchanged when the inputs declare no static column absent
+/// from `schema` (the overwhelmingly common case), so output stays byte-identical
+/// for every table whose schema still matches its on-disk data.
+#[cfg(feature = "write-support")]
+pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]) -> TableSchema {
+    use std::collections::HashSet;
+
+    // Names already known to the current schema (regular + static columns and
+    // both key kinds) must not be re-added.
+    let mut known: HashSet<String> = schema.columns.iter().map(|c| c.name.clone()).collect();
+    for k in &schema.partition_keys {
+        known.insert(k.name.clone());
+    }
+    for k in &schema.clustering_keys {
+        known.insert(k.name.clone());
+    }
+
+    // (name, cql_type) for static columns present in the inputs but missing from
+    // the current schema. Sorted by name for deterministic output.
+    let mut added: Vec<(String, String)> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for data_path in input_paths {
+        let stats_path = {
+            let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let stats_filename = filename.replace("Data.db", "Statistics.db");
+            data_path
+                .parent()
+                .unwrap_or(data_path.as_path())
+                .join(stats_filename)
+        };
+        if !stats_path.exists() {
+            continue;
+        }
+        let stats_bytes = match std::fs::read(&stats_path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!(
+                    "effective_compaction_schema: cannot read Statistics.db {:?}: {}",
+                    stats_path,
+                    e
+                );
+                continue;
+            }
+        };
+        match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+            &stats_bytes,
+            None,
+        ) {
+            Ok((_, sstable_stats)) => {
+                for col in &sstable_stats.serialization_header_columns {
+                    if col.is_static && !known.contains(&col.name) && seen.insert(col.name.clone())
+                    {
+                        added.push((col.name.clone(), col.column_type.clone()));
+                    }
+                }
+            }
+            Err(e) => {
+                log::warn!(
+                    "effective_compaction_schema: cannot parse Statistics.db {:?}: {:?}",
+                    stats_path,
+                    e
+                );
+            }
+        }
+    }
+
+    if added.is_empty() {
+        return schema.clone();
+    }
+
+    added.sort_by(|a, b| a.0.cmp(&b.0));
+    log::info!(
+        "effective_compaction_schema: re-adding {} static column(s) dropped from schema \
+         {}.{} but still present in input SSTable headers: {:?}",
+        added.len(),
+        schema.keyspace,
+        schema.table,
+        added.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>()
+    );
+
+    let mut effective = schema.clone();
+    for (name, data_type) in added {
+        effective.columns.push(crate::schema::Column {
+            name,
+            data_type,
+            nullable: true,
+            default: None,
+            is_static: true,
+        });
+    }
+    effective
+}
+
 /// Compact an explicit set of input SSTables into a single output SSTable.
 ///
 /// Unlike [`WriteEngine::maintenance_step`](super::WriteEngine::maintenance_step),
@@ -1367,23 +1474,44 @@ pub async fn compact_sstables(
         ));
     }
 
-    // Decode with `schema` (retains dropped columns so their input cells parse and
-    // can be purged), but WRITE with a post-drop schema: fully-purged dropped
-    // columns are stripped from the output serialization header (a natural
+    // #850: read static-row presence from the input SSTable headers. If a static
+    // column is absent from the current schema but an input SSTable still declares
+    // it (e.g. it was dropped from the catalog entirely, not retained via
+    // `dropped_columns`), the effective schema re-adds it so the merger decodes the
+    // static cells and the writer emits the static prelude. Byte-identical to
+    // `schema` when no such column exists (the common case). This composes with the
+    // #847/#904 dropped-column flow below: the effective schema keeps `schema`'s
+    // `dropped_columns` map, so the retained-dropped pre-pass and write-schema
+    // derivation operate on it unchanged.
+    let effective_schema = effective_compaction_schema(schema, &input_paths);
+
+    // Decode with `effective_schema` (retains dropped columns so their input cells
+    // parse and can be purged), but WRITE with a post-drop schema: fully-purged
+    // dropped columns are stripped from the output serialization header (a natural
     // post-drop reader is not misaligned) while dropped columns with surviving
     // re-added cells are retained (those cells keep a matching header column).
     // Which dropped columns survive is data-dependent and the writer fixes its
     // header before the first row, so determine the surviving set with a merge
     // pre-pass (only when any column is dropped). The pre-pass uses the SAME merge
     // logic as the write pass, so the two agree. See #847 review.
-    let retained_dropped = if schema.dropped_columns.is_empty() {
+    let retained_dropped = if effective_schema.dropped_columns.is_empty() {
         std::collections::HashSet::new()
     } else {
-        compute_surviving_dropped_columns(input_paths.clone(), schema, gc_before_secs, now_secs)?
+        compute_surviving_dropped_columns(
+            input_paths.clone(),
+            &effective_schema,
+            gc_before_secs,
+            now_secs,
+        )?
     };
-    let write_schema = schema.for_compaction_output(&retained_dropped);
+    let write_schema = effective_schema.for_compaction_output(&retained_dropped);
 
-    let merger = KWayMerger::new_with_gc(input_paths.clone(), schema, gc_before_secs, now_secs)?;
+    let merger = KWayMerger::new_with_gc(
+        input_paths.clone(),
+        &effective_schema,
+        gc_before_secs,
+        now_secs,
+    )?;
 
     let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
         output_dir.to_path_buf(),
@@ -6904,6 +7032,7 @@ mod issue_912_row_tombstone_clustering_identity {
                 is_static: false,
             }],
             comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
         }
     }
 
