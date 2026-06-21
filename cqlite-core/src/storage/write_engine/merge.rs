@@ -1623,9 +1623,18 @@ impl KWayMerger {
         // compaction output, so `compact_sstables` retains any dropped column
         // that has survivors in the *writer* schema (and strips only the
         // fully-purged ones from the serialization header) — see
-        // `TableSchema::for_compaction_output`. Byte-correct for scalar columns at
-        // row-timestamp granularity; element-level collection/UDT filtering needs
-        // per-cell timestamps (#899) and is out of scope.
+        // `TableSchema::for_compaction_output`.
+        //
+        // ROW-TIMESTAMP GRANULARITY (#847 documented scope): `cell.timestamp` here
+        // is the ROW write-time, not the cell's own writetime — the reader's
+        // `(RowKey, Value, ts)` compaction stream does not surface per-cell
+        // timestamps (see `value_to_row_data`; surfacing them is #886 reader
+        // plumbing, a prerequisite the epic sequenced separately). So a row that
+        // mixes a pre-drop cell of the dropped column with a post-drop cell of
+        // another column carries one (newer) row timestamp, and the dropped cell
+        // can survive when it should be purged. This is byte-correct when a row's
+        // cells share a timestamp (the common case); exact per-cell purging needs
+        // #886/#899 and is out of #847's scope.
         // Apply row-tombstone shadowing first (Step 3), then dropped-column
         // filtering (Step 3b) as a second stage so we can tell whether the
         // dropped-column purge is what emptied the row of real data.

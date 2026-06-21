@@ -1751,17 +1751,28 @@ fn parse_json_schema(json: &serde_json::Value) -> Result<TableSchema> {
     }
 
     // Optional dropped-column drop times (column → drop_time_micros) used for
-    // dropped-column filtering during compaction (#904/#847). Absent → empty.
+    // dropped-column filtering during compaction (#904/#847). Absent → empty; a
+    // present-but-malformed field is a hard error (not silently ignored) so a
+    // typo can't leave stale cells unpurged.
     let mut dropped_columns = HashMap::new();
-    if let Some(dropped) = json.get("dropped_columns").and_then(|v| v.as_object()) {
-        for (name, ts) in dropped {
-            let drop_time = ts.as_i64().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "dropped_columns['{}'] must be an integer drop time in microseconds",
-                    name
-                )
-            })?;
-            dropped_columns.insert(name.clone(), drop_time);
+    match json.get("dropped_columns") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::Object(dropped)) => {
+            for (name, ts) in dropped {
+                let drop_time = ts.as_i64().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "dropped_columns['{}'] must be an integer drop time in microseconds",
+                        name
+                    )
+                })?;
+                dropped_columns.insert(name.clone(), drop_time);
+            }
+        }
+        Some(_) => {
+            return Err(anyhow::anyhow!(
+                "schema field `dropped_columns` must be an object mapping column \
+                 name → drop time in microseconds"
+            ));
         }
     }
 
@@ -2940,6 +2951,27 @@ mod dropped_column_json_tests {
             schema.dropped_columns.get("legacy"),
             Some(&1_700_000_000_000_000_i64),
             "CLI JSON loader must preserve dropped_columns drop time"
+        );
+    }
+
+    /// A `dropped_columns` field of the wrong shape (not an object) is a clear
+    /// error, not silently ignored — a typo must not leave stale cells unpurged.
+    #[test]
+    fn parse_json_schema_rejects_non_object_dropped_columns() {
+        let json: serde_json::Value = serde_json::from_str(
+            r#"{
+                "keyspace": "ks",
+                "table": "t",
+                "columns": {"id": {"type": "uuid", "kind": "PartitionKey"}},
+                "dropped_columns": ["legacy"]
+            }"#,
+        )
+        .expect("json parses");
+
+        let err = parse_json_schema(&json).expect_err("non-object dropped_columns must error");
+        assert!(
+            err.to_string().contains("dropped_columns"),
+            "error must name the offending field, got: {err}"
         );
     }
 
