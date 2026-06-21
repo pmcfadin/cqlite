@@ -96,6 +96,21 @@ type ParsedRow = (
 /// Each element is `(table_id, row_key, value_map, cell_metadata_map)`.
 type ParsedBlockWithMeta = Vec<(TableId, RowKey, Value, HashMap<String, CellWriteMetadata>)>;
 
+/// Per-column complex-element capture for the compaction read path (epic #899).
+///
+/// Maps a complex (non-frozen collection / UDT) column name to its optional
+/// complex deletion `(markedForDeleteAt µs, localDeletionTime s)` plus the
+/// per-element cells in on-disk order. Populated by `parse_row_data_with_offset`
+/// only when the caller passes a `Some(&mut _)` collector (the compaction path);
+/// `None` on every user-facing read path.
+type CompactionComplexColumns = HashMap<
+    String,
+    (
+        Option<(i64, i32)>,
+        Vec<crate::storage::sstable::reader::compaction_row::ComplexElement>,
+    ),
+>;
+
 /// Outcome of [`V5CompressedLegacyParser::parse_one_partition_with_timestamps`].
 ///
 /// The sliding-window compaction-read driver (issue #827) feeds the parser a
@@ -222,6 +237,15 @@ struct ComplexCellParse {
     /// Used by `parse_complex_column_inner` to compute the max element writetime
     /// for a collection column (Issue #700, DS4).
     element_writetime: Option<i64>,
+    /// Per-element TTL in seconds when the cell is expiring (`IS_EXPIRING`
+    /// 0x02 set and not `USE_ROW_TTL`). `None` otherwise. Surfaced for the
+    /// per-element compaction contract (epic #899).
+    element_ttl: Option<u32>,
+    /// Per-element `localDeletionTime` in SECONDS for an expiring / deleted
+    /// element. Far-future values in `[2^31, 2^32)` are kept as the wrapping
+    /// `as u32 as i32` representation (epic #899 invariant). `None` when the
+    /// element carries no local deletion time.
+    element_local_deletion_time: Option<i32>,
 }
 
 /// Extra metadata produced by `parse_complex_column_inner` for delta-scan callers
@@ -247,6 +271,11 @@ pub(in crate::storage::sstable::reader) struct ComplexColumnMeta {
     /// collection cell (Issue #493 territory).  v1 does not represent them; callers
     /// must count and warn.
     pub element_tombstone_count: u64,
+    /// Real complex deletion `(markedForDeleteAt µs, localDeletionTime s)` for
+    /// this column, or `None` for the `LIVE` sentinel (epic #899). Used by the
+    /// compaction read path to populate `ComplexColumn.complex_deletion`.
+    /// Always `None` on the user-facing read path (where the field is unused).
+    pub complex_deletion: Option<(i64, i32)>,
 }
 
 // Row header flag constants
@@ -1797,6 +1826,356 @@ impl V5CompressedLegacyParser {
         }
     }
 
+    /// Build a [`CompactionRow`] from a parsed row's pieces (epic #899).
+    ///
+    /// `cells` is the collapsed column→value map (simple columns plus the
+    /// collapsed `Value` for each complex column); `cell_meta` carries per-simple
+    /// -cell write timestamps / TTLs; `complex` carries the per-element capture
+    /// for the complex columns. The complex columns are split out of `cells` (the
+    /// collapsed complex `Value` is dropped in favour of the per-element cells).
+    ///
+    /// A row tombstone produces [`CompactionRowData::Tombstone`]; an empty row
+    /// (no cells, no tombstone) produces an empty `Live`.
+    fn build_compaction_row_data(
+        &self,
+        cells: HashMap<String, Value>,
+        cell_meta: Option<HashMap<String, CellWriteMetadata>>,
+        complex: CompactionComplexColumns,
+        row_header_opt: &Option<RowHeader>,
+        row_ts: i64,
+    ) -> crate::storage::sstable::reader::compaction_row::CompactionRowData {
+        use crate::storage::sstable::reader::compaction_row::{
+            CompactionRowData, ComplexColumn, SimpleCell,
+        };
+
+        if let Some(h) = row_header_opt.as_ref().filter(|h| h.is_row_tombstone()) {
+            return CompactionRowData::Tombstone {
+                deletion_time: h.row_tombstone_deletion_time(),
+                // localDeletionTime in SECONDS (GC-grace clock). Preserve the
+                // far-future [2^31, 2^32) encoding via wrapping `as u32 as i32`.
+                local_deletion_time: h.local_deletion_time.unwrap_or(0),
+            };
+        }
+
+        // Build complex columns (sorted by name for deterministic output, mirroring
+        // the collapsed-value path's column ordering).
+        let mut complex_cols: Vec<ComplexColumn> = complex
+            .into_iter()
+            .map(|(column, (complex_deletion, elements))| ComplexColumn {
+                column,
+                complex_deletion,
+                elements,
+            })
+            .collect();
+        complex_cols.sort_by(|a, b| a.column.cmp(&b.column));
+
+        // Simple cells are every collapsed cell whose column is NOT a complex
+        // column. Per-cell timestamp / ttl / local-deletion-time come from
+        // `cell_meta` when present, else inherit the row timestamp.
+        let complex_names: std::collections::HashSet<&str> =
+            complex_cols.iter().map(|c| c.column.as_str()).collect();
+
+        let mut simple_cells: Vec<SimpleCell> = cells
+            .into_iter()
+            .filter(|(name, _)| !complex_names.contains(name.as_str()))
+            .map(|(column, value)| {
+                let (timestamp, ttl, local_deletion_time) =
+                    match cell_meta.as_ref().and_then(|m| m.get(&column)) {
+                        Some(meta) => {
+                            let ttl = meta.expiration.as_ref().map(|e| e.ttl_seconds as u32);
+                            let ldt = meta
+                                .expiration
+                                .as_ref()
+                                .map(|e| e.expires_at_seconds as u32 as i32);
+                            (meta.write_timestamp_micros, ttl, ldt)
+                        }
+                        None => (row_ts, None, None),
+                    };
+                SimpleCell {
+                    column,
+                    value,
+                    timestamp,
+                    ttl,
+                    local_deletion_time,
+                }
+            })
+            .collect();
+        simple_cells.sort_by(|a, b| a.column.cmp(&b.column));
+
+        CompactionRowData::Live {
+            simple: simple_cells,
+            complex: complex_cols,
+        }
+    }
+
+    /// Parse all partitions in a decompressed block into per-element
+    /// [`CompactionRow`]s (epic #899, compaction-only). Thin Vec wrapper over
+    /// [`Self::parse_block_for_compaction_emit`].
+    pub fn parse_block_for_compaction(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+    ) -> Result<Vec<crate::storage::sstable::reader::compaction_row::CompactionRow>> {
+        let mut results = Vec::new();
+        self.parse_block_for_compaction_emit(data, schema, reader, |row| {
+            results.push(row);
+            Ok(std::ops::ControlFlow::Continue(()))
+        })?;
+        Ok(results)
+    }
+
+    /// Streaming per-element compaction variant of
+    /// [`Self::parse_block_with_timestamps_emit`]: emits a [`CompactionRow`]
+    /// (per-element complex cells + real complex deletion) per row (epic #899).
+    pub fn parse_block_for_compaction_emit<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(
+            crate::storage::sstable::reader::compaction_row::CompactionRow,
+        ) -> Result<std::ops::ControlFlow<()>>,
+    {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                self.keyspace, self.table_name
+            ))
+        })?;
+
+        let mut offset = 0;
+        let mut skipped_partitions = 0;
+
+        let broke = std::cell::Cell::new(false);
+        let mut tracking_emit = |row| -> Result<std::ops::ControlFlow<()>> {
+            let flow = emit(row)?;
+            if matches!(flow, std::ops::ControlFlow::Break(())) {
+                broke.set(true);
+            }
+            Ok(flow)
+        };
+
+        while offset < data.len() {
+            match self.parse_one_partition_for_compaction(
+                &data[offset..],
+                Some(schema),
+                reader,
+                true,
+                &mut tracking_emit,
+            )? {
+                ParseStep::Emitted(consumed) => {
+                    if consumed == 0 {
+                        skipped_partitions += 1;
+                        offset += 1;
+                    } else {
+                        offset += consumed;
+                    }
+                }
+                ParseStep::NeedMore | ParseStep::Done => break,
+            }
+            if broke.get() {
+                break;
+            }
+        }
+
+        if skipped_partitions > 0 {
+            log::warn!(
+                "V5CompressedLegacy (compaction): skipped {} malformed partitions",
+                skipped_partitions
+            );
+        }
+
+        Ok(())
+    }
+
+    /// Per-element compaction counterpart of
+    /// [`Self::parse_one_partition_with_timestamps`] (epic #899). Identical
+    /// sliding-window / `ParseStep` / buffering semantics, but emits a
+    /// [`CompactionRow`] carrying per-element complex cells and the real complex
+    /// deletion instead of the collapsed `(RowKey, Value, ts)` tuple.
+    pub fn parse_one_partition_for_compaction<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        at_final_chunk: bool,
+        emit: &mut F,
+    ) -> Result<ParseStep>
+    where
+        F: FnMut(
+            crate::storage::sstable::reader::compaction_row::CompactionRow,
+        ) -> Result<std::ops::ControlFlow<()>>,
+    {
+        use crate::storage::sstable::reader::compaction_row::CompactionRow;
+
+        if data.is_empty() {
+            return Ok(ParseStep::Done);
+        }
+
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                self.keyspace, self.table_name
+            ))
+        })?;
+
+        const CASSANDRA_MAX_KEY_SIZE: usize = 65536;
+        const FORMAT_MAX_KEY_SIZE: usize = 255;
+
+        if data.len() < 2 {
+            return Ok(if at_final_chunk {
+                ParseStep::Done
+            } else {
+                ParseStep::NeedMore
+            });
+        }
+
+        let key_len = data[1] as usize;
+        let header_min_size = 1 + 1 + key_len + 4 + 8;
+
+        if key_len == 0 || key_len > FORMAT_MAX_KEY_SIZE.min(CASSANDRA_MAX_KEY_SIZE) {
+            return Ok(ParseStep::Emitted(1));
+        }
+
+        if header_min_size > data.len() {
+            return Ok(if at_final_chunk {
+                ParseStep::Done
+            } else {
+                ParseStep::NeedMore
+            });
+        }
+
+        let (partition_key, mut offset) = match self.parse_partition_header(data, 0) {
+            Ok(v) => v,
+            Err(_) => return Ok(ParseStep::Emitted(1)),
+        };
+
+        // Static cells are kept as the collapsed map so they can be folded into
+        // subsequent clustering rows, exactly like the legacy path. They are
+        // surfaced as simple cells on each emitted row.
+        let mut static_cells: HashMap<String, Value> = HashMap::new();
+        let mut pending: Vec<CompactionRow> = Vec::new();
+
+        macro_rules! flush_and_emitted {
+            ($consumed:expr, $pending:expr, $emit:expr) => {{
+                for row in $pending.drain(..) {
+                    match $emit(row)? {
+                        std::ops::ControlFlow::Continue(()) => {}
+                        std::ops::ControlFlow::Break(()) => break,
+                    }
+                }
+                Ok(ParseStep::Emitted($consumed))
+            }};
+        }
+
+        loop {
+            if offset < data.len() && Self::is_end_of_partition(data[offset]) {
+                offset += 1;
+                return flush_and_emitted!(offset, pending, emit);
+            }
+
+            if offset >= data.len() {
+                if at_final_chunk {
+                    return flush_and_emitted!(offset, pending, emit);
+                }
+                return Ok(ParseStep::NeedMore);
+            }
+
+            if Self::is_range_tombstone_marker(data[offset]) {
+                match self.skip_range_tombstone_marker(data, offset, schema) {
+                    Ok(next_offset) => {
+                        offset = next_offset;
+                        continue;
+                    }
+                    Err(_) => {
+                        if at_final_chunk {
+                            return flush_and_emitted!(offset, pending, emit);
+                        }
+                        return Ok(ParseStep::NeedMore);
+                    }
+                }
+            }
+
+            // Compaction mode: capture per-column complex elements and request
+            // per-cell metadata so simple cells carry per-cell timestamps/TTLs.
+            let mut complex_capture: CompactionComplexColumns = HashMap::new();
+            match self.parse_row_data_with_offset_impl(
+                data,
+                offset,
+                Some(schema),
+                reader,
+                true,
+                Some(&mut complex_capture),
+            ) {
+                Ok((
+                    mut cells,
+                    cell_meta,
+                    row_header_opt,
+                    next_offset,
+                    is_static,
+                    _complex_meta,
+                )) => {
+                    offset = next_offset;
+
+                    let row_tombstone = row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
+                    let row_ts = match row_tombstone {
+                        Some(h) => h.row_tombstone_deletion_time(),
+                        None => row_header_opt
+                            .as_ref()
+                            .and_then(|h| h.timestamp)
+                            .unwrap_or(0),
+                    };
+
+                    if is_static {
+                        static_cells = cells;
+                    } else {
+                        for (k, v) in &static_cells {
+                            cells.entry(k.clone()).or_insert_with(|| v.clone());
+                        }
+
+                        let row_data = self.build_compaction_row_data(
+                            cells,
+                            cell_meta,
+                            complex_capture,
+                            &row_header_opt,
+                            row_ts,
+                        );
+
+                        pending.push(CompactionRow {
+                            key: partition_key.clone(),
+                            row_timestamp: row_ts,
+                            row_data,
+                        });
+                    }
+
+                    if offset >= data.len() {
+                        if at_final_chunk {
+                            return flush_and_emitted!(offset, pending, emit);
+                        }
+                        return Ok(ParseStep::NeedMore);
+                    }
+                    if self.peek_is_partition_header(data, offset) {
+                        return flush_and_emitted!(offset, pending, emit);
+                    }
+                }
+                Err(_) => {
+                    if at_final_chunk {
+                        return flush_and_emitted!(offset, pending, emit);
+                    }
+                    return Ok(ParseStep::NeedMore);
+                }
+            }
+        }
+    }
+
     /// Parse row flags only (Issue #213 fix: split from parse_row_header)
     ///
     /// # Format
@@ -3050,10 +3429,29 @@ impl V5CompressedLegacyParser {
     fn parse_row_data_with_offset(
         &self,
         data: &[u8],
+        offset: usize,
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        want_cell_metadata: bool,
+    ) -> Result<ParsedRow> {
+        self.parse_row_data_with_offset_impl(data, offset, schema, reader, want_cell_metadata, None)
+    }
+
+    /// Implementation of [`Self::parse_row_data_with_offset`] with an optional
+    /// per-column complex-element collector for the compaction read path
+    /// (epic #899). When `compaction_complex_out` is `Some`, every complex
+    /// column's per-element cells + complex deletion are captured into it
+    /// alongside the normal collapsed-`Value` cells. On user-facing reads it is
+    /// `None` and behavior is byte-unchanged.
+    #[allow(clippy::too_many_arguments)]
+    fn parse_row_data_with_offset_impl(
+        &self,
+        data: &[u8],
         mut offset: usize,
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
         want_cell_metadata: bool,
+        mut compaction_complex_out: Option<&mut CompactionComplexColumns>,
     ) -> Result<ParsedRow> {
         let mut cells = HashMap::new();
         // Parallel per-cell write metadata map (populated alongside `cells`).
@@ -3410,8 +3808,35 @@ impl V5CompressedLegacyParser {
                     "V5CompressedLegacy: Column '{}' is complex (non-frozen collection), using parse_complex_column",
                     column.name
                 );
-                match self.parse_complex_column(data, offset, column, has_complex_deletion, reader)
-                {
+                // Epic #899: on the compaction read path collect per-element
+                // cells + the real complex deletion into `compaction_complex_out`
+                // (otherwise this is the user-facing read path: collapsed value
+                // only, byte-unchanged). Elements inherit the row liveness
+                // timestamp when they carry USE_ROW_TIMESTAMP.
+                let parse_result = if compaction_complex_out.is_some() {
+                    let row_ts = row_header.timestamp.unwrap_or(0);
+                    let mut element_buf = Vec::new();
+                    self.parse_complex_column_inner(
+                        data,
+                        offset,
+                        column,
+                        has_complex_deletion,
+                        row_ts,
+                        Some(&mut element_buf),
+                    )
+                    .map(|(value, new_offset, col_meta)| {
+                        if let Some(ref mut out) = compaction_complex_out {
+                            out.insert(
+                                column.name.clone(),
+                                (col_meta.complex_deletion, element_buf),
+                            );
+                        }
+                        (value, new_offset, col_meta)
+                    })
+                } else {
+                    self.parse_complex_column(data, offset, column, has_complex_deletion, reader)
+                };
+                match parse_result {
                     Ok((value, new_offset, col_meta)) => {
                         log::debug!(
                             "V5CompressedLegacy:   ✓ Complex column {} '{}' = {:?}, consumed {} bytes",
@@ -5801,16 +6226,57 @@ impl V5CompressedLegacyParser {
         has_complex_deletion: bool,
         _reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize, ComplexColumnMeta)> {
-        self.parse_complex_column_inner(data, offset, column, has_complex_deletion)
+        self.parse_complex_column_inner(data, offset, column, has_complex_deletion, 0, None)
     }
 
+    /// Inner complex-column parser.
+    ///
+    /// When `elements_out` is `Some`, each parsed element (live, empty, or
+    /// tombstoned) is also pushed as a
+    /// [`crate::storage::sstable::reader::compaction_row::ComplexElement`] in
+    /// on-disk order, so the compaction read path can surface per-element cells
+    /// (epic #899). `row_timestamp` is the row liveness timestamp (µs) inherited
+    /// by elements that carry the `USE_ROW_TIMESTAMP` (0x08) flag — only read
+    /// when collecting elements. On the user-facing read path `elements_out` is
+    /// `None`, `row_timestamp` is `0`, and no per-element collection occurs.
     fn parse_complex_column_inner(
         &self,
         data: &[u8],
         mut offset: usize,
         column: &crate::schema::Column,
         has_complex_deletion: bool,
+        row_timestamp: i64,
+        mut elements_out: Option<
+            &mut Vec<crate::storage::sstable::reader::compaction_row::ComplexElement>,
+        >,
     ) -> Result<(Value, usize, ComplexColumnMeta)> {
+        use crate::storage::sstable::reader::compaction_row::ComplexElement;
+
+        // Helper to push a per-element cell into `elements_out` (compaction
+        // path only). `decoded_value` is the resolved element value (the list
+        // member, the set member parsed from the path, or the map value);
+        // `None` for a tombstoned / empty element. The effective timestamp is
+        // the element-own writetime when present, else the inherited row
+        // timestamp (USE_ROW_TIMESTAMP).
+        fn record_element(
+            out: &mut Option<&mut Vec<ComplexElement>>,
+            cell: &ComplexCellParse,
+            decoded_value: Option<Value>,
+            decoded_key: Option<Value>,
+            row_timestamp: i64,
+        ) {
+            if let Some(vec) = out.as_mut() {
+                vec.push(ComplexElement {
+                    cell_path: cell.path_bytes.clone(),
+                    value: decoded_value,
+                    decoded_key,
+                    timestamp: cell.element_writetime.unwrap_or(row_timestamp),
+                    ttl: cell.element_ttl,
+                    local_deletion_time: cell.element_local_deletion_time,
+                    is_deleted: cell.is_deleted,
+                });
+            }
+        }
         log::debug!(
             "V5CompressedLegacy: Parsing complex column '{}' type='{}' has_complex_deletion={} at offset {}",
             column.name, column.data_type, has_complex_deletion, offset
@@ -5827,6 +6293,10 @@ impl V5CompressedLegacyParser {
         //                           + localDeletionTime (VInt).
         // We treat `marked_for_delete_at != i64::MIN` as "has collection tombstone".
         let mut has_collection_tombstone = false;
+        // Epic #899: the real complex deletion `(markedForDeleteAt µs,
+        // localDeletionTime s)` for the compaction contract; `None` is the LIVE
+        // sentinel (no overwrite).
+        let mut complex_deletion: Option<(i64, i32)> = None;
         if has_complex_deletion {
             let (remaining, mfda_delta) = parse_vint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
@@ -5845,7 +6315,7 @@ impl V5CompressedLegacyParser {
                 has_collection_tombstone = true;
             }
 
-            let (remaining, _local_deletion) = parse_vint(&data[offset..]).map_err(|e| {
+            let (remaining, local_deletion_delta) = parse_vint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex column '{}': failed to parse localDeletionTime at offset {}: {:?}",
                     column.name, offset, e
@@ -5853,6 +6323,18 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+
+            // Surface the real complex deletion for the compaction path. The
+            // localDeletionTime is a delta from min_local_deletion_time; the
+            // LIVE sentinel is i32::MAX. Far-future values in [2^31, 2^32) wrap
+            // via `as u32 as i32` (epic #899 invariant). Only record a deletion
+            // when markedForDeleteAt is not the LIVE sentinel.
+            if absolute_mfda != i64::MIN {
+                let absolute_ldt = self
+                    .min_local_deletion_time
+                    .wrapping_add(local_deletion_delta);
+                complex_deletion = Some((absolute_mfda, absolute_ldt as u32 as i32));
+            }
 
             log::debug!(
                 "V5CompressedLegacy: Complex column '{}' deletion time parsed \
@@ -5937,6 +6419,9 @@ impl V5CompressedLegacyParser {
                         i,
                         column.name
                     );
+                    // Epic #899: surface the tombstoned element to the compaction
+                    // path (value None) so per-element reconcile can shadow it.
+                    record_element(&mut elements_out, &cell, None, None, row_timestamp);
                     continue;
                 }
 
@@ -5944,6 +6429,15 @@ impl V5CompressedLegacyParser {
                 // Tombstoned elements are skipped above; their timestamps must not
                 // inflate the max_element_writetime reported for the collection.
                 update_max_writetime(&mut max_element_writetime, &cell);
+
+                // Epic #899: surface this live element to the compaction path.
+                record_element(
+                    &mut elements_out,
+                    &cell,
+                    cell.value.clone(),
+                    None,
+                    row_timestamp,
+                );
 
                 // Add non-null values to the list
                 if let Some(val) = cell.value {
@@ -5984,6 +6478,9 @@ impl V5CompressedLegacyParser {
                         i,
                         column.name
                     );
+                    // Epic #899: surface the tombstoned set element (the element
+                    // identity lives in the cell_path).
+                    record_element(&mut elements_out, &cell, None, None, row_timestamp);
                     continue;
                 }
 
@@ -5995,8 +6492,8 @@ impl V5CompressedLegacyParser {
                 // For sets: the path bytes ARE the element value (cell value is always empty).
                 // If cell.value is Some (unusual case where a set cell has a non-empty value),
                 // use it. Otherwise parse the path bytes as the element type.
-                if let Some(val) = cell.value {
-                    elements.push(val);
+                let set_member: Option<Value> = if let Some(val) = cell.value.clone() {
+                    Some(val)
                 } else if !cell.path_bytes.is_empty() {
                     // Path bytes are the set element — parse them as the element type
                     match self.parse_value_from_raw_bytes(
@@ -6005,7 +6502,7 @@ impl V5CompressedLegacyParser {
                         &column.name,
                         0,
                     ) {
-                        Ok(val) => elements.push(val),
+                        Ok(val) => Some(val),
                         Err(e) => {
                             log::debug!(
                                 "V5CompressedLegacy: set element {} parse failed (type={}): {}",
@@ -6013,8 +6510,25 @@ impl V5CompressedLegacyParser {
                                 element_type,
                                 e
                             );
+                            None
                         }
                     }
+                } else {
+                    None
+                };
+
+                // Epic #899: surface the live set element (decoded member value)
+                // to the compaction path, keyed by its cell_path.
+                record_element(
+                    &mut elements_out,
+                    &cell,
+                    set_member.clone(),
+                    None,
+                    row_timestamp,
+                );
+
+                if let Some(val) = set_member {
+                    elements.push(val);
                 }
             }
 
@@ -6055,7 +6569,10 @@ impl V5CompressedLegacyParser {
                     update_max_writetime(&mut max_element_writetime, &cell);
                 }
 
-                if !cell.path_bytes.is_empty() {
+                // Decode the map key (from cell_path) up front so it can be both
+                // recorded on the per-element compaction entry and used to build
+                // the collapsed `Value::Map`.
+                let decoded_key = if !cell.path_bytes.is_empty() {
                     log::debug!(
                         "V5CompressedLegacy: Parsing map key for column '{}', key_type='{}', path_len={}",
                         column.name,
@@ -6063,9 +6580,24 @@ impl V5CompressedLegacyParser {
                         cell.path_bytes.len()
                     );
                     // For cell path keys, parse directly without expecting length prefixes
-                    let key_value =
-                        self.parse_cell_path_key(&cell.path_bytes, &key_type, &column.name)?;
+                    Some(self.parse_cell_path_key(&cell.path_bytes, &key_type, &column.name)?)
+                } else {
+                    None
+                };
 
+                // Epic #899: surface the map entry to the compaction path keyed
+                // by its cell_path (the map key bytes); value is the map value
+                // (`None` for a tombstoned / null entry), with the decoded key for
+                // whole-`Value::Map` reconstruction downstream.
+                record_element(
+                    &mut elements_out,
+                    &cell,
+                    cell.value.clone(),
+                    decoded_key.clone(),
+                    row_timestamp,
+                );
+
+                if let Some(key_value) = decoded_key {
                     // Add non-null entries to the map
                     if let Some(val) = cell.value {
                         entries.push((key_value, val));
@@ -6102,6 +6634,7 @@ impl V5CompressedLegacyParser {
                 has_collection_tombstone,
                 max_element_writetime,
                 element_tombstone_count,
+                complex_deletion,
             },
         ))
     }
@@ -6190,8 +6723,14 @@ impl V5CompressedLegacyParser {
         }
 
         // Step 3: Local deletion time (if deleted/expiring and not using row TTL)
+        // Epic #899: surface the absolute localDeletionTime (SECONDS) for the
+        // per-element compaction contract. The on-disk value is an unsigned VInt
+        // delta from `min_local_deletion_time`. Far-future values in
+        // `[2^31, 2^32)` are preserved as the wrapping `as u32 as i32`
+        // representation — do NOT widen to i64 (epic #899 invariant).
+        let mut element_local_deletion_time: Option<i32> = None;
         if !use_row_ttl && (is_deleted || is_expiring) {
-            let (remaining, _ldt) = parse_vuint(&data[offset..]).map_err(|e| {
+            let (remaining, ldt_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex cell {}.{}: failed to parse localDeletionTime at offset {}: {:?}",
                     column.name, cell_index, offset, e
@@ -6199,11 +6738,17 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+            let absolute_ldt = self.min_local_deletion_time.wrapping_add(ldt_delta as i64);
+            // Wrap into i32 preserving the far-future [2^31, 2^32) encoding.
+            element_local_deletion_time = Some(absolute_ldt as u32 as i32);
         }
 
         // Step 4: TTL (if expiring and not using row TTL)
+        // Epic #899: surface the per-element TTL (SECONDS) for the compaction
+        // contract. The on-disk value is an unsigned VInt delta from `min_ttl`.
+        let mut element_ttl: Option<u32> = None;
         if !use_row_ttl && is_expiring {
-            let (remaining, _ttl) = parse_vuint(&data[offset..]).map_err(|e| {
+            let (remaining, ttl_delta) = parse_vuint(&data[offset..]).map_err(|e| {
                 Error::corruption(format!(
                     "Complex cell {}.{}: failed to parse TTL at offset {}: {:?}",
                     column.name, cell_index, offset, e
@@ -6211,6 +6756,8 @@ impl V5CompressedLegacyParser {
             })?;
             let bytes_consumed = data[offset..].len() - remaining.len();
             offset += bytes_consumed;
+            let absolute_ttl = self.min_ttl.unwrap_or(0).wrapping_add(ttl_delta as i64);
+            element_ttl = Some(absolute_ttl as u32);
         }
 
         // Step 5: Cell path (VInt length + bytes)
@@ -6325,6 +6872,8 @@ impl V5CompressedLegacyParser {
             is_deleted,
             next_offset: offset,
             element_writetime,
+            element_ttl,
+            element_local_deletion_time,
         })
     }
 
@@ -10228,7 +10777,7 @@ mod tests {
         blob.extend_from_slice(&udt_bytes);
 
         let (value, consumed, _meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false)
+            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
             .expect("parse_complex_column_inner must succeed for list<frozen<address_type>>");
         assert_eq!(consumed, blob.len(), "all bytes must be consumed");
 
@@ -10316,7 +10865,7 @@ mod tests {
         blob.extend(build_set_cell_bytes(world));
 
         let (value, consumed, _meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false)
+            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
             .expect("parse_complex_column_inner should succeed");
 
         assert_eq!(consumed, blob.len());
@@ -10369,7 +10918,7 @@ mod tests {
         blob.extend(build_set_tombstone_cell_bytes(dead));
 
         let (value, consumed, meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false)
+            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
             .expect("parse_complex_column_inner should succeed");
 
         assert_eq!(consumed, blob.len(), "parser must consume the entire blob");
@@ -11022,7 +11571,10 @@ mod tests {
         let blob: Vec<u8> = vec![0x02, 0x00, 0x00];
 
         let (value, consumed, meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, true /* has_complex_deletion */)
+            .parse_complex_column_inner(
+                &blob, 0, &column, true, /* has_complex_deletion */
+                0, None,
+            )
             .expect("parse_complex_column_inner must succeed for collection tombstone");
 
         assert_eq!(consumed, blob.len(), "all bytes must be consumed");

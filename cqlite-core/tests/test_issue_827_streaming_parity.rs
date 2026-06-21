@@ -38,7 +38,7 @@ use cqlite_core::storage::write_engine::{
     CellOperation, ClusteringKey, Mutation, PartitionKey, TableId, WriteEngine, WriteEngineConfig,
 };
 use cqlite_core::types::Value;
-use cqlite_core::{Config, RowKey};
+use cqlite_core::Config;
 use std::collections::HashMap;
 use tempfile::TempDir;
 
@@ -137,24 +137,23 @@ async fn write_sstable(mutations: Vec<Mutation>) -> (TempDir, std::path::PathBuf
     (temp_dir, path)
 }
 
-/// A comparable snapshot of a compaction entry: (key bytes, value, timestamp).
-type EntrySnapshot = (Vec<u8>, Value, i64);
+/// A comparable snapshot of a compaction entry. Epic #899 widened the compaction
+/// read contract from `(RowKey, Value, ts)` to per-element `CompactionRow`; the
+/// streaming↔materialising parity gate compares whole `CompactionRow`s.
+type EntrySnapshot = cqlite_core::storage::sstable::reader::CompactionRow;
 
 async fn collect_vec(reader: &SSTableReader, schema: &TableSchema) -> Vec<EntrySnapshot> {
     reader
         .iterate_all_partitions_for_compaction(Some(schema))
         .await
         .expect("iterate_all_partitions_for_compaction")
-        .into_iter()
-        .map(|(k, v, ts)| (k.0, v, ts))
-        .collect()
 }
 
 async fn collect_stream(reader: &SSTableReader, schema: &TableSchema) -> Vec<EntrySnapshot> {
     let mut out: Vec<EntrySnapshot> = Vec::new();
     reader
-        .stream_all_partitions_for_compaction(Some(schema), |key: RowKey, value, ts| {
-            out.push((key.0, value, ts));
+        .stream_all_partitions_for_compaction(Some(schema), |row| {
+            out.push(row);
             Ok(std::ops::ControlFlow::Continue(()))
         })
         .await
@@ -183,14 +182,17 @@ fn assert_parity(vec_entries: &[EntrySnapshot], stream_entries: &[EntrySnapshot]
         vec_entries.len()
     );
     for (i, (got, want)) in stream_entries.iter().zip(vec_entries.iter()).enumerate() {
-        assert_eq!(got.0, want.0, "Issue #827 [{ctx}]: entry {i} key mismatch");
         assert_eq!(
-            got.1, want.1,
-            "Issue #827 [{ctx}]: entry {i} value mismatch"
+            got.key, want.key,
+            "Issue #827 [{ctx}]: entry {i} key mismatch"
         );
         assert_eq!(
-            got.2, want.2,
+            got.row_timestamp, want.row_timestamp,
             "Issue #827 [{ctx}]: entry {i} timestamp mismatch"
+        );
+        assert_eq!(
+            got.row_data, want.row_data,
+            "Issue #827 [{ctx}]: entry {i} row data mismatch"
         );
     }
 }
@@ -248,14 +250,12 @@ async fn test_streaming_parity_chunk_straddle_wide_partition() {
         "Issue #827 precondition: wide-partition fixture should yield rows"
     );
     // Sanity: the big partition's value really is large (so it straddles chunks).
-    let has_big = vec_entries.iter().any(|(_, v, _)| {
-        if let Value::Map(entries) = v {
-            entries
-                .iter()
-                .any(|(_, val)| matches!(val, Value::Text(s) if s.len() >= 48 * 1024))
-        } else {
-            false
-        }
+    use cqlite_core::storage::sstable::reader::CompactionRowData;
+    let has_big = vec_entries.iter().any(|row| match &row.row_data {
+        CompactionRowData::Live { simple, .. } => simple
+            .iter()
+            .any(|c| matches!(&c.value, Value::Text(s) if s.len() >= 48 * 1024)),
+        CompactionRowData::Tombstone { .. } => false,
     });
     assert!(
         has_big,
@@ -295,9 +295,10 @@ async fn test_streaming_parity_with_row_tombstone() {
     let stream_entries = collect_stream(&reader, &schema).await;
 
     // At least one tombstone must be present, so the parity is non-trivial.
+    use cqlite_core::storage::sstable::reader::CompactionRowData;
     let tombstone_count = vec_entries
         .iter()
-        .filter(|(_, v, _)| matches!(v, Value::Tombstone(_)))
+        .filter(|row| matches!(row.row_data, CompactionRowData::Tombstone { .. }))
         .count();
     assert!(
         tombstone_count >= 1,
@@ -457,7 +458,7 @@ async fn test_streaming_parity_multi_row_partition_chunk_straddle() {
     // both so any duplicate/drop shows up as a mismatch regardless of ordering.
     let mut vec_sorted = vec_entries.clone();
     let mut stream_sorted = stream_entries.clone();
-    let sort_key = |e: &EntrySnapshot| (e.0.clone(), e.2);
+    let sort_key = |e: &EntrySnapshot| (e.key.0.clone(), e.row_timestamp);
     vec_sorted.sort_by_key(sort_key);
     stream_sorted.sort_by_key(sort_key);
     assert_eq!(
@@ -470,11 +471,11 @@ async fn test_streaming_parity_multi_row_partition_chunk_straddle() {
     // that is not also duplicated in the Vec read (catches re-emission directly).
     let mut seen: HashMap<(Vec<u8>, i64), usize> = HashMap::new();
     for e in &stream_entries {
-        *seen.entry((e.0.clone(), e.2)).or_insert(0) += 1;
+        *seen.entry((e.key.0.clone(), e.row_timestamp)).or_insert(0) += 1;
     }
     let mut want: HashMap<(Vec<u8>, i64), usize> = HashMap::new();
     for e in &vec_entries {
-        *want.entry((e.0.clone(), e.2)).or_insert(0) += 1;
+        *want.entry((e.key.0.clone(), e.row_timestamp)).or_insert(0) += 1;
     }
     assert_eq!(
         seen, want,
@@ -498,8 +499,8 @@ async fn test_streaming_break_stops_early() {
 
     let mut collected: Vec<Vec<u8>> = Vec::new();
     reader
-        .stream_all_partitions_for_compaction(Some(&schema), |key: RowKey, _v, _ts| {
-            collected.push(key.0);
+        .stream_all_partitions_for_compaction(Some(&schema), |row| {
+            collected.push(row.key.0);
             if collected.len() >= 5 {
                 Ok(std::ops::ControlFlow::Break(()))
             } else {

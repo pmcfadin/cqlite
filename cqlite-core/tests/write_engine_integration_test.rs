@@ -1368,10 +1368,10 @@ async fn test_two_pass_baseline_regression() -> Result<()> {
     let id1_key_bytes: &[u8] = &[0x00, 0x00, 0x00, 0x01];
     let entry_for_id1 = entries
         .iter()
-        .find(|(key, _, _)| key.as_bytes() == id1_key_bytes)
+        .find(|row| row.key.as_bytes() == id1_key_bytes)
         .expect("partition id=1 must be present in the SSTable");
 
-    let decoded_write_ts = entry_for_id1.2;
+    let decoded_write_ts = entry_for_id1.row_timestamp;
     assert_eq!(
         decoded_write_ts, 2_000_000_i64,
         "Partition id=1 write-timestamp decoded as {} but expected 2_000_000. \
@@ -1386,13 +1386,13 @@ async fn test_two_pass_baseline_regression() -> Result<()> {
     let id2_key_bytes: &[u8] = &[0x00, 0x00, 0x00, 0x02];
     let entry_for_id2 = entries
         .iter()
-        .find(|(key, _, _)| key.as_bytes() == id2_key_bytes)
+        .find(|row| row.key.as_bytes() == id2_key_bytes)
         .expect("partition id=2 must be present in the SSTable");
 
     assert_eq!(
-        entry_for_id2.2, 1_000_000_i64,
+        entry_for_id2.row_timestamp, 1_000_000_i64,
         "Partition id=2 write-timestamp decoded as {} but expected 1_000_000.",
-        entry_for_id2.2,
+        entry_for_id2.row_timestamp,
     );
 
     Ok(())
