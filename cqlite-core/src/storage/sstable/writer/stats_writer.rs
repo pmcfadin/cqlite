@@ -2497,8 +2497,7 @@ mod tests {
                 .build_serialization_header_component(None, &meta)
                 .expect("build header");
             let (rest, _min_ts_delta) = parse_vuint(&bytes).expect("minTimestamp delta");
-            let (_rest, min_ldt_delta) =
-                parse_vuint(rest).expect("minLocalDeletionTime delta");
+            let (_rest, min_ldt_delta) = parse_vuint(rest).expect("minLocalDeletionTime delta");
             min_ldt_delta
         };
 
