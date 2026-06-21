@@ -139,25 +139,40 @@ pub struct PromotedIndexBlock {
 ///   opened lazily on the first `add_partition` call so the parent directory need
 ///   not exist before construction.
 ///
-/// In both modes `index_offset` for a new entry = `position + buffer.len()` measured
-/// before any bytes are written. In streaming mode `buffer` is empty at that point
-/// (cleared after the previous entry's flush) so the offset equals `position`; in
+/// * **Counting mode** (`IndexWriter::counting`): like streaming, but with no sink —
+///   each entry is serialized into the scratch `Vec` only to measure its size, then
+///   the scratch is cleared. No file is created and no entry bytes are retained, so
+///   peak heap is O(one entry). This is the BTI path (Issue #908): BTI has no
+///   `Index.db`, but the write loop still needs the per-entry `index_offset`/size
+///   bookkeeping. The earlier BTI code used in-memory mode, which retained every
+///   serialized entry in `buffer` forever — a full, never-emitted in-memory `Index.db`
+///   that defeated the streaming memory budget on large writes.
+///
+/// In all modes `index_offset` for a new entry = `position + buffer.len()` measured
+/// before any bytes are written. In streaming/counting modes `buffer` is empty at that
+/// point (cleared after the previous entry's flush) so the offset equals `position`; in
 /// in-memory mode `position` is always 0 and `buffer` holds all prior entries, so
 /// the offset equals `buffer.len()`.
 #[derive(Debug)]
 pub struct IndexWriter {
     /// Per-entry scratch buffer.
     ///
-    /// In streaming mode this holds exactly the bytes for one entry (cleared after
-    /// each flush). In in-memory mode it accumulates the entire Index.db output.
+    /// In streaming/counting modes this holds exactly the bytes for one entry (cleared
+    /// after each flush). In in-memory mode it accumulates the entire Index.db output.
     buffer: Vec<u8>,
     /// Streaming sink over the Index.db path (streaming mode only).
     ///
-    /// Lazily opened on the first `add_partition` call. `None` in in-memory mode.
+    /// Lazily opened on the first `add_partition` call. `None` in in-memory and
+    /// counting modes.
     sink: Option<std::io::BufWriter<std::fs::File>>,
     /// Index.db output path (streaming mode only); used for lazy sink open.
+    /// `None` in in-memory and counting modes.
     index_path: Option<PathBuf>,
-    /// Bytes already flushed to `sink`. Always 0 in in-memory mode.
+    /// Whether this writer is in counting mode (no sink, no retention, but the
+    /// per-entry scratch is still cleared so memory stays O(one entry)).
+    counting: bool,
+    /// Bytes that would have been written so far. Advances in streaming and counting
+    /// modes (so `index_offset` tracks correctly); always 0 in in-memory mode.
     position: u64,
     /// Entry count (for validation)
     entry_count: usize,
@@ -193,6 +208,43 @@ impl IndexWriter {
             buffer: Vec::new(),
             sink: None,
             index_path: None,
+            counting: false,
+            position: 0,
+            entry_count: 0,
+        }
+    }
+
+    /// Create a counting-only Index.db writer that retains no entry bytes.
+    ///
+    /// Used by the BTI write path (Issue #908): BTI emits no `Index.db`, but the
+    /// write loop still needs each partition's `index_offset`/`entry_size`
+    /// bookkeeping. Each entry is serialized into a scratch buffer only to measure
+    /// its size and advance `position`, then the scratch is cleared — so peak heap
+    /// is O(one entry) instead of accumulating a full, never-emitted in-memory
+    /// `Index.db`. No file is created.
+    ///
+    /// `index_offset`/`entry_size` values are byte-identical to what the streaming
+    /// and in-memory modes would report for the same partition sequence.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use cqlite_core::storage::sstable::writer::IndexWriter;
+    /// use cqlite_core::storage::write_engine::mutation::DecoratedKey;
+    ///
+    /// let mut writer = IndexWriter::counting();
+    /// let key = DecoratedKey::new(12345, vec![0x00, 0x00, 0x00, 0x2A]);
+    /// let info = writer.add_partition(&key, 0).unwrap();
+    /// assert_eq!(info.index_offset, 0);
+    /// // No entry bytes are retained.
+    /// assert_eq!(writer.buffered_len(), 0);
+    /// ```
+    pub fn counting() -> Self {
+        Self {
+            buffer: Vec::new(),
+            sink: None,
+            index_path: None,
+            counting: true,
             position: 0,
             entry_count: 0,
         }
@@ -211,6 +263,7 @@ impl IndexWriter {
             buffer: Vec::new(),
             sink: None,
             index_path: Some(index_path),
+            counting: false,
             position: 0,
             entry_count: 0,
         }
@@ -236,10 +289,21 @@ impl IndexWriter {
         Ok(())
     }
 
-    /// In streaming mode, flush the scratch buffer to the sink, advance `position`,
-    /// and clear the scratch so only one entry is ever resident.
-    /// No-op in in-memory mode (the scratch keeps accumulating).
+    /// Flush the per-entry scratch buffer, advance `position`, and clear the scratch
+    /// so only one entry is ever resident.
+    ///
+    /// - Streaming mode: writes the scratch bytes to the sink.
+    /// - Counting mode: writes nothing (no sink) but still advances `position` and
+    ///   clears the scratch, so memory stays O(one entry) and offset bookkeeping is
+    ///   identical to streaming.
+    /// - In-memory mode: no-op (the scratch keeps accumulating the whole file).
     fn flush_entry(&mut self) -> Result<()> {
+        if self.counting {
+            // Counting mode: retain nothing, but track byte position for offsets.
+            self.position += self.buffer.len() as u64;
+            self.buffer.clear();
+            return Ok(());
+        }
         if self.index_path.is_none() {
             // In-memory mode: keep accumulating in `buffer`.
             return Ok(());
@@ -443,6 +507,16 @@ impl IndexWriter {
     /// ```
     pub fn entry_count(&self) -> usize {
         self.entry_count
+    }
+
+    /// Number of bytes currently held in the per-entry scratch buffer.
+    ///
+    /// In streaming and counting modes this is 0 between entries (the scratch is
+    /// cleared after each `add_partition`). In in-memory mode it grows to the full
+    /// serialized `Index.db` size. Exposed mainly so the BTI path can assert it does
+    /// not accumulate index entry bytes (Issue #908).
+    pub fn buffered_len(&self) -> usize {
+        self.buffer.len()
     }
 }
 
@@ -1280,6 +1354,107 @@ mod tests {
         assert!(
             result.is_err(),
             "finish_streaming() on in-memory writer must fail"
+        );
+    }
+
+    // ── Counting mode tests (Issue #908 — BTI must not retain Index.db bytes) ──
+
+    /// Finding 2 (roborev #908): the BTI path uses counting mode, which must NOT
+    /// accumulate index entry bytes in memory. After writing many partitions the
+    /// scratch buffer must be empty (O(one entry), and 0 between entries), in
+    /// contrast to in-memory mode which retains the whole Index.db.
+    #[test]
+    fn test_counting_mode_does_not_retain_entry_bytes() {
+        let mut counting = IndexWriter::counting();
+        let mut in_memory = IndexWriter::new();
+
+        for i in 0..1000u64 {
+            // UUID-sized keys so each entry is ~20 bytes; in-memory would hold ~20 KB.
+            let key = DecoratedKey::new(i as i64, vec![(i & 0xff) as u8; 16]);
+            counting.add_partition(&key, i * 64).unwrap();
+            in_memory.add_partition(&key, i * 64).unwrap();
+        }
+
+        // Counting mode retains nothing between entries.
+        assert_eq!(
+            counting.buffered_len(),
+            0,
+            "counting mode must not accumulate any Index.db entry bytes"
+        );
+        // In-memory mode, by contrast, holds the entire serialized Index.db.
+        assert!(
+            in_memory.buffered_len() > 1000,
+            "in-memory mode retains all entries (sanity check the contrast)"
+        );
+        assert_eq!(counting.entry_count(), 1000);
+    }
+
+    /// Counting mode reports byte-identical `index_offset`/`entry_size` bookkeeping
+    /// to in-memory mode for the same partition sequence. This is what the BTI write
+    /// path relies on for Summary/offset accounting, so it must not drift.
+    #[test]
+    fn test_counting_mode_offsets_match_in_memory() {
+        let partitions: Vec<(i64, Vec<u8>, u64)> = vec![
+            (100, vec![0x01, 0x02, 0x03, 0x04], 0),
+            (200, vec![0x05, 0x06], 127),
+            (300, vec![0x07], 12381),
+            (400, vec![0xBB; 16], 1_000_000_000),
+        ];
+
+        let mut counting = IndexWriter::counting();
+        let mut in_memory = IndexWriter::new();
+
+        for (token, key_bytes, offset) in &partitions {
+            let key = DecoratedKey::new(*token, key_bytes.clone());
+            let c = counting.add_partition(&key, *offset).unwrap();
+            let m = in_memory.add_partition(&key, *offset).unwrap();
+            assert_eq!(
+                c.index_offset, m.index_offset,
+                "counting index_offset must match in-memory"
+            );
+            assert_eq!(
+                c.entry_size, m.entry_size,
+                "counting entry_size must match in-memory"
+            );
+            // Scratch is cleared after every entry in counting mode.
+            assert_eq!(counting.buffered_len(), 0);
+        }
+    }
+
+    /// Counting mode handles promoted-index (wide partition) bookkeeping the same
+    /// way in-memory mode does, without retaining the promoted payload bytes.
+    #[test]
+    fn test_counting_mode_with_promoted_index_offsets_match() {
+        let ck_prefix = vec![0x00u8, 0x61, 0x62];
+        let make_block = |off: u64, w: u64| PromotedIndexBlock {
+            first_name: ck_prefix.clone(),
+            last_name: ck_prefix.clone(),
+            offset: off,
+            width: w,
+        };
+        let blocks = vec![
+            make_block(0, 70_000),
+            make_block(70_000, 68_000),
+            make_block(138_000, 65_000),
+        ];
+        let key = DecoratedKey::new(42, vec![0xAA, 0xBB]);
+
+        let mut counting = IndexWriter::counting();
+        let c = counting
+            .add_partition_with_promoted(&key, 1234, &blocks)
+            .unwrap();
+
+        let mut in_memory = IndexWriter::new();
+        let m = in_memory
+            .add_partition_with_promoted(&key, 1234, &blocks)
+            .unwrap();
+
+        assert_eq!(c.index_offset, m.index_offset);
+        assert_eq!(c.entry_size, m.entry_size);
+        assert_eq!(
+            counting.buffered_len(),
+            0,
+            "counting mode must not retain the promoted payload"
         );
     }
 

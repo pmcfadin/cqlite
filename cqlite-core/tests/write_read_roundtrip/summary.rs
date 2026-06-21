@@ -182,7 +182,10 @@ async fn test_summary_roundtrip_via_write_engine() {
         .expect("Should return SSTableInfo");
 
     // Verify Summary.db exists
-    assert!(info.summary_path.exists(), "Summary.db should exist");
+    assert!(
+        info.summary_path.as_ref().unwrap().exists(),
+        "Summary.db should exist"
+    );
 
     // Read using SummaryReader
     let config = cqlite_core::Config::default();
@@ -191,7 +194,7 @@ async fn test_summary_roundtrip_via_write_engine() {
             .await
             .expect("Platform creation should succeed"),
     );
-    let reader = SummaryReader::open(&info.summary_path, platform)
+    let reader = SummaryReader::open(info.summary_path.as_ref().unwrap(), platform)
         .await
         .expect("SummaryReader should open Summary.db created by WriteEngine");
 

@@ -100,9 +100,9 @@ async fn test_write_engine_end_to_end() -> Result<()> {
     assert_eq!(info.partition_count, 10);
     assert!(info.data_size > 0);
     assert!(info.data_path.exists());
-    assert!(info.index_path.exists());
+    assert!(info.index_path.as_ref().unwrap().exists());
     assert!(info.filter_path.exists());
-    assert!(info.summary_path.exists());
+    assert!(info.summary_path.as_ref().unwrap().exists());
     assert!(info.stats_path.exists());
     assert!(info.compression_info_path.is_none());
     assert!(info.toc_path.exists());
@@ -583,9 +583,15 @@ async fn test_stage0_write_read_roundtrip_simple_types() -> Result<()> {
 
     // Verify all component files were created
     assert!(info.data_path.exists(), "Data.db exists");
-    assert!(info.index_path.exists(), "Index.db exists");
+    assert!(
+        info.index_path.as_ref().unwrap().exists(),
+        "Index.db exists"
+    );
     assert!(info.filter_path.exists(), "Filter.db exists");
-    assert!(info.summary_path.exists(), "Summary.db exists");
+    assert!(
+        info.summary_path.as_ref().unwrap().exists(),
+        "Summary.db exists"
+    );
     assert!(info.stats_path.exists(), "Statistics.db exists");
     assert!(
         info.compression_info_path.is_none(),
@@ -708,7 +714,7 @@ async fn test_stage0_write_read_roundtrip_multiple_partitions() -> Result<()> {
     // === VALIDATION PHASE ===
     assert!(info.data_path.exists());
     assert!(
-        info.index_path.exists(),
+        info.index_path.as_ref().unwrap().exists(),
         "Index.db required for partition lookup"
     );
 
@@ -776,9 +782,9 @@ async fn test_stage0_sstable_format_validation() -> Result<()> {
     // 1. All required components exist
     let required_components = vec![
         ("Data.db", &info.data_path),
-        ("Index.db", &info.index_path),
+        ("Index.db", info.index_path.as_ref().unwrap()),
         ("Filter.db", &info.filter_path),
-        ("Summary.db", &info.summary_path),
+        ("Summary.db", info.summary_path.as_ref().unwrap()),
         ("Statistics.db", &info.stats_path),
         ("TOC.txt", &info.toc_path),
         ("Digest.crc32", &info.digest_path),
@@ -800,6 +806,8 @@ async fn test_stage0_sstable_format_validation() -> Result<()> {
     );
     assert!(
         info.index_path
+            .as_ref()
+            .unwrap()
             .to_str()
             .unwrap()
             .contains("nb-1-big-Index.db"),
@@ -834,7 +842,7 @@ async fn test_stage0_sstable_format_validation() -> Result<()> {
         "Data.db is non-empty"
     );
     assert!(
-        std::fs::metadata(&info.index_path)?.len() > 0,
+        std::fs::metadata(info.index_path.as_ref().unwrap())?.len() > 0,
         "Index.db is non-empty"
     );
     assert!(
@@ -937,7 +945,7 @@ async fn test_stage0_multi_partition_token_ordering() -> Result<()> {
 
     // === VALIDATION PHASE ===
     // Index.db should have partitions in token order
-    assert!(info.index_path.exists());
+    assert!(info.index_path.as_ref().unwrap().exists());
 
     Ok(())
 }

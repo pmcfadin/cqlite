@@ -95,24 +95,26 @@ pub enum SSTableFormat {
     /// Legacy BIG format: `Index.db` + `Summary.db`. **Default.**
     #[default]
     Big,
-    /// BTI phase 1: BIG components **plus** a `Partitions.db` partition trie.
+    /// Cassandra-canonical BTI format (`da-<gen>-bti-*`).
     ///
-    /// Phase 1 keeps `Data.db` in BIG layout and continues to emit the BIG
-    /// `Index.db`/`Summary.db` so the existing reader path is unaffected; the
-    /// `Partitions.db` trie is an additional component validated by the BTI
-    /// reader. `Rows.db` (within-partition trie) is out of scope for phase 1.
+    /// Issue #908 (epic #872). Emits a true BTI component set:
+    /// - `Data.db` — the partition/row serialization is **identical** to BIG in
+    ///   Cassandra 5 (the BTI format shares `BigTableWriter`'s row encoding; only
+    ///   the descriptor/version and index components differ — see
+    ///   `docs/sstables-definitive-guide/chapters/17-bti-formats.md`, which lists
+    ///   `Data.db` as a *common component retained*). The bytes are therefore the
+    ///   same as BIG; only the filename descriptor changes.
+    /// - `Partitions.db` — partition trie (replaces `Index.db`/`Summary.db`).
+    /// - `Statistics.db`, `Filter.db`, `Digest.crc32`, `TOC.txt`.
     ///
-    /// **Known phase-1 limitation (follow-up #872):** the output is a hybrid,
-    /// not a Cassandra-canonical BTI SSTable. Components keep the `nb-*-big-*`
-    /// descriptor, and [`crate::storage::sstable::reader::SSTableReader`]
-    /// classifies the directory as BIG from the `Data.db` name — so it does
-    /// **not** auto-discover or use the `Partitions.db` sidecar. The trie is
-    /// verified directly through the BTI reader API
-    /// (`lookup_partition_in_bti_file`). Renaming components to the `da`/`bti`
-    /// prefix here would be unsafe: the reader would then attempt to parse the
-    /// BIG-layout `Data.db` as a BTI `Data.db`. Producing a discoverable,
-    /// Cassandra-readable BTI SSTable (BTI `Data.db`, `da` prefix, dropping
-    /// `Index.db`/`Summary.db`, plus `Rows.db`) is the deferred follow-up.
+    /// **No `Index.db` and no `Summary.db`** — those are BIG-only components; BTI
+    /// resolves partitions through the trie. All components use the `da` version
+    /// letter and `bti` format segment.
+    ///
+    /// **Not yet emitted (follow-up #910):** `Rows.db` (the within-partition
+    /// clustering trie for wide partitions). Until then each partition's trie
+    /// payload is a direct `Data.db` offset, which the BTI reader resolves as a
+    /// point lookup.
     Bti,
 }
 
@@ -124,12 +126,18 @@ pub enum SSTableFormat {
 pub struct SSTableInfo {
     /// Path to the Data.db file
     pub data_path: PathBuf,
-    /// Path to the Index.db file
-    pub index_path: PathBuf,
+    /// Path to the Index.db file.
+    ///
+    /// `Some` for the BIG format; `None` for [`SSTableFormat::Bti`], which has
+    /// no `Index.db` (partition lookups use the `Partitions.db` trie). Issue #908.
+    pub index_path: Option<PathBuf>,
     /// Path to the Filter.db file
     pub filter_path: PathBuf,
-    /// Path to the Summary.db file
-    pub summary_path: PathBuf,
+    /// Path to the Summary.db file.
+    ///
+    /// `Some` for the BIG format; `None` for [`SSTableFormat::Bti`], which has
+    /// no `Summary.db`. Issue #908.
+    pub summary_path: Option<PathBuf>,
     /// Path to the Statistics.db file
     pub stats_path: PathBuf,
     /// Path to the CompressionInfo.db file (None when data is uncompressed)
@@ -316,17 +324,36 @@ impl SSTableWriter {
         // flushed to the Data.db file as it is written, bounding peak memory to a
         // single partition instead of buffering the whole component. The file is
         // opened lazily on the first partition (creating sstable_dir as needed).
-        let data_path = Self::component_path(&sstable_dir, generation, "Data.db");
+        let data_path = Self::component_path_for(&sstable_dir, generation, format, "Data.db");
         let data_writer = DataWriter::with_sink(stats.clone(), data_path);
 
-        // Create Index.db writer in streaming mode (Issue #753): each entry is
-        // serialized and written straight to Index.db as it arrives, keeping only
-        // the current entry's bytes in memory (O(1) in partition count).
-        let index_path = Self::component_path(&sstable_dir, generation, "Index.db");
-        let index_writer = IndexWriter::with_sink(index_path);
+        // Index.db writer.
+        //
+        // BIG (Issue #753): streaming mode flushes each entry straight to
+        // `Index.db` as it arrives, keeping only the current entry's bytes in
+        // memory (O(1) in partition count).
+        //
+        // BTI (Issue #908): the BTI format has no `Index.db` — partition lookups
+        // go through the `Partitions.db` trie instead. We use a *counting-only*
+        // `IndexWriter` (no sink, so no file is created) purely to compute the
+        // per-partition index offsets and promoted-block bookkeeping reused by
+        // the write path. Counting mode serializes each entry into a scratch buffer
+        // only to measure it, then clears the scratch, so peak memory stays
+        // O(one entry). (The prior in-memory mode retained every serialized entry
+        // forever — a full, never-emitted in-memory `Index.db` that defeated the
+        // streaming memory budget on large BTI writes.) Nothing is persisted and no
+        // `Index.db` is emitted.
+        let index_writer = match format {
+            SSTableFormat::Big => {
+                let index_path =
+                    Self::component_path_for(&sstable_dir, generation, format, "Index.db");
+                IndexWriter::with_sink(index_path)
+            }
+            SSTableFormat::Bti => IndexWriter::counting(),
+        };
 
         // Create Filter.db writer (1% false positive rate by default)
-        let filter_path = Self::component_path(&sstable_dir, generation, "Filter.db");
+        let filter_path = Self::component_path_for(&sstable_dir, generation, format, "Filter.db");
         let filter_writer = Some(FilterWriter::new(
             filter_path,
             expected_partitions.max(1),
@@ -690,8 +717,16 @@ impl SSTableWriter {
         // Finalize statistics metadata (normalize sentinel values)
         self.stats.finalize();
 
+        // Capture format/generation up front so component paths can be computed
+        // after `self`'s writers are partially moved out by their `finish()` calls.
+        let format = self.format;
+        let generation = self.generation;
+        let is_bti = matches!(format, SSTableFormat::Bti);
+        let cpath =
+            |component: &str| Self::component_path_for(sstable_dir, generation, format, component);
+
         // 1. Write Statistics.db (FIRST - provides delta baseline)
-        let stats_path = Self::component_path(sstable_dir, self.generation, "Statistics.db");
+        let stats_path = cpath("Statistics.db");
         let stats_writer = StatisticsWriter::new(stats_path.clone());
         stats_writer.write(&self.stats, Some(&self.schema))?;
 
@@ -701,31 +736,49 @@ impl SSTableWriter {
         // flushes and fsyncs the sink and returns the total byte size. If no
         // partitions were written, lazily ensure an (empty) Data.db file exists so
         // the downstream Digest CRC re-read and TOC publication remain valid.
-        let data_path = Self::component_path(sstable_dir, self.generation, "Data.db");
+        //
+        // The BTI `Data.db` row/partition serialization is identical to BIG in
+        // Cassandra 5 (issue #908); only the filename descriptor differs.
+        let data_path = cpath("Data.db");
         let data_size = self.data_writer.finish_streaming()?;
         if data_size == 0 && !data_path.exists() {
             tokio::fs::write(&data_path, b"").await?;
         }
 
-        // 3. Finalize Index.db (Issue #753)
-        // The IndexWriter has been streaming each entry to Index.db as it was
-        // written, so there is no whole-file buffer to write here. `finish_streaming`
-        // flushes and syncs the sink and returns the total byte size.
-        let index_path = Self::component_path(sstable_dir, self.generation, "Index.db");
-        let _index_size = self.index_writer.finish_streaming()?;
+        // 3. Finalize Index.db (Issue #753) — BIG only.
+        // For BIG, the IndexWriter has been streaming each entry to Index.db; we
+        // flush/sync it here. For BTI (issue #908) there is no Index.db: the
+        // IndexWriter ran in counting-only mode (no sink, no retained entry bytes)
+        // purely to compute offsets, so there is nothing to flush and we report no
+        // path. (Calling `finish_streaming` on a non-streaming writer is an error,
+        // so we skip it.)
+        let index_path = if is_bti {
+            None
+        } else {
+            let _index_size = self.index_writer.finish_streaming()?;
+            Some(cpath("Index.db"))
+        };
 
         // 4. Write Filter.db (path already set in constructor using sstable_dir)
-        let filter_path = Self::component_path(sstable_dir, self.generation, "Filter.db");
+        let filter_path = cpath("Filter.db");
         if let Some(filter_writer) = self.filter_writer {
             filter_writer.finish().await?;
         }
 
-        // 5. Write Summary.db
-        let summary_path = Self::component_path(sstable_dir, self.generation, "Summary.db");
+        // 5. Write Summary.db — BIG only.
+        // BTI (issue #908) has no Summary.db; partition sampling is replaced by
+        // the partition trie. We still drive `summary_writer.finish()` to keep its
+        // accounting consistent, but for BTI we discard the bytes and write no file.
         let summary_bytes = self.summary_writer.finish()?;
-        tokio::fs::write(&summary_path, summary_bytes).await?;
+        let summary_path = if is_bti {
+            None
+        } else {
+            let path = cpath("Summary.db");
+            tokio::fs::write(&path, summary_bytes).await?;
+            Some(path)
+        };
 
-        // 5.25. Write Partitions.db (BTI phase 1, issue #766).
+        // 5.25. Write Partitions.db (BTI, issue #766 / #908).
         // Only emitted for SSTableFormat::Bti; for BIG this is None and nothing
         // is written, keeping the default path byte-for-byte unchanged.
         //
@@ -739,7 +792,7 @@ impl SSTableWriter {
             if bytes.is_empty() {
                 None
             } else {
-                let path = Self::component_path(sstable_dir, self.generation, "Partitions.db");
+                let path = cpath("Partitions.db");
                 tokio::fs::write(&path, bytes).await?;
                 Some(path)
             }
@@ -753,36 +806,35 @@ impl SSTableWriter {
         // for future compressed SSTable support.
 
         // 6. Write Digest.crc32 (compute CRC32 of Data.db)
-        let digest_path = Self::component_path(sstable_dir, self.generation, "Digest.crc32");
+        let digest_path = cpath("Digest.crc32");
         let digest_writer = DigestWriter::new(digest_path.clone());
         let crc32_value = Self::compute_crc32(&data_path).await?;
         digest_writer.write(crc32_value)?;
 
-        // 7. Write TOC.txt (LAST - publication barrier)
-        let toc_path = Self::component_path(sstable_dir, self.generation, "TOC.txt");
+        // 7. Write TOC.txt (LAST - publication barrier).
+        //
+        // The TOC lists exactly the component set actually written. BIG lists
+        // Index.db + Summary.db; BTI (issue #908) omits both and lists
+        // Partitions.db instead. `Rows.db` is a follow-up (#910) and is NOT
+        // emitted yet, so it is not listed. TocWriter self-references TOC.txt.
+        use crate::storage::sstable::directory::types::SSTableComponent;
+        let toc_path = cpath("TOC.txt");
         let toc_writer = TocWriter::new(toc_path.clone());
         let mut components = vec![
-            ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Data),
-            ComponentEntry::new(crate::storage::sstable::directory::types::SSTableComponent::Index),
-            ComponentEntry::new(
-                crate::storage::sstable::directory::types::SSTableComponent::Filter,
-            ),
-            ComponentEntry::new(
-                crate::storage::sstable::directory::types::SSTableComponent::Summary,
-            ),
-            ComponentEntry::new(
-                crate::storage::sstable::directory::types::SSTableComponent::Statistics,
-            ),
-            ComponentEntry::new(
-                crate::storage::sstable::directory::types::SSTableComponent::Digest,
-            ),
+            ComponentEntry::new(SSTableComponent::Data),
+            ComponentEntry::new(SSTableComponent::Filter),
+            ComponentEntry::new(SSTableComponent::Statistics),
+            ComponentEntry::new(SSTableComponent::Digest),
         ];
-        // BTI phase 1 (issue #766): list Partitions.db in the TOC only when the
-        // BTI format was selected. The BIG TOC is unchanged.
+        if index_path.is_some() {
+            components.push(ComponentEntry::new(SSTableComponent::Index));
+        }
+        if summary_path.is_some() {
+            components.push(ComponentEntry::new(SSTableComponent::Summary));
+        }
+        // BTI (issue #766 / #908): list Partitions.db when the trie was emitted.
         if partitions_path.is_some() {
-            components.push(ComponentEntry::new(
-                crate::storage::sstable::directory::types::SSTableComponent::Partitions,
-            ));
+            components.push(ComponentEntry::new(SSTableComponent::Partitions));
         }
         toc_writer.write(&components)?;
 
@@ -801,9 +853,25 @@ impl SSTableWriter {
         })
     }
 
-    /// Build component file path
-    fn component_path(output_dir: &Path, generation: u64, component: &str) -> PathBuf {
-        let filename = format!("nb-{}-big-{}", generation, component);
+    /// Build a component file path for a given on-disk `format`.
+    ///
+    /// The Cassandra filename pattern is `<version>-<id>-<format>-<component>`
+    /// (`SsTableDescriptor::parse`). BIG components use the `nb` version letter
+    /// and the `big` format segment (`nb-<gen>-big-<component>`); BTI components
+    /// use the `da` version letter and the `bti` format segment
+    /// (`da-<gen>-bti-<component>`). This is the single source of truth for
+    /// component naming so the version/format ordering stays consistent.
+    fn component_path_for(
+        output_dir: &Path,
+        generation: u64,
+        format: SSTableFormat,
+        component: &str,
+    ) -> PathBuf {
+        let (version, fmt) = match format {
+            SSTableFormat::Big => ("nb", "big"),
+            SSTableFormat::Bti => ("da", "bti"),
+        };
+        let filename = format!("{}-{}-{}-{}", version, generation, fmt, component);
         output_dir.join(filename)
     }
 
@@ -914,11 +982,15 @@ mod tests {
 
         let info = writer.finish().await.unwrap();
 
-        // Verify all files were created
+        // Verify all files were created (BIG format: Index.db + Summary.db present)
         assert!(info.data_path.exists());
-        assert!(info.index_path.exists());
+        assert!(info.index_path.as_ref().expect("BIG has Index.db").exists());
         assert!(info.filter_path.exists());
-        assert!(info.summary_path.exists());
+        assert!(info
+            .summary_path
+            .as_ref()
+            .expect("BIG has Summary.db")
+            .exists());
         assert!(info.stats_path.exists());
         assert!(info.compression_info_path.is_none());
         assert!(info.toc_path.exists());
@@ -1007,10 +1079,19 @@ mod tests {
         // Verify generation number is used in paths
         // (we don't actually write anything, just test path construction)
 
-        let data_path = SSTableWriter::component_path(temp_dir.path(), 42, "Data.db");
+        let big_path =
+            SSTableWriter::component_path_for(temp_dir.path(), 42, SSTableFormat::Big, "Data.db");
         assert_eq!(
-            data_path.file_name().unwrap().to_str().unwrap(),
+            big_path.file_name().unwrap().to_str().unwrap(),
             "nb-42-big-Data.db"
+        );
+
+        // BTI uses the `da` version letter and `bti` format segment (issue #908).
+        let bti_path =
+            SSTableWriter::component_path_for(temp_dir.path(), 42, SSTableFormat::Bti, "Data.db");
+        assert_eq!(
+            bti_path.file_name().unwrap().to_str().unwrap(),
+            "da-42-bti-Data.db"
         );
     }
 

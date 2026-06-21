@@ -1524,16 +1524,23 @@ impl WriteEngine {
         // Build list of (src, dst) renames. TOC.txt goes last (publication barrier).
         let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-        // Non-TOC components first
-        for src in &[
-            &tmp_info.data_path,
-            &tmp_info.index_path,
-            &tmp_info.filter_path,
-            &tmp_info.summary_path,
-            &tmp_info.stats_path,
-            &tmp_info.digest_path,
-        ] {
+        // Non-TOC components first. Index.db/Summary.db are BIG-only (BTI writers
+        // report them as None — issue #908); only rename them when present.
+        let mut non_toc: Vec<&PathBuf> = vec![&tmp_info.data_path];
+        if let Some(ref p) = tmp_info.index_path {
+            non_toc.push(p);
+        }
+        non_toc.push(&tmp_info.filter_path);
+        if let Some(ref p) = tmp_info.summary_path {
+            non_toc.push(p);
+        }
+        non_toc.push(&tmp_info.stats_path);
+        non_toc.push(&tmp_info.digest_path);
+        for src in non_toc {
             renames.push(make_rename(src)?);
+        }
+        if let Some(ref p) = tmp_info.partitions_path {
+            renames.push(make_rename(p)?);
         }
         if let Some(ref ci_path) = tmp_info.compression_info_path {
             renames.push(make_rename(ci_path)?);
@@ -1619,21 +1626,27 @@ impl WriteEngine {
 
         // Compute total bytes written across ALL output SSTable components (not just Data.db).
         // We stat the final paths (post-rename) so we measure what was actually persisted.
-        let total_bytes_written: u64 = [
-            &tmp_info.data_path,
-            &tmp_info.index_path,
-            &tmp_info.filter_path,
-            &tmp_info.summary_path,
-            &tmp_info.stats_path,
-            &tmp_info.digest_path,
-        ]
-        .iter()
-        .map(|p| {
-            let filename = p.file_name().unwrap_or_default();
-            let final_path = sstable_dir.join(filename);
-            std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0)
-        })
-        .sum::<u64>()
+        let mut byte_paths: Vec<&PathBuf> = vec![&tmp_info.data_path];
+        if let Some(ref p) = tmp_info.index_path {
+            byte_paths.push(p);
+        }
+        byte_paths.push(&tmp_info.filter_path);
+        if let Some(ref p) = tmp_info.summary_path {
+            byte_paths.push(p);
+        }
+        byte_paths.push(&tmp_info.stats_path);
+        byte_paths.push(&tmp_info.digest_path);
+        if let Some(ref p) = tmp_info.partitions_path {
+            byte_paths.push(p);
+        }
+        let total_bytes_written: u64 = byte_paths
+            .iter()
+            .map(|p| {
+                let filename = p.file_name().unwrap_or_default();
+                let final_path = sstable_dir.join(filename);
+                std::fs::metadata(&final_path).map(|m| m.len()).unwrap_or(0)
+            })
+            .sum::<u64>()
             + tmp_info
                 .compression_info_path
                 .as_ref()

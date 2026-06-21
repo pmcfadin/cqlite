@@ -62,7 +62,7 @@
 use crate::error::{Error, Result};
 use crate::storage::sstable::bti::encode_partition_key_for_bti_trie;
 use crate::storage::sstable::bti::parser::FLAG_HAS_HASH_BYTE;
-use crate::util::cassandra_murmur3::cassandra_murmur3_token;
+use crate::util::cassandra_murmur3::cassandra_partition_filter_hash_lower_bits;
 use std::collections::BTreeMap;
 
 /// One partition's entry in the partition trie.
@@ -146,27 +146,25 @@ impl PartitionsTrieWriter {
     }
 }
 
-/// Compute the filter hash byte stored at the front of each partition leaf
-/// payload.
+/// Compute the canonical filter hash byte stored at the front of each partition
+/// leaf payload.
 ///
-/// **Phase-1 placeholder (follow-up #872).** Cassandra's BTI partition index
-/// stores a partition-key *filter* hash byte here for fast mismatch rejection
-/// (see `PartitionIndex` / `DecoratedKey.filterHashLowerBits()`), which is a
-/// distinct quantity from the byte-comparable token. We do not yet emit the
-/// canonical value: the exact derivation must be verified against Cassandra
-/// source/fixtures before we encode it (no-heuristics mandate, issue #28), and
-/// phase-1 output is already a non-canonical hybrid (see [`super::SSTableFormat::Bti`]).
-/// Our BTI reader does **not** verify this byte during lookup (it skips it), so
-/// round-trip correctness is independent of its value; we derive it from the
-/// high byte of the same Murmur3 token the trie key uses, keeping the payload
-/// internally self-consistent. Emitting the canonical filter hash byte (with a
-/// vector test) is tracked in #872.
+/// Cassandra's BTI partition index writes `(byte) decoratedKey.filterHashLowerBits()`
+/// as each leaf's hash byte for fast mismatch rejection (see
+/// `org.apache.cassandra.io.sstable.format.bti.PartitionIndex` and
+/// `org.apache.cassandra.db.DecoratedKey.filterHashLowerBits()`, Cassandra 5.0.8).
+/// `filterHashLowerBits()` returns `hash[1]` — the **second** 64-bit word (`h2`) of
+/// the partition key's 128-bit Murmur3 hash — which is a *distinct* quantity from the
+/// token (`hash[0]` / `h1`) used to build the byte-comparable trie key. The stored
+/// byte is the low 8 bits of that `h2` value.
+///
+/// This is the canonical, authoritative derivation (no heuristics, issue #28), verified
+/// byte-for-byte against the real `da-2-bti-Partitions.db` fixture — see the
+/// `canonical_filter_hash_byte_matches_real_bti_fixture` vector test below. It replaces
+/// the earlier phase-1 placeholder that derived the byte from the trie-key token (`h1`),
+/// which produced values a Cassandra-canonical reader would reject.
 fn filter_hash_byte(raw_key_bytes: &[u8]) -> u8 {
-    let token = cassandra_murmur3_token(raw_key_bytes);
-    let bc = (token as u64) ^ 0x8000_0000_0000_0000u64;
-    // High byte of the byte-comparable token (matches the first discriminating
-    // trie byte, which is the most significant token byte).
-    (bc >> 56) as u8
+    cassandra_partition_filter_hash_lower_bits(raw_key_bytes) as u8
 }
 
 // ---------------------------------------------------------------------------
@@ -571,6 +569,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Finding 1 (roborev #908): the partition leaf hash byte must be the
+    /// **canonical** Cassandra value — `(byte) DecoratedKey.filterHashLowerBits()`,
+    /// i.e. the low 8 bits of `h2` (the second 64-bit Murmur3 word) — NOT the
+    /// byte-comparable token's high byte that the phase-1 placeholder emitted.
+    ///
+    /// These expected bytes are read directly from the real, Cassandra-produced
+    /// `da-2-bti-Partitions.db` fixture at
+    /// `test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11`.
+    /// Its three PayloadOnly leaves store:
+    ///   UUID 2222… → hash byte 0x24 (Data.db offset 0)
+    ///   UUID 1111… → hash byte 0x22 (Data.db offset 63)
+    ///   UUID 3333… → hash byte 0xf4 (Data.db offset 125)
+    /// (hexdump: `08 24 ff | 08 22 c0 | 08 f4 82 …`).
+    #[test]
+    fn canonical_filter_hash_byte_matches_real_bti_fixture() {
+        // (raw partition key bytes, expected canonical hash byte from the fixture)
+        let vectors: [(Vec<u8>, u8); 3] = [
+            (vec![0x22u8; 16], 0x24),
+            (vec![0x11u8; 16], 0x22),
+            (vec![0x33u8; 16], 0xf4),
+        ];
+        for (raw_key, expected) in vectors {
+            let got = filter_hash_byte(&raw_key);
+            assert_eq!(
+                got, expected,
+                "canonical hash byte mismatch for key {raw_key:02x?}: \
+                 expected 0x{expected:02x} (from real da-2-bti-Partitions.db), got 0x{got:02x}"
+            );
+        }
+
+        // And confirm the placeholder it replaced (token/h1 high byte) would have
+        // produced *different*, non-canonical values — guarding against a regression
+        // that reintroduces the token-derived byte.
+        for (raw_key, expected) in [(vec![0x22u8; 16], 0x90u8), (vec![0x11u8; 16], 0xbc)] {
+            let token = crate::util::cassandra_murmur3::cassandra_murmur3_token(&raw_key);
+            let placeholder = (((token as u64) ^ 0x8000_0000_0000_0000u64) >> 56) as u8;
+            assert_eq!(placeholder, expected, "placeholder reference value drifted");
+            assert_ne!(
+                placeholder,
+                filter_hash_byte(&raw_key),
+                "canonical hash byte must differ from the old token-derived placeholder"
+            );
+        }
+    }
+
+    /// The canonical hash byte the writer emits round-trips: building a trie that
+    /// includes these partitions yields leaf payloads whose first byte equals the
+    /// canonical hash byte (decoded straight from the serialized bytes).
+    #[test]
+    fn written_leaf_hash_byte_is_canonical() {
+        let raw_key = vec![0x22u8; 16];
+        let mut w = PartitionsTrieWriter::new();
+        w.add_partition(&raw_key, 0);
+        let bytes = w.finish().expect("finish trie");
+        // The first written node is the only leaf (PayloadOnly). Its layout is
+        // [header=0x08][hash_byte][SizedInts position…]; header 0x08 = payloadBits 8.
+        assert_eq!(
+            bytes[0], 0x08,
+            "expected PayloadOnly leaf with payloadBits=8"
+        );
+        assert_eq!(
+            bytes[1],
+            filter_hash_byte(&raw_key),
+            "serialized leaf hash byte must be the canonical value"
+        );
+        assert_eq!(bytes[1], 0x24, "canonical hash byte for UUID 2222… is 0x24");
     }
 
     #[test]

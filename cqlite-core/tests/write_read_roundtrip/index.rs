@@ -168,7 +168,10 @@ async fn test_index_roundtrip_via_write_engine() {
         .expect("Should return SSTableInfo");
 
     // Verify Index.db exists
-    assert!(info.index_path.exists(), "Index.db should exist");
+    assert!(
+        info.index_path.as_ref().unwrap().exists(),
+        "Index.db should exist"
+    );
 
     // Read using IndexReader
     let config = cqlite_core::Config::default();
@@ -177,7 +180,7 @@ async fn test_index_roundtrip_via_write_engine() {
             .await
             .expect("Platform creation should succeed"),
     );
-    let reader = IndexReader::open(&info.index_path, platform)
+    let reader = IndexReader::open(info.index_path.as_ref().unwrap(), platform)
         .await
         .expect("IndexReader should open Index.db created by WriteEngine");
 

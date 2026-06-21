@@ -116,6 +116,33 @@ pub fn cassandra_murmur3_token(data: &[u8]) -> i64 {
     normalize(h1)
 }
 
+/// Compute `DecoratedKey.filterHashLowerBits()` for a raw partition key, matching
+/// Cassandra 5.0's `org.apache.cassandra.db.DecoratedKey`.
+///
+/// Cassandra computes the full 128-bit Murmur3 hash of the partition-key bytes and
+/// uses the two 64-bit words distinctly:
+/// - `hash[0]` (`h1`, after `normalize`) becomes the `Murmur3Partitioner` token.
+/// - `hash[1]` (`h2`, **un-normalized**) is returned by `filterHashLowerBits()` and
+///   is the value whose **low 8 bits** the BTI `Partitions.db` partition index writes
+///   as each leaf's "hash byte" (fast mismatch pre-filter).
+///
+/// Reference: `DecoratedKey.filterHashLowerBits()` returns `hash[1]`
+/// (`org.apache.cassandra.db.DecoratedKey`, Cassandra 5.0.8); the BTI partition index
+/// stores `(byte) decoratedKey.filterHashLowerBits()`
+/// (`org.apache.cassandra.io.sstable.format.bti.PartitionIndex`).
+///
+/// Verified against the real `da-2-bti-Partitions.db` fixture
+/// (`test-data/datasets/sstables/test_da/simple_table-*`): the three UUID partitions
+/// store hash bytes `0x24`, `0x22`, `0xf4`, which are exactly the low bytes of `h2`
+/// for those keys.
+///
+/// Note this is `h2`, NOT the token's `h1`; the placeholder it replaces incorrectly
+/// derived the byte from the byte-comparable `h1` token.
+pub fn cassandra_partition_filter_hash_lower_bits(data: &[u8]) -> i64 {
+    let (_, h2) = cassandra_murmur3_x64_128(data);
+    h2
+}
+
 /// Cassandra's normalize: `Long.MIN_VALUE` maps to `Long.MAX_VALUE`.
 fn normalize(v: i64) -> i64 {
     if v == i64::MIN {

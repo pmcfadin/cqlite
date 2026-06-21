@@ -180,9 +180,9 @@ fn compact_sstables_merges_explicit_inputs_with_lww() {
     let out = &report.output;
     for (label, path) in [
         ("Data.db", &out.data_path),
-        ("Index.db", &out.index_path),
+        ("Index.db", out.index_path.as_ref().unwrap()),
         ("Filter.db", &out.filter_path),
-        ("Summary.db", &out.summary_path),
+        ("Summary.db", out.summary_path.as_ref().unwrap()),
         ("Statistics.db", &out.stats_path),
         ("Digest.crc32", &out.digest_path),
         ("TOC.txt", &out.toc_path),

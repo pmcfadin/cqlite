@@ -98,11 +98,14 @@ async fn main() -> cqlite_core::error::Result<()> {
 
     println!("SSTable written to:");
     println!("  Data.db:  {}", info.data_path.display());
-    println!("  Index.db: {}", info.index_path.display());
+    println!(
+        "  Index.db: {}",
+        info.index_path.as_ref().unwrap().display()
+    );
     println!("  Dir:      {}", info.data_path.parent().unwrap().display());
 
     // Verify that promoted index was emitted
-    let index_bytes = std::fs::read(&info.index_path)?;
+    let index_bytes = std::fs::read(info.index_path.as_ref().unwrap())?;
     let key_len = u16::from_be_bytes([index_bytes[0], index_bytes[1]]) as usize;
     let mut pos = 2 + key_len;
     // skip data_offset vint

@@ -144,11 +144,31 @@ async fn bti_format_partitions_db_roundtrips_via_reader() {
         .expect("BTI format must emit Partitions.db");
     assert!(partitions_path.exists());
 
-    // TOC must list Partitions.db for BTI.
+    // Issue #908: canonical BTI naming + no BIG index components.
+    assert_eq!(
+        partitions_path.file_name().unwrap().to_str().unwrap(),
+        "da-1-bti-Partitions.db",
+        "BTI Partitions.db must use the da/bti descriptor"
+    );
+    assert!(
+        info.index_path.is_none(),
+        "BTI must not emit Index.db (#908)"
+    );
+    assert!(
+        info.summary_path.is_none(),
+        "BTI must not emit Summary.db (#908)"
+    );
+
+    // TOC must list Partitions.db for BTI but not Index/Summary.
     let toc = std::fs::read_to_string(&info.toc_path).unwrap();
     assert!(
         toc.contains("Partitions.db"),
         "BTI TOC must list Partitions.db"
+    );
+    assert!(!toc.contains("Index.db"), "BTI TOC must not list Index.db");
+    assert!(
+        !toc.contains("Summary.db"),
+        "BTI TOC must not list Summary.db"
     );
 
     // Read every partition back through the BTI reader and confirm a hit.

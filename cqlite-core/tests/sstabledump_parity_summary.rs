@@ -544,11 +544,14 @@ async fn test_summary_via_write_engine() -> CqliteResult<()> {
     let info = engine.flush().await?.expect("Should return SSTableInfo");
 
     // Verify Summary.db exists
-    assert!(info.summary_path.exists(), "Summary.db should exist");
+    assert!(
+        info.summary_path.as_ref().unwrap().exists(),
+        "Summary.db should exist"
+    );
 
     // Read and verify
     let platform = Arc::new(Platform::new(&Config::default()).await?);
-    let reader = SummaryReader::open(&info.summary_path, platform).await?;
+    let reader = SummaryReader::open(info.summary_path.as_ref().unwrap(), platform).await?;
 
     let entries = reader.get_entries();
     assert!(!entries.is_empty(), "Summary.db should have entries");
