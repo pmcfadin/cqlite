@@ -801,25 +801,29 @@ impl TableSchema {
     ///
     /// The decode schema retains dropped columns (carrying their type) so input
     /// cells can be parsed and then purged by the merge filter (see
-    /// [`Self::validate_dropped_columns`]). The compaction *output*, however,
-    /// must NOT encode dropped columns in its serialization header / row column
-    /// bitmap: a reader using a natural post-drop schema (one that omits the
-    /// dropped column) intersects the on-disk header with its `columns` and would
-    /// drop that header column *before* applying bitmap indices, misaligning the
-    /// surviving columns that sort after it (roborev #847 review).
+    /// [`Self::validate_dropped_columns`]). The compaction *output* must keep its
+    /// serialization header / row column bitmap consistent with the cells that
+    /// actually survive the merge:
     ///
-    /// Because the merge filter has already purged the dropped columns' cells,
-    /// this returns a schema with those columns removed from `columns` and an
-    /// empty `dropped_columns` map — so the output header reflects the live,
-    /// post-drop column set and is readable by any matching schema.
+    /// - A dropped column with **no surviving cells** (all cells were at or
+    ///   before its drop time) is removed from `columns` so it does not appear in
+    ///   the output header. This lets a natural post-drop reader schema (which
+    ///   omits the column) read the output without the header-column /
+    ///   bitmap-index misalignment that retaining it would cause (roborev #847).
+    /// - A dropped column with **surviving cells** (re-added: cells written after
+    ///   `drop_time`) is RETAINED in `columns`, because the merge still emits
+    ///   those cells and the writer needs a matching header column — otherwise
+    ///   the cell would be serialized with no header entry and corrupt the row.
     ///
-    /// Scope note: a column re-added after its drop (cells with `ts > drop_time`)
-    /// is treated as dropped here and is not retained in the output, consistent
-    /// with the scalar / row-timestamp granularity of dropped-column filtering
-    /// (#847); element-level retention is follow-up work (#899).
-    pub fn for_compaction_output(&self) -> TableSchema {
-        let dropped: std::collections::HashSet<&str> =
-            self.dropped_columns.keys().map(String::as_str).collect();
+    /// `retained` is the set of dropped-column names that had surviving cells
+    /// (computed by `compact_sstables` from a merge pre-pass). The returned
+    /// schema carries an empty `dropped_columns` map: the purge has already
+    /// happened, so the output must not re-purge the surviving cells on a later
+    /// compaction.
+    pub fn for_compaction_output(
+        &self,
+        retained: &std::collections::HashSet<String>,
+    ) -> TableSchema {
         TableSchema {
             keyspace: self.keyspace.clone(),
             table: self.table.clone(),
@@ -828,7 +832,11 @@ impl TableSchema {
             columns: self
                 .columns
                 .iter()
-                .filter(|c| !dropped.contains(c.name.as_str()))
+                .filter(|c| {
+                    // Keep a column unless it is a dropped column with no
+                    // surviving cells.
+                    !self.dropped_columns.contains_key(&c.name) || retained.contains(&c.name)
+                })
                 .cloned()
                 .collect(),
             comments: self.comments.clone(),

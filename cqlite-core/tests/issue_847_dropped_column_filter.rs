@@ -281,17 +281,16 @@ fn dropped_column_absent_from_columns_is_rejected() {
     );
 }
 
-/// A cell written AFTER `drop_time` (ts > drop_time) is still purged from the
-/// compaction output (roborev #847 review). The dropped column is removed from
-/// the post-drop writer schema, so keeping such a cell would orphan it (no
-/// matching header column) and corrupt the row. Purging it keeps the merge and
-/// writer consistent. Retaining re-added cells is #899 follow-up.
+/// A cell written AFTER `drop_time` (ts > drop_time) SURVIVES compaction — the
+/// column was re-added — and the output retains that column so the surviving
+/// cell has a matching serialization-header entry (roborev #847 review). Only
+/// fully-purged dropped columns are stripped from the output header.
 #[test]
-fn dropped_column_cell_after_drop_time_purged_in_output() {
+fn dropped_column_cell_after_drop_time_survives_in_output() {
     let temp = TempDir::new().expect("tempdir");
     let (inputs, _) = build_input(&temp, 300); // score cells written at ts=300
 
-    // Drop `score` at T=150, BEFORE the cells' ts=300 (anomalous post-drop write).
+    // Drop `score` at T=150, BEFORE the cells' ts=300 (re-added after the drop).
     let mut dropped = HashMap::new();
     dropped.insert("score".to_string(), 150_i64);
     let drop_schema = schema_with_drops(dropped);
@@ -299,13 +298,12 @@ fn dropped_column_cell_after_drop_time_purged_in_output() {
     let out_dir = temp.path().join("out");
     let data_path = compact(inputs, &out_dir, &drop_schema);
 
-    // Read with a schema that still includes `score` in columns: even so, it must
-    // be absent because the writer omitted it from the output header.
     let cols = surviving_columns(data_path);
     assert!(
-        cols.iter().all(|(c, _)| c != "score"),
-        "a cell with ts > drop_time must still be purged from the output, got: {:?}",
-        cols.iter().map(|(c, _)| c).collect::<Vec<_>>()
+        cols.iter()
+            .any(|(c, v)| c == "score" && matches!(v, Value::Integer(_))),
+        "a re-added cell (ts > drop_time) must survive in the output, got: {:?}",
+        cols
     );
     assert!(
         cols.iter().any(|(c, _)| c == "name"),

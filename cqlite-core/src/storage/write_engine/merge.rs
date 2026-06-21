@@ -1093,6 +1093,46 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
 /// currently carried but do not yet drop purgeable data. The plumbing lands first
 /// so the parity harness can drive out the purge semantics.
 #[cfg(feature = "write-support")]
+/// Determine which dropped columns still have surviving cells after the merge.
+///
+/// Runs a merge pre-pass with the decode `schema` (so the dropped-column filter
+/// applies identically to the write pass) and collects the names of
+/// `dropped_columns` that appear in at least one surviving `Live` cell — i.e.
+/// columns re-added with writes after their drop time. `compact_sstables` keeps
+/// exactly these dropped columns in the output writer schema; the rest are
+/// stripped from the output header. Stops early once every dropped column has
+/// been observed surviving.
+fn compute_surviving_dropped_columns(
+    input_paths: Vec<PathBuf>,
+    schema: &TableSchema,
+    gc_before_secs: Option<i64>,
+    now_secs: Option<i64>,
+) -> Result<std::collections::HashSet<String>> {
+    let mut surviving: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let total = schema.dropped_columns.len();
+    let mut merger = KWayMerger::new_with_gc(input_paths, schema, gc_before_secs, now_secs)?;
+    loop {
+        match merger.step()? {
+            MergeStep::Complete => break,
+            MergeStep::Partition { rows, .. } => {
+                for row in &rows {
+                    if let RowData::Live { cells } = &row.row_data {
+                        for cell in cells {
+                            if schema.dropped_columns.contains_key(&cell.column) {
+                                surviving.insert(cell.column.clone());
+                            }
+                        }
+                    }
+                }
+                if surviving.len() == total {
+                    break; // every dropped column already shown to survive
+                }
+            }
+        }
+    }
+    Ok(surviving)
+}
+
 pub async fn compact_sstables(
     input_paths: Vec<PathBuf>,
     output_dir: &std::path::Path,
@@ -1107,14 +1147,27 @@ pub async fn compact_sstables(
         ));
     }
 
+    // Decode with `schema` (which retains dropped columns so their input cells
+    // parse and can be purged), but WRITE with a post-drop schema. A dropped
+    // column with no surviving cells must NOT appear in the output serialization
+    // header (else a natural post-drop reader misaligns), while a dropped column
+    // with surviving (re-added) cells MUST be retained (else those cells have no
+    // matching header column and corrupt the row) — see #847 review.
+    //
+    // Which dropped columns survive is data-dependent, and the writer fixes its
+    // header from the schema before the first row is written, so determine the
+    // surviving set with a merge pre-pass (only when any column is dropped — the
+    // common no-drop path skips it entirely). The pre-pass uses the SAME merge
+    // logic as the write pass, so the two agree on what survives.
+    let retained_dropped = if schema.dropped_columns.is_empty() {
+        std::collections::HashSet::new()
+    } else {
+        compute_surviving_dropped_columns(input_paths.clone(), schema, gc_before_secs, now_secs)?
+    };
+    let write_schema = schema.for_compaction_output(&retained_dropped);
+
     let merger = KWayMerger::new_with_gc(input_paths.clone(), schema, gc_before_secs, now_secs)?;
 
-    // Decode with `schema` (which retains dropped columns so their input cells
-    // parse and can be purged), but WRITE with the post-drop schema: dropped
-    // columns are excluded from the output serialization header / row column
-    // bitmap so the compacted output is readable by a natural post-drop schema
-    // (#847 review). The merge filter has already purged those columns' cells.
-    let write_schema = schema.for_compaction_output();
     let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
         output_dir.to_path_buf(),
         generation,
@@ -1560,22 +1613,19 @@ impl KWayMerger {
         // live cells — `reconcile_cluster` is the authoritative behavior here.
         //
         // Step 3b: dropped-column filtering (Cassandra `cb34ad47`,
-        // `compaction.purge`). A column dropped at `drop_time` discards its cells:
-        // for well-formed input every cell of a dropped column predates the drop
-        // (you cannot write to a dropped column), so `timestamp <= drop_time`
-        // holds for all of them and this equals Cassandra's purge.
+        // `compaction.purge`). A column dropped at `drop_time` discards every cell
+        // whose `timestamp <= drop_time`; a cell written strictly after the drop
+        // (the column was re-added) survives. This mirrors the row-tombstone `<=`
+        // shadowing above but is scoped per column via the `dropped_columns` map
+        // (#904 plumbing, #847 filter).
         //
-        // The column is purged WHOLESALE here — `drop_time` bounds the cells in
-        // practice, but the predicate keys on column membership so the merge
-        // output stays consistent with the post-drop *writer* schema
-        // (`TableSchema::for_compaction_output`, which removes dropped columns
-        // from the serialization header / row column bitmap). If the filter kept
-        // a `timestamp > drop_time` cell (an anomalous post-drop / re-added
-        // write) while the writer omitted the column, that cell would be
-        // serialized with no matching header column and corrupt the row. Keeping
-        // re-added cells therefore requires a column re-added into the live set
-        // and is element-level / per-timestamp follow-up (#899); it is out of the
-        // scalar, row-timestamp scope of #847.
+        // Output consistency: a surviving cell here keeps its column in the
+        // compaction output, so `compact_sstables` retains any dropped column
+        // that has survivors in the *writer* schema (and strips only the
+        // fully-purged ones from the serialization header) — see
+        // `TableSchema::for_compaction_output`. Byte-correct for scalar columns at
+        // row-timestamp granularity; element-level collection/UDT filtering needs
+        // per-cell timestamps (#899) and is out of scope.
         let surviving: Vec<CellData> = order
             .into_iter()
             .filter_map(|col| winners.remove(&col))
@@ -1583,7 +1633,10 @@ impl KWayMerger {
                 Some(d) => cell.timestamp > d,
                 None => true,
             })
-            .filter(|cell| !dropped_columns.contains_key(&cell.column))
+            .filter(|cell| match dropped_columns.get(&cell.column) {
+                Some(drop_time) => cell.timestamp > *drop_time,
+                None => true,
+            })
             .collect();
 
         // Step 4: build the merged result. `max()` is `Some` exactly when `surviving`
@@ -4311,33 +4364,25 @@ mod issue_823_complex_column_merge {
         assert_eq!(cells[0].column, "name");
     }
 
-    /// A dropped column is purged WHOLESALE from the compaction output, including
-    /// an anomalous cell written after `drop_time`. This keeps the merge output
-    /// consistent with the post-drop writer schema (the column is absent from the
-    /// output serialization header), avoiding an orphaned cell that would corrupt
-    /// the row. Retaining a re-added column's post-drop cells is #899 follow-up
-    /// (out of the scalar / row-timestamp scope of #847).
+    /// A cell written STRICTLY AFTER the drop time survives the reconcile filter
+    /// (the column was re-added). `compact_sstables` then retains that column in
+    /// the output writer schema so the surviving cell has a matching header
+    /// column (see `for_compaction_output`).
     #[test]
-    fn dropped_column_cell_after_drop_time_is_also_purged() {
-        let row = live(
-            0,
-            200,
-            vec![
-                scalar_cell("name", "keep", 200),
-                scalar_cell("legacy", "anomalous", 200), // ts=200 > drop_time=150
-            ],
-        );
+    fn dropped_column_cell_after_drop_time_survives() {
+        let row = live(0, 200, vec![scalar_cell("legacy", "fresh", 200)]);
         let mut dropped = ::std::collections::HashMap::new();
-        dropped.insert("legacy".to_string(), 150);
+        dropped.insert("legacy".to_string(), 150); // cell ts=200 > 150
 
         let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped)
-            .expect("a live row must be emitted (name survives)");
+            .expect("a live row must be emitted (cell post-dates the drop)");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {:?}", other),
         };
-        assert_eq!(cells.len(), 1, "the dropped column is purged wholesale");
-        assert_eq!(cells[0].column, "name");
+        assert_eq!(cells.len(), 1);
+        assert_eq!(cells[0].column, "legacy");
+        assert_eq!(cells[0].value, Value::Text("fresh".to_string()));
     }
 
     /// Equal timestamp (cell ts == drop_time) is discarded — the `<=` boundary,
