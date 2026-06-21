@@ -1675,10 +1675,7 @@ impl WriteEngine {
         if let Some(ref p) = tmp_info.partitions_path {
             byte_paths.push(p);
         }
-        let total_bytes_written: u64 = byte_paths
-            .iter()
-            .map(|p| stat_final(p))
-            .sum::<u64>()
+        let total_bytes_written: u64 = byte_paths.iter().map(|p| stat_final(p)).sum::<u64>()
             + tmp_info
                 .compression_info_path
                 .as_ref()

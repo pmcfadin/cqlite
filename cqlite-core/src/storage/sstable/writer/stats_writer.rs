@@ -1171,23 +1171,28 @@ impl StatisticsWriter {
         //
         // Cassandra: `EncodingStats.Serializer.serialize` writes the local-deletion
         // baseline with `writeUnsignedVInt32(minLocalDeletionTime - DELETION_TIME_EPOCH)`
-        // (EncodingStats.java:274). Both operands are Java `int`s, so the subtraction
-        // wraps in 32-bit two's-complement and is then written as an UNSIGNED 32-bit
-        // VInt. Far-future LDTs in [2^31, 2^32) are stored as negative i32 bit patterns
-        // here (legitimate after #853 / range-tombstone fixes), so we MUST compute the
-        // delta in i32 wrapping space and re-interpret the bits as u32 — exactly the
-        // i32→u32 path DataWriter uses for the per-row deletion-delta encodings
-        // (`local_deletion_time.wrapping_sub(min) as u32`). Casting the i32 to u64
-        // first would sign-extend the far-future bit pattern into a 64-bit-wide VInt,
-        // diverging from `writeUnsignedVInt32`.
+        // (both operands are Java `int`s), and the reader recovers it with
+        // `readUnsignedVInt32()`, which runs `VIntCoding.checkedCast` and REJECTS any
+        // decoded value that does not round-trip through a SIGNED 32-bit `int`
+        // (`(int)value != value`). The on-disk form therefore carries the SIGN-EXTENDED
+        // delta: for a small LDT like 2, `2 - DELETION_TIME_EPOCH` is the negative int
+        // `-1442879998`, written as the sign-extended 64-bit VInt `0xFFFFFFFFAA…` which
+        // `readUnsignedVInt32` accepts and folds back to `2`. Truncating to a bare `u32`
+        // (e.g. `2852087298`) is OUT OF RANGE for `checkedCast` and makes Cassandra's
+        // `sstabledump` reject the SSTable (verified live against `cassandra:5.0`).
+        //
+        // Casting the i32 delta to `u64` sign-extends in Rust exactly as Java's
+        // `writeUnsignedVInt32` requires, and it also handles a far-future LDT stored as
+        // a negative i32 bit pattern identically (the bit pattern IS the signed int the
+        // reader expects). This mirrors the DataWriter per-row deletion deltas.
         let min_ldt = if metadata.min_local_deletion_time == i32::MAX {
             // No deletions: use Integer.MAX_VALUE as baseline (DeletionTime.LIVE)
             i32::MAX
         } else {
             metadata.min_local_deletion_time
         };
-        let min_del_delta = min_ldt.wrapping_sub(DELETION_TIME_EPOCH) as u32;
-        buffer.write_all(&encode_vuint(min_del_delta as u64))?;
+        let min_del_delta = (min_ldt.wrapping_sub(DELETION_TIME_EPOCH) as i64) as u64;
+        buffer.write_all(&encode_vuint(min_del_delta))?;
 
         // minTTL delta from TTL_EPOCH (TTL_EPOCH=0)
         let min_ttl = if metadata.min_ttl == i32::MAX {
@@ -2464,55 +2469,65 @@ mod tests {
         assert_eq!(regulars.len(), 200, "all 200 columns must be encoded");
     }
 
-    /// Regression (#853/#886 branch-review, Finding 1): a far-future
-    /// `min_local_deletion_time` baseline in [2^31, 2^32) — stored as a negative
-    /// i32 bit pattern but legitimate — must be encoded in the SerializationHeader
-    /// through Cassandra's 32-bit unsigned local-deletion-time path
-    /// (`writeUnsignedVInt32(minLocalDeletionTime - DELETION_TIME_EPOCH)`,
-    /// EncodingStats.java:274), NOT sign-extended through `as u64`.
+    /// Regression: the EncodingStats `minLocalDeletionTime` delta must be written
+    /// as the SIGN-EXTENDED `int` delta `minLocalDeletionTime - DELETION_TIME_EPOCH`,
+    /// because Cassandra recovers it with `readUnsignedVInt32()` →
+    /// `VIntCoding.checkedCast`, which REJECTS any decoded value that does not
+    /// round-trip through a signed 32-bit `int` (`(int)value != value`). A bare
+    /// `u32` truncation of a small LDT (e.g. delta `2852087298` for LDT `2`) is out
+    /// of range for `checkedCast` and makes `cassandra:5.0` `sstabledump` reject the
+    /// SSTable (verified live; see tests/issue_911_bti_partition_deletion_stats.rs).
     ///
-    /// The buggy `as u64` path sign-extends the negative i32 into a ~9-byte 64-bit
-    /// VInt; the correct i32→u32 path yields a small in-range delta matching the
-    /// DataWriter per-row deltas (`local_deletion_time.wrapping_sub(min) as u32`).
+    /// A far-future LDT in `[2^31, 2^32)` is stored as a negative i32 bit pattern,
+    /// which IS the signed int the reader expects, so the same sign-extending path
+    /// handles it. This pins both: the small-LDT delta is a sign-extended 64-bit
+    /// VInt, and the decoded value round-trips through a signed i32.
     #[test]
-    fn test_serialization_header_far_future_ldt_baseline_uses_u32_path() {
+    fn test_serialization_header_ldt_baseline_sign_extends_for_checked_cast() {
         use crate::parser::vint::parse_vuint;
 
-        // Far-future LDT in [2^31, 2^32): pick 2^31 + 5. As an i32 this is the
-        // negative bit pattern 0x80000005.
-        let far_future: u32 = (1u32 << 31) + 5;
-        let mut meta = StatisticsMetadata::new();
-        meta.min_local_deletion_time = far_future as i32;
+        // Helper: decode the minLocalDeletionTime EncodingStats delta for a given
+        // baseline and assert it round-trips through Cassandra's checkedCast (i.e.
+        // the decoded u64, reinterpreted as i64, fits a signed i32).
+        let decode_delta = |min_ldt: i32| -> u64 {
+            let mut meta = StatisticsMetadata::new();
+            meta.min_local_deletion_time = min_ldt;
+            let writer = StatisticsWriter::new(PathBuf::from("test.db"));
+            let bytes = writer
+                .build_serialization_header_component(None, &meta)
+                .expect("build header");
+            let (rest, _min_ts_delta) = parse_vuint(&bytes).expect("minTimestamp delta");
+            let (_rest, min_ldt_delta) =
+                parse_vuint(rest).expect("minLocalDeletionTime delta");
+            min_ldt_delta
+        };
+
+        // checkedCast accepts `value` iff `(int)value == value` — i.e. the decoded
+        // u64, reinterpreted as i64, equals its own truncation to i32.
+        let passes_checked_cast = |delta: u64| -> bool {
+            let v = delta as i64;
+            (v as i32) as i64 == v
+        };
+
+        // Small LDT (e.g. 2): the regression case. The delta is the negative int
+        // `2 - DELETION_TIME_EPOCH`, sign-extended.
+        let small = decode_delta(2);
+        let expected_small = (2i32.wrapping_sub(DELETION_TIME_EPOCH) as i64) as u64;
+        assert_eq!(small, expected_small);
         assert!(
-            meta.min_local_deletion_time < 0,
-            "sanity: far-future LDT is a negative i32 bit pattern"
+            passes_checked_cast(small),
+            "small-LDT delta must round-trip through a signed i32 (checkedCast), got {small:#x}"
         );
 
-        let writer = StatisticsWriter::new(PathBuf::from("test.db"));
-        let bytes = writer
-            .build_serialization_header_component(None, &meta)
-            .expect("build header with far-future LDT baseline");
-
-        // Decode the three EncodingStats deltas.
-        let (rest, _min_ts_delta) = parse_vuint(&bytes).expect("minTimestamp delta");
-        let (_rest, min_ldt_delta) = parse_vuint(rest).expect("minLocalDeletionTime delta");
-
-        // Expected: i32-wrapping subtraction, then reinterpret bits as u32 — the
-        // same path DataWriter uses for per-row deltas.
-        let expected_delta = (meta
-            .min_local_deletion_time
-            .wrapping_sub(DELETION_TIME_EPOCH)) as u32 as u64;
-        assert_eq!(
-            min_ldt_delta, expected_delta,
-            "far-future LDT baseline must encode via the i32->u32 (writeUnsignedVInt32) path"
-        );
-
-        // The correct delta must fit in 32 bits — proving we did NOT sign-extend
-        // into a 64-bit-wide value. The buggy `as u64` path would produce a delta
-        // far above u32::MAX.
+        // Far-future LDT in [2^31, 2^32): a negative i32 bit pattern. Same path.
+        let far_future = ((1u32 << 31) + 5) as i32;
+        assert!(far_future < 0, "sanity: far-future LDT is a negative i32");
+        let far = decode_delta(far_future);
+        let expected_far = (far_future.wrapping_sub(DELETION_TIME_EPOCH) as i64) as u64;
+        assert_eq!(far, expected_far);
         assert!(
-            min_ldt_delta <= u32::MAX as u64,
-            "delta must be a 32-bit unsigned value, got {min_ldt_delta:#x}"
+            passes_checked_cast(far),
+            "far-future LDT delta must round-trip through a signed i32 (checkedCast), got {far:#x}"
         );
     }
 }
