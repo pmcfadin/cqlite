@@ -318,12 +318,22 @@ offsets), consistent with the node-family table above.</p>
 </li>
 </ul>
 <blockquote>
-<p><strong>Scope note (CQLite-specific).</strong> The items here describe CQLite’s BTI <strong>reader</strong>.
-CQLite’s <em>write</em> path emits the classic <code dir="auto">big</code>/<code dir="auto">nb</code> format, not BTI; BTI writing is
-out of scope (epic #762). The byte-invariant test
-<code dir="auto">issue_821_writer_byte_invariants.rs::finding16_bti_partition_leaf_data_offset_roundtrips_over_2gib</code>
-only exercises the leaf <code dir="auto">SizedInts</code> offset encoder in isolation to prove 64-bit
-offset safety — it is not a full BTI writer.</p>
+<p><strong>Scope note (CQLite-specific).</strong> CQLite has both a BTI <strong>reader</strong> (the items
+above) and, as of epic #872 (issues #908/#910), an opt-in BTI <strong>writer</strong>
+(<code dir="auto">SSTableWriter::with_format(.., SSTableFormat::Bti)</code>). The default write path
+still emits classic <code dir="auto">big</code>/<code dir="auto">nb</code>. The BTI writer emits the canonical <code dir="auto">da-*-bti-*</code>
+set — <code dir="auto">Data.db</code>, <code dir="auto">Partitions.db</code>, <code dir="auto">Rows.db</code>, <code dir="auto">Statistics.db</code>, <code dir="auto">Filter.db</code>,
+<code dir="auto">Digest.crc32</code>, <code dir="auto">TOC.txt</code> — with the round-trip invariant proven against this
+reader: <code dir="auto">Partitions.db</code> leaves store a negative direct <code dir="auto">Data.db</code> offset for
+narrow partitions and a positive <code dir="auto">RowsOffset</code> for wide ones; <code dir="auto">Rows.db</code> holds
+one per-partition <code dir="auto">TrieIndexEntry</code> + row-index trie per wide partition, and is
+emitted as a 0-byte component when no partition is wide (matching the real
+<code dir="auto">da-2-bti-Rows.db</code> fixtures). A wide partition is one spanning <code dir="auto">>= 2</code>
+<code dir="auto">column_index_size</code> (64 KiB) blocks, mirroring <code dir="auto">RowIndexEntry.create()</code>. An
+empty BTI write (zero partitions) is refused, since a <code dir="auto">da</code> SSTable has no
+readable zero-partition <code dir="auto">Partitions.db</code> form. See
+<code dir="auto">cqlite-core/src/storage/sstable/writer/partitions_writer.rs</code> (<code dir="auto">RowsTrieWriter</code>)
+and <code dir="auto">tests/issue_908_bti_canonical_write.rs</code>.</p>
 </blockquote>
 <div class="sl-heading-wrapper level-h3"><h3 id="row-index-granularity">Row index granularity</h3><a class="sl-anchor-link" href="#row-index-granularity"><span aria-hidden="true" class="sl-anchor-icon"><svg width="16" height="16" viewBox="0 0 24 24"><path fill="currentcolor" d="m12.11 15.39-3.88 3.88a2.52 2.52 0 0 1-3.5 0 2.47 2.47 0 0 1 0-3.5l3.88-3.88a1 1 0 0 0-1.42-1.42l-3.88 3.89a4.48 4.48 0 0 0 6.33 6.33l3.89-3.88a1 1 0 1 0-1.42-1.42Zm8.58-12.08a4.49 4.49 0 0 0-6.33 0l-3.89 3.88a1 1 0 0 0 1.42 1.42l3.88-3.88a2.52 2.52 0 0 1 3.5 0 2.47 2.47 0 0 1 0 3.5l-3.88 3.88a1 1 0 1 0 1.42 1.42l3.88-3.89a4.49 4.49 0 0 0 0-6.33ZM8.83 15.17a1 1 0 0 0 1.1.22 1 1 0 0 0 .32-.22l4.92-4.92a1 1 0 0 0-1.42-1.42l-4.92 4.92a1 1 0 0 0 0 1.42Z"></path></svg></span><span class="sr-only">Section titled “Row index granularity”</span></a></div>
 <p>The row index does not index every row—it indexes blocks. The default block size is <strong>at least
