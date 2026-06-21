@@ -1662,6 +1662,49 @@ mod tests {
         assert_eq!(i32_col(b, "agg4").value(0), 30);
     }
 
+    fn f64_col(batch: &RecordBatch, name: &str) -> arrow::array::Float64Array {
+        batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Float64Array>()
+            .unwrap()
+            .clone()
+    }
+
+    /// #902: `SumDouble` (the avg numerator) over an integer column emits a
+    /// Float64 partial and totals in f64, so a running sum past i64::MAX does not
+    /// overflow the way a checked-i64 `Sum` would. Here it just verifies the wire
+    /// type and value through the real merge/Arrow path.
+    #[test]
+    fn sum_double_emits_float64_over_integer_column() {
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "a", 10, 100),
+                write_row(2, "b", 20, 100),
+                write_row(3, "c", 30, 100),
+            ]],
+        );
+
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![
+                agg_on(AggFunc::SumDouble, "score", "agg_sum"),
+                agg_on(AggFunc::Count, "score", "agg_cnt"),
+            ],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 1);
+        let b = &batches[0];
+        // SumDouble → Float64 (not Int64), value 60.0; Count → 3. The connector
+        // divides these to 20.0 for avg(score).
+        assert_eq!(f64_col(b, "agg_sum").value(0), 60.0);
+        assert_eq!(i64_col(b, "agg_cnt").value(0), 3);
+    }
+
     /// Global aggregation over EMPTY input → one row: count = 0, sum/min/max null.
     #[test]
     fn global_aggregate_over_empty_input_emits_zero_row() {

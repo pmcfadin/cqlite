@@ -21,7 +21,6 @@ import io.trino.spi.expression.Variable;
 import io.trino.spi.type.BigintType;
 import io.trino.spi.type.BooleanType;
 import io.trino.spi.type.DoubleType;
-import io.trino.spi.type.IntegerType;
 import io.trino.spi.type.Type;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.Schema;
@@ -312,14 +311,10 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
                     if (arg.isEmpty() || !supportsValueAggregate(arg.get())) {
                         return Optional.empty();
                     }
-                    // Decline float/double min/max: NaN ordering is subtle and must
-                    // match Trino exactly; rather than risk an order-dependent result
-                    // we leave these to Trino. Integer/text/etc. min/max still push.
-                    Type argType = arg.get().type();
-                    if (argType instanceof io.trino.spi.type.RealType
-                            || argType instanceof io.trino.spi.type.DoubleType) {
-                        return Optional.empty();
-                    }
+                    // Float/double min/max push too (issue #896): both the Rust
+                    // accumulator and the Java merger order NaN as the largest value
+                    // (Double.compare semantics), so the result matches Trino's
+                    // non-pushed min/max and is independent of input row order.
                     AggregationSpec.Func f = func.equals("min")
                             ? AggregationSpec.Func.Min : AggregationSpec.Func.Max;
                     String out = nextOutput(outputCounter, groupByNameSet);
@@ -332,24 +327,16 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
                     if (arg.isEmpty() || !supportsValueAggregate(arg.get())) {
                         return Optional.empty();
                     }
-                    // Decline avg() on integer columns: its partial Sum uses checked
-                    // i64 (to match Trino's sum(bigint) overflow), but Trino's avg
-                    // accumulates in 128-bit and never overflows — so a pushed
-                    // integer avg could fail a query Trino would answer. Float/double
-                    // avg sums in f64 (no overflow), so it still pushes. See #902.
-                    Type avgType = arg.get().type();
-                    if (avgType instanceof BigintType || avgType instanceof IntegerType
-                            || avgType instanceof io.trino.spi.type.SmallintType
-                            || avgType instanceof io.trino.spi.type.TinyintType) {
-                        return Optional.empty();
-                    }
-                    // avg(x) -> server Sum(x) + Count(x); combined connector-side as
-                    // ΣSum/ΣCount. The connector emits ONE merged DOUBLE result column
-                    // named by sumOut (the pair's first output); Trino references that.
+                    // avg(x) -> server SumDouble(x) + Count(x); combined connector-side
+                    // as ΣSum/ΣCount. SumDouble totals in f64 even for integer columns,
+                    // so the numerator never overflows — matching Trino's 128-bit avg
+                    // (which never fails), unlike a checked-i64 Sum (issue #902). The
+                    // connector emits ONE merged DOUBLE result column named by sumOut
+                    // (the pair's first output); Trino references that.
                     String sumOut = nextOutput(outputCounter, groupByNameSet);
                     String countOut = nextOutput(outputCounter, groupByNameSet);
                     serverAggregates.add(new AggregationSpec.Aggregate(
-                            AggregationSpec.Func.Sum, arg.get().name(), sumOut));
+                            AggregationSpec.Func.SumDouble, arg.get().name(), sumOut));
                     serverAggregates.add(new AggregationSpec.Aggregate(
                             AggregationSpec.Func.Count, arg.get().name(), countOut));
                     addResult(sumOut, DoubleType.DOUBLE, assignmentList, projections);

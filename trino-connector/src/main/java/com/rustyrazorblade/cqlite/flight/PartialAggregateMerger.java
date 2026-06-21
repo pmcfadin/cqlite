@@ -17,11 +17,12 @@ import java.util.Map;
  * <ul>
  *   <li>{@code Count} → sum (Int64, never null)</li>
  *   <li>{@code Sum} → sum, skipping null partials (null if every partial was null)</li>
+ *   <li>{@code SumDouble} → double sum, skipping null (the avg numerator; never overflows)</li>
  *   <li>{@code Min} → min, skipping null</li>
  *   <li>{@code Max} → max, skipping null</li>
  * </ul>
  * {@code avg} is not a server function — it is computed downstream as ΣSum/ΣCount
- * (null when ΣCount == 0) from a {@code Sum}+{@code Count} pair (see
+ * (null when ΣCount == 0) from a {@code SumDouble}+{@code Count} pair (see
  * {@link FinalizeAggregationPlan}).
  *
  * <p>Grouping: rows are keyed by their group-by values (null keys group together,
@@ -149,6 +150,17 @@ public final class PartialAggregateMerger {
                     // surfaces as a query failure.
                     acc.value = Math.addExact(((Number) acc.value).longValue(), ((Number) partial).longValue());
                 }
+                acc.seen = true;
+            }
+            case SumDouble -> {
+                // The avg numerator: always accumulate in double, so the running
+                // total never overflows (matches Trino's non-overflowing avg).
+                if (partial == null) {
+                    return;
+                }
+                double next = (acc.value == null ? 0.0 : ((Number) acc.value).doubleValue())
+                        + ((Number) partial).doubleValue();
+                acc.value = next;
                 acc.seen = true;
             }
             case Min -> {

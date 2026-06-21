@@ -12,16 +12,18 @@ import java.util.List;
  *
  * <p>Mirrors the cqlite-flight server's wire contract exactly. The {@code group_by}
  * list names the grouping columns; the {@code aggregates} list names the partial
- * aggregates the server must compute. Server funcs are ONLY
- * {@link Func#Count}/{@link Func#Sum}/{@link Func#Min}/{@link Func#Max} — there is
- * no {@code Avg} on the wire; {@code avg(x)} is decomposed connector-side into
- * {@code Sum(x)} + {@code Count(x)} (see {@link CqliteFlightMetadata#applyAggregation}).
+ * aggregates the server must compute. Server funcs are
+ * {@link Func#Count}/{@link Func#Sum}/{@link Func#SumDouble}/{@link Func#Min}/{@link Func#Max}
+ * — there is no {@code Avg} on the wire; {@code avg(x)} is decomposed connector-side
+ * into {@code SumDouble(x)} + {@code Count(x)} (see
+ * {@link CqliteFlightMetadata#applyAggregation}).
  *
  * <p>The server returns PARTIAL rows whose Arrow columns are, in order:
  * the {@code group_by} columns (their natural types), then one column per aggregate
  * named by its {@code output}. {@code Count} → Int64 (never null);
  * {@code Sum} → Int64 for integer source types or Float64 for float/double (null if
- * no non-null inputs); {@code Min}/{@code Max} → source column type (null if none).
+ * no non-null inputs); {@code SumDouble} → always Float64 (null if none);
+ * {@code Min}/{@code Max} → source column type (null if none).
  * A global (empty {@code group_by}) aggregation returns exactly one row even on
  * empty input.
  */
@@ -31,6 +33,12 @@ public record AggregationSpec(List<String> groupBy, List<Aggregate> aggregates) 
     public enum Func {
         Count,
         Sum,
+        /**
+         * A sum coerced to Float64 regardless of source type, used as the numerator
+         * of a pushed {@code avg(col)}. Unlike {@link #Sum} it never overflows on an
+         * integer column (issue #902), matching Trino's 128-bit {@code avg}.
+         */
+        SumDouble,
         Min,
         Max
     }
