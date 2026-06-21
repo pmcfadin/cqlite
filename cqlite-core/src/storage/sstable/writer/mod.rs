@@ -552,6 +552,10 @@ impl SSTableWriter {
                 self.stats.update_timestamp(pt.deletion_time);
                 self.stats
                     .update_local_deletion_time(pt.local_deletion_time);
+                // Record the partition-level deletion marker for the `da`-format
+                // StatsMetadata.hasPartitionLevelDeletions field. Authoritative:
+                // the mutation explicitly carries a partition tombstone.
+                self.stats.mark_partition_level_deletion();
             }
 
             // Track stats for range tombstones

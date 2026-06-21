@@ -204,6 +204,17 @@ pub struct StatisticsMetadata {
     /// Last (highest-token) decorated partition-key bytes written to this
     /// SSTable. Serialised as the `da`-format `StatsMetadata.lastKey`.
     pub last_key: Option<Vec<u8>>,
+    /// Whether any partition written to this SSTable carries a partition-level
+    /// deletion (partition tombstone).
+    ///
+    /// Serialised as the `da`-format `StatsMetadata.hasPartitionLevelDeletions`
+    /// boolean (`hasPartitionLevelDeletionsPresenceMarker`); written as a single
+    /// `writeBoolean` byte (`0x01` true, `0x00` false) — matching
+    /// cassandra-5.0.0 `StatsMetadata.StatsMetadataSerializer.serialize`
+    /// (line 495). Set by `SSTableWriter::write_partition` whenever a mutation
+    /// contributes a `partition_tombstone`. Ignored by the legacy BIG (nb/oa)
+    /// STATS body, which never serialises this field.
+    pub has_partition_level_deletions: bool,
 }
 
 impl Default for StatisticsMetadata {
@@ -222,6 +233,7 @@ impl Default for StatisticsMetadata {
             tombstone_histogram: TombstoneHistogram::new(),
             first_key: None,
             last_key: None,
+            has_partition_level_deletions: false,
         }
     }
 }
@@ -273,6 +285,16 @@ impl StatisticsMetadata {
             self.first_key = Some(key.to_vec());
         }
         self.last_key = Some(key.to_vec());
+    }
+
+    /// Record that a partition-level deletion (partition tombstone) was written.
+    ///
+    /// Once set, this stays `true` for the lifetime of the SSTable and drives the
+    /// `da`-format `StatsMetadata.hasPartitionLevelDeletions` marker. Called by
+    /// `SSTableWriter::write_partition` for any partition carrying a
+    /// `partition_tombstone`.
+    pub fn mark_partition_level_deletion(&mut self) {
+        self.has_partition_level_deletions = true;
     }
 
     /// Increment row count
@@ -870,8 +892,14 @@ impl StatisticsWriter {
         // 7. compressionRatio (-1.0 = unknown)
         buffer.write_all(&(-1.0f64).to_be_bytes())?;
 
-        // 8. TombstoneHistogram estimatedTombstoneDropTime
-        self.write_tombstone_histogram(&mut buffer, &metadata.tombstone_histogram)?;
+        // 8. TombstoneHistogram estimatedTombstoneDropTime.
+        //
+        // The `da` (BtiFormat) version resolves `TombstoneHistogram.getSerializer`
+        // to the modern `HistogramSerializer` (long point + int value per bin),
+        // NOT the legacy serializer (double + long) used by older versions. Using
+        // the legacy entry encoding here mis-sizes the body and derails the
+        // subsequent `coveredClustering` Slice deserialization in Cassandra.
+        self.write_tombstone_histogram_modern(&mut buffer, &metadata.tombstone_histogram)?;
 
         // 9. sstableLevel, repairedAt
         buffer.write_all(&0i32.to_be_bytes())?;
@@ -928,7 +956,17 @@ impl StatisticsWriter {
         buffer.write_all(&[0x00])?;
 
         // 17. hasPartitionLevelDeletions
-        buffer.write_all(&[0x00])?;
+        //
+        // cassandra-5.0.0 StatsMetadata.StatsMetadataSerializer.serialize line 495:
+        //   out.writeBoolean(component.hasPartitionLevelDeletions)
+        // DataOutput.writeBoolean emits a single byte: 0x01 for true, 0x00 false.
+        // Set when any partition written carries a partition-level tombstone.
+        let has_partition_deletions = if metadata.has_partition_level_deletions {
+            0x01u8
+        } else {
+            0x00u8
+        };
+        buffer.write_all(&[has_partition_deletions])?;
 
         // 18. firstKey, lastKey (ByteBufferUtil.writeWithVIntLength:
         // unsigned-VInt length then the raw key bytes). Empty when no partitions.
@@ -997,6 +1035,49 @@ impl StatisticsWriter {
             for (point, value) in histogram.entries() {
                 buffer.write_all(&point.to_be_bytes())?; // f64 BE point
                 buffer.write_all(&value.to_be_bytes())?; // i64 BE value
+            }
+        }
+        Ok(())
+    }
+
+    /// Serialise a `TombstoneHistogram` using Cassandra's modern (`oa`/`da`)
+    /// `HistogramSerializer` format.
+    ///
+    /// Identical framing to the legacy serializer (`i32 maxBinSize`, `i32 size`)
+    /// but each bin entry is `i64 BE point` + `i32 BE value` (12 bytes), where
+    /// the legacy serializer used `f64 point` + `i64 value` (16 bytes). The
+    /// version split: `StatsMetadata.StatsMetadataSerializer` resolves
+    /// `TombstoneHistogram.getSerializer(version)` to the modern
+    /// `HistogramSerializer` for `oa`+ (incl. `BtiFormat.BtiVersion` `da`) and
+    /// the `LegacyHistogramSerializer` for older versions.
+    ///
+    /// Authority: repo `docs/sstables-definitive-guide/statistics-db-writer-spec.md`
+    /// (TombstoneHistogram legacy vs modern note) and
+    /// cassandra-5.0.0 `TombstoneHistogram.java` (`HistogramSerializer` ->
+    /// `long` point + `int` value).
+    ///
+    /// ```text
+    /// i32 BE  maxBinSize  — capacity: 100 when non-empty, 0 when empty
+    /// i32 BE  size        — actual number of populated bins
+    /// for each of the `size` bins (ascending point order):
+    ///   i64 BE  point  — local-deletion-time bucket centre (as long)
+    ///   i32 BE  value  — tombstone count for this bucket
+    /// ```
+    fn write_tombstone_histogram_modern(
+        &self,
+        buffer: &mut Vec<u8>,
+        histogram: &TombstoneHistogram,
+    ) -> Result<()> {
+        if histogram.is_empty() {
+            buffer.write_all(&0i32.to_be_bytes())?; // maxBinSize
+            buffer.write_all(&0i32.to_be_bytes())?; // size
+        } else {
+            buffer.write_all(&TOMBSTONE_HISTOGRAM_MAX_BIN_SIZE.to_be_bytes())?; // maxBinSize
+            buffer.write_all(&histogram.size().to_be_bytes())?; // size
+            for (point, value) in histogram.entries() {
+                // Modern: long point (truncate the double bucket centre) + int value.
+                buffer.write_all(&(point as i64).to_be_bytes())?; // i64 BE point
+                buffer.write_all(&(value as i32).to_be_bytes())?; // i32 BE value
             }
         }
         Ok(())
@@ -1341,6 +1422,68 @@ mod tests {
         let row_count_bytes = &data[row_count_offset..row_count_offset + 8];
         let row_count = u64::from_be_bytes(row_count_bytes.try_into().unwrap());
         assert_eq!(row_count, 100);
+    }
+
+    /// The `da` STATS body must serialise `hasPartitionLevelDeletions` as a
+    /// single `writeBoolean` byte: `0x01` when the SSTable contains a
+    /// partition-level deletion, `0x00` otherwise. Authority: cassandra-5.0.0
+    /// `StatsMetadata.StatsMetadataSerializer.serialize` line 495
+    /// (`out.writeBoolean(component.hasPartitionLevelDeletions)`), gated by
+    /// `version.hasPartitionLevelDeletionsPresenceMarker()` which is `true` for
+    /// `BtiFormat.BtiVersion`.
+    #[test]
+    fn test_da_stats_has_partition_level_deletions_marker_byte() {
+        let writer = StatisticsWriter::new_bti(PathBuf::from("da-1-bti-Statistics.db"));
+
+        // Identical metadata except for the partition-level-deletion flag, so
+        // the only differing byte is the hasPartitionLevelDeletions marker.
+        let mut base = StatisticsMetadata::new();
+        base.min_timestamp = 1_000_000;
+        base.max_timestamp = 2_000_000;
+        base.min_local_deletion_time = 0;
+        base.max_local_deletion_time = 0;
+        base.partition_count = 1;
+        base.row_count = 1;
+        base.column_count = 1;
+        base.finalize();
+
+        let mut with_del = base.clone();
+        with_del.mark_partition_level_deletion();
+        assert!(with_del.has_partition_level_deletions);
+        assert!(!base.has_partition_level_deletions);
+
+        let no_del_bytes = writer.build_stats_component_da(&base, None).unwrap();
+        let del_bytes = writer.build_stats_component_da(&with_del, None).unwrap();
+
+        // Same length: only the one marker byte changes value.
+        assert_eq!(
+            no_del_bytes.len(),
+            del_bytes.len(),
+            "the flag must not change the serialized length"
+        );
+
+        // Exactly one byte differs, and it flips 0x00 <-> 0x01.
+        let diffs: Vec<usize> = no_del_bytes
+            .iter()
+            .zip(del_bytes.iter())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(
+            diffs.len(),
+            1,
+            "only the hasPartitionLevelDeletions marker byte should differ"
+        );
+        let marker = diffs[0];
+        assert_eq!(
+            no_del_bytes[marker], 0x00,
+            "no partition deletion => marker byte 0x00"
+        );
+        assert_eq!(
+            del_bytes[marker], 0x01,
+            "partition deletion present => marker byte 0x01"
+        );
     }
 
     #[test]
