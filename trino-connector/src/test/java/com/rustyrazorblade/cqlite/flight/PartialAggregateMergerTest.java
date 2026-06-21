@@ -8,6 +8,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * Unit tests for the partial-merge logic ({@link PartialAggregateMerger}): feed two
@@ -195,5 +196,56 @@ class PartialAggregateMergerTest {
         merger.combine(globalKey, row("agg0", 1.5));
         merger.combine(globalKey, row("agg0", 2.25));
         assertEquals(3.75, (Double) merger.finish().get(0).outputs().get("agg0"), 1e-9);
+    }
+
+    @Test
+    void sumDoubleNumeratorNeverOverflows() {
+        // The avg numerator (SumDouble) totals in double even across ranges whose
+        // combined integer sum exceeds i64 — where a plain integer Sum would throw
+        // (issue #902). Each range ships its partial already widened to double.
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.SumDouble, "x", "agg0"),
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Count, "x", "agg1"));
+        var merger = new PartialAggregateMerger(aggregates);
+        var globalKey = new PartialAggregateMerger.GroupKey(List.of());
+        double big = (double) Long.MAX_VALUE;
+        merger.combine(globalKey, row("agg0", big, "agg1", 1L));
+        merger.combine(globalKey, row("agg0", big, "agg1", 1L)); // sum ≈ 2^64, no overflow
+
+        var out = merger.finish().get(0).outputs();
+        assertEquals(big + big, (Double) out.get("agg0"), 0.0, "SumDouble totals past i64 in f64");
+        assertEquals(2L, out.get("agg1"));
+        // avg = Σsum/Σcount.
+        assertEquals(big, ((Number) out.get("agg0")).doubleValue() / 2.0, 0.0);
+    }
+
+    @Test
+    void sumDoubleNullWhenNoNonNullInputs() {
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.SumDouble, "x", "agg0"));
+        var merger = new PartialAggregateMerger(aggregates);
+        var globalKey = new PartialAggregateMerger.GroupKey(List.of());
+        merger.combine(globalKey, row("agg0", null));
+        merger.combine(globalKey, row("agg0", null));
+        assertNull(merger.finish().get(0).outputs().get("agg0"), "SumDouble null when all-null");
+    }
+
+    @Test
+    void floatMinMaxOrdersNanGreatest() {
+        // Across ranges, max(double) over a NaN partial must return NaN and
+        // min(double) must ignore it — Double.compare orders NaN greatest, matching
+        // Trino and the Rust accumulator (issue #896). Order-independent.
+        var aggregates = List.of(
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Min, "x", "agg0"),
+                new AggregationSpec.Aggregate(AggregationSpec.Func.Max, "x", "agg1"));
+        var merger = new PartialAggregateMerger(aggregates);
+        var globalKey = new PartialAggregateMerger.GroupKey(List.of());
+        // One range's partial is NaN (its only/extreme value), the other finite.
+        merger.combine(globalKey, row("agg0", Double.NaN, "agg1", Double.NaN));
+        merger.combine(globalKey, row("agg0", 2.0, "agg1", 5.0));
+
+        var out = merger.finish().get(0).outputs();
+        assertEquals(2.0, (Double) out.get("agg0"), 0.0, "min ignores NaN");
+        assertTrue(Double.isNaN((Double) out.get("agg1")), "max over a NaN is NaN");
     }
 }

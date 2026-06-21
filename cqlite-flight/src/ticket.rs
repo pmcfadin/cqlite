@@ -158,8 +158,16 @@ pub enum PredicateExpr {
 pub enum AggFunc {
     /// `count(*)` (when `column` is `None`) or `count(col)` (non-null count).
     Count,
-    /// `sum(col)`.
+    /// `sum(col)` — integer sources accumulate in checked `i64` (overflow is an
+    /// error, matching Trino's non-pushed `sum(bigint)`); float sources in `f64`.
     Sum,
+    /// A sum coerced to `f64` regardless of source type, used as the numerator of
+    /// a pushed `avg(col)` (issue #902). Unlike [`AggFunc::Sum`] it never overflows
+    /// (integer inputs widen to `f64`), so an integer `avg` whose running total
+    /// exceeds `i64` succeeds where Trino's 128-bit `avg` also would — instead of
+    /// failing the way a checked-`i64` `Sum` would. Always `Float64`, null when the
+    /// group has no non-null inputs.
+    SumDouble,
     /// `min(col)`.
     Min,
     /// `max(col)`.
