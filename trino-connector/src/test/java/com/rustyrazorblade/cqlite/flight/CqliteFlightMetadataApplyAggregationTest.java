@@ -1,0 +1,280 @@
+package com.rustyrazorblade.cqlite.flight;
+
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import io.trino.spi.connector.AggregateFunction;
+import io.trino.spi.connector.AggregationApplicationResult;
+import io.trino.spi.connector.Assignment;
+import io.trino.spi.connector.ColumnHandle;
+import io.trino.spi.connector.ConnectorTableHandle;
+import io.trino.spi.expression.Call;
+import io.trino.spi.expression.ConnectorExpression;
+import io.trino.spi.expression.Constant;
+import io.trino.spi.expression.StandardFunctions;
+import io.trino.spi.expression.Variable;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+
+import static io.trino.spi.type.BigintType.BIGINT;
+import static io.trino.spi.type.BooleanType.BOOLEAN;
+import static io.trino.spi.type.DoubleType.DOUBLE;
+import static io.trino.spi.type.VarcharType.VARCHAR;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+/**
+ * Exercises {@link CqliteFlightMetadata#applyAggregation} directly with constructed
+ * AggregateFunction/Variable inputs (no live Sidecar/Flight — applyAggregation touches
+ * neither). Verifies the wire spec on the new handle and the SPI result shape.
+ */
+class CqliteFlightMetadataApplyAggregationTest {
+    private static final ObjectMapper MAPPER = new ObjectMapper();
+
+    private final CqliteFlightMetadata metadata = new CqliteFlightMetadata(null, null, null);
+
+    // x: numeric (FULL), c1: grouping column (FULL).
+    private static final CqliteFlightColumnHandle X = new CqliteFlightColumnHandle("x", BIGINT, PushdownCapability.FULL);
+    private static final CqliteFlightColumnHandle C1 = new CqliteFlightColumnHandle("c1", VARCHAR, PushdownCapability.FULL);
+    private static final CqliteFlightColumnHandle NOPUSH =
+            new CqliteFlightColumnHandle("y", BIGINT, PushdownCapability.NONE);
+
+    // d: a double column (FULL) — used to verify float min/max is declined.
+    private static final CqliteFlightColumnHandle D = new CqliteFlightColumnHandle("d", DOUBLE, PushdownCapability.FULL);
+
+    private static final Map<String, ColumnHandle> ASSIGN = Map.of(
+            "x", X, "c1", C1, "y", NOPUSH, "d", D);
+
+    private static final ConnectorTableHandle TABLE = new CqliteFlightTableHandle("ks", "t", "ddl");
+
+    private static AggregateFunction agg(String name, io.trino.spi.type.Type out, ConnectorExpression... args) {
+        return new AggregateFunction(name, out, List.of(args), List.of(), false, Optional.empty());
+    }
+
+    private static JsonNode aggSpec(CqliteFlightTableHandle handle) throws Exception {
+        return MAPPER.readTree(handle.aggregationJson().orElseThrow());
+    }
+
+    @Test
+    void pushesCountStarGlobal() throws Exception {
+        var result = metadata.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)), ASSIGN, List.of(List.of()))
+                .orElseThrow();
+
+        var handle = (CqliteFlightTableHandle) result.getHandle();
+        assertTrue(handle.isAggregated());
+        JsonNode spec = aggSpec(handle);
+        assertEquals(0, spec.get("group_by").size());
+        JsonNode a0 = spec.get("aggregates").get(0);
+        assertEquals("Count", a0.get("func").asText());
+        assertTrue(a0.get("column").isNull(), "count(*) has null column");
+        assertEquals("agg0", a0.get("output").asText());
+
+        // Projections align 1:1 with input aggregates; one Variable of type BIGINT.
+        assertEquals(1, result.getProjections().size());
+        Variable proj = (Variable) result.getProjections().get(0);
+        assertEquals("agg0", proj.getName());
+        assertSame(BIGINT, proj.getType());
+        // Assignment declares the new output column.
+        Assignment assignment = result.getAssignments().get(0);
+        assertEquals("agg0", assignment.getVariable());
+        assertSame(BIGINT, assignment.getType());
+        assertTrue(result.getGroupingColumnMapping().isEmpty(), "no grouping columns");
+    }
+
+    @Test
+    void pushesCountColumn() throws Exception {
+        var result = metadata.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT, new Variable("x", BIGINT))),
+                ASSIGN, List.of(List.of())).orElseThrow();
+        JsonNode a0 = aggSpec((CqliteFlightTableHandle) result.getHandle()).get("aggregates").get(0);
+        assertEquals("Count", a0.get("func").asText());
+        assertEquals("x", a0.get("column").asText());
+    }
+
+    @Test
+    void pushesSumMinMax() throws Exception {
+        var result = metadata.applyAggregation(
+                null, TABLE,
+                List.of(
+                        agg("sum", BIGINT, new Variable("x", BIGINT)),
+                        agg("min", BIGINT, new Variable("x", BIGINT)),
+                        agg("max", BIGINT, new Variable("x", BIGINT))),
+                ASSIGN, List.of(List.of())).orElseThrow();
+
+        JsonNode aggs = aggSpec((CqliteFlightTableHandle) result.getHandle()).get("aggregates");
+        assertEquals("Sum", aggs.get(0).get("func").asText());
+        assertEquals("Min", aggs.get(1).get("func").asText());
+        assertEquals("Max", aggs.get(2).get("func").asText());
+        assertEquals(3, result.getProjections().size(), "1:1 with input aggregates");
+    }
+
+    @Test
+    void decomposesAvgIntoSumPlusCount() throws Exception {
+        // avg over a DOUBLE column (integer avg is declined — see #902); the
+        // Sum+Count decomposition is identical.
+        var result = metadata.applyAggregation(
+                null, TABLE, List.of(agg("avg", DOUBLE, new Variable("d", DOUBLE))),
+                ASSIGN, List.of(List.of())).orElseThrow();
+
+        JsonNode aggs = aggSpec((CqliteFlightTableHandle) result.getHandle()).get("aggregates");
+        assertEquals(2, aggs.size(), "avg(d) -> Sum(d) + Count(d) on the wire");
+        assertEquals("Sum", aggs.get(0).get("func").asText());
+        assertEquals("d", aggs.get(0).get("column").asText());
+        assertEquals("Count", aggs.get(1).get("func").asText());
+        assertEquals("d", aggs.get(1).get("column").asText());
+
+        // But Trino sees ONE projection (the merged DOUBLE avg result).
+        assertEquals(1, result.getProjections().size());
+        Variable proj = (Variable) result.getProjections().get(0);
+        assertSame(DOUBLE, proj.getType());
+    }
+
+    @Test
+    void pushesGroupByOneColumn() throws Exception {
+        var result = metadata.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)),
+                ASSIGN, List.of(List.of(C1))).orElseThrow();
+
+        var handle = (CqliteFlightTableHandle) result.getHandle();
+        JsonNode spec = aggSpec(handle);
+        assertEquals("c1", spec.get("group_by").get(0).asText());
+
+        // groupingColumnMapping remaps the original grouping handle (passthrough).
+        assertEquals(C1, result.getGroupingColumnMapping().get(C1));
+        // The grouping column must NOT appear in `assignments` — that list is only
+        // for the new aggregate-result variables. Declaring the grouping handle here
+        // too made Trino's symbol<->handle BiMap throw "Multiple entries with same
+        // value" (regression: GROUP BY query failed end-to-end).
+        assertTrue(result.getAssignments().stream().noneMatch(a -> a.getVariable().equals("c1")),
+                "grouping column must not be in assignments (only in groupingColumnMapping)");
+        // No assignment may point at the grouping column's handle either.
+        assertTrue(result.getAssignments().stream().noneMatch(a -> a.getColumn().equals(C1)),
+                "no assignment may duplicate the grouping ColumnHandle");
+        // The single count aggregate still has its result assignment.
+        assertEquals(1, result.getAssignments().size());
+    }
+
+    @Test
+    void syntheticOutputNameAvoidsGroupingColumnCollision() throws Exception {
+        // A real column literally named "agg0" used in GROUP BY must NOT collide
+        // with the synthetic aggregate output names (both share the partial Arrow
+        // schema and are resolved by name). count(*) here would naively be "agg0".
+        var agg0col = new CqliteFlightColumnHandle("agg0", VARCHAR, PushdownCapability.FULL);
+        Map<String, ColumnHandle> assign = Map.of("agg0", agg0col, "x", X);
+        var result = metadata.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)),
+                assign, List.of(List.of(agg0col))).orElseThrow();
+
+        var handle = (CqliteFlightTableHandle) result.getHandle();
+        JsonNode spec = aggSpec(handle);
+        assertEquals("agg0", spec.get("group_by").get(0).asText());
+        String out = spec.get("aggregates").get(0).get("output").asText();
+        assertTrue(!out.equals("agg0"), "aggregate output must not collide with grouping column 'agg0'");
+    }
+
+    @Test
+    void declinesDistinct() {
+        var distinct = new AggregateFunction("count", BIGINT,
+                List.of(new Variable("x", BIGINT)), List.of(), true, Optional.empty());
+        assertTrue(metadata.applyAggregation(null, TABLE, List.of(distinct), ASSIGN, List.of(List.of()))
+                .isEmpty());
+    }
+
+    @Test
+    void declinesExpressionArg() {
+        var expr = new Call(BIGINT, StandardFunctions.ADD_FUNCTION_NAME,
+                List.of(new Variable("x", BIGINT), new Constant(1L, BIGINT)));
+        var sum = agg("sum", BIGINT, expr);
+        assertTrue(metadata.applyAggregation(null, TABLE, List.of(sum), ASSIGN, List.of(List.of()))
+                .isEmpty());
+    }
+
+    @Test
+    void declinesMultipleGroupingSets() {
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)),
+                ASSIGN, List.of(List.of(C1), List.of())).isEmpty(),
+                "ROLLUP/CUBE/GROUPING SETS -> multiple grouping sets -> decline");
+    }
+
+    @Test
+    void declinesSumOnNonFullColumn() {
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("sum", BIGINT, new Variable("y", BIGINT))),
+                ASSIGN, List.of(List.of())).isEmpty(),
+                "sum needs a FULL-capability column");
+    }
+
+    @Test
+    void declinesAvgOnIntegerButPushesAvgOnDouble() {
+        // avg(bigint) is declined (its checked-i64 partial sum could overflow where
+        // Trino's 128-bit avg would not). avg(double) sums in f64 — still pushes.
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("avg", DOUBLE, new Variable("x", BIGINT))),
+                ASSIGN, List.of(List.of())).isEmpty(), "avg(bigint) is not pushed");
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("avg", DOUBLE, new Variable("d", DOUBLE))),
+                ASSIGN, List.of(List.of())).isPresent(), "avg(double) still pushes");
+    }
+
+    @Test
+    void declinesGroupByOnDoubleColumn() {
+        // Grouping on a float/double column (non-finite key semantics) is left to Trino.
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)),
+                ASSIGN, List.of(List.of(D))).isEmpty(), "GROUP BY double is not pushed");
+    }
+
+    @Test
+    void declinesMinMaxOnDoubleColumn() {
+        // Float/double min/max is left to Trino (NaN ordering must match exactly).
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("min", DOUBLE, new Variable("d", DOUBLE))),
+                ASSIGN, List.of(List.of())).isEmpty(), "min(double) is not pushed");
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("max", DOUBLE, new Variable("d", DOUBLE))),
+                ASSIGN, List.of(List.of())).isEmpty(), "max(double) is not pushed");
+        // But sum(double) and avg(double) still push (NaN propagates identically).
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("sum", DOUBLE, new Variable("d", DOUBLE))),
+                ASSIGN, List.of(List.of())).isPresent(), "sum(double) still pushes");
+    }
+
+    @Test
+    void declinesUnsupportedFunction() {
+        assertTrue(metadata.applyAggregation(
+                null, TABLE, List.of(agg("approx_distinct", BIGINT, new Variable("x", BIGINT))),
+                ASSIGN, List.of(List.of())).isEmpty());
+    }
+
+    @Test
+    void declinesFilteredAggregate() {
+        var filtered = new AggregateFunction("count", BIGINT,
+                List.of(new Variable("x", BIGINT)), List.of(), false,
+                Optional.of(new Constant(true, BOOLEAN)));
+        assertTrue(metadata.applyAggregation(null, TABLE, List.of(filtered), ASSIGN, List.of(List.of()))
+                .isEmpty());
+    }
+
+    @Test
+    void applyFilterDeclinesOnAggregatedHandle() {
+        // After aggregation pushdown, a later filter must NOT be pushed: it would
+        // apply to aggregate outputs and rebuilding the handle would drop the
+        // aggregation state. The non-aggregated path still pushes filters normally.
+        var aggregated = (CqliteFlightTableHandle) metadata.applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)), ASSIGN, List.of(List.of()))
+                .orElseThrow().getHandle();
+        assertTrue(aggregated.isAggregated());
+
+        var predicate = new Call(BOOLEAN, StandardFunctions.GREATER_THAN_OPERATOR_FUNCTION_NAME,
+                List.of(new Variable("x", BIGINT), new Constant(1L, BIGINT)));
+        var constraint = new io.trino.spi.connector.Constraint(
+                io.trino.spi.predicate.TupleDomain.all(), predicate, ASSIGN);
+        assertTrue(metadata.applyFilter(null, aggregated, constraint).isEmpty(),
+                "filter pushdown must be declined on an already-aggregated handle");
+    }
+}

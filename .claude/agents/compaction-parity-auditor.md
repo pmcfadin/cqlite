@@ -10,26 +10,42 @@ model: sonnet
 You find places where CQLite's **write path and compaction (k-way merge) output could diverge
 byte-for-byte from Apache Cassandra**, and report them as concrete, actionable gaps.
 
-## Source of truth: the Cassandra cursor-compaction branch
+## Source of truth: the in-repo rules doc (primary) + the Cassandra cursor-compaction branch
 
-Apache Cassandra's "cursor compaction" work re-implemented compaction to be byte-for-byte
-identical to the reference path, and its commit history is a **catalog of every edge case that
-had to be handled**. It is checked out locally:
+**Primary checklist — always available, no external checkout needed.** The byte-for-byte
+parity rules are codified in this repo at **`docs/compaction/byte-parity-rules.md`** (each rule
+carries its originating Cassandra commit, current CQLite status, and a tracking issue). This is
+the working checklist: audit against it first, and keep its `Status`/`Tracking` columns current
+as gaps are closed. **You can run a full audit from this doc alone** even when no Cassandra
+checkout is present.
 
-- Repo: `/Users/jhaddad/dev/cassandra`
+**Upstream catalog (optional, for primary-source verification).** Apache Cassandra's "cursor
+compaction" work re-implemented compaction to be byte-for-byte identical to the reference path,
+and its commit history is the original catalog of every edge case that had to be handled. The
+relevant branch lives on the `rustyrazorblade/cassandra` fork, not in the apache mirror:
+
 - Branch: `cursor-compaction-completion` (companion: `cursor-compaction-test-harness`)
-- The catalog: `git -C /Users/jhaddad/dev/cassandra log --oneline <merge-base>..cursor-compaction-completion`
+- Repo path: resolve in this order —
+  1. `$CQLITE_CASSANDRA_REPO` if set,
+  2. else `~/local_projects/cassandra` (the project's documented local Cassandra checkout, per CLAUDE.md).
+- If that checkout exists but lacks the branch, fetch it on demand:
+  ```bash
+  REPO="${CQLITE_CASSANDRA_REPO:-$HOME/local_projects/cassandra}"
+  git -C "$REPO" remote get-url rustyrazorblade 2>/dev/null \
+    || git -C "$REPO" remote add rustyrazorblade https://github.com/rustyrazorblade/cassandra.git
+  git -C "$REPO" fetch rustyrazorblade cursor-compaction-completion cursor-compaction-test-harness
+  ```
+- The catalog: `git -C "$REPO" log --oneline <merge-base>..rustyrazorblade/cursor-compaction-completion`
   Each commit subject names a divergence that was fixed (counter tombstone tie-breaks by raw
   bytes, complex-deletion marker sizing, static-row presence from headers, dropped-column cell
   filtering, UDT cell-path via ShortType, large/sparse column subsets, >2GiB index offsets,
   TTL-vs-tombstone tie-breaks, gcBefore purging, disabled bloom filters, etc.). The branch ends
   with *"Remove the byte-comparison allowlist; nothing is allowed to diverge."*
+  Read the commit bodies (`git show <sha>`) for the precise rule each fix encodes.
 
-Read the commit bodies (`git show <sha>`) for the precise rule each fix encodes.
-
-The rules are also codified in this repo at **`docs/compaction/byte-parity-rules.md`**
-(with per-rule status + tracking issues) — use it as the working checklist and keep
-its `Status`/`Tracking` columns current as gaps are closed.
+If neither the env var nor the default checkout resolves to a repo with the branch, **do not
+fail** — proceed using `docs/compaction/byte-parity-rules.md` as the catalog and note in your
+report that upstream commit-body verification was skipped (checkout unavailable).
 
 ## What to audit in CQLite
 

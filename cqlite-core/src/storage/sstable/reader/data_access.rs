@@ -3,6 +3,7 @@
 //! This module contains all methods related to reading data from SSTables,
 //! including point lookups, range scans, and sequential access.
 
+use super::source::ScanCursor;
 use super::SSTableReader;
 use crate::parser::DataFormat;
 use crate::types::{CellWriteMetadata, TableId, Value};
@@ -189,19 +190,25 @@ impl SSTableReader {
 
     /// Get a value by key from the SSTable
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        // Issue #831 / #909: BTI ("da") readers resolve partitions via the
+        // Partitions.db trie (O(log n)), never via Index.db (absent for BTI) or
+        // the sequential scan. The trie is the AUTHORITATIVE presence oracle for a
+        // BTI SSTable — it answers present/absent definitively — so we branch here
+        // BEFORE the bloom-filter pre-check. Skipping the bloom filter for BTI is
+        // both correct (the trie is authoritative; bloom is only an optimization)
+        // and necessary: a writer-produced Filter.db whose hashing does not match
+        // the reader's would otherwise cause false negatives and drop live
+        // partitions (the writer→reader roundtrip #909 must read back). It also
+        // guarantees a BTI get() can never fall through to scan_for_key.
+        if self.bti_partitions_db.is_some() {
+            return self.bti_point_lookup(table_id, key).await;
+        }
+
         // First check bloom filter if available
         if let Some(bloom_filter) = &self.bloom_filter {
             if !bloom_filter.might_contain(key.as_bytes()) {
                 return Ok(None);
             }
-        }
-
-        // Issue #831: BTI ("da") readers resolve partitions via the Partitions.db
-        // trie (O(log n)), never via Index.db (absent for BTI) or the sequential
-        // scan. Branch BEFORE the Index.db block so a BTI get() can never fall
-        // through to scan_for_key.
-        if self.bti_partitions_db.is_some() {
-            return self.bti_point_lookup(table_id, key).await;
         }
 
         // Use index for efficient lookup if available
@@ -325,7 +332,7 @@ impl SSTableReader {
     /// Chunk targeting (the fast path): when `CompressionInfo` with a non-zero
     /// `chunk_length` is present, the chunk containing `offset` is
     /// `target_chunk = offset / chunk_length`; we seek that chunk via its
-    /// `chunk_offsets` entry, set `current_chunk_index = target_chunk`, then
+    /// `chunk_offsets` entry, set the cursor's chunk index to `target_chunk`, then
     /// decompress forward chunk-by-chunk, appending each into `window`. After each
     /// appended chunk we attempt to parse the FIRST partition at `window[within..]`
     /// (`within = offset % chunk_length`). The stop condition (correctness-critical
@@ -342,8 +349,9 @@ impl SSTableReader {
     /// decompresses the WHOLE section via [`stitch_all_chunks`] (`window_base = 0`)
     /// and runs the same single-partition parse.
     ///
-    /// Serialises against other scans (shared file position + chunk index) by
-    /// holding `scan_mutex` for the whole operation (issue #805).
+    /// Uses its own per-scan [`ScanCursor`] (private file position + chunk
+    /// index), so concurrent lookups run in parallel without serialization
+    /// (issue #815).
     async fn bti_decompress_and_parse_target(
         &self,
         offset: usize,
@@ -354,7 +362,9 @@ impl SSTableReader {
     ) -> Result<Option<Value>> {
         use crate::storage::sstable::compression::Compression;
 
-        let _scan_guard = self.scan_mutex.lock().await;
+        // Issue #815: each lookup uses its own cursor so concurrent lookups on
+        // this reader never share a mutable file position / chunk index.
+        let cursor = self.new_scan_cursor().await?;
 
         // Determine the chunk-targeting parameters. `chunk_length == 0` (or no
         // CompressionInfo) means we cannot chunk-target -> whole-section fallback.
@@ -382,10 +392,11 @@ impl SSTableReader {
                         ))
                     })?;
                 {
-                    let mut file_guard = self.file.lock().await;
+                    let mut file_guard = cursor.file.lock().await;
                     file_guard.seek(SeekFrom::Start(chunk_start)).await?;
                 }
-                self.current_chunk_index
+                cursor
+                    .chunk_index
                     .store(target_chunk, std::sync::atomic::Ordering::Relaxed);
                 (target_chunk, window_base, Vec::<u8>::new())
             }
@@ -393,12 +404,10 @@ impl SSTableReader {
                 // Whole-section fallback (uncompressed BTI, or chunk_length absent/0).
                 let header_size = self.calculate_header_size();
                 {
-                    let mut file_guard = self.file.lock().await;
+                    let mut file_guard = cursor.file.lock().await;
                     file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
                 }
-                self.current_chunk_index
-                    .store(0, std::sync::atomic::Ordering::Relaxed);
-                let whole = self.stitch_all_chunks().await?;
+                let whole = self.stitch_all_chunks(&cursor).await?;
                 (0usize, 0usize, whole)
             }
         };
@@ -420,7 +429,7 @@ impl SSTableReader {
             // If chunk-targeted, append the next chunk before each parse attempt
             // (the whole-section fallback already has all bytes in `window`).
             if chunk_targeted {
-                match self.read_next_block().await? {
+                match self.read_next_block(&cursor).await? {
                     Some(compressed_chunk) => {
                         let decompressed_chunk = if let Some(compression_reader) =
                             &self.compression_reader
@@ -578,6 +587,87 @@ impl SSTableReader {
         &decompressed[key_start..key_end] == expected_key
     }
 
+    /// BTI ("da") full scan: decompress the whole Data.db section and parse
+    /// every partition in token order (issue #660).
+    ///
+    /// BTI SSTables carry no Index.db/Summary.db, so a range/full scan cannot
+    /// use the index path. Instead we stitch the entire (chunk-compressed) data
+    /// section into one buffer and run [`parse_block_with_cell_metadata`], which
+    /// walks ALL partitions — the same per-partition decode the point-lookup
+    /// path uses, but without stopping at the first match.
+    ///
+    /// Returns entries with per-cell write metadata so the WRITETIME/TTL scan
+    /// (`scan_with_cell_metadata`) and the plain `scan` (which drops the metadata)
+    /// can share a single implementation. Results are filtered by the optional
+    /// `[start_key, end_key]` range and tombstone-suppressed, then sorted into
+    /// Murmur3 token order and truncated to `limit` — identical post-processing
+    /// to the V5CompressedLegacy stitched path.
+    ///
+    /// Uses its own per-scan [`ScanCursor`], so it runs in parallel with other
+    /// scans on this reader without serialization (issue #815).
+    ///
+    /// [`parse_block_with_cell_metadata`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser::parse_block_with_cell_metadata
+    async fn bti_scan_with_metadata(
+        &self,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        limit: Option<usize>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<
+        Vec<(
+            RowKey,
+            Value,
+            std::collections::HashMap<String, CellWriteMetadata>,
+        )>,
+    > {
+        let cursor = self.new_scan_cursor().await?;
+
+        // Decompress the entire data section. Precondition for stitch_all_chunks:
+        // cursor's file seeked to data-section start (fresh cursor is at chunk 0).
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        let whole = self.stitch_all_chunks(&cursor).await?;
+
+        // Resolve schema via the four-tier strategy (provided > header > registry).
+        // V5CompressedLegacy partition decode requires a schema (cells lack names).
+        let effective_schema = self.get_table_schema(schema);
+        let parser = self.build_v5_parser();
+        let parsed =
+            parser.parse_block_with_cell_metadata(&whole, effective_schema.as_ref(), self)?;
+
+        let mut results = Vec::new();
+        for (_entry_table_id, entry_key, entry_value, cell_meta) in parsed {
+            if let Some(start) = start_key {
+                if &entry_key < start {
+                    continue;
+                }
+            }
+            if let Some(end) = end_key {
+                if &entry_key > end {
+                    continue;
+                }
+            }
+            if !self.filter_tombstone(&entry_value) {
+                continue;
+            }
+            results.push((entry_key, entry_value, cell_meta));
+        }
+
+        sort_by_token_order_with_meta(&mut results);
+        if let Some(lim) = limit {
+            results.truncate(lim);
+        }
+
+        log::debug!(
+            "SSTableReader::bti_scan_with_metadata - Returning {} results",
+            results.len()
+        );
+        Ok(results)
+    }
+
     /// Scan a range of keys
     ///
     /// # Arguments
@@ -608,6 +698,17 @@ impl SSTableReader {
             "SSTableReader::scan - Has bloom filter: {}",
             self.bloom_filter.is_some()
         );
+
+        // Issue #660: BTI ("da") readers have no Index.db/Summary.db. A full scan
+        // walks the whole (chunk-compressed) Data.db once and parses every
+        // partition — the same partition decode the point-lookup path proves
+        // correct, but emitting ALL partitions instead of stopping at the first.
+        if self.bti_partitions_db.is_some() {
+            let entries = self
+                .bti_scan_with_metadata(start_key, end_key, limit, schema)
+                .await?;
+            return Ok(entries.into_iter().map(|(k, v, _meta)| (k, v)).collect());
+        }
 
         let mut results = Vec::new();
 
@@ -718,20 +819,33 @@ impl SSTableReader {
     /// `Value::Tombstone` entries (with their authoritative deletion timestamps)
     /// so that tombstone-shadowing semantics can be applied during the merge.
     pub async fn get_all_entries(&self) -> Result<Vec<(TableId, RowKey, Value)>> {
-        // Issue #805: serialise concurrent scans (shared file position + chunk index).
-        let _scan_guard = self.scan_mutex.lock().await;
+        // Issue #660: BTI ("da") tables have no Index.db; route through the
+        // whole-Data.db BTI scan, which resolves schema via get_table_schema
+        // (header/registry) and decodes every partition. It mints its own
+        // per-scan cursor, as does the non-BTI path below (issue #815).
+        if self.bti_partitions_db.is_some() {
+            let table_id = TableId::new(format!(
+                "{}.{}",
+                self.header.keyspace, self.header.table_name
+            ));
+            let entries = self.bti_scan_with_metadata(None, None, None, None).await?;
+            return Ok(entries
+                .into_iter()
+                .map(|(k, v, _meta)| (table_id.clone(), k, v))
+                .collect());
+        }
+
+        // Issue #815: independent per-scan cursor — no cross-scan serialization.
+        let cursor = self.new_scan_cursor().await?;
 
         let mut results = Vec::new();
 
         // Reset to beginning of data section
         let header_size = self.calculate_header_size();
         {
-            let mut file_guard = self.file.lock().await;
+            let mut file_guard = cursor.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
-        // Reset chunk index when seeking to start
-        self.current_chunk_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         if self.requires_chunk_stitching() {
             // V5CompressedLegacy: Row payloads can span multiple compressed chunks
@@ -741,11 +855,11 @@ impl SSTableReader {
             );
 
             // Use shared stitching helper method
-            let entries = self.stitch_and_parse_all_chunks(None).await?;
+            let entries = self.stitch_and_parse_all_chunks(&cursor, None).await?;
             results.extend(entries);
         } else {
             // Other formats: Read and parse blocks individually
-            while let Some(block) = self.read_next_block().await? {
+            while let Some(block) = self.read_next_block(&cursor).await? {
                 let entries = self.parse_block_entries(&block, None)?;
                 results.extend(entries);
             }
@@ -765,9 +879,10 @@ impl SSTableReader {
     /// format where partitions can span chunk boundaries.
     async fn stitch_and_parse_all_chunks(
         &self,
+        cursor: &ScanCursor,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(TableId, RowKey, Value)>> {
-        let stitched_buffer = self.stitch_all_chunks().await?;
+        let stitched_buffer = self.stitch_all_chunks(cursor).await?;
         let parser = self.build_v5_parser();
 
         // Get schema (use provided schema or reader's schema)
@@ -794,6 +909,7 @@ impl SSTableReader {
     /// Used when `ProjectionFlags::include_cell_metadata` is set (issue #693).
     async fn stitch_and_parse_all_chunks_with_metadata(
         &self,
+        cursor: &ScanCursor,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<
         Vec<(
@@ -803,7 +919,7 @@ impl SSTableReader {
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
     > {
-        let stitched_buffer = self.stitch_all_chunks().await?;
+        let stitched_buffer = self.stitch_all_chunks(cursor).await?;
         let parser = self.build_v5_parser();
 
         let reader_schema;
@@ -832,16 +948,16 @@ impl SSTableReader {
     /// bounded by the *uncompressed data-section size* — it scales with on-disk
     /// bytes, not row count (issue #790).
     ///
-    /// Precondition: the caller has seeked the file to the start of the data
-    /// section and reset `current_chunk_index` to 0.
-    async fn stitch_all_chunks(&self) -> Result<Vec<u8>> {
+    /// Precondition: the caller has seeked `cursor`'s file to the start of the
+    /// data section (the cursor's chunk index starts at 0 when freshly minted).
+    async fn stitch_all_chunks(&self, cursor: &ScanCursor) -> Result<Vec<u8>> {
         use crate::storage::sstable::compression::Compression;
 
         // Pre-allocate buffer for ~2.5MB (estimated max size for test data)
         let mut stitched_buffer = Vec::with_capacity(2_500_000);
 
         let mut chunk_count = 0;
-        while let Some(compressed_chunk) = self.read_next_block().await? {
+        while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
             let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
                 match compression.decompress(&compressed_chunk) {
@@ -951,23 +1067,21 @@ impl SSTableReader {
         schema: Option<crate::schema::TableSchema>,
         tx: mpsc::Sender<Result<(RowKey, Value)>>,
     ) -> Result<()> {
-        // Issue #805: serialise concurrent scans (shared file position + chunk index).
-        let _scan_guard = self.scan_mutex.lock().await;
+        // Issue #815: independent per-scan cursor — no cross-scan serialization.
+        let cursor = self.new_scan_cursor().await?;
 
         // Position at the start of the data section (mirrors sequential_scan).
         let header_size = self.calculate_header_size();
         {
-            let mut file_guard = self.file.lock().await;
+            let mut file_guard = cursor.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
-        self.current_chunk_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         if self.requires_chunk_stitching() {
             // Stitch the (bounded) data section, then parse on a blocking thread,
             // emitting one entry at a time. `blocking_send` provides backpressure
             // so parsed Values are never all live at once.
-            let stitched = self.stitch_all_chunks().await?;
+            let stitched = self.stitch_all_chunks(&cursor).await?;
             let reader = std::sync::Arc::clone(&self);
             let parse = tokio::task::spawn_blocking(move || {
                 reader.parse_stitched_stream(&stitched, schema.as_ref(), start_key, end_key, &tx)
@@ -982,7 +1096,7 @@ impl SSTableReader {
         } else {
             // Non-stitching formats already read block-by-block; emit per block so
             // only one block's entries are live at a time.
-            while let Some(block) = self.read_next_block().await? {
+            while let Some(block) = self.read_next_block(&cursor).await? {
                 let entries = self.parse_block_entries_with_schema(&block, schema.as_ref())?;
                 for (entry_table_id, entry_key, entry_value) in entries {
                     if !table_ids_match(&entry_table_id, &table_id) {
@@ -1066,6 +1180,7 @@ impl SSTableReader {
     /// Used exclusively by the compaction k-way merger path (Issue #505).
     async fn stitch_and_parse_all_chunks_for_compaction(
         &self,
+        cursor: &ScanCursor,
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(TableId, RowKey, Value, i64)>> {
         log::debug!("stitch_and_parse_all_chunks_for_compaction: stitching chunks");
@@ -1073,7 +1188,7 @@ impl SSTableReader {
         let mut stitched_buffer = Vec::with_capacity(2_500_000);
         let mut chunk_count = 0;
 
-        while let Some(compressed_chunk) = self.read_next_block().await? {
+        while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
             use crate::storage::sstable::compression::Compression;
             let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
@@ -1173,20 +1288,19 @@ impl SSTableReader {
             // can pass it to the async helper without borrow-checker issues.
             let owned_schema = schema.cloned().or_else(|| self.get_table_schema(None));
 
-            // Reset chunk reader to start of data section.
+            // Reset chunk reader to start of data section (own per-scan cursor).
+            let cursor = self.new_scan_cursor().await?;
             let header_size = self.calculate_header_size();
             {
-                let mut file_guard = self.file.lock().await;
+                let mut file_guard = cursor.file.lock().await;
                 use tokio::io::AsyncSeekExt;
                 file_guard
                     .seek(std::io::SeekFrom::Start(header_size as u64))
                     .await?;
             }
-            self.current_chunk_index
-                .store(0, std::sync::atomic::Ordering::Relaxed);
 
             let entries = self
-                .stitch_and_parse_all_chunks_for_compaction(owned_schema.as_ref())
+                .stitch_and_parse_all_chunks_for_compaction(&cursor, owned_schema.as_ref())
                 .await?;
 
             return Ok(entries
@@ -1237,14 +1351,13 @@ impl SSTableReader {
         F: FnMut(RowKey, Value, i64) -> Result<std::ops::ControlFlow<()>>,
     {
         // Reset chunk reader to the start of the data section (mirrors
-        // iterate_all_partitions_for_compaction).
+        // iterate_all_partitions_for_compaction) using an own per-scan cursor.
+        let cursor = self.new_scan_cursor().await?;
         let header_size = self.calculate_header_size();
         {
-            let mut file_guard = self.file.lock().await;
+            let mut file_guard = cursor.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
-        self.current_chunk_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Non-stitching formats are single-block / small: emit via the
         // materialising iterator with ts=0 (matches the Vec-variant fallback).
@@ -1268,7 +1381,7 @@ impl SSTableReader {
 
         use crate::storage::sstable::compression::Compression;
         let mut chunk_count = 0;
-        while let Some(compressed_chunk) = self.read_next_block().await? {
+        while let Some(compressed_chunk) = self.read_next_block(&cursor).await? {
             let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
                 compression.decompress(&compressed_chunk).map_err(|e| {
@@ -1498,8 +1611,8 @@ impl SSTableReader {
         // path never reaches the sequential scan.
         SCAN_FOR_KEY_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-        // Issue #805: serialise concurrent scans (shared file position + chunk index).
-        let _scan_guard = self.scan_mutex.lock().await;
+        // Issue #815: independent per-scan cursor — no cross-scan serialization.
+        let cursor = self.new_scan_cursor().await?;
 
         let header_size = self.calculate_header_size();
 
@@ -1512,28 +1625,24 @@ impl SSTableReader {
             log::debug!(
                 "scan_for_key: V5CompressedLegacy NB detected, using stitched buffer for key lookup"
             );
-            // `stitch_all_chunks` reads from the CURRENT file position forward, so
-            // its precondition is "seeked to the data-section start, chunk index 0"
-            // (mirrors sequential_scan / scan_stream). A prior scan on this reader
-            // leaves the shared file position at end-of-data and the chunk index
-            // advanced; without resetting BOTH, the stitch reads zero chunks and
-            // every key falsely misses — making a get() after a scan() return None
-            // even though the partition exists (e.g. AlwaysPresentFilter tables
-            // where the bloom gate no longer short-circuits the lookup). Reset the
-            // file position too, not just the chunk index.
+            // `stitch_all_chunks` reads from the CURRENT cursor position forward,
+            // so its precondition is "seeked to the data-section start" (the fresh
+            // cursor's chunk index already starts at 0). Each call uses its own
+            // cursor (issue #815), so there is no cross-call position to reset.
             {
-                let mut file_guard = self.file.lock().await;
+                let mut file_guard = cursor.file.lock().await;
                 file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
             }
-            self.current_chunk_index
-                .store(0, std::sync::atomic::Ordering::Relaxed);
 
             // Pass the reader's own schema so that V5CompressedLegacy rows can be fully
             // parsed and their partition RowKeys emitted.  Without a schema, parse_row_v5
             // fails for all rows in a partition, causing no entries to be pushed and making
             // the key comparison always miss even when the key exists.
             let schema_opt = self.get_table_schema(None);
-            let all_entries = match self.stitch_and_parse_all_chunks(schema_opt.as_ref()).await {
+            let all_entries = match self
+                .stitch_and_parse_all_chunks(&cursor, schema_opt.as_ref())
+                .await
+            {
                 Ok(entries) => entries,
                 Err(e) => {
                     // Schema may not be available for this reader (e.g., wrong table type).
@@ -1572,15 +1681,12 @@ impl SSTableReader {
         }
 
         {
-            let mut file_guard = self.file.lock().await;
+            let mut file_guard = cursor.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
-        // Reset chunk index when seeking to start
-        self.current_chunk_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Sequential scan through blocks
-        while let Some(block) = self.read_next_block().await? {
+        while let Some(block) = self.read_next_block(&cursor).await? {
             let entries = self.parse_block_entries(&block, None)?;
 
             for (entry_table_id, entry_key, entry_value) in entries {
@@ -1616,11 +1722,10 @@ impl SSTableReader {
             schema.is_some()
         );
 
-        // Issue #805: Serialise concurrent sequential scans on this reader.
-        // The file seek-position and current_chunk_index are shared state;
-        // two concurrent callers advancing them simultaneously corrupt each
-        // other's reads. Hold the scan_mutex for the full scan lifetime.
-        let _scan_guard = self.scan_mutex.lock().await;
+        // Issue #815: each scan uses its own cursor (private file position and
+        // chunk index), so concurrent scans on this reader run in parallel
+        // without the per-scan serialization #805 introduced for correctness.
+        let cursor = self.new_scan_cursor().await?;
 
         let mut results = Vec::new();
 
@@ -1631,16 +1736,13 @@ impl SSTableReader {
         );
 
         {
-            let mut file_guard = self.file.lock().await;
+            let mut file_guard = cursor.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
             log::debug!(
                 "SSTableReader::sequential_scan - Seeked to start of data section at offset {}",
                 header_size
             );
         }
-        // Reset chunk index when seeking to start
-        self.current_chunk_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // CRITICAL FIX: V5CompressedLegacy partitions can span chunk boundaries.
         // We must stitch all chunks together before parsing to avoid dropping partitions.
@@ -1656,7 +1758,7 @@ impl SSTableReader {
             );
 
             // Stitch all chunks together (reuse logic from get_all_entries)
-            let all_entries = self.stitch_and_parse_all_chunks(schema).await?;
+            let all_entries = self.stitch_and_parse_all_chunks(&cursor, schema).await?;
             log::debug!(
                 "SSTableReader::sequential_scan - Stitched parsing returned {} total entries",
                 all_entries.len()
@@ -1707,7 +1809,7 @@ impl SSTableReader {
 
         // Non-stitching path for other formats
         let mut block_count = 0;
-        while let Some(block) = self.read_next_block().await? {
+        while let Some(block) = self.read_next_block(&cursor).await? {
             block_count += 1;
             log::debug!(
                 "SSTableReader::sequential_scan - Read block {}, size {} bytes",
@@ -1819,20 +1921,27 @@ impl SSTableReader {
     > {
         log::debug!("SSTableReader::scan_with_cell_metadata - Starting");
 
-        let _scan_guard = self.scan_mutex.lock().await;
+        // Issue #660: BTI ("da") metadata scan — same whole-Data.db walk as the
+        // plain BTI scan, but surfaces per-cell write metadata for WRITETIME/TTL.
+        if self.bti_partitions_db.is_some() {
+            return self
+                .bti_scan_with_metadata(start_key, end_key, limit, schema)
+                .await;
+        }
+
+        // Issue #815: independent per-scan cursor — no cross-scan serialization.
+        let cursor = self.new_scan_cursor().await?;
 
         let header_size = self.calculate_header_size();
         {
-            let mut file_guard = self.file.lock().await;
+            let mut file_guard = cursor.file.lock().await;
             file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
         }
-        self.current_chunk_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // V5CompressedLegacy (stitching) path — the common path for Cassandra 5.0 SSTables.
         if self.requires_chunk_stitching() {
             let all_entries = self
-                .stitch_and_parse_all_chunks_with_metadata(schema)
+                .stitch_and_parse_all_chunks_with_metadata(&cursor, schema)
                 .await?;
 
             let mut results = Vec::new();
@@ -1876,29 +1985,41 @@ impl SSTableReader {
             .collect())
     }
 
-    /// Read next block with enhanced error handling and streaming support
-    pub(super) async fn read_next_block(&self) -> Result<Option<Vec<u8>>> {
+    /// Mint a fresh, independent cursor for one scan (issue #815).
+    ///
+    /// Each cursor owns a private file handle (or mmap cursor) and chunk index,
+    /// so concurrent scans on this reader never share a mutable file position —
+    /// they run in parallel without the per-scan serialization #805 required.
+    pub(super) async fn new_scan_cursor(&self) -> Result<ScanCursor> {
+        Ok(ScanCursor::new(
+            self.scan_source.open(&self.file_path).await?,
+        ))
+    }
+
+    /// Read the next block from a scan-local `cursor` (its own file position and
+    /// chunk index). See [`Self::new_scan_cursor`].
+    pub(super) async fn read_next_block(&self, cursor: &ScanCursor) -> Result<Option<Vec<u8>>> {
         use super::block_io;
         block_io::read_next_block(
-            &self.file,
+            &cursor.file,
             &self.header.cassandra_version,
             &self.config,
             &self.compression_info,
-            &self.current_chunk_index,
+            &cursor.chunk_index,
             self.actual_header_size as u64,
         )
         .await
     }
 
-    /// Prepare for a delta-scan pass: seek to the data-section start, reset
-    /// the chunk index, stitch all compressed chunks, and return the
-    /// decompressed buffer together with a pre-configured parser.
+    /// Prepare for a delta-scan pass: stitch all compressed chunks of the data
+    /// section and return the decompressed buffer together with a pre-configured
+    /// parser.
     ///
-    /// The caller is responsible for holding `scan_mutex` for the lifetime of
-    /// the returned buffer (matching the existing compaction-path contract —
-    /// issue #805).  This method is gated on the `delta-scan` feature and is
-    /// the only bridge between the SSTableReader internals and the
-    /// `delta_scan` module, which cannot access private helpers directly.
+    /// Uses its own per-scan cursor (issue #815), so it no longer needs the
+    /// caller to serialize against concurrent reads. This method is gated on the
+    /// `delta-scan` feature and is the only bridge between the SSTableReader
+    /// internals and the `delta_scan` module, which cannot access private
+    /// helpers directly.
     ///
     /// The `schema` parameter is not used here — it is threaded through the
     /// caller's `parse_block_emit_delta` invocation instead.  The parser is
@@ -1910,34 +2031,24 @@ impl SSTableReader {
     ) -> Result<(Vec<u8>, super::parsing::V5CompressedLegacyParser)> {
         use tokio::io::AsyncSeekExt;
 
-        // Seek to the start of the data section and reset the chunk index.
+        // Seek the per-scan cursor to the start of the data section.
+        let cursor = self.new_scan_cursor().await?;
         let header_size = self.calculate_header_size();
         {
-            let mut file_guard = self.file.lock().await;
+            let mut file_guard = cursor.file.lock().await;
             file_guard
                 .seek(std::io::SeekFrom::Start(header_size as u64))
                 .await?;
         }
-        self.current_chunk_index
-            .store(0, std::sync::atomic::Ordering::Relaxed);
 
         // Stitch all compressed chunks (bounded by uncompressed data-section size).
-        let stitched = self.stitch_all_chunks().await?;
+        let stitched = self.stitch_all_chunks(&cursor).await?;
 
         // Build a parser (re-using the existing builder so version-gates and
         // UDT registry are threaded through correctly).
         let parser = self.build_v5_parser();
 
         Ok((stitched, parser))
-    }
-
-    /// Return the `scan_mutex` guard for external callers that need to
-    /// serialise a delta-scan pass against concurrent reads.
-    ///
-    /// Gated on `delta-scan` — only the delta-scan path needs this.
-    #[cfg(feature = "delta-scan")]
-    pub fn delta_scan_mutex(&self) -> &tokio::sync::Mutex<()> {
-        &self.scan_mutex
     }
 }
 

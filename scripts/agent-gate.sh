@@ -8,15 +8,27 @@
 # silently skipping, filtered runs reported as full runs).
 #
 # Components mirror the enforced CI gates (.github/workflows/ci.yml,
-# ci-minimal-features.yml) plus the local smoke suite:
+# ci-minimal-features.yml, python-ci.yml) plus the local smoke suite:
 #   fmt                cargo fmt --all --check
 #   clippy             RUSTFLAGS="-D warnings" clippy --workspace --all-targets --all-features
 #   core-tests         cargo test -p cqlite-core --features cli-helpers (CI skip-list applied)
-#   integration-tests  cargo test -p cqlite-integration-tests (the seven CI-enforced targets)
+#   integration-tests  cargo test -p cqlite-integration-tests: compile ALL targets
+#                      (--no-run, whole package) then run the seven CI-enforced ones
+#   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
+#                      issue #865 folded it into the workspace so fmt/clippy reach it)
 #   write-tests        cargo test -p cqlite-core --features write-support (lib + roundtrip + compaction)
 #   cli-tests          cargo test -p cqlite-cli --test unit_tests
+#   python-bindings    maturin develop + pytest bindings/python/tests in a throwaway
+#                      venv; SKIPs (never silently PASSes) if python3 is unavailable.
+#                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
 #   minimal-build      cargo build -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
+#
+# The integration-tests --no-run sweep, the format-compat component, and the
+# python-bindings component close the three blind spots from issue #865: a
+# compile break in a non-enumerated test target, a fmt/compile break in the
+# (previously workspace-excluded) format-compatibility crate, and Python-only
+# regressions (LIMIT 0, SET<TEXT> validation) that shipped "gate PASS".
 #
 # All components run even after a failure so one run reports everything.
 # Exit code 0 iff every component passes. Machine-checkable output: the
@@ -39,7 +51,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(fmt clippy core-tests integration-tests write-tests cli-tests minimal-build smoke)
+COMPONENTS=(fmt clippy core-tests integration-tests format-compat write-tests cli-tests python-bindings minimal-build smoke)
 ONLY=""
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
@@ -75,6 +87,50 @@ run_component() { # run_component <name> <cmd...>
   echo ">>> [$name] $status ($((end - start))s)"
 }
 
+# python-bindings: build the extension with maturin and run pytest. Unlike the
+# Rust components this is SKIP-aware: if there is no usable python3 the component
+# records SKIP (loudly, never silently PASS) so a missing toolchain can't mask a
+# real Python regression the way it did pre-#865. Anything else (venv/build/test
+# failure) is a hard FAIL.
+run_python_bindings() {
+  local name=python-bindings
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local log="$LOG_DIR/$name.log"
+  local start end status
+  start=$(date +%s)
+  if ! command -v python3 >/dev/null 2>&1; then
+    status=SKIP
+    echo ">>> [$name] SKIP (no python3 on PATH)"
+    NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("0s")
+    return 0
+  fi
+  # Persistent venv under target/ so repeat runs skip the maturin/pytest install.
+  local venv="$REPO_ROOT/target/agent-gate-venv"
+  echo ">>> [$name] maturin develop + pytest (venv: $venv, RUN_SLOW_TESTS=${RUN_SLOW_TESTS:-0})"
+  if RUN_SLOW_TESTS="${RUN_SLOW_TESTS:-0}" bash -c '
+      set -euo pipefail
+      venv="'"$venv"'"
+      [ -x "$venv/bin/python" ] || python3 -m venv "$venv"
+      . "$venv/bin/activate"
+      pip install --quiet --upgrade pip >/dev/null
+      pip install --quiet maturin pytest
+      maturin develop -m bindings/python/Cargo.toml
+      pytest bindings/python/tests -q' >"$log" 2>&1; then
+    status=PASS
+  else
+    status=FAIL
+    OVERALL=FAIL
+    echo "--- [$name] FAILED; last 40 lines of $log ---"
+    tail -40 "$log"
+    echo "--- end of $name output ---"
+  fi
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
 # Dataset preflight: dataset-dependent components must FAIL loudly when data is
 # missing, never silently pass on a skipped suite (the #646 failure mode).
 DATA_COUNT=$(find "$CQLITE_DATASETS_ROOT/sstables" -name "*-Data.db" 2>/dev/null | wc -l | tr -d ' ')
@@ -93,19 +149,28 @@ run_component fmt cargo fmt --all --check
 run_component clippy env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 run_component core-tests cargo test --package cqlite-core --features cli-helpers -- \
   --skip test_legacy_format_allows_blob_fallback_with_feature
-run_component integration-tests cargo test --package cqlite-integration-tests \
-  --test chunked_data_reader_direct_test \
-  --test comprehensive_component_integration_tests \
-  --test fixture_specific_integration_tests \
-  --test golden_path_get_operations_tests \
-  --test golden_path_partition_lookup_tests \
-  --test golden_path_scan_operations_tests \
-  --test golden_path_summary_index_integration_tests
+# Compile EVERY target in the package first (--no-run, whole package) so a
+# new/edited test file that doesn't compile can't hide behind the enumerated
+# run-list (issue #865); then execute the seven CI-enforced targets.
+run_component integration-tests bash -c '
+  cargo test --package cqlite-integration-tests --no-run &&
+  cargo test --package cqlite-integration-tests \
+    --test chunked_data_reader_direct_test \
+    --test comprehensive_component_integration_tests \
+    --test fixture_specific_integration_tests \
+    --test golden_path_get_operations_tests \
+    --test golden_path_partition_lookup_tests \
+    --test golden_path_scan_operations_tests \
+    --test golden_path_summary_index_integration_tests'
+# format-compatibility-tests is now a workspace member (issue #865) so fmt/clippy
+# reach it; run its 'oa' format compliance tests here too.
+run_component format-compat cargo test --package format-compatibility-tests
 run_component write-tests bash -c '
   cargo test --package cqlite-core --features write-support --lib &&
   cargo test --package cqlite-core --features write-support --test write_read_roundtrip &&
   cargo test --package cqlite-core --features write-support --test compaction_integration'
 run_component cli-tests cargo test --package cqlite-cli --test unit_tests
+run_python_bindings
 run_component minimal-build cargo build --package cqlite-core --no-default-features --features all-compression
 # Pin smoke to a binary built from THIS tree. Left to its own devices the
 # smoke script prefers any existing target/release/cqlite, however stale —

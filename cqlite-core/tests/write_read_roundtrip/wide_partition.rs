@@ -84,7 +84,8 @@ async fn test_small_partition_no_promoted_index() {
         .expect("Flush should succeed")
         .expect("Should return SSTableInfo");
 
-    let index_bytes = std::fs::read(&info.index_path).expect("Should read Index.db");
+    let index_bytes =
+        std::fs::read(info.index_path.as_ref().unwrap()).expect("Should read Index.db");
     let promoted_len = first_entry_promoted_len(&index_bytes);
     assert_eq!(
         promoted_len, 0,
@@ -134,7 +135,8 @@ async fn test_wide_partition_emits_promoted_index() {
         .expect("Should return SSTableInfo");
 
     // ── 1. Index.db must have non-zero promoted_index_len ──────────────────
-    let index_bytes = std::fs::read(&info.index_path).expect("Should read Index.db");
+    let index_bytes =
+        std::fs::read(info.index_path.as_ref().unwrap()).expect("Should read Index.db");
     let promoted_len = first_entry_promoted_len(&index_bytes);
     assert!(
         promoted_len > 0,
@@ -152,10 +154,12 @@ async fn test_wide_partition_emits_promoted_index() {
             .await
             .expect("Platform creation"),
     );
-    let reader =
-        cqlite_core::storage::sstable::index_reader::IndexReader::open(&info.index_path, platform)
-            .await
-            .expect("IndexReader must open wide-partition Index.db without error");
+    let reader = cqlite_core::storage::sstable::index_reader::IndexReader::open(
+        info.index_path.as_ref().unwrap(),
+        platform,
+    )
+    .await
+    .expect("IndexReader must open wide-partition Index.db without error");
 
     let entries = reader.get_partition_entries();
     assert_eq!(

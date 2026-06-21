@@ -1543,22 +1543,29 @@ impl WriteEngine {
         // Build list of (src, dst) renames. TOC.txt goes last (publication barrier).
         let mut renames: Vec<(PathBuf, PathBuf)> = Vec::new();
 
-        // Non-TOC components first
-        for src in &[
-            &tmp_info.data_path,
-            &tmp_info.index_path,
-            &tmp_info.summary_path,
-            &tmp_info.stats_path,
-            &tmp_info.digest_path,
-        ] {
-            renames.push(make_rename(src)?);
-        }
-        // Filter.db is optional: a table with a disabled bloom filter
+        // Non-TOC components first. Index.db/Summary.db are BIG-only (BTI writers
+        // report them as None — issue #908); only rename them when present.
+        // Filter.db is optional too: a table with a disabled bloom filter
         // (bloom_filter_fp_chance = 1.0, AlwaysPresentFilter) emits NO Filter.db,
         // so there is nothing to rename. Including a non-existent path here would
         // fail the atomic publish (Issue #852).
-        if let Some(ref filter_path) = tmp_info.filter_path {
-            renames.push(make_rename(filter_path)?);
+        let mut non_toc: Vec<&PathBuf> = vec![&tmp_info.data_path];
+        if let Some(ref p) = tmp_info.index_path {
+            non_toc.push(p);
+        }
+        if let Some(ref p) = tmp_info.filter_path {
+            non_toc.push(p);
+        }
+        if let Some(ref p) = tmp_info.summary_path {
+            non_toc.push(p);
+        }
+        non_toc.push(&tmp_info.stats_path);
+        non_toc.push(&tmp_info.digest_path);
+        for src in non_toc {
+            renames.push(make_rename(src)?);
+        }
+        if let Some(ref p) = tmp_info.partitions_path {
+            renames.push(make_rename(p)?);
         }
         if let Some(ref ci_path) = tmp_info.compression_info_path {
             renames.push(make_rename(ci_path)?);
@@ -1650,22 +1657,28 @@ impl WriteEngine {
                 .map(|m| m.len())
                 .unwrap_or(0)
         };
-        let total_bytes_written: u64 = [
-            &tmp_info.data_path,
-            &tmp_info.index_path,
-            &tmp_info.summary_path,
-            &tmp_info.stats_path,
-            &tmp_info.digest_path,
-        ]
-        .iter()
-        .map(|p| stat_final(p))
-        .sum::<u64>()
-            // Filter.db is optional (disabled bloom filter omits it, Issue #852).
-            + tmp_info
-                .filter_path
-                .as_ref()
-                .map(stat_final)
-                .unwrap_or(0)
+        // Index.db/Summary.db are BIG-only (BTI reports None — issue #908) and
+        // Filter.db is optional (disabled bloom filter omits it, Issue #852), so
+        // only stat the components that were actually written.
+        let mut byte_paths: Vec<&PathBuf> = vec![&tmp_info.data_path];
+        if let Some(ref p) = tmp_info.index_path {
+            byte_paths.push(p);
+        }
+        if let Some(ref p) = tmp_info.filter_path {
+            byte_paths.push(p);
+        }
+        if let Some(ref p) = tmp_info.summary_path {
+            byte_paths.push(p);
+        }
+        byte_paths.push(&tmp_info.stats_path);
+        byte_paths.push(&tmp_info.digest_path);
+        if let Some(ref p) = tmp_info.partitions_path {
+            byte_paths.push(p);
+        }
+        let total_bytes_written: u64 = byte_paths
+            .iter()
+            .map(|p| stat_final(p))
+            .sum::<u64>()
             + tmp_info
                 .compression_info_path
                 .as_ref()

@@ -16,18 +16,20 @@
 
 use std::path::{Path, PathBuf};
 
-use arrow::datatypes::Schema as ArrowSchema;
+use arrow::datatypes::{Field as ArrowField, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 
 use cqlite_core::export::{build_arrow_schema, rows_to_record_batch, ArrowConvertError};
-use cqlite_core::query::{build_row_from_scan, evaluate_predicates, ColumnInfo, QueryRow};
+use cqlite_core::query::{build_row_from_scan, ColumnInfo, QueryRow};
 use cqlite_core::schema::{CqlType, TableSchema};
 use cqlite_core::storage::write_engine::merge::{MergeStep, RowData};
 use cqlite_core::storage::write_engine::KWayMerger;
 use cqlite_core::types::{DataType, Value};
 use cqlite_core::RowKey;
 
+use crate::agg::{AggError, AggPlan};
 use crate::filter::ScanSpec;
+use crate::ticket::Aggregation;
 
 /// Errors produced while merging SSTables into Arrow batches.
 #[derive(Debug, thiserror::Error)]
@@ -57,6 +59,9 @@ pub enum ProducerError {
         /// Underlying I/O error.
         source: std::io::Error,
     },
+    /// The aggregation spec was invalid (bad column, Sum on non-numeric, …).
+    #[error("invalid aggregation: {0}")]
+    Aggregation(#[from] AggError),
 }
 
 /// Source of the SSTable `Data.db` files to merge for one table.
@@ -157,12 +162,62 @@ fn generation_of(path: &Path) -> u64 {
         .unwrap_or(0)
 }
 
+/// Read an SSTable's `[minToken, maxToken]` span from its sibling `Summary.db`.
+///
+/// SSTables store partitions in token order, so the first key carries the
+/// minimum token and the last key the maximum. The `Summary.db` path is derived
+/// by replacing the `-Data.db` suffix. Returns `None` on any failure (missing
+/// file, parse error, unparseable name) so callers can fail open.
+fn sstable_token_span(data_path: &Path) -> Option<(i64, i64)> {
+    let name = data_path.file_name()?.to_str()?;
+    if !name.ends_with("-Data.db") {
+        return None;
+    }
+    let summary_path = data_path.with_file_name(name.replace("-Data.db", "-Summary.db"));
+
+    // `SummaryReader::open` is async; drive it on a short-lived current-thread
+    // runtime. The prune is a one-shot, low-frequency step per DoGet split.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+    let platform = runtime
+        .block_on(cqlite_core::Platform::new(&cqlite_core::Config::default()))
+        .ok()?;
+    let reader = runtime
+        .block_on(
+            cqlite_core::storage::sstable::summary_reader::SummaryReader::open(
+                &summary_path,
+                std::sync::Arc::new(platform),
+            ),
+        )
+        .ok()?;
+
+    let min_token = cqlite_core::storage::write_engine::mutation::DecoratedKey::from_key_bytes(
+        reader.get_first_key().to_vec(),
+    )
+    .ok()?
+    .token;
+    let max_token = cqlite_core::storage::write_engine::mutation::DecoratedKey::from_key_bytes(
+        reader.get_last_key().to_vec(),
+    )
+    .ok()?
+    .token;
+    Some((min_token, max_token))
+}
+
 /// Produces Arrow record batches from a compaction merge of a table's SSTables.
 pub struct MergeProducer {
     schema: TableSchema,
     columns: Vec<ColumnInfo>,
     batch_size: usize,
     spec: ScanSpec,
+    /// Aggregation pushdown plan (issue #841). When `Some`, the producer emits
+    /// PARTIAL aggregate rows under [`Self::partial_columns`] instead of full
+    /// rows; when `None` the row path is unchanged.
+    agg: Option<AggPlan>,
+    /// Partial-output column metadata, present iff [`Self::agg`] is `Some`.
+    partial_columns: Option<Vec<ColumnInfo>>,
 }
 
 impl MergeProducer {
@@ -187,17 +242,70 @@ impl MergeProducer {
             columns,
             batch_size: batch_size.max(1),
             spec,
+            agg: None,
+            partial_columns: None,
         })
     }
 
-    /// The Arrow schema clients should expect (for `GetFlightInfo`/`GetSchema`).
-    pub fn arrow_schema(&self) -> Result<ArrowSchema, ProducerError> {
-        Ok(build_arrow_schema(&self.columns)?)
+    /// Attach an aggregation spec (issue #841), validating it against the table
+    /// schema. When set, [`Self::arrow_schema`] and the produced batches switch
+    /// to the PARTIAL aggregate schema. Consumes and returns `self` for chaining.
+    pub fn with_aggregation(mut self, aggregation: &Aggregation) -> Result<Self, ProducerError> {
+        let plan = AggPlan::build(aggregation, &self.schema)?;
+        let partial = plan.partial_columns(&self.schema)?;
+        self.agg = Some(plan);
+        self.partial_columns = Some(partial);
+        Ok(self)
     }
 
-    /// The ordered Arrow column metadata.
+    /// The Arrow schema clients should expect (for `GetFlightInfo`/`GetSchema`).
+    ///
+    /// Each field is augmented with the `cqlite:pushdown` metadata key declaring
+    /// how the server can push predicates on that column (`"full"`, `"equality"`,
+    /// or `"none"`) — see [`pushdown_capability`]. The Trino connector reads this
+    /// to gate pushdown per column, since several CQL types (inet, duration,
+    /// varint, …) surface as Arrow UTF-8/other shapes indistinguishable from
+    /// genuine `text` by Arrow type alone. Field order, names, types, and any
+    /// existing metadata (e.g. the uuid extension) are preserved.
+    pub fn arrow_schema(&self) -> Result<ArrowSchema, ProducerError> {
+        // With aggregation, the output is the PARTIAL schema (group-by columns
+        // then aggregate outputs); otherwise it is the projected row schema.
+        let output_columns = self.output_columns();
+        let base = build_arrow_schema(output_columns)?;
+        let fields: Vec<ArrowField> = base
+            .fields()
+            .iter()
+            .zip(output_columns.iter())
+            .map(|(field, column)| {
+                let capability = column
+                    .cql_type
+                    .as_ref()
+                    .map(pushdown_capability)
+                    .unwrap_or("none");
+                let mut metadata = field.metadata().clone();
+                metadata.insert("cqlite:pushdown".to_string(), capability.to_string());
+                field.as_ref().clone().with_metadata(metadata)
+            })
+            .collect();
+        Ok(ArrowSchema::new_with_metadata(
+            fields,
+            base.metadata().clone(),
+        ))
+    }
+
+    /// The ordered Arrow column metadata for the produced output: the PARTIAL
+    /// aggregate columns when aggregation is set, else the projected row columns.
     pub fn columns(&self) -> &[ColumnInfo] {
-        &self.columns
+        self.output_columns()
+    }
+
+    /// The output column set: partial aggregate columns under aggregation, else
+    /// the projected row columns.
+    fn output_columns(&self) -> &[ColumnInfo] {
+        match &self.partial_columns {
+            Some(partial) => partial,
+            None => &self.columns,
+        }
     }
 
     /// Merge `source`'s SSTables and return the resulting Arrow batches.
@@ -207,10 +315,61 @@ impl MergeProducer {
     }
 
     /// Merge the given SSTable `Data.db` paths and return Arrow batches.
+    ///
+    /// When the scan carries a token filter, the input path list is first pruned
+    /// to the SSTables whose `[minToken, maxToken]` span overlaps the split's
+    /// `(start, end]` range (issue #839), so a narrow split opens only the
+    /// SSTables it can possibly read from. The per-partition token filter in the
+    /// merge loop remains as a correctness backstop.
     pub fn produce_from_paths(
         &self,
         paths: Vec<PathBuf>,
     ) -> Result<Vec<RecordBatch>, ProducerError> {
+        let paths = self.prune_paths(paths)?;
+        self.merge_paths(paths)
+    }
+
+    /// Prune `paths` to those whose token span overlaps the spec's token range.
+    ///
+    /// Returns `paths` unchanged when there is no token filter. A path is kept
+    /// (fail open) whenever its sibling `Summary.db` is missing or unreadable, so
+    /// pruning can never drop an SSTable that might contain matching partitions.
+    pub(crate) fn prune_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<PathBuf>, ProducerError> {
+        let Some(token) = &self.spec.token else {
+            return Ok(paths);
+        };
+
+        let total = paths.len();
+        let kept: Vec<PathBuf> = paths
+            .into_iter()
+            .filter(|path| match sstable_token_span(path) {
+                // Span known: keep only if it overlaps the split's range.
+                Some((min_token, max_token)) => token.overlaps(min_token, max_token),
+                // Span unknown (missing/unreadable Summary.db): fail open.
+                None => true,
+            })
+            .collect();
+
+        tracing::debug!(
+            kept = kept.len(),
+            pruned = total - kept.len(),
+            total,
+            "token-range SSTable prune"
+        );
+        Ok(kept)
+    }
+
+    /// Merge the (already pruned) SSTable paths into Arrow batches.
+    ///
+    /// With an aggregation plan this branches into [`Self::aggregate_paths`],
+    /// which feeds the SAME surviving rows (token-pruned, predicate-filtered,
+    /// tombstone-suppressed, LWW-reconciled) into the accumulator and emits
+    /// PARTIAL rows. Without one, it emits full rows in `batch_size` chunks.
+    fn merge_paths(&self, paths: Vec<PathBuf>) -> Result<Vec<RecordBatch>, ProducerError> {
+        if let Some(plan) = &self.agg {
+            return self.aggregate_paths(plan, paths);
+        }
+
         let mut batches = Vec::new();
         if paths.is_empty() {
             return Ok(batches);
@@ -235,12 +394,13 @@ impl MergeProducer {
                 let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
                     continue;
                 };
-                // Predicate pushdown: keep only rows satisfying every predicate.
-                if !self.spec.predicates.is_empty()
-                    && !evaluate_predicates(&row, &self.spec.predicates)
-                        .map_err(ProducerError::Predicate)?
-                {
-                    continue;
+                // Predicate pushdown: evaluate the nested filter tree with SQL
+                // Kleene logic and keep the row only when it is definitely True
+                // (Unknown and False both reject — WHERE semantics, issue #834).
+                if let Some(filter) = &self.spec.filter {
+                    if !filter.keeps(&row) {
+                        continue;
+                    }
                 }
                 buffer.push(row);
                 if buffer.len() >= self.batch_size {
@@ -253,6 +413,55 @@ impl MergeProducer {
             batches.push(self.flush_buffer(&mut buffer)?);
         }
         Ok(batches)
+    }
+
+    /// Aggregate path (issue #841): stream every surviving row — through the same
+    /// token-prune + predicate filter as the row path — directly into the
+    /// accumulator state, then emit the PARTIAL batch(es) under the partial
+    /// schema. Rows are NOT buffered: only per-group accumulator state is kept,
+    /// so memory scales with the group count, not the input row count.
+    ///
+    /// A global aggregation (`group_by` empty) always emits exactly one row,
+    /// even over zero input rows. A grouped aggregation emits one row per group.
+    fn aggregate_paths(
+        &self,
+        plan: &AggPlan,
+        paths: Vec<PathBuf>,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
+        // Aggregate POST-reconciliation so partials match a SELECT's row set.
+        let mut state = plan.new_state();
+
+        if !paths.is_empty() {
+            let mut merger = KWayMerger::new(paths, &self.schema).map_err(ProducerError::Merge)?;
+            while let MergeStep::Partition { key, rows } =
+                merger.step().map_err(ProducerError::Merge)?
+            {
+                if let Some(token) = &self.spec.token {
+                    if !token.contains(key.token) {
+                        continue;
+                    }
+                }
+                for entry in rows {
+                    let Some(row) = self.entry_to_row(&key.key, entry.row_data) else {
+                        continue;
+                    };
+                    if let Some(filter) = &self.spec.filter {
+                        if !filter.keeps(&row) {
+                            continue;
+                        }
+                    }
+                    plan.accumulate_row(&mut state, &row)?;
+                }
+            }
+        }
+
+        let partial_rows = plan.finish(state);
+        if partial_rows.is_empty() {
+            // Grouped aggregation over zero input → no rows (global always emits).
+            return Ok(Vec::new());
+        }
+        let columns = self.output_columns();
+        Ok(vec![rows_to_record_batch(columns, &partial_rows)?])
     }
 
     /// Reconstruct one full logical row from a merged entry, or `None` for a row
@@ -277,6 +486,17 @@ impl MergeProducer {
 
         let key = RowKey(partition_key.to_vec());
         build_row_from_scan(key, Value::Map(map_entries), &[], Some(&self.schema))
+    }
+
+    /// Merge `paths` WITHOUT the input prune, relying only on the per-partition
+    /// token backstop. Used by tests to prove the pruned run yields identical
+    /// rows to a full-scan-then-filter run.
+    #[cfg(test)]
+    fn produce_unpruned_for_test(
+        &self,
+        paths: Vec<PathBuf>,
+    ) -> Result<Vec<RecordBatch>, ProducerError> {
+        self.merge_paths(paths)
     }
 
     fn flush_buffer(&self, buffer: &mut Vec<QueryRow>) -> Result<RecordBatch, ProducerError> {
@@ -327,6 +547,56 @@ pub(crate) fn schema_columns(schema: &TableSchema) -> Result<Vec<ColumnInfo>, Pr
     Ok(columns)
 }
 
+/// Declare how the server can push predicates on a column of this CQL type.
+///
+/// The capability is aligned EXACTLY with what
+/// [`crate::filter`]`::json_to_value` can lower a JSON operand into:
+/// - `"full"` — every operator (Equal, In, ordering Gt/Gte/Lt/Lte, Prefix) is
+///   safe. These are the types `json_to_value` parses into a directly
+///   comparable [`Value`]: the integer family (TinyInt/SmallInt/Int/BigInt),
+///   `Counter` and `Timestamp` (both lowered from a JSON integer), `Float`/
+///   `Double`, `Boolean`, and the textual family (Text/Ascii/Varchar).
+/// - `"equality"` — `json_to_value` lowers `Uuid`/`TimeUuid` to `Value::Uuid`,
+///   which only supports exact match (Equal/In/IsNull). Ordering and prefix on a
+///   uuid would compare by uuid bytes, not by the VARCHAR surface form, so they
+///   must stay a Trino residual.
+/// - `"none"` — everything else (`Inet`, `Duration`, `Varint`, `Decimal`,
+///   `Blob`, `Date`, `Time`, and the collection/tuple/UDT/custom types):
+///   `json_to_value` rejects them, so nothing can be pushed.
+///
+/// `Frozen(inner)` is unwrapped recursively (it never changes comparability).
+pub(crate) fn pushdown_capability(ty: &CqlType) -> &'static str {
+    match ty {
+        CqlType::Frozen(inner) => pushdown_capability(inner),
+        CqlType::Boolean
+        | CqlType::TinyInt
+        | CqlType::SmallInt
+        | CqlType::Int
+        | CqlType::BigInt
+        | CqlType::Counter
+        | CqlType::Float
+        | CqlType::Double
+        | CqlType::Timestamp
+        | CqlType::Text
+        | CqlType::Ascii
+        | CqlType::Varchar => "full",
+        CqlType::Uuid | CqlType::TimeUuid => "equality",
+        CqlType::Decimal
+        | CqlType::Blob
+        | CqlType::Date
+        | CqlType::Time
+        | CqlType::Inet
+        | CqlType::Duration
+        | CqlType::Varint
+        | CqlType::List(_)
+        | CqlType::Set(_)
+        | CqlType::Map(_, _)
+        | CqlType::Tuple(_)
+        | CqlType::Udt(_, _)
+        | CqlType::Custom(_) => "none",
+    }
+}
+
 /// Map a `CqlType` to the flat `DataType` fallback carried by `ColumnInfo`.
 ///
 /// The Arrow converter prefers `ColumnInfo.cql_type` (always `Some` here), so this
@@ -370,6 +640,84 @@ mod tests {
         build_sstables, delete_row, make_snapshot, simple_schema, total_rows, write_row, KS, TBL,
     };
     use cqlite_core::schema::{ClusteringColumn, Column};
+
+    #[test]
+    fn pushdown_capability_aligns_with_json_to_value() {
+        use cqlite_core::schema::CqlType;
+        // Full: ordering + equality + prefix are all safe.
+        assert_eq!(pushdown_capability(&CqlType::Text), "full");
+        assert_eq!(pushdown_capability(&CqlType::BigInt), "full");
+        // Equality-only: uuid/timeuuid lower to Value::Uuid (exact match only).
+        assert_eq!(pushdown_capability(&CqlType::Uuid), "equality");
+        // Frozen unwraps to its inner type's capability.
+        assert_eq!(
+            pushdown_capability(&CqlType::Frozen(Box::new(CqlType::Uuid))),
+            "equality"
+        );
+        // None: json_to_value rejects these, so nothing is pushable.
+        assert_eq!(pushdown_capability(&CqlType::Inet), "none");
+        assert_eq!(pushdown_capability(&CqlType::Duration), "none");
+    }
+
+    #[test]
+    fn arrow_schema_tags_each_field_with_pushdown_capability() {
+        // simple_schema: id (uuid? -> check), name (text), score (int).
+        let schema = simple_schema();
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+        let arrow_schema = producer.arrow_schema().unwrap();
+        // Every field carries the pushdown metadata key.
+        for field in arrow_schema.fields() {
+            assert!(
+                field.metadata().contains_key("cqlite:pushdown"),
+                "field {} missing pushdown metadata",
+                field.name()
+            );
+        }
+        // name (text) is full; score (int) is full.
+        assert_eq!(
+            arrow_schema
+                .field_with_name("name")
+                .unwrap()
+                .metadata()
+                .get("cqlite:pushdown")
+                .map(String::as_str),
+            Some("full")
+        );
+        assert_eq!(
+            arrow_schema
+                .field_with_name("score")
+                .unwrap()
+                .metadata()
+                .get("cqlite:pushdown")
+                .map(String::as_str),
+            Some("full")
+        );
+    }
+
+    #[test]
+    fn arrow_schema_preserves_uuid_extension_alongside_pushdown() {
+        use crate::testutil::uuid_schema;
+        let schema = uuid_schema();
+        let producer = MergeProducer::new(schema, 1024).unwrap();
+        let arrow_schema = producer.arrow_schema().unwrap();
+        let id_field = arrow_schema.field_with_name("id").unwrap();
+        // Existing uuid extension metadata survives the augmentation...
+        assert_eq!(
+            id_field
+                .metadata()
+                .get("ARROW:extension:name")
+                .map(String::as_str),
+            Some("arrow.uuid")
+        );
+        // ...and the uuid column declares equality-only pushdown.
+        assert_eq!(
+            id_field
+                .metadata()
+                .get("cqlite:pushdown")
+                .map(String::as_str),
+            Some("equality")
+        );
+    }
 
     #[test]
     fn schema_columns_orders_pk_then_clustering_then_regular() {
@@ -790,5 +1138,748 @@ mod tests {
         let producer = MergeProducer::new(schema, 1024).unwrap();
         let batches = producer.produce_from_paths(vec![]).unwrap();
         assert!(batches.is_empty());
+    }
+
+    // ---- Issue #839: input SSTable pruning by token range ----
+
+    use crate::filter::ScanSpec;
+    use crate::ticket::FlightTicket;
+    use cqlite_core::storage::sstable::summary_reader::SummaryReader;
+    use cqlite_core::storage::write_engine::mutation::DecoratedKey;
+    use cqlite_core::{Config, Platform};
+    use std::sync::Arc;
+
+    /// Read a Data.db's sibling Summary.db and return its (minToken, maxToken).
+    fn span_of(data_path: &std::path::Path) -> (i64, i64) {
+        let name = data_path.file_name().unwrap().to_str().unwrap();
+        let summary = data_path.with_file_name(name.replace("-Data.db", "-Summary.db"));
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let platform = rt.block_on(Platform::new(&Config::default())).unwrap();
+        let reader = rt
+            .block_on(SummaryReader::open(&summary, Arc::new(platform)))
+            .unwrap();
+        let min = DecoratedKey::from_key_bytes(reader.get_first_key().to_vec())
+            .unwrap()
+            .token;
+        let max = DecoratedKey::from_key_bytes(reader.get_last_key().to_vec())
+            .unwrap()
+            .token;
+        (min, max)
+    }
+
+    fn spec_with_token(start: i64, end: i64) -> ScanSpec {
+        ScanSpec::from_ticket(
+            &FlightTicket {
+                token_start: Some(start),
+                token_end: Some(end),
+                ..Default::default()
+            },
+            &simple_schema(),
+        )
+        .unwrap()
+    }
+
+    /// (b) A narrow token range prunes the SSTable that does not overlap it.
+    #[test]
+    fn prune_drops_non_overlapping_sstable() {
+        let schema = simple_schema();
+        // Two SSTables, each its own flush batch (separate Data.db).
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100)],
+                vec![write_row(2, "b", 20, 100)],
+            ],
+        );
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+        assert_eq!(paths.len(), 2, "two SSTables expected");
+
+        // Compute each SSTable's token span and pick a half-open range covering
+        // exactly one of them.
+        let (min0, max0) = span_of(&paths[0]);
+        let (min1, max1) = span_of(&paths[1]);
+        assert_ne!(
+            (min0, max0),
+            (min1, max1),
+            "spans must differ to test pruning"
+        );
+
+        // Target paths[0] only: (min0 - 1, max0] excludes paths[1]'s span.
+        let (lo, hi) = (min0 - 1, max0);
+        // Sanity: this range really does separate the two spans.
+        let spec = spec_with_token(lo, hi);
+        let tf = spec.token.unwrap();
+        assert!(tf.overlaps(min0, max0), "target span must overlap");
+        // Only meaningful if the other span is genuinely outside the range.
+        if tf.overlaps(min1, max1) {
+            // The two spans straddle the boundary; skip rather than assert wrongly.
+            return;
+        }
+
+        let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let kept = producer.prune_paths(paths.clone()).unwrap();
+        assert_eq!(kept.len(), 1, "non-overlapping SSTable pruned");
+        assert_eq!(kept[0], paths[0]);
+    }
+
+    /// (c) The produced row set is IDENTICAL whether or not the input prune ran:
+    /// the per-partition backstop guarantees correctness regardless.
+    #[test]
+    fn prune_preserves_produced_rows() {
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100)],
+                vec![write_row(2, "b", 20, 100)],
+                vec![write_row(3, "c", 30, 100)],
+            ],
+        );
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+
+        // Pick a range that overlaps a subset of SSTables (token of id=1's span).
+        let (min0, max0) = span_of(&paths[0]);
+        let spec = spec_with_token(min0 - 1, max0);
+
+        let pruned_producer = MergeProducer::with_spec(schema.clone(), 1024, spec.clone()).unwrap();
+        let pruned_rows = total_rows(&pruned_producer.produce(&DirSource::new(&dir)).unwrap());
+
+        // Full-scan run: same spec but feed every path explicitly to the merge
+        // WITHOUT the input prune (call produce_from_paths is the same code path,
+        // but we compare against a producer whose spec keeps the backstop only).
+        // Build the reference by pruning disabled: pass all paths and rely on the
+        // per-partition token backstop to drop the same partitions.
+        let full_producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let full_rows = {
+            // Exercise the backstop directly over the full unpruned path list.
+            let all = DirSource::new(&dir).data_paths().unwrap();
+            let merger_only = full_producer.produce_unpruned_for_test(all).unwrap();
+            total_rows(&merger_only)
+        };
+
+        assert_eq!(
+            pruned_rows, full_rows,
+            "pruned run yields identical rows to full-scan-then-filter"
+        );
+    }
+
+    /// (d) A missing Summary.db means the path is kept (fail open).
+    #[test]
+    fn prune_keeps_path_when_summary_missing() {
+        let schema = simple_schema();
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![
+                vec![write_row(1, "a", 10, 100)],
+                vec![write_row(2, "b", 20, 100)],
+            ],
+        );
+        let paths = DirSource::new(&dir).data_paths().unwrap();
+
+        // Delete the Summary.db for paths[0] so its span is unknowable.
+        let name = paths[0].file_name().unwrap().to_str().unwrap();
+        let summary = paths[0].with_file_name(name.replace("-Data.db", "-Summary.db"));
+        std::fs::remove_file(&summary).unwrap();
+
+        // A range that, with a readable summary, would prune paths[0].
+        let (min0, max0) = span_of(&paths[1]); // any concrete range
+        let _ = (min0, max0);
+        // Choose a tiny empty-ish range; the point is paths[0] is kept regardless.
+        let spec = spec_with_token(i64::MAX - 1, i64::MAX);
+        let producer = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let kept = producer.prune_paths(paths.clone()).unwrap();
+        assert!(
+            kept.contains(&paths[0]),
+            "path with missing Summary.db must be kept (fail open)"
+        );
+    }
+
+    // ---- Issue #834: nested predicate pushdown (OR/NOT/IS NULL) ----
+
+    /// Collect the surviving partition-key `id` values across all batches.
+    fn surviving_ids(batches: &[RecordBatch]) -> Vec<i32> {
+        let mut ids = Vec::new();
+        for b in batches {
+            let col = b
+                .column_by_name("id")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<arrow::array::Int32Array>()
+                .unwrap();
+            ids.extend((0..col.len()).map(|i| col.value(i)));
+        }
+        ids.sort_unstable();
+        ids
+    }
+
+    /// `(score > 10 AND name = 'x') OR name IS NULL` — asserts the EXACT
+    /// surviving rows, exercising AND, OR and IS NULL together.
+    #[test]
+    fn nested_or_with_is_null_keeps_exact_rows() {
+        use crate::testutil::write_score_only;
+        use crate::ticket::{FlightTicket, PredicateExpr, PredicateOp};
+        use serde_json::json;
+
+        let schema = simple_schema();
+        // id=1: score=20,name="x"  → left branch TRUE  → kept
+        // id=2: score=20,name="y"  → left FALSE, name present → reject
+        // id=3: score=5, name="x"  → left FALSE (score), name present → reject
+        // id=4: score=99 (no name) → left UNKNOWN(name), name IS NULL TRUE → kept
+        // id=5: score=5  (no name) → left FALSE? score<10 so AND FALSE; IS NULL TRUE → kept
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "x", 20, 100),
+                write_row(2, "y", 20, 100),
+                write_row(3, "x", 5, 100),
+                write_score_only(4, 99, 100),
+                write_score_only(5, 5, 100),
+            ]],
+        );
+
+        let filter = PredicateExpr::Or {
+            exprs: vec![
+                PredicateExpr::And {
+                    exprs: vec![
+                        PredicateExpr::Compare {
+                            column: "score".into(),
+                            op: PredicateOp::Gt,
+                            value: json!(10),
+                        },
+                        PredicateExpr::Compare {
+                            column: "name".into(),
+                            op: PredicateOp::Equal,
+                            value: json!("x"),
+                        },
+                    ],
+                },
+                PredicateExpr::IsNull {
+                    column: "name".into(),
+                },
+            ],
+        };
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                filter: Some(filter),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            surviving_ids(&batches),
+            vec![1, 4, 5],
+            "left-branch match (1) plus both name-is-null rows (4,5)"
+        );
+    }
+
+    /// `NOT (score > 10)` must NOT keep rows where `score` is NULL: `score > 10`
+    /// is UNKNOWN there, `NOT UNKNOWN` is UNKNOWN, and WHERE rejects UNKNOWN.
+    /// This is the case the old "missing column → false" logic got wrong.
+    #[test]
+    fn not_over_null_column_follows_sql_semantics() {
+        use crate::testutil::write_name_only;
+        use crate::ticket::{FlightTicket, PredicateExpr, PredicateOp};
+        use serde_json::json;
+
+        let schema = simple_schema();
+        // id=1: score=20        → score>10 TRUE  → NOT FALSE  → reject
+        // id=2: score=5         → score>10 FALSE → NOT TRUE   → keep
+        // id=3: name only, score NULL → score>10 UNKNOWN → NOT UNKNOWN → reject
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "a", 20, 100),
+                write_row(2, "b", 5, 100),
+                write_name_only(3, "c", 100),
+            ]],
+        );
+
+        let filter = PredicateExpr::Not {
+            expr: Box::new(PredicateExpr::Compare {
+                column: "score".into(),
+                op: PredicateOp::Gt,
+                value: json!(10),
+            }),
+        };
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                filter: Some(filter),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            surviving_ids(&batches),
+            vec![2],
+            "only score=5 survives; NULL-score row rejected (NOT UNKNOWN = UNKNOWN)"
+        );
+    }
+
+    /// `name IS NULL OR score > 1000` over a NULL-score row: the OR's first
+    /// disjunct is TRUE for name-null rows, so an UNKNOWN second disjunct does
+    /// not matter (True dominates). And a non-null-name row with low score is
+    /// rejected (False OR UNKNOWN = UNKNOWN → reject).
+    #[test]
+    fn or_with_null_column_matches_sql() {
+        use crate::testutil::write_score_only;
+        use crate::ticket::{FlightTicket, PredicateExpr, PredicateOp};
+        use serde_json::json;
+
+        let schema = simple_schema();
+        // id=1: score only, name NULL → name IS NULL TRUE → keep (score>1000 UNKNOWN, dominated)
+        // id=2: score only, name NULL → name IS NULL TRUE → keep
+        // id=3: name="x", score NULL  → name IS NULL FALSE, score>1000 UNKNOWN → UNKNOWN → reject
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_score_only(1, 50, 100),
+                write_score_only(2, 50, 100),
+                crate::testutil::write_name_only(3, "x", 100),
+            ]],
+        );
+
+        let filter = PredicateExpr::Or {
+            exprs: vec![
+                PredicateExpr::IsNull {
+                    column: "name".into(),
+                },
+                PredicateExpr::Compare {
+                    column: "score".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(1000),
+                },
+            ],
+        };
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                filter: Some(filter),
+                ..Default::default()
+            },
+        );
+        let p = MergeProducer::with_spec(schema, 1024, spec).unwrap();
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(surviving_ids(&batches), vec![1, 2]);
+    }
+
+    /// v1 back-compat: a flat `predicates` list (no `filter`) yields identical
+    /// results to the equivalent explicit `And` filter tree.
+    #[test]
+    fn v1_flat_predicates_match_explicit_and_tree() {
+        use crate::ticket::{FlightTicket, Predicate, PredicateExpr, PredicateOp};
+        use serde_json::json;
+
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100)) // scores 10..50
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        // v1: two flat predicates 10 < score < 40.
+        let v1 = spec_from(
+            &schema,
+            FlightTicket {
+                predicates: vec![
+                    Predicate {
+                        column: "score".into(),
+                        op: PredicateOp::Gt,
+                        value: json!(10),
+                    },
+                    Predicate {
+                        column: "score".into(),
+                        op: PredicateOp::Lt,
+                        value: json!(40),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let v1_ids = surviving_ids(
+            &MergeProducer::with_spec(schema.clone(), 1024, v1)
+                .unwrap()
+                .produce(&DirSource::new(&dir))
+                .unwrap(),
+        );
+
+        // v2: the same constraint as an explicit And tree.
+        let v2 = spec_from(
+            &schema,
+            FlightTicket {
+                filter: Some(PredicateExpr::And {
+                    exprs: vec![
+                        PredicateExpr::Compare {
+                            column: "score".into(),
+                            op: PredicateOp::Gt,
+                            value: json!(10),
+                        },
+                        PredicateExpr::Compare {
+                            column: "score".into(),
+                            op: PredicateOp::Lt,
+                            value: json!(40),
+                        },
+                    ],
+                }),
+                ..Default::default()
+            },
+        );
+        let v2_ids = surviving_ids(
+            &MergeProducer::with_spec(schema, 1024, v2)
+                .unwrap()
+                .produce(&DirSource::new(&dir))
+                .unwrap(),
+        );
+
+        assert_eq!(v1_ids, v2_ids, "v1 flat predicates == explicit And tree");
+        assert_eq!(v1_ids, vec![2, 3], "scores 20,30 → ids 2,3");
+    }
+
+    // ---- Issue #841: aggregation pushdown over merged SSTables ----
+
+    use crate::ticket::{AggFunc, AggregateSpec, Aggregation};
+    use arrow::array::Array;
+
+    /// Build a producer carrying `aggregation` over `schema`/`spec`.
+    fn agg_producer(
+        schema: TableSchema,
+        spec: ScanSpec,
+        aggregation: Aggregation,
+    ) -> MergeProducer {
+        MergeProducer::with_spec(schema, 1024, spec)
+            .unwrap()
+            .with_aggregation(&aggregation)
+            .unwrap()
+    }
+
+    fn count_star(output: &str) -> AggregateSpec {
+        AggregateSpec {
+            func: AggFunc::Count,
+            column: None,
+            output: output.into(),
+        }
+    }
+
+    fn agg_on(func: AggFunc, column: &str, output: &str) -> AggregateSpec {
+        AggregateSpec {
+            func,
+            column: Some(column.into()),
+            output: output.into(),
+        }
+    }
+
+    fn i64_col(batch: &RecordBatch, name: &str) -> arrow::array::Int64Array {
+        batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .unwrap()
+            .clone()
+    }
+
+    fn i32_col(batch: &RecordBatch, name: &str) -> arrow::array::Int32Array {
+        batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .clone()
+    }
+
+    /// Global `count(*)` over N rows → exactly one partial row, count = N.
+    #[test]
+    fn global_count_star_counts_all_rows() {
+        let schema = simple_schema();
+        let rows = (1..=7)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![count_star("agg0")],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 1, "global aggregation → one row");
+        let counts = i64_col(&batches[0], "agg0");
+        assert_eq!(counts.value(0), 7);
+        assert!(!counts.is_null(0), "Count is never null");
+    }
+
+    /// Global count(col)/sum/min/max with a NULL-score row present: count(score)
+    /// excludes the null and sum/min/max skip it.
+    #[test]
+    fn global_aggregates_skip_null_inputs() {
+        use crate::testutil::write_name_only;
+        let schema = simple_schema();
+        // scores 10,20,30 plus one row whose score is null (name only).
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "a", 10, 100),
+                write_row(2, "b", 20, 100),
+                write_row(3, "c", 30, 100),
+                write_name_only(4, "d", 100),
+            ]],
+        );
+
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![
+                count_star("agg0"),
+                agg_on(AggFunc::Count, "score", "agg1"),
+                agg_on(AggFunc::Sum, "score", "agg2"),
+                agg_on(AggFunc::Min, "score", "agg3"),
+                agg_on(AggFunc::Max, "score", "agg4"),
+            ],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(total_rows(&batches), 1);
+        let b = &batches[0];
+        assert_eq!(
+            i64_col(b, "agg0").value(0),
+            4,
+            "count(*) counts the null row"
+        );
+        assert_eq!(
+            i64_col(b, "agg1").value(0),
+            3,
+            "count(score) excludes the null"
+        );
+        // Sum over an int source is Int64.
+        assert_eq!(i64_col(b, "agg2").value(0), 60, "10+20+30");
+        // Min/Max keep the source (int) type → Int32.
+        assert_eq!(i32_col(b, "agg3").value(0), 10);
+        assert_eq!(i32_col(b, "agg4").value(0), 30);
+    }
+
+    /// Global aggregation over EMPTY input → one row: count = 0, sum/min/max null.
+    #[test]
+    fn global_aggregate_over_empty_input_emits_zero_row() {
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i, 100))
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        // A token range that excludes everything: (MAX, MAX].
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                token_start: Some(i64::MAX),
+                token_end: Some(i64::MAX),
+                ..Default::default()
+            },
+        );
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![
+                count_star("agg0"),
+                agg_on(AggFunc::Count, "score", "agg1"),
+                agg_on(AggFunc::Sum, "score", "agg2"),
+                agg_on(AggFunc::Min, "score", "agg3"),
+                agg_on(AggFunc::Max, "score", "agg4"),
+            ],
+        };
+        let p = agg_producer(schema, spec, agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            total_rows(&batches),
+            1,
+            "global emits one row even on empty"
+        );
+        let b = &batches[0];
+        assert_eq!(i64_col(b, "agg0").value(0), 0, "count(*) = 0");
+        assert_eq!(i64_col(b, "agg1").value(0), 0, "count(score) = 0");
+        assert!(i64_col(b, "agg2").is_null(0), "sum null on empty");
+        assert!(i32_col(b, "agg3").is_null(0), "min null on empty");
+        assert!(i32_col(b, "agg4").is_null(0), "max null on empty");
+    }
+
+    /// GROUP BY a low-cardinality column → one row per group with correct
+    /// per-group count/sum/min/max; a NULL group key forms its own group.
+    #[test]
+    fn group_by_emits_one_row_per_group_including_null_key() {
+        use crate::testutil::write_score_only;
+        let schema = simple_schema();
+        // group "x": scores 10, 30 ; group "y": score 20 ; NULL name: score 99.
+        let (_temp, _data, dir) = build_sstables(
+            &schema,
+            vec![vec![
+                write_row(1, "x", 10, 100),
+                write_row(2, "y", 20, 100),
+                write_row(3, "x", 30, 100),
+                write_score_only(4, 99, 100), // name is null → its own group
+            ]],
+        );
+
+        let agg = Aggregation {
+            group_by: vec!["name".into()],
+            aggregates: vec![
+                count_star("c"),
+                agg_on(AggFunc::Sum, "score", "s"),
+                agg_on(AggFunc::Min, "score", "mn"),
+                agg_on(AggFunc::Max, "score", "mx"),
+            ],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        assert_eq!(
+            total_rows(&batches),
+            3,
+            "groups: x, y, and the null-name group"
+        );
+
+        // Collect per-group results keyed by name (None = the NULL group).
+        let b = &batches[0];
+        let names = b
+            .column_by_name("name")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .unwrap()
+            .clone();
+        let c = i64_col(b, "c");
+        let s = i64_col(b, "s");
+        let mn = i32_col(b, "mn");
+        let mx = i32_col(b, "mx");
+
+        use std::collections::HashMap;
+        let mut by_group: HashMap<Option<String>, (i64, i64, i32, i32)> = HashMap::new();
+        for i in 0..b.num_rows() {
+            let key = if names.is_null(i) {
+                None
+            } else {
+                Some(names.value(i).to_string())
+            };
+            by_group.insert(key, (c.value(i), s.value(i), mn.value(i), mx.value(i)));
+        }
+
+        assert_eq!(by_group[&Some("x".into())], (2, 40, 10, 30));
+        assert_eq!(by_group[&Some("y".into())], (1, 20, 20, 20));
+        assert_eq!(
+            by_group[&None],
+            (1, 99, 99, 99),
+            "the null-name row forms its own group"
+        );
+    }
+
+    /// Aggregation composes with a predicate filter and token pruning: only rows
+    /// surviving `score > 10` (and the split's range) feed the accumulator.
+    #[test]
+    fn aggregation_composes_with_predicate_and_token_prune() {
+        use crate::ticket::{Predicate, PredicateOp};
+        use serde_json::json;
+        let schema = simple_schema();
+        let rows = (1..=5)
+            .map(|i| write_row(i, &format!("n{i}"), i * 10, 100)) // scores 10..50
+            .collect::<Vec<_>>();
+        let (_temp, _data, dir) = build_sstables(&schema, vec![rows]);
+
+        // Full ring + score > 10 → scores 20,30,40,50 survive.
+        let spec = spec_from(
+            &schema,
+            FlightTicket {
+                token_start: Some(i64::MIN),
+                token_end: Some(i64::MAX),
+                predicates: vec![Predicate {
+                    column: "score".into(),
+                    op: PredicateOp::Gt,
+                    value: json!(10),
+                }],
+                ..Default::default()
+            },
+        );
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![
+                count_star("agg0"),
+                agg_on(AggFunc::Sum, "score", "agg1"),
+                agg_on(AggFunc::Min, "score", "agg2"),
+                agg_on(AggFunc::Max, "score", "agg3"),
+            ],
+        };
+        let p = agg_producer(schema, spec, agg);
+        let batches = p.produce(&DirSource::new(&dir)).unwrap();
+        let b = &batches[0];
+        assert_eq!(i64_col(b, "agg0").value(0), 4, "4 rows pass > 10");
+        assert_eq!(i64_col(b, "agg1").value(0), 140, "20+30+40+50");
+        assert_eq!(i32_col(b, "agg2").value(0), 20);
+        assert_eq!(i32_col(b, "agg3").value(0), 50);
+    }
+
+    /// The partial RecordBatch schema's column names and Arrow types match the
+    /// contract: group-by columns keep their mapped type, Count→Int64,
+    /// Sum(int)→Int64, Min/Max(int)→Int32.
+    #[test]
+    fn partial_schema_matches_contract() {
+        use arrow::datatypes::DataType as ArrowDataType;
+        let schema = simple_schema();
+        let agg = Aggregation {
+            group_by: vec!["name".into()],
+            aggregates: vec![
+                count_star("agg0"),
+                agg_on(AggFunc::Sum, "score", "agg1"),
+                agg_on(AggFunc::Min, "score", "agg2"),
+                agg_on(AggFunc::Max, "score", "agg3"),
+            ],
+        };
+        let p = agg_producer(schema, ScanSpec::default(), agg);
+        let s = p.arrow_schema().unwrap();
+        let names: Vec<&str> = s.fields().iter().map(|f| f.name().as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["name", "agg0", "agg1", "agg2", "agg3"],
+            "group-by column then aggregate outputs in order"
+        );
+        assert_eq!(
+            s.field_with_name("name").unwrap().data_type(),
+            &ArrowDataType::Utf8
+        );
+        assert_eq!(
+            s.field_with_name("agg0").unwrap().data_type(),
+            &ArrowDataType::Int64
+        );
+        assert_eq!(
+            s.field_with_name("agg1").unwrap().data_type(),
+            &ArrowDataType::Int64
+        );
+        assert_eq!(
+            s.field_with_name("agg2").unwrap().data_type(),
+            &ArrowDataType::Int32
+        );
+        assert_eq!(
+            s.field_with_name("agg3").unwrap().data_type(),
+            &ArrowDataType::Int32
+        );
+        // Count is non-nullable; sum/min/max are nullable.
+        assert!(!s.field_with_name("agg0").unwrap().is_nullable());
+        assert!(s.field_with_name("agg1").unwrap().is_nullable());
+    }
+
+    /// Sum on a non-numeric source column is a bad spec → ProducerError.
+    #[test]
+    fn sum_on_text_column_is_rejected() {
+        let schema = simple_schema();
+        let agg = Aggregation {
+            group_by: vec![],
+            aggregates: vec![agg_on(AggFunc::Sum, "name", "agg0")],
+        };
+        let result = MergeProducer::with_spec(schema, 1024, ScanSpec::default())
+            .unwrap()
+            .with_aggregation(&agg);
+        match result {
+            Err(ProducerError::Aggregation(_)) => {}
+            other => panic!("expected Aggregation error, got {:?}", other.map(|_| ())),
+        }
     }
 }

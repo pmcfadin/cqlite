@@ -2,7 +2,7 @@
 
 **Comprehensive validation tracking for all test tables across the CQLite test suite**
 
-**Last Updated**: 2026-06-20 (After Issue #699 review — test_deltas adjacent_ranges table added for boundary-marker coverage)
+**Last Updated**: 2026-06-20 (Issue #911 — BTI write-path parity vs Cassandra 5 sstabledump added; see "BTI write-path parity")
 **Issue Reference**: [#200](https://github.com/pmcfadin/cqlite/issues/200) - Validate all 33 test tables can be loaded successfully
 **Current Status**: 39/39 PASS (100% pass rate across nb+oa corpus) — test_deltas (9 tables) skip-pending until dataset asset published (#701)
 
@@ -156,8 +156,11 @@ Example row from `test_basic.ttl_test_table`:
 ### TTL fixture gap (da/BTI format)
 
 The `test_da` keyspace contains a `ttl_table` in da/BTI format that has TTL cells.
-BTI (da) Data.db format is **not yet supported** by the CQLite reader.
-No da-format TTL parity test is included here.
+At the time of issue #694 the BTI (da) Data.db read path was not yet exercised
+here, so no da-format TTL parity test was included. (Reader-side BTI discovery
+landed in #831/#909, and CQLite now also WRITES canonical `da` BTI SSTables
+validated against Cassandra 5 sstabledump — see "BTI write-path parity" below.
+A da-format TTL WRITETIME parity test remains future work.)
 
 Readable TTL fixtures tested above:
 - `test_basic.ttl_test_table` (nb, default_time_to_live=86400) — WRITETIME+TTL both validated
@@ -165,6 +168,66 @@ Readable TTL fixtures tested above:
 - `test_timeseries.log_entries` (nb, default_time_to_live=604800) — not separately tested
 
 No new SSTable fixtures were generated for this issue (Docker/Cassandra required for new data).
+
+---
+
+## BTI write-path parity (Epic #872 / issue #911)
+
+**Added**: 2026-06-20
+
+CQLite now WRITES Cassandra-canonical BTI SSTables (`da-*-bti-*`: `Data.db` +
+`Partitions.db` + `Rows.db`, no `Index.db`/`Summary.db` — #908/#910), reads them
+back through its own `SSTableReader` (#909), AND the output is validated against a
+**real Cassandra 5 reader** (`sstabledump`) — closing epic #872 (#911). This is
+the write-path counterpart to the read-path corpus above, which is exercised only
+by `nb`/`oa` BIG fixtures.
+
+### Write-path parity coverage
+
+| Write path | Format | Reader validated against | Status | Test |
+|-----------|--------|--------------------------|--------|------|
+| BTI narrow + wide partitions | `da` (BTI) | Cassandra 5 `sstabledump` (Docker-gated) | ✅ 2 partitions, 1 narrow + 200 wide rows, values intact | `issue_911_bti_sstabledump_parity::bti_writer_output_reads_under_cassandra5_sstabledump` |
+| BTI narrow-only (no clustering, 0-byte Rows.db) | `da` (BTI) | Cassandra 5 `sstabledump` (Docker-gated) | ✅ 5 partitions, values intact | `issue_911_bti_sstabledump_parity::bti_narrow_only_writer_output_reads_under_cassandra5_sstabledump` |
+| BTI `Partitions.db` canonical footer shape | `da` (BTI) | committed real `da` fixture (no Docker) | ✅ `[firstPos\|keyCount\|root]` + first/last keys shape match | `issue_911_bti_sstabledump_parity::bti_writer_partition_index_footer_matches_cassandra_fixture_shape` |
+| BTI writer→reader roundtrip (CQLite reader) | `da` (BTI) | CQLite `SSTableReader` | ✅ full scan + point lookup | `issue_909_bti_reader_roundtrip` |
+| BTI canonical component set / TOC / descriptor | `da` (BTI) | structural | ✅ | `issue_908_bti_canonical_write` |
+
+### What #911 fixed (surfaced BY the sstabledump gate)
+
+Running a writer-produced `da` SSTable through `sstabledump` exposed two
+canonical-write defects that CQLite's own reader did not catch (it never
+deserialises these structures):
+
+1. **`Statistics.db` STATS layout** — the writer emitted the legacy `nb`
+   `StatsMetadata` body for a `da` descriptor; Cassandra's `da` deserialiser hit a
+   `Slice.<init>` assertion reading `coveredClustering`. Fixed by emitting the
+   BtiFormat `StatsMetadata` layout (uint deletion times, `clusteringTypes` +
+   covered-clustering `Slice`, key range, token-space coverage). `sstablemetadata`
+   now reports `Covered clusterings: [, ]`, correct First/Last token, totalRows.
+2. **`Partitions.db` footer** — the writer wrote an 8-byte root-offset footer;
+   Cassandra's `PartitionIndex.load` requires the 24-byte
+   `[firstPos\|keyCount\|root]` footer with first/last keys at `firstPos`. Fixed in
+   `PartitionsTrieWriter::finish`. The trie node encoding was already
+   Cassandra-compatible; the final 8 bytes stay `root`, so CQLite's own
+   footer-based reader is unaffected.
+
+### How CI validates this (live Cassandra readback)
+
+The `sstabledump` tests are **Docker-gated** (skip cleanly when Docker / a
+`cassandra:5.0` image is absent), mirroring `issue_819_differential_compaction`'s
+`CQLITE_DIFFERENTIAL_CASSANDRA` switch and `e2e-cassandra-readback.sh`. To run the
+live readback (a `cassandra:5.0` or `cassandra:5.0.x` image must be present
+locally; the test does not pull it):
+
+```bash
+env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  cargo test --package cqlite-core --features write-support \
+  --test issue_911_bti_sstabledump_parity -- --test-threads=1
+```
+
+`sstabledump` lives at `/opt/cassandra/tools/bin/sstabledump` inside the image and
+is invoked via `docker run --entrypoint`. The no-Docker footer-shape test always
+runs and cross-checks the real committed `da` fixture when fetched.
 
 ---
 

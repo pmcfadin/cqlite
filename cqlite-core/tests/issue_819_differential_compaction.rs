@@ -774,8 +774,8 @@ fn load_path_report(
     // ── Component completeness (the ones the writer publishes) ──
     let mut required: Vec<(&str, &Path)> = vec![
         ("Data.db", &output.data_path),
-        ("Index.db", &output.index_path),
-        ("Summary.db", &output.summary_path),
+        ("Index.db", output.index_path.as_ref().unwrap()),
+        ("Summary.db", output.summary_path.as_ref().unwrap()),
         ("Statistics.db", &output.stats_path),
         ("Digest.crc32", &output.digest_path),
         ("TOC.txt", &output.toc_path),
@@ -1037,7 +1037,11 @@ fn component_byte_diffs(
     let pairs: [(&'static str, &Path, &Path); 3] = [
         ("Data.db", &left.data_path, &right.data_path),
         ("Statistics.db", &left.stats_path, &right.stats_path),
-        ("Index.db", &left.index_path, &right.index_path),
+        (
+            "Index.db",
+            left.index_path.as_ref().unwrap(),
+            right.index_path.as_ref().unwrap(),
+        ),
     ];
     let mut out = Vec::new();
     for (component, lp, rp) in pairs {
@@ -1105,12 +1109,13 @@ fn ref_sstable_info(data_path: &Path) -> cqlite_core::storage::sstable::writer::
     let data_size = std::fs::metadata(data_path).map(|m| m.len()).unwrap_or(0);
     cqlite_core::storage::sstable::writer::SSTableInfo {
         data_path: data_path.to_path_buf(),
-        index_path: comp("Index.db"),
+        index_path: Some(comp("Index.db")),
         filter_path: opt("Filter.db"),
-        summary_path: comp("Summary.db"),
+        summary_path: Some(comp("Summary.db")),
         stats_path: comp("Statistics.db"),
         compression_info_path: opt("CompressionInfo.db"),
         partitions_path: opt("Partitions.db"),
+        rows_path: opt("Rows.db"),
         toc_path: comp("TOC.txt"),
         digest_path: comp("Digest.crc32"),
         partition_count: 0,

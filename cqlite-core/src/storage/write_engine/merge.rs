@@ -57,7 +57,7 @@ use crate::error::{Error, Result};
 #[cfg(feature = "write-support")]
 use crate::schema::TableSchema;
 #[cfg(feature = "write-support")]
-use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey};
+use crate::storage::write_engine::mutation::{ClusteringKey, DecoratedKey, RangeTombstone};
 #[cfg(feature = "write-support")]
 use crate::types::Value;
 
@@ -87,26 +87,36 @@ pub struct MergeEntry {
     pub timestamp: i64,
     /// Row data (live cells or tombstone)
     pub row_data: RowData,
-    /// Complex (collection / UDT) deletions for this `(pk, ck)` (issue #886).
+    /// Complex (collection / UDT) deletion markers for the multi-cell columns
+    /// of this `(pk, ck)` (issue #886 substrate).
     ///
     /// Carried through the merge so the per-cell-path collection/UDT followup
-    /// (#844) can shadow covered elements. **Not yet consulted** by
-    /// reconciliation — defaults to empty, so output is byte-unchanged.
+    /// (#844) and shadow-before-purge (#887) can preserve collection/UDT
+    /// deletion timestamps. `reconcile_cluster` unions and preserves these
+    /// across a cluster, but reconciliation does **not yet consult** them and
+    /// the writer does not yet apply them — defaults to empty, so output is
+    /// byte-unchanged. Population (per-element reader emit) lands in #899.
     pub complex_deletions: Vec<ComplexDeletion>,
-    /// Range deletion attached to this entry, if any (issue #886).
+    /// Range-deletion marker covering a span of clustering keys (issue #886
+    /// substrate).
     ///
-    /// Carried through the merge so the range-tombstone-shadowing followup
-    /// (#846) can suppress covered cells. **Not yet consulted** by
-    /// reconciliation — defaults to `None`, so output is byte-unchanged.
-    pub range_deletion: Option<RangeDeletion>,
+    /// A first-class slot so range tombstones can flow through the merge stream
+    /// instead of being skipped by the parser; applying them to shadow covered
+    /// cells is the follow-up #846. Carried (and timestamp-max-preserved)
+    /// through `reconcile_cluster` but **not yet consulted** by reconciliation
+    /// or the writer, so output is byte-unchanged. `None` when this entry
+    /// carries no range deletion.
+    pub range_deletion: Option<RangeTombstone>,
 }
 
 impl MergeEntry {
     /// Create a new merge entry.
     ///
-    /// The carried complex/range-deletion entities (issue #886) default to
-    /// empty/`None`; attach them with [`Self::with_complex_deletions`] /
-    /// [`Self::with_range_deletion`] when the reader surfaces them.
+    /// The carry-only #886 substrate fields (`complex_deletions`,
+    /// `range_deletion`) default to empty/`None`; attach them with
+    /// [`with_complex_deletions`](Self::with_complex_deletions) /
+    /// [`with_range_deletion`](Self::with_range_deletion) once the reader emit
+    /// surfaces them (#899).
     pub fn new(
         run_index: usize,
         key: DecoratedKey,
@@ -125,16 +135,16 @@ impl MergeEntry {
         }
     }
 
-    /// Attach complex-column deletions to this entry (issue #886 plumbing).
+    /// Attach complex-deletion markers (issue #886 substrate; carry-only).
     #[must_use]
     pub fn with_complex_deletions(mut self, complex_deletions: Vec<ComplexDeletion>) -> Self {
         self.complex_deletions = complex_deletions;
         self
     }
 
-    /// Attach a range deletion to this entry (issue #886 plumbing).
+    /// Attach a range-deletion marker (issue #886 substrate; carry-only).
     #[must_use]
-    pub fn with_range_deletion(mut self, range_deletion: RangeDeletion) -> Self {
+    pub fn with_range_deletion(mut self, range_deletion: RangeTombstone) -> Self {
         self.range_deletion = Some(range_deletion);
         self
     }
@@ -262,20 +272,26 @@ pub struct CellData {
     pub timestamp: i64,
     /// TTL in seconds (None = no expiration)
     pub ttl: Option<u32>,
-    /// Local deletion time in seconds since epoch.
+    /// Cell path for a complex (collection / non-frozen UDT) element — the
+    /// serialized element key/index that distinguishes one element of a
+    /// multi-cell column from another (issue #886 substrate).
+    ///
+    /// **Carry-only.** This field is threaded through the merge entry so that
+    /// per-element reconciliation can become byte-faithful, but nothing
+    /// populates or consumes it yet: the reader still collapses collections to
+    /// a single whole-column [`CellData`] and the writer does not read this
+    /// field. Population (per-element reader emit) and consumption (per-path
+    /// merge #844) land in the follow-up #899. `None` for simple cells.
+    pub cell_path: Option<Vec<u8>>,
+    /// Local deletion time in **seconds** since the Unix epoch for this cell
+    /// (the on-disk `localDeletionTime`), used by gc_grace purging and
+    /// expiring-cell tie-breaks (issue #886 substrate).
     ///
     /// For an expiring (TTL) cell this is the cell's expiration instant; for a
-    /// cell tombstone it is when the delete was applied. `None` when the reader
-    /// has not surfaced it yet. Required for the tombstone-vs-expiring tie-break
-    /// (#848) and gc_grace purge (#845), neither of which is applied here.
+    /// cell tombstone it is when the delete was applied. **Carry-only.**
+    /// Threaded for #845/#848 but not yet populated by the reader or consumed
+    /// by the merge/writer. `None` when unknown.
     pub local_deletion_time: Option<i32>,
-    /// Cell path for an element of a multi-cell complex column (collection / UDT).
-    ///
-    /// Identifies which map key / set element / UDT field this cell belongs to,
-    /// so disjoint elements from different SSTables can both survive a per-path
-    /// merge (#844). `None` for simple (non-complex) cells and wherever the
-    /// reader does not yet decode the path.
-    pub cell_path: Option<Vec<u8>>,
 }
 
 #[cfg(feature = "write-support")]
@@ -289,53 +305,35 @@ impl CellData {
             value,
             timestamp,
             ttl: None,
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         }
     }
 }
 
-/// First-class **complex (collection / UDT) deletion** marker carried through the
-/// merge (issue #886 plumbing for #844).
+/// Complex (collection / non-frozen UDT) deletion marker for one column
+/// (issue #886 substrate).
 ///
-/// In Cassandra a complex deletion shadows every element of one complex column
-/// written at or before its timestamp, and a merged complex deletion is dropped
-/// unless it **strictly supersedes** the active one (commit `bd244649`). This
-/// type makes that marker expressible on the merge entry. It is **carried but
-/// not yet acted on** — reconciliation does not consult it in this issue.
+/// Cassandra writes a complex-deletion marker ahead of a multi-cell column's
+/// elements to delete every element written at or before `marked_for_delete_at`.
+/// A merged complex deletion is dropped unless it **strictly supersedes** the
+/// active one (Cassandra commit `bd244649`). CQLite currently reduces this to a
+/// boolean and discards the timestamps; this first-class entity preserves them
+/// so per-path merge (#844) and shadow-before-purge (#887) can be byte-faithful.
+///
+/// **Carry-only.** Carried on [`MergeEntry`] (unioned through
+/// `reconcile_cluster`) but not yet populated by the reader or applied during
+/// the merge — that is the follow-up #899/#887.
 #[cfg(feature = "write-support")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ComplexDeletion {
-    /// Name of the complex column this deletion applies to.
+    /// Name of the complex column this deletion covers.
     pub column: String,
-    /// Deletion timestamp (microseconds since Unix epoch).
-    pub deletion_time: i64,
-    /// Local deletion time (seconds since epoch) — when the delete was applied.
+    /// Deletion timestamp (`markedForDeleteAt`) in microseconds since the epoch.
+    pub marked_for_delete_at: i64,
+    /// Local deletion time in seconds since the epoch.
     pub local_deletion_time: i32,
 }
-
-/// First-class **range deletion** entity carried through the merge (issue #886
-/// plumbing for #846).
-///
-/// Reuses the shared [`TombstoneInfo`](crate::types::TombstoneInfo)
-/// representation, including its open-ended (`range_start`/`range_end` = `None`)
-/// form, so the existing open-ended-range and gc-grace utilities in
-/// `tombstone_merger.rs` can be wired up by the followup without reshaping the
-/// merge stream. It is **carried but not yet acted on** — range tombstones do
-/// not shadow covered cells in this issue.
-#[cfg(feature = "write-support")]
-#[derive(Debug, Clone, PartialEq)]
-pub struct RangeDeletion {
-    /// The underlying range tombstone (open-ended when both bounds are `None`).
-    pub tombstone: crate::types::TombstoneInfo,
-}
-
-// `TombstoneInfo` only derives `PartialEq` (it has a custom `Hash`), but its
-// equality is field-wise over `Eq` fields and therefore reflexive, so this
-// marker is sound. We need `Eq` so `RangeDeletion` can live on `MergeEntry`,
-// which derives `Eq` (required by its `Ord` impl for heap routing).
-#[cfg(feature = "write-support")]
-impl Eq for RangeDeletion {}
 
 /// Result of a merge step (incremental merge)
 #[cfg(feature = "write-support")]
@@ -891,8 +889,8 @@ impl SSTableRowIteratorAdapter {
                         // so they stay `None`. Populating them is part of #844 /
                         // #848 once the reader is extended (issue #886 plumbing).
                         ttl: None,
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     });
                 }
                 Ok(RowData::Live { cells })
@@ -906,8 +904,8 @@ impl SSTableRowIteratorAdapter {
                     // Not surfaced by the reader's compaction stream yet; see the
                     // note on the map-entry path above (issue #886 plumbing).
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             }),
         }
@@ -1481,7 +1479,7 @@ impl KWayMerger {
         //   - range_deletion: carried through; if multiple, keep the one with the
         //     highest deletion timestamp.
         let mut complex_deletions: Vec<ComplexDeletion> = Vec::new();
-        let mut range_deletion: Option<RangeDeletion> = None;
+        let mut range_deletion: Option<RangeTombstone> = None;
 
         for entry in &cluster_rows {
             if key.is_none() {
@@ -1497,7 +1495,7 @@ impl KWayMerger {
             if let Some(rd) = &entry.range_deletion {
                 let replace = match &range_deletion {
                     None => true,
-                    Some(current) => rd.tombstone.deletion_time > current.tombstone.deletion_time,
+                    Some(current) => rd.deletion_time > current.deletion_time,
                 };
                 if replace {
                     range_deletion = Some(rd.clone());
@@ -1811,8 +1809,8 @@ mod tests {
                 value: Value::Text("Alice".to_string()),
                 timestamp: 1000,
                 ttl: None,
-                local_deletion_time: None,
                 cell_path: None,
+                local_deletion_time: None,
             }],
         };
 
@@ -1848,8 +1846,8 @@ mod tests {
             value: Value::Integer(30),
             timestamp: 1234567890,
             ttl: Some(3600),
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         };
 
         assert_eq!(cell.column, "age");
@@ -1888,8 +1886,8 @@ mod tests {
                     value: Value::Text("Alice".to_string()),
                     timestamp: 1000,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -1944,8 +1942,8 @@ mod tests {
                     value: Value::Text("Newer".to_string()),
                     timestamp: 1000,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -1961,8 +1959,8 @@ mod tests {
                     value: Value::Text("Older".to_string()),
                     timestamp: 1000,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2047,8 +2045,8 @@ mod tests {
                     value: Value::Text("survivor-if-buggy".to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2154,8 +2152,8 @@ mod tests {
                     value: Value::Text("alice".to_string()),
                     timestamp: 100,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2172,8 +2170,8 @@ mod tests {
                     value: Value::Integer(42),
                     timestamp: 200,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2285,8 +2283,8 @@ mod tests {
                     value: Value::Integer(42),
                     timestamp: 100,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2309,8 +2307,8 @@ mod tests {
                     }),
                     timestamp: 100,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2432,8 +2430,8 @@ mod tests {
                     value: Value::Text(newer_file_value.to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2449,8 +2447,8 @@ mod tests {
                     value: Value::Text(older_file_value.to_string()),
                     timestamp: EQUAL_TS,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2559,16 +2557,16 @@ mod tests {
                         value: Value::Text("old".to_string()),
                         timestamp: 100,
                         ttl: None,
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     },
                     CellData {
                         column: "extra".to_string(),
                         value: Value::Text("a-only".to_string()),
                         timestamp: 100,
                         ttl: None,
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -2585,8 +2583,8 @@ mod tests {
                     value: Value::Text("new".to_string()),
                     timestamp: 200,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2683,8 +2681,8 @@ mod tests {
                     value: Value::Text("old".to_string()),
                     timestamp: 100,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2709,8 +2707,8 @@ mod tests {
                     value: Value::Integer(7),
                     timestamp: 300,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2788,8 +2786,8 @@ mod tests {
                     value: Value::Text("doomed".to_string()),
                     timestamp: 100,
                     ttl: None,
-                    local_deletion_time: None,
                     cell_path: None,
+                    local_deletion_time: None,
                 }],
             },
         );
@@ -2856,8 +2854,8 @@ mod tests {
             value: Value::Text("Old".to_string()),
             timestamp: 1000,
             ttl: None,
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         };
 
         let cell2 = CellData {
@@ -2865,8 +2863,8 @@ mod tests {
             value: Value::Text("New".to_string()),
             timestamp: 2000, // Higher timestamp wins
             ttl: None,
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         };
 
         // Cell2 should win in last-write-wins merge
@@ -2918,16 +2916,16 @@ mod tests {
                         value: Value::Text("Alice".to_string()),
                         timestamp: 999_000_000,
                         ttl: None,
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     },
                     CellData {
                         column: "age".to_string(),
                         value: Value::Integer(30),
                         timestamp: 999_000_000,
                         ttl: Some(3600),
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -3764,8 +3762,8 @@ mod merge_property_tests {
                             value: Value::Integer(ts as i32),
                             timestamp: ts,
                             ttl: None,
-                            local_deletion_time: None,
                             cell_path: None,
+                            local_deletion_time: None,
                         }],
                     },
                 )
@@ -3876,8 +3874,8 @@ mod merge_property_tests {
                         value: Value::Integer(42),
                         timestamp: ts_write,
                         ttl: None,
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     }],
                 },
             );
@@ -4245,8 +4243,8 @@ mod issue_823_complex_column_merge {
                 value: Value::List(vec![Value::Text("b".to_string())]),
                 timestamp: 200,
                 ttl: None,
-                local_deletion_time: None,
                 cell_path: None,
+                local_deletion_time: None,
             }],
         );
         let older = live(
@@ -4257,8 +4255,8 @@ mod issue_823_complex_column_merge {
                 value: Value::List(vec![Value::Text("a".to_string())]),
                 timestamp: 100,
                 ttl: None,
-                local_deletion_time: None,
                 cell_path: None,
+                local_deletion_time: None,
             }],
         );
 
@@ -4314,8 +4312,8 @@ mod issue_823_complex_column_merge {
                 value: mk_udt("city", "SF"),
                 timestamp: 200,
                 ttl: None,
-                local_deletion_time: None,
                 cell_path: None,
+                local_deletion_time: None,
             }],
         );
         let older = live(
@@ -4326,8 +4324,8 @@ mod issue_823_complex_column_merge {
                 value: mk_udt("zip", "94105"),
                 timestamp: 100,
                 ttl: None,
-                local_deletion_time: None,
                 cell_path: None,
+                local_deletion_time: None,
             }],
         );
 
@@ -4435,8 +4433,8 @@ mod issue_823_complex_column_merge {
                 }),
                 timestamp: 100,
                 ttl: None,
-                local_deletion_time: None,
                 cell_path: None,
+                local_deletion_time: None,
             }],
         );
 
@@ -4468,7 +4466,8 @@ mod issue_823_complex_column_merge {
 #[cfg(all(test, feature = "write-support"))]
 mod issue_886_merge_entry_enrichment {
     use super::*;
-    use crate::types::{TombstoneInfo, TombstoneType, Value};
+    use crate::storage::write_engine::mutation::ClusteringBound;
+    use crate::types::Value;
 
     fn dk(byte: u8) -> DecoratedKey {
         DecoratedKey::from_key_bytes(vec![byte]).expect("token")
@@ -4561,7 +4560,7 @@ mod issue_886_merge_entry_enrichment {
     fn merge_entry_carries_complex_deletion_without_acting_on_it() {
         let complex = ComplexDeletion {
             column: "tags".to_string(),
-            deletion_time: 1234,
+            marked_for_delete_at: 1234,
             local_deletion_time: 1_700_000_000,
         };
         let entry = MergeEntry::new(0, dk(1), None, 100, RowData::Live { cells: vec![] })
@@ -4575,7 +4574,7 @@ mod issue_886_merge_entry_enrichment {
         let live = MergeEntry::new(0, dk(1), None, 1234, RowData::Live { cells: vec![cell] })
             .with_complex_deletions(vec![ComplexDeletion {
                 column: "tags".to_string(),
-                deletion_time: 1234,
+                marked_for_delete_at: 1234,
                 local_deletion_time: 1_700_000_000,
             }]);
         let merged =
@@ -4600,14 +4599,11 @@ mod issue_886_merge_entry_enrichment {
     fn merge_entry_carries_range_deletion_without_acting_on_it() {
         // Open-ended range tombstone: both bounds None (the representation the
         // tombstone_merger open-ended utilities use).
-        let range = RangeDeletion {
-            tombstone: TombstoneInfo {
-                deletion_time: 5000,
-                tombstone_type: TombstoneType::RangeTombstone,
-                ttl: None,
-                range_start: None,
-                range_end: None,
-            },
+        let range = RangeTombstone {
+            start: ClusteringBound::Bottom,
+            end: ClusteringBound::Top,
+            deletion_time: 5000,
+            local_deletion_time: 0,
         };
         let cell = CellData::new("v".to_string(), Value::Integer(1), 1000);
         let entry = MergeEntry::new(0, dk(1), None, 1000, RowData::Live { cells: vec![cell] })
@@ -4640,31 +4636,25 @@ mod issue_886_merge_entry_enrichment {
     fn reconcile_cluster_preserves_carried_deletion_metadata() {
         let complex_a = ComplexDeletion {
             column: "tags".to_string(),
-            deletion_time: 1234,
+            marked_for_delete_at: 1234,
             local_deletion_time: 1_700_000_000,
         };
         let complex_b = ComplexDeletion {
             column: "notes".to_string(),
-            deletion_time: 999,
+            marked_for_delete_at: 999,
             local_deletion_time: 1_700_000_001,
         };
-        let range_low = RangeDeletion {
-            tombstone: TombstoneInfo {
-                deletion_time: 3000,
-                tombstone_type: TombstoneType::RangeTombstone,
-                ttl: None,
-                range_start: None,
-                range_end: None,
-            },
+        let range_low = RangeTombstone {
+            start: ClusteringBound::Bottom,
+            end: ClusteringBound::Top,
+            deletion_time: 3000,
+            local_deletion_time: 0,
         };
-        let range_high = RangeDeletion {
-            tombstone: TombstoneInfo {
-                deletion_time: 7000,
-                tombstone_type: TombstoneType::RangeTombstone,
-                ttl: None,
-                range_start: None,
-                range_end: None,
-            },
+        let range_high = RangeTombstone {
+            start: ClusteringBound::Bottom,
+            end: ClusteringBound::Top,
+            deletion_time: 7000,
+            local_deletion_time: 0,
         };
 
         // Two input rows in the same cluster, each carrying distinct metadata.
@@ -4744,7 +4734,7 @@ mod issue_886_merge_entry_enrichment {
     fn reconcile_cluster_preserves_metadata_on_tombstone_entry() {
         let complex = ComplexDeletion {
             column: "tags".to_string(),
-            deletion_time: 10,
+            marked_for_delete_at: 10,
             local_deletion_time: 1_700_000_000,
         };
         let row = MergeEntry::new(
@@ -4775,17 +4765,14 @@ mod issue_886_merge_entry_enrichment {
     fn reconcile_cluster_emits_metadata_only_entry_when_no_row_produced() {
         let complex = ComplexDeletion {
             column: "tags".to_string(),
-            deletion_time: 4242,
+            marked_for_delete_at: 4242,
             local_deletion_time: 1_700_000_000,
         };
-        let range = RangeDeletion {
-            tombstone: TombstoneInfo {
-                deletion_time: 8888,
-                tombstone_type: TombstoneType::RangeTombstone,
-                ttl: None,
-                range_start: None,
-                range_end: None,
-            },
+        let range = RangeTombstone {
+            start: ClusteringBound::Bottom,
+            end: ClusteringBound::Top,
+            deletion_time: 8888,
+            local_deletion_time: 0,
         };
 
         // Empty Live row (no cells), no row tombstone, but carrying both kinds of
@@ -4835,17 +4822,14 @@ mod issue_886_merge_entry_enrichment {
     fn metadata_only_entry_is_detected_and_skipped_on_writer_path() {
         let complex = ComplexDeletion {
             column: "tags".to_string(),
-            deletion_time: 4242,
+            marked_for_delete_at: 4242,
             local_deletion_time: 1_700_000_000,
         };
-        let range = RangeDeletion {
-            tombstone: TombstoneInfo {
-                deletion_time: 8888,
-                tombstone_type: TombstoneType::RangeTombstone,
-                ttl: None,
-                range_start: None,
-                range_end: None,
-            },
+        let range = RangeTombstone {
+            start: ClusteringBound::Bottom,
+            end: ClusteringBound::Top,
+            deletion_time: 8888,
+            local_deletion_time: 0,
         };
 
         // Exactly the shape reconcile_cluster emits for a deletion-metadata-only
@@ -4908,14 +4892,11 @@ mod issue_886_merge_entry_enrichment {
                 local_deletion_time: 0,
             },
         )
-        .with_range_deletion(RangeDeletion {
-            tombstone: TombstoneInfo {
-                deletion_time: 8888,
-                tombstone_type: TombstoneType::RangeTombstone,
-                ttl: None,
-                range_start: None,
-                range_end: None,
-            },
+        .with_range_deletion(RangeTombstone {
+            start: ClusteringBound::Bottom,
+            end: ClusteringBound::Top,
+            deletion_time: 8888,
+            local_deletion_time: 0,
         });
         assert!(
             !tomb.is_metadata_only_no_op(),
@@ -5116,8 +5097,8 @@ mod issue_822_merge_ordering_semantics {
                         value: Value::Text(format!("row-{ck}")),
                         timestamp: TS,
                         ttl: None,
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     }],
                 },
             )
@@ -5170,8 +5151,8 @@ mod issue_822_merge_ordering_semantics {
             value: Value::Text("c".to_string()),
             timestamp: TS,
             ttl: None,
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         };
 
         // Expiring (TTL) live cell for column "v", in the NEWER file (run 0).
@@ -5190,8 +5171,8 @@ mod issue_822_merge_ordering_semantics {
                         value: Value::Text("expiring-if-buggy".to_string()),
                         timestamp: TS,
                         ttl: Some(3600),
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -5217,8 +5198,8 @@ mod issue_822_merge_ordering_semantics {
                         }),
                         timestamp: TS,
                         ttl: None,
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -5268,8 +5249,8 @@ mod issue_822_merge_ordering_semantics {
             value: Value::Text("c".to_string()),
             timestamp: TS,
             ttl: None,
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         };
 
         let tombstone = MergeEntry::new(
@@ -5291,8 +5272,8 @@ mod issue_822_merge_ordering_semantics {
                         }),
                         timestamp: TS,
                         ttl: None,
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -5311,8 +5292,8 @@ mod issue_822_merge_ordering_semantics {
                         value: Value::Text("expiring-if-buggy".to_string()),
                         timestamp: TS,
                         ttl: Some(3600),
-                        local_deletion_time: None,
                         cell_path: None,
+                        local_deletion_time: None,
                     },
                 ],
             },
@@ -5503,8 +5484,8 @@ mod issue_822_merge_ordering_semantics {
             }),
             timestamp: 1,
             ttl: None,
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         };
         assert!(KWayMerger::is_cell_tombstone(&tomb));
         assert!(
@@ -5517,8 +5498,8 @@ mod issue_822_merge_ordering_semantics {
             value: Value::Text("x".to_string()),
             timestamp: 1,
             ttl: Some(60),
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         };
         assert!(
             !KWayMerger::is_cell_tombstone(&expiring),
@@ -5743,8 +5724,7 @@ mod issue_822_merge_ordering_semantics {
 mod issue_886_empty_partition_skip {
     use super::*;
     use crate::schema::{KeyColumn, TableSchema};
-    use crate::storage::write_engine::mutation::{DecoratedKey, PartitionKey};
-    use crate::types::{TombstoneInfo, TombstoneType};
+    use crate::storage::write_engine::mutation::{ClusteringBound, DecoratedKey, PartitionKey};
     use std::collections::HashMap;
 
     /// Single-column `int` partition-key schema with one regular `name` column.
@@ -5778,15 +5758,12 @@ mod issue_886_empty_partition_skip {
     }
 
     /// A range deletion so an empty Live entry classifies as metadata-only.
-    fn range_deletion() -> RangeDeletion {
-        RangeDeletion {
-            tombstone: TombstoneInfo {
-                deletion_time: 8888,
-                tombstone_type: TombstoneType::RangeTombstone,
-                ttl: None,
-                range_start: None,
-                range_end: None,
-            },
+    fn range_deletion() -> RangeTombstone {
+        RangeTombstone {
+            start: ClusteringBound::Bottom,
+            end: ClusteringBound::Top,
+            deletion_time: 8888,
+            local_deletion_time: 0,
         }
     }
 

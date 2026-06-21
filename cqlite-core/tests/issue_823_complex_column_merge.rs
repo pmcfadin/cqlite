@@ -29,38 +29,45 @@
 use cqlite_core::storage::write_engine::merge::{CellData, RowData};
 use cqlite_core::types::{UdtField, UdtValue, Value};
 
-/// `CellData` now carries a `cell_path` (and `local_deletion_time`) dimension
-/// after #886, in addition to `column`/`value`/`timestamp`/`ttl`. Per-path merge
-/// is therefore REPRESENTABLE; whether it is ACTED ON is a separate followup
-/// (#18). This destructuring pins the exact public field set — if it changes
-/// again, this test must be revisited.
+/// Issue #886 added the carry-only `cell_path` / `local_deletion_time` substrate
+/// fields to `CellData` (defaulting to `None`), but per-path merge is still NOT
+/// wired: the reader does not yet populate `cell_path` and the merge does not yet
+/// consume it (that reader-emit + per-path reconcile work is #899). So two writes
+/// to different paths of the same column remain indistinguishable in practice —
+/// the field exists but nothing fills it in. This destructuring also pins the
+/// exact public field set — if it changes again, this test must be revisited.
 #[test]
-fn celldata_exposes_cell_path_dimension() {
+fn celldata_path_dimension_is_carry_only() {
     let cell = CellData {
         column: "tags".to_string(),
         value: Value::List(vec![Value::Text("a".to_string())]),
         timestamp: 1,
         ttl: None,
-        local_deletion_time: None,
         cell_path: None,
+        local_deletion_time: None,
     };
 
+    // The path dimension now exists structurally (#886) but is carry-only: when
+    // built from the reader it is `None`. If a later change starts POPULATING
+    // `cell_path` from the reader emit, this test should be revisited alongside
+    // the #899 per-path merge work.
     let CellData {
         column,
         value,
         timestamp,
         ttl,
-        local_deletion_time,
         cell_path,
+        local_deletion_time,
     } = cell;
     assert_eq!(column, "tags");
     assert!(matches!(value, Value::List(_)));
     assert_eq!(timestamp, 1);
     assert_eq!(ttl, None);
-    // #886 plumbing: the path dimension exists but is defaulted None from the
-    // reader (the behavior that populates/consumes it lands in #844).
-    assert_eq!(local_deletion_time, None);
-    assert_eq!(cell_path, None);
+    assert_eq!(cell_path, None, "carry-only: unpopulated until #899");
+    assert_eq!(
+        local_deletion_time, None,
+        "carry-only: unpopulated until #899"
+    );
 }
 
 /// A multi-cell collection is surfaced as a single nested `Value` under one
@@ -78,8 +85,8 @@ fn multicell_collection_is_one_nested_cell_value() {
             ]),
             timestamp: 10,
             ttl: None,
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         }],
     };
 
@@ -120,8 +127,8 @@ fn nonfrozen_udt_is_one_nested_cell_value() {
             }),
             timestamp: 10,
             ttl: None,
-            local_deletion_time: None,
             cell_path: None,
+            local_deletion_time: None,
         }],
     };
 
@@ -137,11 +144,11 @@ fn nonfrozen_udt_is_one_nested_cell_value() {
     }
 }
 
-/// Complex (collection-level) deletion (#14/#17) has no dedicated public
-/// representation: `RowData::Tombstone` is whole-row only (deletion_time +
-/// local_deletion_time, no column scope). A per-column complex deletion can only
-/// be smuggled as a `Value::Tombstone` inside a cell, which then collapses with
-/// any sibling cell on the same column name.
+/// `RowData::Tombstone` is still whole-row only (deletion_time +
+/// local_deletion_time, no column scope). Issue #886 added a dedicated,
+/// column-scoped complex-deletion entity (`MergeEntry.complex_deletions` /
+/// `ComplexDeletion`) as carry-only substrate, but `RowData` itself is unchanged —
+/// a per-column complex deletion is NOT smuggled into `RowData::Tombstone`.
 #[test]
 fn row_tombstone_has_no_column_scope() {
     let t = RowData::Tombstone {

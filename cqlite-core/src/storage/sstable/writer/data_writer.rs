@@ -623,6 +623,9 @@ impl DataWriter {
         let mut block_start_buf_offset = self.buffer.len() - partition_buf_start;
         let mut current_block_first_ck: Option<Vec<u8>> = None;
         let mut current_block_last_ck: Option<Vec<u8>> = None;
+        // OSS50 byte-comparable separator (first unfiltered's clustering) for the
+        // BTI Rows.db row-index trie (issue #910). `None` until the first item.
+        let mut current_block_oss50: Option<Option<Vec<u8>>> = None;
 
         for item in items {
             // Clustering key bytes for this item (serialized as ClusteringPrefix).
@@ -646,6 +649,37 @@ impl DataWriter {
 
             if current_block_first_ck.is_none() {
                 current_block_first_ck = Some(ck_bytes.clone());
+                // OSS50 byte-comparable separator from the first unfiltered's
+                // clustering values (issue #910). Markers and no-CK rows yield
+                // None (no row-index separator). Encoding errors degrade to None
+                // — the partition then keeps a direct Data.db offset rather than
+                // emitting a separator the reader cannot reconstruct.
+                let ck_values: Option<Vec<Value>> = match &item {
+                    PartitionItem::Row(row) => row
+                        .clustering_key
+                        .filter(|ck| !ck.columns.is_empty())
+                        .map(|ck| ck.columns.iter().map(|(_, v)| v.clone()).collect()),
+                    PartitionItem::Marker { .. } => None,
+                };
+                // Per-column clustering ORDER (ASC/DESC). For a DESC column the
+                // OSS50 separator bytes must be the REVERSED byte-comparable form
+                // (Cassandra `ReversedType`/`ByteSource.invert`: complement every
+                // byte) so that descending value order maps to ascending byte
+                // order — otherwise the strict-ascending separator check rejects
+                // the trie and the wide partition silently falls back to a direct
+                // Data.db offset (roborev MEDIUM, issue #910 follow-up).
+                let is_reversed: Vec<bool> = schema
+                    .clustering_keys
+                    .iter()
+                    .map(|c| c.order == crate::schema::ClusteringOrder::Desc)
+                    .collect();
+                current_block_oss50 = Some(ck_values.and_then(|vals| {
+                    crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order(
+                        &vals,
+                        &is_reversed,
+                    )
+                    .ok()
+                }));
             }
             current_block_last_ck = Some(ck_bytes.clone());
 
@@ -689,11 +723,13 @@ impl DataWriter {
                     last_name: current_block_last_ck.take().unwrap_or_else(|| vec![0x00]),
                     offset: block_start_buf_offset as u64,
                     width: block_bytes,
+                    oss50_separator: current_block_oss50.take().flatten(),
                 });
                 block_start_buf_offset = current_buf_offset;
                 // first/last reset for next block
                 current_block_first_ck = None;
                 current_block_last_ck = None;
+                current_block_oss50 = None;
             }
         }
 
@@ -710,6 +746,7 @@ impl DataWriter {
                     last_name: last,
                     offset: block_start_buf_offset as u64,
                     width: block_bytes,
+                    oss50_separator: current_block_oss50.take().flatten(),
                 });
             }
         }
