@@ -1164,17 +1164,26 @@ impl WriteEngine {
             match step {
                 merge::MergeStep::Partition { key, rows } => {
                     partitions_processed += 1;
-                    let row_count = rows.len() as u64;
 
                     // Convert MergeEntry rows to Mutation format
                     // (collect into a vec first to release the borrow on merge)
                     let entries_vec: Vec<_> = rows.into_iter().collect();
 
-                    // Now we can call self methods without conflict
+                    // Now we can call self methods without conflict.
+                    // Skip metadata-only entries (#886/#899 branch-review): they
+                    // carry complex/range deletion metadata through the merge
+                    // stream but have no writer-emittable content yet, so writing
+                    // them would produce a phantom live empty (pure-PK) row at
+                    // timestamp 0. See `MergeEntry::is_metadata_only_no_op`.
                     let mutations = entries_vec
                         .into_iter()
+                        .filter(|entry| !entry.is_metadata_only_no_op())
                         .map(|entry| self.merge_entry_to_mutation(entry))
                         .collect::<Result<Vec<_>>>()?;
+
+                    // Count rows actually written (skipped metadata-only entries
+                    // produce no row, so they must not inflate the stats).
+                    let row_count = mutations.len() as u64;
 
                     // Write partition to output SSTable
                     // Re-borrow active_merge to write

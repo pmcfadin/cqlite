@@ -138,6 +138,29 @@ impl MergeEntry {
         self.range_deletion = Some(range_deletion);
         self
     }
+
+    /// True when this entry exists ONLY to carry complex/range deletion metadata
+    /// and has no row content the writer can emit today (#886/#899 branch-review).
+    ///
+    /// `reconcile_cluster` emits an empty `RowData::Live { cells: vec![] }` (at
+    /// timestamp 0) when a cluster has no surviving cells and no row tombstone but
+    /// still carries complex/range deletion metadata, so that metadata survives
+    /// reconciliation in the in-memory merge stream. The compaction writer does
+    /// NOT yet consume those carried deletions (deferred to #899); if such an
+    /// entry is routed to the writer it would become a PHANTOM live empty
+    /// (pure-PK) row at timestamp 0, because `DataWriter::merge_row_group` treats
+    /// a no-op mutation as a primary-key insert.
+    ///
+    /// The merge stream never produces a genuine empty-but-live row through this
+    /// path: an entry with empty cells, no row tombstone, AND no carried metadata
+    /// reconciles to `None` (nothing emitted). So an empty live entry that
+    /// survives reconciliation always carries deletion metadata and is purely
+    /// synthetic. The writer path must skip these to avoid phantom liveness.
+    #[must_use]
+    pub fn is_metadata_only_no_op(&self) -> bool {
+        matches!(&self.row_data, RowData::Live { cells } if cells.is_empty())
+            && (!self.complex_deletions.is_empty() || self.range_deletion.is_some())
+    }
 }
 
 /// Ord implementation for min-heap routing ONLY (not LWW winner selection).
@@ -1213,13 +1236,20 @@ impl KWayMerger {
 
         while let MergeStep::Partition { key, rows } = self.step()? {
             stats.output_partitions += 1;
-            stats.output_rows += rows.len() as u64;
 
-            // Convert MergeEntry rows back to Mutation format for writer
+            // Skip metadata-only entries on the writer path (#886/#899
+            // branch-review). They exist only to carry complex/range deletion
+            // metadata through the in-memory merge stream; the writer does not
+            // yet consume those fields, so emitting them would write a phantom
+            // live empty (pure-PK) row at timestamp 0. See
+            // `MergeEntry::is_metadata_only_no_op`.
             let mutations = rows
                 .into_iter()
+                .filter(|entry| !entry.is_metadata_only_no_op())
                 .map(|entry| Self::merge_entry_to_mutation(entry, &self.schema))
                 .collect::<Result<Vec<_>>>()?;
+
+            stats.output_rows += mutations.len() as u64;
 
             output_writer.write_partition(key, mutations)?;
         }
@@ -4782,6 +4812,105 @@ mod issue_886_merge_entry_enrichment {
         assert!(
             KWayMerger::reconcile_cluster(None, vec![row]).is_none(),
             "empty live row with no metadata must not emit an entry"
+        );
+    }
+
+    /// Regression for the #886/#899 branch-review HIGH finding: the synthetic
+    /// metadata-only entry emitted by `reconcile_cluster` (an empty `Live` row
+    /// carrying complex/range deletion metadata, no ops, no row tombstone) MUST
+    /// be classified as a metadata-only no-op so the writer path skips it. The
+    /// writer does not yet consume the carried deletions (#899); routing this
+    /// entry through `merge_entry_to_mutation` would otherwise write a phantom
+    /// live empty (pure-PK) row at timestamp 0.
+    #[test]
+    fn metadata_only_entry_is_detected_and_skipped_on_writer_path() {
+        let complex = ComplexDeletion {
+            column: "tags".to_string(),
+            deletion_time: 4242,
+            local_deletion_time: 1_700_000_000,
+        };
+        let range = RangeDeletion {
+            tombstone: TombstoneInfo {
+                deletion_time: 8888,
+                tombstone_type: TombstoneType::RangeTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            },
+        };
+
+        // Exactly the shape reconcile_cluster emits for a deletion-metadata-only
+        // cluster: empty Live, ts 0, carrying both deletion-metadata kinds.
+        let meta_only = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+            .with_complex_deletions(vec![complex.clone()])
+            .with_range_deletion(range.clone());
+
+        assert!(
+            meta_only.is_metadata_only_no_op(),
+            "synthetic metadata-only entry must be detected so the writer skips it"
+        );
+
+        // It survives reconciliation (metadata preserved in the merge stream) but
+        // is filtered out before reaching the writer — proving the same entry the
+        // merge stream keeps is the one the writer path drops.
+        let reconciled = KWayMerger::reconcile_cluster(None, vec![meta_only])
+            .expect("metadata-only cluster must still emit an entry in the merge stream");
+        assert!(
+            reconciled.is_metadata_only_no_op(),
+            "the reconciled metadata-only entry must be writer-skippable"
+        );
+    }
+
+    /// Guard the boundary of the skip predicate: entries that carry real content
+    /// (live cells, a row tombstone, or no carried metadata) must NOT be treated
+    /// as metadata-only no-ops, so genuine rows are never dropped on the writer
+    /// path.
+    #[test]
+    fn non_metadata_only_entries_are_not_skipped() {
+        // Live row with a real cell — must be written.
+        let live = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            100,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "name".to_string(),
+                    Value::Text("v".to_string()),
+                    100,
+                )],
+            },
+        );
+        assert!(!live.is_metadata_only_no_op());
+
+        // Empty live row carrying metadata? Yes (skip). Empty live row WITHOUT
+        // metadata never survives reconcile, but defensively it is not skippable.
+        let empty_no_meta = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] });
+        assert!(!empty_no_meta.is_metadata_only_no_op());
+
+        // Row tombstone — must be written (real deletion).
+        let tomb = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            500,
+            RowData::Tombstone {
+                deletion_time: 500,
+                local_deletion_time: 0,
+            },
+        )
+        .with_range_deletion(RangeDeletion {
+            tombstone: TombstoneInfo {
+                deletion_time: 8888,
+                tombstone_type: TombstoneType::RangeTombstone,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            },
+        });
+        assert!(
+            !tomb.is_metadata_only_no_op(),
+            "a row tombstone is real content even when carrying range metadata"
         );
     }
 
