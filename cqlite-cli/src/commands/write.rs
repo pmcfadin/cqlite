@@ -358,6 +358,20 @@ impl CompactResult {
 ///
 /// `args.gc_before` / `args.now_sec` are threaded into the merge for
 /// deterministic purge decisions but are not yet applied (issues #845/#848).
+/// Map the `compact` subcommand args to the `purge_safe` flag threaded into
+/// the merge (#921 finding 1).
+///
+/// `cqlite compact` compacts only the SSTables found under `<input-dir>`, which
+/// is NOT necessarily every overlapping SSTable for the table. Tombstone
+/// purging is only overlap-safe when that input set is complete, so the default
+/// is CONSERVATIVE (`false`, no purge) and purging is enabled only when the
+/// operator explicitly asserts a complete/major compaction via `--major`
+/// (alias `--purge-tombstones`).
+#[cfg(feature = "write-support")]
+fn compact_purge_safe(args: &crate::cli_types::CompactArgs) -> bool {
+    args.major
+}
+
 #[cfg(feature = "write-support")]
 pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<CompactResult> {
     let start = Instant::now();
@@ -372,6 +386,10 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
         ));
     }
 
+    // Overlap-safety gate for tombstone purging (#921 finding 1): map the
+    // explicit `--major` opt-in to `purge_safe`. Default (flag absent) is
+    // conservative — see `compact_purge_safe`.
+    let purge_safe = compact_purge_safe(args);
     let report = cqlite_core::storage::write_engine::merge::compact_sstables(
         inputs,
         &args.output,
@@ -379,6 +397,7 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
         args.generation,
         args.gc_before,
         args.now_sec,
+        purge_safe,
     )
     .await
     .with_context(|| "compaction failed")?;
@@ -535,4 +554,64 @@ pub async fn handle_flush(_write_engine: &mut ()) -> Result<Option<()>> {
     Err(anyhow::anyhow!(
         "Write support is not enabled. Build with --features write-support to enable write operations."
     ))
+}
+
+#[cfg(all(test, feature = "write-support"))]
+mod compact_purge_safe_tests {
+    use super::compact_purge_safe;
+    use crate::cli_types::{Cli, Commands};
+    use clap::Parser;
+
+    /// Parse a `cqlite compact ...` invocation and return its `CompactArgs`.
+    fn parse_compact(extra: &[&str]) -> crate::cli_types::CompactArgs {
+        let mut argv = vec![
+            "cqlite",
+            "compact",
+            "/tmp/in",
+            "--output",
+            "/tmp/out",
+            "--schema",
+            "/tmp/s.cql",
+        ];
+        argv.extend_from_slice(extra);
+        match Cli::parse_from(argv).command {
+            Some(Commands::Compact(args)) => args,
+            _ => panic!("expected the Compact subcommand to parse"),
+        }
+    }
+
+    /// #921 finding 1: with NO flag the CLI defaults to `purge_safe = false` —
+    /// a purgeable tombstone is RETAINED (conservative; subset compaction must
+    /// never resurrect shadowed data).
+    #[test]
+    fn issue_921_compact_defaults_to_no_purge() {
+        let args = parse_compact(&[]);
+        assert!(!args.major, "--major must default to false");
+        assert!(
+            !compact_purge_safe(&args),
+            "default (no flag) must map to purge_safe = false (tombstones retained)"
+        );
+    }
+
+    /// #921 finding 1: the explicit `--major` opt-in maps to `purge_safe = true`
+    /// (the operator asserts the input set is the complete SSTable set).
+    #[test]
+    fn issue_921_compact_major_flag_enables_purge() {
+        let args = parse_compact(&["--major"]);
+        assert!(args.major, "--major must set major = true");
+        assert!(
+            compact_purge_safe(&args),
+            "--major must map to purge_safe = true (purging enabled)"
+        );
+    }
+
+    /// The `--purge-tombstones` alias is equivalent to `--major`.
+    #[test]
+    fn issue_921_compact_purge_tombstones_alias_enables_purge() {
+        let args = parse_compact(&["--purge-tombstones"]);
+        assert!(
+            compact_purge_safe(&args),
+            "--purge-tombstones alias must map to purge_safe = true"
+        );
+    }
 }

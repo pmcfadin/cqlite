@@ -432,6 +432,16 @@ pub struct CompactArgs {
     /// Output SSTable generation number (filename nb-<gen>-big-*.db)
     #[arg(long, default_value = "1")]
     pub generation: u64,
+    /// Treat this as a MAJOR (full) compaction and PURGE gc-expired tombstones
+    /// from the output. SAFETY CONTRACT: tombstone purging is only safe when the
+    /// `<input-dir>` contains ALL overlapping SSTables for the table; otherwise a
+    /// purged tombstone could resurrect data still shadowed in a non-included
+    /// SSTable. `cqlite compact` compacts only the SSTables found under
+    /// `<input-dir>`, so this flag is the operator's assertion that that set is
+    /// complete. Default (flag absent): conservative — tombstones are RETAINED
+    /// and nothing is purged.
+    #[arg(long = "major", alias = "purge-tombstones", default_value_t = false)]
+    pub major: bool,
 }
 
 // Arguments for the export-sstable subcommand (Issue #392)

@@ -509,6 +509,7 @@ async fn test_edge_delete_operations() {
     // Delete the column
     let delete_ops = vec![CellOperation::Delete {
         column: "data".to_string(),
+        local_deletion_time: None,
     }];
     let delete_mutation = Mutation::new(
         table_id.clone(),
@@ -1195,6 +1196,7 @@ fn test_edge_cell_tombstone_compaction_merge() {
         let ck = ClusteringKey::single("ck", Value::Text(suffix.to_string()));
         let ops = vec![CellOperation::Delete {
             column: "data".to_string(),
+            local_deletion_time: None,
         }];
         let mutation = Mutation::new(table_id.clone(), pk.clone(), Some(ck), ops, ts, None);
         rt.block_on(engine.write_async(mutation))

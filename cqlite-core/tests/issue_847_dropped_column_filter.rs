@@ -136,7 +136,9 @@ fn compact(inputs: Vec<PathBuf>, out_dir: &Path, schema: &TableSchema) -> PathBu
         .build()
         .expect("runtime");
     let report = rt
-        .block_on(compact_sstables(inputs, out_dir, schema, 901, None, None))
+        .block_on(compact_sstables(
+            inputs, out_dir, schema, 901, None, None, true,
+        ))
         .expect("compaction must succeed");
     report.output.data_path
 }
@@ -271,7 +273,9 @@ fn dropped_column_absent_from_columns_is_rejected() {
         .build()
         .expect("runtime");
     let out_dir = temp.path().join("out");
-    let result = rt.block_on(compact_sstables(inputs, &out_dir, &schema, 902, None, None));
+    let result = rt.block_on(compact_sstables(
+        inputs, &out_dir, &schema, 902, None, None, true,
+    ));
 
     let err = result.expect_err("compaction must reject a dropped column absent from `columns`");
     let msg = err.to_string();

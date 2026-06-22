@@ -304,6 +304,7 @@ async fn test_write_engine_delete_operations() -> Result<()> {
     let pk = PartitionKey::single("id", Value::Integer(2));
     let ops = vec![CellOperation::Delete {
         column: "name".to_string(),
+        local_deletion_time: None,
     }];
     let mutation2 = Mutation::new(table_id.clone(), pk.clone(), None, ops, 1001000, None);
     engine.write_async(mutation2).await?;

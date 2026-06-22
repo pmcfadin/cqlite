@@ -1209,6 +1209,22 @@ pub struct KWayMerger {
     /// Carried but not yet consulted — see the note on `gc_before_secs`.
     #[allow(dead_code)]
     now_secs: Option<i64>,
+    /// Overlap-safety gate for tombstone purging (#921 finding 1).
+    ///
+    /// A compaction that merges only a SUBSET of a table's SSTables may leave
+    /// data shadowed by a tombstone living in a NON-included overlapping
+    /// SSTable. Purging the tombstone in that case resurrects the shadowed data
+    /// once both files are later read together. Cassandra gates the purge on the
+    /// `CompactionController`'s `maxPurgeableTimestamp` / fully-expired-overlap
+    /// check; CQLite has no such controller, so it gates conservatively: a
+    /// tombstone is purged ONLY when this flag proves the compaction is safe
+    /// (i.e. it spans ALL of the table's SSTables — a major/full compaction — so
+    /// no non-included overlapping SSTable can hold shadowed data).
+    ///
+    /// DEFAULT is `false`: the background/partial path does NOT purge, so it can
+    /// never resurrect data. The policy-driven path sets it to `true` only when
+    /// the selected inputs cover every candidate SSTable for the table.
+    purge_safe: bool,
 }
 
 /// Report returned by [`compact_sstables`].
@@ -1427,10 +1443,44 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
 /// wins last-write-wins ties at equal timestamp/liveness.
 ///
 /// `gc_before_secs` / `now_secs` are threaded into the merger for deterministic,
-/// Cassandra-matching purge decisions. NOTE: tombstone purging and TTL expiry are
-/// NOT yet applied during the merge (issues #845, #848); these parameters are
-/// currently carried but do not yet drop purgeable data. The plumbing lands first
-/// so the parity harness can drive out the purge semantics.
+/// Cassandra-matching purge decisions. gc_grace tombstone purging IS applied
+/// (issue #845), but ONLY when the compaction is overlap-safe — see
+/// `KWayMerger::with_purge_safe` (#921 finding 1). TTL expiry (#848) remains
+/// carried-but-not-yet-applied.
+/// Compute the gc_grace `gcBefore` cutoff (GC-clock seconds) for a compaction.
+///
+/// Cassandra purges a tombstone during compaction when its on-disk
+/// `localDeletionTime` is strictly less than `gcBefore = now - gc_grace_seconds`
+/// (parity `8d47ebb2`). CQLite reads `gc_grace_seconds` from the table schema
+/// (the `comments` option map — the same surface `cql_parser` / `cql_generator`
+/// use), since it is a table parameter not recorded inside SSTable files.
+///
+/// When the table declares NO `gc_grace_seconds` (#921 finding 3), CQLite falls
+/// back to Cassandra's table DEFAULT of `864000` seconds (10 days) — CQL tables
+/// commonly omit the option and rely on that default, so disabling purging on
+/// absence diverged from Cassandra. A value of exactly `0` is valid (immediate
+/// grace, `TableParams` allows it) and yields `gcBefore == now`.
+///
+/// Returns `None` ONLY when the declared value is INVALID — unparseable or
+/// NEGATIVE — which DISABLES purging (a strict no-op): garbage metadata must
+/// never cause data to be dropped.
+#[cfg(feature = "write-support")]
+pub(crate) fn compute_gc_before(schema: &TableSchema, now_secs: i64) -> Option<i64> {
+    /// Cassandra's `TableParams.DEFAULT_GC_GRACE_SECONDS` (10 days).
+    const DEFAULT_GC_GRACE_SECONDS: i64 = 864_000;
+
+    match schema.comments.get("gc_grace_seconds") {
+        // Absent → Cassandra default (10 days).
+        None => Some(now_secs - DEFAULT_GC_GRACE_SECONDS),
+        // Present → parse. Reject unparseable or negative values conservatively
+        // (return None = no purge); 0 is valid (immediate grace).
+        Some(s) => match s.trim().parse::<i64>() {
+            Ok(gc_grace_seconds) if gc_grace_seconds >= 0 => Some(now_secs - gc_grace_seconds),
+            _ => None,
+        },
+    }
+}
+
 #[cfg(feature = "write-support")]
 /// Determine which dropped columns still have surviving cells after the merge.
 ///
@@ -1441,15 +1491,35 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
 /// exactly these dropped columns in the output writer schema; the rest are
 /// stripped from the output header. Stops early once every dropped column has
 /// been observed surviving.
-fn compute_surviving_dropped_columns(
+///
+/// A dropped column also counts as surviving when its only surviving state is a
+/// retained `ComplexDeletion` marker. A complex (collection / UDT) tombstone for
+/// a dropped COMPLEX column lives in `row.complex_deletions`, NOT in `cells`, so
+/// counting only live `cells` would strip such a column from the output schema —
+/// and the writer only emits complex-element columns present in the schema,
+/// silently dropping a complex tombstone the merge decided to RETAIN. Because the
+/// merge pre-pass runs reconcile with the SAME `gc_before`/`purge_safe` as the
+/// write pass, a marker purged by gc never reaches the yielded `rows`, so a
+/// retained marker IS counted while a purged one is NOT (#921 finding 2 / #847).
+///
+/// `purge_safe` (#921 finding 1) MUST match the value the write pass uses
+/// (`compact_sstables`'s `purge_safe`). The pre-pass builds its merger with the
+/// SAME gc cutoff (`gc_before_secs`/`now_secs`) AND the SAME `purge_safe` flag
+/// so its purge decisions are byte-identical to the write pass. Without this, a
+/// purgeable tombstone in a dropped column would count as a survivor here (no
+/// purging) yet be purged in the real merge (purging on) — leaving an empty
+/// dropped column in the output header that this pre-pass exists to strip.
+pub(crate) fn compute_surviving_dropped_columns(
     input_paths: Vec<PathBuf>,
     schema: &TableSchema,
     gc_before_secs: Option<i64>,
     now_secs: Option<i64>,
+    purge_safe: bool,
 ) -> Result<std::collections::HashSet<String>> {
     let mut surviving: std::collections::HashSet<String> = std::collections::HashSet::new();
     let total = schema.dropped_columns.len();
-    let mut merger = KWayMerger::new_with_gc(input_paths, schema, gc_before_secs, now_secs)?;
+    let mut merger = KWayMerger::new_with_gc(input_paths, schema, gc_before_secs, now_secs)?
+        .with_purge_safe(purge_safe);
     loop {
         match merger.step()? {
             MergeStep::Complete => break,
@@ -1462,6 +1532,15 @@ fn compute_surviving_dropped_columns(
                             }
                         }
                     }
+                    // A surviving (within-grace / purge-unsafe) complex-deletion
+                    // marker for a dropped COMPLEX column is a survivor too: the
+                    // marker lives here, not in `cells`, and the writer must keep
+                    // the column to emit it.
+                    for cd in &row.complex_deletions {
+                        if schema.dropped_columns.contains_key(&cd.column) {
+                            surviving.insert(cd.column.clone());
+                        }
+                    }
                 }
                 if surviving.len() == total {
                     break; // every dropped column already shown to survive
@@ -1472,6 +1551,13 @@ fn compute_surviving_dropped_columns(
     Ok(surviving)
 }
 
+/// One-shot compaction entry point (behind the `cqlite compact` CLI command).
+///
+/// `purge_safe` (#921 finding 1) gates gc_grace tombstone purging on overlap
+/// safety: pass `true` ONLY when `input_paths` spans EVERY SSTable for the table
+/// (so no non-included overlapping SSTable can hold data shadowed by a purged
+/// tombstone). When `false`, tombstones are retained even if older than
+/// `gcBefore`, so a partial compaction cannot resurrect deleted data.
 pub async fn compact_sstables(
     input_paths: Vec<PathBuf>,
     output_dir: &std::path::Path,
@@ -1479,6 +1565,7 @@ pub async fn compact_sstables(
     generation: u64,
     gc_before_secs: Option<i64>,
     now_secs: Option<i64>,
+    purge_safe: bool,
 ) -> Result<CompactReport> {
     if input_paths.is_empty() {
         return Err(Error::InvalidInput(
@@ -1505,7 +1592,10 @@ pub async fn compact_sstables(
     // Which dropped columns survive is data-dependent and the writer fixes its
     // header before the first row, so determine the surviving set with a merge
     // pre-pass (only when any column is dropped). The pre-pass uses the SAME merge
-    // logic as the write pass, so the two agree. See #847 review.
+    // logic as the write pass — including the same `purge_safe` flag (#921 finding
+    // 1) and gc cutoff — so the two make IDENTICAL purge decisions and a tombstone
+    // purged in the write pass is also purged in the pre-pass (never counted as a
+    // surviving cell). See #847 review.
     let retained_dropped = if effective_schema.dropped_columns.is_empty() {
         std::collections::HashSet::new()
     } else {
@@ -1514,6 +1604,7 @@ pub async fn compact_sstables(
             &effective_schema,
             gc_before_secs,
             now_secs,
+            purge_safe,
         )?
     };
     let write_schema = effective_schema.for_compaction_output(&retained_dropped);
@@ -1523,7 +1614,8 @@ pub async fn compact_sstables(
         &effective_schema,
         gc_before_secs,
         now_secs,
-    )?;
+    )?
+    .with_purge_safe(purge_safe);
 
     let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
         output_dir.to_path_buf(),
@@ -1622,7 +1714,23 @@ impl KWayMerger {
             schema: schema.clone(),
             gc_before_secs,
             now_secs,
+            // Conservatively unsafe by default (#921 finding 1): purging is
+            // dormant until a caller proves the compaction spans all of the
+            // table's SSTables via `with_purge_safe`.
+            purge_safe: false,
         })
+    }
+
+    /// Mark this merge as overlap-safe for tombstone purging (#921 finding 1).
+    ///
+    /// Set `true` ONLY when the compaction inputs provably span EVERY SSTable
+    /// for the table (a major/full compaction), so no non-included overlapping
+    /// SSTable can hold data shadowed by a purged tombstone. When `false` (the
+    /// default) the gc_grace purge stage is a strict no-op — tombstones are
+    /// retained — which can never resurrect data in a partial compaction.
+    pub fn with_purge_safe(mut self, purge_safe: bool) -> Self {
+        self.purge_safe = purge_safe;
+        self
     }
 
     /// Perform a full merge to the output writer
@@ -1824,11 +1932,25 @@ impl KWayMerger {
                 .push(row);
         }
 
+        // Overlap-safety gate for tombstone purging (#921 finding 1): collapse
+        // the gc_grace cutoff to `None` (purge no-op) unless this compaction is
+        // provably overlap-safe (a major/full compaction over every SSTable for
+        // the table). A partial compaction must retain tombstones so it can
+        // never resurrect data shadowed in a non-included overlapping SSTable.
+        let effective_gc_before = if self.purge_safe {
+            self.gc_before_secs
+        } else {
+            None
+        };
+
         let mut merged = Vec::new();
         for (ck, cluster_rows) in clustered_rows {
-            if let Some(entry) =
-                Self::reconcile_cluster(ck, cluster_rows, &self.schema.dropped_columns)
-            {
+            if let Some(entry) = Self::reconcile_cluster(
+                ck,
+                cluster_rows,
+                &self.schema.dropped_columns,
+                effective_gc_before,
+            ) {
                 merged.push(entry);
             }
         }
@@ -1851,6 +1973,34 @@ impl KWayMerger {
         });
 
         Ok(merged)
+    }
+
+    /// The cell's effective `localDeletionTime` (GC-clock seconds, on-disk
+    /// width) for gc_grace purge decisions (#921 finding 1/2).
+    ///
+    /// The reader surfaces an EXPIRING simple cell's LDT in
+    /// [`CellData::local_deletion_time`], but a simple cell TOMBSTONE carries its
+    /// LDT inside its `Value::Tombstone(CellTombstone)` payload
+    /// (`TombstoneInfo::local_deletion_time`, seconds) — `CellData::local_deletion_time`
+    /// stays `None` for it (`v5_compressed_legacy` only fills that field from
+    /// `cell_meta` expiration). Without consulting the tombstone payload, the
+    /// purge stage would always see `None` for a cell tombstone and conservatively
+    /// retain it, so a purgeable dropped-column tombstone would be (wrongly)
+    /// counted as a survivor. Prefer the explicit `CellData` field, then fall back
+    /// to a non-zero tombstone-payload LDT; `0` is the "not surfaced" placeholder
+    /// and yields `None` (retain on unknown LDT — no-heuristics mandate).
+    fn cell_effective_ldt(cell: &CellData) -> Option<i32> {
+        if let Some(ldt) = cell.local_deletion_time {
+            return Some(ldt);
+        }
+        if let crate::types::Value::Tombstone(ref info) = cell.value {
+            if info.tombstone_type == crate::types::TombstoneType::CellTombstone
+                && info.local_deletion_time != 0
+            {
+                return Some(info.local_deletion_time as i32);
+            }
+        }
+        None
     }
 
     /// Returns true when a cell carries a cell-level tombstone
@@ -1914,6 +2064,16 @@ impl KWayMerger {
         clustering_key: Option<ClusteringKey>,
         cluster_rows: Vec<MergeEntry>,
         dropped_columns: &std::collections::HashMap<String, i64>,
+        // EFFECTIVE gc_grace cutoff (`gcBefore`, GC-clock seconds), threaded from
+        // the merger. A tombstone whose `localDeletionTime < gc_before_secs` is
+        // PURGEABLE; `None` disables purging (issue #845).
+        //
+        // OVERLAP SAFETY (#921 finding 1): the caller (`merge_partition_rows`)
+        // collapses this to `None` whenever the compaction is NOT overlap-safe
+        // (a partial compaction), so the purge stage stays a strict no-op there.
+        // Purging therefore runs ONLY for a major/full compaction that spans
+        // every SSTable for the table — see `KWayMerger::with_purge_safe`.
+        gc_before_secs: Option<i64>,
     ) -> Option<MergeEntry> {
         use std::collections::HashMap;
 
@@ -2126,7 +2286,7 @@ impl KWayMerger {
             })
             .collect();
 
-        let surviving: Vec<CellData> = after_row_del
+        let mut surviving: Vec<CellData> = after_row_del
             .iter()
             .filter(|cell| match dropped_columns.get(&cell.column) {
                 Some(drop_time) => cell.timestamp > *drop_time,
@@ -2137,19 +2297,107 @@ impl KWayMerger {
 
         // Phantom-row guard (#847 review): clustering-key columns are intentionally
         // left in the cell list (see `extract_clustering_key`) for read-back. If a
-        // clustered row's only real (non-key) data is a dropped column, the filter
-        // removes it but the clustering-key pseudo-cells remain — which would emit
-        // a phantom live row with a key but no data (the writer, whose schema
-        // excludes the dropped column, would serialize a key-only empty row).
-        // Suppress that: when the row HAD non-key data before the purge and has
-        // none after, treat it as data-less. A row that was always key-only (a
-        // genuine row marker) is preserved.
+        // clustered row's only real (non-key) data is a dropped column (or, per
+        // #921 finding 3 below, a purgeable cell tombstone), the filters remove it
+        // but the clustering-key pseudo-cells remain — which would emit a phantom
+        // live row with a key but no data (the writer, whose schema excludes the
+        // dropped column, would serialize a key-only empty row). Suppress that:
+        // when the row HAD non-key data before the purges and has none after,
+        // treat it as data-less. A row that was always key-only (a genuine row
+        // marker) is preserved.
+        //
+        // We capture `had_data_before` here, but DEFER the
+        // `has_data_after` / `purged_to_empty` determination until AFTER the
+        // gc-grace tombstone purge (Step 3c) — see #921 finding 3 below. Computing
+        // it now (before Step 3c) would miss a clustered row whose only non-key
+        // data is a purgeable cell tombstone: that tombstone is still present in
+        // `surviving` at this point, so a pre-purge check would (wrongly) report
+        // surviving data and emit a phantom key-only live row after the purge.
         let ck_names: std::collections::HashSet<&str> = clustering_key
             .as_ref()
             .map(|ck| ck.columns.iter().map(|(n, _)| n.as_str()).collect())
             .unwrap_or_default();
         let is_data_cell = |cell: &CellData| !ck_names.contains(cell.column.as_str());
         let had_data_before = after_row_del.iter().any(is_data_cell);
+
+        // Step 3c: gc_grace / gcBefore tombstone PURGING (issue #845, parity
+        // Cassandra `8d47ebb2`). A tombstone whose on-disk `localDeletionTime`
+        // (GC-clock seconds) is STRICTLY LESS THAN `gcBefore` is purgeable and
+        // dropped from the output; one within grace (`>= gcBefore`) is retained.
+        // The boundary mirrors Cassandra exactly: `localDeletionTime < gcBefore`
+        // purges, `==` is retained.
+        //
+        // This is a SEPARATE stage that runs AFTER complex-deletion
+        // shadow-before-purge (Step 2b) and the row-tombstone / dropped-column
+        // filters above. Those stages have already removed every cell/element
+        // COVERED by a tombstone WITHIN this compaction, so purging the
+        // now-redundant marker here cannot resurrect data within this set.
+        //
+        // OVERLAP SAFETY (#921 finding 1): `gc_before_secs` here is the EFFECTIVE
+        // cutoff — `merge_partition_rows` already collapsed it to `None` for a
+        // partial (non-overlap-safe) compaction, so this stage runs only for a
+        // major/full compaction that spans every SSTable for the table. A partial
+        // compaction therefore retains every tombstone and cannot resurrect data
+        // shadowed in a non-included overlapping SSTable.
+        //
+        // LDT NORMALIZATION (#921 finding 2): on-disk `localDeletionTime` is an
+        // UNSIGNED 32-bit GC-clock second count (OA/DA). It is carried here as a
+        // wrapped `i32`, so a far-future LDT with bit 31 set reads as a NEGATIVE
+        // `i32`. Comparing that via `as i64` would make it look older than any
+        // `gcBefore` and purge a far-future tombstone immediately. Reinterpret
+        // the bits as unsigned (`i64::from(ldt as u32)`) before every compare.
+        if let Some(gc_before) = gc_before_secs {
+            // (a) Cell tombstones: drop any purgeable simple cell tombstone (and
+            // purgeable complex-element tombstone) from the surviving set. A cell
+            // whose `local_deletion_time` is not surfaced (`None`) is conservative-
+            // ly RETAINED — we never purge on unknown LDT (no-heuristics mandate).
+            surviving.retain(|cell| {
+                if Self::is_cell_tombstone(cell) || cell.is_deleted {
+                    // #921 finding 1: a simple cell tombstone surfaces its LDT in
+                    // its `Value::Tombstone` payload, not `CellData.local_deletion_time`
+                    // (which the reader fills only for expiring cells). Consult both
+                    // via `cell_effective_ldt` so a purgeable cell tombstone is
+                    // actually purged here — matching the survivor pre-pass.
+                    match Self::cell_effective_ldt(cell) {
+                        Some(ldt) => i64::from(ldt as u32) >= gc_before,
+                        None => true,
+                    }
+                } else {
+                    true
+                }
+            });
+
+            // (b) Row tombstone: a purgeable row deletion is dropped so no
+            // tombstone entry is emitted for it. Row-tombstone shadowing already
+            // ran above (`after_row_del`), so cells it covered are gone.
+            //
+            // UNKNOWN-LDT RETENTION (#921 finding 2): `row_del_ldt == 0` is the
+            // "LDT not surfaced" placeholder used by legacy/pre-V5 paths (the
+            // field is initialized to 0 and only overwritten when a real
+            // `local_deletion_time` is carried). Treat 0 as UNKNOWN and RETAIN
+            // the row tombstone — never purge on unknown LDT, matching the
+            // conservative rule already used for cell tombstones (case (a),
+            // `None => true`). Only a real, non-zero, surfaced LDT strictly
+            // below `gcBefore` purges.
+            if row_del.is_some() && row_del_ldt != 0 && i64::from(row_del_ldt as u32) < gc_before {
+                row_del = None;
+            }
+
+            // (c) Complex-deletion markers: drop each purgeable marker. The
+            // strict-supersede reduction + shadow-before-purge already ran in
+            // Step 2b, so a covered element is gone before its marker is purged.
+            complex_deletions.retain(|cd| i64::from(cd.local_deletion_time as u32) >= gc_before);
+        }
+
+        // Phantom key-only-row determination (#921 finding 3): recompute
+        // `purged_to_empty` AFTER the gc-grace cell-tombstone purge above, so a
+        // CLUSTERED row whose only non-key data was a purgeable cell tombstone —
+        // now removed from `surviving` — is recognized as data-less and emits
+        // NOTHING instead of a phantom key-only live row. `had_data_before` was
+        // captured pre-purge above; if the row HAD non-key data before the purges
+        // and has none after, it has been `purged_to_empty`. A row that was always
+        // key-only (a genuine row marker) keeps `had_data_before == false` and is
+        // preserved by Step 4 below.
         let has_data_after = surviving.iter().any(is_data_cell);
         let purged_to_empty = had_data_before && !has_data_after;
 
@@ -2274,15 +2522,32 @@ impl KWayMerger {
                 // Value::Tombstone(CellTombstone); translate to
                 // CellOperation::Delete so the writer emits a proper cell tombstone
                 // rather than a live cell with a null value.
-                if matches!(
-                    cell.value,
-                    Value::Tombstone(ref info)
-                        if info.tombstone_type == TombstoneType::CellTombstone
-                ) {
-                    CellOperation::Delete {
-                        column: cell.column,
+                if let Value::Tombstone(ref info) = cell.value {
+                    if info.tombstone_type == TombstoneType::CellTombstone {
+                        // #921 finding 2: preserve the SOURCE cell tombstone's own
+                        // `localDeletionTime` (GC clock, seconds) so the writer
+                        // emits it verbatim instead of deriving one from the
+                        // enclosing mutation's timestamp. A within-grace cell
+                        // tombstone that survives THIS compaction keeps its
+                        // original GC clock — no drift that would purge it too
+                        // early / keep it too long in a LATER compaction. `0` is
+                        // the "not surfaced" placeholder (the reader writes it
+                        // when the on-disk LDT is absent), in which case we leave
+                        // the op LDT `None` so the writer keeps its historical
+                        // timestamp-derived behavior. The width conversion mirrors
+                        // the row-tombstone path (`info.local_deletion_time as
+                        // i32`, #873).
+                        let preserved_ldt = match info.local_deletion_time {
+                            0 => None,
+                            ldt => Some(ldt as i32),
+                        };
+                        return CellOperation::Delete {
+                            column: cell.column,
+                            local_deletion_time: preserved_ldt,
+                        };
                     }
-                } else if let Some(ttl) = cell.ttl {
+                }
+                if let Some(ttl) = cell.ttl {
                     CellOperation::WriteWithTtl {
                         column: cell.column,
                         value: cell.value,
@@ -2805,6 +3070,7 @@ mod tests {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         };
 
@@ -2925,6 +3191,7 @@ mod tests {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         };
 
@@ -3070,6 +3337,7 @@ mod tests {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         };
 
@@ -3217,6 +3485,7 @@ mod tests {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         };
 
@@ -3363,6 +3632,7 @@ mod tests {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         };
 
@@ -3494,6 +3764,7 @@ mod tests {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         };
 
@@ -3587,6 +3858,7 @@ mod tests {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         };
 
@@ -4573,6 +4845,7 @@ mod merge_property_tests {
                     current_partition: None,
                     gc_before_secs: None,
                     now_secs: None,
+                    purge_safe: false,
                     schema: schema.clone(),
                 };
                 let real_merged = merger.merge_partition_rows(merge_entries.clone())
@@ -4697,6 +4970,7 @@ mod merge_property_tests {
                     current_partition: None,
                     gc_before_secs: None,
                     now_secs: None,
+                    purge_safe: false,
                     schema: schema.clone(),
                 };
                 let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
@@ -4906,6 +5180,7 @@ mod streaming_tests {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         };
 
@@ -5045,7 +5320,7 @@ mod issue_823_complex_column_merge {
         let mut dropped = ::std::collections::HashMap::new();
         dropped.insert("legacy".to_string(), 150); // cell ts=100 <= 150
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped)
+        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped, None)
             .expect("a live row must be emitted (name survives)");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
@@ -5062,7 +5337,7 @@ mod issue_823_complex_column_merge {
         let mut dropped = ::std::collections::HashMap::new();
         dropped.insert("legacy".to_string(), 150); // cell ts=200 > 150
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped)
+        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped, None)
             .expect("a live row must be emitted (cell post-dates the drop)");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
@@ -5081,7 +5356,7 @@ mod issue_823_complex_column_merge {
         dropped.insert("legacy".to_string(), 150);
 
         assert!(
-            KWayMerger::reconcile_cluster(None, vec![row], &dropped).is_none(),
+            KWayMerger::reconcile_cluster(None, vec![row], &dropped, None).is_none(),
             "cell at exactly drop_time must be discarded, leaving no surviving cells"
         );
     }
@@ -5099,7 +5374,7 @@ mod issue_823_complex_column_merge {
         dropped.insert("b".to_string(), 200);
 
         assert!(
-            KWayMerger::reconcile_cluster(None, vec![row], &dropped).is_none(),
+            KWayMerger::reconcile_cluster(None, vec![row], &dropped, None).is_none(),
             "a row whose every cell is a dropped-column cell emits nothing"
         );
     }
@@ -5115,9 +5390,13 @@ mod issue_823_complex_column_merge {
                 scalar_cell("legacy", "stale", 100),
             ],
         );
-        let merged =
-            KWayMerger::reconcile_cluster(None, vec![row], &::std::collections::HashMap::new())
-                .expect("a live row must be emitted");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![row],
+            &::std::collections::HashMap::new(),
+            None,
+        )
+        .expect("a live row must be emitted");
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {:?}", other),
@@ -5177,6 +5456,7 @@ mod issue_823_complex_column_merge {
             None,
             vec![newer, older],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a live row must be emitted");
 
@@ -5256,6 +5536,7 @@ mod issue_823_complex_column_merge {
             None,
             vec![newer, older],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a live row must be emitted");
         let cells = match merged.row_data {
@@ -5373,6 +5654,7 @@ mod issue_823_complex_column_merge {
             None,
             vec![row_tomb, cell_tomb],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("row tombstone keeps the row shadowed");
 
@@ -5452,6 +5734,7 @@ mod issue_823_complex_column_merge {
             None,
             vec![expiring, tombstone],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a row must be emitted");
 
@@ -5489,6 +5772,7 @@ mod issue_823_complex_column_merge {
             None,
             vec![tombstone, expiring],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a row must be emitted");
 
@@ -5517,6 +5801,7 @@ mod issue_823_complex_column_merge {
             None,
             vec![tombstone, expiring],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a row must be emitted");
 
@@ -5661,9 +5946,13 @@ mod issue_886_merge_entry_enrichment {
                 marked_for_delete_at: 1234,
                 local_deletion_time: 1_700_000_000,
             }]);
-        let merged =
-            KWayMerger::reconcile_cluster(None, vec![live], &::std::collections::HashMap::new())
-                .expect("live row must be emitted");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![live],
+            &::std::collections::HashMap::new(),
+            None,
+        )
+        .expect("live row must be emitted");
         match merged.row_data {
             RowData::Live { cells } => {
                 assert_eq!(
@@ -5697,9 +5986,13 @@ mod issue_886_merge_entry_enrichment {
 
         // Plumbing-only: the covered cell (ts=1000 < range ts=5000) STILL
         // survives reconcile because range deletions are not yet applied.
-        let merged =
-            KWayMerger::reconcile_cluster(None, vec![entry], &::std::collections::HashMap::new())
-                .expect("live row must be emitted");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![entry],
+            &::std::collections::HashMap::new(),
+            None,
+        )
+        .expect("live row must be emitted");
         match merged.row_data {
             RowData::Live { cells } => {
                 assert_eq!(
@@ -5771,6 +6064,7 @@ mod issue_886_merge_entry_enrichment {
             None,
             vec![row0, row1],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("live row must be emitted");
 
@@ -5814,6 +6108,7 @@ mod issue_886_merge_entry_enrichment {
             None,
             vec![plain0, plain1],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("live row must be emitted");
         assert_eq!(
@@ -5846,9 +6141,13 @@ mod issue_886_merge_entry_enrichment {
         )
         .with_complex_deletions(vec![complex.clone()]);
 
-        let merged =
-            KWayMerger::reconcile_cluster(None, vec![row], &::std::collections::HashMap::new())
-                .expect("row tombstone must be emitted");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![row],
+            &::std::collections::HashMap::new(),
+            None,
+        )
+        .expect("row tombstone must be emitted");
         assert!(matches!(merged.row_data, RowData::Tombstone { .. }));
         assert_eq!(merged.complex_deletions, vec![complex]);
     }
@@ -5879,9 +6178,13 @@ mod issue_886_merge_entry_enrichment {
             .with_complex_deletions(vec![complex.clone()])
             .with_range_deletion(range.clone());
 
-        let merged =
-            KWayMerger::reconcile_cluster(None, vec![row], &::std::collections::HashMap::new())
-                .expect("metadata-only cluster must still emit an entry");
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![row],
+            &::std::collections::HashMap::new(),
+            None,
+        )
+        .expect("metadata-only cluster must still emit an entry");
 
         // The emitted entry carries the metadata and has no live cells.
         match &merged.row_data {
@@ -5905,8 +6208,13 @@ mod issue_886_merge_entry_enrichment {
     fn reconcile_cluster_empty_live_without_metadata_yields_none() {
         let row = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] });
         assert!(
-            KWayMerger::reconcile_cluster(None, vec![row], &::std::collections::HashMap::new())
-                .is_none(),
+            KWayMerger::reconcile_cluster(
+                None,
+                vec![row],
+                &::std::collections::HashMap::new(),
+                None
+            )
+            .is_none(),
             "empty live row with no metadata must not emit an entry"
         );
     }
@@ -5967,6 +6275,7 @@ mod issue_886_merge_entry_enrichment {
             None,
             vec![complex_only],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("complex-deletion-only cluster must still emit an entry");
         assert!(
@@ -6199,6 +6508,7 @@ mod issue_899_per_element_merge {
             None,
             vec![newer, older],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a live row must be emitted");
         let cells = match merged.row_data {
@@ -6271,6 +6581,7 @@ mod issue_899_per_element_merge {
             None,
             vec![new_el, old_el],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a live row must be emitted");
 
@@ -6365,6 +6676,7 @@ mod issue_899_per_element_merge {
             None,
             vec![survivor, covered],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a live row must be emitted");
 
@@ -6478,6 +6790,7 @@ mod issue_899_per_element_merge {
             None,
             vec![strong, weak],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a live row must be emitted");
 
@@ -6602,6 +6915,7 @@ mod issue_899_per_element_merge {
             None,
             vec![row_tomb, carrier],
             &::std::collections::HashMap::new(),
+            None,
         )
         .expect("a row must be emitted (it carries a row tombstone + survivor)");
 
@@ -6869,6 +7183,7 @@ mod issue_822_merge_ordering_semantics {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         }
     }
@@ -7254,6 +7569,7 @@ mod issue_822_merge_ordering_semantics {
             Some(ClusteringKey::single("ck", Value::Integer(7))),
             vec![CellOperation::Delete {
                 column: "v".to_string(),
+                local_deletion_time: None,
             }],
             TS,
             None,
@@ -7382,6 +7698,7 @@ mod issue_822_merge_ordering_semantics {
             Some(ClusteringKey::single("ck", Value::Integer(7))),
             vec![CellOperation::Delete {
                 column: "v".to_string(),
+                local_deletion_time: None,
             }],
             TS,
             None,
@@ -7770,6 +8087,7 @@ mod issue_886_empty_partition_skip {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema,
         }
     }
@@ -8054,6 +8372,7 @@ mod issue_912_row_tombstone_clustering_identity {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema: schema.clone(),
         };
         let merged = merger
@@ -8134,6 +8453,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             None,
             vec![tombstone_entry(0, deletion_time, source_ldt)],
             &HashMap::new(),
+            None,
         )
         .expect("a surviving row tombstone must be emitted");
 
@@ -8162,7 +8482,7 @@ mod issue_873_preserve_row_tombstone_ldt {
         let older = tombstone_entry(0, 100_000_000, 1_900_000_000);
         let newer = tombstone_entry(1, 200_000_000, 1_500_000_000);
 
-        let merged = KWayMerger::reconcile_cluster(None, vec![older, newer], &HashMap::new())
+        let merged = KWayMerger::reconcile_cluster(None, vec![older, newer], &HashMap::new(), None)
             .expect("a surviving row tombstone must be emitted");
 
         match merged.row_data {
@@ -8302,6 +8622,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             current_partition: None,
             gc_before_secs: None,
             now_secs: None,
+            purge_safe: false,
             schema: schema.clone(),
         };
 
@@ -8354,6 +8675,782 @@ mod issue_873_preserve_row_tombstone_ldt {
         assert!(
             saw_tombstone,
             "the rewritten SSTable must contain the row tombstone"
+        );
+    }
+}
+
+// ── Issue #845 (Epic #921): gc_grace / gcBefore tombstone purging ────────────
+//
+// Parity Cassandra `8d47ebb2` (`cursor-compaction-completion`): a tombstone
+// whose `localDeletionTime < gcBefore` is PURGEABLE and dropped from the
+// compaction output; one within grace (`localDeletionTime >= gcBefore`) is
+// RETAINED. The purge runs as a SEPARATE stage AFTER shadow-before-purge
+// (#887) and the row-tombstone / dropped-column filters, so covered cells
+// are already removed before any marker is purged (no resurrection). When
+// `gc_before_secs` is `None`, the stage is a strict no-op.
+#[cfg(all(test, feature = "write-support"))]
+mod issue_845_gc_grace_purge {
+    use super::*;
+    use crate::schema::{KeyColumn, TableSchema};
+    use crate::storage::write_engine::mutation::DecoratedKey;
+    use crate::types::{TombstoneInfo, TombstoneType};
+    use std::collections::HashMap;
+
+    fn dk(byte: u8) -> DecoratedKey {
+        DecoratedKey::from_key_bytes(vec![byte]).expect("token")
+    }
+
+    fn live(run_index: usize, row_ts: i64, cells: Vec<CellData>) -> MergeEntry {
+        MergeEntry::new(run_index, dk(1), None, row_ts, RowData::Live { cells })
+    }
+
+    fn unclustered_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "ks845".to_string(),
+            table: "t845".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    fn tombstone_entry(run_index: usize, deletion_time: i64, ldt: i32) -> MergeEntry {
+        MergeEntry::new(
+            run_index,
+            DecoratedKey::new(500, 7i32.to_be_bytes().to_vec()),
+            None,
+            deletion_time,
+            RowData::Tombstone {
+                deletion_time,
+                local_deletion_time: ldt,
+            },
+        )
+    }
+
+    /// A single-cell tombstone `CellData` for column `v` carrying its LDT.
+    fn cell_tombstone(ts: i64, ldt: i32) -> CellData {
+        CellData {
+            column: "v".to_string(),
+            value: Value::Tombstone(TombstoneInfo {
+                deletion_time: ts,
+                tombstone_type: TombstoneType::CellTombstone,
+                local_deletion_time: ldt as i64,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            }),
+            timestamp: ts,
+            ttl: None,
+            cell_path: None,
+            local_deletion_time: Some(ldt),
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
+        }
+    }
+
+    /// A complex-deletion marker whose LDT is older than gcBefore is purged; an
+    /// equivalent marker within grace is retained. Boundary: `== gcBefore` is
+    /// RETAINED (only strictly-less purges).
+    #[test]
+    fn issue_845_complex_deletion_purged_when_older_than_gc_before() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        // Marker covers NOTHING (no live elements), so purging cannot resurrect.
+        let make = |ldt: i32| {
+            MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+                .with_complex_deletions(vec![ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: 50,
+                    local_deletion_time: ldt,
+                }])
+        };
+
+        // Older than gcBefore → purgeable → the marker is dropped, and with no
+        // surviving data + no row tombstone the whole entry vanishes.
+        let purged = KWayMerger::reconcile_cluster(
+            None,
+            vec![make((GC_BEFORE - 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        );
+        assert!(
+            purged.is_none(),
+            "a complex-deletion marker older than gcBefore must be purged, \
+             leaving nothing to emit"
+        );
+
+        // Within grace (strictly newer) → retained.
+        let retained = KWayMerger::reconcile_cluster(
+            None,
+            vec![make((GC_BEFORE + 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a within-grace marker must keep a metadata-only entry");
+        assert_eq!(
+            retained.complex_deletions.len(),
+            1,
+            "a complex-deletion marker within grace must be retained"
+        );
+
+        // Boundary: LDT == gcBefore is RETAINED (only `< gcBefore` purges).
+        let boundary = KWayMerger::reconcile_cluster(
+            None,
+            vec![make(GC_BEFORE as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a marker at exactly gcBefore must be retained");
+        assert_eq!(
+            boundary.complex_deletions.len(),
+            1,
+            "localDeletionTime == gcBefore is within grace (only `<` purges)"
+        );
+    }
+
+    /// A row tombstone whose LDT is older than gcBefore is purged; an equivalent
+    /// one within grace is retained. Boundary `== gcBefore` is RETAINED.
+    #[test]
+    fn issue_845_row_tombstone_purged_when_older_than_gc_before() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        // deletion_time (micros) chosen so it does not equal LDT (seconds).
+        let dt = 1_000_000_000_000_000i64;
+
+        let older = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, (GC_BEFORE - 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        );
+        assert!(
+            older.is_none(),
+            "a row tombstone older than gcBefore must be purged (nothing emitted)"
+        );
+
+        let within = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, (GC_BEFORE + 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a within-grace row tombstone must be retained");
+        assert!(
+            matches!(within.row_data, RowData::Tombstone { .. }),
+            "a within-grace row tombstone must survive"
+        );
+
+        let boundary = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, GC_BEFORE as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a row tombstone at exactly gcBefore must be retained");
+        assert!(
+            matches!(boundary.row_data, RowData::Tombstone { .. }),
+            "localDeletionTime == gcBefore is within grace (only `<` purges)"
+        );
+    }
+
+    /// A simple cell tombstone whose LDT is older than gcBefore is purged; one
+    /// within grace is retained. Boundary `== gcBefore` is RETAINED.
+    #[test]
+    fn issue_845_cell_tombstone_purged_when_older_than_gc_before() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        // A live cell on a SEPARATE column keeps the row alive so we observe the
+        // tombstone cell being dropped (not the row collapsing). Its ts is well
+        // above any tombstone ts so row-tombstone shadowing is irrelevant here.
+        let keep = CellData::new("name".to_string(), Value::Text("alive".to_string()), 500);
+
+        let count_tombstone_cells = |ldt: i32| -> usize {
+            let merged = KWayMerger::reconcile_cluster(
+                None,
+                vec![live(0, 500, vec![keep.clone(), cell_tombstone(100, ldt)])],
+                &::std::collections::HashMap::new(),
+                Some(GC_BEFORE),
+            )
+            .expect("a live row must be emitted");
+            match merged.row_data {
+                RowData::Live { cells } => cells
+                    .iter()
+                    .filter(|c| KWayMerger::is_cell_tombstone(c))
+                    .count(),
+                other => panic!("expected Live, got {other:?}"),
+            }
+        };
+
+        assert_eq!(
+            count_tombstone_cells((GC_BEFORE - 1) as i32),
+            0,
+            "a cell tombstone older than gcBefore must be purged from the row"
+        );
+        assert_eq!(
+            count_tombstone_cells((GC_BEFORE + 1) as i32),
+            1,
+            "a cell tombstone within grace must be retained"
+        );
+        assert_eq!(
+            count_tombstone_cells(GC_BEFORE as i32),
+            1,
+            "localDeletionTime == gcBefore is within grace (only `<` purges)"
+        );
+    }
+
+    /// When `gc_before_secs` is `None` the purge stage is a strict no-op: an
+    /// ancient tombstone (LDT far in the past) is RETAINED, preserving the
+    /// pre-#845 behavior.
+    #[test]
+    fn issue_845_no_gc_before_retains_everything() {
+        let dt = 1_000_000_000_000_000i64;
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, 1)],
+            &::std::collections::HashMap::new(),
+            None,
+        )
+        .expect("without gcBefore the tombstone must be retained");
+        assert!(
+            matches!(merged.row_data, RowData::Tombstone { .. }),
+            "with gc_before_secs = None nothing is purged"
+        );
+    }
+
+    /// CRITICAL no-resurrection guard: a complex-deletion marker that SHADOWS a
+    /// covered element (ts <= mfda) must remove that element in Step 2b BEFORE
+    /// the marker is purged in the gc stage. After purging the marker, the
+    /// covered element must NOT reappear.
+    #[test]
+    fn issue_845_purge_does_not_resurrect_shadowed_element() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        const MFDA: i64 = 200;
+        // A complex ELEMENT (carries a cell_path) of column `tags` written at
+        // ts == MFDA, so it is shadowed (`ts <= mfda`) by the marker.
+        let covered = CellData {
+            column: "tags".to_string(),
+            value: Value::Text("ghost".to_string()),
+            timestamp: MFDA,
+            ttl: None,
+            cell_path: Some(vec![1, 2, 3]),
+            local_deletion_time: None,
+            is_complex_element: true,
+            is_deleted: false,
+            has_empty_value: false,
+        };
+        let entry = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            MFDA,
+            RowData::Live {
+                cells: vec![covered],
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: MFDA,
+            // Marker is older than gcBefore → purgeable.
+            local_deletion_time: (GC_BEFORE - 1) as i32,
+        }]);
+
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![entry],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        );
+        // The covered element was shadowed (removed) in Step 2b, then the marker
+        // was purged: nothing survives, so no entry is emitted — and crucially
+        // the shadowed element is NOT resurrected as a live cell.
+        assert!(
+            merged.is_none(),
+            "purging the marker must not resurrect the element it shadowed"
+        );
+    }
+
+    /// `compute_gc_before` derives `now - gc_grace_seconds` from the schema's
+    /// `gc_grace_seconds` comment. When ABSENT it falls back to Cassandra's
+    /// table DEFAULT of 864000s (#921 finding 3); INVALID values return `None`.
+    #[test]
+    fn issue_845_compute_gc_before_from_schema() {
+        let mut schema = unclustered_schema();
+        let now = 2_000_000_000i64;
+
+        // gc_grace_seconds = 0 → gcBefore == now (immediate purge eligibility).
+        schema
+            .comments
+            .insert("gc_grace_seconds".to_string(), "0".to_string());
+        assert_eq!(compute_gc_before(&schema, now), Some(now));
+
+        // gc_grace_seconds = 864000 (10 days) → gcBefore == now - 864000.
+        schema
+            .comments
+            .insert("gc_grace_seconds".to_string(), "864000".to_string());
+        assert_eq!(compute_gc_before(&schema, now), Some(now - 864_000));
+
+        // Unparseable → None (never purge on bad metadata).
+        schema
+            .comments
+            .insert("gc_grace_seconds".to_string(), "not-a-number".to_string());
+        assert_eq!(compute_gc_before(&schema, now), None);
+    }
+
+    /// #921 finding 3: a table that OMITS `gc_grace_seconds` must use
+    /// Cassandra's DEFAULT of 864000s (10 days), not disable purging. A NEGATIVE
+    /// or unparseable value is rejected conservatively (`None`, no purge); 0 is
+    /// valid (immediate grace).
+    #[test]
+    fn issue_921_compute_gc_before_defaults_to_864000_when_absent() {
+        let mut schema = unclustered_schema();
+        let now = 2_000_000_000i64;
+
+        // ABSENT → Cassandra default 864000s (NOT None / disabled).
+        assert_eq!(
+            compute_gc_before(&schema, now),
+            Some(now - 864_000),
+            "missing gc_grace_seconds must use the Cassandra default of 864000s"
+        );
+
+        // 0 is a VALID value (immediate grace) per Cassandra → gcBefore == now.
+        schema
+            .comments
+            .insert("gc_grace_seconds".to_string(), "0".to_string());
+        assert_eq!(
+            compute_gc_before(&schema, now),
+            Some(now),
+            "gc_grace_seconds = 0 is valid (immediate grace)"
+        );
+
+        // NEGATIVE → None (never purge on out-of-range metadata).
+        schema
+            .comments
+            .insert("gc_grace_seconds".to_string(), "-1".to_string());
+        assert_eq!(
+            compute_gc_before(&schema, now),
+            None,
+            "a negative gc_grace_seconds must disable purging (no-op)"
+        );
+
+        // Unparseable → None.
+        schema
+            .comments
+            .insert("gc_grace_seconds".to_string(), "garbage".to_string());
+        assert_eq!(
+            compute_gc_before(&schema, now),
+            None,
+            "an unparseable gc_grace_seconds must disable purging (no-op)"
+        );
+    }
+
+    /// #921 finding 2: on-disk `localDeletionTime` is an UNSIGNED 32-bit count.
+    /// A far-future LDT with bit 31 set (e.g. `0x8000_0000` ≈ year 2038) is
+    /// carried as a NEGATIVE `i32`. The purge compare must normalize it as
+    /// unsigned (`i64::from(ldt as u32)`) so it reads as a LARGE future second
+    /// and is NOT purged by a normal `gcBefore`. The pre-fix `as i64` path made
+    /// it look ancient and purged the tombstone immediately (resurrection bug).
+    #[test]
+    fn issue_921_unsigned_local_deletion_time_not_purged() {
+        // bit 31 set: as i32 this is negative (-2147483648); as u32 it is
+        // 2_147_483_648 seconds ≈ 2038-01-19 — far in the future.
+        let future_ldt_bits = 0x8000_0000u32 as i32;
+        assert!(future_ldt_bits < 0, "the wrapped LDT is a negative i32");
+        // A normal gcBefore well below the unsigned value: nothing should purge.
+        const GC_BEFORE: i64 = 1_700_000_000;
+        assert!(
+            i64::from(future_ldt_bits as u32) > GC_BEFORE,
+            "the unsigned LDT is in the future relative to gcBefore"
+        );
+
+        // (a) Row tombstone with the far-future LDT must be RETAINED.
+        let dt = 1_000_000_000_000_000i64;
+        let row = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, future_ldt_bits)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a far-future row tombstone must NOT be purged");
+        assert!(
+            matches!(row.row_data, RowData::Tombstone { .. }),
+            "an unsigned far-future row tombstone must survive a normal gcBefore"
+        );
+
+        // (b) Complex-deletion marker with the far-future LDT must be RETAINED.
+        let complex = KWayMerger::reconcile_cluster(
+            None,
+            vec![
+                MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+                    .with_complex_deletions(vec![ComplexDeletion {
+                        column: "tags".to_string(),
+                        marked_for_delete_at: 50,
+                        local_deletion_time: future_ldt_bits,
+                    }]),
+            ],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a far-future complex-deletion marker must NOT be purged");
+        assert_eq!(
+            complex.complex_deletions.len(),
+            1,
+            "an unsigned far-future complex marker must survive a normal gcBefore"
+        );
+
+        // (c) Cell tombstone with the far-future LDT must be RETAINED.
+        let keep = CellData::new("name".to_string(), Value::Text("alive".to_string()), 500);
+        let cell = KWayMerger::reconcile_cluster(
+            None,
+            vec![live(
+                0,
+                500,
+                vec![keep, cell_tombstone(100, future_ldt_bits)],
+            )],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a live row must be emitted");
+        let tombstone_cells = match cell.row_data {
+            RowData::Live { cells } => cells
+                .iter()
+                .filter(|c| KWayMerger::is_cell_tombstone(c))
+                .count(),
+            other => panic!("expected Live, got {other:?}"),
+        };
+        assert_eq!(
+            tombstone_cells, 1,
+            "an unsigned far-future cell tombstone must survive a normal gcBefore"
+        );
+
+        // Control: a genuinely ancient LDT (bit 31 clear, < gcBefore) IS purged,
+        // proving the normalization did not disable purging wholesale.
+        let ancient = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, (GC_BEFORE - 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        );
+        assert!(
+            ancient.is_none(),
+            "a genuinely ancient row tombstone must still be purged"
+        );
+    }
+
+    /// #921 finding 1 (SAFETY-CRITICAL): a PARTIAL compaction (not overlap-safe)
+    /// must NOT purge tombstones — purging one could resurrect data shadowed in a
+    /// non-included overlapping SSTable. A MAJOR/full compaction (overlap-safe)
+    /// purges. Drives the gate through `merge_partition_rows`, which collapses
+    /// the gc_grace cutoff to `None` unless `purge_safe` is set.
+    #[test]
+    fn issue_921_partial_compaction_does_not_purge_but_major_does() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        let dt = 1_000_000_000_000_000i64;
+        // A row tombstone old enough to be purgeable (LDT < gcBefore).
+        let ancient_ldt = (GC_BEFORE - 1) as i32;
+
+        // Build a merger with NO runs (merge_partition_rows ignores `runs`),
+        // gc_before set, and toggle only `purge_safe`.
+        let merger = |purge_safe: bool| KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema: unclustered_schema(),
+            gc_before_secs: Some(GC_BEFORE),
+            now_secs: None,
+            purge_safe,
+        };
+
+        // PARTIAL compaction (purge_safe = false): the purgeable row tombstone is
+        // RETAINED — the partial path must never drop a tombstone.
+        let partial = merger(false)
+            .merge_partition_rows(vec![tombstone_entry(0, dt, ancient_ldt)])
+            .expect("merge must succeed");
+        assert_eq!(
+            partial.len(),
+            1,
+            "a partial (non-overlap-safe) compaction must RETAIN the tombstone"
+        );
+        assert!(
+            matches!(partial[0].row_data, RowData::Tombstone { .. }),
+            "the retained entry must still be a row tombstone (no resurrection risk)"
+        );
+
+        // MAJOR compaction (purge_safe = true): the same purgeable tombstone IS
+        // dropped — overlap-safe, so purging cannot resurrect anything.
+        let major = merger(true)
+            .merge_partition_rows(vec![tombstone_entry(0, dt, ancient_ldt)])
+            .expect("merge must succeed");
+        assert!(
+            major.is_empty(),
+            "a major (overlap-safe) compaction must PURGE the ancient tombstone"
+        );
+    }
+
+    /// #921 finding 2: a row tombstone with `local_deletion_time == 0` is the
+    /// "LDT not surfaced" placeholder used by legacy/pre-V5 paths. It must be
+    /// treated as UNKNOWN and RETAINED under purge-safe compaction (never purge
+    /// on unknown LDT). Only a real, non-zero LDT strictly below `gcBefore`
+    /// purges; a within-grace LDT is retained.
+    #[test]
+    fn issue_921_row_tombstone_ldt_zero_is_unknown_and_retained() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        let dt = 1_000_000_000_000_000i64;
+
+        // LDT == 0 (unknown placeholder): RETAINED even though `0 < gcBefore`.
+        let unknown = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, 0)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a row tombstone with unknown (0) LDT must be RETAINED, not purged");
+        assert!(
+            matches!(unknown.row_data, RowData::Tombstone { .. }),
+            "LDT==0 is the unknown placeholder and must be retained (never purge \
+             on unknown LDT)"
+        );
+
+        // A REAL, non-zero ancient LDT (< gcBefore) still purges.
+        let ancient = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, (GC_BEFORE - 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        );
+        assert!(
+            ancient.is_none(),
+            "a real non-zero ancient row tombstone (LDT < gcBefore) must still purge"
+        );
+
+        // Within-grace LDT (>= gcBefore) is retained.
+        let within = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, dt, (GC_BEFORE + 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a within-grace row tombstone must be retained");
+        assert!(
+            matches!(within.row_data, RowData::Tombstone { .. }),
+            "a within-grace row tombstone (LDT >= gcBefore) must survive"
+        );
+    }
+
+    /// #921 finding 3: a CLUSTERED row whose only non-key data is a PURGEABLE
+    /// cell tombstone must emit NOTHING after the gc purge — no phantom key-only
+    /// live row. The `purged_to_empty` determination must run AFTER the cell
+    /// tombstone purge. A clustered row with REAL surviving (non-key) data still
+    /// emits a live row.
+    #[test]
+    fn issue_921_clustered_row_with_only_purgeable_cell_tombstone_emits_nothing() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        // Clustering key column `ck` (a pseudo-cell that stays in the cell list).
+        let ck = ClusteringKey {
+            columns: vec![("ck".to_string(), Value::Text("c1".to_string()))],
+        };
+        // The clustering-key pseudo-cell carried alongside the data cells (mirrors
+        // `extract_clustering_key` keeping CK columns in the cell list for
+        // read-back). It is NOT a data cell (its column name is in `ck_names`).
+        let ck_cell = CellData::new("ck".to_string(), Value::Text("c1".to_string()), 100);
+
+        let make = |extra: Vec<CellData>| {
+            let mut cells = vec![ck_cell.clone()];
+            cells.extend(extra);
+            MergeEntry::new(0, dk(1), Some(ck.clone()), 100, RowData::Live { cells })
+        };
+
+        // Only non-key data is a purgeable (ancient LDT) cell tombstone on `v`.
+        // After the gc purge the row has only the CK pseudo-cell left → it must
+        // be recognized as purged-to-empty and emit NOTHING (no phantom live row).
+        let purged = KWayMerger::reconcile_cluster(
+            Some(ck.clone()),
+            vec![make(vec![cell_tombstone(50, (GC_BEFORE - 1) as i32)])],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        );
+        assert!(
+            purged.is_none(),
+            "a clustered row whose only non-key data is a purgeable cell tombstone \
+             must emit NOTHING (no phantom key-only live row) after the gc purge"
+        );
+
+        // Control: a clustered row with REAL surviving non-key data still emits a
+        // live row (the purge of the tombstone does not collapse a real row).
+        let kept = KWayMerger::reconcile_cluster(
+            Some(ck.clone()),
+            vec![make(vec![
+                CellData::new("v".to_string(), Value::Text("real".to_string()), 60),
+                cell_tombstone(50, (GC_BEFORE - 1) as i32),
+            ])],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+        )
+        .expect("a clustered row with real surviving data must emit a live row");
+        match kept.row_data {
+            RowData::Live { cells } => {
+                assert!(
+                    cells
+                        .iter()
+                        .any(|c| c.column == "v" && !KWayMerger::is_cell_tombstone(c)),
+                    "the real surviving `v` cell must remain in the emitted live row"
+                );
+                assert!(
+                    !cells.iter().any(KWayMerger::is_cell_tombstone),
+                    "the purgeable cell tombstone must still be purged from the live row"
+                );
+            }
+            other => panic!("expected Live row, got {other:?}"),
+        }
+    }
+
+    /// #921 finding 2: the dropped-column survivor pre-pass
+    /// (`compute_surviving_dropped_columns`) must count a RETAINED
+    /// `ComplexDeletion` marker for a dropped COMPLEX column as a survivor.
+    ///
+    /// A complex (collection) tombstone lives in `row.complex_deletions`, NOT in
+    /// `cells`. The pre-fix pre-pass counted only live `cells`, so a dropped
+    /// complex column whose only survivor is a within-grace / purge-unsafe
+    /// complex-deletion marker was stripped from the output schema — and since the
+    /// writer only emits complex-element columns present in the schema, the marker
+    /// was silently dropped despite the merge deciding to RETAIN it.
+    ///
+    /// This drives the FULL merge→writer→on-disk path: it writes a `tags`
+    /// complex-deletion marker (no live elements) to a real SSTable, then runs the
+    /// survivor pre-pass over that file with `tags` dropped. With no gc (`None`),
+    /// the marker is RETAINED so `tags` MUST be counted as a survivor; with a gc
+    /// cutoff strictly above the marker's LDT (and `purge_safe`), the marker is
+    /// PURGED so `tags` MUST NOT be counted. Mirrors the cell-vs-marker asymmetry
+    /// the writer sees.
+    #[tokio::test]
+    async fn issue_921_complex_deletion_marker_counts_as_dropped_column_survivor() {
+        use crate::schema::Column;
+
+        // An in-memory run yielding a fixed `MergeEntry` so we drive the FULL
+        // production merge→writer path onto a real on-disk SSTable.
+        struct VecIterator(std::vec::IntoIter<MergeEntry>);
+        impl SSTableRowIterator for VecIterator {
+            fn next(&mut self) -> Option<Result<MergeEntry>> {
+                self.0.next().map(Ok)
+            }
+        }
+
+        // Schema with a non-frozen complex column `tags set<text>`. Drop map is
+        // applied per-call below.
+        fn schema_with_tags(dropped: HashMap<String, i64>) -> TableSchema {
+            TableSchema {
+                keyspace: "ks921".to_string(),
+                table: "t921".to_string(),
+                partition_keys: vec![KeyColumn {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    position: 0,
+                }],
+                clustering_keys: vec![],
+                columns: vec![
+                    Column {
+                        name: "id".to_string(),
+                        data_type: "int".to_string(),
+                        nullable: false,
+                        default: None,
+                        is_static: false,
+                    },
+                    Column {
+                        name: "tags".to_string(),
+                        data_type: "set<text>".to_string(),
+                        nullable: true,
+                        default: None,
+                        is_static: false,
+                    },
+                ],
+                comments: HashMap::new(),
+                dropped_columns: dropped,
+            }
+        }
+
+        const MARKER_LDT: i32 = 1_700_000_000;
+        const MARKER_MFDA: i64 = 1_600_000_000_000_000; // micros
+
+        // Write an SSTable whose single partition carries ONLY a `tags`
+        // complex-deletion marker (no surviving live elements, no other cells), so
+        // the column's sole survivor is the marker — exactly the case the pre-fix
+        // pre-pass missed.
+        let write_schema = schema_with_tags(HashMap::new());
+        let entry = MergeEntry::new(
+            0,
+            DecoratedKey::new(7, 7i32.to_be_bytes().to_vec()),
+            None,
+            0,
+            RowData::Live { cells: vec![] },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: MARKER_MFDA,
+            local_deletion_time: MARKER_LDT,
+        }]);
+
+        let merger = KWayMerger {
+            runs: vec![RunReader::new(Box::new(VecIterator(
+                vec![entry].into_iter(),
+            )))],
+            heap: std::collections::BinaryHeap::new(),
+            current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
+            purge_safe: false,
+            schema: write_schema.clone(),
+        };
+
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
+            temp_dir.path().to_path_buf(),
+            1,
+            &write_schema,
+        )
+        .expect("create writer");
+        merger.merge(&mut writer).expect("merge+write must succeed");
+        let info = writer.finish().await.expect("finish must succeed");
+        let data_path = info.data_path;
+
+        // Drop `tags`; the column stays in `columns` (decode contract) with a drop
+        // time well before the marker so a re-add filter does not interfere.
+        let mut dropped = HashMap::new();
+        dropped.insert("tags".to_string(), 1_i64);
+        let drop_schema = schema_with_tags(dropped);
+
+        // (a) No gc → the marker is RETAINED → `tags` MUST be a survivor.
+        let retained = compute_surviving_dropped_columns(
+            vec![data_path.clone()],
+            &drop_schema,
+            None,
+            None,
+            false,
+        )
+        .expect("survivor pre-pass (no gc) must succeed");
+        assert!(
+            retained.contains("tags"),
+            "a RETAINED complex-deletion marker for a dropped complex column must \
+             count as a survivor so the writer keeps the column to emit it; got {retained:?}"
+        );
+
+        // (b) gc strictly above the marker's LDT + purge_safe → the marker is
+        // PURGED → `tags` MUST NOT be a survivor (stripped from the output schema).
+        let gc_before = i64::from(MARKER_LDT) + 1;
+        let purged = compute_surviving_dropped_columns(
+            vec![data_path],
+            &drop_schema,
+            Some(gc_before),
+            Some(gc_before),
+            true,
+        )
+        .expect("survivor pre-pass (purging) must succeed");
+        assert!(
+            !purged.contains("tags"),
+            "a PURGED complex-deletion marker must NOT count as a survivor (the \
+             dropped column is stripped from the output schema); got {purged:?}"
         );
     }
 }

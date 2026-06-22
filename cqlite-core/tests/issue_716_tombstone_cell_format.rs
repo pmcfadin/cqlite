@@ -144,6 +144,7 @@ async fn tombstone_cell_sets_has_empty_value_flag() {
         None,
         vec![CellOperation::Delete {
             column: "age".to_string(),
+            local_deletion_time: None,
         }],
         T1,
         None,

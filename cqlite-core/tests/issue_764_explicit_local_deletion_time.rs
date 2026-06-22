@@ -300,6 +300,7 @@ async fn explicit_local_deletion_time_flows_to_complex_column_deletion() {
         None,
         vec![CellOperation::Delete {
             column: "tags".to_string(),
+            local_deletion_time: None,
         }],
         T0,
         None,
@@ -453,6 +454,7 @@ async fn explicit_local_deletion_time_preserved_for_older_static_delete() {
         None,
         vec![CellOperation::Delete {
             column: "s_old".to_string(),
+            local_deletion_time: None,
         }],
         T0,
         None,
@@ -468,6 +470,7 @@ async fn explicit_local_deletion_time_preserved_for_older_static_delete() {
         None,
         vec![CellOperation::Delete {
             column: "s_new".to_string(),
+            local_deletion_time: None,
         }],
         T0 + 2_000_000, // 2 seconds later
         None,

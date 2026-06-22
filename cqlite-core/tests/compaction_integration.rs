@@ -165,6 +165,7 @@ fn delete_score_column(id: i32, timestamp: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Delete {
         column: "score".to_string(),
+        local_deletion_time: None,
     }];
     Mutation::new(table_id, pk, None, ops, timestamp, None)
 }

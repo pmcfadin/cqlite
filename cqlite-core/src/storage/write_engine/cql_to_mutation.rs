@@ -654,6 +654,9 @@ pub(crate) fn delete_to_mutation(
             .iter()
             .map(|col_id| CellOperation::Delete {
                 column: col_id.name.clone(),
+                // CQL DELETE has no per-cell surfaced LDT; the writer derives it
+                // from the mutation timestamp (historical behavior, #921 finding 2).
+                local_deletion_time: None,
             })
             .collect()
     };
@@ -2658,10 +2661,10 @@ mod tests {
         let mutation = delete_to_mutation(&delete, &schema).unwrap();
         assert_eq!(mutation.operations.len(), 2);
         assert!(
-            matches!(&mutation.operations[0], CellOperation::Delete { column } if column == "name")
+            matches!(&mutation.operations[0], CellOperation::Delete { column, .. } if column == "name")
         );
         assert!(
-            matches!(&mutation.operations[1], CellOperation::Delete { column } if column == "age")
+            matches!(&mutation.operations[1], CellOperation::Delete { column, .. } if column == "age")
         );
     }
 

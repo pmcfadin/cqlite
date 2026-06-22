@@ -1133,7 +1133,7 @@ impl DataWriter {
                 let column = match op {
                     CellOperation::Write { column, .. }
                     | CellOperation::WriteWithTtl { column, .. }
-                    | CellOperation::Delete { column } => column.as_str(),
+                    | CellOperation::Delete { column, .. } => column.as_str(),
                     // Epic #899 (Phase B): per-element complex ops keep all
                     // elements (no per-column dedup). A live element write
                     // contributes row liveness; a `ComplexDeletion` marker does
@@ -1263,7 +1263,9 @@ impl DataWriter {
                     op,
                     timestamp_micros: m.timestamp_micros,
                     row_ttl_seconds: m.ttl_seconds,
-                    cell_local_deletion_time: m.effective_local_deletion_time(),
+                    // #921 finding 2: a surviving `Delete` cell tombstone keeps its
+                    // OWN surfaced LDT; other ops fall back to the mutation's LDT.
+                    cell_local_deletion_time: op_cell_local_deletion_time(op, m),
                 };
                 match cells.entry(column) {
                     std::collections::hash_map::Entry::Vacant(entry) => {
@@ -1591,7 +1593,7 @@ impl DataWriter {
             let col_name = match mop.op {
                 CellOperation::Write { column, .. }
                 | CellOperation::WriteWithTtl { column, .. }
-                | CellOperation::Delete { column } => Some(column.as_str()),
+                | CellOperation::Delete { column, .. } => Some(column.as_str()),
                 _ => None,
             };
             col_name.is_some_and(op_targets_complex)
@@ -1664,9 +1666,11 @@ impl DataWriter {
             .operations
             .iter()
             .map(|op| StaticMergedOp {
+                // #921 finding 2: a `Delete` cell tombstone keeps its own surfaced
+                // LDT; every other op falls back to the mutation's effective LDT.
+                cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
                 op: op.clone(),
                 timestamp_micros: mutation.timestamp_micros,
-                cell_local_deletion_time: mutation.effective_local_deletion_time(),
             })
             .collect();
         self.write_static_row_with_prev_size(
@@ -1926,9 +1930,9 @@ impl DataWriter {
                     value,
                     ..
                 } if !matches!(value, Value::Null) => Some(column.as_str()),
-                crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                    Some(column.as_str())
-                }
+                crate::storage::write_engine::mutation::CellOperation::Delete {
+                    column, ..
+                } => Some(column.as_str()),
                 _ => None,
             })
             .collect();
@@ -1998,7 +2002,9 @@ impl DataWriter {
                         )?;
                     }
                 }
-                crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
+                crate::storage::write_engine::mutation::CellOperation::Delete {
+                    column, ..
+                } => {
                     // Only process if it's a static column
                     if static_column_names.contains(column) {
                         cells_written += 1;
@@ -2049,7 +2055,7 @@ impl DataWriter {
             | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
                 column, ..
             }
-            | crate::storage::write_engine::mutation::CellOperation::Delete { column }
+            | crate::storage::write_engine::mutation::CellOperation::Delete { column, .. }
             | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
                 column,
                 ..
@@ -2279,9 +2285,9 @@ impl DataWriter {
                     value,
                     ..
                 } if !matches!(value, Value::Null) => Some(column.as_str()),
-                crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                    Some(column.as_str())
-                }
+                crate::storage::write_engine::mutation::CellOperation::Delete {
+                    column, ..
+                } => Some(column.as_str()),
                 _ => None,
             })
             .collect();
@@ -2312,7 +2318,7 @@ impl DataWriter {
                 {
                     Some(column.as_str())
                 }
-                CellOperation::Delete { column } => Some(column.as_str()),
+                CellOperation::Delete { column, .. } => Some(column.as_str()),
                 _ => None,
             })
             .collect();
@@ -2483,7 +2489,7 @@ impl DataWriter {
                         )?;
                     }
                 }
-                CellOperation::Delete { column } => {
+                CellOperation::Delete { column, .. } => {
                     cells_written += 1;
                     let is_complex = schema
                         .columns
@@ -3736,7 +3742,7 @@ impl DataWriter {
             | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
                 column, ..
             }
-            | crate::storage::write_engine::mutation::CellOperation::Delete { column }
+            | crate::storage::write_engine::mutation::CellOperation::Delete { column, .. }
             | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
                 column,
                 ..
@@ -4065,10 +4071,46 @@ fn merged_op_column(op: &crate::storage::write_engine::mutation::CellOperation) 
     match op {
         CellOperation::Write { column, .. }
         | CellOperation::WriteWithTtl { column, .. }
-        | CellOperation::Delete { column }
+        | CellOperation::Delete { column, .. }
         | CellOperation::WriteComplexElement { column, .. }
         | CellOperation::ComplexDeletion { column, .. } => Some(column.as_str()),
         CellOperation::DeleteRow => None,
+    }
+}
+
+/// The `localDeletionTime` (seconds, GC clock) to stamp a cell tombstone with for
+/// an op carried by `mutation` (#921 finding 2).
+///
+/// A `CellOperation::Delete` that carries its OWN `local_deletion_time` (set by
+/// the compaction merge→rewrite path from the SOURCE cell tombstone's surfaced
+/// LDT) is honored VERBATIM so a surviving within-grace cell tombstone keeps its
+/// original GC clock across compactions. For every other op — and for a `Delete`
+/// with no surfaced LDT (`None`) — fall back to the mutation's
+/// [`effective_local_deletion_time`](crate::storage::write_engine::mutation::Mutation::effective_local_deletion_time),
+/// preserving the historical behavior (WAL / CQL-DELETE paths, row-derived LDT).
+/// Choose the `localDeletionTime` the cell/row tombstone of `op` is actually
+/// emitted with.
+///
+/// A `CellOperation::Delete { local_deletion_time: Some(ldt), .. }` carries an
+/// explicit per-cell LDT (#921 finding 2) that the DataWriter stamps VERBATIM;
+/// every other op (a `Delete` without a per-cell LDT, or a `DeleteRow`) derives
+/// the LDT from the enclosing mutation. The SSTable writer's STATS/baseline
+/// collection MUST record this exact value (not just
+/// `mutation.effective_local_deletion_time()`), otherwise a per-cell LDT below
+/// the mutation-derived value underflows the Data.db delta encoding, and one
+/// above it leaves Statistics.db min/max/histogram describing a tombstone that
+/// was never written (#921 finding 2 — roborev Medium).
+pub(crate) fn op_cell_local_deletion_time(
+    op: &crate::storage::write_engine::mutation::CellOperation,
+    mutation: &Mutation,
+) -> i32 {
+    use crate::storage::write_engine::mutation::CellOperation;
+    match op {
+        CellOperation::Delete {
+            local_deletion_time: Some(ldt),
+            ..
+        } => *ldt,
+        _ => mutation.effective_local_deletion_time(),
     }
 }
 
@@ -4335,7 +4377,7 @@ fn is_static_row_mutation(mutation: &Mutation, schema: &TableSchema) -> bool {
     mutation.operations.iter().all(|operation| match operation {
         crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
         | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { column, .. }
-        | crate::storage::write_engine::mutation::CellOperation::Delete { column }
+        | crate::storage::write_engine::mutation::CellOperation::Delete { column, .. }
         | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
             column,
             ..
@@ -4360,7 +4402,7 @@ fn is_static_operation(
     match op {
         crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
         | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl { column, .. }
-        | crate::storage::write_engine::mutation::CellOperation::Delete { column }
+        | crate::storage::write_engine::mutation::CellOperation::Delete { column, .. }
         | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
             column,
             ..
@@ -4438,9 +4480,9 @@ fn collect_static_operations(
                     column,
                     ..
                 }
-                | crate::storage::write_engine::mutation::CellOperation::Delete { column } => {
-                    column.clone()
-                }
+                | crate::storage::write_engine::mutation::CellOperation::Delete {
+                    column, ..
+                } => column.clone(),
                 // Per-element complex ops (epic #899) are not produced for STATIC
                 // complex columns by the (Phase B) capability — they flow through
                 // the regular-row per-element path. Skip them here defensively.
@@ -4453,9 +4495,11 @@ fn collect_static_operations(
                 crate::storage::write_engine::mutation::CellOperation::DeleteRow => continue,
             };
             let candidate = StaticMergedOp {
+                // #921 finding 2: preserve a `Delete` cell tombstone's own surfaced
+                // LDT; other ops fall back to the mutation's effective LDT.
+                cell_local_deletion_time: op_cell_local_deletion_time(op, mutation),
                 op: op.clone(),
                 timestamp_micros: mutation.timestamp_micros,
-                cell_local_deletion_time: mutation.effective_local_deletion_time(),
             };
             match best.entry(col_name) {
                 std::collections::hash_map::Entry::Vacant(entry) => {
@@ -4704,7 +4748,7 @@ mod tests {
             .filter_map(|m| match m.op {
                 CellOperation::Write { column, .. }
                 | CellOperation::WriteWithTtl { column, .. }
-                | CellOperation::Delete { column }
+                | CellOperation::Delete { column, .. }
                 | CellOperation::WriteComplexElement { column, .. }
                 | CellOperation::ComplexDeletion { column, .. } => Some(column.clone()),
                 CellOperation::DeleteRow => None,
@@ -7815,6 +7859,7 @@ mod tests {
                 None,
                 vec![CellOperation::Delete {
                     column: "tags".to_string(),
+                    local_deletion_time: None,
                 }],
                 2_000_000,
                 None,
@@ -7937,6 +7982,7 @@ mod tests {
             None,
             vec![CellOperation::Delete {
                 column: "tags".to_string(),
+                local_deletion_time: None,
             }],
             1001000,
             None,
@@ -8466,6 +8512,7 @@ mod tests {
             vec![
                 CellOperation::Delete {
                     column: "age".to_string(),
+                    local_deletion_time: None,
                 },
                 CellOperation::Write {
                     column: "name".to_string(),
@@ -8536,6 +8583,7 @@ mod tests {
             None,
             vec![CellOperation::Delete {
                 column: "age".to_string(),
+                local_deletion_time: None,
             }],
             1001000,
             None,
@@ -10727,6 +10775,7 @@ mod tests {
             None,
             vec![CellOperation::Delete {
                 column: "tags".to_string(),
+                local_deletion_time: None,
             }],
             A_DELETE_TS,
             None,
@@ -10784,7 +10833,7 @@ mod tests {
         assert!(
             row.ops.iter().any(|mop| matches!(
                 mop.op,
-                CellOperation::Delete { column } if column == "tags"
+                CellOperation::Delete { column, .. } if column == "tags"
             )),
             "column A's whole-column Delete must survive"
         );

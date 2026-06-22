@@ -107,6 +107,7 @@ fn delete_v(id: i32, ts: i64) -> Mutation {
     let pk = PartitionKey::single("id", Value::Integer(id));
     let ops = vec![CellOperation::Delete {
         column: "v".to_string(),
+        local_deletion_time: None,
     }];
     Mutation::new(TableId::new(KS, TBL), pk, None, ops, ts, None)
 }

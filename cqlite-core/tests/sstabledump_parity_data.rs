@@ -265,6 +265,7 @@ async fn test_data_db_tombstone_parity() -> CqliteResult<()> {
     // Column tombstone
     let delete_ops = vec![CellOperation::Delete {
         column: "data".to_string(),
+        local_deletion_time: None,
     }];
     let delete_mutation = Mutation::new(
         table_id.clone(),

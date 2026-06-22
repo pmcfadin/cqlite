@@ -1144,8 +1144,22 @@ impl WriteEngine {
             let selected = merge_policy.select_merge(&candidates)?;
 
             if !selected.is_empty() {
+                // Overlap-safety gate for tombstone purging (#921 finding 1): a
+                // compaction may purge tombstones ONLY when it spans EVERY
+                // candidate SSTable for the table (a major/full compaction).
+                // Otherwise a tombstone could be purged while a non-included
+                // overlapping SSTable still holds data it shadows, resurrecting
+                // that data on the next read. A partial selection (the common
+                // background-compaction case) is therefore purge-UNSAFE: it
+                // retains tombstones. Compare as sets so input ordering does not
+                // affect the decision.
+                let selected_set: std::collections::HashSet<&PathBuf> = selected.iter().collect();
+                let candidate_set: std::collections::HashSet<&PathBuf> =
+                    candidates.iter().collect();
+                let purge_safe = !candidate_set.is_empty() && selected_set == candidate_set;
+
                 // Start a new merge
-                self.start_merge(selected)?;
+                self.start_merge(selected, purge_safe)?;
             } else {
                 // No work selected by policy
                 report.time_spent = start.elapsed();
@@ -1400,7 +1414,12 @@ impl WriteEngine {
     ///   by readers scanning for `TOC.txt`.
     /// - A crash after all renames but before input deletion: a harmless duplicate
     ///   exists until next compaction.
-    fn start_merge(&mut self, input_paths: Vec<PathBuf>) -> Result<()> {
+    ///
+    /// `purge_safe` (#921 finding 1): `true` only when `input_paths` spans every
+    /// SSTable for the table (a major/full compaction), allowing gc_grace
+    /// tombstone purging without risking resurrection of data shadowed in a
+    /// non-included overlapping SSTable. `false` keeps every tombstone.
+    fn start_merge(&mut self, input_paths: Vec<PathBuf>, purge_safe: bool) -> Result<()> {
         log::info!(
             "Starting compaction merge of {} SSTables",
             input_paths.len()
@@ -1449,15 +1468,65 @@ impl WriteEngine {
         let effective_schema =
             merge::effective_compaction_schema(&self.config.schema, &input_paths);
 
-        // Create K-way merger
-        let merger = KWayMerger::new(input_paths.clone(), &effective_schema)?;
+        // Create K-way merger.
+        //
+        // gc_grace / gcBefore purging (issue #845): compute `gcBefore = now -
+        // gc_grace_seconds` from the table's `gc_grace_seconds` (read from the
+        // AUTHORITATIVE table schema's options, not the dropped-column-augmented
+        // `effective_schema`). When the table declares no `gc_grace_seconds`,
+        // `compute_gc_before` returns `None` and purging is a strict no-op,
+        // preserving the pre-#845 behavior. `now_secs` is the wall-clock used for
+        // both the purge boundary and TTL evaluation.
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        let gc_before_secs = merge::compute_gc_before(&self.config.schema, now_secs);
+        // Overlap-safety gate (#921 finding 1): only a major/full compaction
+        // (one that spans every candidate SSTable for the table) may purge
+        // tombstones. A partial compaction sets `purge_safe = false`, which
+        // makes the gc_grace purge stage a strict no-op and cannot resurrect
+        // data shadowed in a non-included overlapping SSTable.
+
+        // #921 finding 2: mirror `compact_sstables`' dropped-column survivor
+        // pre-pass. Decode with `effective_schema` (retains dropped columns so
+        // their cells parse and can be purged), but WRITE with a post-drop
+        // schema: a background compaction that purges the LAST cell/tombstone of
+        // a dropped column must NOT emit that column in the output
+        // SerializationHeader (stale header columns misalign a post-drop reader).
+        // The pre-pass uses the SAME gc cutoff AND `purge_safe` as the write
+        // merger below so the two make IDENTICAL purge decisions — a tombstone
+        // purged in the write pass is also purged here and never counted as a
+        // surviving cell. Reuses the exact helper `compact_sstables` uses.
+        let retained_dropped = if effective_schema.dropped_columns.is_empty() {
+            std::collections::HashSet::new()
+        } else {
+            merge::compute_surviving_dropped_columns(
+                input_paths.clone(),
+                &effective_schema,
+                gc_before_secs,
+                Some(now_secs),
+                purge_safe,
+            )?
+        };
+        let write_schema = effective_schema.for_compaction_output(&retained_dropped);
+
+        let merger = KWayMerger::new_with_gc(
+            input_paths.clone(),
+            &effective_schema,
+            gc_before_secs,
+            Some(now_secs),
+        )?
+        .with_purge_safe(purge_safe);
 
         // Point the SSTableWriter at the tmp root; it will write to
-        // tmp_dir/keyspace/table/nb-{gen}-big-*.db
+        // tmp_dir/keyspace/table/nb-{gen}-big-*.db. Use the post-drop
+        // `write_schema` (NOT `effective_schema`) so fully-purged dropped
+        // columns are stripped from the output header (#921 finding 2).
         let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
             tmp_dir.clone(),
             output_generation,
-            &effective_schema,
+            &write_schema,
         )?;
 
         // Two-pass compaction (issue #729): compute output FINAL encoding baselines

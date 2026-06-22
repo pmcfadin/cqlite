@@ -264,7 +264,7 @@ impl Memtable {
                 // TTL cells: same as Write + 4 bytes for TTL + 4 bytes for local_deletion_time
                 column.len() + Self::estimate_value_size(value) + 16
             }
-            CellOperation::Delete { column } => column.len() + 8,
+            CellOperation::Delete { column, .. } => column.len() + 8,
             CellOperation::DeleteRow => 8,
             // Epic #899: per-element complex ops. Each carries a column name,
             // the preserved cell path, an optional value, and temporal metadata.

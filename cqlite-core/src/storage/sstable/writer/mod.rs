@@ -547,11 +547,21 @@ impl SSTableWriter {
                         let local_deletion_time = now_seconds.saturating_add(*ttl_seconds as i32);
                         self.stats.update_local_deletion_time(local_deletion_time);
                     }
-                    crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
-                        // Issue #764: honor the explicit local_deletion_time if
-                        // the mutation supplied one, else derive from timestamp.
-                        let local_deletion_time = mutation.effective_local_deletion_time();
+                    op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow) => {
+                        // Issue #764 / #921 finding 2: record the EXACT LDT the
+                        // tombstone is emitted with. A `Delete` carrying a per-cell
+                        // `local_deletion_time: Some(L)` is stamped with `L`
+                        // verbatim by DataWriter; everything else derives the LDT
+                        // from the mutation. Reuse `op_cell_local_deletion_time`
+                        // (the emit path's helper) so stats and the bytes written
+                        // to Data.db agree exactly — a per-cell `L` below the
+                        // mutation-derived value would otherwise underflow the
+                        // delta, and one above it would leave min/max wrong.
+                        let local_deletion_time =
+                            crate::storage::sstable::writer::data_writer::op_cell_local_deletion_time(
+                                op, mutation,
+                            );
                         self.stats.update_local_deletion_time(local_deletion_time);
                     }
                     // Issue #887: a `ComplexDeletion` marker is physically written
@@ -821,12 +831,19 @@ impl SSTableWriter {
                             min_ldt = min_ldt.min(ldt);
                         }
                     }
-                    crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
-                        // Issue #764: the encoding baseline must match the LDT the
-                        // row/cell tombstone will actually be written with, else the
-                        // delta underflows for an explicit LDT below the timestamp.
-                        let ldt = mutation.effective_local_deletion_time();
+                    op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow) => {
+                        // Issue #764 / #921 finding 2: the encoding baseline must
+                        // match the LDT the row/cell tombstone will ACTUALLY be
+                        // written with, else the delta underflows. A `Delete` with
+                        // a per-cell `local_deletion_time: Some(L)` is emitted with
+                        // `L` verbatim; reuse the emit path's
+                        // `op_cell_local_deletion_time` helper so the pre-seeded
+                        // baseline always covers the smallest LDT actually written.
+                        let ldt =
+                            crate::storage::sstable::writer::data_writer::op_cell_local_deletion_time(
+                                op, mutation,
+                            );
                         min_ldt = min_ldt.min(ldt);
                     }
                     // Issue #887: the pre-seeded baseline path must fold the SAME
@@ -2005,6 +2022,103 @@ mod tests {
         assert_eq!(
             min_ttl, 600,
             "baseline min_ttl must reflect the per-element TTL"
+        );
+    }
+
+    /// #921 finding 2 (roborev Medium): a `CellOperation::Delete` carrying an
+    /// explicit per-cell `local_deletion_time: Some(L)` is stamped with `L`
+    /// VERBATIM by `DataWriter` (via `op_cell_local_deletion_time`). The writer's
+    /// STATS collection must record that SAME `L`, not just
+    /// `mutation.effective_local_deletion_time()`:
+    ///   * an `L` BELOW the mutation-derived value must (a) let the Data.db write
+    ///     SUCCEED (no LDT-below-baseline delta underflow) and (b) lower
+    ///     `min_local_deletion_time` to `L`;
+    ///   * an `L` ABOVE the mutation-derived value must lift
+    ///     `max_local_deletion_time` to `L`.
+    /// RED before the fix: stats used the mutation LDT only, so the lower-`L`
+    /// tombstone underflowed the baseline (write fails) and min/max were wrong.
+    #[tokio::test]
+    async fn test_per_cell_delete_ldt_drives_stats_and_write() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        // Mutation timestamp 5_000_000 micros => effective LDT = 5 seconds.
+        // Per-cell LDTs straddle that: 2 (below) and 9_000 (above).
+        const ROW_TS_MICROS: i64 = 5_000_000;
+        const LOWER_LDT: i32 = 2;
+        const HIGHER_LDT: i32 = 9_000;
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                CellOperation::Delete {
+                    column: "name".to_string(),
+                    local_deletion_time: Some(LOWER_LDT),
+                },
+                CellOperation::Delete {
+                    column: "name".to_string(),
+                    local_deletion_time: Some(HIGHER_LDT),
+                },
+            ],
+            ROW_TS_MICROS,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+
+        // (a) The write must SUCCEED: the per-cell LDT of 2 is below the
+        // mutation-derived baseline of 5, so if stats recorded 5 the Data.db
+        // delta (cell LDT 2 - baseline 5) underflows and the write errors.
+        writer
+            .write_partition(key, vec![mutation])
+            .expect("per-cell Delete LDT below the mutation LDT must not underflow the baseline");
+
+        // (b) Stats must describe the tombstones actually written.
+        assert_eq!(
+            writer.stats.min_local_deletion_time, LOWER_LDT,
+            "min_local_deletion_time must reflect the lower per-cell Delete LDT"
+        );
+        assert_eq!(
+            writer.stats.max_local_deletion_time, HIGHER_LDT,
+            "max_local_deletion_time must reflect the higher per-cell Delete LDT"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// #921 finding 2: the PRE-SEEDED baseline path
+    /// (`compute_mutations_baseline_stats`, issue #729 two-pass flush) must lock
+    /// `min_local_deletion_time` to the EXACT LDT the tombstone is written with.
+    /// A per-cell `Delete` LDT below the mutation-derived value must drag the
+    /// baseline down to it, else the locked delta underflows at write time.
+    #[test]
+    fn test_compute_baseline_uses_per_cell_delete_ldt() {
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+
+        // Mutation LDT = 5 (5_000_000 micros). Per-cell LDT of 2 is lower.
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Delete {
+                column: "name".to_string(),
+                local_deletion_time: Some(2),
+            }],
+            5_000_000,
+            None,
+        );
+
+        let (_min_ts, min_ldt, _min_ttl) =
+            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+
+        assert_eq!(
+            min_ldt, 2,
+            "baseline min_ldt must reflect the per-cell Delete LDT (2), not the mutation LDT (5)"
         );
     }
 
