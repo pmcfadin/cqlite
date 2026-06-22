@@ -880,8 +880,8 @@ impl SSTableRowIteratorAdapter {
         } = row_data
         {
             let range = RangeTombstone {
-                start: Self::compaction_bound_to_mutation(start, schema),
-                end: Self::compaction_bound_to_mutation(end, schema),
+                start: Self::compaction_bound_to_mutation(start),
+                end: Self::compaction_bound_to_mutation(end),
                 deletion_time,
                 local_deletion_time,
             };
@@ -934,7 +934,6 @@ impl SSTableRowIteratorAdapter {
     /// [`ClusteringBound`]: crate::storage::write_engine::mutation::ClusteringBound
     fn compaction_bound_to_mutation(
         bound: crate::storage::sstable::reader::compaction_row::CompactionBound,
-        _schema: &TableSchema,
     ) -> crate::storage::write_engine::mutation::ClusteringBound {
         use crate::storage::sstable::reader::compaction_row::CompactionBound;
         use crate::storage::write_engine::mutation::ClusteringBound;
@@ -2480,14 +2479,14 @@ impl KWayMerger {
     /// the newest), de-duplicating exact repeats across inputs (issue #933).
     /// Ranges with different bounds are all retained.
     fn canonicalize_range_tombstones(rts: &mut Vec<(DecoratedKey, RangeTombstone)>) {
-        use crate::storage::write_engine::mutation::ClusteringBound;
         // Group by (key bytes, start, end); keep the max (deletion_time, ldt).
+        // `ClusteringBound` derives `PartialEq`, so bounds compare with `==`.
         let mut out: Vec<(DecoratedKey, RangeTombstone)> = Vec::new();
         'outer: for (key, rt) in rts.drain(..) {
             for (existing_key, existing) in out.iter_mut() {
                 let same_bounds = existing_key.key == key.key
-                    && bounds_eq(&existing.start, &rt.start)
-                    && bounds_eq(&existing.end, &rt.end);
+                    && existing.start == rt.start
+                    && existing.end == rt.end;
                 if same_bounds {
                     if rt.deletion_time > existing.deletion_time {
                         existing.deletion_time = rt.deletion_time;
@@ -2499,10 +2498,6 @@ impl KWayMerger {
             out.push((key, rt));
         }
         *rts = out;
-
-        fn bounds_eq(a: &ClusteringBound, b: &ClusteringBound) -> bool {
-            a == b
-        }
     }
 
     /// Whether a range tombstone's clustering range covers `ck`, comparing bounds
@@ -2564,6 +2559,11 @@ impl KWayMerger {
         range_tombstones: &[(DecoratedKey, RangeTombstone)],
         schema: &TableSchema,
     ) -> Option<MergeEntry> {
+        // Fast path for the overwhelmingly common partition with no range
+        // tombstones: skip the clustering-key clone and coverage scan entirely.
+        if range_tombstones.is_empty() {
+            return Some(entry);
+        }
         let Some(ck) = entry.clustering_key.clone() else {
             return Some(entry);
         };

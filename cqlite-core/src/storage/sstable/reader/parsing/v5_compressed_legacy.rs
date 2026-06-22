@@ -3172,130 +3172,17 @@ impl V5CompressedLegacyParser {
         offset: usize,
         schema: &TableSchema,
     ) -> Result<(Vec<Value>, u8, i64, Option<i64>, usize)> {
-        let mut pos = offset;
-
-        if pos >= data.len() {
-            return Err(Error::corruption(
-                "V5CompressedLegacy: Unexpected end at range tombstone marker (full parse)",
-            ));
-        }
-
-        let marker_flags = data[pos];
-        pos += 1;
-
-        // Extended flags if present
-        if (marker_flags & ROW_HAS_EXTENDED_FLAGS) != 0 {
-            if pos >= data.len() {
-                return Err(Error::corruption(
-                    "V5CompressedLegacy: Unexpected end reading marker extended flags (full)",
-                ));
-            }
-            pos += 1;
-        }
-
-        // Bound kind byte.
-        if pos >= data.len() {
-            return Err(Error::corruption(
-                "V5CompressedLegacy: Unexpected end reading range tombstone bound kind (full)",
-            ));
-        }
-        let bound_kind = data[pos];
-        pos += 1;
-
-        // Cluster count (u16 big-endian).
-        if pos + 2 > data.len() {
-            return Err(Error::corruption(
-                "V5CompressedLegacy: Unexpected end reading range tombstone cluster count (full)",
-            ));
-        }
-        let cluster_count = u16::from_be_bytes([data[pos], data[pos + 1]]) as usize;
-        pos += 2;
-
-        // Clustering values.
-        // Build a truncated schema slice for parsing only `cluster_count` clustering
-        // columns.  Range tombstone bounds may be **prefix** bounds: the Cassandra
-        // serializer writes `cluster_count` < full-arity when a `DELETE WHERE pk=?
-        // AND ck1=?` targets all sub-rows for a given ck1 without specifying ck2.
-        //
-        // If we let `parse_clustering_prefix` iterate over the full schema, it would
-        // read past the `cluster_count` bytes into the marker body (producing garbage
-        // or invalid UTF-8 errors).  Instead we pass a synthetic schema whose
-        // `clustering_keys` vec is truncated to `cluster_count`.
-        let bound_values = if cluster_count > 0 {
-            let prefix_schema_owned = Self::clustering_prefix_schema(schema, cluster_count);
-            let effective_schema = prefix_schema_owned.as_ref().unwrap_or(schema);
-            let (values, new_pos) = self.parse_clustering_prefix(data, pos, effective_schema)?;
-            pos = new_pos;
-            values
-        } else {
-            Vec::new()
-        };
-
-        // marker_body_size VUInt — size of (prev_size VUInt + deletion_time(s)).
-        let (remaining, marker_body_size) = parse_vuint(&data[pos..]).map_err(|e| {
-            Error::corruption(format!(
-                "V5CompressedLegacy: Failed to parse marker_body_size (full) at offset {}: {:?}",
-                pos, e
-            ))
-        })?;
-        let body_size_vint_len = data[pos..].len() - remaining.len();
-        pos += body_size_vint_len;
-
-        let body_start = pos;
-        let body_end = pos + marker_body_size as usize;
-        if body_end > data.len() {
-            return Err(Error::corruption(format!(
-                "V5CompressedLegacy: marker_body_size={} at pos={} exceeds data length {} (full)",
-                marker_body_size,
-                pos,
-                data.len()
-            )));
-        }
-
-        // Inside the body:
-        //   [prev_unfiltered_size: VUInt]    ← skip
-        //   [markedForDeleteAt delta: VUInt]  ← delta from min_timestamp (µs)
-        //   [localDeletionTime delta: VUInt]  ← delta from min_local_deletion_time (s), skip
-        //   (repeat for second deletion time if boundary marker)
-        let (remaining2, _prev_size) = parse_vuint(&data[pos..]).map_err(|e| {
-            Error::corruption(format!(
-                "V5CompressedLegacy: Failed to parse prev_size in marker body at {}: {:?}",
-                pos, e
-            ))
-        })?;
-        pos += data[pos..].len() - remaining2.len();
-
-        // Primary deletion time.
-        let deleted_at_primary = self.parse_deletion_time_pair(data, &mut pos)?;
-
-        // Boundary markers (kind 2 = EXCL_END_INCL_START, kind 5 = INCL_END_EXCL_START)
-        // carry a second deletion time for the adjacent range.
-        let deleted_at_secondary = if bound_kind == 2 || bound_kind == 5 {
-            Some(self.parse_deletion_time_pair(data, &mut pos)?)
-        } else {
-            None
-        };
-
-        // Advance to end of body (in case the secondary parse left pos short).
-        let _ = body_start; // acknowledged
-        pos = body_end;
-
-        log::debug!(
-            "V5CompressedLegacy: Parsed range tombstone marker full: kind={} values={} \
-             deleted_at_primary={} deleted_at_secondary={:?} next_offset={}",
-            bound_kind,
-            bound_values.len(),
-            deleted_at_primary,
-            deleted_at_secondary,
-            pos
-        );
-
+        // Delegate to the LDT-carrying parser and drop the localDeletionTime
+        // fields the delta-scan caller does not need — the on-disk marker grammar
+        // is decoded in exactly one place (issue #933 cleanup).
+        let (bound_values, bound_kind, (mfda_primary, _ldt_primary), secondary, next_offset) =
+            self.parse_range_tombstone_marker_with_ldt(data, offset, schema)?;
         Ok((
             bound_values,
             bound_kind,
-            deleted_at_primary,
-            deleted_at_secondary,
-            pos,
+            mfda_primary,
+            secondary.map(|(mfda, _ldt)| mfda),
+            next_offset,
         ))
     }
 
@@ -3325,40 +3212,11 @@ impl V5CompressedLegacyParser {
         }
     }
 
-    /// Decode one `(markedForDeleteAt delta, localDeletionTime delta)` pair from `data[*pos..]`.
-    ///
-    /// Both fields are unsigned VInts.  `markedForDeleteAt` is a delta from `min_timestamp`
-    /// (µs); `localDeletionTime` is a delta from `min_local_deletion_time` (s) and is
-    /// consumed but not returned (callers do not need the GC-clock value).
-    ///
-    /// Advances `*pos` past both fields and returns the absolute `markedForDeleteAt` in µs.
-    fn parse_deletion_time_pair(&self, data: &[u8], pos: &mut usize) -> Result<i64> {
-        // markedForDeleteAt delta (unsigned VInt, µs since epoch delta).
-        let (remaining, mfda_delta) = parse_vuint(&data[*pos..]).map_err(|e| {
-            Error::corruption(format!(
-                "V5CompressedLegacy: Failed to parse markedForDeleteAt in marker body at {}: {:?}",
-                *pos, e
-            ))
-        })?;
-        *pos += data[*pos..].len() - remaining.len();
-        let absolute_mfda = self.min_timestamp.wrapping_add(mfda_delta as i64);
-
-        // localDeletionTime delta (unsigned VInt, seconds delta) — consume, do not return.
-        let (remaining2, _ldt_delta) = parse_vuint(&data[*pos..]).map_err(|e| {
-            Error::corruption(format!(
-                "V5CompressedLegacy: Failed to parse localDeletionTime in marker body at {}: {:?}",
-                *pos, e
-            ))
-        })?;
-        *pos += data[*pos..].len() - remaining2.len();
-
-        Ok(absolute_mfda)
-    }
-
     /// Decode one `(markedForDeleteAt, localDeletionTime)` pair, returning BOTH
     /// absolute values (issue #933 compaction range-tombstone surfacing).
     ///
-    /// Like [`Self::parse_deletion_time_pair`] but also returns the absolute
+    /// Decodes the `(markedForDeleteAt delta, localDeletionTime delta)` VInt pair
+    /// and returns BOTH absolute values — the absolute
     /// `localDeletionTime` (GC-grace clock, seconds) so the compaction merger can
     /// retain/purge a surviving range marker by gc_grace AND the writer can
     /// re-emit the marker's LDT verbatim. The LDT is decoded with the same
