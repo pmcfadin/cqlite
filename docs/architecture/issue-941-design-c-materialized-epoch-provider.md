@@ -353,3 +353,36 @@ Cons:
 ## Recommendation
 
 Treat this as the production-scale companion to Design A. Build Design A for live interactive reads and use Design C for large repeated analytics. If real user workloads are dashboard-heavy, Design C should become the default production recommendation even if Design A lands first.
+
+---
+
+## Claude Council Review (2026-06-22)
+
+**Verdict: the strongest long-term design for the most likely workload (dashboards / repeated scans), and the only one that escapes per-query decompression + reconciliation cost.** Make it the production default for repeated analytics, with Design A for fresh ad-hoc reads. Ship current-row only; keep delta experimental. The council was notably more unanimous in its praise here than for A or B.
+
+### Trino/MPP — "use Iceberg, not a custom connector" is the single best call in the packet
+
+Routing query-time access through Trino's mature Iceberg/Hive connectors inherits, for free, everything a bespoke live connector must reimplement and keep correct across Trino releases: data-size-based split planning, manifest/partition pruning, min/max + page-index pushdown, dynamic filtering, `applyAggregation`, snapshot isolation / time-travel, and node-agnostic scheduling. Current-row materialization resolves tombstones/TTL/LWW before query, so naive Trino SQL cannot resurrect deleted data — the correctness burden collapses to one builder instead of every query. **But prefer a real Iceberg catalog (HMS/Glue/REST) over "partitioned Parquet + metastore"** for true atomic publish + snapshot isolation. State the routing rule explicitly: dashboards/repeated → C; ad-hoc fresh → A.
+
+### Cassandra/Sidecar — current-row is the right v1; the delta path is worse than the doc admits
+
+- **Current-row materialization as v1 is correct.** But the delta hazard is sharper than stated: once a delta epoch is published and a source tombstone is later purged past `gc_grace_seconds` (or not carried forward), a downstream merge that never saw that tombstone resurrects the row **permanently**. If delta is ever shipped it must carry tombstones/range-tombstones/partition-deletes as first-class records *and* use `gc_grace`-aware scheduling. Mark it **experimental**, not just "explicit."
+- **Counters are more dangerous here than in a live read** — materialized output looks authoritative but a single replica's counter shard is not the cluster value. **Exclude counter tables from materialization**, or label them per-replica-shard.
+- **Current-row still inherits single-replica incompleteness** — can miss acked writes on a non-selected replica, can include rows another replica already deleted. The manifest must record "single-replica-per-range, no read-repair."
+- Confirm partition keys never split across token buckets, or LWW skew appears at bucket boundaries.
+
+### Performance — the build-vs-freshness constraint is under-modeled
+
+- This is the only design that pays decompression + full-row reconciliation **once per epoch** instead of per query — it directly fixes the `producer.rs` full-row-decode penalty (`producer.rs:470-472`) that A and B incur on every query. That is the real headline.
+- **A full current-row rebuild re-reconciles the entire table every epoch.** At 5-minute cadence on a large table, build time can exceed the interval and epochs fall behind. State the rebuild-time-vs-cadence constraint; require longer cadence for large tables or incremental epochs (delta-scan) before claiming "5-minute freshness at scale."
+- **Frame the decision as load shape, not just per-query cost** — a build job is rate-limitable and bounded; N ad-hoc live queries are not.
+- Bucket by output bytes (the doc says this) but allow **adaptive bucket split/merge on rebuild** rather than a fixed 256-4096 count, or the 128-512 MiB file target and the fixed bucket count conflict under wide-partition skew.
+
+### DataFusion/Arrow — best design for the optimizer, and the custom code nearly disappears
+
+- Materializing to Parquet/Iceberg hands DataFusion a columnar table where projection, row-group/page-index pushdown, and `Statistics` all work for free via `ListingTable`/`ParquetExec` — the exact surfaces A and B are missing.
+- The provider section (lines 106-117) is the thinnest and slightly oversells the work: name `ListingTable` + partition columns for `token_bucket`/`epoch`; the provider's real job is epoch **discovery** + handing files to the built-in Parquet scan.
+- **`iceberg-rust` writer support is young** — make Parquet + Hive-style partitioning the v1 output, Iceberg explicitly phase 2.
+- **Schema evolution across epochs is unaddressed** — DataFusion rejects scans mixing fragments with differing Arrow schemas. Specify consumer-side handling when the schema digest changes between epochs.
+
+**Bottom line:** the production-scale companion to A and probably the eventual default for real workloads. Ship current-row only, on a real Iceberg catalog (Parquet-first if Iceberg-Rust isn't ready), exclude counters, mark delta experimental with mandatory tombstone-carry + `gc_grace`-aware scheduling, and pin down the rebuild-time-vs-freshness-cadence story before claiming freshness SLAs at scale.

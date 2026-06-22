@@ -191,3 +191,45 @@ Contention:
 - Whether the first provider supports only exact filters, or also marks some filters as inexact with residual evaluation.
 - Whether snapshot epoch ownership lives in the provider, a small shared Rust crate, or a Sidecar-facing service used by both DataFusion and Trino.
 - Whether Trino and DataFusion share a language-neutral JSON scan manifest that extends the existing `FlightTicket`, or each connector has a separate internal model.
+
+---
+
+## Claude Council Review (2026-06-22)
+
+A second council — five Claude specialist reviewers plus a code-grounding pass against the actual repo — reviewed this packet independently. This section records their findings and rebuttal so the original authors can re-engage. **Overall position: the direction is endorsed (build A first, keep Trino as the MPP owner, DataFusion as a leaf scan surface). The notes are about hardening, not redirection.**
+
+### Code-grounding (verified against current source)
+
+Every factual claim in "Current implementation baseline" is accurate:
+
+- `FlightTicket` carries all claimed fields — `cqlite-flight/src/ticket.rs:219-261`.
+- `producer.produce()` returns `Vec<RecordBatch>` (`producer.rs:312`) and `do_get` collects it before encoding (`service.rs:186-198`); an in-source comment already calls streaming a "later optimization."
+- The Trino page source builds tickets with `Optional.empty()` snapshot / live-dir reads — `CqliteFlightPageSourceProvider.java:69`.
+- Workspace is uniformly Arrow 53; no `datafusion` dependency exists yet.
+- **One nuance the doc omits:** `FlightTicket` *already* has a `wraparound: bool` field and a `token_in_half_open_range` helper, so min-token wrap handling is partially present in code. The design text should make the membership predicate and full-ring coverage test explicit and confirm whether Sidecar emits the wrap as one interval or two.
+
+### DataFusion/Arrow — two contract gaps to promote to invariants
+
+1. **Statistics are absent.** `TableProvider::scan` returns an `ExecutionPlan` whose `statistics()`/`partition_statistics()` feed the cost-based optimizer (join order, TopK vs sort, repartition). Add an invariant that the plan reports at least `Precision::Inexact` row/byte estimates from snapshot/`Statistics.db` sizes.
+2. **"Avoid Inexact in v1" is backwards.** `Inexact` is the *safe* pushdown — DataFusion keeps a `FilterExec` above the scan and re-applies the predicate, so it can never corrupt results. Only a wrong `Exact` is a correctness bug. Default uncertain-but-translatable predicates to `Inexact`; reserve `Unsupported` for what cannot be translated at all.
+
+### Cassandra/Sidecar — three items must move from prose into the non-negotiable invariants
+
+1. **A Cassandra snapshot is not a consistent cut** — it is per-node hardlinks at the instant the endpoint runs; each replica's snapshot is a different instant over different unrepaired data. State plainly: per-range point reads at independent capture instants; no cross-range/cross-replica consistency, atomicity, or monotonicity.
+2. **One-replica reads may be missing acknowledged writes and may contain rows other replicas already deleted** (no read-repair, no digest reconciliation, unreplayed hints).
+3. **Counters are wrong by construction** — a single replica holds only its counter shard. Mark unsupported in v1.
+
+The reconciliation hard-cases list is also incomplete: add `gc_grace`/purgeable-tombstone resurrection, range-tombstone shadowing across SSTables, static rows, partition-level deletes, secondary indexes (read base), MVs, and LWT/Paxos (in-flight state is invisible to an SSTable scan).
+
+### Trino/MPP — thesis endorsed, two gaps
+
+The "no DataFusion-as-second-scheduler inside Trino" thesis is correct. Gaps: (1) **split-to-host affinity is never addressed** — co-location requires `ConnectorSplit.getAddresses()` returning the co-located worker plus a stated `NodeSelectionStrategy` (likely `HARD_AFFINITY`); (2) **dynamic filtering is unmentioned** — the highest-leverage Trino feature for star-joins; fold dynamic filters into ticket predicates / token pruning. Also name explicitly that "DataFusion behind Trino's Arrow Flight connector as a per-endpoint page source" is acceptable and distinct from the rejected "DataFusion as planner inside Trino."
+
+### Performance — the `max()` model under-weights two dominant terms
+
+**Decompression throughput** (split out per-codec; for Zstd it routinely beats disk) and the **CPU of reconstructing full `QueryRow` values before projection** (confirmed `producer.rs:470-472` — projection pushdown saves Arrow-convert + ship cost but not decode CPU, the usually-dominant term; push the projected+predicate-only column set into row assembly). The **p99-feedback throttle is an unspecified closed control loop** — a naive proportional throttle on noisy p99 oscillates. Specify an AIMD governor with a dead-band, ≥30-60 s minimum dwell, and a hard floor of zero scans; treat it as a safety cutout, not a fine-grained rate controller.
+
+### Open decisions worth resolving early
+
+- The Arrow-53-vs-DataFusion version gap: the Flight IPC boundary is a real mitigation, but pin conservative IPC writer options on the server and add a cross-version Flight round-trip test — don't assume the boundary is free.
+- Manifest ownership/versioning: version it with reject-on-unknown-major, generate Java+Rust types from one source of truth, and **sign the manifest itself** (not just per-node tickets) — a tampered manifest reassigns token coverage = silent data loss/duplication.

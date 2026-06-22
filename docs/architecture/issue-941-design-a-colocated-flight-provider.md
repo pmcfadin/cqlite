@@ -383,3 +383,38 @@ Cons:
 4. Add `cqlite-datafusion` or a gated module with `CqliteSidecarTableProvider` and `CqliteFlightExec`.
 5. Reuse the Trino split tests as cross-language fixtures for DataFusion planning.
 6. Add end-to-end comparison: DataFusion query and Trino query over the same snapshot epoch.
+
+---
+
+## Claude Council Review (2026-06-22)
+
+**Verdict: this is the right first design and the most engine-literate of the three.** It reuses the strongest existing work and correctly identifies the only hard blocker (the `Vec<RecordBatch>` → streaming refactor, confirmed at `producer.rs:312` / `service.rs:186-198`). Approve as v1 direction. The items below are must-fixes before it is buildable or before any "correct"/"efficient" claim ships.
+
+### DataFusion/Arrow — one sharp error, two missing surfaces
+
+- **The cancellation claim is asserted but not implemented (lines 144, 293).** DataFusion cancels by dropping the `RecordBatchStream`; if the producer runs in a bare `tokio::spawn`, dropping the stream only drops the mpsc *receiver* — the spawned task keeps running, keeps SSTable handles open, and keeps the snapshot-lease refcount up. Fix: drive the producer inside the stream's own `poll_next` (no detached spawn), or store an `AbortHandle`/`JoinHandle` and `abort()` in a `Drop` impl, or thread a `CancellationToken` the producer polls.
+- **No `PlanProperties`/`EmissionType`/`Boundedness`.** `CqliteFlightExec` (lines 98-107) must add `properties() -> &PlanProperties` carrying `Partitioning` (token-hash or `UnknownPartitioning(n)`), `EmissionType::Incremental`, and `Boundedness::Bounded`.
+- **No `statistics()`** surfaced from the manifest — needed for join ordering and aggregate-strategy selection.
+- **`OR`/`NOT` as `Exact` (line 160) is a foot-gun.** Returning `Exact` on an `OR` tree bets that every leaf's CQL three-valued/NULL/tombstone-vs-absent semantics exactly match DataFusion; one mistranslated leaf silently drops rows. Mark `OR`/`NOT` `Inexact` in v1 (still pushed, still correct).
+- Before hand-rolling the `DoGet`→`RecordBatchStream` adapter (line 119), evaluate DataFusion's `FlightTableFactory`/`FlightExec` (`datafusion-table-providers`). The custom ticket is a legitimate reason to extend rather than adopt — but justify it rather than silently reinvent.
+
+### Cassandra/Sidecar — block any correctness claim until these are explicit and tested
+
+- **Min-token wraparound `(start, end]`.** The wrap segment has `start > end`, so membership is `token > start OR token <= end`. Coverage verification must count the `MIN_VALUE` boundary token exactly once. *(Code-grounding found `FlightTicket` already carries `wraparound: bool` and `token_in_half_open_range`, so this is partly handled at the ticket layer — make the membership predicate and full-ring coverage test explicit in the design, and confirm whether Sidecar emits the wrap as one interval or two.)*
+- **Mid-query topology flux.** `readReplicas` can shift between the `token-range-replicas` call and the snapshot PUT; a NORMAL replica may not yet own (or may be shedding) its assigned range. Re-fetch topology and assert the selected replica still owns each `(start,end]` after snapshots are pinned; treat pending range movement as a hard fail in v1 (never silently switch).
+- **Snapshot-vs-range coverage hole.** The "complete component set" check verifies files exist, not that they *cover* the token interval. Cross-check SSTable first/last-token spans against the assigned interval and surface uncovered sub-ranges.
+- **`avg` pushdown** must ship sum+count partials merged at the coordinator, not a per-node `avg`.
+
+### Trino/MPP — the split model is wrong *for Trino specifically*
+
+- "One grouped scan per selected node" starves Trino, which wants *many* splits per node for driver parallelism, work-stealing, and straggler recovery. A single fat per-node split serializes that node on one core and makes one slow disk a query-wide straggler. **Decouple the engines:** grouped-per-node is fine for DataFusion (single process); for Trino emit many splits per node addressed to the same co-located worker, targeting ~seconds of work each. "Scan SSTables once" is a CQLite-reader concern, not a scheduling decision.
+- **Affinity must become concrete** — `ConnectorSplit` addresses + a stated `NodeSelectionStrategy`.
+- **Move the aggregation `rows/groups ≥ 4-10` heuristic out of the Trino connector** — Trino already runs adaptive partial aggregation; a hard-coded heuristic in `applyAggregation` fights the optimizer. Keep the heuristic only on the DataFusion side, which lacks the equivalent.
+
+### Performance — memory needs arithmetic, the straggler fix shouldn't wait
+
+- **The <128 MB target is plausibly blown under fan-out.** 8 MiB/batch × a 4-batch channel = 32 MiB *per active scan*, before reconciliation state, open range tombstones, K-way merge cursors, and the encoder's copy; ~64 MiB of channel buffers alone at 2 scans/node. Make `byte_cap` the *primary* governor, drop the channel to 1-2 batches, and budget `byte_cap × (depth+1) × active_scans + reconciliation_high_water` against 128 MB explicitly — likely forces byte_cap to 2-4 MiB or active_scans to 1 for wide tables. (The 8k-row/8-MiB batch *shape* is otherwise well chosen.)
+- **Add byte-balanced intra-node splitting now, not "after token seeks."** Open the same SSTable set once but partition the Summary/Index range into K byte-balanced sub-scans with interval-membership filters — recovers multi-core throughput and kills the straggler without redundant SSTable opens.
+- **Wide-partition TTFB:** per-partition reconciliation means a multi-GB wide partition fully assembles before its first row emits. Cap per-partition assembly and emit in clustering-order chunks where reconciliation allows, or add a wide-partition guardrail.
+
+**Bottom line:** correct architecture, correct instincts, correct blocker. Must-fix before build: real cancellation (not bare spawn), `PlanProperties`+`statistics()`, Trino split-count/affinity, byte-cap-primary memory budgeting, and the wraparound/topology correctness tests.

@@ -303,3 +303,36 @@ Cons:
 ## Recommendation
 
 Keep this as a compatibility design, not the default. It is worth building if the target deployments cannot run co-located readers, but it should follow Design A unless local volume access is impossible.
+
+---
+
+## Claude Council Review (2026-06-22)
+
+**Verdict: correct as a documented compatibility fallback — keep it behind Design A.** The doc is honest that it is "performance-fragile" and correctly names `range_request_count × request_latency` as the term that can destroy the design. The concerns below are about not letting it become a default, and about one load-bearing assumption that is unverified.
+
+### Cassandra/Sidecar — the whole design rests on an unchecked assumption
+
+- **Does the Sidecar snapshot-component route actually honor HTTP `Range` efficiently, streaming from disk without buffering whole components?** This is the load-bearing premise and the doc never confirms it against `ApiEndpointsV1`. Some Sidecar component paths are built for whole-file SSTable upload/download, not random-access range serving. **Verify range support and server-side seek behavior before committing — if absent, Design B is dead on arrival.**
+- **Sidecar is not a throughput data plane.** It runs co-located with Cassandra and shares the node's page cache, disk, and often heap. Serving multi-MiB/s of analytics range reads contends directly with Cassandra foreground I/O and pollutes page cache — the exact thing the snapshot was meant to avoid. State this explicitly.
+- **Compression-chunk alignment is a correctness rule, not a perf nicety.** A range that splits a compression chunk is unusable (decompression needs whole chunk + checksum). Make chunk-aligned reads a hard rule.
+- Inherits every Design A distributed-correctness gap (wraparound, topology flux, single-replica incompleteness, counters) plus network failure surface.
+
+### Performance — the coalescing toolkit is right but unquantified
+
+- Add a **regime split** and a **stated RTT budget**. Full-table scans are bandwidth-bound (large sequential ranges, fine); selective index-driven seeks are scattered and latency-bound. Once the seek count would exceed a few hundred ranges, **prefer reading whole SSTables / whole compression-chunk runs over honoring fine-grained token pruning.**
+- **Size in-flight depth from a real RTT.** Required depth = `target_throughput × RTT / range_size`. At 100 MiB/s, 2 MiB ranges, 1 ms RTT that's ~50 outstanding — already above the suggested 32 cap, so **the cap is likely too low for full scans.**
+- **Decompression now competes with HTTP for the same worker cores** — model worker CPU as a distinct budget.
+- The 32-128 MiB/worker metadata cache × concurrent partitions is its own blowup risk — make it a shared per-query LRU.
+
+### DataFusion/Arrow — inherits A's gaps and reinvents `object_store`
+
+- Same omissions as A above the `scan` boundary (no `Statistics`, no `PlanProperties`/`EmissionType`), and the same drop-doesn't-cancel hazard — now multiplied across N concurrent `reqwest` futures. Scope all range reads to a `CancellationToken`/`tokio::select!` against a stream-owned shutdown signal.
+- The hand-rolled `SidecarComponentFile` + coalescing substantially re-implements `object_store`'s `GetOptions { range }` + DataFusion's parquet range-coalescing machinery. **Evaluate wrapping Sidecar behind an `object_store::ObjectStore` impl** to reuse existing coalescing/retry/throttle code.
+- `PositionedReadAt::len()` as a separate async round-trip is wasteful — sizes are already in the component manifest.
+
+### Trino/MPP — this forfeits the co-location premise
+
+- Option 2 (Trino → Rust Flight service → Sidecar → disk) inserts two network hops and makes every Trino split remote, killing `HARD_AFFINITY` scheduling. State plainly that Design B sacrifices co-location; size splits by bytes and raise split count to hide latency.
+- Sidecar's per-host concurrency caps (8-32) backpressure into Trino driver stalls — surface Sidecar admission as split *generation* throttling, not mid-read blocking.
+
+**Bottom line:** a legitimate fallback for unmountable-volume / Kubernetes deployments, but gate it behind a *proven* Sidecar range-read capability, document that Sidecar egress contends with Cassandra and that co-location is forfeited, and keep it strictly secondary to Design A.
