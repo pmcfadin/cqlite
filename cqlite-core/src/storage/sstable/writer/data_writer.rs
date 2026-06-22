@@ -1133,7 +1133,49 @@ impl DataWriter {
             }
         }
 
-        let ops: Vec<MergedOp<'a>> = cells.into_values().collect();
+        let mut ops: Vec<MergedOp<'a>> = cells.into_values().collect();
+
+        // Issue #927 (item 6): mixed-stream reconciliation. A single column may
+        // carry BOTH a whole-column op (in `ops`) and per-element complex ops (in
+        // `complex_element_ops`) — e.g. a UDT overwritten wholesale by one mutation
+        // and edited per-field by another. Emitting both would double-write the
+        // column and desync the reader. Reconcile by timestamp shadowing: keep the
+        // stream with the newer max timestamp and drop the other, rather than
+        // silently losing one.
+        if !complex_element_ops.is_empty() {
+            let mut elem_max_ts: std::collections::HashMap<&str, i64> =
+                std::collections::HashMap::new();
+            for mop in &complex_element_ops {
+                if let Some(col) = merged_op_column(mop.op) {
+                    let entry = elem_max_ts.entry(col).or_insert(i64::MIN);
+                    if mop.timestamp_micros > *entry {
+                        *entry = mop.timestamp_micros;
+                    }
+                }
+            }
+            // Columns whose whole-column op wins (>= element max ts) keep their
+            // whole op; their per-element ops are dropped. Columns where elements
+            // win drop the whole-column op.
+            let mut whole_wins: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            ops.retain(|mop| match merged_op_column(mop.op) {
+                Some(col) => match elem_max_ts.get(col) {
+                    Some(&emax) if mop.timestamp_micros >= emax => {
+                        whole_wins.insert(col);
+                        true
+                    }
+                    Some(_) => false,
+                    None => true,
+                },
+                None => true,
+            });
+            if !whole_wins.is_empty() {
+                complex_element_ops.retain(|mop| match merged_op_column(mop.op) {
+                    Some(col) => !whole_wins.contains(col),
+                    None => true,
+                });
+            }
+        }
+
         if ops.is_empty()
             && complex_element_ops.is_empty()
             && row_deletion.is_none()
@@ -2268,6 +2310,13 @@ impl DataWriter {
             || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
         {
             self.write_list_complex_cells(buf, value, timestamp_micros, ttl_seconds)?;
+        } else if is_udt_marshal(&dt) {
+            // Issue #927: decompose a whole-`Value::Udt` literal into per-field
+            // cells (cell_path = 2-byte signed-short DECLARED field index, value =
+            // field datum). Field index comes from the column's declared order, NOT
+            // the literal's position — a sparse / reordered literal lands each field
+            // at its correct index.
+            self.write_udt_complex_cells(buf, column, value, timestamp_micros, ttl_seconds)?;
         } else {
             return Err(Error::InvalidInput(format!(
                 "Column '{}' has type '{}' which is not a recognized complex column type",
@@ -2275,6 +2324,87 @@ impl DataWriter {
             )));
         }
 
+        Ok(())
+    }
+
+    /// Write the per-field cells of a whole-`Value::Udt` write, following the
+    /// column header already emitted by [`write_complex_column`] (issue #927).
+    ///
+    /// Each non-null field becomes one complex cell whose cell_path is the 2-byte
+    /// big-endian DECLARED field index (resolved by NAME from the `UserType(...)`
+    /// marshal string) and whose value is the serialized field datum. Null fields
+    /// are absent (no cell), matching Cassandra. Cells are emitted in ascending
+    /// field-index order. Row TTL, when present, propagates to every field cell as
+    /// an expiring cell.
+    fn write_udt_complex_cells(
+        &self,
+        buf: &mut Vec<u8>,
+        column: &Column,
+        value: &Value,
+        timestamp_micros: i64,
+        ttl_seconds: Option<u32>,
+    ) -> Result<()> {
+        let udt = match value {
+            Value::Udt(udt) => udt,
+            Value::Frozen(inner) => {
+                if let Value::Udt(udt) = inner.as_ref() {
+                    udt
+                } else {
+                    return Err(Error::InvalidInput(format!(
+                        "Column '{}' is a UDT complex column but value is {:?}",
+                        column.name, value
+                    )));
+                }
+            }
+            other => {
+                return Err(Error::InvalidInput(format!(
+                    "Column '{}' is a UDT complex column but value is {:?}",
+                    column.name, other
+                )));
+            }
+        };
+
+        let declared = udt_declared_field_names(&column.data_type)?;
+
+        // Resolve each literal field to its DECLARED index by name; reject unknown
+        // field names (no-heuristics). Build elements in declared-index order.
+        let mut elements: Vec<ComplexElementWrite> = Vec::new();
+        for field in &udt.fields {
+            let Some(field_value) = &field.value else {
+                // Null field: absent cell.
+                continue;
+            };
+            let idx = declared
+                .iter()
+                .position(|n| n == &field.name)
+                .ok_or_else(|| {
+                    Error::InvalidInput(format!(
+                        "UDT column '{}': literal field '{}' is not a declared field of {}",
+                        column.name, field.name, column.data_type
+                    ))
+                })?;
+            let cell_path = (idx as u16).to_be_bytes().to_vec();
+            let local_deletion_time = match ttl_seconds {
+                Some(ttl) => Some(self.expiring_local_deletion_time(ttl)?),
+                None => None,
+            };
+            elements.push(ComplexElementWrite {
+                cell_path,
+                value: Some(field_value.clone()),
+                timestamp_micros,
+                ttl_seconds,
+                local_deletion_time,
+                is_deleted: false,
+            });
+        }
+
+        // Ascending field-index (signed-short) order.
+        elements.sort_by(|a, b| compare_cell_paths(&a.cell_path, &b.cell_path, true));
+
+        encode_unsigned(elements.len() as u64, buf);
+        for elem in &elements {
+            self.write_complex_element_cell(buf, elem, timestamp_micros)?;
+        }
         Ok(())
     }
 
@@ -2622,14 +2752,15 @@ impl DataWriter {
             }
         }
 
-        // ---- Element order: SET/MAP by cell_path bytes; LIST insertion order.
-        let is_list = {
-            let dt = column.data_type.to_lowercase();
-            dt.starts_with("list<") || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
-        };
+        // ---- Element order: SET/MAP by cell_path bytes; UDT by SIGNED-short field
+        // index (issue #927); LIST insertion order.
+        let dt = column.data_type.to_lowercase();
+        let is_list =
+            dt.starts_with("list<") || dt.starts_with("org.apache.cassandra.db.marshal.listtype(");
+        let is_udt = is_udt_marshal(&dt);
         let mut ordered: Vec<&ComplexElementWrite> = elements.iter().collect();
         if !is_list {
-            ordered.sort_by(|a, b| a.cell_path.cmp(&b.cell_path));
+            ordered.sort_by(|a, b| compare_cell_paths(&a.cell_path, &b.cell_path, is_udt));
         }
 
         // ---- Cell count.
@@ -3339,7 +3470,123 @@ fn is_complex_column(data_type: &str) -> bool {
         return true;
     }
 
+    // Issue #927: a TOP-LEVEL non-frozen UDT is a first-class multi-cell complex
+    // column (each field is a cell keyed by its 2-byte signed-short field index).
+    // Frozen UDTs were excluded above; a UDT nested in a collection is matched by
+    // its outer list/set/map branch. Bare CQL UDT names (e.g. `address`) are NOT
+    // detected here — the writer holds only a `&TableSchema` and cannot resolve a
+    // bare name to a UDT without a `UdtRegistry` (issue #927 item 4, follow-up).
+    // Compaction inputs always carry the full `UserType(...)` marshal string, so
+    // this covers the compaction path.
+    if is_udt_marshal(&dt) {
+        return true;
+    }
+
     false
+}
+
+/// True iff `data_type` is a TOP-LEVEL non-frozen `UserType(...)` marshal string
+/// (issue #927). `dt_lower` is expected already lowercased by the caller.
+fn is_udt_marshal(dt_lower: &str) -> bool {
+    dt_lower.starts_with("org.apache.cassandra.db.marshal.usertype(")
+}
+
+/// Total-order comparator for two complex-column cell paths (issue #927, parity
+/// Cassandra `d14c96b8`). UDT field-index paths are 2-byte **signed** `ShortType`
+/// values, so a field index in `[32768, 65535]` (negative as `i16`) must sort
+/// BEFORE the positive indices — a plain lexicographic byte compare would order
+/// it last. Non-UDT paths (collections) keep lexicographic byte ordering.
+fn compare_cell_paths(a: &[u8], b: &[u8], is_udt: bool) -> std::cmp::Ordering {
+    if is_udt && a.len() == 2 && b.len() == 2 {
+        let ai = i16::from_be_bytes([a[0], a[1]]);
+        let bi = i16::from_be_bytes([b[0], b[1]]);
+        return ai.cmp(&bi);
+    }
+    a.cmp(b)
+}
+
+/// Parse the DECLARED field order (names only) from a top-level `UserType(...)`
+/// marshal string (issue #927). Used to map a whole-`Value::Udt` literal's fields
+/// to their 2-byte signed-short cell-path index by NAME, never by literal
+/// position (the literal may be sparse / out of order).
+fn udt_declared_field_names(data_type: &str) -> Result<Vec<String>> {
+    let start_marker = "org.apache.cassandra.db.marshal.UserType(";
+    let type_lower = data_type.to_lowercase();
+    let start_idx = type_lower
+        .find(&start_marker.to_lowercase())
+        .ok_or_else(|| Error::InvalidInput(format!("Not a UserType: {}", data_type)))?;
+    let inner_start = start_idx + start_marker.len();
+    let mut paren_depth = 1;
+    let mut end_idx = inner_start;
+    let chars: Vec<char> = data_type[inner_start..].chars().collect();
+    for (i, c) in chars.iter().enumerate() {
+        match c {
+            '(' => paren_depth += 1,
+            ')' => {
+                paren_depth -= 1;
+                if paren_depth == 0 {
+                    end_idx = inner_start + i;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if paren_depth != 0 {
+        return Err(Error::InvalidInput(format!(
+            "Unbalanced parentheses in UserType: {}",
+            data_type
+        )));
+    }
+    let inner = &data_type[inner_start..end_idx];
+    // Split top-level args respecting nested parens.
+    let mut parts: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0;
+    for c in inner.chars() {
+        match c {
+            '(' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                parts.push(std::mem::take(&mut current));
+            }
+            _ => current.push(c),
+        }
+    }
+    if !current.is_empty() {
+        parts.push(current);
+    }
+    // First two args are keyspace + hex name; the rest are `hexname:type`.
+    let mut names = Vec::with_capacity(parts.len().saturating_sub(2));
+    for field_def in parts.iter().skip(2) {
+        let field_def = field_def.trim();
+        if field_def.is_empty() {
+            continue;
+        }
+        let colon_idx = field_def.find(':').ok_or_else(|| {
+            Error::InvalidInput(format!(
+                "Invalid UDT field definition (missing colon): {}",
+                field_def
+            ))
+        })?;
+        let name_bytes = hex::decode(&field_def[..colon_idx]).map_err(|e| {
+            Error::InvalidInput(format!(
+                "Invalid hex-encoded UDT field name '{}': {}",
+                &field_def[..colon_idx],
+                e
+            ))
+        })?;
+        let name = String::from_utf8(name_bytes)
+            .map_err(|e| Error::InvalidInput(format!("Invalid UTF-8 in UDT field name: {}", e)))?;
+        names.push(name);
+    }
+    Ok(names)
 }
 
 /// A surviving cell operation in a merged row, tagged with the timestamp and
@@ -3453,6 +3700,20 @@ struct RowWrite<'a> {
 
 fn column_order_key(column: &Column) -> (bool, &str) {
     (is_complex_column(&column.data_type), column.name.as_str())
+}
+
+/// The column name targeted by a cell operation, if any (issue #927: used by
+/// mixed-stream reconciliation). `DeleteRow` targets no specific column.
+fn merged_op_column(op: &crate::storage::write_engine::mutation::CellOperation) -> Option<&str> {
+    use crate::storage::write_engine::mutation::CellOperation;
+    match op {
+        CellOperation::Write { column, .. }
+        | CellOperation::WriteWithTtl { column, .. }
+        | CellOperation::Delete { column }
+        | CellOperation::WriteComplexElement { column, .. }
+        | CellOperation::ComplexDeletion { column, .. } => Some(column.as_str()),
+        CellOperation::DeleteRow => None,
+    }
 }
 
 /// Generate a version-1 TimeUUID for use as a list cell path.
@@ -6474,6 +6735,19 @@ mod tests {
         assert!(!is_complex_column("text"));
         assert!(!is_complex_column("uuid"));
         assert!(!is_complex_column("timestamp"));
+
+        // Issue #927: a TOP-LEVEL non-frozen UDT IS complex.
+        assert!(is_complex_column(
+            "org.apache.cassandra.db.marshal.UserType(ks,61,62:org.apache.cassandra.db.marshal.UTF8Type)"
+        ));
+        // A frozen UDT is NOT complex (single-cell).
+        assert!(!is_complex_column(
+            "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61,62:org.apache.cassandra.db.marshal.UTF8Type))"
+        ));
+        // A bare CQL UDT name is NOT detected here (needs a UdtRegistry — issue
+        // #927 item 4); `frozen<addr>` is likewise not complex.
+        assert!(!is_complex_column("address_type"));
+        assert!(!is_complex_column("frozen<address_type>"));
     }
 
     #[test]
@@ -8926,5 +9200,272 @@ mod tests {
         );
         assert!(dead.value.is_none(), "tombstone writes no value bytes");
         assert_eq!(dead.ldt_delta, Some((1_700_000_009 - 1_700_000_000) as u64));
+    }
+
+    // ===================================================================
+    // Issue #927 — non-frozen UDT multi-cell support (writer + reader).
+    //
+    // A non-frozen UDT column stores each non-null field as its own complex
+    // cell, keyed by the 2-byte signed-short DECLARED field index. These tests
+    // exercise the writer decomposition AND a true writer->reader round-trip.
+    // ===================================================================
+
+    /// `person { name text, age int, email text }` as a top-level non-frozen UDT
+    /// marshal string.
+    fn person_udt_marshal() -> String {
+        "org.apache.cassandra.db.marshal.UserType(\
+         test_ks,706572736f6e,\
+         6e616d65:org.apache.cassandra.db.marshal.UTF8Type,\
+         616765:org.apache.cassandra.db.marshal.Int32Type,\
+         656d61696c:org.apache.cassandra.db.marshal.UTF8Type)"
+            .to_string()
+    }
+
+    fn udt_column(name: &str, data_type: &str) -> Column {
+        Column {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        }
+    }
+
+    fn udt_field(name: &str, value: Option<Value>) -> crate::types::UdtField {
+        crate::types::UdtField {
+            name: name.to_string(),
+            value,
+        }
+    }
+
+    fn person_reader() -> crate::storage::sstable::reader::V5CompressedLegacyParser {
+        crate::storage::sstable::reader::V5CompressedLegacyParser::new(
+            "test_ks".to_string(),
+            "test_table".to_string(),
+            1_000_000, // min_timestamp (matches create_test_stats)
+            0,         // min_local_deletion_time
+            Some(0),   // min_ttl
+        )
+    }
+
+    /// A sparse, out-of-order whole-`Value::Udt` write must round-trip through
+    /// the reader with each field landing at its DECLARED index (issue #927 item
+    /// 3: field index comes from declared order, never the literal's position).
+    #[test]
+    fn udt_whole_write_roundtrips_sparse_out_of_order() {
+        let writer = DataWriter::new(create_test_stats());
+        let col = udt_column("addr", &person_udt_marshal());
+        // Literal lists email THEN name (out of order) and OMITS age (sparse).
+        let udt = Value::Udt(crate::types::UdtValue {
+            type_name: "person".to_string(),
+            keyspace: "test_ks".to_string(),
+            fields: vec![
+                udt_field("email", Some(Value::Text("a@b.com".to_string()))),
+                udt_field("name", Some(Value::Text("Alice".to_string()))),
+            ],
+        });
+
+        let row_ts = 1_005_000i64;
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &col, &udt, row_ts, None)
+            .unwrap();
+
+        // Decode the raw bytes: two cells (name idx 0, email idx 2), ascending
+        // signed-short field index, age (idx 1) absent.
+        let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 2, "two non-null fields => two cells");
+        assert_eq!(
+            cells[0].cell_path,
+            0u16.to_be_bytes().to_vec(),
+            "name idx 0 first"
+        );
+        assert_eq!(
+            cells[1].cell_path,
+            2u16.to_be_bytes().to_vec(),
+            "email idx 2 next"
+        );
+
+        // True round-trip through the reader.
+        let parser = person_reader();
+        let (value, _off, _meta) = parser
+            .parse_complex_column_inner(&buf, 0, &col, true, row_ts, None)
+            .expect("reader must parse the UDT complex column");
+
+        match value {
+            Value::Udt(out) => {
+                assert_eq!(out.type_name, "person");
+                assert_eq!(out.keyspace, "test_ks");
+                assert_eq!(out.fields.len(), 3, "all DECLARED fields present");
+                assert_eq!(out.fields[0].name, "name");
+                assert_eq!(out.fields[0].value, Some(Value::Text("Alice".to_string())));
+                assert_eq!(out.fields[1].name, "age");
+                assert_eq!(out.fields[1].value, None, "omitted field stays null");
+                assert_eq!(out.fields[2].name, "email");
+                assert_eq!(
+                    out.fields[2].value,
+                    Some(Value::Text("a@b.com".to_string()))
+                );
+            }
+            other => panic!("expected Value::Udt, got {:?}", other),
+        }
+    }
+
+    /// Row TTL on a whole-UDT write must propagate to every emitted field cell as
+    /// an expiring cell (issue #927 item 4 / roborev job 929).
+    #[test]
+    fn udt_whole_write_propagates_row_ttl() {
+        let writer = DataWriter::new(create_test_stats());
+        let col = udt_column("addr", &person_udt_marshal());
+        let udt = Value::Udt(crate::types::UdtValue {
+            type_name: "person".to_string(),
+            keyspace: "test_ks".to_string(),
+            fields: vec![
+                udt_field("name", Some(Value::Text("Bob".to_string()))),
+                udt_field("age", Some(Value::Integer(42))),
+            ],
+        });
+
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &col, &udt, 1_005_000, Some(3_600))
+            .unwrap();
+
+        let (_d, _l, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 2);
+        for c in &cells {
+            assert_ne!(
+                c.flags & CELL_IS_EXPIRING,
+                0,
+                "TTL must make every field cell expiring, flags=0x{:02x}",
+                c.flags
+            );
+            assert!(c.ttl_delta.is_some(), "expiring cell carries a TTL delta");
+            assert!(c.ldt_delta.is_some(), "expiring cell carries an LDT delta");
+        }
+    }
+
+    /// A whole-UDT literal naming a field that is not declared is authoritative
+    /// corruption — reject it (no-heuristics mandate, issue #927 item 3).
+    #[test]
+    fn udt_whole_write_rejects_unknown_field() {
+        let writer = DataWriter::new(create_test_stats());
+        let col = udt_column("addr", &person_udt_marshal());
+        let udt = Value::Udt(crate::types::UdtValue {
+            type_name: "person".to_string(),
+            keyspace: "test_ks".to_string(),
+            fields: vec![udt_field("nope", Some(Value::Text("x".to_string())))],
+        });
+        let mut buf = Vec::new();
+        let err = writer
+            .write_complex_column(&mut buf, &col, &udt, 1_005_000, None)
+            .unwrap_err();
+        assert!(
+            matches!(err, Error::InvalidInput(_)),
+            "unknown UDT field must be InvalidInput, got {:?}",
+            err
+        );
+    }
+
+    /// UDT per-element cell paths must sort by SIGNED ShortType, so a field index
+    /// in `[32768, 65535]` (negative as i16) sorts BEFORE the positive indices
+    /// (issue #927, parity Cassandra `d14c96b8`). A plain byte-lexicographic sort
+    /// would put 0x8000 last.
+    #[test]
+    fn udt_per_element_signed_short_ordering() {
+        let writer = DataWriter::new(create_test_stats());
+        let col = udt_column("addr", &person_udt_marshal());
+        let mk = |idx: u16| ComplexElementWrite {
+            cell_path: idx.to_be_bytes().to_vec(),
+            value: Some(Value::Integer(idx as i32)),
+            timestamp_micros: 1_000_000,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+        // Supplied out of order; 0x8000 == -32768 (signed), 0x7FFF == 32767.
+        let elements = vec![mk(0x7FFF), mk(0x8000), mk(0x0001)];
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column_per_element(&mut buf, &col, None, &elements, 1_000_000)
+            .unwrap();
+
+        let (_d, _l, cells) = decode_complex_column(&buf);
+        let paths: Vec<u16> = cells
+            .iter()
+            .map(|c| u16::from_be_bytes([c.cell_path[0], c.cell_path[1]]))
+            .collect();
+        assert_eq!(
+            paths,
+            vec![0x8000, 0x0001, 0x7FFF],
+            "signed-short order: -32768, 1, 32767"
+        );
+    }
+
+    /// Mixed-stream reconciliation (issue #927 item 6): a column carrying BOTH a
+    /// whole-column op and per-element ops keeps the newer stream by timestamp,
+    /// rather than emitting both (which would double-write and desync the reader).
+    #[test]
+    fn udt_mixed_stream_reconciliation_newer_wins() {
+        let writer = DataWriter::new(create_test_stats());
+        let mut schema = create_test_schema();
+        schema
+            .columns
+            .push(udt_column("addr", &person_udt_marshal()));
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+
+        // Older whole-column UDT write (ts 1_000_000) ...
+        let whole = Mutation::new(
+            table_id.clone(),
+            pk.clone(),
+            None,
+            vec![CellOperation::Write {
+                column: "addr".to_string(),
+                value: Value::Udt(crate::types::UdtValue {
+                    type_name: "person".to_string(),
+                    keyspace: "test_ks".to_string(),
+                    fields: vec![udt_field("name", Some(Value::Text("Old".to_string())))],
+                }),
+            }],
+            1_000_000,
+            None,
+        );
+        // ... shadowed by a NEWER per-element edit (ts 2_000_000).
+        let per_elem = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::WriteComplexElement {
+                column: "addr".to_string(),
+                cell_path: 0u16.to_be_bytes().to_vec(),
+                value: Some(Value::Text("New".to_string())),
+                timestamp_micros: 2_000_000,
+                ttl_seconds: None,
+                local_deletion_time: None,
+                is_deleted: false,
+            }],
+            2_000_000,
+            None,
+        );
+
+        let _ = &writer; // writer not needed: merge_row_group is associated
+        let row = DataWriter::merge_row_group(&[&whole, &per_elem], &schema, false, None)
+            .expect("merge must produce a row");
+
+        // The per-element stream is newer, so the whole-column op is dropped and
+        // the per-element op survives — no double-write.
+        assert!(
+            !row.ops
+                .iter()
+                .any(|m| merged_op_column(m.op) == Some("addr")),
+            "older whole-column UDT op must be shadowed by newer per-element edit"
+        );
+        assert_eq!(
+            row.complex_element_ops.len(),
+            1,
+            "newer per-element edit survives"
+        );
     }
 }
