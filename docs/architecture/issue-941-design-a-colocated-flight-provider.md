@@ -44,6 +44,160 @@ It reuses the strongest existing work:
 
 The main implementation risk is bounded streaming, not the planner shape. `cqlite-flight` currently returns `Vec<RecordBatch>` from `producer.produce()` before encoding Flight output. For this design to scale, the producer must become a lazy stream with cancellation.
 
+## Architecture diagrams
+
+These diagrams are intended to make ownership boundaries explicit. DataFusion and Trino can share the same scan manifest, snapshot leases, and Flight ticket contract, but they do not share a query scheduler.
+
+### System Architecture
+
+```mermaid
+flowchart LR
+    subgraph "Query engines"
+        DF["DataFusion session"]
+        TC["Trino coordinator"]
+        TW["Trino workers"]
+    end
+
+    subgraph "Planning control plane"
+        TP["CqliteSidecarTableProvider"]
+        TM["Trino connector metadata and split manager"]
+        RP["ReplicaPlanner"]
+        SLM["SnapshotLeaseManager"]
+        SM["SnapshotScanManifest"]
+    end
+
+    subgraph "Cassandra node A"
+        SA["Sidecar A"]
+        FA["cqlite-flight A"]
+        CA["Cassandra SSTable snapshots A"]
+    end
+
+    subgraph "Cassandra node B"
+        SB["Sidecar B"]
+        FB["cqlite-flight B"]
+        CB["Cassandra SSTable snapshots B"]
+    end
+
+    DF --> TP
+    TC --> TM
+    TM --> TW
+    TP --> RP
+    TM --> RP
+    RP --> SLM
+    SLM --> SM
+    SLM --> SA
+    SLM --> SB
+    SA --> CA
+    SB --> CB
+    DF -->|"RecordBatchStream partitions"| FA
+    DF -->|"RecordBatchStream partitions"| FB
+    TW -->|"Flight DoGet, hard-affinity split"| FA
+    TW -->|"Flight DoGet, hard-affinity split"| FB
+    FA --> CA
+    FB --> CB
+```
+
+Key boundary: Trino never delegates join, split, aggregation, or memory scheduling to DataFusion. The common artifact is the manifest/ticket contract, not a DataFusion physical plan.
+
+### Snapshot Lease Lifecycle
+
+```mermaid
+flowchart TD
+    Start["Query planning starts"] --> Schema["Fetch schema, settings, ring, readReplicas"]
+    Schema --> Select["Select one healthy read replica per token interval"]
+    Select --> Topology1["Reject gaps, overlaps, non-UP/NORMAL replicas, and range movement"]
+    Topology1 --> Create["Create unique Sidecar snapshot on selected replicas"]
+    Create --> VerifyFiles["Verify component set, table UUID, schema digest, sizes, and dataDirectoryIndex"]
+    VerifyFiles --> VerifyCoverage["Verify snapshot SSTable token spans cover assigned intervals"]
+    VerifyCoverage --> Topology2["Re-fetch topology after snapshots are pinned"]
+    Topology2 --> Publish["Publish immutable SnapshotScanManifest"]
+    Publish --> Execute["Issue signed tickets and execute Flight streams"]
+    Execute --> Success{"Query terminal state"}
+    Success -->|"success"| Cleanup["Clear snapshots and close lease"]
+    Success -->|"failure"| Cleanup
+    Success -->|"client cancellation"| Cancel["Cancel streams and producer tasks"]
+    Cancel --> Cleanup
+    Create -->|"partial create"| Fail["Fail query"]
+    VerifyFiles -->|"manifest mismatch"| Fail
+    VerifyCoverage -->|"uncovered range"| Fail
+    Topology2 -->|"ownership changed"| Fail
+    Fail --> Cleanup
+```
+
+The published epoch is a stable file-set contract only. It is not a Cassandra `QUORUM` read, not a cross-range transaction, and not a globally consistent cut.
+
+### Split Planning And Token Coverage
+
+```mermaid
+flowchart LR
+    Ring["Sidecar readReplicas ranges"] --> Canonical["Canonical token intervals: start exclusive, end inclusive"]
+    Canonical --> Wrap["Wraparound interval if start > end: token > start OR token <= end"]
+    Wrap --> Coverage["Coverage validator counts every ring interval exactly once"]
+    Coverage --> Replica["ReplicaPlanner chooses one healthy replica per interval"]
+
+    Replica --> DFPlan["DataFusion plan"]
+    Replica --> TrinoPlan["Trino plan"]
+
+    DFPlan --> DFGrouped["Group adjacent intervals by replica for fewer local scans"]
+    DFGrouped --> DFPartitions["DataFusion ExecutionPlan partitions"]
+
+    TrinoPlan --> ByteSplit["Create many byte-balanced splits per selected replica"]
+    ByteSplit --> Affinity["ConnectorSplit addresses plus HARD_AFFINITY to co-located worker"]
+    Affinity --> TrinoSplits["Trino worker PageSource per split"]
+
+    DFPartitions --> Ticket["Ticket carries assigned interval set"]
+    TrinoSplits --> Ticket
+    Ticket --> Backstop["cqlite-flight row-level token membership backstop"]
+```
+
+The same correctness intervals feed both engines. The physical split policy differs: DataFusion can tolerate grouped partitions; Trino needs enough affinity splits per node for parallelism and straggler control.
+
+### Flight DoGet Data Path
+
+```mermaid
+flowchart TD
+    TicketIn["Signed Flight ticket"] --> Validate["Validate expiry, schema digest, snapshot lease, token intervals, and pushdowns"]
+    Validate --> Open["Open snapshot SSTable components read-only"]
+    Open --> Prune["Prune SSTables by Summary token span when safe"]
+    Prune --> Merge["K-way read-only reconciliation"]
+    Merge --> RowState["Apply partition deletes, range tombstones, row/cell tombstones, TTL reference time"]
+    RowState --> Decode["Decode internal column set: keys, predicates, reconciliation metadata, outputs"]
+    Decode --> Predicate["Evaluate exact pushed predicate tree after reconciliation"]
+    Predicate --> Project["Project output columns"]
+    Project --> Agg{"Aggregation pushed?"}
+    Agg -->|"no"| Batch["Build Arrow batches with byte cap and row cap"]
+    Agg -->|"yes"| Partial["Compute sum/count/min/max partials, never per-node avg"]
+    Partial --> Batch
+    Batch --> Stream["FlightData stream to DataFusion or Trino"]
+```
+
+Projection pushdown reduces Arrow conversion and network bytes. It does not automatically reduce decode CPU until row assembly accepts the projected plus predicate column set instead of always rebuilding full `QueryRow` values.
+
+### Cancellation And Backpressure
+
+```mermaid
+flowchart TD
+    Consumer["DataFusion RecordBatchStream or Trino PageSource"] --> Pull["Poll next batch / read next page"]
+    Pull --> Channel["Small bounded batch buffer: depth 1-2"]
+    Channel --> Producer["Streaming CQLite producer"]
+    Producer --> SSTables["Open SSTable readers"]
+    Producer --> Lease["Snapshot lease refcount"]
+
+    Consumer -->|"drop, close, failure, timeout"| Cancel["CancellationToken or AbortHandle"]
+    Cancel --> Producer
+    Producer -->|"observes cancellation"| Stop["Stop merge loop"]
+    Stop --> CloseFiles["Close SSTable handles and release buffers"]
+    CloseFiles --> DecLease["Decrement snapshot lease refcount"]
+    DecLease --> Cleanup{"Last user of epoch?"}
+    Cleanup -->|"yes"| Clear["Clear Sidecar snapshots"]
+    Cleanup -->|"no"| Keep["Keep epoch for remaining streams"]
+
+    Channel --> Budget["Memory budget: byte_cap x buffer_depth x active_scans plus reconciliation high water"]
+    Budget --> Admission["Admission control and AIMD safety throttle"]
+```
+
+Dropping the receiver side of a channel is not sufficient by itself. The producer must be poll-driven by the stream, explicitly abortable, or wired to a cancellation token that it checks during merge and decode.
+
 ## Components
 
 ### `CqliteSidecarTableProvider`
