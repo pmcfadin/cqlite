@@ -547,14 +547,64 @@ impl SSTableWriter {
                         let local_deletion_time = now_seconds.saturating_add(*ttl_seconds as i32);
                         self.stats.update_local_deletion_time(local_deletion_time);
                     }
-                    crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
-                        // Issue #764: honor the explicit local_deletion_time if
-                        // the mutation supplied one, else derive from timestamp.
-                        let local_deletion_time = mutation.effective_local_deletion_time();
+                    op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow) => {
+                        // Issue #764 / #921 finding 2: record the EXACT LDT the
+                        // tombstone is emitted with. A `Delete` carrying a per-cell
+                        // `local_deletion_time: Some(L)` is stamped with `L`
+                        // verbatim by DataWriter; everything else derives the LDT
+                        // from the mutation. Reuse `op_cell_local_deletion_time`
+                        // (the emit path's helper) so stats and the bytes written
+                        // to Data.db agree exactly — a per-cell `L` below the
+                        // mutation-derived value would otherwise underflow the
+                        // delta, and one above it would leave min/max wrong.
+                        let local_deletion_time =
+                            crate::storage::sstable::writer::data_writer::op_cell_local_deletion_time(
+                                op, mutation,
+                            );
                         self.stats.update_local_deletion_time(local_deletion_time);
                     }
-                    _ => {}
+                    // Issue #887: a `ComplexDeletion` marker is physically written
+                    // with its OWN `marked_for_delete_at` / `local_deletion_time`
+                    // (DataWriter delta-encodes both against `min_timestamp` /
+                    // `min_local_deletion_time`). The mutation's row timestamp does
+                    // NOT cover the marker — for a tombstone-only row whose marker
+                    // strictly supersedes the row tombstone, `marked_for_delete_at`
+                    // can lie ABOVE the row timestamp and the marker LDT below the
+                    // row's LDT. Fold both into the stats so `max_timestamp` /
+                    // `min_local_deletion_time` reflect what was actually emitted to
+                    // Data.db (LIVE sentinels are filtered inside the `update_*`
+                    // chokepoints, issue #851).
+                    crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+                        marked_for_delete_at,
+                        local_deletion_time,
+                        ..
+                    } => {
+                        self.stats.update_timestamp(*marked_for_delete_at);
+                        self.stats.update_local_deletion_time(*local_deletion_time);
+                    }
+                    // Issue #887: a per-element complex cell carries its OWN explicit
+                    // timestamp/ttl/local_deletion_time (DataWriter delta-encodes each
+                    // against the SSTable baselines). The element timestamp can differ
+                    // from the row liveness timestamp, and a deleted/expiring element
+                    // supplies an LDT/TTL the row-level accumulation never sees. Fold
+                    // them all in so the baselines cover every byte emitted by
+                    // `write_complex_element_cell`.
+                    crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+                        timestamp_micros,
+                        ttl_seconds,
+                        local_deletion_time,
+                        ..
+                    } => {
+                        self.stats.update_timestamp(*timestamp_micros);
+                        if let Some(ttl) = ttl_seconds {
+                            self.stats.update_ttl(*ttl as i32);
+                        }
+                        if let Some(ldt) = local_deletion_time {
+                            self.stats.update_local_deletion_time(*ldt);
+                        }
+                    }
+                    crate::storage::write_engine::mutation::CellOperation::Write { .. } => {}
                 }
             }
             // Track stats for partition tombstones
@@ -781,15 +831,68 @@ impl SSTableWriter {
                             min_ldt = min_ldt.min(ldt);
                         }
                     }
-                    crate::storage::write_engine::mutation::CellOperation::Delete { .. }
-                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow => {
-                        // Issue #764: the encoding baseline must match the LDT the
-                        // row/cell tombstone will actually be written with, else the
-                        // delta underflows for an explicit LDT below the timestamp.
-                        let ldt = mutation.effective_local_deletion_time();
+                    op @ (crate::storage::write_engine::mutation::CellOperation::Delete { .. }
+                    | crate::storage::write_engine::mutation::CellOperation::DeleteRow) => {
+                        // Issue #764 / #921 finding 2: the encoding baseline must
+                        // match the LDT the row/cell tombstone will ACTUALLY be
+                        // written with, else the delta underflows. A `Delete` with
+                        // a per-cell `local_deletion_time: Some(L)` is emitted with
+                        // `L` verbatim; reuse the emit path's
+                        // `op_cell_local_deletion_time` helper so the pre-seeded
+                        // baseline always covers the smallest LDT actually written.
+                        let ldt =
+                            crate::storage::sstable::writer::data_writer::op_cell_local_deletion_time(
+                                op, mutation,
+                            );
                         min_ldt = min_ldt.min(ldt);
                     }
-                    _ => {}
+                    // Issue #887: the pre-seeded baseline path must fold the SAME
+                    // marker timestamps/LDTs the DataWriter delta-encodes (it
+                    // subtracts `min_timestamp` / `min_local_deletion_time` from
+                    // `marked_for_delete_at` and the element LDT). A
+                    // `ComplexDeletion`/`WriteComplexElement` carrying a timestamp or
+                    // LDT BELOW the mutation's own values would make the delta
+                    // underflow when baselines are locked — exactly what #729's
+                    // two-pass flush is meant to prevent. Mirror the non-pre-seeded
+                    // accumulation in `write_partition`.
+                    crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
+                        marked_for_delete_at,
+                        local_deletion_time,
+                        ..
+                    } => {
+                        // Exclude LIVE / NO_DELETION sentinels exactly as the
+                        // `update_*` chokepoints do (issue #851), so a sentinel
+                        // marker cannot drag the min baselines to `i64::MIN` /
+                        // `i32::MAX`.
+                        if *marked_for_delete_at != i64::MIN && *marked_for_delete_at != i64::MAX {
+                            min_timestamp = min_timestamp.min(*marked_for_delete_at);
+                        }
+                        if *local_deletion_time != i32::MAX {
+                            min_ldt = min_ldt.min(*local_deletion_time);
+                        }
+                    }
+                    crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
+                        timestamp_micros,
+                        ttl_seconds,
+                        local_deletion_time,
+                        ..
+                    } => {
+                        if *timestamp_micros != i64::MIN && *timestamp_micros != i64::MAX {
+                            min_timestamp = min_timestamp.min(*timestamp_micros);
+                        }
+                        if let Some(ttl) = ttl_seconds {
+                            let ttl = *ttl as i32;
+                            if ttl > 0 {
+                                min_ttl = min_ttl.min(ttl);
+                            }
+                        }
+                        if let Some(ldt) = local_deletion_time {
+                            if *ldt != i32::MAX {
+                                min_ldt = min_ldt.min(*ldt);
+                            }
+                        }
+                    }
+                    crate::storage::write_engine::mutation::CellOperation::Write { .. } => {}
                 }
             }
 
@@ -1721,6 +1824,302 @@ mod tests {
         assert_eq!(writer.stats.partition_count, 3);
 
         let _info = writer.finish().await.unwrap();
+    }
+
+    /// A schema with one partition key, one clustering key, and a non-frozen
+    /// `set<text>` regular column `tags` (a complex/multi-cell column). Used by the
+    /// issue #887 complex-deletion / per-element stats regressions.
+    fn create_complex_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_complex".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: Default::default(),
+            }],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "ck".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                Column {
+                    name: "tags".to_string(),
+                    data_type: "set<text>".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Issue #887: a tombstone-only row that ALSO carries a surviving complex-deletion
+    /// marker (its `marked_for_delete_at` strictly supersedes the row tombstone) must
+    /// fold the marker's OWN `marked_for_delete_at` / `local_deletion_time` into the
+    /// SSTable stats. The DataWriter delta-encodes the marker against `min_timestamp`
+    /// / `min_local_deletion_time`, so if the stats only saw the row tombstone's
+    /// timestamp/LDT the marker's bytes would be encoded against a baseline that
+    /// Statistics.db never advertises.
+    #[tokio::test]
+    async fn test_complex_deletion_marker_folds_into_stats() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_complex_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_complex");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let ck = ClusteringKey::single("ck", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            Some(ck),
+            vec![
+                CellOperation::DeleteRow,
+                CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: 9_000_000,
+                    local_deletion_time: 1_500,
+                },
+            ],
+            5_000_000,
+            None,
+        )
+        .with_local_deletion_time(1_700);
+        let key = mutation.decorated_key(&schema).unwrap();
+
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.max_timestamp, 9_000_000,
+            "complex-deletion marked_for_delete_at must lift max_timestamp above the row timestamp"
+        );
+        assert_eq!(
+            writer.stats.min_local_deletion_time, 1_500,
+            "complex-deletion local_deletion_time must lower min_local_deletion_time below the row LDT"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #887: a per-element complex cell carries its OWN timestamp/ttl/
+    /// local_deletion_time, which the DataWriter delta-encodes against the SSTable
+    /// baselines. A `WriteComplexElement`-only row must fold all three into the stats.
+    #[tokio::test]
+    async fn test_write_complex_element_folds_into_stats() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_complex_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        let table_id = TableId::new("test_ks", "test_complex");
+        let pk = PartitionKey::single("id", Value::Integer(2));
+        let ck = ClusteringKey::single("ck", Value::Integer(1));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            Some(ck),
+            vec![CellOperation::WriteComplexElement {
+                column: "tags".to_string(),
+                cell_path: b"hot".to_vec(),
+                value: None,
+                timestamp_micros: 9_500_000,
+                ttl_seconds: Some(4_200),
+                local_deletion_time: Some(1_400),
+                is_deleted: false,
+            }],
+            3_000_000,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+
+        writer.write_partition(key, vec![mutation]).unwrap();
+
+        assert_eq!(
+            writer.stats.max_timestamp, 9_500_000,
+            "per-element timestamp must lift max_timestamp above the row timestamp"
+        );
+        assert_eq!(
+            writer.stats.min_ttl, 4_200,
+            "per-element TTL must populate min_ttl"
+        );
+        assert_eq!(
+            writer.stats.max_ttl, 4_200,
+            "per-element TTL must populate max_ttl"
+        );
+        assert_eq!(
+            writer.stats.min_local_deletion_time, 1_400,
+            "per-element local_deletion_time must populate min_local_deletion_time"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// Issue #887: the PRE-SEEDED baseline path (`compute_mutations_baseline_stats`,
+    /// issue #729 two-pass flush) must fold the same marker/element timestamps the
+    /// DataWriter delta-encodes. A marker LDT or element ts/ttl BELOW the mutation's
+    /// own values would otherwise underflow the locked delta baseline.
+    #[test]
+    fn test_compute_baseline_folds_complex_ops() {
+        let table_id = TableId::new("test_ks", "test_complex");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let ck = ClusteringKey::single("ck", Value::Integer(1));
+
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            Some(ck),
+            vec![
+                CellOperation::DeleteRow,
+                CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: 9_000_000,
+                    local_deletion_time: 1_500,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: b"warm".to_vec(),
+                    value: None,
+                    timestamp_micros: 2_000_000,
+                    ttl_seconds: Some(600),
+                    local_deletion_time: Some(1_300),
+                    is_deleted: false,
+                },
+            ],
+            5_000_000,
+            None,
+        )
+        .with_local_deletion_time(1_700);
+
+        let (min_ts, min_ldt, min_ttl) =
+            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+
+        assert_eq!(
+            min_ts, 2_000_000,
+            "baseline min_timestamp must reflect the per-element timestamp below the row ts"
+        );
+        assert_eq!(
+            min_ldt, 1_300,
+            "baseline min_ldt must reflect the lowest complex LDT (the element's 1_300)"
+        );
+        assert_eq!(
+            min_ttl, 600,
+            "baseline min_ttl must reflect the per-element TTL"
+        );
+    }
+
+    /// #921 finding 2 (roborev Medium): a `CellOperation::Delete` carrying an
+    /// explicit per-cell `local_deletion_time: Some(L)` is stamped with `L`
+    /// VERBATIM by `DataWriter` (via `op_cell_local_deletion_time`). The writer's
+    /// STATS collection must record that SAME `L`, not just
+    /// `mutation.effective_local_deletion_time()`:
+    ///   * an `L` BELOW the mutation-derived value must (a) let the Data.db write
+    ///     SUCCEED (no LDT-below-baseline delta underflow) and (b) lower
+    ///     `min_local_deletion_time` to `L`;
+    ///   * an `L` ABOVE the mutation-derived value must lift
+    ///     `max_local_deletion_time` to `L`.
+    /// RED before the fix: stats used the mutation LDT only, so the lower-`L`
+    /// tombstone underflowed the baseline (write fails) and min/max were wrong.
+    #[tokio::test]
+    async fn test_per_cell_delete_ldt_drives_stats_and_write() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+        let mut writer = SSTableWriter::new(temp_dir.path().to_path_buf(), 1, &schema).unwrap();
+
+        // Mutation timestamp 5_000_000 micros => effective LDT = 5 seconds.
+        // Per-cell LDTs straddle that: 2 (below) and 9_000 (above).
+        const ROW_TS_MICROS: i64 = 5_000_000;
+        const LOWER_LDT: i32 = 2;
+        const HIGHER_LDT: i32 = 9_000;
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![
+                CellOperation::Delete {
+                    column: "name".to_string(),
+                    local_deletion_time: Some(LOWER_LDT),
+                },
+                CellOperation::Delete {
+                    column: "name".to_string(),
+                    local_deletion_time: Some(HIGHER_LDT),
+                },
+            ],
+            ROW_TS_MICROS,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+
+        // (a) The write must SUCCEED: the per-cell LDT of 2 is below the
+        // mutation-derived baseline of 5, so if stats recorded 5 the Data.db
+        // delta (cell LDT 2 - baseline 5) underflows and the write errors.
+        writer
+            .write_partition(key, vec![mutation])
+            .expect("per-cell Delete LDT below the mutation LDT must not underflow the baseline");
+
+        // (b) Stats must describe the tombstones actually written.
+        assert_eq!(
+            writer.stats.min_local_deletion_time, LOWER_LDT,
+            "min_local_deletion_time must reflect the lower per-cell Delete LDT"
+        );
+        assert_eq!(
+            writer.stats.max_local_deletion_time, HIGHER_LDT,
+            "max_local_deletion_time must reflect the higher per-cell Delete LDT"
+        );
+
+        let _info = writer.finish().await.unwrap();
+    }
+
+    /// #921 finding 2: the PRE-SEEDED baseline path
+    /// (`compute_mutations_baseline_stats`, issue #729 two-pass flush) must lock
+    /// `min_local_deletion_time` to the EXACT LDT the tombstone is written with.
+    /// A per-cell `Delete` LDT below the mutation-derived value must drag the
+    /// baseline down to it, else the locked delta underflows at write time.
+    #[test]
+    fn test_compute_baseline_uses_per_cell_delete_ldt() {
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(7));
+
+        // Mutation LDT = 5 (5_000_000 micros). Per-cell LDT of 2 is lower.
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Delete {
+                column: "name".to_string(),
+                local_deletion_time: Some(2),
+            }],
+            5_000_000,
+            None,
+        );
+
+        let (_min_ts, min_ldt, _min_ttl) =
+            SSTableWriter::compute_mutations_baseline_stats(std::slice::from_ref(&mutation));
+
+        assert_eq!(
+            min_ldt, 2,
+            "baseline min_ldt must reflect the per-cell Delete LDT (2), not the mutation LDT (5)"
+        );
     }
 
     #[tokio::test]

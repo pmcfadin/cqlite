@@ -518,6 +518,7 @@ async fn test_cell_tombstones() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(1));
         let ops = vec![CellOperation::Delete {
             column: "value".to_string(),
+            local_deletion_time: None,
         }];
         Mutation::new(table_id, pk, None, ops, 1000001, None)
     };
@@ -584,6 +585,7 @@ async fn test_tombstone_overwrite() -> Result<()> {
         let pk = PartitionKey::single("id", Value::Integer(1));
         let ops = vec![CellOperation::Delete {
             column: "value".to_string(),
+            local_deletion_time: None,
         }];
         Mutation::new(table_id, pk, None, ops, 1000001, None)
     };
@@ -996,6 +998,7 @@ async fn test_mixed_operations_in_partition() -> Result<()> {
         None,
         vec![CellOperation::Delete {
             column: "value".to_string(),
+            local_deletion_time: None,
         }],
         1000002,
         None,

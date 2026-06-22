@@ -1120,6 +1120,7 @@ fn delete_score_cell(id: i32, ck: i32, ts: i64) -> Mutation {
         Some(ClusteringKey::single("ck", Value::Integer(ck))),
         vec![CellOperation::Delete {
             column: "score".to_string(),
+            local_deletion_time: None,
         }],
         ts,
         None,
@@ -1295,6 +1296,8 @@ fn cqlite_compact(
     let report = rt
         .block_on(compact_sstables(
             inputs, out_dir, schema, generation, None, None,
+            // Full compaction over all inputs → overlap-safe purge (#921 finding 1).
+            true,
         ))
         .expect("compaction must succeed");
     report.output

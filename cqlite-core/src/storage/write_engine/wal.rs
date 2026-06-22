@@ -143,21 +143,123 @@ fn set_secure_permissions(_file: &File) -> Result<()> {
     Ok(())
 }
 
-/// Legacy on-disk `Mutation` layout (pre-Issue #764).
+/// Legacy `CellOperation` layout (pre-Issue #921).
+///
+/// bincode is positional and NOT self-describing: it encodes an enum as a `u32`
+/// variant index followed by that variant's fields, with no field names and no
+/// length/version prefix. Issue #921 added a `local_deletion_time: Option<i32>`
+/// field to [`CellOperation::Delete`], turning the on-disk shape of that variant
+/// from `{ column }` into `{ column, local_deletion_time }`. A `#[serde(default)]`
+/// attribute does NOT help bincode here — there are simply no bytes for the new
+/// field in an older record, so decoding the new `Delete` reads the bytes of the
+/// following operation as the missing `Option<i32>` and the whole record
+/// misaligns.
+///
+/// This mirror enum reproduces the EXACT pre-#921 variant order and shapes so a
+/// record written by an older binary round-trips. Only `Delete` differs (no
+/// `local_deletion_time`). It MUST stay in lockstep with [`CellOperation`]:
+/// variant order is the bincode discriminant, so any reordering / insertion in
+/// the live enum must be reflected here or legacy decoding breaks.
+#[derive(serde::Serialize, serde::Deserialize)]
+enum LegacyCellOperation {
+    Write {
+        column: String,
+        value: crate::types::Value,
+    },
+    WriteWithTtl {
+        column: String,
+        value: crate::types::Value,
+        ttl_seconds: u32,
+    },
+    /// Pre-#921 `Delete` had no `local_deletion_time` field.
+    Delete {
+        column: String,
+    },
+    DeleteRow,
+    WriteComplexElement {
+        column: String,
+        cell_path: Vec<u8>,
+        value: Option<crate::types::Value>,
+        timestamp_micros: i64,
+        ttl_seconds: Option<u32>,
+        local_deletion_time: Option<i32>,
+        is_deleted: bool,
+    },
+    ComplexDeletion {
+        column: String,
+        marked_for_delete_at: i64,
+        local_deletion_time: i32,
+    },
+}
+
+impl From<LegacyCellOperation> for CellOperation {
+    fn from(op: LegacyCellOperation) -> Self {
+        match op {
+            LegacyCellOperation::Write { column, value } => CellOperation::Write { column, value },
+            LegacyCellOperation::WriteWithTtl {
+                column,
+                value,
+                ttl_seconds,
+            } => CellOperation::WriteWithTtl {
+                column,
+                value,
+                ttl_seconds,
+            },
+            // Pre-#921 cell tombstone: no surfaced source LDT, so the writer
+            // derives it from the enclosing mutation (historical behavior).
+            LegacyCellOperation::Delete { column } => CellOperation::Delete {
+                column,
+                local_deletion_time: None,
+            },
+            LegacyCellOperation::DeleteRow => CellOperation::DeleteRow,
+            LegacyCellOperation::WriteComplexElement {
+                column,
+                cell_path,
+                value,
+                timestamp_micros,
+                ttl_seconds,
+                local_deletion_time,
+                is_deleted,
+            } => CellOperation::WriteComplexElement {
+                column,
+                cell_path,
+                value,
+                timestamp_micros,
+                ttl_seconds,
+                local_deletion_time,
+                is_deleted,
+            },
+            LegacyCellOperation::ComplexDeletion {
+                column,
+                marked_for_delete_at,
+                local_deletion_time,
+            } => CellOperation::ComplexDeletion {
+                column,
+                marked_for_delete_at,
+                local_deletion_time,
+            },
+        }
+    }
+}
+
+/// Legacy on-disk `Mutation` layout (pre-Issue #764 / pre-Issue #921).
 ///
 /// The WAL has no per-record version field; mutations are bincode-serialized
 /// directly and bincode is positional, so the `local_deletion_time` field added
-/// in #764 changes the byte layout. To keep recovering WAL records written by an
-/// older binary, `decode_mutation` first tries the current layout and, on
-/// failure, falls back to this legacy layout (which lacks `local_deletion_time`)
-/// and upgrades it to `local_deletion_time: None` — exactly the pre-#764
-/// behavior. The field order here MUST mirror the historical `Mutation` struct.
+/// to [`Mutation`] in #764 — and the `local_deletion_time` field added to
+/// [`CellOperation::Delete`] in #921 — both change the byte layout. To keep
+/// recovering WAL records written by an older binary, `decode_mutation` first
+/// tries the current layout and, on failure, falls back to this legacy layout
+/// (which lacks the `Mutation`-level `local_deletion_time` AND uses the pre-#921
+/// [`LegacyCellOperation`] for `operations`), upgrading both to the historical
+/// `None` behavior. The field order here MUST mirror the historical `Mutation`
+/// struct.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct LegacyMutation {
     table: TableId,
     partition_key: PartitionKey,
     clustering_key: Option<ClusteringKey>,
-    operations: Vec<CellOperation>,
+    operations: Vec<LegacyCellOperation>,
     timestamp_micros: i64,
     ttl_seconds: Option<u32>,
     partition_tombstone: Option<PartitionTombstone>,
@@ -170,7 +272,7 @@ impl From<LegacyMutation> for Mutation {
             table: m.table,
             partition_key: m.partition_key,
             clustering_key: m.clustering_key,
-            operations: m.operations,
+            operations: m.operations.into_iter().map(CellOperation::from).collect(),
             timestamp_micros: m.timestamp_micros,
             ttl_seconds: m.ttl_seconds,
             partition_tombstone: m.partition_tombstone,
@@ -182,14 +284,79 @@ impl From<LegacyMutation> for Mutation {
     }
 }
 
+/// Intermediate on-disk `Mutation` layout (post-Issue #764, pre-Issue #921).
+///
+/// There are three historical WAL record layouts because the WAL has no
+/// per-record version field and bincode is positional:
+///
+/// - **(A)** pre-#764: no `Mutation`-level `local_deletion_time`, old
+///   `Delete { column }` operations — see [`LegacyMutation`].
+/// - **(B)** post-#764 / pre-#921 (THIS struct): the `Mutation`-level
+///   `local_deletion_time: Option<i32>` trailing field is PRESENT, but the
+///   operations still use the pre-#921 `Delete { column }` shape.
+/// - **(C)** current: `Mutation`-level LDT present AND
+///   `Delete { column, local_deletion_time }`.
+///
+/// Layout (B) records are NOT covered by [`LegacyMutation`] (which lacks the
+/// mutation-level LDT) nor by the current [`Mutation`] (whose `Delete` carries
+/// an extra `Option<i32>`), so without this struct a (B) record would fail to
+/// replay and silently lose its mutation-level local deletion time.
+///
+/// The field order MUST mirror the current [`Mutation`] struct exactly, with
+/// only `operations` swapped to [`LegacyCellOperation`].
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LegacyMutationWithLdt {
+    table: TableId,
+    partition_key: PartitionKey,
+    clustering_key: Option<ClusteringKey>,
+    operations: Vec<LegacyCellOperation>,
+    timestamp_micros: i64,
+    ttl_seconds: Option<u32>,
+    partition_tombstone: Option<PartitionTombstone>,
+    range_tombstones: Vec<RangeTombstone>,
+    /// Mutation-level local deletion time added in #764; preserved on upgrade.
+    local_deletion_time: Option<i32>,
+}
+
+impl From<LegacyMutationWithLdt> for Mutation {
+    fn from(m: LegacyMutationWithLdt) -> Self {
+        Mutation {
+            table: m.table,
+            partition_key: m.partition_key,
+            clustering_key: m.clustering_key,
+            operations: m.operations.into_iter().map(CellOperation::from).collect(),
+            timestamp_micros: m.timestamp_micros,
+            ttl_seconds: m.ttl_seconds,
+            partition_tombstone: m.partition_tombstone,
+            range_tombstones: m.range_tombstones,
+            // Preserve the mutation-level LDT that layout (B) carries; only the
+            // pre-#921 cell `Delete` ops lose their (never-present) LDT to None.
+            local_deletion_time: m.local_deletion_time,
+        }
+    }
+}
+
 /// Deserialize a `Mutation` from WAL bytes, tolerating records written by an
-/// older binary that predates the `local_deletion_time` field (Issue #764).
+/// older binary that predates the `Mutation::local_deletion_time` field
+/// (Issue #764) or the `CellOperation::Delete::local_deletion_time` field
+/// (Issue #921).
+///
+/// Attempts the layouts most-recent-first: current (C), then layout (B)
+/// (post-#764/pre-#921: mutation LDT present, old `Delete` op shape), then
+/// layout (A) (pre-#764: no mutation LDT, old `Delete` op shape). Each maps to
+/// the current [`Mutation`]/[`CellOperation`] with `Delete.local_deletion_time
+/// = None`, while layout (B) additionally preserves the mutation-level LDT.
 fn decode_mutation(bytes: &[u8]) -> std::result::Result<Mutation, bincode::Error> {
     match bincode::deserialize::<Mutation>(bytes) {
         Ok(mutation) => Ok(mutation),
         Err(current_err) => {
-            // Fall back to the legacy layout. If that also fails, surface the
-            // original (current-layout) error which is the more informative one.
+            // Layout (B): mutation-level LDT present, pre-#921 Delete ops.
+            if let Ok(m) = bincode::deserialize::<LegacyMutationWithLdt>(bytes) {
+                return Ok(Mutation::from(m));
+            }
+            // Layout (A): pre-#764 (no mutation LDT), pre-#921 Delete ops. If
+            // this also fails, surface the original (current-layout) error,
+            // which is the more informative one.
             bincode::deserialize::<LegacyMutation>(bytes)
                 .map(Mutation::from)
                 .map_err(|_| current_err)
@@ -912,6 +1079,7 @@ mod tests {
         let pk = PartitionKey::single("id", Value::Integer(1));
         let ops = vec![CellOperation::Delete {
             column: "name".to_string(),
+            local_deletion_time: None,
         }];
 
         let mutation = Mutation::new(table_id, pk, None, ops, 1234567890, None);
@@ -990,15 +1158,15 @@ mod tests {
     }
 
     #[test]
-    fn test_wal_decodes_legacy_record_without_local_deletion_time() {
+    fn test_wal_decodes_legacy_record_without_mutation_local_deletion_time() {
         // Issue #764: the WAL has no per-record version field. A record written
-        // by an older binary (legacy layout, no local_deletion_time) must still
-        // decode, upgrading to local_deletion_time: None.
+        // by an older binary (legacy Mutation layout, no Mutation-level
+        // local_deletion_time) must still decode, upgrading to None.
         let legacy = LegacyMutation {
             table: TableId::new("ks", "tbl"),
             partition_key: PartitionKey::single("id", Value::Integer(3)),
             clustering_key: None,
-            operations: vec![CellOperation::Delete {
+            operations: vec![LegacyCellOperation::Delete {
                 column: "name".to_string(),
             }],
             timestamp_micros: 1_234_567_890,
@@ -1007,27 +1175,8 @@ mod tests {
             range_tombstones: Vec::new(),
         };
 
-        // Serialize using the LEGACY layout (no local_deletion_time field).
+        // Serialize using the LEGACY layout.
         let legacy_bytes = bincode::serialize(&legacy).unwrap();
-
-        // Sanity: the new layout has a different length (extra Option byte) so
-        // this genuinely exercises the legacy fallback path.
-        let mutation = Mutation::new(
-            TableId::new("ks", "tbl"),
-            PartitionKey::single("id", Value::Integer(3)),
-            None,
-            vec![CellOperation::Delete {
-                column: "name".to_string(),
-            }],
-            1_234_567_890,
-            None,
-        );
-        let current_bytes = bincode::serialize(&mutation).unwrap();
-        assert_eq!(
-            current_bytes.len(),
-            legacy_bytes.len() + 1,
-            "Current layout should add exactly one byte (Option<i32> discriminant) for None"
-        );
 
         // The fallback must decode the legacy bytes into None.
         let decoded = decode_mutation(&legacy_bytes).expect("legacy record must decode");
@@ -1035,8 +1184,214 @@ mod tests {
         assert_eq!(decoded.timestamp_micros, 1_234_567_890);
         assert!(matches!(
             &decoded.operations[0],
-            CellOperation::Delete { .. }
+            CellOperation::Delete {
+                local_deletion_time: None,
+                ..
+            }
         ));
+    }
+
+    #[test]
+    fn test_wal_decodes_legacy_delete_op_without_local_deletion_time() {
+        // Issue #921: `CellOperation::Delete` gained a `local_deletion_time:
+        // Option<i32>` field. bincode is positional and NOT self-describing, so a
+        // pre-#921 record encoding `Delete { column }` (no LDT) has no bytes for
+        // the new field. Decoding it with the NEW enum reads the following
+        // operation's bytes as the missing Option and misaligns the record;
+        // `#[serde(default)]` does NOT save bincode. The legacy fallback must
+        // recover such a record as `Delete { column, local_deletion_time: None }`.
+        //
+        // The Delete is placed FIRST (followed by a Write) so that a naive new
+        // decode genuinely misreads the trailing operation — this is the case
+        // `#[serde(default)]` cannot handle and that the prior test (which used
+        // only the new enum) failed to exercise.
+        let legacy = LegacyMutation {
+            table: TableId::new("ks", "tbl"),
+            partition_key: PartitionKey::single("id", Value::Integer(7)),
+            clustering_key: None,
+            operations: vec![
+                LegacyCellOperation::Delete {
+                    column: "dropped_col".to_string(),
+                },
+                LegacyCellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("Bob".to_string()),
+                },
+            ],
+            timestamp_micros: 999_000,
+            ttl_seconds: None,
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+        };
+
+        // Bytes as written by a pre-#921 binary.
+        let legacy_bytes = bincode::serialize(&legacy).unwrap();
+
+        // Sanity: the NEW layout adds exactly one byte for the Delete's
+        // Option<i32> discriminant (None), so the legacy bytes are genuinely a
+        // different, shorter shape that the current decode cannot consume cleanly.
+        let current = Mutation::new(
+            TableId::new("ks", "tbl"),
+            PartitionKey::single("id", Value::Integer(7)),
+            None,
+            vec![
+                CellOperation::Delete {
+                    column: "dropped_col".to_string(),
+                    local_deletion_time: None,
+                },
+                CellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("Bob".to_string()),
+                },
+            ],
+            999_000,
+            None,
+        );
+        let current_bytes = bincode::serialize(&current).unwrap();
+        assert!(
+            current_bytes.len() > legacy_bytes.len(),
+            "Current Delete layout is strictly longer (adds the Option<i32> \
+             discriminant for local_deletion_time): current={}, legacy={}",
+            current_bytes.len(),
+            legacy_bytes.len()
+        );
+
+        // The legacy fallback must recover the record with both ops intact and
+        // the Delete upgraded to local_deletion_time: None.
+        let decoded = decode_mutation(&legacy_bytes).expect("legacy #921 record must decode");
+        assert_eq!(decoded.timestamp_micros, 999_000);
+        assert_eq!(decoded.operations.len(), 2);
+        match &decoded.operations[0] {
+            CellOperation::Delete {
+                column,
+                local_deletion_time,
+            } => {
+                assert_eq!(column, "dropped_col");
+                assert_eq!(*local_deletion_time, None);
+            }
+            other => panic!("expected Delete, got {other:?}"),
+        }
+        match &decoded.operations[1] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "name");
+                assert_eq!(value, &Value::Text("Bob".to_string()));
+            }
+            other => panic!("expected Write, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wal_roundtrips_delete_with_explicit_local_deletion_time() {
+        // The current layout must round-trip a Delete carrying an explicit
+        // per-cell local_deletion_time (the #921 compaction path).
+        let temp_dir = TempDir::new().unwrap();
+        let mut wal = WriteAheadLog::create(temp_dir.path()).unwrap();
+
+        let mutation = Mutation::new(
+            TableId::new("ks", "tbl"),
+            PartitionKey::single("id", Value::Integer(11)),
+            None,
+            vec![CellOperation::Delete {
+                column: "name".to_string(),
+                local_deletion_time: Some(1_700_000_000),
+            }],
+            1_700_000_000_000_000,
+            None,
+        );
+        wal.append(&mutation).unwrap();
+        wal.sync().unwrap();
+
+        let mutations = wal.replay().unwrap();
+        assert_eq!(mutations.len(), 1);
+        match &mutations[0].operations[0] {
+            CellOperation::Delete {
+                column,
+                local_deletion_time,
+            } => {
+                assert_eq!(column, "name");
+                assert_eq!(*local_deletion_time, Some(1_700_000_000));
+            }
+            other => panic!("expected Delete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_wal_decodes_layout_b_record_preserving_mutation_local_deletion_time() {
+        // Layout (B): post-#764 / pre-#921. The mutation-level
+        // local_deletion_time trailing field is PRESENT (Some(x)), but the
+        // operations still use the pre-#921 `Delete { column }` shape, with the
+        // Delete placed FIRST so a naive current decode misreads the trailing
+        // op. Neither the current `Mutation` layout (whose Delete carries an
+        // extra Option<i32>) nor `LegacyMutation` (which lacks the mutation-level
+        // LDT) can decode these bytes, so the (B) compat layout is required. The
+        // decoded mutation must preserve the mutation-level LDT AND recover both
+        // ops with `Delete.local_deletion_time = None`.
+        let legacy = LegacyMutationWithLdt {
+            table: TableId::new("ks", "tbl"),
+            partition_key: PartitionKey::single("id", Value::Integer(13)),
+            clustering_key: None,
+            operations: vec![
+                LegacyCellOperation::Delete {
+                    column: "dropped_col".to_string(),
+                },
+                LegacyCellOperation::Write {
+                    column: "name".to_string(),
+                    value: Value::Text("Carol".to_string()),
+                },
+            ],
+            timestamp_micros: 1_650_000_000_000_000,
+            ttl_seconds: None,
+            partition_tombstone: None,
+            range_tombstones: Vec::new(),
+            local_deletion_time: Some(1_650_000_000),
+        };
+
+        // Bytes as written by a post-#764/pre-#921 binary.
+        let legacy_bytes = bincode::serialize(&legacy).unwrap();
+
+        // Sanity: the current `Mutation` layout cannot decode (B) bytes
+        // correctly. The pre-#921 `Delete { column }` op (first in the list) has
+        // no `local_deletion_time` byte, so a current decode either errors or
+        // misaligns and reads a wrong number of operations — it can never
+        // recover the two-op mutation faithfully. This is what forces the (B)
+        // compat layout to run.
+        let current_attempt = bincode::deserialize::<Mutation>(&legacy_bytes);
+        let current_recovers_faithfully = matches!(
+            &current_attempt,
+            Ok(m) if m.operations.len() == 2
+                && matches!(&m.operations[0], CellOperation::Delete { column, .. } if column == "dropped_col")
+                && matches!(&m.operations[1], CellOperation::Write { column, value }
+                    if column == "name" && value == &Value::Text("Carol".to_string()))
+        );
+        assert!(
+            !current_recovers_faithfully,
+            "current layout must NOT faithfully decode a layout (B) record; \
+             otherwise the (B) compat path is never exercised"
+        );
+
+        // The (B) compat layout must recover the record: mutation-level LDT
+        // preserved, both ops intact, Delete upgraded to local_deletion_time: None.
+        let decoded = decode_mutation(&legacy_bytes).expect("layout (B) record must decode");
+        assert_eq!(decoded.local_deletion_time, Some(1_650_000_000));
+        assert_eq!(decoded.timestamp_micros, 1_650_000_000_000_000);
+        assert_eq!(decoded.operations.len(), 2);
+        match &decoded.operations[0] {
+            CellOperation::Delete {
+                column,
+                local_deletion_time,
+            } => {
+                assert_eq!(column, "dropped_col");
+                assert_eq!(*local_deletion_time, None);
+            }
+            other => panic!("expected Delete, got {other:?}"),
+        }
+        match &decoded.operations[1] {
+            CellOperation::Write { column, value } => {
+                assert_eq!(column, "name");
+                assert_eq!(value, &Value::Text("Carol".to_string()));
+            }
+            other => panic!("expected Write, got {other:?}"),
+        }
     }
 
     #[test]

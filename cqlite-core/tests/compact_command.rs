@@ -166,8 +166,9 @@ fn compact_sstables_merges_explicit_inputs_with_lww() {
             &output_dir,
             &schema,
             9,                   // output generation
-            Some(1_700_000_000), // gc_before (threaded but not yet applied)
+            Some(1_700_000_000), // gc_before
             None,                // now_sec
+            true,                // purge_safe: full compaction (#921 finding 1)
         ))
         .expect("compaction must succeed");
 
@@ -314,6 +315,7 @@ fn compact_disabled_filter_table_succeeds_without_filter_db() {
             9,
             Some(1_700_000_000),
             None,
+            true, // purge_safe: full compaction (#921 finding 1)
         ))
         .expect("compaction of a disabled-filter table must succeed");
 
@@ -473,6 +475,7 @@ fn compact_clustering_table_preserves_rows_and_lww() {
             9,
             None,
             None,
+            true, // purge_safe: full compaction (#921 finding 1)
         ))
         .expect("compaction must succeed");
     assert_eq!(report.stats.output_partitions, 1, "single partition id=1");

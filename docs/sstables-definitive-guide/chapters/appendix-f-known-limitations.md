@@ -738,17 +738,29 @@ index VInts as cell data, corrupting the row stream. The reader also treats any 
 `cqlite-core/tests/issue_824_column_subset_and_filter.rs`. **Workaround**: tables with fewer
 than 64 regular columns are unaffected (the common case).
 
-### Complex-column merge is whole-column, not per-cell-path (#14/#17/#18)
+### Complex-column merge is whole-column, not per-cell-path (#14/#17/#18) — RESOLVED in epic #921
 
-**Status**: 🐛 **OPEN** (limitation)
+**Status**: ✅ **RESOLVED** (#844 / #888 / #927 / #887, epic #921)
 
-Cassandra merges complex (multi-cell collection/UDT) columns **per cell-path** using the
-column's path comparator — signed `ShortType` for a UDT field index, `TimeUUIDType` for a list
-element, the map key type for a map — applying shadow-before-purge per path. CQLite's merge
-(`storage/write_engine/merge.rs::reconcile_cluster`) reconciles by **whole column**: its
-`CellData` carries no cell-path, so per-path merge of multi-cell collections/UDTs is not yet
-representable. Authority: `org.apache.cassandra.db.rows.Cells` (per-column complex merge) and
-the column's `CellPath` comparator.
+**Was** (Epic #817): Cassandra merges complex (multi-cell collection/UDT) columns **per
+cell-path** using the column's path comparator — signed `ShortType` for a UDT field index,
+`TimeUUIDType` for a list element, the map key type for a map — applying shadow-before-purge per
+path. CQLite's merge (`storage/write_engine/merge.rs::reconcile_cluster`) reconciled by **whole
+column**: its `CellData` carried no cell-path, so per-path merge of multi-cell collections/UDTs
+was not representable.
+
+**Now** (epic #921): `reconcile_cluster` keys per-cell winners by `(column, cell_path)` and the
+`merge_entry_to_mutation` rewrite emits one `WriteComplexElement` per surviving element. Disjoint
+elements survive; a same-key collision resolves by the higher per-cell timestamp (#844). UDT field
+paths compare as **signed** `ShortType` (`compare_cell_paths`, field index `>= 32768` sorts
+negative) and complex columns match **by name** across differing source headers
+(#888 / #927; parity Cassandra `d14c96b8` / `5e636f9`). Complex deletion markers reconcile with
+strict-supersede (equal `markedForDeleteAt` does NOT supersede) and shadow-before-purge (elements
+with ts `<= markedForDeleteAt` are shadowed BEFORE the marker is purged) (#887; parity `bd244649`
++ `f66fa14f`). Non-frozen UDT multi-cell data now reads and writes end-to-end (#927). See
+Chapter 11 — "Compaction merge semantics". Authority:
+`org.apache.cassandra.db.rows.Cells` (per-column complex merge) and the column's `CellPath`
+comparator.
 
 ### Equal-timestamp live-cell value tie-break diverges from Cassandra (#4/#21)
 
@@ -789,6 +801,72 @@ filter ("always maybe") never short-circuits a point lookup to `None`; `get` the
 the same stitched-chunk scan that `scan` uses. Verified by
 `cqlite-core/tests/issue_824_column_subset_and_filter.rs` (absent-`Filter.db` scan + get tests,
 which also strip the `Filter.db` TOC entry to faithfully reproduce the always-present case).
+
+---
+
+## Epic #921 — Compaction merge semantics (landed) and residual gaps
+
+Epic #921 made CQLite's compaction merge path act on metadata that earlier epics
+only carried. The merge behaviors are documented in full in Chapter 11 — "Compaction
+merge semantics"; this section records what is now **supported** and the limitations
+that **remain** after the epic, each verified against the code on the epic branch.
+
+### Non-frozen UDT multi-cell read+write — SUPPORTED (#927)
+
+**Status**: ✅ **SUPPORTED** end-to-end (was previously called out as unsupported)
+
+A non-frozen UDT is stored as a complex column with one cell per field, keyed by a
+2-byte **signed** `ShortType` declared field index. CQLite now reads such columns and
+writes them back through compaction: per-element winners reconcile by `(column,
+cell_path)`, field paths sort by signed `ShortType` (`compare_cell_paths`), and
+complex columns are matched **by name** so two sources with differing serialization
+headers merge the same logical column (#888 / #927; parity Cassandra `d14c96b8` /
+`5e636f9`). Any stale "non-frozen UDT unsupported" claim elsewhere is superseded by
+this entry.
+
+### Row-deletion + live-cells coexistence — NOT represented (#932)
+
+**Status**: 🐛 **OPEN** (limitation)
+
+A Cassandra row can carry a **row deletion** (`HAS_DELETION`) **and** surviving cells
+written strictly after the deletion timestamp at the same time. CQLite does not
+represent this: the V5CompressedLegacy reader collapses a `HAS_DELETION` row to a
+**pure tombstone** (it emits the row tombstone with an empty cell map and detects it
+via `RowHeader::is_row_tombstone`), and the merge `RowData` is an enum — `Tombstone`
+**xor** `Live`, never both. So a row tombstone that should coexist with newer
+surviving cells **loses the row deletion** (the surviving cells win and the deletion
+is dropped). Authority: `org.apache.cassandra.db.rows.Row` (a `Row` carries both a
+`Row.Deletion` and live cells). Tracked in **#932**.
+
+### Range tombstones during compaction — NOT applied/emitted (#933)
+
+**Status**: 🐛 **OPEN** (limitation)
+
+Range tombstones are not applied or emitted end-to-end in the compaction merge path.
+The V5CompressedLegacy reader **skips** range tombstone markers
+(`skip_range_tombstone_marker`) on the normal scan/compaction path — it does not
+surface a surviving marker to the merger (only the dedicated `delta-scan` path decodes
+them via `parse_range_tombstone_marker_full`), and `merge_entry_to_mutation` does not
+persist a surviving range marker into the rewritten output. Consequently a range
+tombstone is neither used to shadow covered rows during compaction nor re-emitted into
+the compacted SSTable. Authority:
+`org.apache.cassandra.db.rows.RangeTombstoneMarker` / `UnfilteredSerializer`. Tracked
+in **#933**.
+
+### gc_grace purging only on full/major compaction (#935)
+
+**Status**: 🐛 **OPEN** (limitation / by design for safety)
+
+gc_grace / `gcBefore` tombstone purging (#845, parity Cassandra `8d47ebb2`) runs
+**only** on an overlap-safe **full/major** compaction that spans every SSTable for the
+table. A **partial / background** compaction collapses the effective `gc_before_secs`
+to `None` (`merge_partition_rows`, gated by `KWayMerger::with_purge_safe` /
+`purge_safe`) and therefore **retains** every tombstone — there is no per-key
+`maxPurgeableTimestamp` overlap check yet, so the conservative choice avoids
+resurrecting data shadowed in a non-included overlapping SSTable. In the CLI, purging
+is opt-in via `--major` / `--purge-tombstones`. Authority:
+`org.apache.cassandra.db.compaction.CompactionController#maxPurgeableTimestamp`.
+Tracked in **#935**.
 
 ---
 

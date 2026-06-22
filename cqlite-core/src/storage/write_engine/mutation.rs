@@ -227,6 +227,27 @@ pub enum CellOperation {
     Delete {
         /// Column name
         column: String,
+        /// Optional per-cell `localDeletionTime` (seconds since the Unix epoch,
+        /// the on-disk GC clock) for this cell tombstone (#921 finding 2).
+        ///
+        /// When `Some`, the writer stamps the emitted cell tombstone with this
+        /// LDT VERBATIM rather than deriving one from the enclosing mutation's
+        /// timestamp / [`Mutation::local_deletion_time`]. The compaction
+        /// merge→rewrite path sets it from the SOURCE cell tombstone's own LDT
+        /// (`TombstoneInfo::local_deletion_time`) so a within-grace cell
+        /// tombstone that survives a compaction keeps its original GC clock and
+        /// is not purged too early / kept too long in a LATER compaction.
+        ///
+        /// `None` preserves the historical behavior (the writer derives the LDT
+        /// from the mutation), so the WAL / CQL-DELETE paths that build a
+        /// `Delete` without a surfaced source LDT are unchanged.
+        ///
+        /// `#[serde(default)]` keeps backward compatibility with `Delete`
+        /// values serialized before this field existed (e.g. older WAL records).
+        ///
+        /// [`Mutation::local_deletion_time`]: Mutation::local_deletion_time
+        #[serde(default)]
+        local_deletion_time: Option<i32>,
     },
     /// Delete entire row (row tombstone)
     DeleteRow,
@@ -1214,10 +1235,11 @@ mod tests {
     fn test_cell_operation_delete() {
         let op = CellOperation::Delete {
             column: "name".to_string(),
+            local_deletion_time: None,
         };
 
         match op {
-            CellOperation::Delete { column } => {
+            CellOperation::Delete { column, .. } => {
                 assert_eq!(column, "name");
             }
             _ => panic!("Expected Delete operation"),

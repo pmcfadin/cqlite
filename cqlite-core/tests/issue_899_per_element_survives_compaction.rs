@@ -196,6 +196,8 @@ fn per_element_metadata_survives_compaction_of_real_cassandra_sstable() {
             900,
             None,
             None,
+            // Full compaction over all inputs → overlap-safe purge (#921 finding 1).
+            true,
         ))
         .expect("compaction must succeed");
 
