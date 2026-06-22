@@ -1157,10 +1157,13 @@ impl SelectExecutor {
 
                     // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
                     // partition-targeted lookup that prunes SSTables via bloom/BTI,
-                    // instead of streaming a scan over every SSTable. The result is
-                    // a single partition's rows, sent through the same per-row
-                    // pipeline (predicates, PER PARTITION LIMIT, OFFSET, LIMIT) as
-                    // the streaming scan below.
+                    // instead of streaming a scan over every SSTable. The resulting
+                    // rows are sent through the same per-row pipeline below
+                    // (predicates, PER PARTITION LIMIT, OFFSET, LIMIT). Note
+                    // `scan_partition` reconciles across SSTable generations like the
+                    // materializing `scan()` (last-write-wins + tombstone shadowing),
+                    // which is the authoritative read semantics; it does not merely
+                    // mirror `scan_stream`'s per-key merge.
                     #[cfg(not(feature = "tombstones"))]
                     if let Some(pk_bytes) =
                         full_partition_key_lookup(predicates, schema_opt.as_ref())

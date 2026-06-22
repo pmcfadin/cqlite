@@ -973,11 +973,21 @@ impl SSTableManager {
     /// SSTables, a single-partition read drops from "open and scan all of them" to
     /// "scan only the handful that can hold the key".
     ///
-    /// Output is byte-for-byte identical to filtering the full [`scan`](Self::scan)
-    /// result down to `partition_key`: the same per-reader parse and the same
-    /// cross-generation reconciliation run, just over the pruned candidate set. The
-    /// caller still applies its own predicate evaluation, so any over-inclusion
-    /// (e.g. a BTI prefix-collision candidate) is filtered out downstream.
+    /// Output matches filtering the full [`scan`](Self::scan) result down to
+    /// `partition_key`: the same per-reader parse and the same cross-generation
+    /// reconciliation run, just over the pruned candidate set. Concretely, with
+    /// more than one candidate generation this drives the authoritative k-way
+    /// merge (write-support, schema present); the single-candidate and concat
+    /// fallbacks behave exactly as the corresponding `scan` paths do — including
+    /// sharing `scan`'s known multi-generation concat limitation (Issue #883) when
+    /// the merge is unavailable. The caller still applies its own predicate
+    /// evaluation, so any over-inclusion (e.g. a BTI prefix-collision candidate) is
+    /// filtered out downstream.
+    ///
+    /// Gated on `not(tombstones)` to match the `scan` variant it parallels: the
+    /// `tombstones` build uses a structurally different reader map, so the method
+    /// is defined only for the default build (the executor falls back to a full
+    /// scan under `tombstones`).
     ///
     /// `partition_key` is the raw on-disk partition-key bytes produced by
     /// [`encode_partition_key_columns`](crate::storage::partition_key_codec::encode_partition_key_columns),

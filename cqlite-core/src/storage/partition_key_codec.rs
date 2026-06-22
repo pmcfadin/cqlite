@@ -526,4 +526,59 @@ mod tests {
         let schema = schema_with_pks(&[("id", "int")]);
         assert!(encode_partition_key_columns(&[Value::BigInt(i64::MAX)], &schema).is_err());
     }
+
+    /// Drift guard (review follow-up): this module's encoder must stay
+    /// byte-for-byte identical to the write engine's `PartitionKey::to_bytes`,
+    /// because a write persists keys with one and the read-side bloom/BTI prune
+    /// matches with the other. If they ever diverge, a `WHERE pk = ?` could prune
+    /// away the very SSTable holding the row. Values are pre-typed so no coercion
+    /// is involved — we're comparing the raw serializers and framing directly.
+    #[cfg(feature = "write-support")]
+    #[test]
+    fn encoder_matches_write_engine_partition_key_to_bytes() {
+        use crate::storage::write_engine::mutation::PartitionKey;
+
+        let uuid = [
+            0u8, 35, 236, 231, 124, 78, 71, 5, 144, 104, 209, 165, 158, 197, 254, 25,
+        ];
+        let cases: Vec<(Vec<(&str, &str)>, Vec<(&str, Value)>)> = vec![
+            (
+                vec![("id", "text")],
+                vec![("id", Value::Text("k123".to_string()))],
+            ),
+            (vec![("id", "int")], vec![("id", Value::Integer(42))]),
+            (vec![("id", "bigint")], vec![("id", Value::BigInt(-7))]),
+            (vec![("id", "uuid")], vec![("id", Value::Uuid(uuid))]),
+            (
+                vec![("app", "text"), ("metric", "text")],
+                vec![
+                    ("app", Value::Text("a".to_string())),
+                    ("metric", Value::Text("view".to_string())),
+                ],
+            ),
+            (
+                vec![("app", "text"), ("part", "int")],
+                vec![
+                    ("app", Value::Text("svc".to_string())),
+                    ("part", Value::Integer(3)),
+                ],
+            ),
+        ];
+
+        for (pks, values) in cases {
+            let schema = schema_with_pks(&pks);
+            let value_only: Vec<Value> = values.iter().map(|(_, v)| v.clone()).collect();
+            let columns: Vec<(String, Value)> = values
+                .iter()
+                .map(|(n, v)| (n.to_string(), v.clone()))
+                .collect();
+
+            let codec_bytes = encode_partition_key_columns(&value_only, &schema).unwrap();
+            let write_bytes = PartitionKey::new(columns).to_bytes(&schema).unwrap();
+            assert_eq!(
+                codec_bytes, write_bytes,
+                "codec encoder and write-engine PartitionKey::to_bytes disagree for {pks:?}",
+            );
+        }
+    }
 }
