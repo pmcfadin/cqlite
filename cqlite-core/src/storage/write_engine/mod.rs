@@ -54,7 +54,7 @@ pub use mutation::{
 pub use wal::WriteAheadLog;
 
 use crate::error::{Error, Result};
-use crate::schema::TableSchema;
+use crate::schema::{TableSchema, UdtRegistry};
 use crate::storage::sstable::writer::SSTableInfo;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -234,6 +234,11 @@ pub struct WriteEngineConfig {
     pub schema: TableSchema,
     /// WAL durability mode (default: [`Durability::SyncEachWrite`])
     pub durability: Durability,
+    /// Optional UDT registry for resolving bare CQL UDT column types to their
+    /// `UserType(...)` marshal form at flush time (issue #929). When `None`
+    /// (the default), a column whose `data_type` is a bare UDT name is written
+    /// as a single simple cell (documented fallback).
+    pub udt_registry: Option<UdtRegistry>,
 }
 
 #[cfg(feature = "write-support")]
@@ -252,7 +257,15 @@ impl WriteEngineConfig {
             memtable_hard_limit: Self::DEFAULT_HARD_LIMIT,
             schema,
             durability: Durability::default(),
+            udt_registry: None,
         }
+    }
+
+    /// Attach a [`UdtRegistry`] used to resolve bare CQL UDT column types at
+    /// flush time (issue #929). See [`WriteEngineConfig::udt_registry`].
+    pub fn with_udt_registry(mut self, registry: UdtRegistry) -> Self {
+        self.udt_registry = Some(registry);
+        self
     }
 
     /// Set a custom flush threshold
@@ -779,12 +792,14 @@ impl WriteEngine {
 
         // Create SSTable writer with hint for Bloom filter sizing
         let partition_count_hint = self.memtable.iter().count();
-        let mut writer = crate::storage::sstable::writer::SSTableWriter::with_expected_partitions(
-            self.config.data_dir.clone(),
-            self.generation,
-            &self.config.schema,
-            partition_count_hint,
-        )?;
+        let mut writer =
+            crate::storage::sstable::writer::SSTableWriter::with_expected_partitions_and_registry(
+                self.config.data_dir.clone(),
+                self.generation,
+                &self.config.schema,
+                partition_count_hint,
+                self.config.udt_registry.as_ref(),
+            )?;
 
         // Two-pass flush (issue #729): compute FINAL encoding baselines from all
         // partitions before writing any data.  Delta encoding in Data.db must use
@@ -1465,8 +1480,25 @@ impl WriteEngine {
         // merger decodes the static cells and the writer emits the static prelude
         // (header-driven static presence). Byte-identical to `config.schema` when
         // no such column exists.
-        let effective_schema =
+        let mut effective_schema =
             merge::effective_compaction_schema(&self.config.schema, &input_paths);
+        // #929: normalize bare-name UDT columns to their UserType(...) marshal on
+        // the EFFECTIVE (decode) schema by copying each column's exact UserType
+        // marshal from the input headers. The compaction reader decides complex-
+        // vs-simple from this schema's `data_type` (is_complex_column), so a bare
+        // name would make it misdecode/drop pre-existing per-field UDT cells
+        // (roborev #1009/#1013/#1015/#1017/#1019/#1021). Derived ENTIRELY from the
+        // input headers, so it runs unconditionally (a registry is needed only at
+        // flush time); errors on a mixed encoding rather than corrupting.
+        // `write_schema` derives from this via `for_compaction_output`. The
+        // configured registry handles a UDT column added after the inputs were
+        // written (absent from every input header) so the output is not emitted
+        // as a bare/BytesType column (roborev #1023).
+        merge::apply_udt_marshals_from_inputs(
+            &mut effective_schema,
+            &input_paths,
+            self.config.udt_registry.as_ref(),
+        )?;
 
         // Create K-way merger.
         //
@@ -1509,6 +1541,8 @@ impl WriteEngine {
                 purge_safe,
             )?
         };
+        // `write_schema` inherits the #929 UDT normalization from the already-
+        // normalized `effective_schema` (for_compaction_output clones columns).
         let write_schema = effective_schema.for_compaction_output(&retained_dropped);
 
         let merger = KWayMerger::new_with_gc(

@@ -380,7 +380,22 @@ impl StatisticsMetadata {
 /// - Collections: list<T>, set<T>, map<K,V>
 /// - Frozen wrappers: frozen<list<T>>, frozen<map<K,V>>
 /// - Tuples: tuple<T1, T2, ...>
-fn cql_type_to_marshal_type(cql_type: &str) -> String {
+pub(crate) fn cql_type_to_marshal_type(cql_type: &str) -> String {
+    // Already a marshal string (e.g. a UDT column normalized to UserType(...),
+    // or a column type read back from an input SSTable's SerializationHeader):
+    // return it verbatim. The marshal grammar is case-sensitive (UserType,
+    // Int32Type, ...), so this MUST happen before the lowercasing below, and the
+    // original-case string MUST be preserved. Without this, an already-marshaled
+    // type would fall through to BytesType, advertising the wrong type in the
+    // header while Data.db carries the real (e.g. complex UDT) cells (#929).
+    let raw = cql_type.trim();
+    if raw
+        .to_lowercase()
+        .starts_with("org.apache.cassandra.db.marshal.")
+    {
+        return raw.to_string();
+    }
+
     // Normalize to lowercase for case-insensitive matching.
     // CQL type names are case-insensitive, and the parser may preserve
     // original case from CQL files (e.g., "SET<TEXT>" instead of "set<text>").
@@ -1882,6 +1897,20 @@ mod tests {
         assert_eq!(
             cql_type_to_marshal_type("unknown_type"),
             "org.apache.cassandra.db.marshal.BytesType"
+        );
+
+        // Already-marshaled strings pass through verbatim, case preserved (#929).
+        // This is what a normalized bare-UDT column carries, and what columns
+        // read back from an input SSTable's SerializationHeader look like.
+        let user_type =
+            "org.apache.cassandra.db.marshal.UserType(ks,706572736f6e,6e616d65:org.apache.cassandra.db.marshal.UTF8Type)";
+        assert_eq!(cql_type_to_marshal_type(user_type), user_type);
+        let int_type = "org.apache.cassandra.db.marshal.Int32Type";
+        assert_eq!(cql_type_to_marshal_type(int_type), int_type);
+        // Whitespace around a marshal string is trimmed but case is preserved.
+        assert_eq!(
+            cql_type_to_marshal_type("  org.apache.cassandra.db.marshal.UTF8Type  "),
+            "org.apache.cassandra.db.marshal.UTF8Type"
         );
 
         // Collection types

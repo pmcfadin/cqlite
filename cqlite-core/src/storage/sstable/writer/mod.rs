@@ -76,6 +76,8 @@ pub use toc_writer::{ComponentEntry, TocWriter};
 
 use crate::error::{Error, Result};
 use crate::schema::TableSchema;
+#[cfg(feature = "write-support")]
+use crate::schema::UdtRegistry;
 use crate::storage::write_engine::mutation::{DecoratedKey, Mutation};
 use std::path::{Path, PathBuf};
 
@@ -359,6 +361,63 @@ impl SSTableWriter {
         expected_partitions: usize,
         format: SSTableFormat,
     ) -> Result<Self> {
+        Self::with_format_and_registry(
+            output_dir,
+            generation,
+            schema,
+            expected_partitions,
+            format,
+            None,
+        )
+    }
+
+    /// Create a new SSTable writer with an expected partition count hint and an
+    /// optional [`UdtRegistry`] for resolving bare UDT column types (issue #929).
+    ///
+    /// When `registry` is `Some`, any column whose `data_type` is a TOP-LEVEL
+    /// bare CQL UDT name (e.g. `person`) that resolves in the registry is
+    /// rewritten to its full `UserType(...)` marshal string so the existing
+    /// complex-cell decomposition path writes per-field cells. With `None`, or
+    /// for an unregistered name, behavior is unchanged (single simple cell).
+    pub fn with_expected_partitions_and_registry(
+        output_dir: PathBuf,
+        generation: u64,
+        schema: &TableSchema,
+        expected_partitions: usize,
+        registry: Option<&UdtRegistry>,
+    ) -> Result<Self> {
+        Self::with_format_and_registry(
+            output_dir,
+            generation,
+            schema,
+            expected_partitions,
+            SSTableFormat::default(),
+            registry,
+        )
+    }
+
+    /// Create a new SSTable writer selecting the on-disk index `format` and an
+    /// optional [`UdtRegistry`] for bare-UDT resolution (issue #766 + #929).
+    pub fn with_format_and_registry(
+        output_dir: PathBuf,
+        generation: u64,
+        schema: &TableSchema,
+        expected_partitions: usize,
+        format: SSTableFormat,
+        registry: Option<&UdtRegistry>,
+    ) -> Result<Self> {
+        // Issue #929: resolve TOP-LEVEL bare UDT column names to their marshal
+        // form on the schema copy the writer holds, so the existing complex-cell
+        // path treats them as multi-cell UDTs. No registry => no rewrite.
+        let mut schema = schema.clone();
+        if let Some(registry) = registry {
+            crate::storage::sstable::writer::data_writer::normalize_schema_udts(
+                &mut schema,
+                registry,
+            );
+        }
+        let schema = &schema;
+
         // Initialize statistics metadata with sentinel values
         let mut stats = StatisticsMetadata::new();
         // Pre-set min values to reasonable defaults (will be updated during writes)
@@ -1304,6 +1363,105 @@ mod tests {
             comments: HashMap::new(),
             dropped_columns: HashMap::new(),
         }
+    }
+
+    /// Issue #929: a bare-name non-frozen UDT column, after registry-backed
+    /// normalization, must be advertised in the Statistics.db SERIALIZATION_HEADER
+    /// as the full `UserType(...)` marshal — NOT `BytesType`. Otherwise Data.db
+    /// would carry complex UDT cells while the header claims a blob, producing an
+    /// inconsistent SSTable (roborev #999).
+    #[tokio::test]
+    async fn bare_udt_column_emits_usertype_in_serialization_header() {
+        use crate::schema::{CqlType, UdtRegistry};
+        use crate::types::{UdtField, UdtTypeDef, UdtValue};
+
+        let schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                // Declared with the BARE UDT name `person`.
+                Column {
+                    name: "addr".to_string(),
+                    data_type: "person".to_string(),
+                    nullable: true,
+                    default: None,
+                    is_static: false,
+                },
+            ],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        };
+
+        let mut registry = UdtRegistry::new();
+        registry.register_udt(
+            UdtTypeDef::new("test_ks".to_string(), "person".to_string())
+                .with_field("name".to_string(), CqlType::Text, true)
+                .with_field("age".to_string(), CqlType::Int, true),
+        );
+
+        let temp_dir = TempDir::new().unwrap();
+        let mut writer = SSTableWriter::with_expected_partitions_and_registry(
+            temp_dir.path().to_path_buf(),
+            1,
+            &schema,
+            1,
+            Some(&registry),
+        )
+        .unwrap();
+
+        let table_id = TableId::new("test_ks", "test_table");
+        let pk = PartitionKey::single("id", Value::Integer(1));
+        let udt = Value::Udt(UdtValue {
+            type_name: "person".to_string(),
+            keyspace: "test_ks".to_string(),
+            fields: vec![
+                UdtField {
+                    name: "name".to_string(),
+                    value: Some(Value::Text("Alice".to_string())),
+                },
+                UdtField {
+                    name: "age".to_string(),
+                    value: Some(Value::Integer(30)),
+                },
+            ],
+        });
+        let mutation = Mutation::new(
+            table_id,
+            pk,
+            None,
+            vec![CellOperation::Write {
+                column: "addr".to_string(),
+                value: udt,
+            }],
+            1_000_000,
+            None,
+        );
+        let key = mutation.decorated_key(&schema).unwrap();
+        writer.write_partition(key, vec![mutation]).unwrap();
+        let info = writer.finish().await.unwrap();
+
+        let stats_bytes = std::fs::read(&info.stats_path).unwrap();
+        let expected = "org.apache.cassandra.db.marshal.UserType(test_ks,706572736f6e,6e616d65:org.apache.cassandra.db.marshal.UTF8Type,616765:org.apache.cassandra.db.marshal.Int32Type)";
+        let contains = stats_bytes
+            .windows(expected.len())
+            .any(|w| w == expected.as_bytes());
+        assert!(
+            contains,
+            "serialization header must advertise the bare UDT column as UserType(...)"
+        );
     }
 
     /// A schema with a single static column (and a clustering key, so static
