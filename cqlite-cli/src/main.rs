@@ -452,7 +452,21 @@ async fn run_main() -> Result<()> {
             ));
         };
 
-        let config = WriteEngineConfig::new(write_dir.join("data"), write_dir.join("wal"), schema);
+        let mut config = WriteEngineConfig::new(
+            write_dir.join("data"),
+            write_dir.join("wal"),
+            schema.clone(),
+        );
+        // #929: supply a UDT registry built from the schema file's CREATE TYPE
+        // statements so a bare-name non-frozen UDT column flushes as complex
+        // per-field cells instead of the single-cell fallback (roborev #1029).
+        if let Some(ref schema_path) = cli.schema {
+            config =
+                config.with_udt_registry(crate::commands::write::udt_registry_from_schema_file(
+                    schema_path,
+                    &schema.keyspace,
+                ));
+        }
         Some(
             WriteEngine::new(config)
                 .map_err(|e| anyhow::anyhow!("Failed to initialize WriteEngine: {}", e))?,

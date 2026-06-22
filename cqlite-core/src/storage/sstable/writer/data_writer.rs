@@ -57,7 +57,7 @@
 //! - Format docs: `docs/sstables-definitive-guide/chapters/05-data-db-format.md`
 
 use crate::error::{Error, Result};
-use crate::schema::{Column, CqlType, TableSchema};
+use crate::schema::{Column, CqlType, TableSchema, UdtRegistry};
 use crate::storage::serialization::types::TypeSerializer;
 use crate::storage::serialization::vint::{encode_signed, encode_unsigned, unsigned_len};
 use crate::storage::sstable::writer::index_writer::{PromotedIndexBlock, COLUMN_INDEX_SIZE_BYTES};
@@ -3915,6 +3915,271 @@ fn udt_declared_field_names(data_type: &str) -> Result<Vec<String>> {
         names.push(name);
     }
     Ok(names)
+}
+
+/// Render a [`CqlType`] back to a CQL type string that
+/// [`cql_type_to_marshal_type`] can convert to a Cassandra marshal type.
+///
+/// Used by [`render_udt_marshal`] to emit each UDT field's marshal type. Only
+/// the shapes that the string-based converter understands are produced
+/// (primitives, `list/set/map/frozen/tuple` wrappers). A nested bare UDT
+/// reference (`CqlType::Udt`) has no marshal expansion here — it is rendered as
+/// its bare name and will fall through `cql_type_to_marshal_type` to
+/// `BytesType`, matching the documented "top-level bare UDT only" scope of
+/// issue #929.
+fn cql_type_to_cql_string(ty: &CqlType) -> String {
+    match ty {
+        CqlType::Boolean => "boolean".to_string(),
+        CqlType::TinyInt => "tinyint".to_string(),
+        CqlType::SmallInt => "smallint".to_string(),
+        CqlType::Int => "int".to_string(),
+        CqlType::BigInt => "bigint".to_string(),
+        CqlType::Counter => "counter".to_string(),
+        CqlType::Float => "float".to_string(),
+        CqlType::Double => "double".to_string(),
+        CqlType::Decimal => "decimal".to_string(),
+        CqlType::Text => "text".to_string(),
+        CqlType::Ascii => "ascii".to_string(),
+        CqlType::Varchar => "varchar".to_string(),
+        CqlType::Blob => "blob".to_string(),
+        CqlType::Timestamp => "timestamp".to_string(),
+        CqlType::Date => "date".to_string(),
+        CqlType::Time => "time".to_string(),
+        CqlType::Uuid => "uuid".to_string(),
+        CqlType::TimeUuid => "timeuuid".to_string(),
+        CqlType::Inet => "inet".to_string(),
+        CqlType::Duration => "duration".to_string(),
+        CqlType::Varint => "varint".to_string(),
+        CqlType::List(inner) => format!("list<{}>", cql_type_to_cql_string(inner)),
+        CqlType::Set(inner) => format!("set<{}>", cql_type_to_cql_string(inner)),
+        CqlType::Map(k, v) => format!(
+            "map<{},{}>",
+            cql_type_to_cql_string(k),
+            cql_type_to_cql_string(v)
+        ),
+        CqlType::Tuple(fields) => {
+            let inner: Vec<String> = fields.iter().map(cql_type_to_cql_string).collect();
+            format!("tuple<{}>", inner.join(","))
+        }
+        CqlType::Frozen(inner) => format!("frozen<{}>", cql_type_to_cql_string(inner)),
+        // Bare UDT reference — emit the name; out of scope for marshal expansion
+        // (issue #929 covers top-level bare UDTs only).
+        CqlType::Udt(name, _) => name.clone(),
+        CqlType::Custom(name) => name.clone(),
+    }
+}
+
+/// True if `name` (already lowercased) is a native CQL primitive type keyword.
+/// Used to keep [`resolve_bare_udt_marshal`] from rewriting a real primitive
+/// column even if a same-named UDT is registered (an illegal collision in
+/// Cassandra, guarded against defensively). Mirrors the primitive arms of
+/// `cql_type_to_marshal_type`.
+fn is_cql_primitive_name(lower: &str) -> bool {
+    matches!(
+        lower,
+        "text"
+            | "varchar"
+            | "int"
+            | "bigint"
+            | "smallint"
+            | "tinyint"
+            | "float"
+            | "double"
+            | "boolean"
+            | "blob"
+            | "uuid"
+            | "timeuuid"
+            | "timestamp"
+            | "date"
+            | "time"
+            | "duration"
+            | "inet"
+            | "ascii"
+            | "decimal"
+            | "varint"
+            | "counter"
+    )
+}
+
+/// Render a [`UdtTypeDef`] as a TOP-LEVEL non-frozen `UserType(...)` marshal
+/// string (issue #929) in exactly the shape [`udt_declared_field_names`] parses
+/// and [`is_udt_marshal`] recognizes:
+///
+/// ```text
+/// org.apache.cassandra.db.marshal.UserType(<keyspace>,<hex-name>,<hex-fieldname>:<field-marshal-type>,...)
+/// ```
+///
+/// The keyspace appears as plain text; the UDT name and each field name are
+/// lowercase-hex of their UTF-8 bytes. Each field's marshal type comes from the
+/// canonical CQL→marshal string converter ([`cql_type_to_marshal_type`]).
+///
+/// SCOPE / KNOWN LIMITATION: a field that is itself a UDT (or a
+/// collection/tuple/frozen *containing* a UDT) renders to `BytesType`, NOT the
+/// nested `UserType(...)`. This is deliberate: the direct-write value path
+/// ([`serialize_value`] for `Value::Udt`) infers a nested UDT's schema from the
+/// literal's own field order and does not pad missing fields, so it cannot yet
+/// guarantee declared-order serialization of a sparse / out-of-order nested
+/// literal. Advertising the expanded nested `UserType` in the header while the
+/// value bytes follow literal order would make the SSTable inconsistent (a
+/// reader decoding in declared order would mis-read the fields). Keeping nested
+/// UDT fields as `BytesType` leaves the header and the (blob) value bytes
+/// self-consistent. Schema-aware nested-UDT value serialization is tracked as a
+/// follow-up. Issue #929 targets TOP-LEVEL bare-name non-frozen UDT columns
+/// (whose own fields are primitives / collections of primitives).
+fn render_udt_marshal(udt: &UdtTypeDef) -> String {
+    let prefix = "org.apache.cassandra.db.marshal.UserType(";
+    let mut out = String::from(prefix);
+    out.push_str(&udt.keyspace);
+    out.push(',');
+    out.push_str(&hex::encode(udt.name.as_bytes()));
+    for field in &udt.fields {
+        out.push(',');
+        out.push_str(&hex::encode(field.name.as_bytes()));
+        out.push(':');
+        let field_cql = cql_type_to_cql_string(&field.field_type);
+        out.push_str(
+            &crate::storage::sstable::writer::stats_writer::cql_type_to_marshal_type(&field_cql),
+        );
+    }
+    out.push(')');
+    out
+}
+
+/// Normalize a schema's column `data_type`s by resolving TOP-LEVEL bare CQL UDT
+/// names (e.g. `person`) to their full `UserType(...)` marshal string via the
+/// registry (issue #929).
+///
+/// A direct user write may give a column a bare UDT name as its `data_type`.
+/// The writer holds only a `&TableSchema` and cannot otherwise resolve such a
+/// name to its fields, so it would incorrectly write the column as a single
+/// simple cell. Rewriting the `data_type` to the marshal form lets the existing
+/// [`is_complex_column`] / `write_udt_complex_cells` path decompose it into
+/// per-field cells unchanged.
+///
+/// Scope is strictly TOP-LEVEL bare names: a column whose `data_type` already
+/// looks like a CQL type the converter understands (primitive, `frozen<...>`,
+/// `list<...>`, `set<...>`, `map<...>`, `tuple<...>`) or an
+/// `org.apache.cassandra.db.marshal.*` string is left untouched. With no
+/// registry, or for an unregistered name, the column is left as-is (documented
+/// fallback: single simple cell, no error).
+pub(crate) fn normalize_schema_udts(schema: &mut TableSchema, registry: &UdtRegistry) {
+    let keyspace = schema.keyspace.clone();
+    for column in &mut schema.columns {
+        if let Some(marshal) = resolve_bare_udt_marshal(&column.data_type, &keyspace, registry) {
+            column.data_type = marshal;
+        }
+    }
+}
+
+/// If `data_type` is a TOP-LEVEL bare CQL UDT name that resolves in `registry`,
+/// return its rendered `UserType(...)` marshal string; otherwise `None`.
+pub(crate) fn resolve_bare_udt_marshal(
+    data_type: &str,
+    keyspace: &str,
+    registry: &UdtRegistry,
+) -> Option<String> {
+    let trimmed = data_type.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_lowercase();
+
+    // Already a marshal string (incl. UserType / frozen marshal) — leave as-is.
+    if lower.starts_with("org.apache.cassandra.db.marshal.") {
+        return None;
+    }
+    // Parameterized CQL types are not bare names — leave to the existing path.
+    if lower.contains('<') {
+        return None;
+    }
+    // A bare name must be a single identifier (no commas / parens).
+    if trimmed.contains(',') || trimmed.contains('(') || trimmed.contains(')') {
+        return None;
+    }
+    // A native CQL type name never denotes a UDT. Cassandra forbids creating a
+    // UDT whose name shadows a primitive, but guard defensively: a registered
+    // UDT colliding with a primitive keyword must not rewrite a real primitive
+    // column into a UserType marshal (which would corrupt it).
+    if is_cql_primitive_name(&lower) {
+        return None;
+    }
+
+    // Resolve the bare name in the registry. Try an exact match first, then
+    // fall back to a case-insensitive match within the keyspace: unquoted CQL
+    // identifiers are case-insensitive, so a `CREATE TYPE Person` registered as
+    // `Person` must still resolve a column declared `person` (roborev #1005).
+    // The exact match wins when present, so a quoted (case-preserving) name is
+    // never shadowed by a differently-cased sibling. The case-insensitive
+    // fallback resolves ONLY when it is unambiguous (exactly one match), so two
+    // differently-cased quoted names never resolve nondeterministically
+    // (roborev #1011).
+    let udt = match registry.get_udt(keyspace, trimmed) {
+        Some(udt) => udt,
+        None => {
+            let ks_udts = registry.get_keyspace_udts(keyspace)?;
+            let mut matches = ks_udts
+                .iter()
+                .filter(|(name, _)| name.eq_ignore_ascii_case(trimmed));
+            let first = matches.next()?;
+            if matches.next().is_some() {
+                return None; // ambiguous — refuse rather than guess.
+            }
+            first.1
+        }
+    };
+
+    // Only normalize UDTs we can FULLY represent: every field is a primitive or
+    // a collection/tuple/frozen OF primitives. A field that is itself a UDT is
+    // NOT yet supported on the direct-write value path (serialize_value infers a
+    // nested UDT's schema from the literal's own order and cannot guarantee
+    // declared-order serialization of a sparse/out-of-order nested literal). If
+    // we normalized such a UDT, its nested field would be advertised as
+    // `BytesType` while the value bytes follow literal order — losing the nested
+    // type semantics. Leaving the column unnormalized keeps it a single,
+    // self-consistent simple cell (documented fallback) until schema-aware
+    // nested-UDT value serialization exists (roborev #1011).
+    if udt
+        .fields
+        .iter()
+        .any(|f| cql_type_references_udt(&f.field_type, keyspace, registry))
+    {
+        return None;
+    }
+
+    Some(render_udt_marshal(udt))
+}
+
+/// True if `ty` is, or transitively contains, a UDT reference (a nested
+/// `UserType`). Used by [`resolve_bare_udt_marshal`] to skip normalizing a
+/// top-level UDT whose fields include another UDT — see the note there.
+///
+/// A `CqlType::Custom` is a UDT reference when its name carries the parser's
+/// `udt:` prefix OR resolves to a registered UDT in `keyspace` (the CQL parser
+/// also emits unprefixed lowercase names like `address` for UDT references, so
+/// the registry lookup is required — roborev #1013).
+fn cql_type_references_udt(ty: &CqlType, keyspace: &str, registry: &UdtRegistry) -> bool {
+    match ty {
+        CqlType::Udt(..) => true,
+        CqlType::Custom(name) => {
+            let clean = name.strip_prefix("udt:").unwrap_or(name);
+            name.starts_with("udt:")
+                || registry.get_udt(keyspace, clean).is_some()
+                || registry
+                    .get_keyspace_udts(keyspace)
+                    .is_some_and(|m| m.keys().any(|k| k.eq_ignore_ascii_case(clean)))
+        }
+        CqlType::List(inner) | CqlType::Set(inner) | CqlType::Frozen(inner) => {
+            cql_type_references_udt(inner, keyspace, registry)
+        }
+        CqlType::Map(k, v) => {
+            cql_type_references_udt(k, keyspace, registry)
+                || cql_type_references_udt(v, keyspace, registry)
+        }
+        CqlType::Tuple(fields) => fields
+            .iter()
+            .any(|f| cql_type_references_udt(f, keyspace, registry)),
+        _ => false,
+    }
 }
 
 /// A surviving cell operation in a merged row, tagged with the timestamp and
@@ -11319,5 +11584,317 @@ mod tests {
             "a row-tombstone row whose complex elements are all shadowed must NOT carry \
              a LIVE row timestamp"
         );
+    }
+
+    // ===================================================================
+    // Issue #929 — bare-name non-frozen UDT resolution at write time.
+    //
+    // A direct user write may give a column a BARE CQL UDT name (e.g. `person`)
+    // as its `data_type`. With a populated `UdtRegistry` the writer's schema is
+    // normalized to the full `UserType(...)` marshal string so the existing
+    // complex-cell path decomposes it into per-field cells. With no registry it
+    // falls back to a single simple cell (documented behavior).
+    // ===================================================================
+
+    /// Build the `person { name text, age int, email text }` registry def used
+    /// by the bare-name tests, in declared field order.
+    fn person_udt_def() -> UdtTypeDef {
+        UdtTypeDef::new("test_ks".to_string(), "person".to_string())
+            .with_field("name".to_string(), CqlType::Text, true)
+            .with_field("age".to_string(), CqlType::Int, true)
+            .with_field("email".to_string(), CqlType::Text, true)
+    }
+
+    /// A registry containing only the `person` UDT.
+    fn person_registry() -> UdtRegistry {
+        let mut reg = UdtRegistry::new();
+        reg.register_udt(person_udt_def());
+        reg
+    }
+
+    /// The rendered marshal string for a `UdtTypeDef` must match the hand-written
+    /// `person_udt_marshal()` byte-for-byte AND round-trip through
+    /// `udt_declared_field_names` to the declared field order (issue #929).
+    #[test]
+    fn render_udt_marshal_matches_and_roundtrips() {
+        let rendered = render_udt_marshal(&person_udt_def());
+        assert_eq!(
+            rendered,
+            person_udt_marshal(),
+            "rendered marshal must match the canonical hand-written form"
+        );
+
+        let names = udt_declared_field_names(&rendered)
+            .expect("rendered marshal must parse via udt_declared_field_names");
+        assert_eq!(
+            names,
+            vec!["name".to_string(), "age".to_string(), "email".to_string()],
+            "field names must round-trip in declared order"
+        );
+
+        // And the renderer's output is recognized as a top-level UDT marshal.
+        assert!(
+            is_udt_marshal(&rendered.to_lowercase()),
+            "rendered marshal must be recognized by is_udt_marshal"
+        );
+        assert!(
+            is_complex_column(&rendered),
+            "rendered marshal must be treated as a complex column"
+        );
+    }
+
+    /// A bare UDT name resolves to its marshal string only when the registry
+    /// knows it; parameterized / marshal / unknown types are left untouched
+    /// (issue #929 top-level-bare-only scope).
+    #[test]
+    fn resolve_bare_udt_marshal_scope() {
+        let reg = person_registry();
+
+        // Bare known name -> rendered marshal.
+        assert_eq!(
+            resolve_bare_udt_marshal("person", "test_ks", &reg).as_deref(),
+            Some(person_udt_marshal().as_str())
+        );
+        // Whitespace tolerated.
+        assert_eq!(
+            resolve_bare_udt_marshal("  person  ", "test_ks", &reg).as_deref(),
+            Some(person_udt_marshal().as_str())
+        );
+        // Unquoted CQL identifiers are case-insensitive: a column declared with a
+        // different case than the registered name still resolves (roborev #1005).
+        assert_eq!(
+            resolve_bare_udt_marshal("Person", "test_ks", &reg).as_deref(),
+            Some(person_udt_marshal().as_str())
+        );
+        assert_eq!(
+            resolve_bare_udt_marshal("PERSON", "test_ks", &reg).as_deref(),
+            Some(person_udt_marshal().as_str())
+        );
+
+        // Unknown name / wrong keyspace -> no rewrite.
+        assert!(resolve_bare_udt_marshal("unknown", "test_ks", &reg).is_none());
+        assert!(resolve_bare_udt_marshal("person", "other_ks", &reg).is_none());
+
+        // Primitives and parameterized types are not bare UDT names.
+        assert!(resolve_bare_udt_marshal("text", "test_ks", &reg).is_none());
+        assert!(resolve_bare_udt_marshal("list<person>", "test_ks", &reg).is_none());
+        assert!(resolve_bare_udt_marshal("frozen<person>", "test_ks", &reg).is_none());
+
+        // An already-marshalled type is left untouched.
+        assert!(resolve_bare_udt_marshal(&person_udt_marshal(), "test_ks", &reg).is_none());
+
+        // SCOPE (roborev #1011): a UDT whose fields include a nested UDT (directly,
+        // or inside a collection/tuple/frozen) is NOT normalized at all — it stays
+        // a single, self-consistent simple cell rather than a partially-degraded
+        // complex column. A UDT with only primitive / collection-of-primitive
+        // fields IS normalized.
+        let mut nested_reg = UdtRegistry::new();
+        nested_reg.register_udt(
+            UdtTypeDef::new("test_ks".to_string(), "inner".to_string()).with_field(
+                "x".to_string(),
+                CqlType::Int,
+                true,
+            ),
+        );
+        // `with_nested` has a direct nested-UDT field -> skipped.
+        nested_reg.register_udt(
+            UdtTypeDef::new("test_ks".to_string(), "with_nested".to_string()).with_field(
+                "i".to_string(),
+                CqlType::Udt("inner".to_string(), vec![]),
+                true,
+            ),
+        );
+        // `with_nested_list` hides the nested UDT inside a list -> skipped.
+        nested_reg.register_udt(
+            UdtTypeDef::new("test_ks".to_string(), "with_nested_list".to_string()).with_field(
+                "xs".to_string(),
+                CqlType::List(Box::new(CqlType::Udt("inner".to_string(), vec![]))),
+                true,
+            ),
+        );
+        // `prim_coll` has only primitive / collection-of-primitive fields ->
+        // normalized, with the collection field rendered fully.
+        nested_reg.register_udt(
+            UdtTypeDef::new("test_ks".to_string(), "prim_coll".to_string())
+                .with_field("n".to_string(), CqlType::Text, true)
+                .with_field(
+                    "xs".to_string(),
+                    CqlType::List(Box::new(CqlType::Int)),
+                    true,
+                ),
+        );
+        assert!(
+            resolve_bare_udt_marshal("with_nested", "test_ks", &nested_reg).is_none(),
+            "UDT with a nested-UDT field must be skipped (single-cell fallback)"
+        );
+        assert!(
+            resolve_bare_udt_marshal("with_nested_list", "test_ks", &nested_reg).is_none(),
+            "UDT with a collection-of-UDT field must be skipped (single-cell fallback)"
+        );
+        let prim_coll = resolve_bare_udt_marshal("prim_coll", "test_ks", &nested_reg)
+            .expect("primitive-only UDT resolves");
+        assert!(
+            prim_coll.contains(&format!(
+                "{}:org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)",
+                hex::encode(b"xs")
+            )),
+            "list<int> field must render as ListType(Int32Type), got: {prim_coll}"
+        );
+        assert!(
+            !prim_coll.contains("BytesType"),
+            "a primitive-only UDT must not contain BytesType, got: {prim_coll}"
+        );
+
+        // Defensive: even if a UDT named after a primitive is registered, a real
+        // primitive column must NOT be rewritten into a UserType marshal.
+        let mut shadow = UdtRegistry::new();
+        shadow.register_udt(
+            UdtTypeDef::new("test_ks".to_string(), "text".to_string()).with_field(
+                "x".to_string(),
+                CqlType::Int,
+                true,
+            ),
+        );
+        assert!(
+            resolve_bare_udt_marshal("text", "test_ks", &shadow).is_none(),
+            "primitive keyword must never resolve to a UDT marshal"
+        );
+    }
+
+    /// A direct write of a BARE-name non-frozen UDT column WITH a populated
+    /// registry must, after schema normalization, decompose into per-field
+    /// complex cells at declared indices and round-trip through the reader,
+    /// even for a sparse / out-of-order literal (issue #929, mirroring the #927
+    /// sparse test but starting from a bare `person` name).
+    #[test]
+    fn bare_udt_with_registry_roundtrips_sparse_out_of_order() {
+        // A schema whose UDT column is declared with the BARE name `person`.
+        let mut schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![udt_column("addr", "person")],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        };
+
+        // Before normalization the bare name is NOT complex.
+        assert!(
+            !is_complex_column(&schema.columns[0].data_type),
+            "bare name is not complex before normalization"
+        );
+
+        normalize_schema_udts(&mut schema, &person_registry());
+
+        // After normalization the column carries the full marshal string and is
+        // recognized as a complex column.
+        assert_eq!(schema.columns[0].data_type, person_udt_marshal());
+        assert!(is_complex_column(&schema.columns[0].data_type));
+
+        let col = schema.columns[0].clone();
+        let writer = DataWriter::new(create_test_stats());
+        // Literal lists email THEN name (out of order) and OMITS age (sparse).
+        let udt = Value::Udt(crate::types::UdtValue {
+            type_name: "person".to_string(),
+            keyspace: "test_ks".to_string(),
+            fields: vec![
+                udt_field("email", Some(Value::Text("a@b.com".to_string()))),
+                udt_field("name", Some(Value::Text("Alice".to_string()))),
+            ],
+        });
+
+        let row_ts = 1_005_000i64;
+        let mut buf = Vec::new();
+        writer
+            .write_complex_column(&mut buf, &col, &udt, row_ts, None)
+            .expect("normalized bare UDT must write as a complex column");
+
+        let (_del_ts, _del_ldt, cells) = decode_complex_column(&buf);
+        assert_eq!(cells.len(), 2, "two non-null fields => two cells");
+        assert_eq!(
+            cells[0].cell_path,
+            0u16.to_be_bytes().to_vec(),
+            "name idx 0"
+        );
+        assert_eq!(
+            cells[1].cell_path,
+            2u16.to_be_bytes().to_vec(),
+            "email idx 2"
+        );
+
+        let parser = person_reader();
+        let (value, _off, _meta) = parser
+            .parse_complex_column_inner(&buf, 0, &col, true, row_ts, None)
+            .expect("reader must parse the UDT complex column");
+
+        match value {
+            Value::Udt(out) => {
+                assert_eq!(out.type_name, "person");
+                assert_eq!(out.keyspace, "test_ks");
+                assert_eq!(out.fields.len(), 3, "all DECLARED fields present");
+                assert_eq!(out.fields[0].name, "name");
+                assert_eq!(out.fields[0].value, Some(Value::Text("Alice".to_string())));
+                assert_eq!(out.fields[1].name, "age");
+                assert_eq!(out.fields[1].value, None, "omitted field stays null");
+                assert_eq!(out.fields[2].name, "email");
+                assert_eq!(
+                    out.fields[2].value,
+                    Some(Value::Text("a@b.com".to_string()))
+                );
+            }
+            other => panic!("expected Value::Udt, got {:?}", other),
+        }
+    }
+
+    /// With NO registry a bare-name UDT column stays bare, is NOT detected as
+    /// complex, and a whole-`Value::Udt` write goes through the simple-cell path
+    /// without panicking (issue #929 documented fallback).
+    #[test]
+    fn bare_udt_without_registry_is_single_simple_cell() {
+        let mut schema = TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![udt_column("addr", "person")],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        };
+
+        // No registry => no normalization (empty registry resolves nothing).
+        normalize_schema_udts(&mut schema, &UdtRegistry::new());
+        assert_eq!(
+            schema.columns[0].data_type, "person",
+            "with no matching registry entry the bare name is unchanged"
+        );
+        assert!(
+            !is_complex_column(&schema.columns[0].data_type),
+            "bare name without resolution is not a complex column"
+        );
+
+        // A whole-UDT write must not panic on the simple-cell path.
+        let col = schema.columns[0].clone();
+        let writer = DataWriter::new(create_test_stats());
+        let udt = Value::Udt(crate::types::UdtValue {
+            type_name: "person".to_string(),
+            keyspace: "test_ks".to_string(),
+            fields: vec![udt_field("name", Some(Value::Text("Alice".to_string())))],
+        });
+        let mut buf = Vec::new();
+        let res = writer.write_cell(&mut buf, &col.name, &udt, 1_005_000);
+        assert!(
+            res.is_ok(),
+            "bare-name fallback write must succeed as a simple cell: {res:?}"
+        );
+        assert!(!buf.is_empty(), "a simple cell must have been written");
     }
 }

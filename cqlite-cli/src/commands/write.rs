@@ -376,7 +376,15 @@ fn compact_purge_safe(args: &crate::cli_types::CompactArgs) -> bool {
 pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<CompactResult> {
     let start = Instant::now();
 
-    let schema = crate::commands::load_schema_file(&args.schema, false, None)?;
+    // Parse the table schema robustly: a real CQL file commonly has CREATE TYPE
+    // (and CREATE KEYSPACE / USE) statements BEFORE the CREATE TABLE, which the
+    // single-statement `load_schema_file` cannot handle (roborev #1031).
+    let schema = load_compaction_table_schema(&args.schema)?;
+    // #929: a bare-name UDT column added after the input SSTables were written is
+    // absent from every input header; supply a registry built from the schema
+    // file's CREATE TYPE statements so the compaction output normalizes it to a
+    // UserType(...) header instead of a bare/BytesType column (roborev #1027).
+    let udt_registry = udt_registry_from_schema_file(&args.schema, &schema.keyspace);
 
     let inputs = discover_input_sstables(&args.input_dir)?;
     if inputs.is_empty() {
@@ -390,7 +398,7 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
     // explicit `--major` opt-in to `purge_safe`. Default (flag absent) is
     // conservative — see `compact_purge_safe`.
     let purge_safe = compact_purge_safe(args);
-    let report = cqlite_core::storage::write_engine::merge::compact_sstables(
+    let report = cqlite_core::storage::write_engine::merge::compact_sstables_with_registry(
         inputs,
         &args.output,
         &schema,
@@ -398,6 +406,7 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
         args.gc_before,
         args.now_sec,
         purge_safe,
+        Some(&udt_registry),
     )
     .await
     .with_context(|| "compaction failed")?;
@@ -410,6 +419,131 @@ pub async fn handle_compact(args: &crate::cli_types::CompactArgs) -> Result<Comp
         data_file_size: report.output.data_size,
         execution_time_ms: start.elapsed().as_secs_f64() * 1000.0,
     })
+}
+
+/// Load the table schema for compaction from a CQL or JSON schema file.
+///
+/// Unlike the single-statement `load_schema_file`, a `.cql` file is split into
+/// statements and the FIRST `CREATE TABLE` is selected, applying any file-level
+/// keyspace from `CREATE KEYSPACE` / `USE` — so a realistic file with
+/// `CREATE TYPE` (and keyspace) statements before the table parses correctly
+/// (roborev #1031). JSON files fall back to `load_schema_file`.
+#[cfg(feature = "write-support")]
+fn load_compaction_table_schema(schema_path: &Path) -> Result<cqlite_core::schema::TableSchema> {
+    use cqlite_core::schema::cql_parser::{
+        classify_statement, parse_create_table, split_cql_statements, StatementType,
+    };
+
+    let is_cql = matches!(
+        schema_path
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_lowercase()
+            .as_str(),
+        "cql" | "sql" | ""
+    );
+    if !is_cql {
+        // JSON (or other) — the single-statement loader handles it.
+        return crate::commands::load_schema_file(schema_path, false, None);
+    }
+
+    let content = std::fs::read_to_string(schema_path)
+        .with_context(|| format!("Failed to read schema file: {}", schema_path.display()))?;
+
+    let mut file_keyspace: Option<String> = None;
+    for stmt in split_cql_statements(&content) {
+        match classify_statement(&stmt) {
+            StatementType::Other(ref kind) if kind == "use" => {
+                let name = stmt
+                    .trim()
+                    .strip_prefix("USE")
+                    .or_else(|| stmt.trim().strip_prefix("use"))
+                    .unwrap_or("")
+                    .trim()
+                    .trim_end_matches(';')
+                    .trim()
+                    .to_string();
+                if !name.is_empty() {
+                    file_keyspace = Some(name);
+                }
+            }
+            StatementType::Other(ref kind) if kind == "create" => {
+                let lower = stmt.to_lowercase();
+                if lower.contains("create keyspace") {
+                    let after = if let Some(pos) = lower.find("exists") {
+                        &stmt[pos + 6..]
+                    } else if let Some(pos) = lower.find("keyspace") {
+                        &stmt[pos + 8..]
+                    } else {
+                        ""
+                    };
+                    let name = after
+                        .trim()
+                        .split(|c: char| c.is_whitespace() || c == '{' || c == ';')
+                        .next()
+                        .unwrap_or("")
+                        .trim()
+                        .to_string();
+                    if !name.is_empty() {
+                        file_keyspace = Some(name);
+                    }
+                }
+            }
+            StatementType::CreateTable => {
+                if let Ok((_, mut ts)) = parse_create_table(&stmt) {
+                    if ts.keyspace.is_empty()
+                        || ts.keyspace == "unknown"
+                        || ts.keyspace == "default"
+                    {
+                        if let Some(ref ks) = file_keyspace {
+                            ts.keyspace = ks.clone();
+                        }
+                    }
+                    return Ok(ts);
+                }
+            }
+            _ => {}
+        }
+    }
+    Err(anyhow::anyhow!(
+        "No CREATE TABLE statement found in {}",
+        schema_path.display()
+    ))
+}
+
+/// Build a [`UdtRegistry`] from the `CREATE TYPE` statements in a CQL schema
+/// file (#929). Used so compaction can normalize a bare-name UDT column that was
+/// added after the input SSTables were written. Best-effort: a file with no
+/// `CREATE TYPE` statements (or a non-CQL file) yields an empty registry, which
+/// makes compaction header-only — identical to the prior behavior.
+#[cfg(feature = "write-support")]
+pub(crate) fn udt_registry_from_schema_file(
+    schema_path: &Path,
+    default_keyspace: &str,
+) -> cqlite_core::schema::UdtRegistry {
+    use cqlite_core::schema::cql_parser::{parse_create_type, split_cql_statements};
+    use cqlite_core::schema::{CqlType, UdtRegistry};
+    use cqlite_core::types::UdtTypeDef;
+
+    let mut registry = UdtRegistry::new();
+    let Ok(content) = std::fs::read_to_string(schema_path) else {
+        return registry;
+    };
+    for stmt in split_cql_statements(&content) {
+        if let Ok((_, (name, keyspace, fields))) = parse_create_type(&stmt) {
+            let keyspace = keyspace.unwrap_or_else(|| default_keyspace.to_string());
+            let mut def = UdtTypeDef::new(keyspace, name);
+            for (field_name, field_type) in fields {
+                // Unparseable field types fall back to Blob (rendered BytesType),
+                // matching the writer's unknown-type handling.
+                let cql = CqlType::parse(&field_type).unwrap_or(CqlType::Blob);
+                def = def.with_field(field_name, cql, true);
+            }
+            registry.register_udt(def);
+        }
+    }
+    registry
 }
 
 /// Recursively discover published input SSTables under `dir`, ordered
@@ -613,5 +747,81 @@ mod compact_purge_safe_tests {
             compact_purge_safe(&args),
             "--purge-tombstones alias must map to purge_safe = true"
         );
+    }
+}
+
+#[cfg(all(test, feature = "write-support"))]
+mod issue_929_tests {
+    use super::*;
+    use cqlite_core::schema::CqlType;
+    use std::io::Write as _;
+
+    /// The CLI builds a UDT registry from a schema file's CREATE TYPE statements
+    /// so a bare-name UDT column flushes/compacts as complex (#929).
+    #[test]
+    fn builds_udt_registry_from_create_type_statements() {
+        let mut f = tempfile::Builder::new()
+            .suffix(".cql")
+            .tempfile()
+            .expect("temp file");
+        write!(
+            f,
+            "CREATE KEYSPACE test_ks WITH replication = {{'class':'SimpleStrategy'}};\n\
+             CREATE TYPE test_ks.person (name text, age int);\n\
+             CREATE TABLE test_ks.t (id int PRIMARY KEY, addr person);\n"
+        )
+        .expect("write schema");
+
+        let registry = udt_registry_from_schema_file(f.path(), "test_ks");
+        let person = registry
+            .get_udt("test_ks", "person")
+            .expect("person UDT registered");
+        let fields: Vec<(&str, &CqlType)> = person
+            .fields
+            .iter()
+            .map(|fd| (fd.name.as_str(), &fd.field_type))
+            .collect();
+        assert_eq!(fields.len(), 2, "person has two fields");
+        assert_eq!(fields[0].0, "name");
+        assert!(matches!(fields[0].1, CqlType::Text));
+        assert_eq!(fields[1].0, "age");
+        assert!(matches!(fields[1].1, CqlType::Int));
+    }
+
+    /// The compaction schema loader handles a realistic multi-statement CQL file
+    /// where CREATE KEYSPACE / CREATE TYPE precede the CREATE TABLE (roborev #1031).
+    #[test]
+    fn loads_table_schema_after_create_type_statements() {
+        let mut f = tempfile::Builder::new()
+            .suffix(".cql")
+            .tempfile()
+            .expect("temp file");
+        write!(
+            f,
+            "CREATE KEYSPACE test_ks WITH replication = {{'class':'SimpleStrategy'}};\n\
+             CREATE TYPE test_ks.person (name text, age int);\n\
+             CREATE TABLE test_ks.t (id int PRIMARY KEY, addr person);\n"
+        )
+        .expect("write schema");
+
+        let schema = load_compaction_table_schema(f.path()).expect("schema parses");
+        assert_eq!(schema.keyspace, "test_ks");
+        assert_eq!(schema.table, "t");
+        assert!(
+            schema.columns.iter().any(|c| c.name == "addr"),
+            "the addr UDT column must be present"
+        );
+    }
+
+    /// A schema file with no CREATE TYPE yields an empty registry (no-op path).
+    #[test]
+    fn no_create_type_yields_empty_registry() {
+        let mut f = tempfile::Builder::new()
+            .suffix(".cql")
+            .tempfile()
+            .expect("temp file");
+        write!(f, "CREATE TABLE test_ks.t (id int PRIMARY KEY, n text);\n").expect("write");
+        let registry = udt_registry_from_schema_file(f.path(), "test_ks");
+        assert_eq!(registry.total_udts(), 0);
     }
 }
