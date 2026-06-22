@@ -1010,6 +1010,20 @@ impl DataWriter {
                 // Issue #764: honor the mutation's explicit local_deletion_time.
                 row_deletion = Some((m.timestamp_micros, m.effective_local_deletion_time()));
             }
+            // Issue #932: an explicit coexisting row tombstone carries a deletion
+            // time DECOUPLED from `m.timestamp_micros` (the row's liveness
+            // writetime). Select it by its OWN `deletion_time`, not the mutation
+            // timestamp. The mutation's surviving cells were written strictly
+            // after this deletion, so they are NOT shadowed by it (the shadow
+            // boundary below uses `deletion_ts`, which equals the deletion's own
+            // time) — the row keeps both the deletion AND the newer cells.
+            if let Some((del_ts, del_ldt)) = m.row_tombstone {
+                if shadow_floor.is_none_or(|floor| del_ts > floor)
+                    && row_deletion.is_none_or(|(ts, _)| del_ts >= ts)
+                {
+                    row_deletion = Some((del_ts, del_ldt));
+                }
+            }
         }
         // Cells and liveness are shadowed by the strongest covering deletion:
         // the row deletion or the partition/range tombstone floor.

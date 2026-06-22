@@ -107,6 +107,21 @@ pub struct MergeEntry {
     /// or the writer, so output is byte-unchanged. `None` when this entry
     /// carries no range deletion.
     pub range_deletion: Option<RangeTombstone>,
+    /// Row-level deletion that COEXISTS with this entry's surviving live cells
+    /// (issue #932).
+    ///
+    /// `Some((deletion_time_micros, local_deletion_time_secs))` when a row
+    /// tombstone whose timestamp is OLDER than the surviving cells must be kept
+    /// alongside `RowData::Live`. `RowData::Live` has no row-deletion slot, so —
+    /// mirroring the carry-only `complex_deletions` / `range_deletion` fields —
+    /// the coexisting deletion rides here instead of forcing a `RowData` change
+    /// across ~100 `RowData::Live` sites. `reconcile_cluster` folds it into the
+    /// winning row deletion and re-attaches it to the emitted live entry;
+    /// `merge_entry_to_mutation` emits it as `Mutation::row_tombstone`. Without
+    /// this, a partial compaction that keeps newer cells would DROP the row
+    /// deletion and let older cells of other columns (in SSTables not part of the
+    /// compaction) resurrect. `None` for a row with no coexisting deletion.
+    pub row_deletion: Option<(i64, i32)>,
 }
 
 impl MergeEntry {
@@ -132,6 +147,7 @@ impl MergeEntry {
             row_data,
             complex_deletions: Vec::new(),
             range_deletion: None,
+            row_deletion: None,
         }
     }
 
@@ -139,6 +155,18 @@ impl MergeEntry {
     #[must_use]
     pub fn with_complex_deletions(mut self, complex_deletions: Vec<ComplexDeletion>) -> Self {
         self.complex_deletions = complex_deletions;
+        self
+    }
+
+    /// Attach a coexisting row-level deletion (issue #932).
+    ///
+    /// `deletion_time` is `markedForDeleteAt` (microseconds); `ldt` is the
+    /// `localDeletionTime` (GC-clock seconds, `0` = not surfaced). Used when a
+    /// row's surviving cells are newer than a row tombstone that must still be
+    /// preserved so it keeps shadowing older cells in non-compacted SSTables.
+    #[must_use]
+    pub fn with_row_deletion(mut self, deletion_time: i64, ldt: i32) -> Self {
+        self.row_deletion = Some((deletion_time, ldt));
         self
     }
 
@@ -845,7 +873,7 @@ impl SSTableRowIteratorAdapter {
         // the partition's `None` bucket and mis-reconcile against the static row
         // and against other clustering-row tombstones.
         let clustering_key = Self::extract_clustering_key_from_compaction(&row_data, schema);
-        let (row_data, complex_deletions) =
+        let (row_data, complex_deletions, row_deletion) =
             Self::compaction_row_data_to_row_data(row_data, row_timestamp);
         let entry = MergeEntry::new(
             run_index,
@@ -858,6 +886,13 @@ impl SSTableRowIteratorAdapter {
             entry
         } else {
             entry.with_complex_deletions(complex_deletions)
+        };
+        // Issue #932: carry the coexisting row deletion so reconciliation keeps it
+        // alongside the surviving live cells (preventing resurrection of older
+        // cells in non-compacted SSTables).
+        let entry = match row_deletion {
+            Some((deletion_time, ldt)) => entry.with_row_deletion(deletion_time, ldt),
+            None => entry,
         };
         Ok(entry)
     }
@@ -961,7 +996,7 @@ impl SSTableRowIteratorAdapter {
     fn compaction_row_data_to_row_data(
         row_data: crate::storage::sstable::reader::compaction_row::CompactionRowData,
         _row_timestamp: i64,
-    ) -> (RowData, Vec<ComplexDeletion>) {
+    ) -> (RowData, Vec<ComplexDeletion>, Option<(i64, i32)>) {
         use crate::storage::sstable::reader::compaction_row::CompactionRowData;
 
         match row_data {
@@ -978,8 +1013,15 @@ impl SSTableRowIteratorAdapter {
                     local_deletion_time,
                 },
                 Vec::new(),
+                None,
             ),
-            CompactionRowData::Live { simple, complex } => {
+            CompactionRowData::Live {
+                simple,
+                complex,
+                // Issue #932: a coexisting row deletion surfaces here so the
+                // merge entry carries it alongside the live cells.
+                row_deletion,
+            } => {
                 let element_count: usize = complex.iter().map(|c| c.elements.len()).sum();
                 let mut cells = Vec::with_capacity(simple.len() + element_count);
                 let mut complex_deletions = Vec::new();
@@ -1047,7 +1089,7 @@ impl SSTableRowIteratorAdapter {
                     }
                 }
 
-                (RowData::Live { cells }, complex_deletions)
+                (RowData::Live { cells }, complex_deletions, row_deletion)
             }
         }
     }
@@ -2130,6 +2172,19 @@ impl KWayMerger {
                 }
             }
 
+            // Issue #932: a coexisting row deletion carried on a LIVE entry (a
+            // read-back row that held BOTH a row tombstone and surviving newer
+            // cells) contributes to the winning row deletion exactly as a
+            // standalone `RowData::Tombstone` does — capture its paired LDT when
+            // it sets the new max so the rebuilt deletion preserves its wall-clock
+            // `localDeletionTime` (#873).
+            if let Some((del_ts, del_ldt)) = entry.row_deletion {
+                if row_del.is_none_or(|d| del_ts > d) {
+                    row_del = Some(del_ts);
+                    row_del_ldt = del_ldt;
+                }
+            }
+
             match &entry.row_data {
                 RowData::Tombstone {
                     deletion_time,
@@ -2422,13 +2477,24 @@ impl KWayMerger {
             // `surviving` is non-empty, so `max()` is `Some`; `unwrap_or(0)` only
             // guards the type and never triggers.
             let row_ts = surviving.iter().map(|c| c.timestamp).max().unwrap_or(0);
-            Some(MergeEntry::new(
+            let live = MergeEntry::new(
                 run_index,
                 key,
                 clustering_key,
                 row_ts,
                 RowData::Live { cells: surviving },
-            ))
+            );
+            // Issue #932: a row deletion that survived purging COEXISTS with the
+            // surviving (strictly-newer) cells. Carry it on the live entry so the
+            // merge→mutation step emits a `HAS_DELETION` row holding both — the row
+            // deletion keeps shadowing older cells of OTHER columns living in
+            // SSTables not part of a partial compaction, preventing resurrection.
+            // Step 3 already dropped the cells this deletion covers (ts <= row_del),
+            // so the deletion shadows nothing within `surviving`.
+            Some(match row_del {
+                Some(deletion_time) => live.with_row_deletion(deletion_time, row_del_ldt),
+                None => live,
+            })
         } else if let Some(deletion_time) = row_del {
             // No surviving data. If a row tombstone exists, keep the row shadowed
             // so downstream still emits the deletion (preserves #505/#498 absence).
@@ -2604,6 +2670,18 @@ impl KWayMerger {
             _ => None,
         };
 
+        // Issue #932: a coexisting row deletion carried on a LIVE entry must be
+        // emitted as the mutation's `row_tombstone` (deletion time decoupled from
+        // the row's liveness `timestamp_micros`), so the writer re-emits a
+        // `HAS_DELETION` row holding both the deletion and the surviving cells. A
+        // pure `RowData::Tombstone` entry carries its deletion via `DeleteRow`
+        // (below) and leaves `row_deletion` unset, so this only fires for the
+        // coexistence case.
+        let coexisting_row_tombstone = match &entry.row_data {
+            RowData::Live { .. } => entry.row_deletion,
+            RowData::Tombstone { .. } => None,
+        };
+
         // Capture the row tombstone's deletion time (`row_del`) BEFORE moving
         // `row_data` into `operations`. A row tombstone shadows only cells/markers
         // whose timestamp is `<= row_del`; a complex-deletion marker whose
@@ -2665,8 +2743,14 @@ impl KWayMerger {
             entry.timestamp,
             None,
         );
-        Ok(match row_tombstone_ldt {
+        let mutation = match row_tombstone_ldt {
             Some(ldt) => mutation.with_local_deletion_time(ldt),
+            None => mutation,
+        };
+        // Issue #932: attach the coexisting row deletion (deletion time + LDT) so
+        // the writer keeps both the row tombstone and the surviving newer cells.
+        Ok(match coexisting_row_tombstone {
+            Some((deletion_time, ldt)) => mutation.with_row_tombstone(deletion_time, ldt),
             None => mutation,
         })
     }
@@ -6445,9 +6529,10 @@ mod issue_899_per_element_merge {
                     Value::Text("c".to_string()),
                 ]),
             }],
+            row_deletion: None,
         };
 
-        let (row, complex_deletions) =
+        let (row, complex_deletions, _row_deletion) =
             SSTableRowIteratorAdapter::compaction_row_data_to_row_data(row_data, 999);
         assert!(complex_deletions.is_empty(), "no complex deletion present");
 
@@ -6487,9 +6572,10 @@ mod issue_899_per_element_merge {
                 elements: vec![element(&[0xAB], "x", 20_000)],
                 collapsed_value: Value::Set(vec![Value::Text("x".to_string())]),
             }],
+            row_deletion: None,
         };
 
-        let (_row, complex_deletions) =
+        let (_row, complex_deletions, _row_deletion) =
             SSTableRowIteratorAdapter::compaction_row_data_to_row_data(row_data, 20_000);
         assert_eq!(complex_deletions.len(), 1);
         assert_eq!(complex_deletions[0].column, "tags");
@@ -8354,6 +8440,7 @@ mod issue_912_row_tombstone_clustering_identity {
                 local_deletion_time: None,
             }],
             complex: Vec::new(),
+            row_deletion: None,
         };
         let live_ck =
             SSTableRowIteratorAdapter::extract_clustering_key_from_compaction(&live, &schema);
@@ -8619,6 +8706,147 @@ mod issue_873_preserve_row_tombstone_ldt {
         assert_eq!(
             mutation.local_deletion_time, None,
             "a live row must not pin an explicit LDT"
+        );
+    }
+
+    /// Issue #932: when a row tombstone (older) reconciles with a surviving cell
+    /// (newer) for the same `(pk, ck)`, `reconcile_cluster` must emit a LIVE entry
+    /// carrying the surviving cell AND the coexisting `row_deletion` (so the
+    /// deletion keeps shadowing older cells of other columns in SSTables not part
+    /// of a partial compaction). Pre-#932 the row deletion was DROPPED.
+    #[test]
+    fn reconcile_cluster_attaches_row_deletion_when_cells_survive() {
+        let deletion_time = 100i64;
+        let source_ldt = 1_700_000_000i32;
+        // A row tombstone at ts=100 and a live `name` cell at ts=300 (> 100).
+        let tomb = tombstone_entry(1, deletion_time, source_ldt);
+        let live = MergeEntry::new(
+            0,
+            DecoratedKey::new(500, 7i32.to_be_bytes().to_vec()),
+            None,
+            300,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "name".to_string(),
+                    Value::Text("new".to_string()),
+                    300,
+                )],
+            },
+        );
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![tomb, live], &HashMap::new(), None)
+            .expect("a live coexistence row must be emitted");
+
+        match &merged.row_data {
+            RowData::Live { cells } => {
+                assert_eq!(cells.len(), 1, "the surviving name cell must remain");
+                assert_eq!(cells[0].column, "name");
+                assert_eq!(cells[0].timestamp, 300);
+            }
+            other => panic!("expected a Live coexistence row, got {:?}", other),
+        }
+        assert_eq!(
+            merged.row_deletion,
+            Some((deletion_time, source_ldt)),
+            "the coexisting row deletion (and its source LDT) must be preserved on the live entry"
+        );
+    }
+
+    /// Issue #932: an older cell shadowed by the coexisting row deletion must be
+    /// dropped from the surviving set (a cell at ts <= row_del is shadowed) while
+    /// the deletion is still carried for the newer survivor.
+    #[test]
+    fn reconcile_cluster_shadows_older_cell_under_coexisting_deletion() {
+        let deletion_time = 100i64;
+        let tomb = tombstone_entry(1, deletion_time, 1_700_000_000);
+        // Older `score` cell at ts=50 (<= 100, must be shadowed) and a newer
+        // `name` cell at ts=300 (> 100, must survive), in two runs.
+        let older = MergeEntry::new(
+            2,
+            DecoratedKey::new(500, 7i32.to_be_bytes().to_vec()),
+            None,
+            50,
+            RowData::Live {
+                cells: vec![CellData::new("score".to_string(), Value::Integer(999), 50)],
+            },
+        );
+        let newer = MergeEntry::new(
+            0,
+            DecoratedKey::new(500, 7i32.to_be_bytes().to_vec()),
+            None,
+            300,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "name".to_string(),
+                    Value::Text("new".to_string()),
+                    300,
+                )],
+            },
+        );
+
+        let merged =
+            KWayMerger::reconcile_cluster(None, vec![tomb, older, newer], &HashMap::new(), None)
+                .expect("a live coexistence row must be emitted");
+
+        match &merged.row_data {
+            RowData::Live { cells } => {
+                assert_eq!(cells.len(), 1, "only the newer cell survives");
+                assert_eq!(
+                    cells[0].column, "name",
+                    "the older `score` cell is shadowed"
+                );
+            }
+            other => panic!("expected a Live coexistence row, got {:?}", other),
+        }
+        assert_eq!(
+            merged.row_deletion.map(|(dt, _)| dt),
+            Some(deletion_time),
+            "the row deletion must be preserved to keep shadowing across SSTables"
+        );
+    }
+
+    /// Issue #932: `merge_entry_to_mutation` must emit the coexisting row deletion
+    /// as `Mutation::row_tombstone` (decoupled from the row's liveness
+    /// `timestamp_micros`) so the writer re-emits a `HAS_DELETION` row holding both
+    /// the deletion and the surviving cells.
+    #[test]
+    fn merge_entry_to_mutation_emits_coexisting_row_tombstone() {
+        let schema = unclustered_schema();
+        let deletion_time = 100i64;
+        let source_ldt = 1_700_000_000i32;
+        let entry = MergeEntry::new(
+            0,
+            DecoratedKey::new(500, 7i32.to_be_bytes().to_vec()),
+            None,
+            300,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "name".to_string(),
+                    Value::Text("new".to_string()),
+                    300,
+                )],
+            },
+        )
+        .with_row_deletion(deletion_time, source_ldt);
+
+        let mutation =
+            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+
+        assert_eq!(
+            mutation.row_tombstone,
+            Some((deletion_time, source_ldt)),
+            "the coexisting row deletion must be emitted as Mutation::row_tombstone"
+        );
+        assert_eq!(
+            mutation.timestamp_micros, 300,
+            "the mutation's liveness timestamp stays the row write time, NOT the deletion time"
+        );
+        assert!(
+            mutation
+                .operations
+                .iter()
+                .any(|op| matches!(op, crate::storage::write_engine::mutation::CellOperation::Write { column, .. } if column == "name")),
+            "the surviving cell must still be emitted alongside the row tombstone"
         );
     }
 
