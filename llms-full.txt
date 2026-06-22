@@ -4611,13 +4611,13 @@ A Cassandra row can carry a **row deletion** (`HAS_DELETION`) **and** surviving 
 
 Range tombstones are not applied or emitted end-to-end in the compaction merge path. The V5CompressedLegacy reader **skips** range tombstone markers (`skip_range_tombstone_marker`) on the normal scan/compaction path — it does not surface a surviving marker to the merger (only the dedicated `delta-scan` path decodes them via `parse_range_tombstone_marker_full`), and `merge_entry_to_mutation` does not persist a surviving range marker into the rewritten output. Consequently a range tombstone is neither used to shadow covered rows during compaction nor re-emitted into the compacted SSTable. Authority: `org.apache.cassandra.db.rows.RangeTombstoneMarker` / `UnfilteredSerializer`. Tracked in **#933**.
 
-### gc\_grace purging only on full/major compaction (#935)
+### gc\_grace purging: overlap-aware in partial compactions (#935)
 
-[Section titled “gc\_grace purging only on full/major compaction (#935)”](#gc_grace-purging-only-on-fullmajor-compaction-935)
+[Section titled “gc\_grace purging: overlap-aware in partial compactions (#935)”](#gc_grace-purging-overlap-aware-in-partial-compactions-935)
 
-**Status**: 🐛 **OPEN** (limitation / by design for safety)
+**Status**: ✅ **RESOLVED** (#935; full-compaction fast path from #845 retained)
 
-gc\_grace / `gcBefore` tombstone purging (#845, parity Cassandra `8d47ebb2`) runs **only** on an overlap-safe **full/major** compaction that spans every SSTable for the table. A **partial / background** compaction collapses the effective `gc_before_secs` to `None` (`merge_partition_rows`, gated by `KWayMerger::with_purge_safe` / `purge_safe`) and therefore **retains** every tombstone — there is no per-key `maxPurgeableTimestamp` overlap check yet, so the conservative choice avoids resurrecting data shadowed in a non-included overlapping SSTable. In the CLI, purging is opt-in via `--major` / `--purge-tombstones`. Authority: `org.apache.cassandra.db.compaction.CompactionController#maxPurgeableTimestamp`. Tracked in **#935**.
+gc\_grace / `gcBefore` tombstone purging (#845, parity Cassandra `8d47ebb2`) runs on a **full/major** compaction (which spans every SSTable for the table) **and**, since **#935**, on a **partial / background** compaction when an overlap check proves the tombstone is safe to purge. The background path (`WriteEngine::maintenance_step`) computes a `max_purgeable_timestamp` — the minimum write timestamp (`markedForDeleteAt`, micros) across the **non-included overlapping** SSTables, read from their `Statistics.db` min-timestamp bound (`merge::compute_max_purgeable_timestamp`) — and threads it into the merger (`KWayMerger::with_max_purgeable_timestamp`). In `reconcile_cluster_with_overlap` a tombstone is purged only when BOTH its gc grace has elapsed (`localDeletionTime < gcBefore`) AND its own deletion timestamp is **strictly less** than that bound, so it provably shadows nothing outside the compaction set. A full compaction uses an `i64::MAX` (+∞) bound, identical to #845; a partial compaction with no readable overlap bound stays conservative and retains every tombstone (#921). In the one-shot CLI, purging remains opt-in via `--major` / `--purge-tombstones` (the explicit input list carries no table-wide overlap context). Authority: `org.apache.cassandra.db.compaction.CompactionController#maxPurgeableTimestamp` / `getPurgeEvaluator` (`time -> time < minTimestamp`).
 
 ***
 
