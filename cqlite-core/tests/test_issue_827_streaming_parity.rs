@@ -257,6 +257,8 @@ async fn test_streaming_parity_chunk_straddle_wide_partition() {
             .iter()
             .any(|c| matches!(&c.value, Value::Text(s) if s.len() >= 48 * 1024)),
         CompactionRowData::Tombstone { .. } => false,
+        // Issue #933: range-tombstone markers carry no inline cell values.
+        CompactionRowData::RangeMarker { .. } => false,
     });
     assert!(
         has_big,

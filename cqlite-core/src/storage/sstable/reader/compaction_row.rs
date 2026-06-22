@@ -118,9 +118,49 @@ impl CompactionRow {
     }
 }
 
+/// A clustering bound of a range-tombstone marker surfaced on the compaction
+/// read path (issue #933).
+///
+/// Reader-native counterpart of
+/// [`crate::storage::write_engine::mutation::ClusteringBound`]; kept here so the
+/// compaction read contract does not depend on the write-engine types. Each
+/// bound carries its clustering-prefix `(name, value)` pairs (possibly a PREFIX
+/// shorter than the full clustering arity). An open bound (the writer emits these
+/// as an inclusive bound with zero clustering values) is [`Self::Bottom`] /
+/// [`Self::Top`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum CompactionBound {
+    /// Inclusive bound (the clustering prefix is part of the deletion range).
+    Inclusive(Vec<(String, Value)>),
+    /// Exclusive bound (the clustering prefix is NOT part of the deletion range).
+    Exclusive(Vec<(String, Value)>),
+    /// Before all clustering keys (start of partition).
+    Bottom,
+    /// After all clustering keys (end of partition).
+    Top,
+}
+
 /// Live-or-tombstone payload of a [`CompactionRow`].
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompactionRowData {
+    /// A complete range tombstone (issue #933): the paired start + end bounds of
+    /// a clustering-range delete, with the authoritative deletion timestamps.
+    ///
+    /// The reader pairs the on-disk start/end bound markers (or boundary markers)
+    /// into one self-contained range so the compaction merge can shadow covered
+    /// cells AND re-emit the surviving marker to the output SSTable. `deletion_time`
+    /// is `markedForDeleteAt` (microseconds); `local_deletion_time` is the GC-grace
+    /// clock (seconds, carried as the wrapping `as u32 as i32` for far-future LDTs).
+    RangeMarker {
+        /// Start bound of the deleted clustering range.
+        start: CompactionBound,
+        /// End bound of the deleted clustering range.
+        end: CompactionBound,
+        /// `markedForDeleteAt` in microseconds.
+        deletion_time: i64,
+        /// `localDeletionTime` in seconds (GC-grace clock).
+        local_deletion_time: i32,
+    },
     /// Row tombstone (whole-row delete) carrying its authoritative timestamps.
     Tombstone {
         /// `markedForDeleteAt` in microseconds.
