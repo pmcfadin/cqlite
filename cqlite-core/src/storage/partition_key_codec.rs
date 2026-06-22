@@ -88,6 +88,152 @@ pub fn decode_partition_key_columns(
     Ok(columns)
 }
 
+/// Encode partition-key column values into the raw on-disk partition-key bytes.
+///
+/// This is the inverse of [`decode_partition_key_columns`] and produces byte-for-byte
+/// the same layout the write path emits (`PartitionKey::to_bytes`):
+///
+/// - **Single-component keys** — raw value bytes, no length prefix.
+/// - **Multi-component (composite) keys** — `[len:u16 BE][value bytes][0x00]` per
+///   component, including a trailing `0x00` after the final component.
+///
+/// `values` must be in schema-declared partition-key order and have exactly one
+/// entry per partition-key column. Because the encoding reproduces the on-disk raw
+/// key bytes exactly, the result can be matched directly against (a) the partition
+/// RowKeys returned by a scan and (b) the bloom filter / BTI trie, which are keyed
+/// on the same raw bytes. Used by the query engine to turn a fully-constrained
+/// `WHERE pk = ?` into a partition-targeted lookup.
+///
+/// Returns an error (so callers can fall back to a full scan) when the column count
+/// disagrees with the schema or a value cannot be serialized for its declared type.
+pub fn encode_partition_key_columns(values: &[Value], schema: &TableSchema) -> Result<Vec<u8>> {
+    if schema.partition_keys.is_empty() {
+        return Err(Error::InvalidInput(
+            "Schema has no partition keys".to_string(),
+        ));
+    }
+    if values.len() != schema.partition_keys.len() {
+        return Err(Error::InvalidInput(format!(
+            "Partition key column count mismatch: expected {}, got {}",
+            schema.partition_keys.len(),
+            values.len()
+        )));
+    }
+
+    // Single-component key: raw value bytes, no length prefix.
+    if schema.partition_keys.len() == 1 {
+        let comparator = ComparatorType::from_data_type(&schema.partition_keys[0].data_type)?;
+        let coerced = coerce_value_for_comparator(&values[0], &comparator);
+        return serialize_value_bytes(&coerced, &comparator);
+    }
+
+    // Multi-component: [len:u16 BE][value bytes][0x00] per component.
+    let mut result = Vec::new();
+    for (key_col, value) in schema.partition_keys.iter().zip(values.iter()) {
+        let comparator = ComparatorType::from_data_type(&key_col.data_type)?;
+        let coerced = coerce_value_for_comparator(value, &comparator);
+        let value_bytes = serialize_value_bytes(&coerced, &comparator)?;
+        if value_bytes.len() > u16::MAX as usize {
+            return Err(Error::InvalidInput(format!(
+                "Partition key component too large: {} bytes",
+                value_bytes.len()
+            )));
+        }
+        result.extend_from_slice(&(value_bytes.len() as u16).to_be_bytes());
+        result.extend_from_slice(&value_bytes);
+        result.push(0x00);
+    }
+    Ok(result)
+}
+
+/// Best-effort coercion of a parsed CQL literal `Value` to the variant the
+/// partition-key serializer expects for `comparator`.
+///
+/// The SELECT parser emits every integer literal as [`Value::BigInt`], so a
+/// `WHERE id = 5` against an `int`/`smallint`/`tinyint`/`timestamp` partition key
+/// would otherwise fail to serialize. This narrows those numeric literals to the
+/// declared type (only when the value fits); every other case is returned
+/// unchanged so an unrepresentable value falls through to a serialization error
+/// and the caller reverts to a full scan.
+fn coerce_value_for_comparator(value: &Value, comparator: &ComparatorType) -> Value {
+    match (value, comparator) {
+        (Value::BigInt(n), ComparatorType::Int)
+            if *n >= i32::MIN as i64 && *n <= i32::MAX as i64 =>
+        {
+            Value::Integer(*n as i32)
+        }
+        (Value::BigInt(n), ComparatorType::SmallInt)
+            if *n >= i16::MIN as i64 && *n <= i16::MAX as i64 =>
+        {
+            Value::SmallInt(*n as i16)
+        }
+        (Value::BigInt(n), ComparatorType::TinyInt)
+            if *n >= i8::MIN as i64 && *n <= i8::MAX as i64 =>
+        {
+            Value::TinyInt(*n as i8)
+        }
+        (Value::BigInt(n), ComparatorType::Timestamp) => Value::Timestamp(*n),
+        (Value::Integer(n), ComparatorType::BigInt) => Value::BigInt(*n as i64),
+        _ => value.clone(),
+    }
+}
+
+/// Serialize a single partition-key value to its raw on-disk bytes.
+///
+/// Mirrors the write engine's `serialize_value_bytes`
+/// ([`crate::storage::write_engine::mutation`]); kept here as the inverse of
+/// [`deserialize_value_bytes`] so the read-side encoder has no dependency on the
+/// (feature-gated) write engine.
+fn serialize_value_bytes(value: &Value, comparator: &ComparatorType) -> Result<Vec<u8>> {
+    match (value, comparator) {
+        (Value::Boolean(b), ComparatorType::Boolean) => Ok(vec![u8::from(*b)]),
+        (Value::TinyInt(n), ComparatorType::TinyInt) => Ok(vec![*n as u8]),
+        (Value::SmallInt(n), ComparatorType::SmallInt) => Ok(n.to_be_bytes().to_vec()),
+        (Value::Integer(n), ComparatorType::Int) => Ok(n.to_be_bytes().to_vec()),
+        (Value::BigInt(n), ComparatorType::BigInt) => Ok(n.to_be_bytes().to_vec()),
+        (Value::Counter(n), ComparatorType::Counter) => Ok(n.to_be_bytes().to_vec()),
+        (Value::Float32(f), ComparatorType::Float32) => Ok(f.to_bits().to_be_bytes().to_vec()),
+        (Value::Float(f), ComparatorType::Float) => Ok(f.to_bits().to_be_bytes().to_vec()),
+        (Value::Text(s), ComparatorType::Text) => Ok(s.as_bytes().to_vec()),
+        (Value::Blob(bytes), ComparatorType::Blob) => Ok(bytes.clone()),
+        (Value::Timestamp(millis), ComparatorType::Timestamp) => Ok(millis.to_be_bytes().to_vec()),
+        (Value::Date(days), ComparatorType::Date) => {
+            let stored = days.wrapping_sub(i32::MIN) as u32;
+            Ok(stored.to_be_bytes().to_vec())
+        }
+        (Value::Uuid(bytes), ComparatorType::Uuid) => Ok(bytes.to_vec()),
+        (Value::Time(nanos), ComparatorType::Custom(name)) if name == "time" => {
+            Ok(nanos.to_be_bytes().to_vec())
+        }
+        (Value::Inet(bytes), ComparatorType::Custom(name)) if name == "inet" => Ok(bytes.clone()),
+        (Value::Varint(bytes), ComparatorType::Varint) => Ok(bytes.clone()),
+        (Value::Decimal { scale, unscaled }, ComparatorType::Decimal) => {
+            let mut result = Vec::with_capacity(4 + unscaled.len());
+            result.extend_from_slice(&scale.to_be_bytes());
+            result.extend_from_slice(unscaled);
+            Ok(result)
+        }
+        (
+            Value::Duration {
+                months,
+                days,
+                nanos,
+            },
+            ComparatorType::Duration,
+        ) => {
+            let mut result = Vec::with_capacity(16);
+            result.extend_from_slice(&months.to_be_bytes());
+            result.extend_from_slice(&days.to_be_bytes());
+            result.extend_from_slice(&nanos.to_be_bytes());
+            Ok(result)
+        }
+        _ => Err(Error::InvalidInput(format!(
+            "Type mismatch encoding partition key: value {:?} does not match comparator {:?}",
+            value, comparator
+        ))),
+    }
+}
+
 /// Deserialize a single raw value from its byte-comparable key encoding.
 ///
 /// `data` is the raw value bytes for one component (no length prefix). This is
@@ -311,5 +457,73 @@ mod tests {
     fn empty_bytes_error() {
         let schema = schema_with_pks(&[("id", "text")]);
         assert!(decode_partition_key_columns(&[], &schema).is_err());
+    }
+
+    #[test]
+    fn encode_single_text_pk_is_raw_bytes() {
+        let schema = schema_with_pks(&[("id", "text")]);
+        let bytes =
+            encode_partition_key_columns(&[Value::Text("k0000000000000000".to_string())], &schema)
+                .unwrap();
+        assert_eq!(bytes, b"k0000000000000000");
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_single_uuid() {
+        let schema = schema_with_pks(&[("id", "uuid")]);
+        let raw = [
+            0u8, 35, 236, 231, 124, 78, 71, 5, 144, 104, 209, 165, 158, 197, 254, 25,
+        ];
+        let bytes = encode_partition_key_columns(&[Value::Uuid(raw)], &schema).unwrap();
+        assert_eq!(bytes, raw);
+        let decoded = decode_partition_key_columns(&bytes, &schema).unwrap();
+        assert_eq!(decoded, vec![("id".to_string(), Value::Uuid(raw))]);
+    }
+
+    #[test]
+    fn encode_decode_roundtrip_composite() {
+        let schema = schema_with_pks(&[("application_id", "text"), ("metric_name", "text")]);
+        let values = vec![
+            Value::Text("a".to_string()),
+            Value::Text("view".to_string()),
+        ];
+        let bytes = encode_partition_key_columns(&values, &schema).unwrap();
+        // [len=1]['a'][0x00][len=4]["view"][0x00]
+        assert_eq!(
+            bytes,
+            vec![0u8, 1, b'a', 0, 0, 4, b'v', b'i', b'e', b'w', 0]
+        );
+        let decoded = decode_partition_key_columns(&bytes, &schema).unwrap();
+        assert_eq!(
+            decoded,
+            vec![
+                ("application_id".to_string(), Value::Text("a".to_string())),
+                ("metric_name".to_string(), Value::Text("view".to_string())),
+            ]
+        );
+    }
+
+    #[test]
+    fn encode_coerces_bigint_literal_to_int_column() {
+        // The SELECT parser emits integer literals as Value::BigInt; an `int`
+        // partition key must still encode to the canonical 4-byte form.
+        let schema = schema_with_pks(&[("id", "int")]);
+        let bytes = encode_partition_key_columns(&[Value::BigInt(5)], &schema).unwrap();
+        assert_eq!(bytes, 5i32.to_be_bytes().to_vec());
+        let decoded = decode_partition_key_columns(&bytes, &schema).unwrap();
+        assert_eq!(decoded, vec![("id".to_string(), Value::Integer(5))]);
+    }
+
+    #[test]
+    fn encode_column_count_mismatch_errors() {
+        let schema = schema_with_pks(&[("a", "text"), ("b", "text")]);
+        assert!(encode_partition_key_columns(&[Value::Text("a".to_string())], &schema).is_err());
+    }
+
+    #[test]
+    fn encode_out_of_range_bigint_for_int_column_errors() {
+        // Too large to narrow to i32 -> serialization fails -> caller falls back to scan.
+        let schema = schema_with_pks(&[("id", "int")]);
+        assert!(encode_partition_key_columns(&[Value::BigInt(i64::MAX)], &schema).is_err());
     }
 }

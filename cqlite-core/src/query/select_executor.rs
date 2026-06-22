@@ -402,6 +402,43 @@ pub fn build_row_from_scan(
     })
 }
 
+/// If the pushed-down predicates fully constrain the partition key with
+/// equality, return the raw on-disk partition-key bytes so the scan can be
+/// turned into a partition-targeted lookup (Issue #949).
+///
+/// Returns `None` — and the caller falls back to a full table scan — when:
+/// - no schema is available (we cannot identify the partition-key columns),
+/// - any partition-key column is missing an `=` predicate (partial key, or an
+///   `IN`/range restriction — those still require the scan path today), or
+/// - the constrained values cannot be encoded to the on-disk key form (e.g. a
+///   type mismatch), in which case a full scan is the safe, correct fallback.
+///
+/// Only an all-equality restriction over the complete partition key qualifies,
+/// mirroring Cassandra's requirement for a single-partition read.
+#[cfg(not(feature = "tombstones"))]
+fn full_partition_key_lookup(
+    predicates: &[SSTablePredicate],
+    schema: Option<&crate::schema::TableSchema>,
+) -> Option<Vec<u8>> {
+    use super::select_optimizer::SSTableFilterOp;
+
+    let schema = schema?;
+    if schema.partition_keys.is_empty() {
+        return None;
+    }
+
+    let mut values = Vec::with_capacity(schema.partition_keys.len());
+    for pk in &schema.partition_keys {
+        let predicate = predicates
+            .iter()
+            .find(|p| p.column == pk.name && matches!(p.operation, SSTableFilterOp::Equal))?;
+        // An `Equal` predicate always carries exactly one value.
+        values.push(predicate.values.first()?.clone());
+    }
+
+    crate::storage::partition_key_codec::encode_partition_key_columns(&values, schema).ok()
+}
+
 /// Apply an `ArithmeticOperator` to two same-typed numeric `Value`s.
 ///
 /// Behaviour matches the previous inline implementations: same-type only
@@ -1118,6 +1155,57 @@ impl SelectExecutor {
                         .find_schema_by_table(&keyspace, &table_name)
                         .await;
 
+                    // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
+                    // partition-targeted lookup that prunes SSTables via bloom/BTI,
+                    // instead of streaming a scan over every SSTable. The result is
+                    // a single partition's rows, sent through the same per-row
+                    // pipeline (predicates, PER PARTITION LIMIT, OFFSET, LIMIT) as
+                    // the streaming scan below.
+                    #[cfg(not(feature = "tombstones"))]
+                    if let Some(pk_bytes) =
+                        full_partition_key_lookup(predicates, schema_opt.as_ref())
+                    {
+                        let rows = storage
+                            .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                            .await?;
+                        for (key, value) in rows {
+                            let part_sig = per_partition_limit.map(|_| key.0.clone());
+                            let Some(row) =
+                                build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                            else {
+                                continue;
+                            };
+                            if !evaluate_predicates(&row, predicates)? {
+                                continue;
+                            }
+                            if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
+                                if current_partition.as_deref() != Some(sig.as_slice()) {
+                                    current_partition = Some(sig);
+                                    partition_count = 0;
+                                }
+                                if partition_count >= cap {
+                                    continue;
+                                }
+                                partition_count += 1;
+                            }
+                            if offset_remaining > 0 {
+                                offset_remaining -= 1;
+                                continue;
+                            }
+                            if tx.send(Ok(row)).await.is_err() {
+                                return Ok(());
+                            }
+                            sent += 1;
+                            if let Some(count) = limit_count {
+                                if sent >= count {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        // This SSTableScan step is fully served by the lookup.
+                        continue;
+                    }
+
                     // Issue #790: pull rows lazily from a bounded streaming scan
                     // instead of materializing the full result `Vec`. The reader
                     // parses one entry at a time into this channel, so live heap
@@ -1269,10 +1357,40 @@ impl SelectExecutor {
                 }
             }
         } else {
-            let scan_results = self
-                .storage
-                .scan(table, None, None, None, schema_opt.as_ref())
-                .await?;
+            // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
+            // partition-targeted lookup that prunes SSTables via bloom/BTI and only
+            // parses the candidates, instead of scanning every SSTable for the
+            // table. Falls back to a full scan when the partition key isn't fully
+            // pinned or can't be encoded. The per-row predicate evaluation below is
+            // unchanged, so clustering predicates and the pk equality itself are
+            // still applied (and any over-inclusion is filtered out).
+            let scan_results = {
+                #[cfg(not(feature = "tombstones"))]
+                {
+                    if let Some(pk_bytes) =
+                        full_partition_key_lookup(predicates, schema_opt.as_ref())
+                    {
+                        log::info!(
+                            "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
+                            pk_bytes.len(),
+                            table
+                        );
+                        self.storage
+                            .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                            .await?
+                    } else {
+                        self.storage
+                            .scan(table, None, None, None, schema_opt.as_ref())
+                            .await?
+                    }
+                }
+                #[cfg(feature = "tombstones")]
+                {
+                    self.storage
+                        .scan(table, None, None, None, schema_opt.as_ref())
+                        .await?
+                }
+            };
 
             log::info!("Scan returned {} rows", scan_results.len());
 

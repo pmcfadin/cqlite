@@ -219,6 +219,25 @@ impl StorageEngine {
             .await
     }
 
+    /// Partition-targeted scan for a fully-constrained `WHERE pk = ?` (Issue #949).
+    ///
+    /// Returns only the rows for the single partition identified by the raw
+    /// `partition_key` bytes, after pruning the SSTable set down to those whose
+    /// bloom filter / BTI trie admit the key — so unrelated SSTables are never
+    /// parsed. Output matches filtering the full [`scan`](Self::scan) result to the
+    /// partition. Delegates to [`SSTableManager::scan_partition`].
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        self.sstables
+            .scan_partition(table_id, partition_key, schema)
+            .await
+    }
+
     /// Scan a table and return per-cell write metadata alongside row values.
     ///
     /// Delegates to [`SSTableManager::scan_with_cell_metadata`].  Used when

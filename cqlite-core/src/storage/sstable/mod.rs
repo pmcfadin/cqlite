@@ -961,6 +961,119 @@ impl SSTableManager {
         }
     }
 
+    /// Partition-targeted scan: return only the rows for a single partition key,
+    /// touching only the SSTables whose bloom filter / BTI trie admit the key.
+    ///
+    /// This is the storage-layer fast path for a fully-constrained `WHERE pk = ?`
+    /// (Issue #949). Rather than scanning every SSTable for the table and filtering
+    /// in memory, it prunes the reader set with
+    /// [`might_contain_partition`](reader::SSTableReader::might_contain_partition)
+    /// — an O(1) bloom check for BIG format, an O(log n) trie walk for BTI — and
+    /// only parses the surviving candidates. On a table backed by thousands of
+    /// SSTables, a single-partition read drops from "open and scan all of them" to
+    /// "scan only the handful that can hold the key".
+    ///
+    /// Output is byte-for-byte identical to filtering the full [`scan`](Self::scan)
+    /// result down to `partition_key`: the same per-reader parse and the same
+    /// cross-generation reconciliation run, just over the pruned candidate set. The
+    /// caller still applies its own predicate evaluation, so any over-inclusion
+    /// (e.g. a BTI prefix-collision candidate) is filtered out downstream.
+    ///
+    /// `partition_key` is the raw on-disk partition-key bytes produced by
+    /// [`encode_partition_key_columns`](crate::storage::partition_key_codec::encode_partition_key_columns),
+    /// which match the bytes the bloom filter, Index.db/BTI trie, and scan RowKeys
+    /// are keyed on.
+    ///
+    /// Note: within a surviving SSTable this still performs a full parse (then keeps
+    /// only the matching partition). Seeking directly to the partition's Data.db
+    /// offset via Index.db/BTI for the single-candidate case is a follow-up; the
+    /// dominant win for the "thousands of SSTables" scenario is the cross-SSTable
+    /// pruning above.
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        let table_readers = self.table_readers.read().await;
+        let table_name = table_id.name();
+
+        // Same qualified-then-unqualified resolution as `scan` (Issue #680).
+        let reader_list = if table_readers.contains_key(table_name) {
+            table_readers.get(table_name)
+        } else {
+            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
+                &table_name[dot_pos + 1..]
+            } else {
+                table_name
+            };
+            table_readers.get(unqualified_name)
+        };
+
+        let Some(reader_list) = reader_list else {
+            return Ok(Vec::new());
+        };
+
+        // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
+        let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
+            .iter()
+            .filter(|r| r.might_contain_partition(partition_key))
+            .cloned()
+            .collect();
+
+        log::debug!(
+            "SSTableManager::scan_partition - {}/{} SSTables admit partition key (len={}) for '{}'",
+            candidates.len(),
+            reader_list.len(),
+            partition_key.len(),
+            table_id
+        );
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let matches_key = |entry: &(RowKey, Value)| entry.0.as_bytes() == partition_key;
+
+        // Multiple candidate generations may hold the same partition; reconcile
+        // with the same authoritative k-way merge the full scan uses (write-support
+        // only), then keep just this partition's rows.
+        #[cfg(feature = "write-support")]
+        if candidates.len() > 1 {
+            if let Some(schema) = schema {
+                match self
+                    .merge_generations_for_read(&candidates, schema, None)
+                    .await
+                {
+                    Ok(mut merged) => {
+                        merged.retain(matches_key);
+                        return Ok(merged);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "SSTableManager::scan_partition - cross-generation merge failed for \
+                             '{}' ({}); falling back to per-reader concatenation",
+                            table_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Single candidate (the common case), or the concat fallback: parse each
+        // candidate and keep only the target partition's rows.
+        let mut all_results = Vec::new();
+        for reader in &candidates {
+            let mut results = reader.scan(table_id, None, None, None, schema).await?;
+            results.retain(matches_key);
+            all_results.extend(results);
+        }
+        all_results.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(all_results)
+    }
+
     /// Reconcile multiple SSTable generations of one table into the single
     /// authoritative live-row set, matching Cassandra read semantics (Issue #883).
     ///
