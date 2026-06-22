@@ -330,6 +330,7 @@ fn test_json_serializes_all_value_variants() {
             Value::Tombstone(TombstoneInfo {
                 deletion_time: 1673778645000000,
                 tombstone_type: TombstoneType::RowTombstone,
+                local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
@@ -478,6 +479,7 @@ fn test_csv_serializes_all_value_variants() {
             Value::Tombstone(TombstoneInfo {
                 deletion_time: 1673778645000000,
                 tombstone_type: TombstoneType::RowTombstone,
+                local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,

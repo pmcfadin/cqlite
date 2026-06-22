@@ -144,11 +144,24 @@ pub struct TombstoneInfo {
     pub deletion_time: i64,
     /// Type of tombstone
     pub tombstone_type: TombstoneType,
+    /// Local deletion time in **seconds** since the Unix epoch (the on-disk
+    /// `localDeletionTime`, GC clock), as opposed to `deletion_time` which is the
+    /// reconciliation `markedForDeleteAt` in microseconds.
+    ///
+    /// Carried so the compaction merge→rewrite path can preserve a tombstone's
+    /// source LDT instead of re-deriving it from the deletion timestamp (#873),
+    /// which keeps gc_grace semantics faithful and avoids underflowing the
+    /// unsigned row-deletion LDT delta in the writer. `0` when unknown.
+    ///
+    /// `#[serde(default)]` keeps backward compatibility with serialized values
+    /// written before this field existed.
+    #[serde(default)]
+    pub local_deletion_time: i64,
     /// TTL if applicable (for TTL-based expiration)
     pub ttl: Option<i64>,
     /// Range start key for range tombstones
     pub range_start: Option<RowKey>,
-    /// Range end key for range tombstones  
+    /// Range end key for range tombstones
     pub range_end: Option<RowKey>,
 }
 
@@ -472,6 +485,8 @@ impl Value {
         Value::Tombstone(TombstoneInfo {
             deletion_time,
             tombstone_type,
+            // No GC-clock LDT is supplied by this constructor; default to 0.
+            local_deletion_time: 0,
             ttl,
             range_start,
             range_end,
@@ -1144,6 +1159,7 @@ impl DataType {
             DataType::Tombstone => Value::Tombstone(TombstoneInfo {
                 deletion_time: 0,
                 tombstone_type: TombstoneType::RowTombstone,
+                local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
@@ -1375,6 +1391,7 @@ impl std::hash::Hash for TombstoneInfo {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.deletion_time.hash(state);
         self.tombstone_type.hash(state);
+        self.local_deletion_time.hash(state);
         self.ttl.hash(state);
         self.range_start.hash(state);
         self.range_end.hash(state);
@@ -1517,6 +1534,7 @@ mod tests {
             Value::Tombstone(TombstoneInfo {
                 deletion_time: 1000,
                 tombstone_type: TombstoneType::RowTombstone,
+                local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,

@@ -548,6 +548,7 @@ mod tests {
         let tombstone = TombstoneInfo {
             deletion_time: 2000,
             tombstone_type: TombstoneType::RangeTombstone,
+            local_deletion_time: 0,
             ttl: None,
             range_start: Some(start_key),
             range_end: Some(end_key),
