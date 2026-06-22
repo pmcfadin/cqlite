@@ -268,7 +268,7 @@ struct ComplexCellParse {
 /// without that feature the struct is built but not consumed, hence the allow.
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(in crate::storage::sstable::reader) struct ComplexColumnMeta {
+pub(crate) struct ComplexColumnMeta {
     /// `true` when the collection generation carries a collection-level tombstone
     /// (`s = {...}` overwrite), meaning the consumer must **replace** rather than
     /// merge the prior collection state.
@@ -6231,7 +6231,93 @@ impl V5CompressedLegacyParser {
             return true;
         }
 
+        // Issue #927: a TOP-LEVEL non-frozen UDT is a first-class multi-cell
+        // complex column — each field is stored as its own cell whose cell_path
+        // is the 2-byte (signed ShortType) field index. Frozen UDTs were already
+        // excluded above (frozen<...> / FrozenType(...)), and a UDT nested inside
+        // a collection (e.g. ListType(UserType(...))) is matched by its outer
+        // list/set/map branch, so a bare `usertype(` prefix here is unambiguous.
+        if dt.starts_with("org.apache.cassandra.db.marshal.usertype(") {
+            return true;
+        }
+
         false
+    }
+
+    /// Parse the OUTERMOST `UserType(ks,hexname,hexfield:type,...)` marshal string
+    /// into its DECLARED field order, returning `(field_name, field_marshal_type)`
+    /// pairs (issue #927). The field type is kept as its raw marshal string so the
+    /// per-field value bytes can be decoded with [`parse_value_from_raw_bytes`].
+    ///
+    /// Reuses the same paren-matching / hex-name decoding as
+    /// [`parse_udt_type_definition`]; the two differ only in that this preserves
+    /// the raw type string instead of converting it to a `CqlType`.
+    fn udt_field_marshal_types(type_str: &str) -> Result<Vec<(String, String)>> {
+        let start_marker = "org.apache.cassandra.db.marshal.UserType(";
+        let type_lower = type_str.to_lowercase();
+        let start_marker_lower = start_marker.to_lowercase();
+        let start_idx = type_lower
+            .find(&start_marker_lower)
+            .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
+
+        let inner_start = start_idx + start_marker.len();
+        let mut paren_depth = 1;
+        let mut end_idx = inner_start;
+        let chars: Vec<char> = type_str[inner_start..].chars().collect();
+        for (i, c) in chars.iter().enumerate() {
+            match c {
+                '(' => paren_depth += 1,
+                ')' => {
+                    paren_depth -= 1;
+                    if paren_depth == 0 {
+                        end_idx = inner_start + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if paren_depth != 0 {
+            return Err(Error::schema(format!(
+                "Unbalanced parentheses in UserType: {}",
+                type_str
+            )));
+        }
+
+        let inner = &type_str[inner_start..end_idx];
+        let parts = Self::split_type_args(inner)?;
+        if parts.len() < 2 {
+            return Err(Error::schema(format!(
+                "UserType requires at least keyspace and name: {}",
+                inner
+            )));
+        }
+
+        let mut fields = Vec::with_capacity(parts.len().saturating_sub(2));
+        for field_def in parts.iter().skip(2) {
+            let field_def = field_def.trim();
+            if field_def.is_empty() {
+                continue;
+            }
+            let colon_idx = field_def.find(':').ok_or_else(|| {
+                Error::schema(format!(
+                    "Invalid UDT field definition (missing colon): {}",
+                    field_def
+                ))
+            })?;
+            let field_name = Self::decode_hex_name(&field_def[..colon_idx])?;
+            let field_type = field_def[colon_idx + 1..].trim().to_string();
+            fields.push((field_name, field_type));
+        }
+        Ok(fields)
+    }
+
+    /// Extract `(keyspace, type_name)` from the outermost `UserType(...)` marshal
+    /// string (issue #927). The keyspace is the first arg; the name is the
+    /// hex-decoded second arg.
+    fn udt_keyspace_and_name(type_str: &str) -> Result<(String, String)> {
+        let udt_def = Self::parse_udt_type_definition(type_str)?;
+        Ok((udt_def.keyspace, udt_def.name))
     }
 
     /// Parse a complex column (non-frozen collection).
@@ -6277,7 +6363,7 @@ impl V5CompressedLegacyParser {
     /// by elements that carry the `USE_ROW_TIMESTAMP` (0x08) flag — only read
     /// when collecting elements. On the user-facing read path `elements_out` is
     /// `None`, `row_timestamp` is `0`, and no per-element collection occurs.
-    fn parse_complex_column_inner(
+    pub(crate) fn parse_complex_column_inner(
         &self,
         data: &[u8],
         mut offset: usize,
@@ -6660,6 +6746,101 @@ impl V5CompressedLegacyParser {
             }
 
             Value::Map(entries)
+        } else if dt.starts_with("org.apache.cassandra.db.marshal.usertype(") {
+            // Issue #927: TOP-LEVEL non-frozen UDT — each field is a cell whose
+            // cell_path is the 2-byte (signed ShortType) declared field index and
+            // whose value bytes are the field datum. Decode each cell's value with
+            // the DECLARED field type resolved from the marshal string.
+            let field_defs = Self::udt_field_marshal_types(&column.data_type)?;
+            // Field values keyed by declared index; absent / null fields stay None.
+            let mut field_values: Vec<Option<Value>> = vec![None; field_defs.len()];
+
+            for i in 0..cell_count_usize {
+                // Capture the value bytes raw (BytesType is identity) so they can
+                // be re-decoded with the per-field type AFTER the cell_path (which
+                // carries the field index) is known.
+                let cell = self.parse_complex_cell_value(
+                    data,
+                    offset,
+                    "org.apache.cassandra.db.marshal.BytesType",
+                    column,
+                    i as u64,
+                )?;
+                offset = cell.next_offset;
+
+                // Resolve the declared field index from the 2-byte signed-short
+                // cell_path. A path that is not exactly 2 bytes, or that names a
+                // field index outside the declared range, is authoritative
+                // corruption — surface it rather than guessing (no-heuristics).
+                let field_index = if cell.path_bytes.len() == 2 {
+                    i16::from_be_bytes([cell.path_bytes[0], cell.path_bytes[1]]) as i32
+                } else {
+                    return Err(Error::corruption(format!(
+                        "UDT column '{}' cell {}: field-index cell_path must be 2 bytes, got {}",
+                        column.name,
+                        i,
+                        cell.path_bytes.len()
+                    )));
+                };
+
+                if cell.is_deleted {
+                    element_tombstone_count += 1;
+                    record_element(&mut elements_out, &cell, None, None, row_timestamp);
+                    continue;
+                }
+                update_max_writetime(&mut max_element_writetime, &cell);
+
+                // Decode the field value with its DECLARED type. `cell.value` is the
+                // raw bytes wrapped as Blob (BytesType) above; an empty-value cell
+                // yields None.
+                let decoded = match &cell.value {
+                    Some(Value::Blob(raw)) => {
+                        let (_name, field_type) = field_defs
+                            .get(field_index as usize)
+                            .filter(|_| field_index >= 0)
+                            .ok_or_else(|| {
+                                Error::corruption(format!(
+                                    "UDT column '{}' cell {}: field index {} out of range (0..{})",
+                                    column.name,
+                                    i,
+                                    field_index,
+                                    field_defs.len()
+                                ))
+                            })?;
+                        Some(self.parse_value_from_raw_bytes(raw, field_type, &column.name, 0)?)
+                    }
+                    other => other.clone(),
+                };
+
+                record_element(
+                    &mut elements_out,
+                    &cell,
+                    decoded.clone(),
+                    None,
+                    row_timestamp,
+                );
+
+                if field_index >= 0 && (field_index as usize) < field_values.len() {
+                    field_values[field_index as usize] = decoded;
+                }
+            }
+
+            // Build the collapsed UDT in DECLARED field order for the user-facing
+            // read path. The keyspace/type-name come from the marshal string.
+            let (udt_keyspace, udt_name) = Self::udt_keyspace_and_name(&column.data_type)?;
+            let fields = field_defs
+                .iter()
+                .zip(field_values)
+                .map(|((name, _ty), value)| crate::types::UdtField {
+                    name: name.clone(),
+                    value,
+                })
+                .collect();
+            Value::Udt(UdtValue {
+                type_name: udt_name,
+                keyspace: udt_keyspace,
+                fields,
+            })
         } else {
             // Unknown complex column type, skip cells
             for i in 0..cell_count_usize {
@@ -11780,5 +11961,37 @@ mod tests {
             min_timestamp + 500,
             min_local_deletion_time + 617
         );
+    }
+
+    // Issue #927: reader-side classification + declared-field parsing for
+    // top-level non-frozen UDT complex columns.
+    #[test]
+    fn test_is_complex_column_udt() {
+        // Top-level non-frozen UDT IS complex.
+        assert!(V5CompressedLegacyParser::is_complex_column(
+            "org.apache.cassandra.db.marshal.UserType(ks,61,62:org.apache.cassandra.db.marshal.UTF8Type)"
+        ));
+        // Frozen UDT is NOT complex.
+        assert!(!V5CompressedLegacyParser::is_complex_column(
+            "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,61,62:org.apache.cassandra.db.marshal.UTF8Type))"
+        ));
+    }
+
+    #[test]
+    fn test_udt_field_marshal_types_declared_order() {
+        let marshal = "org.apache.cassandra.db.marshal.UserType(\
+            test_ks,706572736f6e,\
+            6e616d65:org.apache.cassandra.db.marshal.UTF8Type,\
+            616765:org.apache.cassandra.db.marshal.Int32Type)";
+        let fields = V5CompressedLegacyParser::udt_field_marshal_types(marshal).unwrap();
+        assert_eq!(fields.len(), 2);
+        assert_eq!(fields[0].0, "name");
+        assert_eq!(fields[0].1, "org.apache.cassandra.db.marshal.UTF8Type");
+        assert_eq!(fields[1].0, "age");
+        assert_eq!(fields[1].1, "org.apache.cassandra.db.marshal.Int32Type");
+
+        let (ks, name) = V5CompressedLegacyParser::udt_keyspace_and_name(marshal).unwrap();
+        assert_eq!(ks, "test_ks");
+        assert_eq!(name, "person");
     }
 }
