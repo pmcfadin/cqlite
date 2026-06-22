@@ -120,8 +120,14 @@ escargot = "0.5"                # Cargo subprocess management
 cargo-llvm-cov = "0.5"          # LLVM coverage
 trybuild = "1.0"                # Compile-fail testing
 
-# E2E validation: DuckDB reads Parquet exports to validate data integrity
-duckdb = "1.1"
+# E2E validation: DuckDB reads Parquet exports to validate data integrity.
+# `bundled` compiles DuckDB from source via libduckdb-sys so the test binary does
+# not link against a system `-lduckdb`, which is absent on ubuntu-latest CI
+# runners (issue #916). `parquet` statically links the parquet extension so
+# read_parquet() never auto-installs it into ~/.duckdb/extensions at runtime —
+# that autoload races across parallel test threads and fails on CI runners. Both
+# features together keep the delta round-trip suite fully hermetic.
+duckdb = { version = "1.1", features = ["bundled", "parquet"] }
 
 [features]
 # M2+ production defaults: Interactive REPL with query engine
