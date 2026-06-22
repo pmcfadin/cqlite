@@ -1296,6 +1296,22 @@ pub struct CompactReport {
     pub stats: MergeStats,
 }
 
+/// Derive the sibling `Statistics.db` path for an SSTable `Data.db` path.
+///
+/// SSTable components share a `nb-<gen>-big-<Component>.db` stem, so the
+/// `Statistics.db` sibling is the `Data.db` filename with `Data.db` →
+/// `Statistics.db`, joined back onto the same directory. Falls back to the input
+/// path's own location when it has no parent. Shared by every Statistics.db
+/// reader in this module (`compute_baseline_min`, `compute_max_purgeable_timestamp`,
+/// the UDT-eligibility and effective-schema scans) so the component-naming
+/// convention lives in one place.
+#[cfg(feature = "write-support")]
+fn stats_path_for(data_path: &Path) -> PathBuf {
+    let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let stats_filename = filename.replace("Data.db", "Statistics.db");
+    data_path.parent().unwrap_or(data_path).join(stats_filename)
+}
+
 /// Compute output encoding baselines (min timestamp / local-deletion-time / TTL)
 /// from the input SSTables' `Statistics.db` files (two-pass compaction, issue #729).
 ///
@@ -1313,14 +1329,7 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
     let mut baseline_min_ttl = i32::MAX;
     for data_path in input_paths {
         // Derive Statistics.db path from Data.db path
-        let stats_path = {
-            let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let stats_filename = filename.replace("Data.db", "Statistics.db");
-            data_path
-                .parent()
-                .unwrap_or(data_path.as_path())
-                .join(stats_filename)
-        };
+        let stats_path = stats_path_for(data_path);
         if !stats_path.exists() {
             continue;
         }
@@ -1414,14 +1423,7 @@ pub fn compute_max_purgeable_timestamp(outside_paths: &[PathBuf]) -> Option<i64>
 
     let mut min_ts = i64::MAX;
     for data_path in outside_paths {
-        let stats_path = {
-            let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let stats_filename = filename.replace("Data.db", "Statistics.db");
-            data_path
-                .parent()
-                .unwrap_or(data_path.as_path())
-                .join(stats_filename)
-        };
+        let stats_path = stats_path_for(data_path);
         // Any outside SSTable we cannot read/parse leaves the bound UNKNOWN: we
         // can no longer prove a tombstone predates its data, so disable
         // overlap-aware purging entirely (conservative — never resurrect data).
@@ -1531,14 +1533,7 @@ pub fn udt_columns_eligible_for_normalization(input_paths: &[PathBuf]) -> UdtNor
     // columns declared as a non-UserType (simple) form by some input
     let mut vetoed: HashSet<String> = HashSet::new();
     for data_path in input_paths {
-        let stats_path = {
-            let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let stats_filename = filename.replace("Data.db", "Statistics.db");
-            data_path
-                .parent()
-                .unwrap_or(data_path.as_path())
-                .join(stats_filename)
-        };
+        let stats_path = stats_path_for(data_path);
         let Ok(stats_bytes) = std::fs::read(&stats_path) else {
             return UdtNormalizationPlan::default();
         };
@@ -1650,14 +1645,7 @@ pub fn effective_compaction_schema(schema: &TableSchema, input_paths: &[PathBuf]
     let mut seen: HashSet<String> = HashSet::new();
 
     for data_path in input_paths {
-        let stats_path = {
-            let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            let stats_filename = filename.replace("Data.db", "Statistics.db");
-            data_path
-                .parent()
-                .unwrap_or(data_path.as_path())
-                .join(stats_filename)
-        };
+        let stats_path = stats_path_for(data_path);
         if !stats_path.exists() {
             continue;
         }
@@ -2826,13 +2814,11 @@ impl KWayMerger {
             // (`markedForDeleteAt` = `row_del`) to be STRICTLY BELOW the min
             // outside timestamp so it shadows nothing in a non-included
             // overlapping SSTable. `i64::MAX` (full compaction) is a no-op.
-            if let Some(d) = row_del {
-                if row_del_ldt != 0
-                    && i64::from(row_del_ldt as u32) < gc_before
-                    && d < max_purgeable_timestamp
-                {
-                    row_del = None;
-                }
+            if row_del_ldt != 0
+                && i64::from(row_del_ldt as u32) < gc_before
+                && row_del.is_some_and(|d| d < max_purgeable_timestamp)
+            {
+                row_del = None;
             }
 
             // (c) Complex-deletion markers: drop each purgeable marker. The
