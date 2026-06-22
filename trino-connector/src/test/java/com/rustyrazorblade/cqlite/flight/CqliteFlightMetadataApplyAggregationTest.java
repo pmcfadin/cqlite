@@ -278,6 +278,69 @@ class CqliteFlightMetadataApplyAggregationTest {
                 .isEmpty());
     }
 
+    // --- Cardinality / operator gate (issue #893) ---
+
+    private static CqliteFlightMetadata metadataWithPolicy(String policy) {
+        var config = CqliteFlightConfig.fromMap(Map.of(
+                "cqlite.sidecar-uri", "http://localhost:9043",
+                "cqlite.aggregation-pushdown-group-by", policy));
+        return new CqliteFlightMetadata(config, null, null);
+    }
+
+    @Test
+    void neverPolicyDeclinesGroupByPushdown() {
+        // GROUP BY is left to Trino entirely when the operator forces it off.
+        assertTrue(metadataWithPolicy("never").applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)), ASSIGN, List.of(List.of(C1))).isEmpty(),
+                "GROUP BY must not push under aggregation-pushdown-group-by=never");
+    }
+
+    @Test
+    void neverPolicyStillPushesGlobalAggregate() {
+        // Global aggregates are an unconditional win — the gate never blocks them.
+        assertTrue(metadataWithPolicy("never").applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)), ASSIGN, List.of(List.of())).isPresent(),
+                "global aggregate must push even when GROUP BY pushdown is disabled");
+    }
+
+    @Test
+    void alwaysPolicyPushesGroupBy() {
+        assertTrue(metadataWithPolicy("always").applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)), ASSIGN, List.of(List.of(C1))).isPresent(),
+                "GROUP BY must push under aggregation-pushdown-group-by=always");
+    }
+
+    @Test
+    void automaticPolicyPushesGroupByWhenNoEstimate() {
+        // No NDV stats are surfaced yet, so AUTOMATIC has no estimate and pushes
+        // (always correct; only risks the rare high-cardinality perf loss).
+        assertTrue(metadataWithPolicy("automatic").applyAggregation(
+                null, TABLE, List.of(agg("count", BIGINT)), ASSIGN, List.of(List.of(C1))).isPresent(),
+                "AUTOMATIC pushes GROUP BY when no cardinality estimate is available");
+    }
+
+    @Test
+    void declineGroupByPushdownDecisionTable() {
+        var none = java.util.OptionalDouble.empty();
+        var low = java.util.OptionalDouble.of(0.1);   // groups well under rows -> push
+        var high = java.util.OptionalDouble.of(0.9);  // groups ~= rows -> decline
+        double maxRatio = 0.5;
+
+        // NEVER always declines; ALWAYS never declines — regardless of estimate.
+        assertTrue(CqliteFlightMetadata.declineGroupByPushdown(GroupByPushdownPolicy.NEVER, low, maxRatio));
+        assertTrue(CqliteFlightMetadata.declineGroupByPushdown(GroupByPushdownPolicy.NEVER, none, maxRatio));
+        assertTrue(!CqliteFlightMetadata.declineGroupByPushdown(GroupByPushdownPolicy.ALWAYS, high, maxRatio));
+        assertTrue(!CqliteFlightMetadata.declineGroupByPushdown(GroupByPushdownPolicy.ALWAYS, none, maxRatio));
+
+        // AUTOMATIC: no estimate -> push; below threshold -> push; above -> decline.
+        assertTrue(!CqliteFlightMetadata.declineGroupByPushdown(GroupByPushdownPolicy.AUTOMATIC, none, maxRatio));
+        assertTrue(!CqliteFlightMetadata.declineGroupByPushdown(GroupByPushdownPolicy.AUTOMATIC, low, maxRatio));
+        assertTrue(CqliteFlightMetadata.declineGroupByPushdown(GroupByPushdownPolicy.AUTOMATIC, high, maxRatio));
+        // Exactly at the threshold is NOT declined (strict >).
+        assertTrue(!CqliteFlightMetadata.declineGroupByPushdown(
+                GroupByPushdownPolicy.AUTOMATIC, java.util.OptionalDouble.of(0.5), maxRatio));
+    }
+
     @Test
     void applyFilterDeclinesOnAggregatedHandle() {
         // After aggregation pushdown, a later filter must NOT be pushed: it would

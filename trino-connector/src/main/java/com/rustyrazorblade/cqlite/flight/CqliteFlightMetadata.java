@@ -236,6 +236,7 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             return Optional.empty();
         }
         List<ColumnHandle> groupingSet = groupingSets.get(0);
+        boolean hasGroupBy = !groupingSet.isEmpty();
 
         // Grouping columns must be plain column handles (projectable).
         List<CqliteFlightColumnHandle> groupingColumns = new ArrayList<>();
@@ -253,6 +254,16 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
             }
             groupingColumns.add(col);
             groupByNameSet.add(col.name());
+        }
+
+        // Cardinality / operator gate (issue #893). Global aggregates (no GROUP BY)
+        // are an unconditional data-reduction win and are NEVER gated — they bypass
+        // this check. For a GROUP BY, the single-finalize-split design degrades to
+        // break-even-to-loss as distinct groups approach the row count, so honor the
+        // operator policy and decline when the estimated group ratio is too high.
+        if (hasGroupBy && declineGroupByPushdown(
+                groupByPolicy(), estimateGroupRatio(table, groupingColumns), maxGroupRatio())) {
+            return Optional.empty();
         }
 
         // Translate each Trino aggregate into one or more server partial aggregates,
@@ -381,6 +392,53 @@ public class CqliteFlightMetadata implements ConnectorMetadata {
                 assignmentList,
                 groupingColumnMapping,
                 false));
+    }
+
+    /** Effective GROUP BY pushdown policy (defaults to AUTOMATIC when no config is set). */
+    private GroupByPushdownPolicy groupByPolicy() {
+        return config != null ? config.groupByPushdown() : GroupByPushdownPolicy.AUTOMATIC;
+    }
+
+    /** Effective groups/rows crossover for the AUTOMATIC gate. */
+    private double maxGroupRatio() {
+        return config != null ? config.maxGroupRatio() : CqliteFlightConfig.DEFAULT_MAX_GROUP_RATIO;
+    }
+
+    /**
+     * Decide whether to DECLINE GROUP BY aggregation pushdown (issue #893). Pure
+     * decision over the operator policy and an optional estimated groups/rows ratio:
+     *
+     * <ul>
+     *   <li>{@link GroupByPushdownPolicy#NEVER} — always decline.</li>
+     *   <li>{@link GroupByPushdownPolicy#ALWAYS} — never decline (push).</li>
+     *   <li>{@link GroupByPushdownPolicy#AUTOMATIC} — decline only when an estimate is
+     *       present AND it exceeds {@code maxGroupRatio}; with no estimate, push (always
+     *       correct, only a possible perf loss in the rare high-cardinality case).</li>
+     * </ul>
+     */
+    static boolean declineGroupByPushdown(
+            GroupByPushdownPolicy policy, java.util.OptionalDouble estimatedGroupRatio, double maxGroupRatio) {
+        return switch (policy) {
+            case NEVER -> true;
+            case ALWAYS -> false;
+            case AUTOMATIC -> estimatedGroupRatio.isPresent()
+                    && estimatedGroupRatio.getAsDouble() > maxGroupRatio;
+        };
+    }
+
+    /**
+     * Estimate distinct-groups / rows for a GROUP BY, used by the AUTOMATIC gate.
+     *
+     * <p>Returns empty today: an authoritative per-column NDV is not surfaced through
+     * the Flight/Sidecar path (Cassandra's Statistics.db does not store it), so there is
+     * no estimate to gate on. The hook is in place — once a row-count + per-grouping-column
+     * cardinality source exists, populate it here and AUTOMATIC starts gating without any
+     * other change. Until then AUTOMATIC pushes, and operators who hit the rare
+     * high-cardinality loss set {@code cqlite.aggregation-pushdown-group-by=never}.
+     */
+    private java.util.OptionalDouble estimateGroupRatio(
+            CqliteFlightTableHandle table, List<CqliteFlightColumnHandle> groupingColumns) {
+        return java.util.OptionalDouble.empty();
     }
 
     /**
