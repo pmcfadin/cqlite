@@ -1173,8 +1173,27 @@ impl WriteEngine {
                     candidates.iter().collect();
                 let purge_safe = !candidate_set.is_empty() && selected_set == candidate_set;
 
+                // Overlap-aware partial-compaction purging (#935): when this is a
+                // PARTIAL compaction (some candidate SSTables are NOT included),
+                // compute the min write timestamp across those non-included
+                // SSTables. A tombstone older than every one of them shadows
+                // nothing outside the set and can be purged even here. For a full
+                // compaction (`purge_safe == true`) there are no non-included
+                // SSTables, so the bound is `None` and the merger uses its +inf
+                // full-compaction fast path.
+                let max_purgeable_timestamp = if purge_safe {
+                    None
+                } else {
+                    let non_included: Vec<PathBuf> = candidates
+                        .iter()
+                        .filter(|p| !selected_set.contains(*p))
+                        .cloned()
+                        .collect();
+                    merge::compute_max_purgeable_timestamp(&non_included)
+                };
+
                 // Start a new merge
-                self.start_merge(selected, purge_safe)?;
+                self.start_merge(selected, purge_safe, max_purgeable_timestamp)?;
             } else {
                 // No work selected by policy
                 report.time_spent = start.elapsed();
@@ -1434,7 +1453,18 @@ impl WriteEngine {
     /// SSTable for the table (a major/full compaction), allowing gc_grace
     /// tombstone purging without risking resurrection of data shadowed in a
     /// non-included overlapping SSTable. `false` keeps every tombstone.
-    fn start_merge(&mut self, input_paths: Vec<PathBuf>, purge_safe: bool) -> Result<()> {
+    ///
+    /// `max_purgeable_timestamp` (#935): for a PARTIAL compaction (`purge_safe ==
+    /// false`), the min write timestamp across the non-included overlapping
+    /// SSTables — see [`merge::compute_max_purgeable_timestamp`]. When `Some`, a
+    /// tombstone older than every outside SSTable is purged even in a partial
+    /// compaction; `None` keeps the conservative #921 behavior (no purging).
+    fn start_merge(
+        &mut self,
+        input_paths: Vec<PathBuf>,
+        purge_safe: bool,
+        max_purgeable_timestamp: Option<i64>,
+    ) -> Result<()> {
         log::info!(
             "Starting compaction merge of {} SSTables",
             input_paths.len()
@@ -1539,6 +1569,7 @@ impl WriteEngine {
                 gc_before_secs,
                 Some(now_secs),
                 purge_safe,
+                max_purgeable_timestamp,
             )?
         };
         // `write_schema` inherits the #929 UDT normalization from the already-
@@ -1551,7 +1582,11 @@ impl WriteEngine {
             gc_before_secs,
             Some(now_secs),
         )?
-        .with_purge_safe(purge_safe);
+        .with_purge_safe(purge_safe)
+        // #935: overlap-aware purging for a partial compaction. `purge_safe`
+        // overrides this in the merger (full compaction → +inf bound), so passing
+        // the partial bound unconditionally is safe.
+        .with_max_purgeable_timestamp(max_purgeable_timestamp);
 
         // Point the SSTableWriter at the tmp root; it will write to
         // tmp_dir/keyspace/table/nb-{gen}-big-*.db. Use the post-drop

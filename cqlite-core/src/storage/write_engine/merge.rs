@@ -1267,6 +1267,23 @@ pub struct KWayMerger {
     /// never resurrect data. The policy-driven path sets it to `true` only when
     /// the selected inputs cover every candidate SSTable for the table.
     purge_safe: bool,
+    /// Overlap-aware per-compaction max-purgeable timestamp (#935, parity with
+    /// Cassandra `CompactionController.maxPurgeableTimestamp`).
+    ///
+    /// For a PARTIAL compaction (`purge_safe == false`) this is the MINIMUM write
+    /// timestamp (`markedForDeleteAt`, micros) across every NON-INCLUDED
+    /// overlapping SSTable for the table — read from those files' `Statistics.db`
+    /// minimum-timestamp bound. A tombstone whose own deletion timestamp is
+    /// STRICTLY LESS THAN this value provably predates all data living outside the
+    /// compaction set, so purging it can never resurrect shadowed data and is
+    /// safe even in a partial compaction. A tombstone at or above this bound is
+    /// retained.
+    ///
+    /// `None` (the default) means no overlap bound was supplied, so a partial
+    /// compaction keeps the conservative #921 behavior (no purging). A FULL
+    /// compaction ignores this field entirely: `purge_safe == true` already proves
+    /// there is no non-included overlapping SSTable, so the bound is `+inf`.
+    max_purgeable_timestamp: Option<i64>,
 }
 
 /// Report returned by [`compact_sstables`].
@@ -1364,6 +1381,83 @@ pub fn compute_baseline_min(input_paths: &[PathBuf]) -> (i64, i32, i32) {
         }
     }
     (baseline_min_ts, baseline_min_ldt, baseline_min_ttl)
+}
+
+/// Compute the overlap-aware max-purgeable timestamp (#935, parity with
+/// Cassandra `CompactionController.maxPurgeableTimestamp`) for a PARTIAL
+/// compaction from the SSTables NOT included in it.
+///
+/// `outside_paths` is the set of Data.db paths for the table's SSTables that are
+/// NOT part of this compaction but overlap it (conservatively, every other
+/// SSTable for the table). The returned value is the MINIMUM write timestamp
+/// (`markedForDeleteAt`, micros) across those files — read from each one's
+/// `Statistics.db` minimum-timestamp bound (`EncodingStats.minTimestamp`, the same
+/// value Cassandra exposes as `SSTableReader.getMinTimestamp()`).
+///
+/// A tombstone whose own deletion timestamp is STRICTLY LESS THAN this value
+/// provably predates all data living outside the compaction set, so purging it can
+/// never resurrect shadowed data even in a partial compaction. Thread the result
+/// into the merger via [`KWayMerger::with_max_purgeable_timestamp`].
+///
+/// Returns `None` when `outside_paths` is empty (no overlap — the caller should
+/// treat the compaction as full and use `purge_safe`) or when NONE of the outside
+/// `Statistics.db` files could be read/parsed (cannot prove safety → stay
+/// conservative and do not purge). A missing/unreadable file for one of several
+/// outside SSTables is treated conservatively: it cannot raise the bound, so an
+/// unreadable outside file leaves the bound unknown and DISABLES overlap-aware
+/// purging rather than risk resurrecting its data.
+#[cfg(feature = "write-support")]
+pub fn compute_max_purgeable_timestamp(outside_paths: &[PathBuf]) -> Option<i64> {
+    if outside_paths.is_empty() {
+        return None;
+    }
+
+    let mut min_ts = i64::MAX;
+    for data_path in outside_paths {
+        let stats_path = {
+            let filename = data_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            let stats_filename = filename.replace("Data.db", "Statistics.db");
+            data_path
+                .parent()
+                .unwrap_or(data_path.as_path())
+                .join(stats_filename)
+        };
+        // Any outside SSTable we cannot read/parse leaves the bound UNKNOWN: we
+        // can no longer prove a tombstone predates its data, so disable
+        // overlap-aware purging entirely (conservative — never resurrect data).
+        if !stats_path.exists() {
+            return None;
+        }
+        let stats_bytes = match std::fs::read(&stats_path) {
+            Ok(b) => b,
+            Err(e) => {
+                log::warn!(
+                    "Could not read Statistics.db {:?} for max-purgeable bound: {}",
+                    stats_path,
+                    e
+                );
+                return None;
+            }
+        };
+        match crate::parser::enhanced_statistics_parser::parse_statistics_with_fallback(
+            &stats_bytes,
+            None,
+        ) {
+            Ok((_, sstable_stats)) => {
+                min_ts = min_ts.min(sstable_stats.timestamp_stats.min_timestamp);
+            }
+            Err(e) => {
+                log::warn!(
+                    "Could not parse Statistics.db {:?} for max-purgeable bound: {:?}",
+                    stats_path,
+                    e
+                );
+                return None;
+            }
+        }
+    }
+
+    Some(min_ts)
 }
 
 /// Build the effective compaction schema (#850): `schema` augmented with any
@@ -1698,24 +1792,27 @@ pub(crate) fn compute_gc_before(schema: &TableSchema, now_secs: i64) -> Option<i
 /// write pass, a marker purged by gc never reaches the yielded `rows`, so a
 /// retained marker IS counted while a purged one is NOT (#921 finding 2 / #847).
 ///
-/// `purge_safe` (#921 finding 1) MUST match the value the write pass uses
-/// (`compact_sstables`'s `purge_safe`). The pre-pass builds its merger with the
-/// SAME gc cutoff (`gc_before_secs`/`now_secs`) AND the SAME `purge_safe` flag
-/// so its purge decisions are byte-identical to the write pass. Without this, a
-/// purgeable tombstone in a dropped column would count as a survivor here (no
-/// purging) yet be purged in the real merge (purging on) — leaving an empty
-/// dropped column in the output header that this pre-pass exists to strip.
+/// `purge_safe` (#921 finding 1) and `max_purgeable_timestamp` (#935) MUST match
+/// the values the write pass uses (`compact_sstables`' / `start_merge`'s). The
+/// pre-pass builds its merger with the SAME gc cutoff (`gc_before_secs`/`now_secs`),
+/// the SAME `purge_safe` flag, AND the SAME overlap bound so its purge decisions
+/// are byte-identical to the write pass. Without this, a purgeable tombstone in a
+/// dropped column would count as a survivor here (no purging) yet be purged in the
+/// real merge (purging on) — leaving an empty dropped column in the output header
+/// that this pre-pass exists to strip.
 pub(crate) fn compute_surviving_dropped_columns(
     input_paths: Vec<PathBuf>,
     schema: &TableSchema,
     gc_before_secs: Option<i64>,
     now_secs: Option<i64>,
     purge_safe: bool,
+    max_purgeable_timestamp: Option<i64>,
 ) -> Result<std::collections::HashSet<String>> {
     let mut surviving: std::collections::HashSet<String> = std::collections::HashSet::new();
     let total = schema.dropped_columns.len();
     let mut merger = KWayMerger::new_with_gc(input_paths, schema, gc_before_secs, now_secs)?
-        .with_purge_safe(purge_safe);
+        .with_purge_safe(purge_safe)
+        .with_max_purgeable_timestamp(max_purgeable_timestamp);
     loop {
         match merger.step()? {
             MergeStep::Complete => break,
@@ -1841,6 +1938,11 @@ pub async fn compact_sstables_with_registry(
             gc_before_secs,
             now_secs,
             purge_safe,
+            // The one-shot `compact_sstables` entry point only knows its explicit
+            // input list, not the rest of the table, so it has no overlap bound to
+            // supply (#935 overlap-aware purging is driven by the WriteEngine
+            // background path). Purging here is governed solely by `purge_safe`.
+            None,
         )?
     };
     // `write_schema` inherits the #929 UDT normalization from the already-
@@ -1956,6 +2058,10 @@ impl KWayMerger {
             // dormant until a caller proves the compaction spans all of the
             // table's SSTables via `with_purge_safe`.
             purge_safe: false,
+            // No overlap bound by default (#935): a partial compaction stays
+            // conservative (no purging) until a caller supplies the min outside
+            // timestamp via `with_max_purgeable_timestamp`.
+            max_purgeable_timestamp: None,
         })
     }
 
@@ -1968,6 +2074,23 @@ impl KWayMerger {
     /// retained — which can never resurrect data in a partial compaction.
     pub fn with_purge_safe(mut self, purge_safe: bool) -> Self {
         self.purge_safe = purge_safe;
+        self
+    }
+
+    /// Supply the overlap-aware max-purgeable timestamp for a PARTIAL compaction
+    /// (#935, parity with Cassandra `CompactionController.maxPurgeableTimestamp`).
+    ///
+    /// `max_purgeable_timestamp` is the MINIMUM write timestamp (`markedForDeleteAt`,
+    /// micros) across every NON-INCLUDED overlapping SSTable for the table (their
+    /// `Statistics.db` min-timestamp bound). With it set, the gc_grace purge stage
+    /// additionally purges a tombstone in a partial compaction when the tombstone's
+    /// own deletion timestamp is STRICTLY LESS THAN this bound — proving it shadows
+    /// nothing outside the compaction set. `None` keeps the conservative #921
+    /// behavior (a partial compaction does not purge). Ignored when `purge_safe`
+    /// is `true` (a full compaction already has no non-included overlap, so the
+    /// effective bound is `+inf`).
+    pub fn with_max_purgeable_timestamp(mut self, max_purgeable_timestamp: Option<i64>) -> Self {
+        self.max_purgeable_timestamp = max_purgeable_timestamp;
         self
     }
 
@@ -2170,24 +2293,35 @@ impl KWayMerger {
                 .push(row);
         }
 
-        // Overlap-safety gate for tombstone purging (#921 finding 1): collapse
-        // the gc_grace cutoff to `None` (purge no-op) unless this compaction is
-        // provably overlap-safe (a major/full compaction over every SSTable for
-        // the table). A partial compaction must retain tombstones so it can
-        // never resurrect data shadowed in a non-included overlapping SSTable.
-        let effective_gc_before = if self.purge_safe {
-            self.gc_before_secs
+        // Overlap-safety gate for tombstone purging (#921 finding 1, #935):
+        // decide BOTH the effective gc_grace cutoff and the overlap-aware
+        // max-purgeable timestamp this cluster is reconciled with.
+        //
+        // - FULL compaction (`purge_safe == true`): no non-included overlapping
+        //   SSTable exists, so the overlap bound is `+inf` (`i64::MAX`) — every
+        //   gc-purgeable tombstone passes the overlap gate, exactly as #845.
+        // - PARTIAL compaction with an overlap bound (#935): purge a tombstone
+        //   only when its own deletion timestamp is STRICTLY LESS THAN the min
+        //   write timestamp of every non-included overlapping SSTable, proving it
+        //   shadows nothing outside the set.
+        // - PARTIAL compaction without a bound (#921 default): retain every
+        //   tombstone — collapse the cutoff to `None` (purge no-op).
+        let (effective_gc_before, max_purgeable_timestamp) = if self.purge_safe {
+            (self.gc_before_secs, i64::MAX)
+        } else if let Some(bound) = self.max_purgeable_timestamp {
+            (self.gc_before_secs, bound)
         } else {
-            None
+            (None, i64::MIN)
         };
 
         let mut merged = Vec::new();
         for (ck, cluster_rows) in clustered_rows {
-            if let Some(entry) = Self::reconcile_cluster(
+            if let Some(entry) = Self::reconcile_cluster_with_overlap(
                 ck,
                 cluster_rows,
                 &self.schema.dropped_columns,
                 effective_gc_before,
+                max_purgeable_timestamp,
             ) {
                 merged.push(entry);
             }
@@ -2298,7 +2432,32 @@ impl KWayMerger {
     /// `cluster_rows` is in heap-routing order (run_index ascending within equal
     /// keys), so when two cells tie on both timestamp and liveness the first-seen
     /// (newer file) is kept.
+    ///
+    /// Thin wrapper over [`Self::reconcile_cluster_with_overlap`] that defaults the
+    /// overlap-aware max-purgeable timestamp to `i64::MAX` (unrestricted — the
+    /// full-compaction semantics in effect before #935). The production merge path
+    /// (`merge_partition_rows`) calls the `_with_overlap` form directly to pass the
+    /// real bound for a partial compaction.
+    #[cfg(test)]
     fn reconcile_cluster(
+        clustering_key: Option<ClusteringKey>,
+        cluster_rows: Vec<MergeEntry>,
+        dropped_columns: &std::collections::HashMap<String, i64>,
+        gc_before_secs: Option<i64>,
+    ) -> Option<MergeEntry> {
+        Self::reconcile_cluster_with_overlap(
+            clustering_key,
+            cluster_rows,
+            dropped_columns,
+            gc_before_secs,
+            i64::MAX,
+        )
+    }
+
+    /// Reconcile a clustering-key group with an explicit overlap-aware
+    /// max-purgeable timestamp (#935). See [`Self::reconcile_cluster`] for the base
+    /// reconciliation rules.
+    fn reconcile_cluster_with_overlap(
         clustering_key: Option<ClusteringKey>,
         cluster_rows: Vec<MergeEntry>,
         dropped_columns: &std::collections::HashMap<String, i64>,
@@ -2306,12 +2465,21 @@ impl KWayMerger {
         // the merger. A tombstone whose `localDeletionTime < gc_before_secs` is
         // PURGEABLE; `None` disables purging (issue #845).
         //
-        // OVERLAP SAFETY (#921 finding 1): the caller (`merge_partition_rows`)
-        // collapses this to `None` whenever the compaction is NOT overlap-safe
-        // (a partial compaction), so the purge stage stays a strict no-op there.
-        // Purging therefore runs ONLY for a major/full compaction that spans
-        // every SSTable for the table — see `KWayMerger::with_purge_safe`.
+        // OVERLAP SAFETY (#921 finding 1, #935): the caller
+        // (`merge_partition_rows`) collapses this to `None` only when the
+        // compaction is a PARTIAL one with NO overlap bound, so the purge stage is
+        // a strict no-op there. With a bound it runs and each tombstone is
+        // additionally gated on `max_purgeable_timestamp` below.
         gc_before_secs: Option<i64>,
+        // EFFECTIVE overlap-aware max-purgeable timestamp (`markedForDeleteAt`,
+        // micros), threaded from the merger (#935). A tombstone is purgeable ONLY
+        // when its own deletion timestamp is STRICTLY LESS THAN this value, so it
+        // provably shadows no data living in a non-included overlapping SSTable.
+        // `i64::MAX` for a full compaction (no outside overlap — every gc-purgeable
+        // tombstone passes); the min outside timestamp for an overlap-aware partial
+        // compaction; `i64::MIN` when purging is disabled (`gc_before_secs` is then
+        // `None`, so this is unused).
+        max_purgeable_timestamp: i64,
     ) -> Option<MergeEntry> {
         use std::collections::HashMap;
 
@@ -2590,12 +2758,20 @@ impl KWayMerger {
         // COVERED by a tombstone WITHIN this compaction, so purging the
         // now-redundant marker here cannot resurrect data within this set.
         //
-        // OVERLAP SAFETY (#921 finding 1): `gc_before_secs` here is the EFFECTIVE
-        // cutoff — `merge_partition_rows` already collapsed it to `None` for a
-        // partial (non-overlap-safe) compaction, so this stage runs only for a
-        // major/full compaction that spans every SSTable for the table. A partial
-        // compaction therefore retains every tombstone and cannot resurrect data
-        // shadowed in a non-included overlapping SSTable.
+        // OVERLAP SAFETY (#921 finding 1, #935): `gc_before_secs` here is the
+        // EFFECTIVE cutoff. For a FULL compaction it is the table cutoff and
+        // `max_purgeable_timestamp` is `i64::MAX` (no non-included overlap exists),
+        // so every gc-purgeable tombstone is dropped exactly as #845. For a PARTIAL
+        // compaction WITHOUT an overlap bound `merge_partition_rows` collapsed the
+        // cutoff to `None`, so this stage is a strict no-op (every tombstone
+        // retained, #921). For a PARTIAL compaction WITH an overlap bound (#935)
+        // the cutoff is the table cutoff and `max_purgeable_timestamp` is the min
+        // write timestamp of every non-included overlapping SSTable: a tombstone is
+        // purged only when BOTH its gc grace has elapsed AND its own deletion
+        // timestamp (`markedForDeleteAt`) is STRICTLY LESS THAN that bound — so it
+        // provably shadows nothing outside the compaction set and cannot resurrect
+        // data on a later read. This mirrors Cassandra
+        // `CompactionController.getPurgeEvaluator` (`time -> time < minTimestamp`).
         //
         // LDT NORMALIZATION (#921 finding 2): on-disk `localDeletionTime` is an
         // UNSIGNED 32-bit GC-clock second count (OA/DA). It is carried here as a
@@ -2615,10 +2791,19 @@ impl KWayMerger {
                     // (which the reader fills only for expiring cells). Consult both
                     // via `cell_effective_ldt` so a purgeable cell tombstone is
                     // actually purged here — matching the survivor pre-pass.
-                    match Self::cell_effective_ldt(cell) {
-                        Some(ldt) => i64::from(ldt as u32) >= gc_before,
-                        None => true,
-                    }
+                    let gc_purgeable = match Self::cell_effective_ldt(cell) {
+                        Some(ldt) => i64::from(ldt as u32) < gc_before,
+                        // Unknown LDT: never purge (no-heuristics mandate).
+                        None => false,
+                    };
+                    // #935 overlap gate: the cell tombstone's own write timestamp
+                    // (`markedForDeleteAt`) must be STRICTLY BELOW the min outside
+                    // timestamp to prove it shadows nothing in a non-included
+                    // overlapping SSTable. `i64::MAX` for a full compaction lets
+                    // every gc-purgeable tombstone through unchanged.
+                    let overlap_purgeable = cell.timestamp < max_purgeable_timestamp;
+                    // RETAIN unless BOTH gates allow the purge.
+                    !(gc_purgeable && overlap_purgeable)
                 } else {
                     true
                 }
@@ -2636,14 +2821,30 @@ impl KWayMerger {
             // conservative rule already used for cell tombstones (case (a),
             // `None => true`). Only a real, non-zero, surfaced LDT strictly
             // below `gcBefore` purges.
-            if row_del.is_some() && row_del_ldt != 0 && i64::from(row_del_ldt as u32) < gc_before {
-                row_del = None;
+            //
+            // #935 overlap gate: also require the row deletion's own timestamp
+            // (`markedForDeleteAt` = `row_del`) to be STRICTLY BELOW the min
+            // outside timestamp so it shadows nothing in a non-included
+            // overlapping SSTable. `i64::MAX` (full compaction) is a no-op.
+            if let Some(d) = row_del {
+                if row_del_ldt != 0
+                    && i64::from(row_del_ldt as u32) < gc_before
+                    && d < max_purgeable_timestamp
+                {
+                    row_del = None;
+                }
             }
 
             // (c) Complex-deletion markers: drop each purgeable marker. The
             // strict-supersede reduction + shadow-before-purge already ran in
             // Step 2b, so a covered element is gone before its marker is purged.
-            complex_deletions.retain(|cd| i64::from(cd.local_deletion_time as u32) >= gc_before);
+            // #935 overlap gate: also require the marker's `marked_for_delete_at`
+            // to be STRICTLY BELOW the min outside timestamp.
+            complex_deletions.retain(|cd| {
+                let gc_purgeable = i64::from(cd.local_deletion_time as u32) < gc_before;
+                let overlap_purgeable = cd.marked_for_delete_at < max_purgeable_timestamp;
+                !(gc_purgeable && overlap_purgeable)
+            });
         }
 
         // Phantom key-only-row determination (#921 finding 3): recompute
@@ -3357,6 +3558,7 @@ mod tests {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         };
 
@@ -3478,6 +3680,7 @@ mod tests {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         };
 
@@ -3624,6 +3827,7 @@ mod tests {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         };
 
@@ -3772,6 +3976,7 @@ mod tests {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         };
 
@@ -3919,6 +4124,7 @@ mod tests {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         };
 
@@ -4051,6 +4257,7 @@ mod tests {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         };
 
@@ -4145,6 +4352,7 @@ mod tests {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         };
 
@@ -4417,6 +4625,74 @@ mod tests {
             baseline_ldt,
             i32::MAX,
             "live/no-deletion sentinel must not lower the seeded baseline"
+        );
+    }
+
+    /// #935: `compute_max_purgeable_timestamp` returns the MIN write timestamp
+    /// across the non-included overlapping SSTables (from each `Statistics.db`
+    /// `min_timestamp`), so a tombstone older than that bound can be purged.
+    #[test]
+    fn compute_max_purgeable_timestamp_returns_min_over_outside_sstables() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        let write_stats = |gen: u32, min_ts: i64| -> PathBuf {
+            let data_path = tmp.path().join(format!("nb-{gen}-big-Data.db"));
+            std::fs::write(&data_path, b"").expect("touch Data.db");
+            let stats_path = tmp.path().join(format!("nb-{gen}-big-Statistics.db"));
+            let mut meta = StatisticsMetadata::new();
+            meta.min_timestamp = min_ts;
+            StatisticsWriter::new(stats_path)
+                .write(&meta, None)
+                .expect("write Statistics.db");
+            data_path
+        };
+
+        let a = write_stats(1, 5_000);
+        let b = write_stats(2, 2_500);
+        let c = write_stats(3, 9_000);
+
+        let bound = compute_max_purgeable_timestamp(&[a, b, c]);
+        assert_eq!(
+            bound,
+            Some(2_500),
+            "the bound must be the minimum min_timestamp across all outside SSTables"
+        );
+
+        // Empty outside set → None (caller treats as full / no overlap).
+        assert_eq!(
+            compute_max_purgeable_timestamp(&[]),
+            None,
+            "no outside SSTables means no overlap bound"
+        );
+    }
+
+    /// #935: a missing/unreadable outside `Statistics.db` leaves the bound UNKNOWN
+    /// (returns `None`), disabling overlap-aware purging — never resurrect data.
+    #[test]
+    fn compute_max_purgeable_timestamp_unreadable_outside_disables_purging() {
+        use crate::storage::sstable::writer::{StatisticsMetadata, StatisticsWriter};
+        use tempfile::TempDir;
+
+        let tmp = TempDir::new().expect("temp dir");
+        // One readable outside SSTable.
+        let readable = tmp.path().join("nb-1-big-Data.db");
+        std::fs::write(&readable, b"").expect("touch Data.db");
+        let mut meta = StatisticsMetadata::new();
+        meta.min_timestamp = 1_000;
+        StatisticsWriter::new(tmp.path().join("nb-1-big-Statistics.db"))
+            .write(&meta, None)
+            .expect("write Statistics.db");
+
+        // A second outside SSTable whose Statistics.db does NOT exist.
+        let missing = tmp.path().join("nb-2-big-Data.db");
+        std::fs::write(&missing, b"").expect("touch Data.db");
+
+        assert_eq!(
+            compute_max_purgeable_timestamp(&[readable, missing]),
+            None,
+            "an unreadable outside Statistics.db must disable overlap-aware purging"
         );
     }
 }
@@ -5132,6 +5408,7 @@ mod merge_property_tests {
                     gc_before_secs: None,
                     now_secs: None,
                     purge_safe: false,
+                    max_purgeable_timestamp: None,
                     schema: schema.clone(),
                 };
                 let real_merged = merger.merge_partition_rows(merge_entries.clone())
@@ -5257,6 +5534,7 @@ mod merge_property_tests {
                     gc_before_secs: None,
                     now_secs: None,
                     purge_safe: false,
+                    max_purgeable_timestamp: None,
                     schema: schema.clone(),
                 };
                 let merged = merger.merge_partition_rows(vec![live_entry, tombstone_entry])
@@ -5467,6 +5745,7 @@ mod streaming_tests {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         };
 
@@ -7503,6 +7782,7 @@ mod issue_822_merge_ordering_semantics {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         }
     }
@@ -8407,6 +8687,7 @@ mod issue_886_empty_partition_skip {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema,
         }
     }
@@ -8693,6 +8974,7 @@ mod issue_912_row_tombstone_clustering_identity {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema: schema.clone(),
         };
         let merged = merger
@@ -9084,6 +9366,7 @@ mod issue_873_preserve_row_tombstone_ldt {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema: schema.clone(),
         };
 
@@ -9623,6 +9906,7 @@ mod issue_845_gc_grace_purge {
             gc_before_secs: Some(GC_BEFORE),
             now_secs: None,
             purge_safe,
+            max_purgeable_timestamp: None,
         };
 
         // PARTIAL compaction (purge_safe = false): the purgeable row tombstone is
@@ -9768,6 +10052,233 @@ mod issue_845_gc_grace_purge {
         }
     }
 
+    // ── Issue #935: overlap-aware partial-compaction purging ─────────────────
+    //
+    // Parity Cassandra `CompactionController.maxPurgeableTimestamp` /
+    // `getPurgeEvaluator` (`time -> time < minTimestamp`): in a PARTIAL
+    // compaction a tombstone is purgeable only when BOTH its gc grace has
+    // elapsed (`localDeletionTime < gcBefore`) AND its own deletion timestamp
+    // (`markedForDeleteAt`) is STRICTLY LESS THAN the minimum write timestamp of
+    // every non-included overlapping SSTable — so it provably shadows nothing
+    // outside the compaction set. `reconcile_cluster_with_overlap` takes that
+    // bound as `max_purgeable_timestamp`; `i64::MAX` is the full-compaction fast
+    // path (unrestricted, identical to #845).
+
+    /// A row tombstone that PROVABLY predates all non-included overlapping data
+    /// (`markedForDeleteAt < bound`) and is past grace is PURGED in a partial
+    /// compaction.
+    #[test]
+    fn issue_935_partial_compaction_purges_row_tombstone_below_overlap_bound() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        // Outside SSTables' min write timestamp. The tombstone's markedForDeleteAt
+        // is strictly below it, so it shadows nothing outside the set.
+        const BOUND: i64 = 1_000_000_000_000_000;
+        let mfda = BOUND - 1; // strictly older than every outside cell
+
+        let purged = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![tombstone_entry(0, mfda, (GC_BEFORE - 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            BOUND,
+        );
+        assert!(
+            purged.is_none(),
+            "a row tombstone older than every non-included overlapping SSTable \
+             (markedForDeleteAt < bound) and past grace must be purged even in a \
+             partial compaction (#935)"
+        );
+    }
+
+    /// A row tombstone whose `markedForDeleteAt >= bound` COULD shadow data in a
+    /// non-included overlapping SSTable, so it is RETAINED even though its gc
+    /// grace has elapsed. Boundary `== bound` is retained (only strictly-less
+    /// purges).
+    #[test]
+    fn issue_935_partial_compaction_retains_row_tombstone_at_or_above_overlap_bound() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        const BOUND: i64 = 1_000_000_000_000_000;
+
+        // markedForDeleteAt strictly ABOVE the bound: outside data could be older
+        // than the tombstone and thus shadowed → must retain.
+        let above = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![tombstone_entry(0, BOUND + 1, (GC_BEFORE - 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            BOUND,
+        )
+        .expect("a tombstone that could shadow outside data must be retained");
+        assert!(
+            matches!(above.row_data, RowData::Tombstone { .. }),
+            "a row tombstone with markedForDeleteAt > overlap bound must survive a \
+             partial compaction (#935): outside data may be shadowed"
+        );
+
+        // Boundary: markedForDeleteAt EXACTLY at the bound is retained — an outside
+        // SSTable could hold a cell at exactly the bound that the tombstone would
+        // shadow (`time < minTimestamp` is the purge predicate, so `==` retains).
+        let boundary = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![tombstone_entry(0, BOUND, (GC_BEFORE - 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            BOUND,
+        )
+        .expect("a tombstone at exactly the overlap bound must be retained");
+        assert!(
+            matches!(boundary.row_data, RowData::Tombstone { .. }),
+            "markedForDeleteAt == overlap bound is retained (only `<` purges, #935)"
+        );
+    }
+
+    /// The overlap gate is independent of the gc-grace gate: a tombstone below the
+    /// overlap bound but still WITHIN grace is retained (both gates must allow the
+    /// purge).
+    #[test]
+    fn issue_935_within_grace_tombstone_retained_despite_overlap_bound() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        const BOUND: i64 = 1_000_000_000_000_000;
+
+        let within = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![tombstone_entry(0, BOUND - 1, (GC_BEFORE + 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            BOUND,
+        )
+        .expect("a within-grace tombstone must be retained regardless of overlap");
+        assert!(
+            matches!(within.row_data, RowData::Tombstone { .. }),
+            "a tombstone within gc grace must be retained even when its \
+             markedForDeleteAt is below the overlap bound (#935)"
+        );
+    }
+
+    /// A purgeable simple cell tombstone is dropped in a partial compaction only
+    /// when its write timestamp is below the overlap bound; at/above the bound it
+    /// is retained. The control row carries a live cell on another column so the
+    /// row survives and we observe the per-cell decision.
+    #[test]
+    fn issue_935_partial_compaction_cell_tombstone_overlap_gate() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        const BOUND: i64 = 5_000;
+
+        // Below the bound (and past grace) → purged from the surviving cells.
+        let purged = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![live(
+                0,
+                100,
+                vec![
+                    CellData::new("keep".to_string(), Value::Text("x".to_string()), 9_000),
+                    cell_tombstone(BOUND - 1, (GC_BEFORE - 1) as i32),
+                ],
+            )],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            BOUND,
+        )
+        .expect("the live `keep` cell keeps the row alive");
+        match purged.row_data {
+            RowData::Live { cells } => assert!(
+                !cells.iter().any(KWayMerger::is_cell_tombstone),
+                "a cell tombstone below the overlap bound must be purged (#935)"
+            ),
+            other => panic!("expected Live row, got {other:?}"),
+        }
+
+        // At/above the bound → retained (could shadow an outside cell).
+        let retained = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![live(
+                0,
+                100,
+                vec![
+                    CellData::new("keep".to_string(), Value::Text("x".to_string()), 9_000),
+                    cell_tombstone(BOUND, (GC_BEFORE - 1) as i32),
+                ],
+            )],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            BOUND,
+        )
+        .expect("the live `keep` cell keeps the row alive");
+        match retained.row_data {
+            RowData::Live { cells } => assert!(
+                cells.iter().any(KWayMerger::is_cell_tombstone),
+                "a cell tombstone at the overlap bound must be retained (#935)"
+            ),
+            other => panic!("expected Live row, got {other:?}"),
+        }
+    }
+
+    /// A complex-deletion marker is purged in a partial compaction only when its
+    /// `marked_for_delete_at` is below the overlap bound.
+    #[test]
+    fn issue_935_partial_compaction_complex_deletion_overlap_gate() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        const BOUND: i64 = 5_000;
+        let make = |mfda: i64| {
+            MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
+                .with_complex_deletions(vec![ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: mfda,
+                    local_deletion_time: (GC_BEFORE - 1) as i32,
+                }])
+        };
+
+        // Below the bound and past grace → purged (nothing left to emit).
+        let purged = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![make(BOUND - 1)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            BOUND,
+        );
+        assert!(
+            purged.is_none(),
+            "a complex-deletion marker below the overlap bound must be purged (#935)"
+        );
+
+        // At the bound → retained as a metadata-only entry.
+        let retained = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![make(BOUND)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            BOUND,
+        )
+        .expect("a marker at the overlap bound must be retained");
+        assert_eq!(
+            retained.complex_deletions.len(),
+            1,
+            "a complex-deletion marker at the overlap bound must be retained (#935)"
+        );
+    }
+
+    /// The full-compaction fast path (`max_purgeable_timestamp == i64::MAX`)
+    /// purges a past-grace tombstone regardless of its timestamp — identical to
+    /// the pre-#935 behavior, so the overlap gate is a strict no-op there.
+    #[test]
+    fn issue_935_full_compaction_bound_is_unrestricted() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        // A very large markedForDeleteAt that no realistic outside bound would
+        // exceed still purges under the full-compaction +inf bound.
+        let purged = KWayMerger::reconcile_cluster_with_overlap(
+            None,
+            vec![tombstone_entry(0, i64::MAX - 1, (GC_BEFORE - 1) as i32)],
+            &::std::collections::HashMap::new(),
+            Some(GC_BEFORE),
+            i64::MAX,
+        );
+        assert!(
+            purged.is_none(),
+            "the full-compaction +inf overlap bound must purge any past-grace \
+             tombstone, identical to #845 (#935 no-op for full compactions)"
+        );
+    }
+
     /// #921 finding 2: the dropped-column survivor pre-pass
     /// (`compute_surviving_dropped_columns`) must count a RETAINED
     /// `ComplexDeletion` marker for a dropped COMPLEX column as a survivor.
@@ -9862,6 +10373,7 @@ mod issue_845_gc_grace_purge {
             gc_before_secs: None,
             now_secs: None,
             purge_safe: false,
+            max_purgeable_timestamp: None,
             schema: write_schema.clone(),
         };
 
@@ -9889,6 +10401,7 @@ mod issue_845_gc_grace_purge {
             None,
             None,
             false,
+            None,
         )
         .expect("survivor pre-pass (no gc) must succeed");
         assert!(
@@ -9906,6 +10419,7 @@ mod issue_845_gc_grace_purge {
             Some(gc_before),
             Some(gc_before),
             true,
+            None,
         )
         .expect("survivor pre-pass (purging) must succeed");
         assert!(
