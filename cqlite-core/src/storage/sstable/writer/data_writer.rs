@@ -1025,16 +1025,110 @@ impl DataWriter {
         // (a column has many elements). Kept verbatim and emitted via
         // `write_complex_column_per_element`. Empty for every existing scenario.
         let mut complex_element_ops: Vec<MergedOp<'a>> = Vec::new();
-        // Liveness: (timestamp, row-level TTL) of the newest contributing mutation
+        // Liveness: (timestamp, row-level TTL) of the newest contributing mutation.
+        // Cell-less liveness sources (pure-PK inserts, clustering-only writes) are
+        // recorded here directly (they are never shadowed by complex-deletion markers).
         let mut liveness: Option<(i64, Option<u32>)> = None;
+        // Issue #921 (roborev High): WHOLE-COLUMN write liveness candidates, keyed by
+        // regular-column name → (newest write ts, that write's row TTL). A
+        // `Write`/`WriteWithTtl` of a regular column sets the ROW MARKER (row
+        // liveness) even when its CELL loses last-write-wins to a same-column
+        // `Delete` tombstone at an equal timestamp (issue #822) — the row marker is
+        // independent of cell-level reconciliation. So these candidates are collected
+        // here REGARDLESS of the per-column `cells` LWW outcome. They are folded into
+        // `liveness` only AFTER the #927 mixed-stream reconcile, with candidates for
+        // any column whose COMPLEX stream wins removed first: a whole-column write
+        // entirely superseded by a newer complex marker/element stream leaves no live
+        // cell and must NOT leak a phantom row marker.
+        let mut whole_col_liveness: std::collections::HashMap<&'a str, (i64, Option<u32>)> =
+            std::collections::HashMap::new();
+        // Issue #887 / #921: a live `WriteComplexElement` contributes row liveness too,
+        // but ONLY if it actually survives every reconcile/retain below. Rather than
+        // tracking pre-retain candidates with an exclusion set (fragile — roborev
+        // #921 High), complex-element liveness is DERIVED at the very end directly
+        // from the FINAL surviving `complex_element_ops`: after the #927 mixed-stream
+        // reconcile AND the #887 strict-supersede/shadow-before-purge retain have run,
+        // each surviving LIVE element (a `WriteComplexElement` with a value, not an
+        // element tombstone) folds its OWN `(elem_ts, ttl)` into `liveness`. This way
+        // liveness reflects exactly the live per-element cells that remain in the
+        // output — no candidate can resurrect liveness for an element that was dropped
+        // (by a winning whole-column op, LIVE or Delete) or shadowed (by a same-column
+        // complex deletion). Simple-cell and pure-PK liveness in `liveness` is folded
+        // directly below and is never shadowed by complex-deletion markers.
 
         for m in group {
-            // Shadowed entirely by the row deletion
-            if deletion_ts.is_some_and(|dts| m.timestamp_micros <= dts) {
+            // Shadowed by the row deletion (or partition/range floor): cells,
+            // liveness, and row-level writes of this mutation written at
+            // `timestamp <= deletion_ts` are dead.
+            //
+            // Issue #887: a `ComplexDeletion` marker is itself a deletion with its OWN
+            // `marked_for_delete_at`, NOT the mutation's row timestamp. A marker whose
+            // mfda STRICTLY exceeds `deletion_ts` covers a range the row/partition
+            // tombstone does not (e.g. elements in OTHER SSTables not part of this
+            // compaction), so it must survive even when the carrying mutation's row
+            // timestamp is shadowed. The SAME independence applies to
+            // `WriteComplexElement`: each per-element complex write carries its OWN
+            // `timestamp_micros` (an explicit delta, NOT the mutation's row timestamp);
+            // an element whose own timestamp STRICTLY exceeds `deletion_ts` is live and
+            // must survive.
+            //
+            // Skip the rest of a shadowed mutation, but still scan it for such
+            // surviving complex-deletion markers AND surviving per-element writes so
+            // they are emitted alongside the row tombstone.
+            let mutation_shadowed = deletion_ts.is_some_and(|dts| m.timestamp_micros <= dts);
+            if mutation_shadowed {
+                // The mutation's row timestamp is covered, so its simple cells,
+                // liveness, and row-level writes are dead. Per-element/per-marker
+                // complex ops carry INDEPENDENT timestamps, however, so still scan for
+                // them and push verbatim — carrying each op's OWN timestamp in the
+                // `MergedOp` (see the per-op rationale on the normal path below). The
+                // `deletion_ts` shadow boundary is applied UNIFORMLY for both paths by
+                // the single retain pass after this loop (Issue #921 roborev), so no
+                // per-op boundary check is done here; that keeps the normal and
+                // shadowed paths from drifting apart.
+                for op in &m.operations {
+                    match op {
+                        CellOperation::ComplexDeletion {
+                            marked_for_delete_at,
+                            ..
+                        } => {
+                            if skip_static_ops && is_static_operation(op, schema) {
+                                continue;
+                            }
+                            complex_element_ops.push(MergedOp {
+                                op,
+                                timestamp_micros: *marked_for_delete_at,
+                                row_ttl_seconds: m.ttl_seconds,
+                                cell_local_deletion_time: m.effective_local_deletion_time(),
+                            });
+                        }
+                        CellOperation::WriteComplexElement {
+                            timestamp_micros: elem_ts,
+                            ..
+                        } => {
+                            if skip_static_ops && is_static_operation(op, schema) {
+                                continue;
+                            }
+                            complex_element_ops.push(MergedOp {
+                                op,
+                                timestamp_micros: *elem_ts,
+                                row_ttl_seconds: m.ttl_seconds,
+                                cell_local_deletion_time: m.effective_local_deletion_time(),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
                 continue;
             }
 
-            let mut contributes_liveness = false;
+            // Issue #921: a `Write`/`WriteWithTtl` of a PRIMARY-KEY column (the
+            // compaction path can surface a clustering column as a Write, #857) is
+            // dropped from `cells` below — it leaves NO survivor to derive liveness
+            // from. Such a clustering-only write must still keep the row live, so
+            // record its contribution inline (it can never be shadowed by a complex
+            // marker — primary-key columns are never complex).
+            let mut pk_write_liveness = false;
             for op in &m.operations {
                 let column = match op {
                     CellOperation::Write { column, .. }
@@ -1045,28 +1139,71 @@ impl DataWriter {
                     // contributes row liveness; a `ComplexDeletion` marker does
                     // not. Primary-key columns can never be complex, so no
                     // key-column skip is needed.
-                    CellOperation::WriteComplexElement { value, .. } => {
+                    //
+                    // Issue #887: the liveness contribution is DEFERRED. If this
+                    // element is later shadowed by a same-column `ComplexDeletion`
+                    // (shadow-before-purge retain below), it must NOT keep the row
+                    // live. Record a candidate carrying the column + the element's OWN
+                    // timestamp; fold it into `liveness` only if it survives the retain.
+                    CellOperation::WriteComplexElement {
+                        timestamp_micros: elem_ts,
+                        ..
+                    } => {
                         if skip_static_ops && is_static_operation(op, schema) {
                             continue;
                         }
-                        if value.is_some() {
-                            contributes_liveness = true;
-                        }
+                        // Issue #887 / #921: row liveness from a live per-element write
+                        // is NOT recorded here. It is derived from the FINAL surviving
+                        // `complex_element_ops` after all reconciles/retains (see the
+                        // end of this function), so an element later dropped or
+                        // shadowed cannot leak liveness.
+                        //
+                        // Issue #921 (roborev Finding 1): carry the element's OWN
+                        // `*elem_ts` in the `MergedOp`, NOT the mutation row timestamp.
+                        // #927's mixed-stream reconcile below derives `elem_max_ts`
+                        // from `MergedOp.timestamp_micros`; using the mutation row
+                        // timestamp would understate it and let an older whole-column
+                        // write wrongly shadow a newer per-element edit whose enclosing
+                        // mutation happens to carry an older row timestamp. This also
+                        // matches the shadowed/rescue path above (which already stores
+                        // `*elem_ts`) and the #887 shadow-before-purge retain. The
+                        // per-element writer reads the element's own timestamp from the
+                        // `WriteComplexElement` payload, so the emitted cell timestamp
+                        // is unaffected.
                         complex_element_ops.push(MergedOp {
                             op,
-                            timestamp_micros: m.timestamp_micros,
+                            timestamp_micros: *elem_ts,
                             row_ttl_seconds: m.ttl_seconds,
                             cell_local_deletion_time: m.effective_local_deletion_time(),
                         });
                         continue;
                     }
-                    CellOperation::ComplexDeletion { .. } => {
+                    CellOperation::ComplexDeletion {
+                        marked_for_delete_at,
+                        ..
+                    } => {
                         if skip_static_ops && is_static_operation(op, schema) {
                             continue;
                         }
+                        // Issue #921 (roborev Finding): a `ComplexDeletion` marker is a
+                        // deletion with its OWN `marked_for_delete_at` (mfda), which is
+                        // INDEPENDENT of the enclosing mutation's row timestamp (the
+                        // marker can be carried by an OLDER metadata/tombstone mutation).
+                        // #927's mixed-stream reconcile below derives `elem_max_ts` from
+                        // `MergedOp.timestamp_micros` and uses `mop.timestamp_micros >=
+                        // emax` to decide whether a whole-column op shadows the
+                        // per-element/marker stream. Carrying the row timestamp here
+                        // would let a whole-column write/delete at `row_ts > mfda` but
+                        // `whole_ts < mfda` wrongly drop a NEWER collection tombstone —
+                        // losing the marker and resurrecting covered elements. Carry the
+                        // mfda so the comparison reflects the marker's true deletion time.
+                        // The emitted marker bytes read mfda/ldt from the
+                        // `ComplexDeletion` payload (see
+                        // `write_complex_element_columns`), so this only affects the
+                        // RECONCILE COMPARISON, never the serialized marker.
                         complex_element_ops.push(MergedOp {
                             op,
-                            timestamp_micros: m.timestamp_micros,
+                            timestamp_micros: *marked_for_delete_at,
                             row_ttl_seconds: m.ttl_seconds,
                             cell_local_deletion_time: m.effective_local_deletion_time(),
                         });
@@ -1077,23 +1214,49 @@ impl DataWriter {
                 if skip_static_ops && is_static_operation(op, schema) {
                     continue;
                 }
-                if matches!(
-                    op,
-                    CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
-                ) {
-                    // A write — even of a primary-key column — means the row is
-                    // live. This must be recorded BEFORE the key-column skip below,
-                    // so a row whose only cells are clustering values (a pure
-                    // primary-key row) keeps its liveness instead of vanishing.
-                    contributes_liveness = true;
-                }
+                // Issue #921 (roborev High): whole-column `Write`/`WriteWithTtl`
+                // liveness is NOT folded into `liveness` here anymore. It is recorded
+                // as a per-column candidate in `whole_col_liveness` (below the
+                // cells-dedup block) and folded only AFTER the #927 mixed-stream
+                // reconcile, with candidates for columns whose complex stream wins
+                // removed. Folding inline before reconcile let a whole-column write
+                // entirely superseded by a newer complex marker/element stream leak a
+                // phantom row marker.
                 // Primary-key columns are encoded positionally (partition key +
                 // clustering prefix), never as cells. The compaction path can
                 // surface a clustering column as a Write op (#857) — drop it so the
                 // writer doesn't emit a phantom cell that corrupts the row body for
                 // strict readers.
                 if is_primary_key_column(column, schema) {
+                    if matches!(
+                        op,
+                        CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
+                    ) {
+                        // A clustering-only write keeps the row live even though it
+                        // produces no cell survivor (see note above).
+                        pk_write_liveness = true;
+                    }
                     continue;
+                }
+
+                // Issue #921: record the ROW-MARKER liveness candidate for this
+                // regular-column write. Done BEFORE the cells LWW dedup so that a
+                // same-column `Delete` cell tombstone winning an equal-ts tie does not
+                // erase the row marker (issue #822). Keep the newest write's ts/ttl.
+                if matches!(
+                    op,
+                    CellOperation::Write { .. } | CellOperation::WriteWithTtl { .. }
+                ) {
+                    match whole_col_liveness.entry(column) {
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            entry.insert((m.timestamp_micros, m.ttl_seconds));
+                        }
+                        std::collections::hash_map::Entry::Occupied(mut entry) => {
+                            if m.timestamp_micros >= entry.get().0 {
+                                entry.insert((m.timestamp_micros, m.ttl_seconds));
+                            }
+                        }
+                    }
                 }
 
                 let candidate = MergedOp {
@@ -1126,11 +1289,33 @@ impl DataWriter {
             let pure_pk_insert = m.operations.is_empty()
                 && m.partition_tombstone.is_none()
                 && m.range_tombstones.is_empty();
-            if (contributes_liveness || pure_pk_insert)
+            // Issue #921: only the cell-less liveness sources are folded inline here
+            // — a pure-PK insert and a clustering-only write. Whole-column writes
+            // that DO produce a `cells` survivor are derived after reconcile.
+            if (pk_write_liveness || pure_pk_insert)
                 && liveness.is_none_or(|(ts, _)| m.timestamp_micros >= ts)
             {
                 liveness = Some((m.timestamp_micros, m.ttl_seconds));
             }
+        }
+
+        // Issue #921 (roborev HIGH/MEDIUM): apply the row/range `deletion_ts` shadow
+        // boundary UNIFORMLY to per-element/per-marker complex ops, regardless of
+        // whether the enclosing mutation was classified shadowed. Each such op carries
+        // its OWN timestamp (a `WriteComplexElement`'s explicit delta, a
+        // `ComplexDeletion`'s `marked_for_delete_at`), already stored in
+        // `MergedOp.timestamp_micros` at every push point above. Previously this
+        // boundary was applied ONLY on the shadowed/rescue path; the normal path
+        // (mutation row ts > deletion_ts) pushed complex ops unconditionally, so a
+        // covered element (`elem_ts <= deletion_ts`) resurrected after the tombstone
+        // was purged, and a fully-covered marker (`mfda <= deletion_ts`) emitted a dead
+        // redundant tombstone. One retain here gives both paths the SAME boundary:
+        // `> deletion_ts` survives, `<= deletion_ts` is shadowed (equal-ts tombstone
+        // wins, #498). This is the ONLY complex-op family with an independent timestamp;
+        // simple `Write`/`Delete` and pure-PK liveness keep their mutation-level shadow
+        // behavior (handled by `mutation_shadowed` above).
+        if let Some(dts) = deletion_ts {
+            complex_element_ops.retain(|mop| mop.timestamp_micros > dts);
         }
 
         let mut ops: Vec<MergedOp<'a>> = cells.into_values().collect();
@@ -1142,6 +1327,13 @@ impl DataWriter {
         // column and desync the reader. Reconcile by timestamp shadowing: keep the
         // stream with the newer max timestamp and drop the other, rather than
         // silently losing one.
+        //
+        // Issue #921 (roborev High): liveness is no longer tracked via a candidate
+        // list + exclusion set here. Because complex-element liveness is DERIVED at
+        // the end from the FINAL surviving `complex_element_ops`, a per-element
+        // stream dropped by a winning whole-column op (LIVE write OR Delete) simply
+        // leaves no survivor to fold — so it cannot leak liveness, and this
+        // reconcile only has to drop the losing stream.
         if !complex_element_ops.is_empty() {
             let mut elem_max_ts: std::collections::HashMap<&str, i64> =
                 std::collections::HashMap::new();
@@ -1173,6 +1365,125 @@ impl DataWriter {
                     Some(col) => !whole_wins.contains(col),
                     None => true,
                 });
+            }
+            // Issue #921 (roborev High): a column whose COMPLEX stream won (present in
+            // `elem_max_ts` but NOT in `whole_wins`) had its whole-column op dropped
+            // from `ops`. That whole-column write is entirely superseded — it leaves
+            // no live cell — so it must NOT contribute the row marker. Drop its
+            // liveness candidate so a phantom live row is not emitted.
+            if !whole_col_liveness.is_empty() {
+                whole_col_liveness
+                    .retain(|col, _| !elem_max_ts.contains_key(col) || whole_wins.contains(col));
+            }
+        }
+
+        // Issue #887: SHADOW-BEFORE-PURGE for the direct writer merge path — the
+        // writer-side analogue of reconcile_cluster Step 2b (merge.rs). Above, a
+        // `WriteComplexElement` is kept based only on its timestamp vs the ROW/RANGE
+        // `deletion_ts`; it is NOT yet shadowed against a surviving `ComplexDeletion`
+        // marker for the SAME column. A mutation set carrying e.g.
+        // `ComplexDeletion(tags, mfda=300)` and an element `tags[path]@200` would
+        // otherwise emit BOTH the marker and the covered element@200 — violating
+        // shadow-before-purge (a later purge of the marker resurrects the element).
+        //
+        // Mirror Step 2b exactly: (1) reduce to the ACTIVE complex deletion PER COLUMN
+        // NAME (strict-supersede: greatest `marked_for_delete_at` wins; EQUAL does NOT
+        // supersede), then (2) drop every `WriteComplexElement` of that column whose
+        // own `timestamp_micros <= marked_for_delete_at` (shadowed). Boundary: element
+        // ts STRICTLY GREATER than mfda survives; `<=` is shadowed. Matched BY COLUMN
+        // NAME. This runs unconditionally so the normal mutation path and the
+        // shadowed-mutation rescue path are consistent.
+        if !complex_element_ops.is_empty() {
+            // Strict-supersede: active mfda per column name from surviving markers.
+            let mut active_mfda: std::collections::HashMap<&'a str, i64> =
+                std::collections::HashMap::new();
+            for mop in &complex_element_ops {
+                if let CellOperation::ComplexDeletion {
+                    column,
+                    marked_for_delete_at,
+                    ..
+                } = mop.op
+                {
+                    let col = column.as_str();
+                    match active_mfda.get(col) {
+                        // STRICTLY GREATER supersedes; equal/lesser does NOT.
+                        Some(existing) if marked_for_delete_at <= existing => {}
+                        _ => {
+                            active_mfda.insert(col, *marked_for_delete_at);
+                        }
+                    }
+                }
+            }
+            // Shadow-before-purge: drop any WriteComplexElement whose own timestamp is
+            // `<= mfda` of the active marker on its column.
+            if !active_mfda.is_empty() {
+                complex_element_ops.retain(|mop| match mop.op {
+                    CellOperation::WriteComplexElement {
+                        column,
+                        timestamp_micros: elem_ts,
+                        ..
+                    } => active_mfda
+                        .get(column.as_str())
+                        .is_none_or(|mfda| *elem_ts > *mfda),
+                    _ => true,
+                });
+            }
+        }
+
+        // Issue #921 (roborev High): FOLD the surviving WHOLE-COLUMN write liveness
+        // candidates — i.e. AFTER the #927 mixed-stream reconcile, which removed
+        // candidates for any column whose complex stream won (the whole-column write
+        // was entirely superseded by a newer complex marker/element stream). The
+        // remaining candidates are regular-column `Write`/`WriteWithTtl` ops that set
+        // the ROW MARKER: each contributes even when its CELL lost a same-column
+        // equal-ts `Delete` tie (issue #822) — the row marker is independent of
+        // cell-level reconciliation. This is the symmetric counterpart to the
+        // per-element liveness derivation below: a whole-column write dropped by a
+        // winning complex stream (e.g. `Write(tags)@500` + `ComplexDeletion(tags,
+        // mfda=900)`) is no longer in `whole_col_liveness`, so it cannot leak a
+        // phantom live row. Cell-less liveness sources (pure-PK insert,
+        // clustering-only write) were already folded inline above.
+        for &(ts, ttl) in whole_col_liveness.values() {
+            if liveness.is_none_or(|(cur, _)| ts >= cur) {
+                liveness = Some((ts, ttl));
+            }
+        }
+
+        // Issue #921 (roborev High): DERIVE complex-element liveness from the FINAL
+        // surviving `complex_element_ops` — i.e. AFTER the #927 mixed-stream
+        // reconcile AND the #887 strict-supersede / shadow-before-purge retain. Each
+        // surviving LIVE element (a `WriteComplexElement` carrying a value, not an
+        // element tombstone and not a `ComplexDeletion` marker) folds its OWN
+        // `(elem_ts, ttl)` into row liveness. Because we read only the survivors, an
+        // element dropped by a winning whole-column op (LIVE write OR Delete) or
+        // shadowed by a same-column complex deletion contributes nothing — it is no
+        // longer in `complex_element_ops`. A row whose only live complex elements
+        // were all dropped/shadowed therefore carries NO complex-element liveness.
+        // Simple-cell `Write`/`WriteWithTtl` and pure-PK liveness already folded into
+        // `liveness` above are independent and untouched here.
+        //
+        // The element's OWN `timestamp_micros` and `ttl_seconds` are read straight
+        // from its `WriteComplexElement` payload (the same values the writer stamps
+        // on the surviving element cell), so row liveness reflects exactly that live
+        // element.
+        for mop in &complex_element_ops {
+            if let CellOperation::WriteComplexElement {
+                value,
+                timestamp_micros: elem_ts,
+                ttl_seconds,
+                is_deleted,
+                ..
+            } = mop.op
+            {
+                // A live element has a value and is not a tombstone. Element-level
+                // tombstones (`value == None` / `is_deleted`) and empty-value
+                // members carry no liveness.
+                if *is_deleted || value.is_none() {
+                    continue;
+                }
+                if liveness.is_none_or(|(ts, _)| *elem_ts >= ts) {
+                    liveness = Some((*elem_ts, *ttl_seconds));
+                }
             }
         }
 
@@ -9568,6 +9879,1205 @@ mod tests {
             row.complex_element_ops.len(),
             1,
             "newer per-element edit survives"
+        );
+    }
+
+    /// Schema with a non-frozen complex column `tags` (`list<text>`).
+    fn complex_column_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "tags".to_string(),
+                data_type: "list<text>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    /// Issue #887: a row-tombstone mutation that ALSO carries a complex-deletion
+    /// marker whose `marked_for_delete_at` STRICTLY exceeds the row-tombstone time
+    /// must NOT have that marker shadowed out of `merge_row_group`. The row tombstone
+    /// covers only `timestamp <= row_del`; the marker covers `(row_del, mfda]` — so
+    /// it must survive into the written row alongside the row deletion.
+    #[test]
+    fn merge_row_group_keeps_strictly_newer_complex_deletion_on_row_tombstone() {
+        let schema = complex_column_schema();
+        const ROW_DEL: i64 = 100;
+        const MFDA: i64 = 300; // strictly greater than ROW_DEL
+
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::DeleteRow,
+                CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: MFDA,
+                    local_deletion_time: 1_700_000_000,
+                },
+            ],
+            ROW_DEL,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("a row tombstone + surviving complex deletion must produce a row");
+
+        assert!(
+            row.row_deletion.is_some(),
+            "the row tombstone must be preserved"
+        );
+        assert_eq!(row.row_deletion.map(|(ts, _)| ts), Some(ROW_DEL));
+
+        let kept_marker = row.complex_element_ops.iter().any(|mop| {
+            matches!(
+                mop.op,
+                CellOperation::ComplexDeletion {
+                    column,
+                    marked_for_delete_at,
+                    ..
+                } if column == "tags" && *marked_for_delete_at == MFDA
+            )
+        });
+        assert!(
+            kept_marker,
+            "the strictly-newer (mfda > row_del) complex deletion marker must survive \
+             into the written row (else (row_del, mfda] elements resurrect)"
+        );
+    }
+
+    /// Issue #887: a row-tombstone mutation that ALSO carries a per-element
+    /// `WriteComplexElement` whose OWN `timestamp_micros` STRICTLY exceeds the
+    /// row-tombstone time must NOT have that element shadowed out. Per-element writes
+    /// carry INDEPENDENT timestamps; the row tombstone covers only `timestamp <=
+    /// row_del`, so a live element with `elem_ts > row_del` survives.
+    #[test]
+    fn merge_row_group_keeps_strictly_newer_complex_element_on_row_tombstone() {
+        let schema = complex_column_schema();
+        const ROW_DEL: i64 = 100;
+        const SHADOWED_ELEM_TS: i64 = 100; // <= ROW_DEL: fully shadowed, dropped
+        const LIVE_ELEM_TS: i64 = 300; // > ROW_DEL: must survive
+
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::DeleteRow,
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: vec![0u8; 16],
+                    value: Some(Value::Text("shadowed".to_string())),
+                    timestamp_micros: SHADOWED_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: vec![1u8; 16],
+                    value: Some(Value::Text("live".to_string())),
+                    timestamp_micros: LIVE_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+            ],
+            ROW_DEL,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("a row tombstone + surviving complex element must produce a row");
+
+        assert!(
+            row.row_deletion.is_some(),
+            "the row tombstone must be preserved"
+        );
+        assert_eq!(row.row_deletion.map(|(ts, _)| ts), Some(ROW_DEL));
+
+        let kept: Vec<i64> = row
+            .complex_element_ops
+            .iter()
+            .filter_map(|mop| match mop.op {
+                CellOperation::WriteComplexElement {
+                    timestamp_micros, ..
+                } => Some(*timestamp_micros),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            vec![LIVE_ELEM_TS],
+            "the element whose OWN timestamp ({LIVE_ELEM_TS}) strictly exceeds row_del \
+             ({ROW_DEL}) must survive while the boundary element ({SHADOWED_ELEM_TS}) \
+             stays shadowed"
+        );
+    }
+
+    /// Issue #887, complement: a complex-deletion marker FULLY COVERED by the row
+    /// tombstone (`mfda <= row_del`) is shadowed out — redundant with the row
+    /// tombstone. Mirrors the strict boundary (`equal` does NOT survive).
+    #[test]
+    fn merge_row_group_drops_fully_covered_complex_deletion_on_row_tombstone() {
+        let schema = complex_column_schema();
+        const ROW_DEL: i64 = 300;
+
+        for covered_mfda in [ROW_DEL - 100, ROW_DEL] {
+            let mutation = Mutation::new(
+                TableId::new("test_ks", "test_table"),
+                PartitionKey::single("id", Value::Integer(1)),
+                None,
+                vec![
+                    CellOperation::DeleteRow,
+                    CellOperation::ComplexDeletion {
+                        column: "tags".to_string(),
+                        marked_for_delete_at: covered_mfda,
+                        local_deletion_time: 1_700_000_000,
+                    },
+                ],
+                ROW_DEL,
+                None,
+            );
+
+            let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+                .expect("the row tombstone alone still produces a row");
+            assert!(row.row_deletion.is_some());
+            assert!(
+                row.complex_element_ops.is_empty(),
+                "a marker with mfda ({covered_mfda}) <= row_del ({ROW_DEL}) is fully \
+                 covered by the row tombstone and must be dropped"
+            );
+        }
+    }
+
+    /// Issue #921 (roborev HIGH): the `deletion_ts` shadow boundary for per-element
+    /// complex writes must apply on the NORMAL (non-shadowed) merge path too, not only
+    /// the row-tombstone rescue path. Here a partition/range tombstone supplies
+    /// `deletion_ts` via `shadow_floor`, but the carrying mutation's row timestamp is
+    /// ABOVE the floor, so it is NOT classified shadowed (takes the normal path). A
+    /// `WriteComplexElement` whose OWN `timestamp_micros <= deletion_ts` must still be
+    /// DROPPED (it is covered by the partition/range tombstone and would otherwise
+    /// resurrect once that tombstone is purged); an element with `ts > deletion_ts` in
+    /// the SAME mutation must survive. Boundary: `> deletion_ts` survives, `<=` shadowed
+    /// (equal-ts tombstone wins, #498) — identical to the rescue path.
+    #[test]
+    fn merge_row_group_shadows_complex_element_on_normal_path_by_floor() {
+        let schema = complex_column_schema();
+        const FLOOR: i64 = 200; // partition/range tombstone deletion_ts
+        const MUTATION_ROW_TS: i64 = 500; // > FLOOR => NORMAL path (not shadowed)
+        const COVERED_ELEM_TS: i64 = 200; // == FLOOR: covered, must drop (equal-ts loses)
+        const BELOW_ELEM_TS: i64 = 150; // < FLOOR: covered, must drop
+        const LIVE_ELEM_TS: i64 = 350; // > FLOOR: survives
+
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: vec![0u8; 16],
+                    value: Some(Value::Text("covered-eq".to_string())),
+                    timestamp_micros: COVERED_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: vec![1u8; 16],
+                    value: Some(Value::Text("covered-below".to_string())),
+                    timestamp_micros: BELOW_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: vec![2u8; 16],
+                    value: Some(Value::Text("live".to_string())),
+                    timestamp_micros: LIVE_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+            ],
+            MUTATION_ROW_TS,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, Some(FLOOR))
+            .expect("a surviving live element must still produce a row");
+
+        let kept: Vec<i64> = row
+            .complex_element_ops
+            .iter()
+            .filter_map(|mop| match mop.op {
+                CellOperation::WriteComplexElement {
+                    timestamp_micros, ..
+                } => Some(*timestamp_micros),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            kept,
+            vec![LIVE_ELEM_TS],
+            "on the NORMAL path (mutation row ts {MUTATION_ROW_TS} > floor {FLOOR}), \
+             elements at ts <= floor ({COVERED_ELEM_TS}, {BELOW_ELEM_TS}) must be \
+             shadowed by the partition/range tombstone; only ts > floor \
+             ({LIVE_ELEM_TS}) survives"
+        );
+        assert_eq!(
+            row.liveness_ts,
+            Some(LIVE_ELEM_TS),
+            "row liveness comes only from the surviving live element"
+        );
+    }
+
+    /// Issue #921 (roborev MEDIUM): the `deletion_ts` shadow boundary for complex
+    /// DELETION markers must apply on the NORMAL merge path too. A partition/range
+    /// tombstone supplies `deletion_ts` via `shadow_floor`; the carrying mutation's row
+    /// timestamp is ABOVE the floor (normal path). A `ComplexDeletion` whose own
+    /// `marked_for_delete_at <= deletion_ts` is FULLY COVERED and must be DROPPED
+    /// (redundant dead marker); one with `mfda > deletion_ts` must be retained.
+    /// Boundary matches the rescue path exactly (`equal` is shadowed).
+    #[test]
+    fn merge_row_group_drops_covered_complex_deletion_on_normal_path_by_floor() {
+        let schema = complex_column_schema();
+        const FLOOR: i64 = 300; // partition/range tombstone deletion_ts
+        const MUTATION_ROW_TS: i64 = 700; // > FLOOR => NORMAL path
+
+        // Covered markers (mfda <= floor) must be dropped on the normal path.
+        for covered_mfda in [FLOOR - 100, FLOOR] {
+            let mutation = Mutation::new(
+                TableId::new("test_ks", "test_table"),
+                PartitionKey::single("id", Value::Integer(1)),
+                None,
+                vec![CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: covered_mfda,
+                    local_deletion_time: 1_700_000_000,
+                }],
+                MUTATION_ROW_TS,
+                None,
+            );
+            let row = DataWriter::merge_row_group(&[&mutation], &schema, false, Some(FLOOR));
+            assert!(
+                row.is_none_or(|r| r.complex_element_ops.is_empty()),
+                "on the NORMAL path (row ts {MUTATION_ROW_TS} > floor {FLOOR}), a marker \
+                 with mfda ({covered_mfda}) <= floor is fully covered and must be dropped"
+            );
+        }
+
+        // A marker strictly above the floor must be retained on the normal path.
+        const LIVE_MFDA: i64 = 500; // > FLOOR
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::ComplexDeletion {
+                column: "tags".to_string(),
+                marked_for_delete_at: LIVE_MFDA,
+                local_deletion_time: 1_700_000_000,
+            }],
+            MUTATION_ROW_TS,
+            None,
+        );
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, Some(FLOOR))
+            .expect("a strictly-newer marker must produce a row");
+        assert!(
+            row.complex_element_ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::ComplexDeletion { column, marked_for_delete_at, .. }
+                    if column == "tags" && *marked_for_delete_at == LIVE_MFDA
+            )),
+            "a marker with mfda ({LIVE_MFDA}) > floor ({FLOOR}) must survive on the \
+             normal path"
+        );
+    }
+
+    /// Issue #887: SHADOW-BEFORE-PURGE in the direct writer merge path — the analogue
+    /// of `reconcile_cluster` Step 2b. A surviving `ComplexDeletion(col, mfda)` marker
+    /// must shadow every `WriteComplexElement` of THE SAME COLUMN whose own
+    /// `timestamp_micros <= mfda`, while elements with `ts > mfda` survive. This MUST
+    /// hold on BOTH the NORMAL path and the SHADOWED (row-tombstone) rescue path.
+    #[test]
+    fn merge_row_group_shadows_complex_element_against_surviving_marker() {
+        let schema = complex_column_schema();
+        const MFDA: i64 = 300;
+        const COVERED_ELEM_TS: i64 = 200; // <= MFDA: shadowed by the marker
+        const LIVE_ELEM_TS: i64 = 500; // > MFDA: survives
+
+        let covered_elem = || CellOperation::WriteComplexElement {
+            column: "tags".to_string(),
+            cell_path: vec![0u8; 16],
+            value: Some(Value::Text("covered".to_string())),
+            timestamp_micros: COVERED_ELEM_TS,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+        let live_elem = || CellOperation::WriteComplexElement {
+            column: "tags".to_string(),
+            cell_path: vec![1u8; 16],
+            value: Some(Value::Text("live".to_string())),
+            timestamp_micros: LIVE_ELEM_TS,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+        let marker = || CellOperation::ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: MFDA,
+            local_deletion_time: 1_700_000_000,
+        };
+
+        let assert_shadowed = |row: &RowWrite<'_>, scenario: &str| {
+            let kept_marker = row.complex_element_ops.iter().any(|mop| {
+                matches!(
+                    mop.op,
+                    CellOperation::ComplexDeletion {
+                        marked_for_delete_at,
+                        ..
+                    } if *marked_for_delete_at == MFDA
+                )
+            });
+            assert!(
+                kept_marker,
+                "{scenario}: the surviving complex-deletion marker (mfda={MFDA}) must be emitted"
+            );
+            let kept_elems: Vec<i64> = row
+                .complex_element_ops
+                .iter()
+                .filter_map(|mop| match mop.op {
+                    CellOperation::WriteComplexElement {
+                        timestamp_micros, ..
+                    } => Some(*timestamp_micros),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(
+                kept_elems,
+                vec![LIVE_ELEM_TS],
+                "{scenario}: the covered element@{COVERED_ELEM_TS} (<= mfda={MFDA}) must be \
+                 shadowed; only the live element@{LIVE_ELEM_TS} (> mfda) survives"
+            );
+        };
+
+        // --- Normal path: no row tombstone. mfda alone shadows the element. ---
+        let normal = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![marker(), covered_elem(), live_elem()],
+            COVERED_ELEM_TS,
+            None,
+        );
+        let row = DataWriter::merge_row_group(&[&normal], &schema, false, None)
+            .expect("normal path must produce a row");
+        assert!(
+            row.row_deletion.is_none(),
+            "normal path carries no row tombstone"
+        );
+        assert_shadowed(&row, "normal path");
+
+        // --- Shadowed (row-tombstone) rescue path: DeleteRow@100, mfda=300>100. ---
+        const ROW_DEL: i64 = 100;
+        let shadowed = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::DeleteRow,
+                marker(),
+                covered_elem(),
+                live_elem(),
+            ],
+            ROW_DEL,
+            None,
+        );
+        let row = DataWriter::merge_row_group(&[&shadowed], &schema, false, None)
+            .expect("shadowed path must produce a row");
+        assert_eq!(
+            row.row_deletion.map(|(ts, _)| ts),
+            Some(ROW_DEL),
+            "shadowed path preserves the row tombstone"
+        );
+        assert_shadowed(&row, "shadowed (row-tombstone) path");
+    }
+
+    /// Issue #887: when EVERY live complex element of a mutation is shadowed by a
+    /// same-column `ComplexDeletion` (every element `timestamp_micros <= mfda`), and
+    /// there is NO other live contributor, the row must NOT carry a LIVE row timestamp
+    /// — it is a marker-only / deletion row. Liveness from OTHER sources (a surviving
+    /// element or a simple-cell `Write`) must still keep the row live.
+    #[test]
+    fn merge_row_group_drops_liveness_when_all_complex_elements_shadowed() {
+        let schema = complex_column_schema();
+        const MFDA: i64 = 300;
+        const SHADOWED_ELEM_TS: i64 = 200; // <= MFDA: shadowed by the marker
+        const LIVE_ELEM_TS: i64 = 500; // > MFDA: survives
+
+        let marker = || CellOperation::ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: MFDA,
+            local_deletion_time: 1_700_000_000,
+        };
+        let shadowed_elem = || CellOperation::WriteComplexElement {
+            column: "tags".to_string(),
+            cell_path: vec![0u8; 16],
+            value: Some(Value::Text("shadowed".to_string())),
+            timestamp_micros: SHADOWED_ELEM_TS,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+        let live_elem = || CellOperation::WriteComplexElement {
+            column: "tags".to_string(),
+            cell_path: vec![1u8; 16],
+            value: Some(Value::Text("live".to_string())),
+            timestamp_micros: LIVE_ELEM_TS,
+            ttl_seconds: None,
+            local_deletion_time: None,
+            is_deleted: false,
+        };
+
+        // --- Case 1: marker + ONLY shadowed element, no other live contributor. ---
+        let all_shadowed = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![marker(), shadowed_elem()],
+            SHADOWED_ELEM_TS,
+            None,
+        );
+        let row = DataWriter::merge_row_group(&[&all_shadowed], &schema, false, None)
+            .expect("the surviving marker alone still produces a row");
+        assert!(
+            row.complex_element_ops
+                .iter()
+                .all(|mop| !matches!(mop.op, CellOperation::WriteComplexElement { .. })),
+            "the shadowed element must be purged; only the marker survives"
+        );
+        assert_eq!(
+            row.liveness_ts, None,
+            "a marker-only row carries NO liveness (shadowed element must not leak one)"
+        );
+
+        // --- Case 2: a SURVIVING element (ts > mfda) keeps the row live. ---
+        let one_survives = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![marker(), shadowed_elem(), live_elem()],
+            LIVE_ELEM_TS,
+            None,
+        );
+        let row = DataWriter::merge_row_group(&[&one_survives], &schema, false, None)
+            .expect("a surviving element must produce a row");
+        assert_eq!(
+            row.liveness_ts,
+            Some(LIVE_ELEM_TS),
+            "a surviving element (ts {LIVE_ELEM_TS} > mfda {MFDA}) must keep the row live"
+        );
+
+        // --- Case 3: an explicit simple-cell Write is an independent live source. ---
+        let mut simple_schema = complex_column_schema();
+        simple_schema.columns.push(Column {
+            name: "v".to_string(),
+            data_type: "text".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+        let with_simple_write = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: MFDA,
+                    local_deletion_time: 1_700_000_000,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: vec![0u8; 16],
+                    value: Some(Value::Text("shadowed".to_string())),
+                    timestamp_micros: SHADOWED_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+                CellOperation::Write {
+                    column: "v".to_string(),
+                    value: Value::Text("alive".to_string()),
+                },
+            ],
+            SHADOWED_ELEM_TS,
+            None,
+        );
+        let row = DataWriter::merge_row_group(&[&with_simple_write], &simple_schema, false, None)
+            .expect("a simple write must produce a row");
+        assert_eq!(
+            row.liveness_ts,
+            Some(SHADOWED_ELEM_TS),
+            "a simple-cell Write is an independent live source and must keep the row live \
+             even when every complex element is shadowed"
+        );
+    }
+
+    /// Schema with TWO non-frozen complex columns (`tags` and `notes`, both
+    /// `list<text>`) for mixed-stream / multi-column reconcile tests (issue #921).
+    fn two_complex_column_schema() -> TableSchema {
+        let mut schema = complex_column_schema();
+        schema.columns.push(Column {
+            name: "notes".to_string(),
+            data_type: "list<text>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        });
+        schema
+    }
+
+    /// Issue #921 (roborev Finding 1): in the #927 mixed-stream reconcile a column
+    /// may carry BOTH a whole-column write and a per-element edit. The reconcile
+    /// compares the whole op's timestamp to the per-element stream's MAX timestamp.
+    /// That max must be the element's OWN `timestamp_micros`, NOT the enclosing
+    /// mutation's row timestamp. Here a per-element edit's own timestamp is NEWER
+    /// than a whole-column write, but its enclosing mutation's row timestamp is
+    /// OLDER. The element must still WIN (be retained, whole op dropped).
+    #[test]
+    fn merge_row_group_element_own_ts_wins_mixed_stream_over_older_row_ts() {
+        let schema = complex_column_schema();
+        // Whole-column write at ts 500.
+        const WHOLE_TS: i64 = 500;
+        // Per-element edit: OWN element ts 900 (newer than the whole op) but its
+        // enclosing mutation carries an OLDER row timestamp of 100.
+        const ELEM_OWN_TS: i64 = 900;
+        const MUTATION_ROW_TS: i64 = 100;
+
+        let whole = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "tags".to_string(),
+                value: Value::Text("whole".to_string()),
+            }],
+            WHOLE_TS,
+            None,
+        );
+        let per_elem = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::WriteComplexElement {
+                column: "tags".to_string(),
+                cell_path: vec![0u8; 16],
+                value: Some(Value::Text("new-elem".to_string())),
+                timestamp_micros: ELEM_OWN_TS,
+                ttl_seconds: None,
+                local_deletion_time: None,
+                is_deleted: false,
+            }],
+            MUTATION_ROW_TS,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&whole, &per_elem], &schema, false, None)
+            .expect("mixed stream must produce a row");
+
+        // The element's OWN ts (900) exceeds the whole-column write (500), so the
+        // per-element stream wins regardless of the older enclosing row ts (100).
+        assert!(
+            !row.ops
+                .iter()
+                .any(|m| merged_op_column(m.op) == Some("tags")),
+            "the whole-column write must lose: the per-element edit's OWN timestamp \
+             ({ELEM_OWN_TS}) exceeds it ({WHOLE_TS}), even though its mutation row \
+             timestamp ({MUTATION_ROW_TS}) is older"
+        );
+        assert_eq!(
+            row.complex_element_ops.len(),
+            1,
+            "the newer per-element edit (own ts {ELEM_OWN_TS}) must be retained"
+        );
+        assert!(
+            row.complex_element_ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::WriteComplexElement { column, timestamp_micros, .. }
+                    if column == "tags" && *timestamp_micros == ELEM_OWN_TS
+            )),
+            "the surviving element must be the newer per-element edit"
+        );
+    }
+
+    /// Issue #921 (roborev, ComplexDeletion analogue of element-own-ts-wins): a
+    /// `ComplexDeletion(col, mfda)` carried by an OLDER metadata/tombstone mutation
+    /// (row ts 100) must NOT be shadowed by a whole-column write/delete (ts 500)
+    /// whose timestamp is below the marker's `marked_for_delete_at` (900). The #927
+    /// mixed-stream reconcile compares `MergedOp.timestamp_micros`; the marker must
+    /// carry its OWN mfda there so the per-element/marker stream WINS, retaining the
+    /// collection tombstone (otherwise covered elements survive/resurrect). Covers
+    /// the NORMAL (non-shadowed) merge path.
+    #[test]
+    fn merge_row_group_complex_deletion_mfda_wins_mixed_stream_over_older_row_ts() {
+        let schema = complex_column_schema();
+        // Whole-column write to `tags` at ts 500.
+        const WHOLE_TS: i64 = 500;
+        // ComplexDeletion marker: OWN mfda 900 (newer than the whole op) but carried
+        // by a mutation whose row timestamp is an OLDER 100.
+        const MARKER_MFDA: i64 = 900;
+        const MUTATION_ROW_TS: i64 = 100;
+        const MARKER_LDT: i32 = 1_700_000_000;
+
+        let whole = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "tags".to_string(),
+                value: Value::Text("whole".to_string()),
+            }],
+            WHOLE_TS,
+            None,
+        );
+        let marker = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::ComplexDeletion {
+                column: "tags".to_string(),
+                marked_for_delete_at: MARKER_MFDA,
+                local_deletion_time: MARKER_LDT,
+            }],
+            MUTATION_ROW_TS,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&whole, &marker], &schema, false, None)
+            .expect("mixed stream must produce a row");
+
+        // The marker's OWN mfda (900) exceeds the whole-column write (500), so the
+        // marker stream wins regardless of the older enclosing row ts (100).
+        assert!(
+            !row.ops
+                .iter()
+                .any(|m| merged_op_column(m.op) == Some("tags")),
+            "the whole-column write must lose: the ComplexDeletion's OWN mfda \
+             ({MARKER_MFDA}) exceeds it ({WHOLE_TS}), even though its mutation row \
+             timestamp ({MUTATION_ROW_TS}) is older"
+        );
+        // The collection tombstone must be retained with its UNCHANGED mfda/ldt bytes.
+        assert!(
+            row.complex_element_ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::ComplexDeletion {
+                    column,
+                    marked_for_delete_at,
+                    local_deletion_time,
+                } if column == "tags"
+                    && *marked_for_delete_at == MARKER_MFDA
+                    && *local_deletion_time == MARKER_LDT
+            )),
+            "the ComplexDeletion marker must survive with its emitted mfda/ldt unchanged"
+        );
+    }
+
+    /// Issue #921 (roborev, ComplexDeletion analogue, SHADOWED rescue path): the same
+    /// independence on the row-tombstone rescue path. A row tombstone at ts 100 carries
+    /// a `ComplexDeletion(col, mfda=900)`; a separate whole-column write to `col` at
+    /// ts 500 must NOT shadow the marker via the #927 reconcile, because the marker
+    /// carries its OWN mfda (900) as the comparison timestamp. The marker survives the
+    /// row tombstone (mfda > row_del) AND wins the mixed-stream reconcile.
+    #[test]
+    fn merge_row_group_complex_deletion_mfda_wins_mixed_stream_shadowed_path() {
+        let schema = complex_column_schema();
+        const ROW_DEL: i64 = 100;
+        const WHOLE_TS: i64 = 500;
+        const MARKER_MFDA: i64 = 900;
+        const MARKER_LDT: i32 = 1_700_000_000;
+
+        // Row-tombstone mutation (ts == ROW_DEL) that ALSO carries the marker. Its row
+        // timestamp is shadowed by its own deletion, exercising the rescue path.
+        let mut tombstone = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::ComplexDeletion {
+                column: "tags".to_string(),
+                marked_for_delete_at: MARKER_MFDA,
+                local_deletion_time: MARKER_LDT,
+            }],
+            ROW_DEL,
+            None,
+        );
+        tombstone.operations.push(CellOperation::DeleteRow);
+
+        // A separate whole-column write at ts 500 (> row_del, < mfda).
+        let whole = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "tags".to_string(),
+                value: Value::Text("whole".to_string()),
+            }],
+            WHOLE_TS,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&tombstone, &whole], &schema, false, None)
+            .expect("row tombstone + surviving marker must produce a row");
+
+        assert!(
+            !row.ops
+                .iter()
+                .any(|m| merged_op_column(m.op) == Some("tags")),
+            "the whole-column write must lose on the shadowed path too: the marker's \
+             OWN mfda ({MARKER_MFDA}) exceeds the whole op ts ({WHOLE_TS})"
+        );
+        assert!(
+            row.complex_element_ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::ComplexDeletion {
+                    column,
+                    marked_for_delete_at,
+                    local_deletion_time,
+                } if column == "tags"
+                    && *marked_for_delete_at == MARKER_MFDA
+                    && *local_deletion_time == MARKER_LDT
+            )),
+            "the rescued ComplexDeletion marker must survive the #927 reconcile with \
+             its emitted mfda/ldt unchanged"
+        );
+    }
+
+    /// Issue #921 (roborev Finding 2): a winning whole-column `Delete` for column A
+    /// drops A's per-element ops via the #927 mixed-stream reconcile. The deferred
+    /// complex-element liveness fold must NOT then let A's dropped (live) element
+    /// keep the row alive — even though another complex column B keeps
+    /// `complex_element_ops` non-empty (so the fold runs). The result is a
+    /// deletion-only column A: no liveness leaks from it.
+    #[test]
+    fn merge_row_group_no_liveness_from_element_dropped_by_whole_column_delete() {
+        let schema = two_complex_column_schema();
+        // Column A (`tags`): a live per-element write at ts 300, shadowed by a NEWER
+        // whole-column Delete at ts 500 (delete wins the #927 reconcile, drops A's
+        // element). A contributes NO liveness.
+        const A_ELEM_TS: i64 = 300;
+        const A_DELETE_TS: i64 = 500;
+        // Column B (`notes`): an unrelated whole-column Delete keeps the row a
+        // deletion (B's per-element stream is empty; B does not contribute either).
+        // Crucially, column B keeps a per-element op so `complex_element_ops` is
+        // non-empty and the liveness fold executes.
+        const B_ELEM_TS: i64 = 200; // shadowed by B's own marker below
+        const B_MFDA: i64 = 400; // > B_ELEM_TS: B's element is fully shadowed too
+
+        let a_elem = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::WriteComplexElement {
+                column: "tags".to_string(),
+                cell_path: vec![0u8; 16],
+                value: Some(Value::Text("a-live".to_string())),
+                timestamp_micros: A_ELEM_TS,
+                ttl_seconds: None,
+                local_deletion_time: None,
+                is_deleted: false,
+            }],
+            A_ELEM_TS,
+            None,
+        );
+        let a_delete = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Delete {
+                column: "tags".to_string(),
+            }],
+            A_DELETE_TS,
+            None,
+        );
+        // Column B: a marker + a fully-shadowed element so B keeps a per-element op
+        // (the surviving marker) without contributing any liveness of its own.
+        let b_marker_and_elem = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::ComplexDeletion {
+                    column: "notes".to_string(),
+                    marked_for_delete_at: B_MFDA,
+                    local_deletion_time: 1_700_000_000,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "notes".to_string(),
+                    cell_path: vec![1u8; 16],
+                    value: Some(Value::Text("b-shadowed".to_string())),
+                    timestamp_micros: B_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+            ],
+            B_ELEM_TS,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(
+            &[&a_elem, &a_delete, &b_marker_and_elem],
+            &schema,
+            false,
+            None,
+        )
+        .expect("the surviving deletes/marker still produce a row");
+
+        // Column A's element was dropped by the winning whole-column Delete; no
+        // liveness must leak from it. Column B contributes none either. The row is a
+        // deletion-only row.
+        assert_eq!(
+            row.liveness_ts, None,
+            "a live element of column A dropped by a winning whole-column Delete must \
+             NOT keep the row live (Finding 2)"
+        );
+        // Sanity: A's element op did not survive; the whole-column Delete did.
+        assert!(
+            !row.complex_element_ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::WriteComplexElement { column, .. } if column == "tags"
+            )),
+            "column A's per-element write must be dropped by the winning whole-column Delete"
+        );
+        assert!(
+            row.ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::Delete { column } if column == "tags"
+            )),
+            "column A's whole-column Delete must survive"
+        );
+    }
+
+    /// Issue #921 (roborev High): a winning whole-column LIVE `Write` for column A
+    /// drops A's per-element ops via the #927 mixed-stream reconcile. The OLD
+    /// candidate-list + exclusion-set fold only excluded columns whose stream was
+    /// dropped by a NON-live (Delete) winner, so a dropped LIVE element could still
+    /// fold liveness — and it folded the ENCLOSING MUTATION's row timestamp, which
+    /// can be NEWER than the surviving write even though the dropped element's OWN
+    /// timestamp is OLDER. The row would then carry a liveness timestamp from an
+    /// element that no longer exists. After the fix, complex-element liveness is
+    /// derived from the FINAL surviving `complex_element_ops`, so a dropped element
+    /// contributes nothing and the row's liveness comes only from the surviving LIVE
+    /// whole-column write.
+    #[test]
+    fn merge_row_group_no_liveness_from_element_dropped_by_whole_column_live_write() {
+        let schema = two_complex_column_schema();
+        // Column A (`tags`): a live per-element write whose OWN timestamp (300) is
+        // OLDER than the winning whole-column Write (500), but whose ENCLOSING
+        // mutation carries a NEWER row timestamp (1000). The whole-column Write wins
+        // the #927 reconcile (500 >= elem_max 300) and drops A's element.
+        const A_ELEM_TS: i64 = 300;
+        const A_WRITE_TS: i64 = 500;
+        const A_ELEM_MUTATION_ROW_TS: i64 = 1000; // > A_WRITE_TS: the trap for the old fold
+                                                  // Column B (`notes`): a marker + fully-shadowed element so B keeps a
+                                                  // per-element op (the surviving marker) and `complex_element_ops` is
+                                                  // non-empty, exercising the liveness derivation. B contributes no liveness.
+        const B_ELEM_TS: i64 = 200;
+        const B_MFDA: i64 = 400; // > B_ELEM_TS: B's element is fully shadowed
+
+        let a_elem = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::WriteComplexElement {
+                column: "tags".to_string(),
+                cell_path: vec![0u8; 16],
+                value: Some(Value::Text("a-live".to_string())),
+                timestamp_micros: A_ELEM_TS,
+                ttl_seconds: None,
+                local_deletion_time: None,
+                is_deleted: false,
+            }],
+            A_ELEM_MUTATION_ROW_TS,
+            None,
+        );
+        let a_write = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "tags".to_string(),
+                value: Value::Text("a-whole".to_string()),
+            }],
+            A_WRITE_TS,
+            None,
+        );
+        let b_marker_and_elem = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::ComplexDeletion {
+                    column: "notes".to_string(),
+                    marked_for_delete_at: B_MFDA,
+                    local_deletion_time: 1_700_000_000,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "notes".to_string(),
+                    cell_path: vec![1u8; 16],
+                    value: Some(Value::Text("b-shadowed".to_string())),
+                    timestamp_micros: B_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+            ],
+            B_ELEM_TS,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(
+            &[&a_elem, &a_write, &b_marker_and_elem],
+            &schema,
+            false,
+            None,
+        )
+        .expect("the surviving write/marker still produce a row");
+
+        // A's per-element write was dropped by the winning whole-column LIVE Write;
+        // its OWN timestamp (300) no longer exists in the output, so the only live
+        // source is the surviving whole-column Write at 500. Liveness must be 500 —
+        // NOT the dropped element's enclosing mutation row ts (1000), which the OLD
+        // fold would have leaked.
+        assert_eq!(
+            row.liveness_ts,
+            Some(A_WRITE_TS),
+            "liveness must come from the surviving whole-column Write ({A_WRITE_TS}), \
+             not the dropped per-element write's enclosing mutation row ts \
+             ({A_ELEM_MUTATION_ROW_TS})"
+        );
+        // Sanity: A's element op did not survive; the whole-column Write did.
+        assert!(
+            !row.complex_element_ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::WriteComplexElement { column, .. } if column == "tags"
+            )),
+            "column A's per-element write must be dropped by the winning whole-column Write"
+        );
+        assert!(
+            row.ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::Write { column, .. } if column == "tags"
+            )),
+            "column A's whole-column Write must survive"
+        );
+    }
+
+    /// Issue #921 (roborev HIGH — symmetric counterpart to the per-element liveness
+    /// fix): a live WHOLE-COLUMN `Write` that LOSES the #927 mixed-stream reconcile to
+    /// a newer same-column complex stream must NOT leak row liveness. Here
+    /// `Write(tags)@500` competes with `ComplexDeletion(tags, mfda=900)`. The complex
+    /// marker stream wins (900 >= whole-column 500), so the whole-column Write is
+    /// DROPPED from `ops`, and the marker is a deletion (no live element) — there is
+    /// NO surviving live cell for `tags`. The row therefore carries NO liveness.
+    ///
+    /// RED before the fix: whole-column liveness was folded INLINE at 500 during the
+    /// per-mutation loop, before reconcile decided the write loses, so the row emitted
+    /// a phantom live timestamp@500. GREEN after: liveness is derived from the FINAL
+    /// surviving `ops`, which no longer contain the dropped write.
+    #[test]
+    fn merge_row_group_no_liveness_when_whole_column_write_loses_to_complex_marker() {
+        let schema = complex_column_schema();
+        const WRITE_TS: i64 = 500;
+        const MFDA: i64 = 900; // > WRITE_TS: the complex marker stream wins
+
+        let write = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "tags".to_string(),
+                value: Value::Text("whole".to_string()),
+            }],
+            WRITE_TS,
+            None,
+        );
+        let marker = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::ComplexDeletion {
+                column: "tags".to_string(),
+                marked_for_delete_at: MFDA,
+                local_deletion_time: 1_700_000_000,
+            }],
+            MFDA,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&write, &marker], &schema, false, None)
+            .expect("the surviving complex-deletion marker still produces a row");
+
+        // The whole-column Write lost the reconcile and was dropped; the only
+        // surviving op is the deletion marker (no live cell). No phantom liveness.
+        assert_eq!(
+            row.liveness_ts, None,
+            "a whole-column Write dropped by a winning complex marker must NOT leak \
+             row liveness (no surviving live cell)"
+        );
+        assert!(
+            !row.ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::Write { column, .. } if column == "tags"
+            )),
+            "the whole-column Write must be dropped by the winning complex stream"
+        );
+        assert!(
+            row.complex_element_ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::ComplexDeletion { column, .. } if column == "tags"
+            )),
+            "the complex-deletion marker must survive"
+        );
+    }
+
+    /// Issue #921: a surviving whole-column `Write` with NO competing complex winner
+    /// still sets row liveness at its own timestamp — the common case must be
+    /// unaffected by deriving liveness from final survivors.
+    #[test]
+    fn merge_row_group_surviving_whole_column_write_sets_liveness() {
+        let schema = create_test_schema();
+        const WRITE_TS: i64 = 700;
+
+        let write = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "name".to_string(),
+                value: Value::Text("alive".to_string()),
+            }],
+            WRITE_TS,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&write], &schema, false, None)
+            .expect("a live whole-column write produces a row");
+
+        assert_eq!(
+            row.liveness_ts,
+            Some(WRITE_TS),
+            "a surviving whole-column write must set row liveness at its own timestamp"
+        );
+        assert!(
+            row.ops.iter().any(|mop| matches!(
+                mop.op,
+                CellOperation::Write { column, .. } if column == "name"
+            )),
+            "the whole-column write must survive into ops"
+        );
+    }
+
+    /// Issue #921: a pure primary-key insert (no ops, no tombstone payload) still
+    /// sets row liveness — the cell-less liveness source must be preserved when
+    /// whole-column liveness moves to a post-reconcile derivation.
+    #[test]
+    fn merge_row_group_pure_pk_insert_still_sets_liveness() {
+        let schema = create_test_schema();
+        const INSERT_TS: i64 = 1234;
+
+        let insert = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![],
+            INSERT_TS,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&insert], &schema, false, None)
+            .expect("a pure primary-key insert produces a live row with no cells");
+
+        assert_eq!(
+            row.liveness_ts,
+            Some(INSERT_TS),
+            "a pure primary-key insert must keep its liveness timestamp"
+        );
+        assert!(
+            row.ops.is_empty(),
+            "a pure primary-key insert produces no cells"
+        );
+    }
+
+    /// Issue #887: the all-shadowed case on the SHADOWED (row-tombstone) rescue path.
+    /// A row tombstone produces a row, but its surviving complex elements (rescue
+    /// path) deliberately contribute no liveness — so an all-shadowed complex column
+    /// must leave the row a pure tombstone (no LIVE timestamp).
+    #[test]
+    fn merge_row_group_row_tombstone_all_complex_shadowed_carries_no_liveness() {
+        let schema = complex_column_schema();
+        const ROW_DEL: i64 = 100;
+        const MFDA: i64 = 300; // > ROW_DEL so the marker survives the row tombstone
+        const COVERED_ELEM_TS: i64 = 250; // > ROW_DEL but <= MFDA: rescued then shadowed
+
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::DeleteRow,
+                CellOperation::ComplexDeletion {
+                    column: "tags".to_string(),
+                    marked_for_delete_at: MFDA,
+                    local_deletion_time: 1_700_000_000,
+                },
+                CellOperation::WriteComplexElement {
+                    column: "tags".to_string(),
+                    cell_path: vec![0u8; 16],
+                    value: Some(Value::Text("covered".to_string())),
+                    timestamp_micros: COVERED_ELEM_TS,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+            ],
+            ROW_DEL,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("a row tombstone + surviving marker must produce a row");
+        assert_eq!(
+            row.row_deletion.map(|(ts, _)| ts),
+            Some(ROW_DEL),
+            "the row tombstone is preserved"
+        );
+        assert!(
+            row.complex_element_ops
+                .iter()
+                .all(|mop| !matches!(mop.op, CellOperation::WriteComplexElement { .. })),
+            "the element@{COVERED_ELEM_TS} (<= mfda {MFDA}) is shadowed out; only the marker survives"
+        );
+        assert_eq!(
+            row.liveness_ts, None,
+            "a row-tombstone row whose complex elements are all shadowed must NOT carry \
+             a LIVE row timestamp"
         );
     }
 }

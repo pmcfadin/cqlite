@@ -951,9 +951,10 @@ impl SSTableRowIteratorAdapter {
     ///
     /// The real per-column complex deletion (`markedForDeleteAt` +
     /// `localDeletionTime`) is surfaced on `complex_deletions` so the writer
-    /// emits a REAL deletion marker (replacing the LIVE sentinel). Applying that
-    /// marker to SHADOW covered elements (strict-supersede, gc) is deferred to
-    /// #887/#845 — Phase C carries and emits the marker but does not shadow.
+    /// emits a REAL deletion marker (replacing the LIVE sentinel). `reconcile_cluster`
+    /// reduces these to the strict-superseding (max-mfda) deletion per column NAME
+    /// and SHADOWS covered elements (ts <= mfda) before purge (issue #887). gc_grace
+    /// purging of the surviving marker remains future work (#845).
     ///
     /// [`ComplexElement`]: crate::storage::sstable::reader::compaction_row::ComplexElement
     /// [`CellOperation::WriteComplexElement`]: crate::storage::write_engine::mutation::CellOperation::WriteComplexElement
@@ -1903,16 +1904,12 @@ impl KWayMerger {
         let mut order: Vec<CellKey> = Vec::new();
         let mut winners: HashMap<CellKey, CellData> = HashMap::new();
 
-        // Carried complex deletions (epic #899 substrate). PHASE A IS
-        // BEHAVIOR-NEUTRAL: we POPULATE `complex_deletions` (the foundation the
-        // writer will consume in Phase C) but reconcile MUST NOT act on them —
-        // no element shadowing, no strict-supersede filtering. Acting on them now
-        // would drop collection tombstones / element survivors and change the
-        // emitted bytes vs pre-Phase-A (roborev #863, Finding 2). The shadowing
-        // rule + writing the complex-deletion marker is deferred to Phase C
-        // (where the writer consumes it and differential parity verifies it).
-        // Accumulate as the pre-Phase-A simple union: first-seen order,
-        // de-duplicated.
+        // Carried complex deletions (epic #899 substrate). Accumulate the inputs'
+        // markers as a first-seen, de-duplicated union here; the strict-supersede
+        // reduction (one max-mfda deletion per column NAME) and shadow-before-purge
+        // (dropping covered elements) run in Step 2b AFTER per-cell winner resolution
+        // and BEFORE the row-tombstone / dropped-column filters (issue #887, parity
+        // Cassandra `bd244649` + `f66fa14f`).
         let mut complex_deletions: Vec<ComplexDeletion> = Vec::new();
         let mut range_deletion: Option<RangeTombstone> = None;
 
@@ -1980,6 +1977,80 @@ impl KWayMerger {
 
         let key = key?; // empty group => nothing to emit
 
+        // Step 2b: COMPLEX-DELETION reconcile — strict-supersede + shadow-before-purge
+        // (issue #887). This runs AFTER per-cell winner resolution and BEFORE the
+        // row-tombstone / dropped-column filters, so an element shadowed by a
+        // surviving complex deletion cannot be resurrected by a later purge of the
+        // deletion marker.
+        //
+        // 1. STRICT SUPERSEDE (parity Cassandra `bd244649`): per complex column the
+        //    ACTIVE deletion is the one with the greatest `marked_for_delete_at`. A
+        //    merged deletion supersedes the active one only when its mfda is STRICTLY
+        //    GREATER — EQUAL timestamps do NOT supersede. Reduce the carried
+        //    first-seen union to ONE deletion per column NAME (the strict max),
+        //    preserving first-seen column order for deterministic output. Matched BY
+        //    NAME (`ComplexDeletion.column`), never by header identity (consistent
+        //    with #888's match-by-name substrate).
+        //
+        // 2. SHADOW BEFORE PURGE (parity Cassandra `f66fa14f`): for the surviving
+        //    deletion on a column, drop every per-element winner of THAT column
+        //    (matched by NAME, only complex ELEMENTS carrying a `cell_path`) whose own
+        //    timestamp is `<= marked_for_delete_at`. The boundary mirrors the
+        //    cell-vs-deletion rule (#498): an element with ts STRICTLY GREATER than
+        //    mfda survives; `<=` is shadowed. A simple cell sharing the name is never
+        //    collapsed by a complex marker.
+        if !complex_deletions.is_empty() {
+            // Strict-supersede: collapse to the max-mfda deletion per column name.
+            let mut active: HashMap<String, ComplexDeletion> = HashMap::new();
+            let mut active_order: Vec<String> = Vec::new();
+            for cd in complex_deletions.drain(..) {
+                match active.get_mut(&cd.column) {
+                    None => {
+                        active_order.push(cd.column.clone());
+                        active.insert(cd.column.clone(), cd);
+                    }
+                    // STRICTLY GREATER supersedes; equal/lesser does NOT (bd244649).
+                    Some(existing) if cd.marked_for_delete_at > existing.marked_for_delete_at => {
+                        *existing = cd;
+                    }
+                    Some(_) => {}
+                }
+            }
+
+            // Shadow-before-purge: drop covered per-element winners of each column
+            // whose ts <= mfda (matched by NAME), so purging the marker later cannot
+            // resurrect them (f66fa14f). Elements strictly newer than mfda survive.
+            for column in &active_order {
+                if let Some(cd) = active.get(column) {
+                    let mfda = cd.marked_for_delete_at;
+                    order.retain(|cell_key| {
+                        let (cell_column, cell_path) = cell_key;
+                        // Only complex elements (those with a cell_path) of THIS
+                        // column are candidates for shadowing.
+                        if cell_column != column || cell_path.is_none() {
+                            return true;
+                        }
+                        match winners.get(cell_key) {
+                            // ts > mfda survives; ts <= mfda is shadowed (purged).
+                            Some(cell) if cell.timestamp > mfda => true,
+                            Some(_) => {
+                                winners.remove(cell_key);
+                                false
+                            }
+                            None => false,
+                        }
+                    });
+                }
+            }
+
+            // Rebuild the carried union as the surviving per-column deletions in
+            // first-seen column order.
+            complex_deletions = active_order
+                .into_iter()
+                .filter_map(|column| active.remove(&column))
+                .collect();
+        }
+
         // Step 3: apply row-tombstone shadowing per cell. A cell whose timestamp is
         // <= row_del is shadowed (`<=` lets the tombstone win at equal ts, #498).
         // Cells written strictly after row_del survive. This shadowing applies to
@@ -1988,13 +2059,10 @@ impl KWayMerger {
         // the `reference_merge` model, whose range-tombstone path only suppresses
         // live cells — `reconcile_cluster` is the authoritative behavior here.
         //
-        // PHASE A NEUTRALITY (roborev #863, Finding 2): row-tombstone shadowing is
-        // pre-existing and unchanged. COMPLEX-DELETION shadowing (dropping elements
-        // covered by a collection `markedForDeleteAt`) is INTENTIONALLY NOT applied
-        // here — it is deferred to Phase C alongside writing the complex-deletion
-        // marker. Applying it now would filter shadowed/metadata-only elements out
-        // before the writer runs, dropping collection tombstones and risking data
-        // resurrection, and would diverge from pre-Phase-A output bytes.
+        // COMPLEX-DELETION shadowing (dropping elements covered by a collection
+        // `markedForDeleteAt`) has already been applied in Step 2b above, BEFORE this
+        // row-tombstone filter, so a surviving complex deletion cannot resurrect a
+        // covered element on a later purge (issue #887, parity `f66fa14f`).
         //
         // Step 3b: dropped-column filtering (Cassandra `cb34ad47`,
         // `compaction.purge`). A column dropped at `drop_time` discards every cell
@@ -2231,6 +2299,16 @@ impl KWayMerger {
             _ => None,
         };
 
+        // Capture the row tombstone's deletion time (`row_del`) BEFORE moving
+        // `row_data` into `operations`. A row tombstone shadows only cells/markers
+        // whose timestamp is `<= row_del`; a complex-deletion marker whose
+        // `marked_for_delete_at` is STRICTLY GREATER than `row_del` covers a range
+        // the row tombstone does NOT, and must still be emitted (see below).
+        let row_del = match &entry.row_data {
+            RowData::Tombstone { deletion_time, .. } => Some(*deletion_time),
+            RowData::Live { .. } => None,
+        };
+
         let mut operations = match entry.row_data {
             RowData::Live { cells } => Self::cells_to_cell_operations(cells),
             RowData::Tombstone { .. } => vec![CellOperation::DeleteRow],
@@ -2239,13 +2317,27 @@ impl KWayMerger {
         // Epic #899 Phase C: emit a REAL per-column complex deletion marker for
         // each carried `ComplexDeletion`, replacing the writer's hardcoded LIVE
         // sentinel. The writer pairs this with the column's surviving per-element
-        // cells (WriteComplexElement ops above). Only meaningful for a live row;
-        // a row tombstone already covers the whole row. Applying the marker to
-        // SHADOW covered elements (strict-supersede / gc purge) is deferred to
-        // #887 / #845 — Phase C carries and emits the marker faithfully but does
-        // not shadow (see merge module / reconcile_cluster docs).
-        if !matches!(operations.as_slice(), [CellOperation::DeleteRow]) {
-            for cd in entry.complex_deletions {
+        // cells (WriteComplexElement ops above). `reconcile_cluster` has already
+        // applied strict-supersede + shadow-before-purge to this carried deletion
+        // (issue #887), so the marker emitted here is the surviving (max-mfda)
+        // deletion and the paired elements are only the survivors. gc_grace purging
+        // of the surviving marker remains future work (#845).
+        //
+        // Issue #887: for a row that reduces to a ROW TOMBSTONE we must NOT
+        // unconditionally drop carried complex-deletion markers. A row tombstone at
+        // `row_del` shadows only `timestamp <= row_del`. A carried marker whose
+        // `marked_for_delete_at` is STRICTLY GREATER than `row_del` covers elements
+        // in `(row_del, mfda]` — including elements living in OTHER SSTables not part
+        // of this compaction. Dropping such a marker would let those elements be
+        // RESURRECTED. So we emit any marker that strictly supersedes the row
+        // tombstone (`mfda > row_del`) alongside the `DeleteRow`, mirroring #887's
+        // strict boundary. A marker with `mfda <= row_del` is fully covered by the
+        // row tombstone and is dropped. For a live row (`row_del == None`) every
+        // carried marker is emitted as before.
+        for cd in entry.complex_deletions {
+            let strictly_supersedes_row_tombstone =
+                row_del.is_none_or(|rd| cd.marked_for_delete_at > rd);
+            if strictly_supersedes_row_tombstone {
                 operations.push(CellOperation::ComplexDeletion {
                     column: cd.column,
                     marked_for_delete_at: cd.marked_for_delete_at,
@@ -5944,14 +6036,13 @@ mod issue_899_per_element_merge {
         assert_eq!(paths, vec![vec![0xAA], vec![0xBB]]);
     }
 
-    /// PHASE A NEUTRALITY (roborev #863, Finding 2): a complex deletion is
-    /// CARRIED on the MergeEntry but reconcile does NOT act on it — it does NOT
-    /// shadow elements written at or before its `markedForDeleteAt`. Both
-    /// elements survive in Phase A; the complex-deletion marker rides along on
-    /// `MergeEntry.complex_deletions` for Phase C, where the writer consumes it
-    /// (shadowing + marker emit) under differential parity.
+    /// ISSUE #887 (parity f66fa14f): a surviving complex deletion SHADOWS the
+    /// elements it covers BEFORE the marker is purged. An element whose timestamp
+    /// is `<= markedForDeleteAt` is shadowed; an element strictly newer survives.
+    /// The marker still rides along on `MergeEntry.complex_deletions` so the writer
+    /// can emit it (and the per-element survivors) faithfully.
     #[test]
-    fn complex_deletion_is_carried_but_does_not_shadow_in_phase_a() {
+    fn complex_deletion_shadows_covered_elements_before_purge() {
         let old_el = MergeEntry::new(
             1,
             dk(1),
@@ -5965,7 +6056,7 @@ mod issue_899_per_element_merge {
                     ttl: None,
                     cell_path: Some(vec![0x01]),
                     local_deletion_time: None,
-                    is_complex_element: false,
+                    is_complex_element: true,
                     is_deleted: false,
                     has_empty_value: false,
                 }],
@@ -5984,7 +6075,7 @@ mod issue_899_per_element_merge {
                     ttl: None,
                     cell_path: Some(vec![0x02]),
                     local_deletion_time: None,
-                    is_complex_element: false,
+                    is_complex_element: true,
                     is_deleted: false,
                     has_empty_value: false,
                 }],
@@ -6003,7 +6094,7 @@ mod issue_899_per_element_merge {
         )
         .expect("a live row must be emitted");
 
-        // The complex deletion is carried (foundation for Phase C)...
+        // The complex deletion is carried so the writer can emit the marker...
         assert_eq!(
             merged.complex_deletions,
             vec![ComplexDeletion {
@@ -6014,22 +6105,483 @@ mod issue_899_per_element_merge {
             "complex deletion is carried on the MergeEntry"
         );
 
-        // ...but reconcile does NOT shadow on it: both elements survive in Phase A.
+        // ...and reconcile shadows the covered element (ts 100 <= mfda 200) BEFORE
+        // purge: only the strictly-newer element (ts 300 > mfda 200) survives.
         let cells = match merged.row_data {
             RowData::Live { cells } => cells,
             other => panic!("expected Live, got {other:?}"),
         };
         assert_eq!(
             cells.len(),
-            2,
-            "Phase A does NOT apply complex-deletion shadowing (deferred to Phase C)"
+            1,
+            "the covered element (ts<=mfda) is shadowed before purge (#887 f66fa14f)"
         );
-        let mut paths: Vec<Vec<u8>> = cells
+        assert_eq!(
+            cells[0].cell_path.as_deref(),
+            Some([0x02].as_slice()),
+            "the strictly-newer element (ts>mfda) survives"
+        );
+    }
+
+    /// ACCEPTANCE #887 (1) — parity bd244649: when two SSTables carry complex
+    /// deletions on the SAME column at EQUAL `markedForDeleteAt`, the merged
+    /// deletion does NOT supersede the active one (only STRICTLY-greater
+    /// supersedes). At equal mfda the boundary is still `<=`, so an element at
+    /// exactly `mfda` is shadowed, but an element strictly newer survives — proving
+    /// the equal-ts deletions did not collapse into a stronger one.
+    #[test]
+    fn complex_deletion_equal_timestamps_do_not_supersede() {
+        let covered = MergeEntry::new(
+            1,
+            dk(1),
+            None,
+            200,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "tags".to_string(),
+                    value: Value::Text("at-mfda".to_string()),
+                    timestamp: 200,
+                    ttl: None,
+                    cell_path: Some(vec![0x01]),
+                    local_deletion_time: None,
+                    is_complex_element: true,
+                    is_deleted: false,
+                    has_empty_value: false,
+                }],
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: 200,
+            local_deletion_time: 1_700_000_100,
+        }]);
+        let survivor = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            300,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "tags".to_string(),
+                    value: Value::Text("after".to_string()),
+                    timestamp: 300,
+                    ttl: None,
+                    cell_path: Some(vec![0x02]),
+                    local_deletion_time: None,
+                    is_complex_element: true,
+                    is_deleted: false,
+                    has_empty_value: false,
+                }],
+            },
+        )
+        // SAME column, EQUAL marked_for_delete_at — must NOT supersede the active.
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: 200,
+            local_deletion_time: 1_700_000_000,
+        }]);
+
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![survivor, covered],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("a live row must be emitted");
+
+        // The deletion at mfda=200 survives (one carried marker for `tags`)...
+        let tags_dels: Vec<&ComplexDeletion> = merged
+            .complex_deletions
             .iter()
-            .map(|c| c.cell_path.clone().expect("cell_path"))
+            .filter(|d| d.column == "tags")
             .collect();
-        paths.sort();
-        assert_eq!(paths, vec![vec![0x01], vec![0x02]]);
+        assert_eq!(
+            tags_dels.len(),
+            1,
+            "the union keeps one complex deletion for the column"
+        );
+        assert_eq!(
+            tags_dels[0].marked_for_delete_at, 200,
+            "equal-ts deletions do not produce a stronger mfda (bd244649)"
+        );
+
+        // ...the strictly-newer element (ts 300 > 200) survives; the at-mfda element
+        // (ts 200 <= 200) is shadowed.
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {other:?}"),
+        };
+        assert_eq!(
+            cells.len(),
+            1,
+            "only the strictly-newer element survives the active deletion"
+        );
+        assert_eq!(
+            cells[0].cell_path.as_deref(),
+            Some([0x02].as_slice()),
+            "ts>mfda element survives; equal-ts deletions did not shadow it"
+        );
+    }
+
+    /// ACCEPTANCE #887 (2) — parity bd244649 + f66fa14f: a STRICTLY-superseding
+    /// complex deletion shadows every covered element (ts <= mfda) BEFORE the marker
+    /// is purged, so a later purge cannot resurrect them. An element with ts STRICTLY
+    /// GREATER than the surviving mfda MUST survive.
+    #[test]
+    fn complex_deletion_strict_supersede_shadows_before_purge() {
+        // Older source: weaker deletion (mfda 100) + element at ts 50 (covered by
+        // the strong deletion below) + element at ts 500 (survives everything).
+        let weak = MergeEntry::new(
+            1,
+            dk(1),
+            None,
+            500,
+            RowData::Live {
+                cells: vec![
+                    CellData {
+                        column: "tags".to_string(),
+                        value: Value::Text("ancient".to_string()),
+                        timestamp: 50,
+                        ttl: None,
+                        cell_path: Some(vec![0x01]),
+                        local_deletion_time: None,
+                        is_complex_element: true,
+                        is_deleted: false,
+                        has_empty_value: false,
+                    },
+                    CellData {
+                        column: "tags".to_string(),
+                        value: Value::Text("survivor".to_string()),
+                        timestamp: 500,
+                        ttl: None,
+                        cell_path: Some(vec![0x03]),
+                        local_deletion_time: None,
+                        is_complex_element: true,
+                        is_deleted: false,
+                        has_empty_value: false,
+                    },
+                ],
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: 100,
+            local_deletion_time: 1_700_000_000,
+        }]);
+        // Newer source: STRONG deletion (mfda 300, strictly > 100) + element at ts
+        // 300 (== strong mfda → covered).
+        let strong = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            300,
+            RowData::Live {
+                cells: vec![CellData {
+                    column: "tags".to_string(),
+                    value: Value::Text("covered".to_string()),
+                    timestamp: 300,
+                    ttl: None,
+                    cell_path: Some(vec![0x02]),
+                    local_deletion_time: None,
+                    is_complex_element: true,
+                    is_deleted: false,
+                    has_empty_value: false,
+                }],
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: 300,
+            local_deletion_time: 1_700_000_200,
+        }]);
+
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![strong, weak],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("a live row must be emitted");
+
+        // The strong deletion (mfda 300) strictly supersedes the weak one (100).
+        let tags_dels: Vec<&ComplexDeletion> = merged
+            .complex_deletions
+            .iter()
+            .filter(|d| d.column == "tags")
+            .collect();
+        assert_eq!(
+            tags_dels.len(),
+            1,
+            "one surviving complex deletion for tags"
+        );
+        assert_eq!(
+            tags_dels[0].marked_for_delete_at, 300,
+            "the strictly-greater mfda supersedes (bd244649)"
+        );
+
+        // Covered elements (ts 50 and ts 300, both <= 300) are shadowed BEFORE purge;
+        // only the ts 500 element (strictly > 300) survives (f66fa14f).
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {other:?}"),
+        };
+        assert_eq!(
+            cells.len(),
+            1,
+            "all elements with ts<=mfda are shadowed before purge (no resurrection)"
+        );
+        assert_eq!(
+            cells[0].cell_path.as_deref(),
+            Some([0x03].as_slice()),
+            "the strictly-newer element (ts>mfda) survives"
+        );
+        assert_eq!(cells[0].timestamp, 500);
+    }
+
+    /// ISSUE #887: a row that reduces to a ROW TOMBSTONE at `row_del = T_low` must
+    /// STILL emit any carried complex-deletion marker whose `marked_for_delete_at =
+    /// T_high` is STRICTLY GREATER than `row_del`.
+    ///
+    /// A row tombstone shadows only `timestamp <= row_del`. A complex deletion at
+    /// `mfda = T_high > T_low` covers elements in `(T_low, T_high]` — including
+    /// elements that live in OTHER SSTables NOT part of this compaction. If the
+    /// marker is dropped, those elements would be RESURRECTED. So the emitted
+    /// mutation must carry BOTH the `DeleteRow` AND the `ComplexDeletion{T_high}`.
+    #[test]
+    fn row_tombstone_keeps_strictly_newer_complex_deletion_marker() {
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use crate::storage::write_engine::mutation::CellOperation;
+        use std::collections::HashMap;
+
+        const T_LOW: i64 = 100; // row tombstone (row_del)
+        const T_HIGH: i64 = 300; // complex deletion mfda (strictly > row_del)
+
+        // Source A (newest, run 0): a ROW TOMBSTONE at T_low.
+        let row_tomb = MergeEntry::new(
+            0,
+            dk(1),
+            None,
+            T_LOW,
+            RowData::Tombstone {
+                deletion_time: T_LOW,
+                local_deletion_time: 0,
+            },
+        );
+
+        // Source B (older, run 1): carries the STRONGER complex deletion (mfda
+        // T_high > row_del) plus three elements (shadowed-by-row, shadowed-by-complex,
+        // survivor).
+        let carrier = MergeEntry::new(
+            1,
+            dk(1),
+            None,
+            T_HIGH + 200,
+            RowData::Live {
+                cells: vec![
+                    CellData {
+                        column: "tags".to_string(),
+                        value: Value::Text("shadowed_by_row".to_string()),
+                        timestamp: T_LOW,
+                        ttl: None,
+                        cell_path: Some(vec![0x01]),
+                        local_deletion_time: None,
+                        is_complex_element: true,
+                        is_deleted: false,
+                        has_empty_value: false,
+                    },
+                    CellData {
+                        column: "tags".to_string(),
+                        value: Value::Text("shadowed_by_complex".to_string()),
+                        timestamp: T_HIGH,
+                        ttl: None,
+                        cell_path: Some(vec![0x02]),
+                        local_deletion_time: None,
+                        is_complex_element: true,
+                        is_deleted: false,
+                        has_empty_value: false,
+                    },
+                    CellData {
+                        column: "tags".to_string(),
+                        value: Value::Text("survivor".to_string()),
+                        timestamp: T_HIGH + 200,
+                        ttl: None,
+                        cell_path: Some(vec![0x03]),
+                        local_deletion_time: None,
+                        is_complex_element: true,
+                        is_deleted: false,
+                        has_empty_value: false,
+                    },
+                ],
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: T_HIGH,
+            local_deletion_time: 1_700_000_000,
+        }]);
+
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![row_tomb, carrier],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("a row must be emitted (it carries a row tombstone + survivor)");
+
+        // The strictly-newer element (ts T_high+200) survives both deletions; the
+        // ts<=T_low and T_low<ts<=T_high elements are shadowed BEFORE purge.
+        let cells = match &merged.row_data {
+            RowData::Live { cells } => cells.clone(),
+            other => panic!("expected Live (survivor present), got {other:?}"),
+        };
+        assert_eq!(
+            cells.len(),
+            1,
+            "only the element with ts > T_high survives the complex deletion"
+        );
+        assert_eq!(cells[0].cell_path.as_deref(), Some([0x03].as_slice()));
+        assert_eq!(cells[0].timestamp, T_HIGH + 200);
+
+        // The strictly-newer complex deletion marker is preserved on the merge entry.
+        let tags_dels: Vec<&ComplexDeletion> = merged
+            .complex_deletions
+            .iter()
+            .filter(|d| d.column == "tags")
+            .collect();
+        assert_eq!(tags_dels.len(), 1, "the T_high complex deletion is carried");
+        assert_eq!(tags_dels[0].marked_for_delete_at, T_HIGH);
+
+        // Schema with a non-frozen complex column `tags`.
+        let schema = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "t".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "tags".to_string(),
+                data_type: "list<text>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        };
+
+        // The crux: `merge_entry_to_mutation` MUST emit BOTH a `DeleteRow` AND the
+        // strictly-newer `ComplexDeletion` (mfda = T_high). `merge_entry_to_mutation`
+        // decodes the partition key against the schema's `int` PK, so the key must be
+        // a 4-byte big-endian int.
+        let int_pk = DecoratedKey::new(1, 1i32.to_be_bytes().to_vec());
+        let tomb_entry = MergeEntry::new(
+            0,
+            int_pk,
+            None,
+            T_LOW,
+            RowData::Tombstone {
+                deletion_time: T_LOW,
+                local_deletion_time: 0,
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "tags".to_string(),
+            marked_for_delete_at: T_HIGH,
+            local_deletion_time: 1_700_000_000,
+        }]);
+
+        let mutation = KWayMerger::merge_entry_to_mutation(tomb_entry, &schema)
+            .expect("conversion should succeed");
+
+        let has_delete_row = mutation
+            .operations
+            .iter()
+            .any(|op| matches!(op, CellOperation::DeleteRow));
+        assert!(has_delete_row, "the row tombstone must still be emitted");
+
+        let strictly_newer_marker = mutation.operations.iter().any(|op| {
+            matches!(
+                op,
+                CellOperation::ComplexDeletion {
+                    column,
+                    marked_for_delete_at,
+                    ..
+                } if column == "tags" && *marked_for_delete_at == T_HIGH
+            )
+        });
+        assert!(
+            strictly_newer_marker,
+            "the strictly-newer (mfda > row_del) complex deletion marker must be \
+             emitted alongside the row tombstone (else (row_del, mfda] resurrects)"
+        );
+    }
+
+    /// ISSUE #887, complement: a carried complex-deletion marker that is FULLY
+    /// COVERED by the row tombstone (`mfda <= row_del`) IS dropped — the row
+    /// tombstone already shadows its entire range. Mirrors #887's strict boundary
+    /// (equal does not supersede).
+    #[test]
+    fn row_tombstone_drops_fully_covered_complex_deletion_marker() {
+        use crate::schema::{Column, KeyColumn, TableSchema};
+        use crate::storage::write_engine::mutation::CellOperation;
+        use std::collections::HashMap;
+
+        const ROW_DEL: i64 = 300;
+
+        let schema = TableSchema {
+            keyspace: "ks".to_string(),
+            table: "t".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![Column {
+                name: "tags".to_string(),
+                data_type: "list<text>".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        };
+
+        let int_pk = DecoratedKey::new(1, 1i32.to_be_bytes().to_vec());
+        for covered_mfda in [ROW_DEL - 100, ROW_DEL] {
+            let entry = MergeEntry::new(
+                0,
+                int_pk.clone(),
+                None,
+                ROW_DEL,
+                RowData::Tombstone {
+                    deletion_time: ROW_DEL,
+                    local_deletion_time: 0,
+                },
+            )
+            .with_complex_deletions(vec![ComplexDeletion {
+                column: "tags".to_string(),
+                marked_for_delete_at: covered_mfda,
+                local_deletion_time: 1_700_000_000,
+            }]);
+
+            let mutation = KWayMerger::merge_entry_to_mutation(entry, &schema)
+                .expect("conversion should succeed");
+
+            assert!(
+                mutation
+                    .operations
+                    .iter()
+                    .all(|op| !matches!(op, CellOperation::ComplexDeletion { .. })),
+                "a marker with mfda ({covered_mfda}) <= row_del ({ROW_DEL}) is fully \
+                 covered by the row tombstone and must be dropped (strict boundary)"
+            );
+            assert!(
+                matches!(mutation.operations.as_slice(), [CellOperation::DeleteRow]),
+                "the fully-covered case reduces to exactly [DeleteRow]"
+            );
+        }
     }
 }
 
