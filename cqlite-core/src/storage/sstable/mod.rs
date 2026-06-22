@@ -721,19 +721,8 @@ impl SSTableManager {
 
         let table_name = table_id.name();
 
-        // Try exact (qualified) lookup first, then fall back to unqualified name.
-        let reader_list = if let Some(list) = table_readers.get(table_name) {
-            list
-        } else {
-            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
-                &table_name[dot_pos + 1..]
-            } else {
-                table_name
-            };
-            match table_readers.get(unqualified_name) {
-                Some(list) => list,
-                None => return Ok(None),
-            }
+        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+            return Ok(None);
         };
 
         // Return the first value found across all SSTables for this table
@@ -845,27 +834,7 @@ impl SSTableManager {
 
         let table_name = table_id.name();
 
-        // Try exact (qualified) lookup first, then fall back to unqualified name.
-        // This ensures that same-named tables in different keyspaces are correctly
-        // distinguished (Issue #680).
-        let readers = if table_readers.contains_key(table_name) {
-            log::debug!(
-                "SSTableManager::scan - Found readers via qualified name '{}'",
-                table_name
-            );
-            table_readers.get(table_name)
-        } else {
-            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
-                &table_name[dot_pos + 1..]
-            } else {
-                table_name
-            };
-            log::debug!(
-                "SSTableManager::scan - Falling back to unqualified name '{}'",
-                unqualified_name
-            );
-            table_readers.get(unqualified_name)
-        };
+        let readers = Self::resolve_reader_list(&table_readers, table_name);
 
         if let Some(reader_list) = readers {
             log::debug!(
@@ -959,6 +928,162 @@ impl SSTableManager {
             );
             Ok(Vec::new())
         }
+    }
+
+    /// Partition-targeted scan: return only the rows for a single partition key,
+    /// touching only the SSTables whose bloom filter / BTI trie admit the key.
+    ///
+    /// This is the storage-layer fast path for a fully-constrained `WHERE pk = ?`
+    /// (Issue #949). Rather than scanning every SSTable for the table and filtering
+    /// in memory, it prunes the reader set with
+    /// [`might_contain_partition`](reader::SSTableReader::might_contain_partition)
+    /// — an O(1) bloom check for BIG format, an O(log n) trie walk for BTI — and
+    /// only parses the surviving candidates. On a table backed by thousands of
+    /// SSTables, a single-partition read drops from "open and scan all of them" to
+    /// "scan only the handful that can hold the key".
+    ///
+    /// Output matches filtering the full [`scan`](Self::scan) result down to
+    /// `partition_key`: the same per-reader parse and the same cross-generation
+    /// reconciliation run, just over the pruned candidate set. Concretely, with
+    /// more than one candidate generation this drives the authoritative k-way
+    /// merge (write-support, schema present); the single-candidate and concat
+    /// fallbacks behave exactly as the corresponding `scan` paths do — including
+    /// sharing `scan`'s known multi-generation concat limitation (Issue #883) when
+    /// the merge is unavailable. The caller still applies its own predicate
+    /// evaluation, so any over-inclusion (e.g. a BTI prefix-collision candidate) is
+    /// filtered out downstream.
+    ///
+    /// Gated on `not(tombstones)` to match the `scan` variant it parallels: the
+    /// `tombstones` build uses a structurally different reader map, so the method
+    /// is defined only for the default build (the executor falls back to a full
+    /// scan under `tombstones`).
+    ///
+    /// `partition_key` is the raw on-disk partition-key bytes produced by
+    /// [`encode_partition_key_columns`](crate::storage::partition_key_codec::encode_partition_key_columns),
+    /// which match the bytes the bloom filter, Index.db/BTI trie, and scan RowKeys
+    /// are keyed on.
+    ///
+    /// Note: within a surviving SSTable this still performs a full parse (then keeps
+    /// only the matching partition). Seeking directly to the partition's Data.db
+    /// offset via Index.db/BTI for the single-candidate case is a follow-up; the
+    /// dominant win for the "thousands of SSTables" scenario is the cross-SSTable
+    /// pruning above.
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        let table_readers = self.table_readers.read().await;
+        let table_name = table_id.name();
+
+        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+            return Ok(Vec::new());
+        };
+
+        // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
+        let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
+            .iter()
+            .filter(|r| r.might_contain_partition(partition_key))
+            .cloned()
+            .collect();
+
+        log::debug!(
+            "SSTableManager::scan_partition - {}/{} SSTables admit partition key (len={}) for '{}'",
+            candidates.len(),
+            reader_list.len(),
+            partition_key.len(),
+            table_id
+        );
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let matches_key = |entry: &(RowKey, Value)| entry.0.as_bytes() == partition_key;
+
+        // Multiple candidate generations may hold the same partition; reconcile
+        // with the same authoritative k-way merge the full scan uses (write-support
+        // only), then keep just this partition's rows.
+        #[cfg(feature = "write-support")]
+        if candidates.len() > 1 {
+            if let Some(schema) = schema {
+                match self
+                    .merge_generations_for_read(&candidates, schema, None)
+                    .await
+                {
+                    Ok(mut merged) => {
+                        merged.retain(matches_key);
+                        return Ok(merged);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "SSTableManager::scan_partition - cross-generation merge failed for \
+                             '{}' ({}); falling back to per-reader concatenation",
+                            table_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Single candidate (the common case), or the concat fallback: parse each
+        // candidate and keep only the target partition's rows.
+        let mut all_results = Vec::new();
+        for reader in &candidates {
+            let mut results = reader.scan(table_id, None, None, None, schema).await?;
+            results.retain(matches_key);
+            all_results.extend(results);
+        }
+        // A single candidate's rows already come back in on-disk key order; only
+        // concatenating more than one candidate needs a re-sort to merge them.
+        if candidates.len() > 1 {
+            all_results.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        Ok(all_results)
+    }
+
+    /// `tombstones`-build counterpart of [`scan_partition`](Self::scan_partition).
+    ///
+    /// That build uses a structurally different reader map and has no bloom-prune
+    /// `scan_partition` path, so a fully-constrained `WHERE pk = ?` is served by
+    /// scanning and filtering to the partition key. The output is a subset of
+    /// [`scan`](Self::scan) — identical to what the `not(tombstones)`
+    /// `scan_partition` returns — which keeps the query executor free of any
+    /// `tombstones` cfg branching.
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_partition(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        let mut rows = self.scan(table_id, None, None, None, schema).await?;
+        rows.retain(|entry| entry.0.as_bytes() == partition_key);
+        Ok(rows)
+    }
+
+    /// Resolve the reader list for a table id, trying the fully-qualified
+    /// `keyspace.table` name first and falling back to the bare table name, so
+    /// same-named tables in different keyspaces stay distinct (Issue #680).
+    ///
+    /// Shared by [`get`](Self::get), [`scan`](Self::scan), and
+    /// [`scan_partition`](Self::scan_partition) so the resolution rule lives in
+    /// one place and the targeted-lookup path can never drift from `scan`.
+    #[cfg(not(feature = "tombstones"))]
+    fn resolve_reader_list<'a>(
+        table_readers: &'a HashMap<String, Vec<Arc<reader::SSTableReader>>>,
+        table_name: &str,
+    ) -> Option<&'a Vec<Arc<reader::SSTableReader>>> {
+        if let Some(list) = table_readers.get(table_name) {
+            return Some(list);
+        }
+        let unqualified = table_name
+            .rfind('.')
+            .map_or(table_name, |dot| &table_name[dot + 1..]);
+        table_readers.get(unqualified)
     }
 
     /// Reconcile multiple SSTable generations of one table into the single

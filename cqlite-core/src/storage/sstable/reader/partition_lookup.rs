@@ -144,6 +144,38 @@ impl SSTableReader {
         }
     }
 
+    /// Cheap presence oracle: can this SSTable possibly contain `partition_key`?
+    ///
+    /// Used to prune SSTables before a partition-targeted scan (the query engine's
+    /// `WHERE pk = ?` fast path). Returning `false` MUST be definitive — the SSTable
+    /// is then skipped entirely without being parsed — so this only ever returns
+    /// `false` for an authoritative "absent" signal:
+    ///
+    /// - **BTI ("da")** readers have no bloom filter; the Partitions.db trie is the
+    ///   authoritative present/absent oracle. A trie miss (`Ok(None)`) is definitive
+    ///   absence. A trie hit may be a prefix-collision candidate, which is a safe
+    ///   *false positive* here (the partition scan re-verifies the key). Any trie
+    ///   parse error is treated conservatively as "maybe present".
+    /// - **BIG-format** readers consult the bloom filter, which never reports false
+    ///   negatives: `might_contain == false` is definitive absence. With no bloom
+    ///   filter loaded we cannot prune, so we conservatively return `true`.
+    ///
+    /// `partition_key` must be the raw partition-key bytes (same encoding the bloom
+    /// filter and Index.db/BTI trie are keyed on).
+    pub fn might_contain_partition(&self, partition_key: &[u8]) -> bool {
+        if self.bti_partitions_db.is_some() {
+            // BTI: trie miss is authoritative absence; any error is conservative.
+            return matches!(
+                self.lookup_partition_via_bti_trie(partition_key),
+                Ok(Some(_)) | Err(_)
+            );
+        }
+        match &self.bloom_filter {
+            Some(bloom) => bloom.might_contain(partition_key),
+            None => true,
+        }
+    }
+
     /// Enhanced partition lookup using schema-driven key digest computation
     pub async fn lookup_partition_with_schema_context(
         &self,
