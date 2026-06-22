@@ -70,7 +70,11 @@ jobs:
   delta-roundtrip:
     name: DS11 Reconciliation Round-Trip
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # 45 min headroom: the duckdb dev-dependency builds DuckDB (+ parquet
+    # extension) from source via the `bundled`/`parquet` features (issue #916),
+    # which compiles across the build, test, and clippy steps on a cold cargo
+    # cache. Warm-cache runs finish in ~10 min.
+    timeout-minutes: 45
 
     steps:
       - uses: actions/checkout@v4
