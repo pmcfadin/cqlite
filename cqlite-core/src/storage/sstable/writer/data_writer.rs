@@ -1489,6 +1489,22 @@ impl DataWriter {
             let ts_delta = (deletion_ts - self.stats.min_timestamp) as u64;
             encode_unsigned(ts_delta, &mut body);
 
+            // Issue #873: reject a row-tombstone LDT that is genuinely below the
+            // baseline, in normal (non-negative i32) time space — a silent
+            // `wrapping_sub` here would zero-extend the underflow into a huge u32,
+            // emit a multi-byte VInt, and corrupt the row body / row-size. A
+            // far-future LDT (negative as i32, value in [2^31, 2^32)) is a
+            // legitimate value, not corruption, so the wrapping arithmetic is
+            // intended there (matches the complex-deletion guard).
+            if local_deletion_time >= 0
+                && self.stats.min_local_deletion_time >= 0
+                && local_deletion_time < self.stats.min_local_deletion_time
+            {
+                return Err(Error::InvalidInput(format!(
+                    "Row tombstone: local deletion time {} is less than min_local_deletion_time {}",
+                    local_deletion_time, self.stats.min_local_deletion_time
+                )));
+            }
             let ldt_delta =
                 local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
             encode_unsigned(ldt_delta as u64, &mut body);
@@ -1779,6 +1795,19 @@ impl DataWriter {
             let ts_delta = (deletion_ts - self.stats.min_timestamp) as u64;
             encode_unsigned(ts_delta, &mut body);
 
+            // Issue #873: same loud guard as the single-row path — reject a
+            // below-baseline row-tombstone LDT in normal time space instead of
+            // silently wrapping the unsigned delta and corrupting the row body.
+            // A far-future LDT (negative as i32) is legitimate and kept.
+            if local_deletion_time >= 0
+                && self.stats.min_local_deletion_time >= 0
+                && local_deletion_time < self.stats.min_local_deletion_time
+            {
+                return Err(Error::InvalidInput(format!(
+                    "Row tombstone: local deletion time {} is less than min_local_deletion_time {}",
+                    local_deletion_time, self.stats.min_local_deletion_time
+                )));
+            }
             let ldt_delta =
                 local_deletion_time.wrapping_sub(self.stats.min_local_deletion_time) as u32;
             encode_unsigned(ldt_delta as u64, &mut body);
@@ -6900,6 +6929,79 @@ mod tests {
             result.is_err(),
             "LDT below baseline must be rejected to avoid VInt wrap corruption"
         );
+    }
+
+    /// Issue #873: a ROW tombstone whose explicit localDeletionTime is below the
+    /// Statistics baseline (in normal, non-negative i32 time space) must be
+    /// rejected loudly rather than silently wrapping the unsigned LDT delta into
+    /// a huge VInt — which would over-count the row body and corrupt Data.db.
+    /// This mirrors the complex-deletion guard above.
+    #[test]
+    fn test_row_tombstone_rejects_ldt_below_baseline() {
+        use crate::storage::write_engine::mutation::{
+            CellOperation, Mutation, PartitionKey, TableId,
+        };
+
+        let schema = create_test_schema();
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 0;
+        stats.min_local_deletion_time = 1_700_000_000; // baseline well above the delete's LDT
+        let mut writer = DataWriter::new(stats);
+
+        // A row tombstone (DeleteRow) whose explicit LDT (50s) is far below the
+        // baseline. `effective_local_deletion_time()` honors the explicit value.
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![CellOperation::DeleteRow],
+            1_000_000, // deletion timestamp (micros)
+            None,
+        )
+        .with_local_deletion_time(50);
+
+        let key = mutation
+            .decorated_key(&schema)
+            .expect("decorated key must build");
+        let result = writer.write_partition(&key, &[mutation], &schema, None, &[]);
+        assert!(
+            result.is_err(),
+            "a below-baseline row-tombstone LDT must be rejected to avoid VInt wrap corruption"
+        );
+    }
+
+    /// Companion to the guard test: a row tombstone with a far-future LDT in
+    /// [2^31, 2^32) (negative i32 bit pattern) is a LEGITIMATE value and must NOT
+    /// be rejected — the wrapping i32 arithmetic is intended there (#853/#873).
+    #[test]
+    fn test_row_tombstone_far_future_ldt_is_accepted() {
+        use crate::storage::write_engine::mutation::{
+            CellOperation, Mutation, PartitionKey, TableId,
+        };
+
+        let schema = create_test_schema();
+        let mut stats = create_test_stats();
+        stats.min_timestamp = 0;
+        stats.min_local_deletion_time = 0; // common DeletionTime.LIVE-derived baseline
+        let mut writer = DataWriter::new(stats);
+
+        let far_future_ldt = (1u32 << 31) as i32; // negative i32, value 2^31
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(2)),
+            None,
+            vec![CellOperation::DeleteRow],
+            1_000_000,
+            None,
+        )
+        .with_local_deletion_time(far_future_ldt);
+
+        let key = mutation
+            .decorated_key(&schema)
+            .expect("decorated key must build");
+        writer
+            .write_partition(&key, &[mutation], &schema, None, &[])
+            .expect("a far-future row-tombstone LDT must be accepted, not rejected");
     }
 
     /// Issue #853: a complex-deletion marker whose localDeletionTime lands in

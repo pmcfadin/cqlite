@@ -198,6 +198,10 @@ impl RowHeader {
         Value::Tombstone(TombstoneInfo {
             deletion_time,
             tombstone_type: TombstoneType::RowTombstone,
+            // Carry the on-disk `localDeletionTime` (GC clock, seconds) so the
+            // compaction merge→rewrite path can preserve it (#873). Absent for a
+            // non-tombstone header, hence the `0` fallback.
+            local_deletion_time: self.local_deletion_time.unwrap_or(0) as i64,
             ttl: None,
             range_start: None,
             range_end: None,
@@ -4215,6 +4219,9 @@ impl V5CompressedLegacyParser {
                 Value::Tombstone(TombstoneInfo {
                     deletion_time,
                     tombstone_type: TombstoneType::CellTombstone,
+                    // On-disk `localDeletionTime` (GC clock, seconds) for the cell
+                    // tombstone; `0` when not surfaced (#873).
+                    local_deletion_time: cell_local_deletion_time.unwrap_or(0),
                     ttl: None,
                     range_start: None,
                     range_end: None,

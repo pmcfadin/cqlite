@@ -7,6 +7,7 @@ expression: "Value::row_tombstone(1704067200000)"
   "Tombstone": {
     "deletion_time": 1704067200000,
     "tombstone_type": "RowTombstone",
+    "local_deletion_time": 0,
     "ttl": null,
     "range_start": null,
     "range_end": null

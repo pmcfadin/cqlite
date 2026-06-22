@@ -888,6 +888,7 @@ fn test_parquet_tombstone_value() {
     let tombstone = Value::Tombstone(TombstoneInfo {
         deletion_time: 1673778645,
         tombstone_type: TombstoneType::CellTombstone,
+        local_deletion_time: 0,
         ttl: None,
         range_start: None,
         range_end: None,

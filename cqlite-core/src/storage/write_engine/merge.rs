@@ -1022,6 +1022,9 @@ impl SSTableRowIteratorAdapter {
                             Value::Tombstone(crate::types::TombstoneInfo {
                                 deletion_time: elem.timestamp,
                                 tombstone_type: crate::types::TombstoneType::CellTombstone,
+                                // Element's on-disk localDeletionTime (GC clock,
+                                // seconds); `0` when not surfaced (#873).
+                                local_deletion_time: elem.local_deletion_time.unwrap_or(0) as i64,
                                 ttl: None,
                                 range_start: None,
                                 range_end: None,
@@ -1074,7 +1077,15 @@ impl SSTableRowIteratorAdapter {
         match value {
             crate::types::Value::Tombstone(info) => Ok(RowData::Tombstone {
                 deletion_time: info.deletion_time,
-                local_deletion_time: 0, // TombstoneInfo does not carry local_deletion_time
+                // #873: TombstoneInfo now carries the source localDeletionTime
+                // (GC clock, seconds). `RowData::Tombstone` stores it as i32
+                // (the on-disk width); the value fits an i32 in practice
+                // (epoch-seconds, incl. far-future negative-i32 bit patterns).
+                // NOTE: this legacy adapter is `#[cfg(test)]` only — the
+                // production compaction tombstone path is
+                // `compaction_row_data_to_row_data`, which already threads the
+                // LDT from `CompactionRowData::Tombstone`.
+                local_deletion_time: info.local_deletion_time as i32,
             }),
             crate::types::Value::Map(map_entries) => {
                 let mut cells = Vec::with_capacity(map_entries.len());
@@ -1876,7 +1887,12 @@ impl KWayMerger {
         let mut run_index = usize::MAX;
 
         // Step 1: effective row deletion — max deletion_time across row tombstones.
+        // Track the source `local_deletion_time` (GC-clock seconds) PAIRED with the
+        // winning (max) deletion_time so the rebuilt tombstone preserves its
+        // wall-clock LDT instead of re-deriving it from the deletion timestamp
+        // (#873 — gc_grace semantics + unsigned LDT-delta underflow guard).
         let mut row_del: Option<i64> = None;
+        let mut row_del_ldt: i32 = 0;
 
         // Step 2: per-cell reconcile keyed by `(column, cell_path)` so each
         // element of a multi-cell column reconciles independently (epic #899).
@@ -1922,8 +1938,17 @@ impl KWayMerger {
             }
 
             match &entry.row_data {
-                RowData::Tombstone { deletion_time, .. } => {
-                    row_del = Some(row_del.map_or(*deletion_time, |d| d.max(*deletion_time)));
+                RowData::Tombstone {
+                    deletion_time,
+                    local_deletion_time,
+                } => {
+                    // When this tombstone's deletion_time becomes (or sets) the new
+                    // max, capture its paired LDT too so the winning tombstone's
+                    // source `localDeletionTime` survives reconciliation (#873).
+                    if row_del.is_none_or(|d| *deletion_time > d) {
+                        row_del = Some(*deletion_time);
+                        row_del_ldt = *local_deletion_time;
+                    }
                 }
                 RowData::Live { cells } => {
                     for cell in cells {
@@ -2058,7 +2083,10 @@ impl KWayMerger {
                 deletion_time,
                 RowData::Tombstone {
                     deletion_time,
-                    local_deletion_time: 0,
+                    // Preserve the source LDT paired with the winning deletion_time
+                    // (#873) instead of resetting it to 0; the writer encodes it
+                    // verbatim and gc_grace decisions stay faithful.
+                    local_deletion_time: row_del_ldt,
                 },
             ))
         } else if has_carried_metadata {
@@ -2180,6 +2208,29 @@ impl KWayMerger {
         let partition_key = PartitionKey::from_bytes(&entry.key.key, schema)?;
         let table_id = TableId::new(&schema.keyspace, &schema.table);
 
+        // Capture the row tombstone's source LDT (GC-clock seconds) by borrow,
+        // before the `match` below moves `cells` out of `entry.row_data` (#873).
+        //
+        // `0` is the established "LDT not surfaced by the reader" placeholder
+        // (the legacy `CompactionRow::from_legacy_value` fallback and pre-V5 row
+        // tombstones both build `local_deletion_time: 0`), NOT an authoritative
+        // epoch-1970 deletion — a real Cassandra row tombstone always carries a
+        // nonzero wall-clock LDT. Only thread a genuinely-surfaced (nonzero) LDT;
+        // for the placeholder leave it `None` so the writer keeps deriving LDT
+        // from `entry.timestamp` exactly as before this change. Threading `0`
+        // here would both lose that fallback and trip the new below-baseline
+        // writer guard against a nonzero pre-seeded `min_local_deletion_time`,
+        // rejecting previously-valid legacy-path compactions (#873 review #946).
+        // A live row leaves it `None` so any cell tombstones keep their historical
+        // timestamp-derived behavior.
+        let row_tombstone_ldt = match &entry.row_data {
+            RowData::Tombstone {
+                local_deletion_time,
+                ..
+            } if *local_deletion_time != 0 => Some(*local_deletion_time),
+            _ => None,
+        };
+
         let mut operations = match entry.row_data {
             RowData::Live { cells } => Self::cells_to_cell_operations(cells),
             RowData::Tombstone { .. } => vec![CellOperation::DeleteRow],
@@ -2203,22 +2254,24 @@ impl KWayMerger {
             }
         }
 
-        // NOTE (follow-up #873): the rewritten row tombstone's
-        // local_deletion_time is left None here, so the writer derives it from
-        // `entry.timestamp`. The source SSTable's localDeletionTime is not yet
-        // preserved through compaction because it is dropped upstream
-        // (`value_to_row_data` builds `RowData::Tombstone { local_deletion_time: 0 }`
-        // since `TombstoneInfo` carries no LDT). Threading it end-to-end —
-        // including a guard against negative row-tombstone LDT deltas — is
-        // tracked in #873.
-        Ok(Mutation::new(
+        // Thread the row tombstone's preserved source `localDeletionTime` onto the
+        // mutation so the writer emits it verbatim (#873) rather than re-deriving
+        // it from `entry.timestamp` (`timestamp_micros / 1_000_000`). That keeps
+        // gc_grace semantics intact and avoids underflowing the unsigned
+        // row-deletion LDT delta for logical-timestamp deletes. A live row leaves
+        // the mutation LDT unset (`None`).
+        let mutation = Mutation::new(
             table_id,
             partition_key,
             entry.clustering_key,
             operations,
             entry.timestamp,
             None,
-        ))
+        );
+        Ok(match row_tombstone_ldt {
+            Some(ldt) => mutation.with_local_deletion_time(ldt),
+            None => mutation,
+        })
     }
 }
 
@@ -2869,6 +2922,7 @@ mod tests {
                     value: Value::Tombstone(TombstoneInfo {
                         deletion_time: 100,
                         tombstone_type: TombstoneType::CellTombstone,
+                        local_deletion_time: 0,
                         ttl: None,
                         range_start: None,
                         range_end: None,
@@ -5174,6 +5228,7 @@ mod issue_823_complex_column_merge {
                 value: Value::Tombstone(TombstoneInfo {
                     deletion_time: 100,
                     tombstone_type: TombstoneType::CellTombstone,
+                    local_deletion_time: 0,
                     ttl: None,
                     range_start: None,
                     range_end: None,
@@ -6264,6 +6319,7 @@ mod issue_822_merge_ordering_semantics {
                         value: Value::Tombstone(TombstoneInfo {
                             deletion_time: TS,
                             tombstone_type: TombstoneType::CellTombstone,
+                            local_deletion_time: 0,
                             ttl: None,
                             range_start: None,
                             range_end: None,
@@ -6344,6 +6400,7 @@ mod issue_822_merge_ordering_semantics {
                         value: Value::Tombstone(TombstoneInfo {
                             deletion_time: TS,
                             tombstone_type: TombstoneType::CellTombstone,
+                            local_deletion_time: 0,
                             ttl: None,
                             range_start: None,
                             range_end: None,
@@ -6563,6 +6620,7 @@ mod issue_822_merge_ordering_semantics {
             value: Value::Tombstone(TombstoneInfo {
                 deletion_time: 1,
                 tombstone_type: TombstoneType::CellTombstone,
+                local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,
@@ -7175,6 +7233,290 @@ mod issue_912_row_tombstone_clustering_identity {
                 .iter()
                 .all(|m| matches!(m.row_data, RowData::Tombstone { .. })),
             "both surviving entries must be row tombstones"
+        );
+    }
+}
+
+/// Issue #873: a row tombstone's source `localDeletionTime` (LDT, the GC clock
+/// instant in seconds) must be preserved through the compaction merge→rewrite
+/// path. Pre-#873 `reconcile_cluster` tracked only the winning `deletion_time`
+/// and rebuilt the surviving tombstone with `local_deletion_time: 0`, and
+/// `merge_entry_to_mutation` passed `None` for the mutation LDT — so the writer
+/// re-derived the LDT from the deletion *timestamp* (`timestamp_micros /
+/// 1_000_000`). That breaks gc_grace semantics and, for a pathological logical
+/// (non-wall-clock) timestamp delete, can underflow the unsigned row-deletion
+/// LDT delta in the writer and corrupt Data.db.
+#[cfg(all(test, feature = "write-support"))]
+mod issue_873_preserve_row_tombstone_ldt {
+    use super::*;
+    use crate::schema::{KeyColumn, TableSchema};
+    use crate::storage::write_engine::mutation::DecoratedKey;
+    use std::collections::HashMap;
+
+    fn unclustered_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "ks873".to_string(),
+            table: "t873".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    fn tombstone_entry(run_index: usize, deletion_time: i64, ldt: i32) -> MergeEntry {
+        MergeEntry::new(
+            run_index,
+            DecoratedKey::new(500, 7i32.to_be_bytes().to_vec()),
+            None,
+            deletion_time,
+            RowData::Tombstone {
+                deletion_time,
+                local_deletion_time: ldt,
+            },
+        )
+    }
+
+    /// `reconcile_cluster` must carry the winning tombstone's source LDT through
+    /// to the rebuilt surviving tombstone instead of hardcoding 0, and the LDT it
+    /// keeps must be the one paired with the winning (max) `deletion_time` — NOT
+    /// re-derived from that timestamp.
+    #[test]
+    fn reconcile_cluster_preserves_winning_tombstone_ldt() {
+        // deletion_time chosen so it does NOT equal LDT (which is GC-clock seconds):
+        // a logical-timestamp delete where micros and the wall-clock LDT diverge.
+        let deletion_time = 1_000_000_000_000_000i64; // micros
+        let source_ldt = 1_700_000_000i32; // seconds (wall clock)
+
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone_entry(0, deletion_time, source_ldt)],
+            &HashMap::new(),
+        )
+        .expect("a surviving row tombstone must be emitted");
+
+        match merged.row_data {
+            RowData::Tombstone {
+                deletion_time: dt,
+                local_deletion_time,
+            } => {
+                assert_eq!(dt, deletion_time, "deletion_time must survive");
+                assert_eq!(
+                    local_deletion_time, source_ldt,
+                    "the source LDT must be preserved, not reset to 0 nor derived from the timestamp"
+                );
+            }
+            other => panic!("expected Tombstone, got {:?}", other),
+        }
+    }
+
+    /// When several row tombstones reconcile, the LDT kept must pair with the
+    /// winning (max) `deletion_time`, not the max LDT and not the first-seen LDT.
+    #[test]
+    fn reconcile_cluster_keeps_ldt_paired_with_max_deletion_time() {
+        // Older delete (smaller deletion_time) but LARGER LDT; newer delete
+        // (larger deletion_time) with a SMALLER LDT. The winner is the newer
+        // delete, so its (smaller) LDT must be the one carried through.
+        let older = tombstone_entry(0, 100_000_000, 1_900_000_000);
+        let newer = tombstone_entry(1, 200_000_000, 1_500_000_000);
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![older, newer], &HashMap::new())
+            .expect("a surviving row tombstone must be emitted");
+
+        match merged.row_data {
+            RowData::Tombstone {
+                deletion_time,
+                local_deletion_time,
+            } => {
+                assert_eq!(deletion_time, 200_000_000, "the newer delete must win");
+                assert_eq!(
+                    local_deletion_time, 1_500_000_000,
+                    "the LDT carried must be the one paired with the winning deletion_time"
+                );
+            }
+            other => panic!("expected Tombstone, got {:?}", other),
+        }
+    }
+
+    /// `merge_entry_to_mutation` must thread a row tombstone's LDT onto the
+    /// produced mutation so the writer emits it verbatim instead of re-deriving it
+    /// from `timestamp_micros`. A live row keeps `local_deletion_time == None`.
+    #[test]
+    fn merge_entry_to_mutation_threads_row_tombstone_ldt() {
+        let schema = unclustered_schema();
+        let deletion_time = 1_000_000_000_000_000i64;
+        let source_ldt = 1_700_000_000i32;
+
+        let mutation = KWayMerger::merge_entry_to_mutation(
+            tombstone_entry(0, deletion_time, source_ldt),
+            &schema,
+        )
+        .expect("conversion should succeed");
+
+        assert_eq!(
+            mutation.local_deletion_time,
+            Some(source_ldt),
+            "the row tombstone's source LDT must be threaded onto the mutation"
+        );
+        assert_eq!(
+            mutation.effective_local_deletion_time(),
+            source_ldt,
+            "the writer must use the preserved LDT, not the timestamp-derived one"
+        );
+        // The timestamp-derived LDT would be deletion_time / 1_000_000 =
+        // 1_000_000_000, which must NOT be what the writer would stamp.
+        assert_ne!(
+            mutation.effective_local_deletion_time() as i64,
+            deletion_time / 1_000_000,
+            "the LDT must NOT be re-derived from the deletion timestamp"
+        );
+    }
+
+    /// A row tombstone whose LDT is the `0` "not surfaced" placeholder (the legacy
+    /// `from_legacy_value` fallback and pre-V5 row tombstones) must NOT pin an
+    /// explicit LDT — doing so would lose the writer's timestamp-derived fallback
+    /// and could trip the below-baseline guard against a nonzero pre-seeded
+    /// `min_local_deletion_time`, regressing previously-valid compactions (#946).
+    #[test]
+    fn merge_entry_to_mutation_placeholder_ldt_stays_unset() {
+        let schema = unclustered_schema();
+        let deletion_time = 1_000_000_000_000_000i64;
+
+        let mutation = KWayMerger::merge_entry_to_mutation(
+            // ldt = 0 is the reader's "no LDT surfaced" sentinel, not a real delete.
+            tombstone_entry(0, deletion_time, 0),
+            &schema,
+        )
+        .expect("conversion should succeed");
+
+        assert_eq!(
+            mutation.local_deletion_time, None,
+            "a placeholder (0) LDT must leave the mutation LDT unset so the writer \
+             keeps deriving it from the timestamp, exactly as before #873"
+        );
+    }
+
+    /// A live (non-tombstone) row must leave the mutation LDT unset so the writer
+    /// keeps its historical timestamp-derived behavior for cell tombstones.
+    #[test]
+    fn merge_entry_to_mutation_live_row_leaves_ldt_none() {
+        let schema = unclustered_schema();
+        let entry = MergeEntry::new(
+            0,
+            DecoratedKey::new(500, 7i32.to_be_bytes().to_vec()),
+            None,
+            100,
+            RowData::Live {
+                cells: vec![CellData::new(
+                    "value".to_string(),
+                    Value::Text("alive".to_string()),
+                    100,
+                )],
+            },
+        );
+
+        let mutation =
+            KWayMerger::merge_entry_to_mutation(entry, &schema).expect("conversion should succeed");
+        assert_eq!(
+            mutation.local_deletion_time, None,
+            "a live row must not pin an explicit LDT"
+        );
+    }
+
+    /// An in-memory run yielding a fixed list of `MergeEntry`s in order, so the
+    /// readback test can drive the FULL production merge→writer path
+    /// (`merge_entry_to_mutation` + `write_partition`) rather than a hand-rolled
+    /// shortcut.
+    struct VecIterator(std::vec::IntoIter<MergeEntry>);
+    impl SSTableRowIterator for VecIterator {
+        fn next(&mut self) -> Option<Result<MergeEntry>> {
+            self.0.next().map(Ok)
+        }
+    }
+
+    /// Readback regression: a row tombstone whose `deletion_time` (micros) and
+    /// `local_deletion_time` (GC-clock seconds) intentionally DIFFER must survive
+    /// a full compaction rewrite (merge → SSTableWriter → on-disk Data.db →
+    /// reader) with BOTH values intact. The reader re-surfaces the row-tombstone
+    /// `deletion_time` (markedForDeleteAt, micros) on the compaction read path;
+    /// the LDT is the on-disk `localDeletionTime` the writer must have encoded
+    /// without underflowing the unsigned delta.
+    #[tokio::test]
+    async fn row_tombstone_ldt_survives_compaction_rewrite() {
+        use crate::platform::Platform;
+        use crate::storage::sstable::reader::compaction_row::CompactionRowData;
+        use crate::Config;
+        use std::sync::Arc;
+
+        let schema = unclustered_schema();
+        let deletion_time = 1_000_000_000_000_000i64; // micros
+        let source_ldt = 1_700_000_000i32; // seconds, deliberately != deletion_time/1e6
+
+        let merger = KWayMerger {
+            runs: vec![RunReader::new(Box::new(VecIterator(
+                vec![tombstone_entry(0, deletion_time, source_ldt)].into_iter(),
+            )))],
+            heap: std::collections::BinaryHeap::new(),
+            current_partition: None,
+            gc_before_secs: None,
+            now_secs: None,
+            schema: schema.clone(),
+        };
+
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let mut writer = crate::storage::sstable::writer::SSTableWriter::new(
+            temp_dir.path().to_path_buf(),
+            1,
+            &schema,
+        )
+        .expect("create writer");
+
+        // Drives merge_partition_rows → merge_entry_to_mutation → write_partition
+        // (the production rewrite path). Must not underflow the LDT delta.
+        merger
+            .merge(&mut writer)
+            .expect("merge+write must succeed (no LDT underflow)");
+        let info = writer.finish().await.expect("finish must succeed");
+
+        // Read the row tombstone back from the on-disk SSTable and assert the LDT
+        // round-tripped (the writer encoded the preserved value, not 0 / derived).
+        let config = Config::default();
+        let platform = Arc::new(Platform::new(&config).await.expect("platform"));
+        let reader = crate::storage::sstable::reader::SSTableReader::open(
+            &info.data_path,
+            &config,
+            platform,
+        )
+        .await
+        .expect("open written SSTable");
+        let rows = reader
+            .iterate_all_partitions_for_compaction(Some(&schema))
+            .await
+            .expect("compaction iterator");
+        let mut saw_tombstone = false;
+        for row in rows {
+            if let CompactionRowData::Tombstone {
+                deletion_time: dt,
+                local_deletion_time,
+                ..
+            } = row.row_data
+            {
+                saw_tombstone = true;
+                assert_eq!(dt, deletion_time, "deletion_time must round-trip");
+                assert_eq!(
+                    local_deletion_time, source_ldt,
+                    "local_deletion_time must round-trip the preserved source value"
+                );
+            }
+        }
+        assert!(
+            saw_tombstone,
+            "the rewritten SSTable must contain the row tombstone"
         );
     }
 }

@@ -688,6 +688,7 @@ mod tests {
         let tombstone = Value::Tombstone(TombstoneInfo {
             deletion_time: 1673778645000000,
             tombstone_type: TombstoneType::CellTombstone,
+            local_deletion_time: 0,
             ttl: None,
             range_start: None,
             range_end: None,
@@ -707,6 +708,7 @@ mod tests {
         let tombstone = Value::Tombstone(TombstoneInfo {
             deletion_time: 1673778645000000,
             tombstone_type: TombstoneType::RowTombstone,
+            local_deletion_time: 0,
             ttl: None,
             range_start: None,
             range_end: None,
@@ -737,6 +739,7 @@ mod tests {
             Value::Tombstone(TombstoneInfo {
                 deletion_time: 0,
                 tombstone_type: TombstoneType::CellTombstone,
+                local_deletion_time: 0,
                 ttl: None,
                 range_start: None,
                 range_end: None,

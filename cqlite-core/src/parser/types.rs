@@ -1261,6 +1261,9 @@ pub fn parse_tombstone(input: &[u8]) -> IResult<&[u8], Value> {
     let tombstone_info = TombstoneInfo {
         deletion_time,
         tombstone_type,
+        // The legacy CQL binary tombstone encoding carries no localDeletionTime
+        // (only deletion_time); default to 0 (#873).
+        local_deletion_time: 0,
         ttl,
         range_start: range_start.map(RowKey::new),
         range_end: range_end.map(RowKey::new),
@@ -2249,6 +2252,7 @@ mod tests {
         let partition_tombstone = Value::Tombstone(TombstoneInfo {
             deletion_time: 9999,
             tombstone_type: TombstoneType::PartitionTombstone,
+            local_deletion_time: 0,
             ttl: None,
             range_start: None,
             range_end: None,
