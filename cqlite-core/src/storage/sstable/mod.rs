@@ -721,19 +721,8 @@ impl SSTableManager {
 
         let table_name = table_id.name();
 
-        // Try exact (qualified) lookup first, then fall back to unqualified name.
-        let reader_list = if let Some(list) = table_readers.get(table_name) {
-            list
-        } else {
-            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
-                &table_name[dot_pos + 1..]
-            } else {
-                table_name
-            };
-            match table_readers.get(unqualified_name) {
-                Some(list) => list,
-                None => return Ok(None),
-            }
+        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+            return Ok(None);
         };
 
         // Return the first value found across all SSTables for this table
@@ -845,27 +834,7 @@ impl SSTableManager {
 
         let table_name = table_id.name();
 
-        // Try exact (qualified) lookup first, then fall back to unqualified name.
-        // This ensures that same-named tables in different keyspaces are correctly
-        // distinguished (Issue #680).
-        let readers = if table_readers.contains_key(table_name) {
-            log::debug!(
-                "SSTableManager::scan - Found readers via qualified name '{}'",
-                table_name
-            );
-            table_readers.get(table_name)
-        } else {
-            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
-                &table_name[dot_pos + 1..]
-            } else {
-                table_name
-            };
-            log::debug!(
-                "SSTableManager::scan - Falling back to unqualified name '{}'",
-                unqualified_name
-            );
-            table_readers.get(unqualified_name)
-        };
+        let readers = Self::resolve_reader_list(&table_readers, table_name);
 
         if let Some(reader_list) = readers {
             log::debug!(
@@ -1009,19 +978,7 @@ impl SSTableManager {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
 
-        // Same qualified-then-unqualified resolution as `scan` (Issue #680).
-        let reader_list = if table_readers.contains_key(table_name) {
-            table_readers.get(table_name)
-        } else {
-            let unqualified_name = if let Some(dot_pos) = table_name.rfind('.') {
-                &table_name[dot_pos + 1..]
-            } else {
-                table_name
-            };
-            table_readers.get(unqualified_name)
-        };
-
-        let Some(reader_list) = reader_list else {
+        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
             return Ok(Vec::new());
         };
 
@@ -1080,8 +1037,53 @@ impl SSTableManager {
             results.retain(matches_key);
             all_results.extend(results);
         }
-        all_results.sort_by(|a, b| a.0.cmp(&b.0));
+        // A single candidate's rows already come back in on-disk key order; only
+        // concatenating more than one candidate needs a re-sort to merge them.
+        if candidates.len() > 1 {
+            all_results.sort_by(|a, b| a.0.cmp(&b.0));
+        }
         Ok(all_results)
+    }
+
+    /// `tombstones`-build counterpart of [`scan_partition`](Self::scan_partition).
+    ///
+    /// That build uses a structurally different reader map and has no bloom-prune
+    /// `scan_partition` path, so a fully-constrained `WHERE pk = ?` is served by
+    /// scanning and filtering to the partition key. The output is a subset of
+    /// [`scan`](Self::scan) — identical to what the `not(tombstones)`
+    /// `scan_partition` returns — which keeps the query executor free of any
+    /// `tombstones` cfg branching.
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_partition(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, Value)>> {
+        let mut rows = self.scan(table_id, None, None, None, schema).await?;
+        rows.retain(|entry| entry.0.as_bytes() == partition_key);
+        Ok(rows)
+    }
+
+    /// Resolve the reader list for a table id, trying the fully-qualified
+    /// `keyspace.table` name first and falling back to the bare table name, so
+    /// same-named tables in different keyspaces stay distinct (Issue #680).
+    ///
+    /// Shared by [`get`](Self::get), [`scan`](Self::scan), and
+    /// [`scan_partition`](Self::scan_partition) so the resolution rule lives in
+    /// one place and the targeted-lookup path can never drift from `scan`.
+    #[cfg(not(feature = "tombstones"))]
+    fn resolve_reader_list<'a>(
+        table_readers: &'a HashMap<String, Vec<Arc<reader::SSTableReader>>>,
+        table_name: &str,
+    ) -> Option<&'a Vec<Arc<reader::SSTableReader>>> {
+        if let Some(list) = table_readers.get(table_name) {
+            return Some(list);
+        }
+        let unqualified = table_name
+            .rfind('.')
+            .map_or(table_name, |dot| &table_name[dot + 1..]);
+        table_readers.get(unqualified)
     }
 
     /// Reconcile multiple SSTable generations of one table into the single

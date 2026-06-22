@@ -415,7 +415,6 @@ pub fn build_row_from_scan(
 ///
 /// Only an all-equality restriction over the complete partition key qualifies,
 /// mirroring Cassandra's requirement for a single-partition read.
-#[cfg(not(feature = "tombstones"))]
 fn full_partition_key_lookup(
     predicates: &[SSTablePredicate],
     schema: Option<&crate::schema::TableSchema>,
@@ -1164,7 +1163,6 @@ impl SelectExecutor {
                     // materializing `scan()` (last-write-wins + tombstone shadowing),
                     // which is the authoritative read semantics; it does not merely
                     // mirror `scan_stream`'s per-key merge.
-                    #[cfg(not(feature = "tombstones"))]
                     if let Some(pk_bytes) =
                         full_partition_key_lookup(predicates, schema_opt.as_ref())
                     {
@@ -1367,32 +1365,21 @@ impl SelectExecutor {
             // pinned or can't be encoded. The per-row predicate evaluation below is
             // unchanged, so clustering predicates and the pk equality itself are
             // still applied (and any over-inclusion is filtered out).
-            let scan_results = {
-                #[cfg(not(feature = "tombstones"))]
-                {
-                    if let Some(pk_bytes) =
-                        full_partition_key_lookup(predicates, schema_opt.as_ref())
-                    {
-                        log::info!(
-                            "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
-                            pk_bytes.len(),
-                            table
-                        );
-                        self.storage
-                            .scan_partition(table, &pk_bytes, schema_opt.as_ref())
-                            .await?
-                    } else {
-                        self.storage
-                            .scan(table, None, None, None, schema_opt.as_ref())
-                            .await?
-                    }
-                }
-                #[cfg(feature = "tombstones")]
-                {
-                    self.storage
-                        .scan(table, None, None, None, schema_opt.as_ref())
-                        .await?
-                }
+            let scan_results = if let Some(pk_bytes) =
+                full_partition_key_lookup(predicates, schema_opt.as_ref())
+            {
+                log::info!(
+                    "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
+                    pk_bytes.len(),
+                    table
+                );
+                self.storage
+                    .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                    .await?
+            } else {
+                self.storage
+                    .scan(table, None, None, None, schema_opt.as_ref())
+                    .await?
             };
 
             log::info!("Scan returned {} rows", scan_results.len());

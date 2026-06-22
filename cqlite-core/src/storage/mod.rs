@@ -225,8 +225,9 @@ impl StorageEngine {
     /// `partition_key` bytes, after pruning the SSTable set down to those whose
     /// bloom filter / BTI trie admit the key — so unrelated SSTables are never
     /// parsed. Output matches filtering the full [`scan`](Self::scan) result to the
-    /// partition. Delegates to [`SSTableManager::scan_partition`].
-    #[cfg(not(feature = "tombstones"))]
+    /// partition. Delegates to [`SSTableManager::scan_partition`] (which has a
+    /// bloom-prune implementation for the default build and a scan-and-filter
+    /// fallback for the `tombstones` build, so callers need no cfg branching).
     pub async fn scan_partition(
         &self,
         table_id: &TableId,

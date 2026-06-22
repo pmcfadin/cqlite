@@ -120,19 +120,23 @@ pub fn encode_partition_key_columns(values: &[Value], schema: &TableSchema) -> R
         )));
     }
 
+    // Serialize one component to its raw value bytes (the framing differs
+    // between single- and multi-component keys, but the value encoding does not).
+    let encode_one = |data_type: &str, value: &Value| -> Result<Vec<u8>> {
+        let comparator = ComparatorType::from_data_type(data_type)?;
+        let coerced = coerce_value_for_comparator(value, &comparator);
+        serialize_value_bytes(&coerced, &comparator)
+    };
+
     // Single-component key: raw value bytes, no length prefix.
     if schema.partition_keys.len() == 1 {
-        let comparator = ComparatorType::from_data_type(&schema.partition_keys[0].data_type)?;
-        let coerced = coerce_value_for_comparator(&values[0], &comparator);
-        return serialize_value_bytes(&coerced, &comparator);
+        return encode_one(&schema.partition_keys[0].data_type, &values[0]);
     }
 
     // Multi-component: [len:u16 BE][value bytes][0x00] per component.
     let mut result = Vec::new();
     for (key_col, value) in schema.partition_keys.iter().zip(values.iter()) {
-        let comparator = ComparatorType::from_data_type(&key_col.data_type)?;
-        let coerced = coerce_value_for_comparator(value, &comparator);
-        let value_bytes = serialize_value_bytes(&coerced, &comparator)?;
+        let value_bytes = encode_one(&key_col.data_type, value)?;
         if value_bytes.len() > u16::MAX as usize {
             return Err(Error::InvalidInput(format!(
                 "Partition key component too large: {} bytes",
