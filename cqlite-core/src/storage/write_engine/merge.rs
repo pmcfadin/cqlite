@@ -1865,6 +1865,42 @@ impl KWayMerger {
             crate::types::Value::Tombstone(ref info)
                 if info.tombstone_type == crate::types::TombstoneType::CellTombstone
         )
+            // Complex-element tombstones carry their delete via the IS_DELETED
+            // (0x01) flag (epic #899); their value is wrapped as a CellTombstone in
+            // `compaction_row_data_to_row_data`, so the `matches!` above already
+            // covers them. Keep `is_deleted` as a belt-and-braces signal so a
+            // future element representation that sets the flag without the wrapped
+            // value still counts as a deletion for the tie-break.
+            || cell.is_deleted
+    }
+
+    /// Per-cell winner resolution mirroring Cassandra `Cells#reconcile`
+    /// (parity commit `a62c749`): returns `true` when `candidate` should replace
+    /// the current `existing` winner.
+    ///
+    /// Ordering (decided IN THIS ORDER, short-circuiting):
+    /// 1. **timestamp** — a strictly higher write timestamp always wins.
+    /// 2. **deletion vs live/expiring at EQUAL timestamp** — a cell DELETION
+    ///    (tombstone) beats a LIVE or EXPIRING (TTL) cell. This is decided
+    ///    *before* any `localDeletionTime` comparison, so an expiring cell can
+    ///    never resurrect data over a same-timestamp tombstone just because its
+    ///    TTL expiry instant is later (issue #848 / #498). `is_cell_tombstone`
+    ///    treats an expiring cell as LIVE (it carries a real value + a TTL, not a
+    ///    `CellTombstone`), so this single rule subsumes both
+    ///    tombstone-beats-live and tombstone-beats-expiring.
+    /// 3. **equal timestamp + equal liveness** — keep the first-seen (newer file)
+    ///    winner. `reconcile_cluster` only calls this for a later-seen candidate,
+    ///    so returning `false` preserves first-seen order deterministically.
+    ///    `localDeletionTime` is intentionally NOT a discriminator here: at equal
+    ///    ts + equal deletion-status the cells are equivalent and first-seen order
+    ///    is the stable choice.
+    fn cell_reconcile_replace(candidate: &CellData, existing: &CellData) -> bool {
+        if candidate.timestamp != existing.timestamp {
+            return candidate.timestamp > existing.timestamp;
+        }
+        // Equal timestamp: deletion wins over a live/expiring cell, BEFORE any
+        // localDeletionTime compare (parity `a62c749`).
+        Self::is_cell_tombstone(candidate) && !Self::is_cell_tombstone(existing)
     }
 
     /// Reconcile all entries for a single clustering-key group into at most one
@@ -1957,15 +1993,13 @@ impl KWayMerger {
                             }
                             Some(existing) => {
                                 // Higher timestamp wins. At EQUAL timestamp a cell
-                                // tombstone beats a live value (Issue #498 per
-                                // cell). At EQUAL timestamp + liveness, break ties
-                                // by value bytes for determinism, else keep the
-                                // first-seen (newer file) winner.
-                                let replace = cell.timestamp > existing.timestamp
-                                    || (cell.timestamp == existing.timestamp
-                                        && Self::is_cell_tombstone(cell)
-                                        && !Self::is_cell_tombstone(existing));
-                                if replace {
+                                // DELETION (tombstone) beats a LIVE or EXPIRING
+                                // (TTL) cell, decided BEFORE any localDeletionTime
+                                // compare (parity Cassandra `a62c749`,
+                                // `Cells#reconcile`; issue #848 / #498). At equal ts
+                                // + equal deletion-status, keep the first-seen
+                                // (newer file) winner. See `cell_reconcile_replace`.
+                                if Self::cell_reconcile_replace(cell, existing) {
                                     winners.insert(cell_key, cell.clone());
                                 }
                             }
@@ -5352,6 +5386,152 @@ mod issue_823_complex_column_merge {
             }
         }
     }
+
+    // ── Issue #848 (Epic #921): tombstone-vs-expiring(TTL) tie-break ──────────
+    //
+    // Parity Cassandra `a62c749` (`Cells#reconcile`): at EQUAL timestamp a cell
+    // DELETION wins over a LIVE/expiring cell, decided BEFORE any
+    // `localDeletionTime` compare. `main` carries `ttl`/`local_deletion_time` on
+    // `CellData` (now populated for simple cells via SimpleCell), so an expiring
+    // cell at equal ts must NOT resurrect data over a same-ts cell tombstone.
+
+    /// Build a single-cell expiring (TTL) `CellData` for column `v`.
+    fn expiring_cell(value: &str, ts: i64, ttl: u32, ldt: i32) -> CellData {
+        CellData {
+            column: "v".to_string(),
+            value: Value::Text(value.to_string()),
+            timestamp: ts,
+            ttl: Some(ttl),
+            cell_path: None,
+            local_deletion_time: Some(ldt),
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
+        }
+    }
+
+    /// Build a single-cell tombstone `CellData` for column `v`.
+    fn cell_tombstone(ts: i64, ldt: i32) -> CellData {
+        CellData {
+            column: "v".to_string(),
+            value: Value::Tombstone(TombstoneInfo {
+                deletion_time: ts,
+                tombstone_type: TombstoneType::CellTombstone,
+                local_deletion_time: ldt as i64,
+                ttl: None,
+                range_start: None,
+                range_end: None,
+            }),
+            timestamp: ts,
+            ttl: None,
+            cell_path: None,
+            local_deletion_time: Some(ldt),
+            is_complex_element: false,
+            is_deleted: false,
+            has_empty_value: false,
+        }
+    }
+
+    /// At equal timestamp the cell tombstone beats an expiring cell — EXPIRING
+    /// arrives FIRST (newer run_index) so a naive recency/first-seen pick would
+    /// resurrect it. The tombstone must still win (parity `a62c749`).
+    #[test]
+    fn issue_848_tombstone_beats_expiring_at_equal_ts_expiring_first() {
+        const TS: i64 = 200;
+        // EXPIRING cell carries a LARGER localDeletionTime than the tombstone, so
+        // a (wrong) localDeletionTime-first tie-break would pick the expiring
+        // cell. The deletion must be decided BEFORE that compare.
+        let expiring = live(
+            0,
+            TS,
+            vec![expiring_cell("resurrected-if-buggy", TS, 3600, 9_999)],
+        );
+        let tombstone = live(1, TS, vec![cell_tombstone(TS, 1_000)]);
+
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![expiring, tombstone],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("a row must be emitted");
+
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
+        };
+        assert_eq!(cells.len(), 1, "single column `v`");
+        assert!(
+            KWayMerger::is_cell_tombstone(&cells[0]),
+            "at equal ts the cell TOMBSTONE must win over the expiring cell \
+             (before any localDeletionTime compare); got {:?}",
+            cells[0].value
+        );
+        assert!(
+            cells[0].ttl.is_none(),
+            "the surviving winner is the tombstone, which carries no TTL"
+        );
+    }
+
+    /// Same equal-ts tie-break with the source order REVERSED — tombstone arrives
+    /// FIRST. The tombstone must still win (order-independence; the existing
+    /// `tombstone beats live` rule already covered this, pinned here too).
+    #[test]
+    fn issue_848_tombstone_beats_expiring_at_equal_ts_tombstone_first() {
+        const TS: i64 = 200;
+        let tombstone = live(0, TS, vec![cell_tombstone(TS, 1_000)]);
+        let expiring = live(
+            1,
+            TS,
+            vec![expiring_cell("resurrected-if-buggy", TS, 3600, 9_999)],
+        );
+
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone, expiring],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("a row must be emitted");
+
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
+        };
+        assert_eq!(cells.len(), 1, "single column `v`");
+        assert!(
+            KWayMerger::is_cell_tombstone(&cells[0]),
+            "at equal ts the cell TOMBSTONE must win regardless of source order; \
+             got {:?}",
+            cells[0].value
+        );
+    }
+
+    /// A STRICTLY NEWER expiring cell still beats an older tombstone — the
+    /// tie-break only fires at EQUAL timestamp, so timestamp recency is honored
+    /// first (parity `a62c749`: timestamp compared before deletion-status).
+    #[test]
+    fn issue_848_newer_expiring_beats_older_tombstone() {
+        let tombstone = live(0, 100, vec![cell_tombstone(100, 1_000)]);
+        let expiring = live(1, 200, vec![expiring_cell("survives", 200, 3600, 9_999)]);
+
+        let merged = KWayMerger::reconcile_cluster(
+            None,
+            vec![tombstone, expiring],
+            &::std::collections::HashMap::new(),
+        )
+        .expect("a row must be emitted");
+
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
+        };
+        assert_eq!(cells.len(), 1, "single column `v`");
+        assert!(
+            !KWayMerger::is_cell_tombstone(&cells[0]),
+            "a strictly NEWER expiring cell (ts=200) beats the older tombstone \
+             (ts=100); the deletion tie-break only fires at equal ts"
+        );
+        assert_eq!(cells[0].value, Value::Text("survives".to_string()));
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -7156,6 +7336,111 @@ mod issue_822_merge_ordering_semantics {
         assert_eq!(
             cell_flags, 0x05,
             "surviving cell tombstone must serialize as CELL_IS_DELETED|HAS_EMPTY \
+             (0x05); got {cell_flags:#04x}"
+        );
+    }
+
+    /// Issue #848: writer-path equal-ts tie-break, REVERSED source order. The
+    /// cell tombstone arrives FIRST, the expiring write SECOND (newer in
+    /// recency). The writer's `cells` LWW must still keep the tombstone — an
+    /// equal-ts expiring write does NOT supersede an existing cell tombstone
+    /// (parity `a62c749`). Pins the writer path agrees with `reconcile_cluster`
+    /// in BOTH source orders.
+    #[test]
+    fn issue_848_writer_tombstone_beats_expiring_tombstone_first() {
+        let schema = TableSchema {
+            keyspace: "issue_822".to_string(),
+            table: "tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order: ClusteringOrder::Asc,
+            }],
+            columns: vec![Column {
+                name: "v".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        };
+
+        const TS: i64 = 2_000_000;
+        let key = DecoratedKey::new(1, int_key_bytes(1));
+
+        let tombstone = Mutation::new(
+            TableId::new("issue_822", "tbl"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(7))),
+            vec![CellOperation::Delete {
+                column: "v".to_string(),
+            }],
+            TS,
+            None,
+        );
+        let expiring = Mutation::new(
+            TableId::new("issue_822", "tbl"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(7))),
+            vec![CellOperation::WriteWithTtl {
+                column: "v".to_string(),
+                value: Value::Text("expiring-if-buggy".to_string()),
+                ttl_seconds: 3600,
+            }],
+            TS,
+            None,
+        );
+
+        // Tombstone FIRST so a recency bug favoring the later expiring write
+        // would surface (the reverse of issue_3_tombstone_beats_expiring).
+        let mut w = DataWriter::new(writer_stats());
+        w.write_partition(&key, &[tombstone, expiring], &schema, None, &[])
+            .expect("write_partition must succeed");
+        let bytes = w.finish().expect("finish must succeed");
+
+        let mut p = INT_PK_HEADER_SIZE;
+        let row_flags = bytes[p];
+        p += 1;
+        assert_eq!(
+            row_flags & ROW_HAS_ALL_COLUMNS,
+            0,
+            "a surviving cell tombstone forces a column subset/bitmap"
+        );
+        // Clustering prefix: 1 header byte + 4 int value bytes.
+        p += 1 + 4;
+        let (_row_size, rs_len) = read_vuint(&bytes, p);
+        p += rs_len;
+        let (_prev_size, ps_len) = read_vuint(&bytes, p);
+        p += ps_len;
+        let (_ts_delta, ts_len) = read_vuint(&bytes, p);
+        p += ts_len;
+        let (_bitmap, bm_len) = read_vuint(&bytes, p);
+        p += bm_len;
+
+        let cell_flags = bytes[p];
+        assert_ne!(
+            cell_flags & CELL_IS_DELETED,
+            0,
+            "tombstone-first: at equal ts the cell tombstone must still win \
+             (CELL_IS_DELETED set). Flags byte = {cell_flags:#04x}"
+        );
+        assert_eq!(
+            cell_flags & CELL_IS_EXPIRING,
+            0,
+            "the surviving tombstone must NOT carry CELL_IS_EXPIRING. \
+             Flags byte = {cell_flags:#04x}"
+        );
+        assert_eq!(
+            cell_flags, 0x05,
+            "surviving cell tombstone serializes as CELL_IS_DELETED|HAS_EMPTY \
              (0x05); got {cell_flags:#04x}"
         );
     }

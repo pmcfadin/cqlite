@@ -1271,12 +1271,28 @@ impl DataWriter {
                     }
                     std::collections::hash_map::Entry::Occupied(mut entry) => {
                         let existing = entry.get();
+                        // Per-cell winner resolution mirroring Cassandra
+                        // `Cells#reconcile` (parity `a62c749`; issue #848 / #498),
+                        // kept CONSISTENT with `KWayMerger::cell_reconcile_replace`:
+                        //   1. higher timestamp always wins;
+                        //   2. at EQUAL timestamp a cell DELETION (a `Delete`
+                        //      tombstone) beats a LIVE/EXPIRING write — decided
+                        //      BEFORE any localDeletionTime compare, so an expiring
+                        //      (TTL) write at equal ts can never resurrect data over
+                        //      a same-ts cell tombstone (`WriteWithTtl` is LIVE here,
+                        //      NOT a tombstone). `local_deletion_time` is never used
+                        //      as a tie-break.
+                        // The writer keeps its existing convention for equal-ts
+                        // live-vs-live (later mutation wins) via `!existing_is_tomb`;
+                        // only the tombstone-vs-live/expiring axis is load-bearing
+                        // for #848 and matches reconcile.
                         let candidate_is_tombstone =
                             matches!(candidate.op, CellOperation::Delete { .. });
+                        let existing_is_tombstone =
+                            matches!(existing.op, CellOperation::Delete { .. });
                         let wins = candidate.timestamp_micros > existing.timestamp_micros
                             || (candidate.timestamp_micros == existing.timestamp_micros
-                                && (candidate_is_tombstone
-                                    || !matches!(existing.op, CellOperation::Delete { .. })));
+                                && (candidate_is_tombstone || !existing_is_tombstone));
                         if wins {
                             entry.insert(candidate);
                         }
