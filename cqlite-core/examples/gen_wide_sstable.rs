@@ -88,6 +88,7 @@ async fn main() -> cqlite_core::error::Result<()> {
             partition_tombstone: None,
             range_tombstones: vec![],
             local_deletion_time: None,
+            row_tombstone: None,
         };
         engine.write_async(mutation).await?;
     }

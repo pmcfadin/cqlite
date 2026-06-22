@@ -92,6 +92,10 @@ impl CompactionRow {
                 CompactionRowData::Live {
                     simple,
                     complex: Vec::new(),
+                    // The legacy collapsed-value fallback never carries a
+                    // coexisting row deletion (a `Value::Tombstone` row maps to
+                    // `Tombstone` above; a `Value::Map` row is purely live).
+                    row_deletion: None,
                 }
             }
             other => CompactionRowData::Live {
@@ -103,6 +107,7 @@ impl CompactionRow {
                     local_deletion_time: None,
                 }],
                 complex: Vec::new(),
+                row_deletion: None,
             },
         };
         CompactionRow {
@@ -140,6 +145,16 @@ pub enum CompactionRowData {
         /// Complex (non-frozen collection / UDT) columns, each with its
         /// per-element cells and optional complex deletion.
         complex: Vec<ComplexColumn>,
+        /// Row-level deletion that COEXISTS with the surviving live cells
+        /// (issue #932). `Some((markedForDeleteAt µs, localDeletionTime s))`
+        /// when this row carried `HAS_DELETION` AND still has surviving cells
+        /// (the cells the merge kept are strictly newer than the deletion). The
+        /// deletion is preserved so it keeps shadowing older cells of OTHER
+        /// columns in SSTables not part of a partial compaction. `None` for a
+        /// plain live row with no row deletion. A row whose ONLY payload is the
+        /// deletion (no surviving cells) is a [`Self::Tombstone`], not a `Live`
+        /// with this field set.
+        row_deletion: Option<(i64, i32)>,
     },
 }
 

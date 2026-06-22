@@ -280,6 +280,8 @@ impl From<LegacyMutation> for Mutation {
             // Pre-#764 records had no explicit local deletion time; preserving
             // None means the writer derives it from the timestamp as before.
             local_deletion_time: None,
+            // Pre-#932 records had no coexisting row tombstone field.
+            row_tombstone: None,
         }
     }
 }
@@ -332,6 +334,53 @@ impl From<LegacyMutationWithLdt> for Mutation {
             // Preserve the mutation-level LDT that layout (B) carries; only the
             // pre-#921 cell `Delete` ops lose their (never-present) LDT to None.
             local_deletion_time: m.local_deletion_time,
+            // Layout (B) predates #932; no coexisting row tombstone field.
+            row_tombstone: None,
+        }
+    }
+}
+
+/// On-disk `Mutation` layout post-Issue #921, pre-Issue #932 (layout (C)).
+///
+/// Issue #932 appended a trailing `row_tombstone: Option<(i64, i32)>` field to
+/// [`Mutation`]. Because the WAL has no per-record version field and bincode is
+/// positional, a record written by a #921-era binary (layout (C): current
+/// `CellOperation` shapes and mutation-level LDT, but NO trailing
+/// `row_tombstone`) has no bytes for the new field. Decoding it as the current
+/// [`Mutation`] runs out of bytes when reading the trailing `Option`. This
+/// mirror reproduces the EXACT layout-(C) field order — identical to the current
+/// `Mutation` minus the new trailing field — so such records still replay,
+/// upgrading `row_tombstone` to `None` (historical behavior).
+///
+/// The field order MUST stay in lockstep with [`Mutation`] (current
+/// [`CellOperation`]), with only the trailing `row_tombstone` omitted.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PreRowTombstoneMutation {
+    table: TableId,
+    partition_key: PartitionKey,
+    clustering_key: Option<ClusteringKey>,
+    operations: Vec<CellOperation>,
+    timestamp_micros: i64,
+    ttl_seconds: Option<u32>,
+    partition_tombstone: Option<PartitionTombstone>,
+    range_tombstones: Vec<RangeTombstone>,
+    local_deletion_time: Option<i32>,
+}
+
+impl From<PreRowTombstoneMutation> for Mutation {
+    fn from(m: PreRowTombstoneMutation) -> Self {
+        Mutation {
+            table: m.table,
+            partition_key: m.partition_key,
+            clustering_key: m.clustering_key,
+            operations: m.operations,
+            timestamp_micros: m.timestamp_micros,
+            ttl_seconds: m.ttl_seconds,
+            partition_tombstone: m.partition_tombstone,
+            range_tombstones: m.range_tombstones,
+            local_deletion_time: m.local_deletion_time,
+            // Pre-#932 records carry no coexisting row tombstone.
+            row_tombstone: None,
         }
     }
 }
@@ -350,6 +399,13 @@ fn decode_mutation(bytes: &[u8]) -> std::result::Result<Mutation, bincode::Error
     match bincode::deserialize::<Mutation>(bytes) {
         Ok(mutation) => Ok(mutation),
         Err(current_err) => {
+            // Layout (C): post-#921, pre-#932 — current op shapes + mutation LDT
+            // but no trailing `row_tombstone`. Tried first so a #921-era record
+            // with current `Delete { column, local_deletion_time }` ops decodes
+            // correctly rather than misaligning under the pre-#921 mirrors below.
+            if let Ok(m) = bincode::deserialize::<PreRowTombstoneMutation>(bytes) {
+                return Ok(Mutation::from(m));
+            }
             // Layout (B): mutation-level LDT present, pre-#921 Delete ops.
             if let Ok(m) = bincode::deserialize::<LegacyMutationWithLdt>(bytes) {
                 return Ok(Mutation::from(m));

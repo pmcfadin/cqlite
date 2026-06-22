@@ -95,6 +95,23 @@ pub struct Mutation {
     /// this field. (Issue #764)
     #[serde(default)]
     pub local_deletion_time: Option<i32>,
+    /// Row-level deletion that COEXISTS with the live cells produced by this
+    /// mutation's `operations` (issue #932).
+    ///
+    /// `Some((deletion_time_micros, local_deletion_time_secs))` carries a row
+    /// tombstone whose `deletion_time` is DECOUPLED from `timestamp_micros` — it
+    /// is older than the row's surviving cells (whose own writetimes drive
+    /// `timestamp_micros`). The writer emits a `HAS_DELETION` row carrying BOTH
+    /// the deletion AND the surviving cells, so older cells of OTHER columns in
+    /// SSTables not part of a partial compaction stay shadowed (they cannot
+    /// resurrect). This is distinct from a `CellOperation::DeleteRow`, whose
+    /// deletion time IS the mutation timestamp; `row_tombstone` is used only on
+    /// the compaction merge→mutation path where the two diverge.
+    ///
+    /// `None` (the default) preserves historical behavior: a row deletion, when
+    /// present, rides as `CellOperation::DeleteRow` at `timestamp_micros`.
+    #[serde(default)]
+    pub row_tombstone: Option<(i64, i32)>,
 }
 
 impl Mutation {
@@ -117,7 +134,21 @@ impl Mutation {
             partition_tombstone: None,
             range_tombstones: Vec::new(),
             local_deletion_time: None,
+            row_tombstone: None,
         }
+    }
+
+    /// Attach a row-level deletion that coexists with this mutation's live cells
+    /// (issue #932).
+    ///
+    /// `deletion_time` is in microseconds (`markedForDeleteAt`); `ldt` is the
+    /// `localDeletionTime` in GC-clock seconds. The writer emits a `HAS_DELETION`
+    /// row carrying both the deletion and the surviving cells, decoupling the
+    /// deletion time from `timestamp_micros` (the row's liveness writetime).
+    #[must_use]
+    pub fn with_row_tombstone(mut self, deletion_time: i64, ldt: i32) -> Self {
+        self.row_tombstone = Some((deletion_time, ldt));
+        self
     }
 
     /// Set an explicit local deletion time (seconds since Unix epoch) for the

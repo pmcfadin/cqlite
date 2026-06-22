@@ -816,6 +816,158 @@ fn row_tombstone_shadows_live_row_after_compaction() {
     drop(temp_dir);
 }
 
+// ── Test 4b: Row deletion coexists with a surviving newer cell (Issue #932) ───
+
+/// Regression test for Issue #932: a row-level deletion that COEXISTS with cells
+/// written strictly AFTER it must (a) be read back with its surviving cells (not
+/// collapsed to a pure tombstone), and (b) keep shadowing an OLDER cell of a
+/// different column so that cell cannot resurrect across a compaction.
+///
+/// Setup (two SSTables):
+///   - SSTable A (ts=50):  `score=999` for PK=7   (an OLDER cell, must be shadowed)
+///   - SSTable B: a row tombstone for PK=7 at ts=100 AND `name="new"` at ts=300.
+///     The intra-memtable flush already produces a COEXISTENCE row on disk —
+///     `HAS_DELETION`(100) + the surviving `name`(300) cell.
+///
+/// Expected after compacting A+B:
+///   - PK=7 is PRESENT and live, carrying `name="new"` (300 > 100 survives).
+///   - PK=7 has NO `score`: the older `score`(50) is shadowed by the row
+///     deletion (100). Before the fix, B's coexistence row read back as a PURE
+///     tombstone (dropping `name`), so the merged row was either absent or had
+///     `name` lost — and the preserved deletion is exactly what stops `score`
+///     from resurrecting.
+#[test]
+fn row_deletion_coexists_with_newer_cell_after_compaction() {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("build tokio runtime");
+
+    let temp_dir = TempDir::new().expect("tempdir");
+    let data_dir = temp_dir.path().join("data");
+    let wal_dir = temp_dir.path().join("wal");
+    let schema = make_schema();
+
+    let config = WriteEngineConfig::new(data_dir.clone(), wal_dir.clone(), schema.clone());
+    let mut engine = WriteEngine::new(config).expect("engine creation");
+
+    // SSTable A: an OLDER `score` cell (ts=50) for PK=7. This must end up shadowed
+    // by the row deletion that lives in SSTable B.
+    engine
+        .write(write_score_only(7, 999, 50))
+        .expect("write score A");
+    let info_a = rt
+        .block_on(engine.flush())
+        .expect("flush A")
+        .expect("info A");
+    assert_eq!(info_a.partition_count, 1, "SSTable A: 1 partition");
+
+    // SSTable B: a row tombstone at ts=100 PLUS a newer `name` write at ts=300 in
+    // the same memtable. On flush these merge into ONE on-disk row carrying BOTH
+    // the row deletion (100) and the surviving `name` cell (300) — the coexistence
+    // row at the heart of #932.
+    engine
+        .write(delete_row(7, 100))
+        .expect("write row-tombstone B");
+    engine
+        .write(write_name_only(7, "new", 300))
+        .expect("write name B");
+    let info_b = rt
+        .block_on(engine.flush())
+        .expect("flush B")
+        .expect("info B");
+    assert!(info_b.partition_count > 0, "SSTable B: non-empty");
+
+    // Compact A+B (min_threshold=2, permissive buckets).
+    let policy = STCSPolicy::new(2, 32, 0.01, 100.0, 0).expect("valid STCS params");
+    engine
+        .set_merge_policy(Box::new(policy))
+        .expect("set policy");
+
+    let budget = Duration::from_secs(30);
+    let mut compacted = false;
+    for _ in 0..5 {
+        let report = engine.maintenance_step(budget).expect("maintenance_step");
+        if !report.completed_merges.is_empty() {
+            compacted = true;
+            break;
+        }
+        if !report.pending_compaction {
+            break;
+        }
+    }
+    assert!(compacted, "Compaction must complete");
+
+    rt.block_on(engine.close()).expect("close engine");
+
+    // Re-open and scan the merged SSTable.
+    let cqlite_config = Config::default();
+    let manager = rt.block_on(async {
+        let platform = Arc::new(
+            Platform::new(&cqlite_config)
+                .await
+                .expect("platform creation"),
+        );
+        SSTableManager::new(
+            &data_dir,
+            &cqlite_config,
+            platform,
+            #[cfg(feature = "state_machine")]
+            None,
+        )
+        .await
+        .expect("SSTableManager must open")
+    });
+
+    let table_id = CqlTableId::from("compact_ks.items");
+    let results = rt
+        .block_on(manager.scan(&table_id, None, None, None, Some(&schema)))
+        .expect("post-compaction scan");
+
+    let result_map: HashMap<Vec<u8>, Value> = results.into_iter().map(|(k, v)| (k.0, v)).collect();
+
+    let key_7: Vec<u8> = 7_i32.to_be_bytes().into();
+    let pk7 = result_map.get(&key_7).unwrap_or_else(|| {
+        panic!(
+            "PK=7 must be PRESENT after compaction: the row deletion (ts=100) coexists with the \
+             newer name='new' cell (ts=300) — Issue #932 (reader dropped the surviving cell)"
+        )
+    });
+
+    match pk7 {
+        Value::Map(pairs) => {
+            let name = pairs.iter().find_map(|(k, v)| match (k, v) {
+                (Value::Text(col), Value::Text(val)) if col == "name" => Some(val.clone()),
+                _ => None,
+            });
+            assert_eq!(
+                name.as_deref(),
+                Some("new"),
+                "PK=7 must carry the surviving name='new' (ts=300 > deletion ts=100) — Issue #932"
+            );
+            // The older score (ts=50 <= deletion ts=100) must be shadowed by the
+            // preserved row deletion and must NOT resurrect.
+            let score = pairs.iter().find_map(|(k, v)| match (k, v) {
+                (Value::Text(col), Value::Integer(val)) if col == "score" => Some(*val),
+                _ => None,
+            });
+            assert!(
+                score.is_none(),
+                "PK=7 score (ts=50) must be shadowed by the row deletion (ts=100) and NOT \
+                 resurrect, got score={:?} — Issue #932 resurrection regression",
+                score
+            );
+        }
+        other => panic!(
+            "PK=7 must read back as a live row (Value::Map) carrying name='new', got {:?} — \
+             Issue #932 (coexistence row collapsed to a pure tombstone)",
+            other
+        ),
+    }
+
+    drop(temp_dir);
+}
+
 // ── Test 5: Equal-timestamp Delete-vs-Live reconcile (Issue #498) ─────────────
 
 /// Regression test for Issue #498: when a live row and a row tombstone for the

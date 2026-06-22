@@ -300,6 +300,20 @@ const ROW_HAS_ALL_COLUMNS: u8 = 0x20;
 const ROW_HAS_COMPLEX_DELETION: u8 = 0x40; // Issue #221: Row contains complex column with deletion info
 const ROW_HAS_EXTENDED_FLAGS: u8 = 0x80;
 
+/// Issue #932: does the decoded cell map hold any NON-primary-key data cell?
+///
+/// Primary-key (partition + clustering) columns are surfaced into the cell map
+/// as pseudo-cells (#229) so the read-back path can recover the clustering
+/// identity; they are NOT row data. A row carrying `HAS_DELETION` is a PURE row
+/// tombstone only when no such data cell survives — otherwise the row deletion
+/// COEXISTS with surviving (strictly-newer) cells and the row displays as live.
+fn row_has_non_key_cell(cells: &HashMap<String, Value>, schema: &TableSchema) -> bool {
+    cells.keys().any(|name| {
+        !schema.partition_keys.iter().any(|k| &k.name == name)
+            && !schema.clustering_keys.iter().any(|c| &c.name == name)
+    })
+}
+
 // Unfiltered marker constants (from Cassandra UnfilteredSerializer.java lines 102-109)
 // Issue #229: These markers were being misinterpreted as row data, causing parsing failures
 const END_OF_PARTITION: u8 = 0x01; // Signal end of partition - nothing follows this flag byte
@@ -557,8 +571,18 @@ impl V5CompressedLegacyParser {
                             let row_tombstone =
                                 row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
 
-                            let row_value = if let Some(h) = row_tombstone {
-                                h.row_tombstone()
+                            // Issue #932: a HAS_DELETION row may ALSO carry surviving
+                            // cells (written strictly after the row deletion). For the
+                            // user-facing scan those cells — all newer than the
+                            // deletion — display as a live row; the deletion shadows
+                            // only already-absent older cells, so it has no display
+                            // effect here. Emit a pure `Tombstone` ONLY when no
+                            // non-primary-key cell survives.
+                            let has_data_cell = row_has_non_key_cell(&cells, schema);
+                            let row_value = if row_tombstone.is_some() && !has_data_cell {
+                                row_tombstone
+                                    .map(|h| h.row_tombstone())
+                                    .unwrap_or(Value::Null)
                             } else if cells.is_empty() {
                                 Value::Null
                             } else {
@@ -1310,12 +1334,23 @@ impl V5CompressedLegacyParser {
                                     let row_tombstone =
                                         row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
 
-                                    let row_value = if let Some(h) = row_tombstone {
-                                        log::debug!(
-                                            "V5CompressedLegacy: Partition {} Row {} - emitting Tombstone(deletion_time={})",
-                                            partition_index, row_count, h.row_tombstone_deletion_time()
-                                        );
-                                        h.row_tombstone()
+                                    // Issue #932: a HAS_DELETION row carrying
+                                    // surviving (strictly-newer) cells displays as a
+                                    // live row for the user-facing scan — the
+                                    // deletion shadows only already-absent older
+                                    // cells. Emit a pure Tombstone only when no
+                                    // non-primary-key cell survives.
+                                    let has_data_cell = row_has_non_key_cell(&cells, schema);
+                                    let row_value = if row_tombstone.is_some() && !has_data_cell {
+                                        if let Some(h) = row_tombstone {
+                                            log::debug!(
+                                                "V5CompressedLegacy: Partition {} Row {} - emitting Tombstone(deletion_time={})",
+                                                partition_index, row_count, h.row_tombstone_deletion_time()
+                                            );
+                                            h.row_tombstone()
+                                        } else {
+                                            Value::Null
+                                        }
                                     } else if cells.is_empty() {
                                         warn!(
                                             "V5CompressedLegacy: No cells extracted for {}.{} partition {} row {} (partition key: {} bytes)",
@@ -1764,13 +1799,18 @@ impl V5CompressedLegacyParser {
                     // Both the merger tuple `row_ts` and the emitted
                     // Value::Tombstone must agree, so resolve once here (#505).
                     let row_tombstone = row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
-                    let row_ts = match row_tombstone {
-                        Some(h) => h.row_tombstone_deletion_time(),
-                        None => row_header_opt
-                            .as_ref()
-                            .and_then(|h| h.timestamp)
-                            .unwrap_or(0),
-                    };
+                    // Issue #932: a HAS_DELETION row may ALSO carry a liveness
+                    // timestamp (surviving cells written strictly after the
+                    // deletion). Prefer the liveness timestamp as the row
+                    // timestamp so those cells inherit it and are NOT shadowed by
+                    // the older row deletion during reconcile; fall back to
+                    // markedForDeleteAt only for a PURE row tombstone (which has no
+                    // HAS_TIMESTAMP).
+                    let row_ts = row_header_opt
+                        .as_ref()
+                        .and_then(|h| h.timestamp)
+                        .or_else(|| row_tombstone.map(|h| h.row_tombstone_deletion_time()))
+                        .unwrap_or(0);
 
                     if is_static {
                         static_cells = cells;
@@ -1779,9 +1819,16 @@ impl V5CompressedLegacyParser {
                             cells.entry(k.clone()).or_insert_with(|| v.clone());
                         }
 
-                        // Row tombstone → Value::Tombstone(markedForDeleteAt)
-                        let row_value = if let Some(h) = row_tombstone {
-                            h.row_tombstone()
+                        // Row tombstone → Value::Tombstone(markedForDeleteAt).
+                        // Issue #932: unless the row ALSO carries surviving cells
+                        // (newer than the deletion), in which case it displays as a
+                        // live row — the deletion shadows only already-absent older
+                        // cells.
+                        let has_data_cell = row_has_non_key_cell(&cells, schema);
+                        let row_value = if row_tombstone.is_some() && !has_data_cell {
+                            row_tombstone
+                                .map(|h| h.row_tombstone())
+                                .unwrap_or(Value::Null)
                         } else if cells.is_empty() {
                             Value::Null
                         } else {
@@ -1863,34 +1910,23 @@ impl V5CompressedLegacyParser {
             CompactionRowData, ComplexColumn, SimpleCell,
         };
 
-        if let Some(h) = row_header_opt.as_ref().filter(|h| h.is_row_tombstone()) {
-            // #912: capture the clustering prefix that the parser surfaced into
-            // `cells` (see `parse_row_data_with_offset_impl`, Issue #229). Without
-            // it every clustering-row tombstone — and the partition's static row —
-            // would collapse into the single `None` clustering bucket during merge,
-            // mis-reconciling against each other. Build the columns in schema
-            // order; a clustering column missing from `cells` (partial/range
-            // boundary) yields an empty vec → the `None` bucket, the previous
-            // behavior.
-            let mut clustering: Vec<(String, Value)> =
-                Vec::with_capacity(schema.clustering_keys.len());
-            for ck in &schema.clustering_keys {
-                match cells.get(&ck.name) {
-                    Some(v) => clustering.push((ck.name.clone(), v.clone())),
-                    None => {
-                        clustering.clear();
-                        break;
-                    }
-                }
-            }
-            return CompactionRowData::Tombstone {
-                deletion_time: h.row_tombstone_deletion_time(),
-                // localDeletionTime in SECONDS (GC-grace clock). Preserve the
-                // far-future [2^31, 2^32) encoding via wrapping `as u32 as i32`.
-                local_deletion_time: h.local_deletion_time.unwrap_or(0),
-                clustering,
-            };
-        }
+        // Issue #932: a row with `HAS_DELETION` may ALSO carry surviving cells
+        // (cells written strictly after the row deletion). The row deletion is
+        // captured here either as the coexisting `row_deletion` on a `Live` row
+        // (when data cells survive) or as a pure `Tombstone` (when only the
+        // deletion remains). The decision is made AFTER building the cell sets so
+        // we can tell whether any NON-clustering data cell survived.
+        let row_deletion: Option<(i64, i32)> = row_header_opt
+            .as_ref()
+            .filter(|h| h.is_row_tombstone())
+            .map(|h| {
+                (
+                    h.row_tombstone_deletion_time(),
+                    // localDeletionTime in SECONDS (GC-grace clock). Preserve the
+                    // far-future [2^31, 2^32) encoding via wrapping `as u32 as i32`.
+                    h.local_deletion_time.unwrap_or(0),
+                )
+            });
 
         // Build complex columns (sorted by name for deterministic output, mirroring
         // the collapsed-value path's column ordering).
@@ -1940,9 +1976,53 @@ impl V5CompressedLegacyParser {
             .collect();
         simple_cells.sort_by(|a, b| a.column.cmp(&b.column));
 
+        // Issue #932: a row deletion either COEXISTS with surviving data cells
+        // (kept as `Live { row_deletion: Some(..) }`) or — when no NON-primary-key
+        // cell and no complex element survives — is a pure row tombstone (kept as
+        // `Tombstone`, preserving the #912 clustering-prefix capture). The earlier
+        // code always took the `Tombstone` branch, DROPPING surviving cells and
+        // letting older cells of other columns resurrect in a partial compaction.
+        if let Some((deletion_time, local_deletion_time)) = row_deletion {
+            let primary_key: std::collections::HashSet<&str> = schema
+                .partition_keys
+                .iter()
+                .map(|k| k.name.as_str())
+                .chain(schema.clustering_keys.iter().map(|c| c.name.as_str()))
+                .collect();
+            let has_simple_data = simple_cells
+                .iter()
+                .any(|c| !primary_key.contains(c.column.as_str()));
+            let has_complex_data = complex_cols
+                .iter()
+                .any(|c| !c.elements.is_empty() || c.complex_deletion.is_some());
+
+            if !has_simple_data && !has_complex_data {
+                // Pure row tombstone: rebuild the clustering prefix in schema
+                // order from the surfaced clustering pseudo-cells (#912). A
+                // missing clustering column falls back to the `None` bucket.
+                let mut clustering: Vec<(String, Value)> =
+                    Vec::with_capacity(schema.clustering_keys.len());
+                for ck in &schema.clustering_keys {
+                    match simple_cells.iter().find(|c| c.column == ck.name) {
+                        Some(c) => clustering.push((ck.name.clone(), c.value.clone())),
+                        None => {
+                            clustering.clear();
+                            break;
+                        }
+                    }
+                }
+                return CompactionRowData::Tombstone {
+                    deletion_time,
+                    local_deletion_time,
+                    clustering,
+                };
+            }
+        }
+
         CompactionRowData::Live {
             simple: simple_cells,
             complex: complex_cols,
+            row_deletion,
         }
     }
 
@@ -2164,13 +2244,18 @@ impl V5CompressedLegacyParser {
                     offset = next_offset;
 
                     let row_tombstone = row_header_opt.as_ref().filter(|h| h.is_row_tombstone());
-                    let row_ts = match row_tombstone {
-                        Some(h) => h.row_tombstone_deletion_time(),
-                        None => row_header_opt
-                            .as_ref()
-                            .and_then(|h| h.timestamp)
-                            .unwrap_or(0),
-                    };
+                    // Issue #932: a HAS_DELETION row may ALSO carry a liveness
+                    // timestamp (surviving cells written strictly after the
+                    // deletion). Prefer the liveness timestamp as the row
+                    // timestamp so those cells inherit it and are NOT shadowed by
+                    // the older row deletion during reconcile; fall back to
+                    // markedForDeleteAt only for a PURE row tombstone (which has no
+                    // HAS_TIMESTAMP).
+                    let row_ts = row_header_opt
+                        .as_ref()
+                        .and_then(|h| h.timestamp)
+                        .or_else(|| row_tombstone.map(|h| h.row_tombstone_deletion_time()))
+                        .unwrap_or(0);
 
                     if is_static {
                         static_cells = cells;
@@ -3623,32 +3708,34 @@ impl V5CompressedLegacyParser {
             offset, row_header.header_size, row_size, row_header.timestamp, row_header.ttl, row_header.local_deletion_time
         );
 
-        // CRITICAL FIX (Issue #191, Phase 2): Row tombstone detection
-        // If the row has deletion metadata (local_deletion_time is set), the entire row is deleted.
-        // In this case, there are NO cell values to parse - the row_size includes ONLY the header.
-        // Attempting to parse cells from a tombstoned row will read garbage data and fail.
+        // Row tombstone detection (Issue #191, Phase 2) + coexistence (Issue #932).
         //
-        // According to Cassandra 5.0 format:
-        // - Deleted rows have ROW_HAS_DELETION flag (0x10) set
-        // - Row header contains deletion time and deletion timestamp
-        // - row_size = header_size (no cell data follows)
-        // - Cell parsing must be skipped entirely
-        if row_header.local_deletion_time.is_some() {
+        // A row with ROW_HAS_DELETION (0x10) carries a row-level deletion. HISTORICALLY
+        // such a row had NO cells, so the parser skipped cell parsing entirely. But a
+        // row deletion can COEXIST with surviving cells (cells written strictly after
+        // the deletion — issue #932): the writer emits HAS_DELETION + HAS_TIMESTAMP +
+        // the surviving cells. We must therefore skip cell parsing ONLY when there are
+        // no cell bytes after the row header; otherwise fall through to the normal cell
+        // loop so the surviving cells are read (the row header still carries the
+        // deletion via `local_deletion_time` / `marked_for_delete_at`).
+        //
+        // Calculate offset after row data (based on row_size from header).
+        //
+        // CRITICAL FIX (Issue #237): row_size is measured from AFTER the row_size VInt,
+        // not from where it starts. This matches Cassandra's getFilePointer() semantics:
+        //   next_position = row_size_value + position_after_reading_row_size_vint
+        let after_row_offset =
+            (row_metadata_offset + row_header.row_size_vint_len) + row_size as usize;
+        // Cell data (if any) begins right after the row header. When that start
+        // reaches the row boundary there are no cells — a pure row tombstone.
+        let cell_data_start = row_metadata_offset + row_header.header_size;
+        let has_cell_bytes = cell_data_start < after_row_offset;
+
+        if row_header.local_deletion_time.is_some() && !has_cell_bytes {
             log::debug!(
-                "V5CompressedLegacy: Row is tombstoned (deletion_time={:?}), skipping cell parsing",
+                "V5CompressedLegacy: Pure row tombstone (deletion_time={:?}), skipping cell parsing",
                 row_header.local_deletion_time
             );
-
-            // Calculate offset after row data (based on row_size from header)
-            //
-            // CRITICAL FIX (Issue #237): row_size is measured from AFTER the row_size VInt,
-            // not from where it starts. This matches Cassandra's getFilePointer() semantics:
-            //   next_position = row_size_value + position_after_reading_row_size_vint
-            //
-            // There is NO trailing field in V5CompressedLegacy format - the next partition/row
-            // starts immediately after row_size bytes from this position.
-            let after_row_offset =
-                (row_metadata_offset + row_header.row_size_vint_len) + row_size as usize;
 
             // Validate we have enough data
             if after_row_offset > data.len() {
