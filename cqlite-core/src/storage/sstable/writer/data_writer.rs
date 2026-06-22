@@ -2389,95 +2389,94 @@ impl DataWriter {
     ) -> Result<u64> {
         use crate::storage::write_engine::mutation::CellOperation;
 
-        let mut cells_written: u64 = 0;
-        for mop in self.sorted_merged_ops(&row.ops, schema) {
+        // Index the reconciled WHOLE-COLUMN ops by column name. `merge_row_group`
+        // keeps at most one surviving op per column (last-write-wins) and only for
+        // regular columns (primary-key and static ops are filtered upstream), so
+        // every key here is a regular column.
+        let mut whole_by_col: std::collections::HashMap<&str, &MergedOp<'_>> =
+            std::collections::HashMap::new();
+        for mop in &row.ops {
             match mop.op {
-                CellOperation::Write { column, value } => {
-                    // Skip NULL values - they are represented by absence in the bitmap
-                    if matches!(value, Value::Null) {
-                        continue;
-                    }
-                    cells_written += 1;
-                    // Check if this column is a complex column (non-frozen collection)
-                    let is_complex = schema
-                        .columns
-                        .iter()
-                        .find(|c| c.name == *column)
-                        .map(|c| is_complex_column(&c.data_type))
-                        .unwrap_or(false);
-
-                    if is_complex {
-                        let col = schema
-                            .columns
-                            .iter()
-                            .find(|c| c.name == *column)
-                            .ok_or_else(|| {
-                                Error::Schema(format!(
-                                    "Complex column '{}' not found in schema",
-                                    column
-                                ))
-                            })?;
-                        self.write_complex_column(buf, col, value, mop.timestamp_micros, None)?;
-                    } else if let Some(ttl_seconds) = mop.row_ttl_seconds {
-                        if row.ttl_seconds == Some(ttl_seconds)
-                            && row.liveness_ts == Some(mop.timestamp_micros)
-                        {
-                            self.write_cell_with_row_ttl(
-                                buf,
-                                column,
-                                value,
-                                mop.timestamp_micros,
-                                ttl_seconds,
-                            )?;
-                        } else {
-                            self.write_cell_with_ttl(
-                                buf,
-                                column,
-                                value,
-                                mop.timestamp_micros,
-                                ttl_seconds,
-                            )?;
-                        }
-                    } else if row.liveness_ts == Some(mop.timestamp_micros) {
-                        self.write_cell(buf, column, value, mop.timestamp_micros)?;
-                    } else {
-                        self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
-                    }
+                CellOperation::Write { column, .. }
+                | CellOperation::WriteWithTtl { column, .. }
+                | CellOperation::Delete { column, .. } => {
+                    whole_by_col.insert(column.as_str(), mop);
                 }
-                CellOperation::WriteWithTtl {
-                    column,
-                    value,
-                    ttl_seconds,
-                } => {
-                    // Skip NULL values - they are represented by absence in the bitmap
-                    if matches!(value, Value::Null) {
-                        continue;
-                    }
-                    cells_written += 1;
-                    let is_complex = schema
-                        .columns
-                        .iter()
-                        .find(|c| c.name == *column)
-                        .map(|c| is_complex_column(&c.data_type))
-                        .unwrap_or(false);
+                // Row deletion is a row-level flag, not a cell; per-element complex
+                // ops live in `row.complex_element_ops` and are grouped below.
+                CellOperation::DeleteRow
+                | CellOperation::WriteComplexElement { .. }
+                | CellOperation::ComplexDeletion { .. } => {}
+            }
+        }
 
-                    if is_complex {
-                        let col = schema
-                            .columns
-                            .iter()
-                            .find(|c| c.name == *column)
-                            .ok_or_else(|| {
-                                Error::Schema(format!(
-                                    "Complex column '{}' not found in schema",
-                                    column
-                                ))
-                            })?;
-                        self.write_complex_column(
+        // Group the surviving PER-ELEMENT complex ops by column (one emitted
+        // complex column each).
+        let mut per_element_by_col = self.group_complex_element_ops(row);
+
+        // ONE schema-ordered emission pass (issue #930): for each regular column
+        // emit its whole-column op and/or its per-element complex column, walking
+        // `regular_columns(schema)` — the exact order the header bitmap /
+        // `write_column_subset` use. A previous two-pass design emitted every
+        // whole-column op first and every per-element column second, which
+        // inverted the wire order whenever a row mixed a whole-column write for
+        // one column with per-element ops for another column that sorts earlier,
+        // misaligning the bodies against the bitmap for strict positional readers.
+        let mut cells_written: u64 = 0;
+        for col in self.regular_columns(schema) {
+            let name = col.name.as_str();
+            if let Some(mop) = whole_by_col.get(name) {
+                cells_written += self.emit_whole_column_op(buf, row, col, mop)?;
+            }
+            if let Some((complex_deletion, elements)) = per_element_by_col.remove(name) {
+                self.write_complex_column_per_element(
+                    buf,
+                    col,
+                    complex_deletion,
+                    &elements,
+                    row.liveness_ts.unwrap_or(0),
+                )?;
+                cells_written += 1;
+            }
+        }
+
+        Ok(cells_written)
+    }
+
+    /// Emit a single reconciled WHOLE-COLUMN op (`Write` / `WriteWithTtl` /
+    /// `Delete`) for `col`. Returns the number of cells serialized: 0 for a
+    /// skipped NULL write (represented by absence in the bitmap), else 1.
+    fn emit_whole_column_op(
+        &self,
+        buf: &mut Vec<u8>,
+        row: &RowWrite<'_>,
+        col: &Column,
+        mop: &MergedOp<'_>,
+    ) -> Result<u64> {
+        use crate::storage::write_engine::mutation::CellOperation;
+
+        // `col` is the schema column for this op, so the complex check needs no
+        // second lookup.
+        let is_complex = is_complex_column(&col.data_type);
+
+        match mop.op {
+            CellOperation::Write { column, value } => {
+                // Skip NULL values - they are represented by absence in the bitmap
+                if matches!(value, Value::Null) {
+                    return Ok(0);
+                }
+                if is_complex {
+                    self.write_complex_column(buf, col, value, mop.timestamp_micros, None)?;
+                } else if let Some(ttl_seconds) = mop.row_ttl_seconds {
+                    if row.ttl_seconds == Some(ttl_seconds)
+                        && row.liveness_ts == Some(mop.timestamp_micros)
+                    {
+                        self.write_cell_with_row_ttl(
                             buf,
-                            col,
+                            column,
                             value,
                             mop.timestamp_micros,
-                            Some(*ttl_seconds),
+                            ttl_seconds,
                         )?;
                     } else {
                         self.write_cell_with_ttl(
@@ -2485,80 +2484,86 @@ impl DataWriter {
                             column,
                             value,
                             mop.timestamp_micros,
-                            *ttl_seconds,
+                            ttl_seconds,
                         )?;
                     }
+                } else if row.liveness_ts == Some(mop.timestamp_micros) {
+                    self.write_cell(buf, column, value, mop.timestamp_micros)?;
+                } else {
+                    self.write_cell_explicit_ts(buf, column, value, mop.timestamp_micros)?;
                 }
-                CellOperation::Delete { column, .. } => {
-                    cells_written += 1;
-                    let is_complex = schema
-                        .columns
-                        .iter()
-                        .find(|c| c.name == *column)
-                        .map(|c| is_complex_column(&c.data_type))
-                        .unwrap_or(false);
-
-                    if is_complex {
-                        // Complex column deletion: write empty complex column
-                        // with active deletion time (not LIVE).
-                        // Issue #764: honor the originating mutation's explicit
-                        // local_deletion_time, not a timestamp-derived value.
-                        self.write_complex_column_deletion(
-                            buf,
-                            mop.timestamp_micros,
-                            mop.cell_local_deletion_time,
-                        )?;
-                    } else {
-                        // Issue #764: honor explicit local_deletion_time.
-                        let local_deletion_time = mop.cell_local_deletion_time;
-                        self.write_tombstone_cell(
-                            buf,
-                            column,
-                            mop.timestamp_micros,
-                            local_deletion_time,
-                        )?;
-                    }
-                }
-                CellOperation::DeleteRow => {
-                    // Row deletion handled at row level with HAS_DELETION flag
-                }
-                // Per-element complex ops are collected into
-                // `row.complex_element_ops`, not `row.ops`, and emitted below.
-                CellOperation::WriteComplexElement { .. }
-                | CellOperation::ComplexDeletion { .. } => {}
+                Ok(1)
             }
+            CellOperation::WriteWithTtl {
+                column,
+                value,
+                ttl_seconds,
+            } => {
+                // Skip NULL values - they are represented by absence in the bitmap
+                if matches!(value, Value::Null) {
+                    return Ok(0);
+                }
+                if is_complex {
+                    self.write_complex_column(
+                        buf,
+                        col,
+                        value,
+                        mop.timestamp_micros,
+                        Some(*ttl_seconds),
+                    )?;
+                } else {
+                    self.write_cell_with_ttl(
+                        buf,
+                        column,
+                        value,
+                        mop.timestamp_micros,
+                        *ttl_seconds,
+                    )?;
+                }
+                Ok(1)
+            }
+            CellOperation::Delete { column, .. } => {
+                if is_complex {
+                    // Complex column deletion: write empty complex column
+                    // with active deletion time (not LIVE).
+                    // Issue #764: honor the originating mutation's explicit
+                    // local_deletion_time, not a timestamp-derived value.
+                    self.write_complex_column_deletion(
+                        buf,
+                        mop.timestamp_micros,
+                        mop.cell_local_deletion_time,
+                    )?;
+                } else {
+                    // Issue #764: honor explicit local_deletion_time.
+                    self.write_tombstone_cell(
+                        buf,
+                        column,
+                        mop.timestamp_micros,
+                        mop.cell_local_deletion_time,
+                    )?;
+                }
+                Ok(1)
+            }
+            // Only whole-column ops are indexed into `whole_by_col`; these never
+            // reach here.
+            CellOperation::DeleteRow
+            | CellOperation::WriteComplexElement { .. }
+            | CellOperation::ComplexDeletion { .. } => Ok(0),
         }
-
-        // Epic #899 (Phase B): emit per-element complex columns. Empty for every
-        // existing scenario (the real pipeline does not yet route ops here), so
-        // this is byte-neutral; exercised by the Phase B writer-capability unit
-        // tests via `write_complex_column_per_element` directly.
-        cells_written += self.write_complex_element_columns(buf, row, schema)?;
-
-        Ok(cells_written)
     }
 
-    /// Group `row.complex_element_ops` by column and emit each as a per-element
-    /// complex column (real deletion marker + surviving element cells), in
-    /// regular-column serialization order. Returns the number of complex columns
-    /// physically written (one per emitted column, matching Cassandra's
-    /// `Row.columnCount()` for non-frozen collections).
-    fn write_complex_element_columns(
+    /// Group `row.complex_element_ops` by column for the single emission pass.
+    /// Each entry is `(strongest complex deletion marker, surviving element
+    /// writes)`, keyed by column name. The emission order is decided by the
+    /// caller walking `regular_columns(schema)`; the map only deduplicates the
+    /// per-column deletion marker and accumulates element writes verbatim.
+    fn group_complex_element_ops<'a>(
         &self,
-        buf: &mut Vec<u8>,
-        row: &RowWrite<'_>,
-        schema: &TableSchema,
-    ) -> Result<u64> {
+        row: &RowWrite<'a>,
+    ) -> std::collections::BTreeMap<&'a str, ComplexColumnGroup> {
         use crate::storage::write_engine::mutation::CellOperation;
 
-        if row.complex_element_ops.is_empty() {
-            return Ok(0);
-        }
-
-        // Group by column, preserving per-element ops and the (single) deletion.
-        // BTreeMap keeps a deterministic intermediate order; final emit order is
-        // the schema's regular-column order below.
-        let mut per_column: std::collections::BTreeMap<&str, ComplexColumnGroup> =
+        let mut per_column: std::collections::BTreeMap<&'a str, ComplexColumnGroup> =
             std::collections::BTreeMap::new();
 
         for mop in &row.complex_element_ops {
@@ -2604,23 +2609,7 @@ impl DataWriter {
             }
         }
 
-        // Emit in schema regular-column order so complex columns land in the same
-        // position the bitmap/`sorted_merged_ops` use.
-        let mut cells_written: u64 = 0;
-        for col in self.regular_columns(schema) {
-            if let Some((complex_deletion, elements)) = per_column.remove(col.name.as_str()) {
-                self.write_complex_column_per_element(
-                    buf,
-                    col,
-                    complex_deletion,
-                    &elements,
-                    row.liveness_ts.unwrap_or(0),
-                )?;
-                cells_written += 1;
-            }
-        }
-
-        Ok(cells_written)
+        per_column
     }
 
     /// Write a complex column (non-frozen collection stored as multiple cells).
@@ -3720,43 +3709,6 @@ impl DataWriter {
             .collect();
         columns.sort_by_key(|column| column_order_key(column));
         columns
-    }
-
-    /// Sort merged ops into regular-column serialization order
-    /// (simple columns before complex, then by name).
-    fn sorted_merged_ops<'a, 'b>(
-        &self,
-        ops: &'b [MergedOp<'a>],
-        schema: &TableSchema,
-    ) -> Vec<&'b MergedOp<'a>> {
-        let columns = self.regular_columns(schema);
-        let column_order: std::collections::HashMap<&str, usize> = columns
-            .iter()
-            .enumerate()
-            .map(|(idx, column)| (column.name.as_str(), idx))
-            .collect();
-
-        let mut sorted: Vec<&'b MergedOp<'a>> = ops.iter().collect();
-        sorted.sort_by_key(|mop| match mop.op {
-            crate::storage::write_engine::mutation::CellOperation::Write { column, .. }
-            | crate::storage::write_engine::mutation::CellOperation::WriteWithTtl {
-                column, ..
-            }
-            | crate::storage::write_engine::mutation::CellOperation::Delete { column, .. }
-            | crate::storage::write_engine::mutation::CellOperation::WriteComplexElement {
-                column,
-                ..
-            }
-            | crate::storage::write_engine::mutation::CellOperation::ComplexDeletion {
-                column,
-                ..
-            } => column_order
-                .get(column.as_str())
-                .copied()
-                .unwrap_or(usize::MAX - 1),
-            crate::storage::write_engine::mutation::CellOperation::DeleteRow => usize::MAX,
-        });
-        sorted
     }
 
     fn write_column_subset(
@@ -9677,6 +9629,215 @@ mod tests {
         );
         assert!(dead.value.is_none(), "tombstone writes no value bytes");
         assert_eq!(dead.ldt_delta, Some((1_700_000_009 - 1_700_000_000) as u64));
+    }
+
+    // ===================================================================
+    // Issue #930 — a single row may mix a WHOLE-COLUMN complex write (one
+    // column) with PER-ELEMENT complex ops (a DIFFERENT column). The header
+    // bitmap and `write_column_subset` lay columns out in `regular_columns`
+    // order; the row body MUST emit complex columns in that same order so a
+    // strict positional reader maps cell bodies to the right columns. The
+    // pre-#930 writer ran two passes — every whole-column op, then every
+    // per-element op — which inverted the wire order whenever the per-element
+    // column sorted BEFORE the whole-column one.
+    // ===================================================================
+
+    /// Schema: id (pk int) + two non-frozen complex columns. `aaa_set` sorts
+    /// before `zzz_set`, so they straddle the whole-column / per-element split.
+    fn two_complex_columns_schema() -> TableSchema {
+        TableSchema {
+            keyspace: "test_ks".to_string(),
+            table: "test_table".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "id".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![],
+            columns: vec![
+                Column {
+                    name: "id".to_string(),
+                    data_type: "int".to_string(),
+                    nullable: false,
+                    default: None,
+                    is_static: false,
+                },
+                set_column("aaa_set"),
+                set_column("zzz_set"),
+            ],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn mixed_whole_column_and_per_element_emit_in_schema_order() {
+        let schema = two_complex_columns_schema();
+
+        let mut stats = StatisticsMetadata::new();
+        stats.min_timestamp = 1_000_000;
+        stats.min_ttl = 0;
+        stats.min_local_deletion_time = 1_700_000_000;
+
+        let row_ts = 2_000_000i64;
+
+        // EARLIER-sorting column gets a PER-ELEMENT op (member int 10).
+        let aaa_path = serialize_collection_element(&Value::Integer(10), "SET").unwrap();
+        // LATER-sorting column gets a WHOLE-COLUMN complex write ({99}).
+        let zzz_path = serialize_collection_element(&Value::Integer(99), "SET").unwrap();
+
+        let mutation = Mutation::new(
+            TableId::new("test_ks", "test_table"),
+            PartitionKey::single("id", Value::Integer(1)),
+            None,
+            vec![
+                // Whole-column complex write → lands in row.ops.
+                CellOperation::Write {
+                    column: "zzz_set".to_string(),
+                    value: Value::Set(vec![Value::Integer(99)]),
+                },
+                // Per-element complex op → lands in row.complex_element_ops.
+                CellOperation::WriteComplexElement {
+                    column: "aaa_set".to_string(),
+                    cell_path: aaa_path.clone(),
+                    value: None,
+                    timestamp_micros: row_ts,
+                    ttl_seconds: None,
+                    local_deletion_time: None,
+                    is_deleted: false,
+                },
+            ],
+            row_ts,
+            None,
+        );
+
+        let row = DataWriter::merge_row_group(&[&mutation], &schema, false, None)
+            .expect("row should merge");
+        assert_eq!(
+            row.ops.len(),
+            1,
+            "zzz_set whole-column write lands in row.ops"
+        );
+        assert_eq!(
+            row.complex_element_ops.len(),
+            1,
+            "aaa_set per-element op lands in row.complex_element_ops"
+        );
+
+        let mut writer = DataWriter::new(stats.clone());
+        let (_bytes, cells_written) = writer
+            .write_merged_row_with_prev_size(&row, &schema, 0)
+            .expect("row path write should succeed");
+        assert_eq!(
+            cells_written, 2,
+            "two complex columns emitted => two columns counted"
+        );
+
+        // ---- Strip [row_flags][row_size][prev_size] to reach the body.
+        fn read_uvint(buf: &[u8], pos: &mut usize) -> u64 {
+            let first = buf[*pos];
+            *pos += 1;
+            if first == 0xFF {
+                let mut v = 0u64;
+                for _ in 0..8 {
+                    v = (v << 8) | buf[*pos] as u64;
+                    *pos += 1;
+                }
+                return v;
+            }
+            let extra = first.leading_ones() as usize;
+            let mask = 0xFF_u8.wrapping_shr((extra + 1) as u32);
+            let mut v = (first & mask) as u64;
+            for _ in 0..extra {
+                v = (v << 8) | buf[*pos] as u64;
+                *pos += 1;
+            }
+            v
+        }
+        fn skip_uvint(buf: &[u8], pos: &mut usize) {
+            let first = buf[*pos];
+            let extra = if first == 0xFF {
+                8
+            } else {
+                first.leading_ones() as usize
+            };
+            *pos += 1 + extra;
+        }
+        /// Walk one complex column (deletion header + cells) and return its cell
+        /// paths, advancing `pos` past the column.
+        fn walk_complex_column(buf: &[u8], pos: &mut usize) -> Vec<Vec<u8>> {
+            let _del_ts = read_uvint(buf, pos);
+            let _del_ldt = read_uvint(buf, pos);
+            let cell_count = read_uvint(buf, pos) as usize;
+            let mut paths = Vec::with_capacity(cell_count);
+            for _ in 0..cell_count {
+                let flags = buf[*pos];
+                *pos += 1;
+                let is_deleted = (flags & CELL_IS_DELETED) != 0;
+                let is_expiring = (flags & CELL_IS_EXPIRING) != 0;
+                let has_empty_value = (flags & CELL_HAS_EMPTY_VALUE) != 0;
+                let use_row_ts = (flags & CELL_USE_ROW_TIMESTAMP) != 0;
+                let use_row_ttl = (flags & CELL_USE_ROW_TTL) != 0;
+                if !use_row_ts {
+                    read_uvint(buf, pos);
+                }
+                if !use_row_ttl && (is_deleted || is_expiring) {
+                    read_uvint(buf, pos);
+                }
+                if !use_row_ttl && is_expiring {
+                    read_uvint(buf, pos);
+                }
+                let path_len = read_uvint(buf, pos) as usize;
+                paths.push(buf[*pos..*pos + path_len].to_vec());
+                *pos += path_len;
+                if !(is_deleted || has_empty_value) {
+                    let value_len = read_uvint(buf, pos) as usize;
+                    *pos += value_len;
+                }
+            }
+            paths
+        }
+
+        let out = writer.buffer.clone();
+        let mut pos = 0usize;
+        let row_flags = out[pos];
+        pos += 1;
+        skip_uvint(&out, &mut pos); // row_size
+        skip_uvint(&out, &mut pos); // prev_size
+
+        let body = &out[pos..];
+        let mut bpos = 0usize;
+        if (row_flags & ROW_HAS_TIMESTAMP) != 0 {
+            read_uvint(body, &mut bpos);
+        }
+        if (row_flags & ROW_HAS_TTL) != 0 {
+            read_uvint(body, &mut bpos);
+            read_uvint(body, &mut bpos);
+        }
+        if (row_flags & ROW_HAS_DELETION) != 0 {
+            read_uvint(body, &mut bpos);
+            read_uvint(body, &mut bpos);
+        }
+        if (row_flags & ROW_HAS_ALL_COLUMNS) == 0 {
+            read_uvint(body, &mut bpos); // column bitmap (both present)
+        }
+
+        // The body must lay the complex columns out in schema order: the
+        // earlier-sorting per-element column (aaa_set) FIRST, then the
+        // later-sorting whole-column write (zzz_set).
+        let col1 = walk_complex_column(body, &mut bpos);
+        let col2 = walk_complex_column(body, &mut bpos);
+        assert_eq!(
+            col1,
+            vec![aaa_path.clone()],
+            "first complex column in the body must be the earlier-sorting \
+             per-element column aaa_set, not the whole-column zzz_set"
+        );
+        assert_eq!(
+            col2,
+            vec![zzz_path.clone()],
+            "second complex column in the body must be the whole-column write zzz_set"
+        );
     }
 
     // ===================================================================
