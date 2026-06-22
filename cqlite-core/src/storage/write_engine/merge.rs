@@ -2267,12 +2267,18 @@ impl KWayMerger {
         // strips only the fully-purged ones from the output serialization header
         // (`TableSchema::for_compaction_output`).
         //
-        // ROW-TIMESTAMP GRANULARITY (#847 scope): `cell.timestamp` is the ROW
-        // write-time, not the cell's own writetime (`value_to_row_data`), so a row
-        // mixing a pre-drop dropped-column cell with a post-drop cell of another
-        // column carries one (newer) row timestamp and the dropped cell can
-        // survive. Byte-correct when a row's cells share a timestamp (common
-        // case); exact per-cell purging needs #886/#899 plumbing, tracked as #922.
+        // EXACT PER-CELL GRANULARITY (#922): `cell.timestamp` is the cell's OWN
+        // writetime. The production compaction path builds each simple cell from
+        // the reader's per-cell `CellWriteMetadata.write_timestamp_micros`
+        // (`build_compaction_row_data` → `SimpleCell.timestamp`, the #886/#899
+        // enrichment), so a row mixing a pre-drop dropped-column cell with a
+        // post-drop cell of ANOTHER column purges the dropped cell by its own
+        // writetime while the sibling survives by its — even though they share one
+        // on-disk row. (Cells with no per-cell metadata fall back to the row
+        // timestamp, matching Cassandra when every cell shares a writetime.) The
+        // legacy `value_to_row_data` row-timestamp path is `#[cfg(test)]`-only and
+        // is not on the production compaction stream. Verified end-to-end by
+        // `tests/issue_922_per_cell_dropped_purge.rs`.
         //
         // Apply row-tombstone shadowing first, then dropped-column filtering as a
         // second stage so we can tell whether the dropped-column purge is what
@@ -5302,8 +5308,10 @@ mod issue_823_complex_column_merge {
     // ── Issue #847: dropped-column cell filtering during compaction ──────────
     // A column dropped at drop_time discards cells with `timestamp <= drop_time`;
     // cells written after the drop (re-added) survive. The drop time comes from
-    // the `dropped_columns` map (#904). Byte-correct for scalar columns at
-    // row-timestamp granularity (#922 tracks exact per-cell purging).
+    // the `dropped_columns` map (#904). `cell.timestamp` is the cell's OWN
+    // writetime (#886/#899 enrichment), so purging is exact per cell even when
+    // sibling cells in the same row carry different timestamps (#922 — end-to-end
+    // coverage in `tests/issue_922_per_cell_dropped_purge.rs`).
 
     /// A cell of a dropped column written at/before the drop time is filtered; a
     /// sibling column with no drop entry is untouched.
@@ -5402,6 +5410,35 @@ mod issue_823_complex_column_merge {
             other => panic!("expected Live, got {:?}", other),
         };
         assert_eq!(cells.len(), 2, "no drops configured → every cell survives");
+    }
+
+    /// Issue #922 — exact per-cell purging. One row carries two cells with
+    /// DISTINCT writetimes: a pre-drop cell of the dropped column (`legacy`@100)
+    /// and a post-drop cell of another column (`name`@300). The dropped cell is
+    /// purged by its OWN timestamp (100 <= drop_time 150) while `name` survives by
+    /// its own (300 > 150) — proving the filter is per-cell, not row-timestamp.
+    #[test]
+    fn dropped_column_purge_is_exact_per_cell_within_one_row() {
+        let row = live(
+            0,
+            300, // row liveness ts = newest cell; must NOT govern the older cell
+            vec![
+                scalar_cell("name", "alice", 300),
+                scalar_cell("legacy", "stale", 100),
+            ],
+        );
+        let mut dropped = ::std::collections::HashMap::new();
+        dropped.insert("legacy".to_string(), 150);
+
+        let merged = KWayMerger::reconcile_cluster(None, vec![row], &dropped, None)
+            .expect("name survives, so a live row must be emitted");
+        let cells = match merged.row_data {
+            RowData::Live { cells } => cells,
+            other => panic!("expected Live, got {:?}", other),
+        };
+        assert_eq!(cells.len(), 1, "only the post-drop `name` cell survives");
+        assert_eq!(cells[0].column, "name");
+        assert_eq!(cells[0].timestamp, 300);
     }
 
     /// GATING TEST — multi-cell merge granularity.
