@@ -1181,12 +1181,29 @@ impl WriteEngine {
                 // compaction (`purge_safe == true`) there are no non-included
                 // SSTables, so the bound is `None` and the merger uses its +inf
                 // full-compaction fast path.
+                //
+                // SCOPE TO THIS TABLE: `scan_sstable_candidates` scans the whole
+                // `data_dir` recursively, so `candidates` can include SSTables of
+                // OTHER keyspaces/tables. A tombstone in this table can only shadow
+                // THIS table's data, so the bound must be the min over this table's
+                // non-included SSTables only — restricting it to the compacting
+                // table's directory (`data_dir/keyspace/table/`). Every published
+                // SSTable for this table lives under that directory, so none is
+                // missed (the bound can never be unsafely raised); excluding foreign
+                // tables avoids their unrelated (often older) min_timestamp wrongly
+                // suppressing a valid purge.
                 let max_purgeable_timestamp = if purge_safe {
                     None
                 } else {
+                    let table_dir = self
+                        .config
+                        .data_dir
+                        .join(&self.config.schema.keyspace)
+                        .join(&self.config.schema.table);
                     let non_included: Vec<PathBuf> = candidates
                         .iter()
                         .filter(|p| !selected_set.contains(*p))
+                        .filter(|p| p.starts_with(&table_dir))
                         .cloned()
                         .collect();
                     merge::compute_max_purgeable_timestamp(&non_included)
