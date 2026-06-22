@@ -1155,7 +1155,28 @@ impl WriteEngine {
 
         // If no active merge exists, check if we should start one
         if self.active_merge.is_none() {
-            let candidates = self.scan_sstable_candidates()?;
+            // SCOPE TO THIS TABLE (#935 branch review): `scan_sstable_candidates`
+            // walks the whole `data_dir` recursively, so it can include SSTables
+            // of OTHER keyspaces/tables. This WriteEngine is single-table
+            // (`config.schema`) and always publishes output to
+            // `data_dir/keyspace/table/`, so restrict the candidate set to THIS
+            // table's directory BEFORE any policy or purge-safety decision.
+            // Otherwise a full compaction of this table is misclassified as
+            // partial whenever a foreign table's SSTable exists under `data_dir`
+            // (`selected_set != candidate_set`), which both lets the policy see
+            // foreign-table inputs and disables tombstone purging that is actually
+            // safe. Every published SSTable for this table lives under
+            // `table_dir`, so the scoping never drops a real input.
+            let table_dir = self
+                .config
+                .data_dir
+                .join(&self.config.schema.keyspace)
+                .join(&self.config.schema.table);
+            let candidates: Vec<PathBuf> = self
+                .scan_sstable_candidates()?
+                .into_iter()
+                .filter(|p| p.starts_with(&table_dir))
+                .collect();
             let selected = merge_policy.select_merge(&candidates)?;
 
             if !selected.is_empty() {
@@ -1173,8 +1194,29 @@ impl WriteEngine {
                     candidates.iter().collect();
                 let purge_safe = !candidate_set.is_empty() && selected_set == candidate_set;
 
+                // Overlap-aware partial-compaction purging (#935): when this is a
+                // PARTIAL compaction (some candidate SSTables are NOT included),
+                // compute the min write timestamp across those non-included
+                // SSTables. A tombstone older than every one of them shadows
+                // nothing outside the set and can be purged even here. For a full
+                // compaction (`purge_safe == true`) there are no non-included
+                // SSTables, so the bound is `None` and the merger uses its +inf
+                // full-compaction fast path. `candidates` is already scoped to
+                // this table's directory (see above), so the non-included set is
+                // exactly this table's outside SSTables.
+                let max_purgeable_timestamp = if purge_safe {
+                    None
+                } else {
+                    let non_included: Vec<PathBuf> = candidates
+                        .iter()
+                        .filter(|p| !selected_set.contains(*p))
+                        .cloned()
+                        .collect();
+                    merge::compute_max_purgeable_timestamp(&non_included)
+                };
+
                 // Start a new merge
-                self.start_merge(selected, purge_safe)?;
+                self.start_merge(selected, purge_safe, max_purgeable_timestamp)?;
             } else {
                 // No work selected by policy
                 report.time_spent = start.elapsed();
@@ -1434,7 +1476,18 @@ impl WriteEngine {
     /// SSTable for the table (a major/full compaction), allowing gc_grace
     /// tombstone purging without risking resurrection of data shadowed in a
     /// non-included overlapping SSTable. `false` keeps every tombstone.
-    fn start_merge(&mut self, input_paths: Vec<PathBuf>, purge_safe: bool) -> Result<()> {
+    ///
+    /// `max_purgeable_timestamp` (#935): for a PARTIAL compaction (`purge_safe ==
+    /// false`), the min write timestamp across the non-included overlapping
+    /// SSTables — see [`merge::compute_max_purgeable_timestamp`]. When `Some`, a
+    /// tombstone older than every outside SSTable is purged even in a partial
+    /// compaction; `None` keeps the conservative #921 behavior (no purging).
+    fn start_merge(
+        &mut self,
+        input_paths: Vec<PathBuf>,
+        purge_safe: bool,
+        max_purgeable_timestamp: Option<i64>,
+    ) -> Result<()> {
         log::info!(
             "Starting compaction merge of {} SSTables",
             input_paths.len()
@@ -1539,6 +1592,7 @@ impl WriteEngine {
                 gc_before_secs,
                 Some(now_secs),
                 purge_safe,
+                max_purgeable_timestamp,
             )?
         };
         // `write_schema` inherits the #929 UDT normalization from the already-
@@ -1551,7 +1605,11 @@ impl WriteEngine {
             gc_before_secs,
             Some(now_secs),
         )?
-        .with_purge_safe(purge_safe);
+        .with_purge_safe(purge_safe)
+        // #935: overlap-aware purging for a partial compaction. `purge_safe`
+        // overrides this in the merger (full compaction → +inf bound), so passing
+        // the partial bound unconditionally is safe.
+        .with_max_purgeable_timestamp(max_purgeable_timestamp);
 
         // Point the SSTableWriter at the tmp root; it will write to
         // tmp_dir/keyspace/table/nb-{gen}-big-*.db. Use the post-drop
@@ -3251,6 +3309,79 @@ mod tests {
         // bytes_written may be 0 if the merged output is empty (reader/writer compatibility),
         // but total_time must be non-zero
         assert!(stats.total_time > Duration::ZERO, "total_time must be > 0");
+    }
+
+    /// #935 branch-review regression: `scan_sstable_candidates` walks the whole
+    /// `data_dir` recursively, so a foreign keyspace/table's SSTable sitting under
+    /// `data_dir` must NOT be treated as a candidate for this table's compaction.
+    /// Before the fix the foreign SSTable inflated `candidate_set`, so a full
+    /// compaction of this table was misclassified as partial (the policy could
+    /// also see the foreign input). After the fix candidates are scoped to
+    /// `data_dir/keyspace/table/`, so only this table's SSTables are merged and
+    /// the foreign file is left untouched.
+    #[test]
+    fn test_maintenance_step_ignores_foreign_table_sstables() {
+        let temp_dir = TempDir::new().unwrap();
+        let schema = create_test_schema();
+
+        let policy = crate::storage::write_engine::STCSPolicy::new(
+            4,   // min_threshold
+            32,  // max_threshold
+            0.5, // bucket_low
+            1.5, // bucket_high
+            0,   // min_sstable_size = 0 so tiny files group together
+        )
+        .unwrap();
+
+        let data_dir = temp_dir.path().join("data");
+        let config = WriteEngineConfig::new(data_dir.clone(), temp_dir.path().join("wal"), schema);
+
+        let mut engine = WriteEngine::new(config).unwrap();
+
+        // Flush 4 SSTables for THIS table (data/test_ks/test_table/).
+        let input_paths = flush_n_sstables_sync(&mut engine, 4);
+        assert_eq!(input_paths.len(), 4, "Expected 4 flushed SSTables");
+
+        // Plant a foreign keyspace/table SSTable under the same data_dir, with a
+        // sibling TOC.txt so it passes the publication barrier and would be
+        // discovered by the recursive scan.
+        let foreign_dir = data_dir.join("other_ks").join("other_tbl");
+        std::fs::create_dir_all(&foreign_dir).unwrap();
+        let foreign_data = foreign_dir.join("nb-1-big-Data.db");
+        std::fs::write(&foreign_data, b"not a real sstable").unwrap();
+        std::fs::write(foreign_dir.join("nb-1-big-TOC.txt"), b"Data.db\nTOC.txt\n").unwrap();
+
+        engine.set_merge_policy(Box::new(policy)).unwrap();
+        let report = engine.maintenance_step(Duration::from_secs(60)).unwrap();
+
+        // The merge must complete using ONLY this table's 4 inputs.
+        assert_eq!(
+            report.completed_merges.len(),
+            1,
+            "Expected exactly 1 completed merge, got: {:?}",
+            report.completed_merges
+        );
+        let stats = engine.maintenance_stats();
+        assert_eq!(
+            stats.sstables_merged_in, 4,
+            "Only this table's 4 SSTables must be merged; the foreign SSTable must be excluded"
+        );
+
+        // The foreign SSTable must be left completely untouched.
+        assert!(
+            foreign_data.exists(),
+            "Foreign-table SSTable {:?} must not be consumed by this table's compaction",
+            foreign_data
+        );
+
+        // This table's inputs are consumed as usual.
+        for p in &input_paths {
+            assert!(
+                !p.exists(),
+                "Input file {:?} should have been deleted after compaction",
+                p
+            );
+        }
     }
 
     #[test]
