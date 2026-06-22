@@ -55,6 +55,29 @@ docker compose exec trino trino
 trino> SELECT * FROM cqlite.<keyspace>.<table> LIMIT 10;
 ```
 
+## Catalog configuration
+
+Catalog properties (`etc/catalog/cqlite.properties`):
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `cqlite.sidecar-uri` | *(required)* | Cassandra Sidecar base URI for DDL/ring discovery. |
+| `cqlite.flight-port` | `8815` | Arrow Flight port on each Cassandra node. |
+| `cqlite.local-datacenter` | *(none)* | Preferred datacenter for split placement. |
+| `cqlite.aggregation-pushdown-group-by` | `automatic` | GROUP BY aggregation-pushdown policy: `automatic`, `always`, or `never`. Global aggregates (no GROUP BY) are an unconditional win and always push regardless of this setting. |
+| `cqlite.aggregation-pushdown-max-group-ratio` | `0.5` | `automatic` only: decline GROUP BY pushdown once the estimated distinct-groups / rows ratio exceeds this. Must be in `(0.0, 1.0]`. |
+
+**Aggregation-pushdown gate (issue #893).** The single-finalize-split design wins
+big for global aggregates and low/mid-cardinality `GROUP BY`, but degrades to
+break-even (and slightly negative on bytes) once the number of distinct groups
+approaches the row count. `automatic` declines pushdown in that high-cardinality
+case so Trino aggregates locally — but only when a cardinality estimate is
+available. No authoritative per-grouping-column NDV is surfaced through the
+Flight/Sidecar path yet (Cassandra's `Statistics.db` does not store it), so today
+`automatic` always pushes. Operators who hit the high-cardinality loss can force
+the gate with `cqlite.aggregation-pushdown-group-by=never`; `always` restores the
+unconditional pre-gate behavior.
+
 ## Load testing (optional `loadtest` profile)
 
 `cassandra-easy-stress` is wired in behind a separate `loadtest` profile, so a
