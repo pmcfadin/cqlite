@@ -964,11 +964,19 @@ impl SSTableManager {
     /// which match the bytes the bloom filter, Index.db/BTI trie, and scan RowKeys
     /// are keyed on.
     ///
-    /// Note: within a surviving SSTable this still performs a full parse (then keeps
-    /// only the matching partition). Seeking directly to the partition's Data.db
-    /// offset via Index.db/BTI for the single-candidate case is a follow-up; the
-    /// dominant win for the "thousands of SSTables" scenario is the cross-SSTable
-    /// pruning above.
+    /// Within-SSTable seek (Issue #953): for the SINGLE-candidate case (the common
+    /// point-lookup path) this seeks directly to the partition's `Data.db` offset
+    /// — resolved via the BTI Partitions.db trie or the BIG `Index.db` — and
+    /// decodes ONLY that partition via
+    /// [`scan_single_partition`](reader::SSTableReader::scan_single_partition),
+    /// instead of full-parsing the candidate and retaining one partition. The
+    /// decode reuses the scan path's `parse_block_emit`, so its output is
+    /// byte-for-byte identical to `scan(...).retain(matches_key)`; when the offset
+    /// cannot be resolved authoritatively (no `Index.db` hit, or an unsupported
+    /// format) it falls back to the full scan + retain for that candidate. The
+    /// MULTI-candidate path is unchanged: it still reconciles via the k-way merge
+    /// (or the per-candidate concat fallback), so cross-generation LWW / tombstone
+    /// shadowing (#883) is preserved.
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan_partition(
         &self,
@@ -1035,17 +1043,47 @@ impl SSTableManager {
             }
         }
 
-        // Single candidate (the common case), or the concat fallback: parse each
-        // candidate and keep only the target partition's rows.
+        // Single candidate (the common case): SEEK directly to the partition's
+        // Data.db offset and decode ONLY that partition (Issue #953), instead of a
+        // full parse-then-retain. The seek resolves the offset via the BTI trie /
+        // Index.db and runs the same per-partition decode the scan path uses, so
+        // its output is byte-for-byte identical to `scan(...).retain(matches_key)`.
+        // If the seek is not applicable for this reader (no authoritative offset,
+        // or an unsupported format), it returns `Ok(None)` and we FALL BACK to the
+        // full scan + retain for that candidate (Constraint #4: correctness over
+        // optimization). The multi-candidate concat fallback below is unchanged —
+        // only the single-candidate path gets the seek.
         let mut all_results = Vec::new();
         for reader in &candidates {
-            // Work-counter gate (Issue #958): one real Data.db parse per surviving
+            // Work-counter gate (Issue #958): one real Data.db touch per surviving
             // candidate. Counted here (not at prune time) so the counter reflects
             // SSTables actually opened/scanned, the cost a regression would balloon.
             work_counters::add_sstables_scanned(1);
-            let mut results = reader.scan(table_id, None, None, None, schema).await?;
-            results.retain(matches_key);
-            all_results.extend(results);
+
+            let mut results = if candidates.len() == 1 {
+                match reader
+                    .scan_single_partition(table_id, partition_key, schema)
+                    .await
+                {
+                    // Seek resolved authoritatively: use its rows directly. They
+                    // already match exactly this partition's key, so no retain.
+                    Ok(Some(rows)) => rows,
+                    // Seek not applicable (Constraint #4): full scan + retain.
+                    Ok(None) => {
+                        let mut r = reader.scan(table_id, None, None, None, schema).await?;
+                        r.retain(matches_key);
+                        r
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
+                // Multi-candidate concat fallback (merge unavailable): preserve the
+                // existing full-scan + retain behaviour per candidate (Constraint #2).
+                let mut r = reader.scan(table_id, None, None, None, schema).await?;
+                r.retain(matches_key);
+                r
+            };
+            all_results.append(&mut results);
         }
         // A single candidate's rows already come back in on-disk key order; only
         // concatenating more than one candidate needs a re-sort to merge them.

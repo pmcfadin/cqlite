@@ -36,6 +36,22 @@
 //!   0 (absent key) or the number of rows that partition holds; it never scales
 //!   with the table's total partition count, which a full scan would.
 //!
+//! - [`partitions_decoded`] — incremented **once per partition actually decoded
+//!   out of `Data.db`** by the single-candidate *seek* path (Issue #953). Where
+//!   `sstables_scanned` proves we touched few SSTables, this proves that *within*
+//!   a touched SSTable we did not decode every partition: the seek resolves the
+//!   target partition's `Data.db` offset (via the BTI trie or `Index.db`) and
+//!   decodes only that one partition, so this stays O(1) for a point lookup. A
+//!   regression that reverts the single-candidate path to a full parse-then-retain
+//!   would bump this by the SSTable's whole partition count (~N), failing the
+//!   `issue_953` bound. It is incremented at the per-partition decode site of the
+//!   seek (`SSTableReader::scan_single_partition` → the emit closure that captures
+//!   a complete partition), NOT at the result-count boundary. The full-scan +
+//!   retain fallback does **not** bump it (it is the unoptimized path the seek
+//!   replaces); a candidate that cannot be seeked therefore reads 0 here, which is
+//!   why the test asserts a *small upper bound* (decode happened cheaply) rather
+//!   than an exact equality.
+//!
 //! # Cost
 //!
 //! Each increment is a single `Relaxed` atomic add on the cold per-lookup
@@ -54,6 +70,10 @@ static SSTABLES_SCANNED: AtomicU64 = AtomicU64::new(0);
 /// Count of partitions a partition-targeted lookup has returned since the last
 /// [`reset`]. See module docs for the exact increment site.
 static PARTITIONS_PARSED: AtomicU64 = AtomicU64::new(0);
+
+/// Count of partitions actually DECODED from `Data.db` by the single-candidate
+/// seek path since the last [`reset`]. See module docs (Issue #953).
+static PARTITIONS_DECODED: AtomicU64 = AtomicU64::new(0);
 
 /// Record that `count` candidate SSTables were parsed by a partition-targeted
 /// lookup. Called once per `scan_partition` invocation with the number of
@@ -75,6 +95,20 @@ pub(crate) fn add_partitions_parsed(count: u64) {
     PARTITIONS_PARSED.fetch_add(count, Ordering::Relaxed);
 }
 
+/// Record that one partition was DECODED from `Data.db` by the single-candidate
+/// seek path (Issue #953). Called once per complete partition the seek decodes
+/// at the resolved offset — exactly one for a point lookup that hits, zero for a
+/// verified-absent key.
+///
+/// Gated on `not(tombstones)` like the other mutators: the seek path
+/// (`SSTableReader::scan_single_partition`) is only reachable from the default
+/// build's `scan_partition`; under `tombstones` the full-scan fallback never
+/// seeks, so the counter stays at 0 and the mutator would be dead code.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) fn add_partition_decoded() {
+    PARTITIONS_DECODED.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Number of candidate SSTables parsed by partition-targeted lookups since the
 /// last [`reset`].
 ///
@@ -91,6 +125,16 @@ pub fn partitions_parsed() -> u64 {
     PARTITIONS_PARSED.load(Ordering::Relaxed)
 }
 
+/// Number of partitions DECODED from `Data.db` by the single-candidate seek path
+/// since the last [`reset`] (Issue #953).
+///
+/// Tests assert this stays O(1) for a point lookup — a small bound, near 1 for a
+/// hit — so a regression that reverts the single-candidate path to a full parse
+/// (decoding every partition in the SSTable, then retaining one) fails CI.
+pub fn partitions_decoded() -> u64 {
+    PARTITIONS_DECODED.load(Ordering::Relaxed)
+}
+
 /// Clear both counters. Tests call this before a query so a stale value from an
 /// earlier query cannot satisfy a later assertion. Because the probe is
 /// process-global, a test that asserts on it must run without a concurrent query
@@ -98,6 +142,7 @@ pub fn partitions_parsed() -> u64 {
 pub fn reset() {
     SSTABLES_SCANNED.store(0, Ordering::Relaxed);
     PARTITIONS_PARSED.store(0, Ordering::Relaxed);
+    PARTITIONS_DECODED.store(0, Ordering::Relaxed);
 }
 
 #[cfg(all(test, not(feature = "tombstones")))]
@@ -109,12 +154,17 @@ mod tests {
         reset();
         assert_eq!(sstables_scanned(), 0);
         assert_eq!(partitions_parsed(), 0);
+        assert_eq!(partitions_decoded(), 0);
         add_sstables_scanned(2);
         add_partitions_parsed(5);
+        add_partition_decoded();
+        add_partition_decoded();
         assert_eq!(sstables_scanned(), 2);
         assert_eq!(partitions_parsed(), 5);
+        assert_eq!(partitions_decoded(), 2);
         reset();
         assert_eq!(sstables_scanned(), 0);
         assert_eq!(partitions_parsed(), 0);
+        assert_eq!(partitions_decoded(), 0);
     }
 }

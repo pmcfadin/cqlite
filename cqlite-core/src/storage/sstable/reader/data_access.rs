@@ -253,6 +253,121 @@ impl SSTableReader {
         SCAN_FOR_KEY_CALLS.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Single-partition *seek* for the partition-targeted lookup fast path
+    /// (Issue #953, Epic #951).
+    ///
+    /// Where [`scan`](Self::scan) decodes EVERY partition in this SSTable and the
+    /// caller retains one, this resolves the target partition's `Data.db` offset
+    /// from the authoritative index (the BTI Partitions.db trie or the BIG
+    /// `Index.db`) and decodes ONLY that partition — the same per-partition decode
+    /// `scan` runs (`parse_block_emit` over the chunk-targeted decompressed
+    /// window), so its output is byte-for-byte identical to filtering the full
+    /// `scan` result down to `partition_key`.
+    ///
+    /// Return contract (the caller branches on it):
+    /// - `Ok(Some(rows))` — the seek RESOLVED and DECODED authoritatively. `rows`
+    ///   is the target partition's rows in on-disk form: one `(RowKey, Value)` for
+    ///   a hit (the `RowKey` is `partition_key`), or empty for a key the index
+    ///   proves absent / that decoded to a tombstone. The caller uses `rows`
+    ///   directly and does NOT fall back.
+    /// - `Ok(None)` — the seek is NOT APPLICABLE for this reader (no trie and no
+    ///   `Index.db` hit, or a format/offset the seek cannot target). The caller
+    ///   MUST fall back to `scan` + retain for correctness (Constraint #4).
+    ///
+    /// Offset domains (no-heuristics: authoritative resolved offsets only):
+    /// - **BTI ("da")** — `lookup_partition_via_bti_trie` returns the UNCOMPRESSED
+    ///   `Data.db` offset; a trie miss is authoritative absence (`Ok(Some(vec![]))`).
+    /// - **BIG (`nb`)** — `lookup_partition_with_index` returns the partition's
+    ///   offset into the (uncompressed) data section. A hit is authoritative
+    ///   present; a MISS returns `Ok(None)` (the `Index.db` may be digest-keyed or
+    ///   incomplete, exactly the `get()` fallback rationale at #517) so the caller
+    ///   re-checks via a full scan rather than risk a false negative.
+    ///
+    /// Prefix-collision / wrong-offset guard: the decode
+    /// ([`bti_decompress_and_parse_target`]) re-verifies the decoded partition key
+    /// equals `partition_key` before emitting, so a BTI prefix-collision candidate
+    /// or a stale/mismatched index offset decodes to nothing and is reported as
+    /// absent — never a wrong partition.
+    ///
+    /// [`bti_decompress_and_parse_target`]: Self::bti_decompress_and_parse_target
+    ///
+    /// Compiled only for the default (`not(tombstones)`) build: the manager's
+    /// seek-driven `scan_partition` exists only there, so under `tombstones` this
+    /// would be dead code.
+    #[cfg(not(feature = "tombstones"))]
+    pub(crate) async fn scan_single_partition(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Option<Vec<(RowKey, Value)>>> {
+        // 1. Resolve the partition's uncompressed Data.db offset, and record
+        //    whether THIS path's "decoded nothing" is authoritative absence (BTI
+        //    trie) or merely inconclusive (BIG Index.db).
+        let is_bti = self.bti_partitions_db.is_some();
+        let offset = if is_bti {
+            match self.lookup_partition_via_bti_trie(partition_key)? {
+                // Trie hit: candidate uncompressed offset (re-verified on decode).
+                Some(off) => off as usize,
+                // Trie miss is AUTHORITATIVE absence for BTI.
+                None => return Ok(Some(Vec::new())),
+            }
+        } else {
+            match self.lookup_partition_with_index(partition_key).await? {
+                // Index.db hit: a candidate offset into the data section.
+                Some((off, _size)) => off as usize,
+                // No Index.db hit: cannot seek authoritatively (the index may be
+                // digest-keyed / incomplete, exactly the get() #517 rationale).
+                // Fall back to a full scan.
+                None => return Ok(None),
+            }
+        };
+
+        // 2. Decode ONLY the target partition at the resolved offset, using the
+        //    SAME parser the scan path uses. `bti_decompress_and_parse_target`
+        //    chunk-targets the decompression (decodes just the chunk window that
+        //    holds the partition) and re-verifies the decoded key, so this is
+        //    O(1) partitions decoded regardless of the SSTable's partition count.
+        let schema_opt = self.get_table_schema(schema);
+        let parser = self.build_v5_parser();
+        let key = RowKey::from(partition_key.to_vec());
+        let decoded = self
+            .bti_decompress_and_parse_target(offset, &key, table_id, schema_opt.as_ref(), &parser)
+            .await?;
+
+        // 3. Record the per-partition decode (Issue #953): exactly one partition is
+        //    decoded for a hit. This is the signal that proves the within-SSTable
+        //    seek (vs a full parse-then-retain).
+        match decoded {
+            Some(value) => {
+                super::super::work_counters::add_partition_decoded();
+                // Tombstone suppression matches the user-facing scan path
+                // (`sequential_scan`/`bti_scan_with_metadata` both apply it).
+                if self.filter_tombstone(&value) {
+                    Ok(Some(vec![(key, value)]))
+                } else {
+                    Ok(Some(Vec::new()))
+                }
+            }
+            // Decoded nothing at the resolved offset. Whether that is authoritative
+            // depends on HOW the offset was resolved (Constraint #4: never return a
+            // wrong/empty result from an unsupported/inconclusive seek):
+            //
+            // - **BTI** — the trie is the authoritative present/absent oracle and
+            //   the decode re-verified the key, so "decoded nothing" means the trie
+            //   candidate was a prefix-collision for an absent key. AUTHORITATIVE
+            //   empty: the caller does NOT fall back.
+            // - **BIG** — the `Index.db` offset is only a candidate position; its
+            //   promoted-index / chunk layout is not as load-bearing as the BTI
+            //   trie, so a failed decode at the resolved offset is INCONCLUSIVE (a
+            //   partition that straddles a chunk boundary, or a stale offset, can
+            //   fail the chunk-targeted decode yet be found by a full parse).
+            //   Fall back to a full scan rather than risk a false negative.
+            None if is_bti => Ok(Some(Vec::new())),
+            None => Ok(None),
+        }
+    }
+
     /// BTI ("da") point lookup: resolve a partition key via the Partitions.db
     /// trie, decode the partition at the resolved offset, and return its row
     /// `Value` (issue #831).
