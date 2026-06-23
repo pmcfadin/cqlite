@@ -177,34 +177,32 @@ impl MergeEntry {
         self
     }
 
-    /// True when this entry exists ONLY to carry metadata the writer CANNOT emit
-    /// today and has no row content — so routing it to the writer would create a
+    /// True when this entry has NO writer-emittable content at all — an empty
+    /// `RowData::Live { cells: vec![] }` with no row tombstone and no carried
+    /// deletion metadata. Routing such an entry to the writer would create a
     /// PHANTOM live empty (pure-PK) row at timestamp 0 (`DataWriter::merge_row_group`
-    /// treats a no-op mutation as a primary-key insert).
+    /// treats a no-op mutation as a primary-key insert), so `merge` filters it.
     ///
-    /// `reconcile_cluster` emits an empty `RowData::Live { cells: vec![] }` (at
-    /// timestamp 0) when a cluster has no surviving cells and no row tombstone but
-    /// still carries deletion metadata, so that metadata survives reconciliation
-    /// in the in-memory merge stream.
+    /// Epic #899 Phase C: a COMPLEX DELETION is consumed by the writer (a real
+    /// `CellOperation::ComplexDeletion` marker), so a complex-deletion-only entry
+    /// is NOT a no-op.
     ///
-    /// Epic #899 Phase C: a COMPLEX DELETION is now consumed by the writer — the
-    /// merge→mutation step emits a real `CellOperation::ComplexDeletion` marker, so
-    /// a complex-deletion-only entry is NO LONGER a no-op and MUST reach the
-    /// SSTable (a fully-deleted-collection marker must survive). It is therefore
-    /// NOT filtered.
-    ///
-    /// A RANGE DELETION, by contrast, is still NOT consumed by the compaction
-    /// writer (deferred to #846): an entry whose only surviving state is a range
-    /// deletion (empty cells, no row tombstone, no complex deletion) would still
-    /// become a phantom live row, so it is filtered here. The merge stream never
-    /// produces a genuine empty-but-live row through this path (an entry with empty
-    /// cells, no row tombstone, AND no carried metadata reconciles to `None`), so
-    /// filtering this synthetic case is safe.
+    /// Issue #933: a RANGE DELETION is now ALSO consumed by the compaction writer —
+    /// `merge_entry_to_mutation` threads it onto the mutation's `range_tombstones`,
+    /// which the writer interleaves as on-disk bound markers AND uses to shadow
+    /// covered same-partition rows. A range-deletion-only carrier is therefore NO
+    /// LONGER a no-op and MUST reach the writer (dropping it would resurrect the
+    /// covered rows it shadowed — roborev #959 High #2). In practice
+    /// `reconcile_cluster` never emits a truly-empty entry (one with empty cells,
+    /// no row tombstone, and no carried metadata reconciles to `None`), so this
+    /// guard is now effectively unreachable but kept as a defensive phantom-row
+    /// filter.
     #[must_use]
     pub fn is_metadata_only_no_op(&self) -> bool {
         matches!(&self.row_data, RowData::Live { cells } if cells.is_empty())
             && self.complex_deletions.is_empty()
-            && self.range_deletion.is_some()
+            && self.range_deletion.is_none()
+            && self.row_deletion.is_none()
     }
 }
 
@@ -401,6 +399,43 @@ pub struct ComplexDeletion {
     pub marked_for_delete_at: i64,
     /// Local deletion time in seconds since the epoch.
     pub local_deletion_time: i32,
+}
+
+/// A cut position on the clustering axis, used to coalesce range tombstones
+/// into a NON-OVERLAPPING canonical sequence (issue #933 / roborev #959 High
+/// #1).
+///
+/// The writer emits each [`RangeTombstone`] as an INDEPENDENT open/close marker
+/// pair, sorted by clustering position; the reader pairs markers using a single
+/// `pending_range_start`. Overlapping or nested ranges with different bounds
+/// would therefore mis-pair on read-back (e.g. `start[1,5] start[2,3] end[2,3]
+/// end[1,5]` resurfaces as `[2,3]` and `[Bottom,5]`), corrupting the persisted
+/// deletion ranges. Coalescing the cross-SSTable union into disjoint ranges
+/// before re-emission mirrors Cassandra's `RangeTombstoneList` invariant
+/// (on-disk range tombstones within a partition never overlap).
+///
+/// A range `[start, end]` is modelled as a closed interval over these cut
+/// positions. [`Self::At`] is the infinitesimal point just before (`after =
+/// false`) or just after (`after = true`) a clustering prefix; an open bound is
+/// [`Self::Bottom`] / [`Self::Top`]. The `after` flag at a SHORTER prefix sorts
+/// relative to all longer extensions (Cassandra's kind-weighted prefix
+/// ordering), so a prefix end bound `[ck1]` correctly covers every `[ck1, *]`.
+#[cfg(feature = "write-support")]
+#[derive(Clone)]
+enum RangeCut {
+    /// Before all clustering keys (start of partition).
+    Bottom,
+    /// Infinitesimally before (`after == false`) or after (`after == true`) the
+    /// clustering prefix.
+    At {
+        /// Clustering prefix (possibly shorter than the full arity).
+        key: ClusteringKey,
+        /// `false` = just before the prefix and all its extensions; `true` =
+        /// just after them.
+        after: bool,
+    },
+    /// After all clustering keys (end of partition).
+    Top,
 }
 
 /// Result of a merge step (incremental merge)
@@ -860,12 +895,44 @@ impl SSTableRowIteratorAdapter {
         compaction_row: crate::storage::sstable::reader::compaction_row::CompactionRow,
         schema: &TableSchema,
     ) -> Result<MergeEntry> {
+        use crate::storage::sstable::reader::compaction_row::CompactionRowData;
+
         let crate::storage::sstable::reader::compaction_row::CompactionRow {
             key,
             row_timestamp,
             row_data,
         } = compaction_row;
         let decorated_key = DecoratedKey::from_key_bytes(key.0)?;
+
+        // Issue #933: a range-tombstone marker surfaces as a self-contained
+        // carrier `MergeEntry` (empty live row + `range_deletion`), routed into the
+        // partition's `None` clustering bucket so it is never collapsed with data
+        // rows. `merge_partition_rows` extracts these to shadow covered cells and
+        // re-emit the surviving marker to the output SSTable.
+        if let CompactionRowData::RangeMarker {
+            start,
+            end,
+            deletion_time,
+            local_deletion_time,
+        } = row_data
+        {
+            let range = RangeTombstone {
+                start: Self::compaction_bound_to_mutation(start),
+                end: Self::compaction_bound_to_mutation(end),
+                deletion_time,
+                local_deletion_time,
+            };
+            return Ok(MergeEntry::new(
+                run_index,
+                decorated_key,
+                None,
+                // Use the deletion time as the entry timestamp so the writer's
+                // stats baselines see a real value (not 0) for the carrier.
+                deletion_time,
+                RowData::Live { cells: Vec::new() },
+            )
+            .with_range_deletion(range));
+        }
         // #912: derive the clustering identity from the per-element compaction row
         // BEFORE collapsing it to `RowData`. A row tombstone carries no cells in
         // `RowData::Tombstone`, so its clustering key must come from the
@@ -895,6 +962,28 @@ impl SSTableRowIteratorAdapter {
             None => entry,
         };
         Ok(entry)
+    }
+
+    /// Convert a reader-native [`CompactionBound`] into a write-engine
+    /// [`ClusteringBound`] (issue #933).
+    ///
+    /// [`CompactionBound`]: crate::storage::sstable::reader::compaction_row::CompactionBound
+    /// [`ClusteringBound`]: crate::storage::write_engine::mutation::ClusteringBound
+    fn compaction_bound_to_mutation(
+        bound: crate::storage::sstable::reader::compaction_row::CompactionBound,
+    ) -> crate::storage::write_engine::mutation::ClusteringBound {
+        use crate::storage::sstable::reader::compaction_row::CompactionBound;
+        use crate::storage::write_engine::mutation::ClusteringBound;
+        match bound {
+            CompactionBound::Inclusive(cols) => {
+                ClusteringBound::Inclusive(ClusteringKey { columns: cols })
+            }
+            CompactionBound::Exclusive(cols) => {
+                ClusteringBound::Exclusive(ClusteringKey { columns: cols })
+            }
+            CompactionBound::Bottom => ClusteringBound::Bottom,
+            CompactionBound::Top => ClusteringBound::Top,
+        }
     }
 
     /// Extract a `ClusteringKey` from the row's live cells using the schema.
@@ -964,6 +1053,9 @@ impl SSTableRowIteratorAdapter {
                     columns: ck_columns,
                 })
             }
+            // Issue #933: a range marker is handled by `build_merge_entry` before
+            // this point and routed into the `None` clustering bucket.
+            CompactionRowData::RangeMarker { .. } => None,
         }
     }
 
@@ -1090,6 +1182,12 @@ impl SSTableRowIteratorAdapter {
                 }
 
                 (RowData::Live { cells }, complex_deletions, row_deletion)
+            }
+            // Issue #933: range markers are intercepted in `build_merge_entry`
+            // (carrier entry with `range_deletion`); they never reach this
+            // conversion. Map defensively to an empty live row.
+            CompactionRowData::RangeMarker { .. } => {
+                (RowData::Live { cells: Vec::new() }, Vec::new(), None)
             }
         }
     }
@@ -2112,11 +2210,11 @@ impl KWayMerger {
         };
 
         while let MergeStep::Partition { key, rows } = self.step()? {
-            // Skip metadata-only entries on the writer path (#886/#899
-            // branch-review). They exist only to carry complex/range deletion
-            // metadata through the in-memory merge stream; the writer does not
-            // yet consume those fields, so emitting them would write a phantom
-            // live empty (pure-PK) row at timestamp 0. See
+            // Skip truly-empty phantom entries on the writer path (#886/#899
+            // branch-review). A range-tombstone carrier is NO LONGER filtered here
+            // (#933): `merge_entry_to_mutation` turns it into a mutation carrying
+            // `range_tombstones`, which the writer emits as on-disk bound markers
+            // (and uses to shadow same-partition rows). See
             // `MergeEntry::is_metadata_only_no_op`.
             let mutations = rows
                 .into_iter()
@@ -2124,18 +2222,30 @@ impl KWayMerger {
                 .map(|entry| Self::merge_entry_to_mutation(entry, &self.schema))
                 .collect::<Result<Vec<_>>>()?;
 
-            // If every merged row was metadata-only, the partition has no
-            // writer-emittable content. Skipping `write_partition` here avoids a
-            // phantom EMPTY partition (header/end marker + Index/Filter/Summary/
-            // statistics registration) in the output SSTable. Such a partition
-            // must not be counted as an output partition or row (#886
-            // branch-review).
+            // If the partition has no writer-emittable content at all, skip
+            // `write_partition` to avoid a phantom EMPTY partition. A partition
+            // carrying ONLY range-tombstone markers (every data row covered) IS
+            // emittable — Cassandra writes such marker-only partitions — so it is
+            // kept here (#933).
             if mutations.is_empty() {
                 continue;
             }
 
+            // Count only real rows toward `output_rows`; a pure range-tombstone
+            // carrier (empty operations, no row tombstone, only `range_tombstones`)
+            // emits a marker, not a row (#933).
+            let row_mutations = mutations
+                .iter()
+                .filter(|m| {
+                    !(m.operations.is_empty()
+                        && m.partition_tombstone.is_none()
+                        && m.row_tombstone.is_none()
+                        && !m.range_tombstones.is_empty())
+                })
+                .count();
+
             stats.output_partitions += 1;
-            stats.output_rows += mutations.len() as u64;
+            stats.output_rows += row_mutations as u64;
 
             output_writer.write_partition(key, mutations)?;
         }
@@ -2269,18 +2379,6 @@ impl KWayMerger {
     fn merge_partition_rows(&self, rows: Vec<MergeEntry>) -> Result<Vec<MergeEntry>> {
         use std::collections::BTreeMap;
 
-        // Group by clustering key using BTreeMap (ClusteringKey implements Ord).
-        // Preserve heap-routing order within each group so the per-cell tiebreak
-        // (first-seen wins at equal timestamp+liveness) follows run_index.
-        let mut clustered_rows: BTreeMap<Option<ClusteringKey>, Vec<MergeEntry>> = BTreeMap::new();
-
-        for row in rows {
-            clustered_rows
-                .entry(row.clustering_key.clone())
-                .or_default()
-                .push(row);
-        }
-
         // Overlap-safety gate for tombstone purging (#921 finding 1, #935):
         // decide BOTH the effective gc_grace cutoff and the overlap-aware
         // max-purgeable timestamp this cluster is reconciled with.
@@ -2294,6 +2392,9 @@ impl KWayMerger {
         //   shadows nothing outside the set.
         // - PARTIAL compaction without a bound (#921 default): retain every
         //   tombstone — collapse the cutoff to `None` (purge no-op).
+        //
+        // Issue #933 builds `clustered_rows` (and splits out range-tombstone
+        // carriers) AFTER this gate, below.
         let (effective_gc_before, max_purgeable_timestamp) = if self.purge_safe {
             (self.gc_before_secs, i64::MAX)
         } else if let Some(bound) = self.max_purgeable_timestamp {
@@ -2301,6 +2402,37 @@ impl KWayMerger {
         } else {
             (None, i64::MIN)
         };
+
+        // Issue #933: split the range-tombstone carrier entries out of the row
+        // stream. They are partition-level markers spanning a clustering range —
+        // NOT per-`(pk, ck)` rows — so routing them through `reconcile_cluster`
+        // (which collapses a cluster to ONE entry, keeping a single max-deletion
+        // range) would lose every range but one. Collect them here, canonicalize
+        // overlapping duplicates, then (a) shadow covered cells per cluster and
+        // (b) re-emit the survivors so the writer persists the markers.
+        let mut range_tombstones: Vec<(DecoratedKey, RangeTombstone)> = Vec::new();
+        let mut clustered_rows: BTreeMap<Option<ClusteringKey>, Vec<MergeEntry>> = BTreeMap::new();
+
+        for row in rows {
+            if Self::is_range_marker_carrier(&row) {
+                if let Some(rt) = row.range_deletion.clone() {
+                    range_tombstones.push((row.key.clone(), rt));
+                    continue;
+                }
+            }
+            clustered_rows
+                .entry(row.clustering_key.clone())
+                .or_default()
+                .push(row);
+        }
+
+        // Coalesce the cross-SSTable union into a NON-OVERLAPPING canonical
+        // sequence per partition (newest deletion wins per covered segment). The
+        // writer emits each range as an independent open/close marker pair and the
+        // reader pairs them with a single pending-start, so overlapping re-emitted
+        // ranges would corrupt the persisted ranges on read-back (roborev #959
+        // High #1). This also subsumes the old identical-bounds dedup.
+        Self::coalesce_range_tombstones(&mut range_tombstones, &self.schema);
 
         let mut merged = Vec::new();
         for (ck, cluster_rows) in clustered_rows {
@@ -2311,8 +2443,43 @@ impl KWayMerger {
                 effective_gc_before,
                 max_purgeable_timestamp,
             ) {
-                merged.push(entry);
+                // Issue #933: shadow cells covered by a range tombstone. The merge
+                // must do this per-cell (not just per-row at the writer) because a
+                // reconciled row's simple cells lose their individual writetimes
+                // when converted to a mutation — only the merge still sees each
+                // `CellData.timestamp`.
+                if let Some(shadowed) =
+                    Self::apply_range_shadowing(entry, &range_tombstones, &self.schema)
+                {
+                    merged.push(shadowed);
+                }
             }
+        }
+
+        // Re-emit the surviving range tombstones as carrier entries so the writer
+        // persists the markers (otherwise the shadowing above would resurrect the
+        // covered rows from a non-compacted SSTable — issue #933 / roborev #959
+        // High #2). gc_grace purges a marker only when this compaction is
+        // overlap-safe AND the marker's `localDeletionTime` is strictly below
+        // `gcBefore` (coordinate with #845); the covered cells were already removed
+        // above, so dropping the now-redundant marker cannot resurrect data within
+        // this overlap-safe set.
+        for (key, rt) in range_tombstones {
+            if let Some(gc_before) = effective_gc_before {
+                if i64::from(rt.local_deletion_time as u32) < gc_before {
+                    continue;
+                }
+            }
+            merged.push(
+                MergeEntry::new(
+                    usize::MAX,
+                    key,
+                    None,
+                    rt.deletion_time,
+                    RowData::Live { cells: Vec::new() },
+                )
+                .with_range_deletion(rt),
+            );
         }
 
         // Sort merged rows by clustering key for output order
@@ -2333,6 +2500,462 @@ impl KWayMerger {
         });
 
         Ok(merged)
+    }
+
+    /// True when an entry exists ONLY to carry a range-tombstone marker (issue
+    /// #933): an empty live row whose only payload is `range_deletion`. These are
+    /// produced by [`Self::build_merge_entry`] from a reader `RangeMarker` and are
+    /// split out of the row stream by [`Self::merge_partition_rows`].
+    fn is_range_marker_carrier(entry: &MergeEntry) -> bool {
+        entry.range_deletion.is_some()
+            && entry.complex_deletions.is_empty()
+            && entry.row_deletion.is_none()
+            && matches!(&entry.row_data, RowData::Live { cells } if cells.is_empty())
+    }
+
+    /// Coalesce range tombstones into a NON-OVERLAPPING canonical sequence per
+    /// partition, the winning (newest) deletion time per covered segment (issue
+    /// #933 / roborev #959 High #1).
+    ///
+    /// Each input SSTable's range tombstones are individually non-overlapping
+    /// (Cassandra's `RangeTombstoneList` invariant), but the cross-SSTable union
+    /// gathered during compaction can overlap with different bounds. The writer
+    /// emits each retained range as an independent open/close marker pair and the
+    /// reader pairs them with a single `pending_range_start`, so OVERLAPPING
+    /// re-emitted ranges would mis-pair on read-back and corrupt the persisted
+    /// ranges. Splitting the union into disjoint segments (each carrying the max
+    /// `markedForDeleteAt` covering it) keeps the on-disk markers a clean
+    /// alternating open/close sequence. This also subsumes the prior
+    /// identical-bounds dedup.
+    fn coalesce_range_tombstones(
+        rts: &mut Vec<(DecoratedKey, RangeTombstone)>,
+        schema: &TableSchema,
+    ) {
+        // Group by partition-key bytes, preserving the first-seen DecoratedKey as
+        // the representative for each group (token + raw bytes are identical
+        // across the group).
+        let mut groups: Vec<(DecoratedKey, Vec<RangeTombstone>)> = Vec::new();
+        for (key, rt) in rts.drain(..) {
+            if let Some((_, ranges)) = groups.iter_mut().find(|(k, _)| k.key == key.key) {
+                ranges.push(rt);
+            } else {
+                groups.push((key, vec![rt]));
+            }
+        }
+
+        let mut out: Vec<(DecoratedKey, RangeTombstone)> = Vec::new();
+        for (key, ranges) in groups {
+            for rt in Self::coalesce_partition_range_tombstones(ranges, schema) {
+                out.push((key.clone(), rt));
+            }
+        }
+        *rts = out;
+    }
+
+    /// Coalesce the range tombstones of a SINGLE partition into a disjoint,
+    /// clustering-sorted sequence (helper for [`Self::coalesce_range_tombstones`]).
+    fn coalesce_partition_range_tombstones(
+        ranges: Vec<RangeTombstone>,
+        schema: &TableSchema,
+    ) -> Vec<RangeTombstone> {
+        if ranges.len() <= 1 {
+            return ranges;
+        }
+
+        // Model each range as a closed interval [start_cut, end_cut] with its
+        // (mfda, ldt).
+        let items: Vec<(RangeCut, RangeCut, i64, i32)> = ranges
+            .iter()
+            .map(|rt| {
+                (
+                    Self::range_start_cut(&rt.start),
+                    Self::range_end_cut(&rt.end),
+                    rt.deletion_time,
+                    rt.local_deletion_time,
+                )
+            })
+            .collect();
+
+        // Distinct, sorted cut positions (the candidate segment boundaries).
+        let mut cuts: Vec<RangeCut> = Vec::with_capacity(items.len() * 2);
+        for (s, e, _, _) in &items {
+            cuts.push(s.clone());
+            cuts.push(e.clone());
+        }
+        cuts.sort_by(|a, b| Self::cut_cmp(a, b, schema));
+        cuts.dedup_by(|a, b| Self::cut_cmp(a, b, schema) == Ordering::Equal);
+
+        // For each elementary gap (cuts[i], cuts[i+1]), the winning deletion is
+        // the max `markedForDeleteAt` among ranges whose closed interval fully
+        // contains the gap (start <= lo AND hi <= end).
+        let mut segs: Vec<(RangeCut, RangeCut, i64, i32)> = Vec::new();
+        for window in cuts.windows(2) {
+            let (lo, hi) = (&window[0], &window[1]);
+            let mut best: Option<(i64, i32)> = None;
+            for (s, e, mfda, ldt) in &items {
+                let covers = Self::cut_cmp(s, lo, schema) != Ordering::Greater
+                    && Self::cut_cmp(hi, e, schema) != Ordering::Greater;
+                if !covers {
+                    continue;
+                }
+                best = Some(match best {
+                    Some((bm, bl)) if bm > *mfda || (bm == *mfda && bl >= *ldt) => (bm, bl),
+                    _ => (*mfda, *ldt),
+                });
+            }
+            if let Some((mfda, ldt)) = best {
+                segs.push((lo.clone(), hi.clone(), mfda, ldt));
+            }
+        }
+
+        // Merge adjacent segments that share a boundary AND the same deletion
+        // (minimal fragmentation); a gap with no covering range breaks the run.
+        let mut merged: Vec<(RangeCut, RangeCut, i64, i32)> = Vec::new();
+        for seg in segs {
+            if let Some(last) = merged.last_mut() {
+                if last.2 == seg.2
+                    && last.3 == seg.3
+                    && Self::cut_cmp(&last.1, &seg.0, schema) == Ordering::Equal
+                {
+                    last.1 = seg.1;
+                    continue;
+                }
+            }
+            merged.push(seg);
+        }
+
+        merged
+            .into_iter()
+            .map(|(lo, hi, mfda, ldt)| RangeTombstone {
+                start: Self::cut_to_start_bound(lo),
+                end: Self::cut_to_end_bound(hi),
+                deletion_time: mfda,
+                local_deletion_time: ldt,
+            })
+            .collect()
+    }
+
+    /// Total order of two cut positions on the clustering axis (schema-aware,
+    /// honoring per-column ASC/DESC and Cassandra's kind-weighted prefix
+    /// ordering). See [`RangeCut`].
+    fn cut_cmp(a: &RangeCut, b: &RangeCut, schema: &TableSchema) -> Ordering {
+        match (a, b) {
+            (RangeCut::Bottom, RangeCut::Bottom) => Ordering::Equal,
+            (RangeCut::Bottom, _) => Ordering::Less,
+            (_, RangeCut::Bottom) => Ordering::Greater,
+            (RangeCut::Top, RangeCut::Top) => Ordering::Equal,
+            (RangeCut::Top, _) => Ordering::Greater,
+            (_, RangeCut::Top) => Ordering::Less,
+            (RangeCut::At { key: ka, after: aa }, RangeCut::At { key: kb, after: ab }) => {
+                // Compare the common prefix only; a shorter prefix's `after` flag
+                // decides its position relative to every longer extension.
+                let l = ka.columns.len().min(kb.columns.len());
+                let ta = ClusteringKey {
+                    columns: ka.columns[..l].to_vec(),
+                };
+                let tb = ClusteringKey {
+                    columns: kb.columns[..l].to_vec(),
+                };
+                let ord = ta.compare(&tb, schema).unwrap_or_else(|_| ta.cmp(&tb));
+                if ord != Ordering::Equal {
+                    return ord;
+                }
+                match ka.columns.len().cmp(&kb.columns.len()) {
+                    Ordering::Equal => aa.cmp(ab),
+                    // `a` is the shorter prefix: just-after sorts past every
+                    // extension of it, just-before sorts ahead of all of them.
+                    Ordering::Less => {
+                        if *aa {
+                            Ordering::Greater
+                        } else {
+                            Ordering::Less
+                        }
+                    }
+                    // `b` is the shorter prefix (mirror image).
+                    Ordering::Greater => {
+                        if *ab {
+                            Ordering::Less
+                        } else {
+                            Ordering::Greater
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Left edge (cut) of a range's start bound.
+    fn range_start_cut(
+        bound: &crate::storage::write_engine::mutation::ClusteringBound,
+    ) -> RangeCut {
+        use crate::storage::write_engine::mutation::ClusteringBound;
+        match bound {
+            ClusteringBound::Inclusive(ck) => RangeCut::At {
+                key: ck.clone(),
+                after: false,
+            },
+            ClusteringBound::Exclusive(ck) => RangeCut::At {
+                key: ck.clone(),
+                after: true,
+            },
+            ClusteringBound::Bottom => RangeCut::Bottom,
+            ClusteringBound::Top => RangeCut::Top,
+        }
+    }
+
+    /// Right edge (cut) of a range's end bound.
+    fn range_end_cut(bound: &crate::storage::write_engine::mutation::ClusteringBound) -> RangeCut {
+        use crate::storage::write_engine::mutation::ClusteringBound;
+        match bound {
+            ClusteringBound::Inclusive(ck) => RangeCut::At {
+                key: ck.clone(),
+                after: true,
+            },
+            ClusteringBound::Exclusive(ck) => RangeCut::At {
+                key: ck.clone(),
+                after: false,
+            },
+            ClusteringBound::Top => RangeCut::Top,
+            ClusteringBound::Bottom => RangeCut::Bottom,
+        }
+    }
+
+    /// Convert a left-edge cut back into a start [`ClusteringBound`].
+    fn cut_to_start_bound(
+        cut: RangeCut,
+    ) -> crate::storage::write_engine::mutation::ClusteringBound {
+        use crate::storage::write_engine::mutation::ClusteringBound;
+        match cut {
+            RangeCut::Bottom => ClusteringBound::Bottom,
+            RangeCut::At { key, after: false } => ClusteringBound::Inclusive(key),
+            RangeCut::At { key, after: true } => ClusteringBound::Exclusive(key),
+            RangeCut::Top => ClusteringBound::Top,
+        }
+    }
+
+    /// Convert a right-edge cut back into an end [`ClusteringBound`].
+    fn cut_to_end_bound(cut: RangeCut) -> crate::storage::write_engine::mutation::ClusteringBound {
+        use crate::storage::write_engine::mutation::ClusteringBound;
+        match cut {
+            RangeCut::Top => ClusteringBound::Top,
+            RangeCut::At { key, after: true } => ClusteringBound::Inclusive(key),
+            RangeCut::At { key, after: false } => ClusteringBound::Exclusive(key),
+            RangeCut::Bottom => ClusteringBound::Bottom,
+        }
+    }
+
+    /// Whether a range tombstone's clustering range covers `ck`, comparing bounds
+    /// SCHEMA-AWARE (honoring per-column ASC/DESC via [`ClusteringKey::compare`],
+    /// NOT the schema-agnostic `cmp`) — issue #933 / roborev #959 Medium #3.
+    ///
+    /// Bounds may be a PREFIX shorter than the full clustering arity; comparing
+    /// only the bound's components (via [`ClusteringKey::compare`], which treats an
+    /// absent trailing component as a first-sorting NULL) yields the correct
+    /// containment for the `DELETE WHERE pk=? AND ck1=?` prefix case.
+    fn range_tombstone_covers_ck(
+        ck: &ClusteringKey,
+        rt: &RangeTombstone,
+        schema: &TableSchema,
+    ) -> bool {
+        use crate::storage::write_engine::mutation::ClusteringBound;
+
+        // Compare `ck` against a bound key over the bound's component count so a
+        // prefix bound only compares its present components.
+        let cmp = |bound: &ClusteringKey| -> Ordering {
+            let n = bound.columns.len();
+            let truncated = ClusteringKey {
+                columns: ck.columns.iter().take(n).cloned().collect(),
+            };
+            truncated
+                .compare(bound, schema)
+                .unwrap_or_else(|_| truncated.cmp(bound))
+        };
+
+        let after_start = match &rt.start {
+            ClusteringBound::Inclusive(b) => cmp(b) != Ordering::Less,
+            ClusteringBound::Exclusive(b) => cmp(b) == Ordering::Greater,
+            ClusteringBound::Bottom => true,
+            ClusteringBound::Top => false,
+        };
+        let before_end = match &rt.end {
+            ClusteringBound::Inclusive(b) => cmp(b) != Ordering::Greater,
+            ClusteringBound::Exclusive(b) => cmp(b) == Ordering::Less,
+            ClusteringBound::Top => true,
+            ClusteringBound::Bottom => false,
+        };
+        after_start && before_end
+    }
+
+    /// Shadow the cells of a reconciled cluster entry that are covered by a range
+    /// tombstone (issue #933, the re-applied #846 "Step 2c" made schema-aware).
+    ///
+    /// Computes the max `markedForDeleteAt` among range tombstones covering this
+    /// entry's clustering key, then drops every DATA cell whose own `timestamp` is
+    /// `<= floor` (the `<=` boundary lets a deletion win an equal-ts tie, #498).
+    /// Clustering-key pseudo-cells are retained whenever any data cell survives so
+    /// the row keeps its key columns for read-back. A row whose every data cell is
+    /// shadowed AND whose row-marker liveness is `<= floor` produces nothing (the
+    /// re-emitted range marker covers it); a coexisting row deletion newer than the
+    /// floor is preserved as a row tombstone. A row with no clustering key (static
+    /// / unclustered) is never covered by a range tombstone.
+    fn apply_range_shadowing(
+        entry: MergeEntry,
+        range_tombstones: &[(DecoratedKey, RangeTombstone)],
+        schema: &TableSchema,
+    ) -> Option<MergeEntry> {
+        // Fast path for the overwhelmingly common partition with no range
+        // tombstones: skip the clustering-key clone and coverage scan entirely.
+        if range_tombstones.is_empty() {
+            return Some(entry);
+        }
+        let Some(ck) = entry.clustering_key.clone() else {
+            return Some(entry);
+        };
+
+        let floor = range_tombstones
+            .iter()
+            .filter(|(key, rt)| {
+                key.key == entry.key.key && Self::range_tombstone_covers_ck(&ck, rt, schema)
+            })
+            .map(|(_, rt)| rt.deletion_time)
+            .max();
+        let Some(floor) = floor else {
+            return Some(entry);
+        };
+
+        // A complex (collection) deletion OLDER than the covering range is
+        // subsumed by the range marker; one STRICTLY NEWER must survive, else
+        // older collection elements from a non-compacted SSTable could resurrect
+        // (roborev #959 High #2 — `apply_range_shadowing` previously dropped
+        // `entry.complex_deletions` on the whole-row-covered path). Filtered once
+        // here and reused by every arm below.
+        let surviving_complex: Vec<ComplexDeletion> = entry
+            .complex_deletions
+            .into_iter()
+            .filter(|cd| cd.marked_for_delete_at > floor)
+            .collect();
+
+        match entry.row_data {
+            RowData::Tombstone {
+                deletion_time,
+                local_deletion_time,
+            } => {
+                // A row tombstone fully covered by a newer/equal range deletion is
+                // redundant (the range marker shadows it); drop it. A strictly
+                // newer row tombstone survives.
+                if deletion_time > floor {
+                    let mut rebuilt = MergeEntry::new(
+                        entry.run_index,
+                        entry.key,
+                        Some(ck),
+                        deletion_time,
+                        RowData::Tombstone {
+                            deletion_time,
+                            local_deletion_time,
+                        },
+                    );
+                    if !surviving_complex.is_empty() {
+                        rebuilt = rebuilt.with_complex_deletions(surviving_complex);
+                    }
+                    Some(rebuilt)
+                } else if !surviving_complex.is_empty() {
+                    // The row tombstone is subsumed by the range, but a newer
+                    // complex deletion must persist as a metadata-only carrier.
+                    Some(
+                        MergeEntry::new(
+                            entry.run_index,
+                            entry.key,
+                            Some(ck),
+                            entry.timestamp,
+                            RowData::Live { cells: Vec::new() },
+                        )
+                        .with_complex_deletions(surviving_complex),
+                    )
+                } else {
+                    None
+                }
+            }
+            RowData::Live { cells } => {
+                let ck_names: std::collections::HashSet<&str> =
+                    ck.columns.iter().map(|(n, _)| n.as_str()).collect();
+                let is_data = |c: &CellData| !ck_names.contains(c.column.as_str());
+
+                // Keep clustering pseudo-cells; keep data cells strictly newer than
+                // the covering range deletion.
+                let kept: Vec<CellData> = cells
+                    .into_iter()
+                    .filter(|c| !is_data(c) || c.timestamp > floor)
+                    .collect();
+                let has_data = kept.iter().any(is_data);
+
+                // A coexisting row deletion (#932) older than the range floor is
+                // subsumed by the range marker; a newer one is preserved.
+                let surviving_row_del = entry.row_deletion.filter(|(dt, _)| *dt > floor);
+
+                // The row-marker liveness survives the range only if its own
+                // timestamp is strictly newer than the covering deletion.
+                let marker_live = entry.timestamp > floor;
+
+                if !has_data && !marker_live {
+                    // Whole row covered by the range. A coexisting row deletion
+                    // (#932) newer than the floor wins and subsumes any collection
+                    // deletion. Otherwise a complex deletion newer than the floor
+                    // must persist as a metadata-only carrier (roborev #959 High
+                    // #2); failing that, the re-emitted range marker is the sole
+                    // survivor and this entry contributes nothing.
+                    if let Some((dt, ldt)) = surviving_row_del {
+                        return Some(MergeEntry::new(
+                            entry.run_index,
+                            entry.key,
+                            Some(ck),
+                            dt,
+                            RowData::Tombstone {
+                                deletion_time: dt,
+                                local_deletion_time: ldt,
+                            },
+                        ));
+                    }
+                    if !surviving_complex.is_empty() {
+                        return Some(
+                            MergeEntry::new(
+                                entry.run_index,
+                                entry.key,
+                                Some(ck),
+                                entry.timestamp,
+                                RowData::Live { cells: Vec::new() },
+                            )
+                            .with_complex_deletions(surviving_complex),
+                        );
+                    }
+                    return None;
+                }
+
+                let row_ts = if has_data {
+                    kept.iter()
+                        .filter(|c| is_data(c))
+                        .map(|c| c.timestamp)
+                        .max()
+                        .unwrap_or(entry.timestamp)
+                } else {
+                    entry.timestamp
+                };
+
+                let mut rebuilt = MergeEntry::new(
+                    entry.run_index,
+                    entry.key,
+                    Some(ck),
+                    row_ts,
+                    RowData::Live { cells: kept },
+                );
+                if !surviving_complex.is_empty() {
+                    rebuilt = rebuilt.with_complex_deletions(surviving_complex);
+                }
+                if let Some((dt, ldt)) = surviving_row_del {
+                    rebuilt = rebuilt.with_row_deletion(dt, ldt);
+                }
+                Some(rebuilt)
+            }
+        }
     }
 
     /// The cell's effective `localDeletionTime` (GC-clock seconds, on-disk
@@ -3030,6 +3653,13 @@ impl KWayMerger {
         let partition_key = PartitionKey::from_bytes(&entry.key.key, schema)?;
         let table_id = TableId::new(&schema.keyspace, &schema.table);
 
+        // Issue #933: a surviving range tombstone rides on the mutation's
+        // `range_tombstones`, which the writer interleaves as on-disk bound markers
+        // (and uses to shadow same-partition rows). Captured before `entry` is
+        // consumed below. A range carrier has empty operations and no clustering
+        // key, so it produces NO row — only the marker is written.
+        let range_tombstone = entry.range_deletion.clone();
+
         // Capture the row tombstone's source LDT (GC-clock seconds) by borrow,
         // before the `match` below moves `cells` out of `entry.row_data` (#873).
         //
@@ -3132,10 +3762,16 @@ impl KWayMerger {
         };
         // Issue #932: attach the coexisting row deletion (deletion time + LDT) so
         // the writer keeps both the row tombstone and the surviving newer cells.
-        Ok(match coexisting_row_tombstone {
+        let mut mutation = match coexisting_row_tombstone {
             Some((deletion_time, ldt)) => mutation.with_row_tombstone(deletion_time, ldt),
             None => mutation,
-        })
+        };
+        // Issue #933: thread the surviving range tombstone so the writer emits the
+        // on-disk bound markers (and shadows same-partition rows the marker covers).
+        if let Some(rt) = range_tombstone {
+            mutation.range_tombstones.push(rt);
+        }
+        Ok(mutation)
     }
 }
 
@@ -6806,8 +7442,8 @@ mod issue_886_merge_entry_enrichment {
     /// be skipped — the writer now emits a real complex-deletion marker for it
     /// (`merge_entry_to_mutation` produces a `CellOperation::ComplexDeletion`), so
     /// a fully-deleted-collection marker reaches the SSTable instead of being
-    /// dropped. A RANGE-deletion-only entry is still not consumable by the writer
-    /// (deferred to #846) and remains skippable.
+    /// dropped. Issue #933: a RANGE-deletion-only carrier is ALSO now writer-
+    /// visible (the writer emits its bound markers), so it too is no longer skipped.
     #[test]
     fn complex_deletion_only_entry_reaches_writer_but_range_only_is_skipped() {
         let complex = ComplexDeletion {
@@ -6831,14 +7467,15 @@ mod issue_886_merge_entry_enrichment {
             "Phase C: a complex-deletion-only entry must reach the writer"
         );
 
-        // Range-deletion-only (no complex deletion): still skippable — the writer
-        // does not consume range deletions yet (#846), so routing it would write a
-        // phantom pure-PK row.
+        // Range-deletion-only (no complex deletion): now WRITER-VISIBLE (#933) —
+        // `merge_entry_to_mutation` threads it onto the mutation's range_tombstones
+        // so the writer emits the on-disk bound markers; dropping it would
+        // resurrect the rows it shadowed.
         let range_only = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] })
             .with_range_deletion(range.clone());
         assert!(
-            range_only.is_metadata_only_no_op(),
-            "range-deletion-only entry stays writer-skippable (deferred to #846)"
+            !range_only.is_metadata_only_no_op(),
+            "#933: a range-deletion-only carrier must reach the writer"
         );
 
         // Both kinds present → the complex deletion is writer-visible, so the
@@ -6888,10 +7525,12 @@ mod issue_886_merge_entry_enrichment {
         );
         assert!(!live.is_metadata_only_no_op());
 
-        // Empty live row carrying metadata? Yes (skip). Empty live row WITHOUT
-        // metadata never survives reconcile, but defensively it is not skippable.
+        // Empty live row WITHOUT any metadata: a true phantom no-op. It never
+        // survives reconcile in practice, but the defensive filter DOES treat it as
+        // skippable (#933 redefinition: no cells, no complex, no range, no row
+        // deletion).
         let empty_no_meta = MergeEntry::new(0, dk(1), None, 0, RowData::Live { cells: vec![] });
-        assert!(!empty_no_meta.is_metadata_only_no_op());
+        assert!(empty_no_meta.is_metadata_only_no_op());
 
         // Row tombstone — must be written (real deletion).
         let tomb = MergeEntry::new(
@@ -8613,7 +9252,7 @@ mod issue_822_merge_ordering_semantics {
 mod issue_886_empty_partition_skip {
     use super::*;
     use crate::schema::{KeyColumn, TableSchema};
-    use crate::storage::write_engine::mutation::{ClusteringBound, DecoratedKey, PartitionKey};
+    use crate::storage::write_engine::mutation::{DecoratedKey, PartitionKey};
     use std::collections::HashMap;
 
     /// Single-column `int` partition-key schema with one regular `name` column.
@@ -8647,16 +9286,6 @@ mod issue_886_empty_partition_skip {
             .expect("encode int partition key")
     }
 
-    /// A range deletion so an empty Live entry classifies as metadata-only.
-    fn range_deletion() -> RangeTombstone {
-        RangeTombstone {
-            start: ClusteringBound::Bottom,
-            end: ClusteringBound::Top,
-            deletion_time: 8888,
-            local_deletion_time: 0,
-        }
-    }
-
     /// An in-memory run yielding a fixed list of `MergeEntry`s in order.
     struct VecIterator(std::vec::IntoIter<MergeEntry>);
     impl SSTableRowIterator for VecIterator {
@@ -8688,16 +9317,17 @@ mod issue_886_empty_partition_skip {
     async fn empty_partition_is_skipped_on_writer_path() {
         let schema = schema();
 
-        // Partition token 1: ONLY a metadata-only no-op (empty Live + range
-        // deletion). After filtering, this partition's mutations are empty.
+        // Partition token 1: ONLY a truly-empty no-op (empty Live, no metadata).
+        // It reconciles to nothing, so after filtering this partition's mutations
+        // are empty. (A range-deletion carrier is no longer a no-op under #933, so
+        // a genuinely-empty entry is used here to exercise the phantom-skip path.)
         let meta_only = MergeEntry::new(
             0,
             DecoratedKey::new(1, pk_bytes(&schema, 1)),
             None,
             0,
             RowData::Live { cells: vec![] },
-        )
-        .with_range_deletion(range_deletion());
+        );
         assert!(
             meta_only.is_metadata_only_no_op(),
             "test precondition: the token-1 entry must be a metadata-only no-op"
@@ -11184,6 +11814,282 @@ mod issue_929_bare_udt_compaction {
                 .data_type,
             "person",
             "with unverified headers, a bare UDT column must NOT be registry-normalized"
+        );
+    }
+}
+
+/// Roborev #959 fixes on the #933 range-tombstone compaction path:
+///   - High #1: overlapping cross-SSTable ranges with different bounds must be
+///     coalesced into a NON-OVERLAPPING canonical sequence before re-emission
+///     (the writer emits independent open/close marker pairs and the reader
+///     pairs them with a single pending-start, so overlaps corrupt on read-back).
+///   - High #2: `apply_range_shadowing` must preserve a complex (collection)
+///     deletion newer than the covering range when the row is otherwise fully
+///     shadowed (it previously dropped `complex_deletions`).
+#[cfg(all(test, feature = "write-support"))]
+mod issue_959_range_tombstone_fixes {
+    use super::*;
+    use crate::schema::{Column, KeyColumn};
+    use crate::storage::write_engine::mutation::ClusteringBound;
+    use crate::types::Value;
+    use std::collections::HashMap;
+
+    fn dk(byte: u8) -> DecoratedKey {
+        DecoratedKey::from_key_bytes(vec![byte]).expect("token")
+    }
+
+    /// Single-column `int` partition + single-column `int` clustering schema.
+    fn schema_int_ck(order: crate::schema::ClusteringOrder) -> TableSchema {
+        TableSchema {
+            keyspace: "ks".to_string(),
+            table: "tbl".to_string(),
+            partition_keys: vec![KeyColumn {
+                name: "pk".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+            }],
+            clustering_keys: vec![crate::schema::ClusteringColumn {
+                name: "ck".to_string(),
+                data_type: "int".to_string(),
+                position: 0,
+                order,
+            }],
+            columns: vec![Column {
+                name: "v".to_string(),
+                data_type: "int".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            }],
+            comments: HashMap::new(),
+            dropped_columns: HashMap::new(),
+        }
+    }
+
+    fn ck(n: i32) -> ClusteringKey {
+        ClusteringKey {
+            columns: vec![("ck".to_string(), Value::Integer(n))],
+        }
+    }
+
+    fn rt(start: ClusteringBound, end: ClusteringBound, dt: i64) -> RangeTombstone {
+        RangeTombstone {
+            start,
+            end,
+            deletion_time: dt,
+            local_deletion_time: (dt / 1_000_000) as i32,
+        }
+    }
+
+    /// High #1: two OVERLAPPING ranges with different bounds split into three
+    /// disjoint segments, the inner (newer) deletion winning its overlap.
+    #[test]
+    fn overlapping_ranges_coalesce_to_disjoint_segments() {
+        let schema = schema_int_ck(Default::default());
+        // [1,5] @100 overlapped by [2,3] @200.
+        let mut rts = vec![
+            (
+                dk(1),
+                rt(
+                    ClusteringBound::Inclusive(ck(1)),
+                    ClusteringBound::Inclusive(ck(5)),
+                    100,
+                ),
+            ),
+            (
+                dk(1),
+                rt(
+                    ClusteringBound::Inclusive(ck(2)),
+                    ClusteringBound::Inclusive(ck(3)),
+                    200,
+                ),
+            ),
+        ];
+        KWayMerger::coalesce_range_tombstones(&mut rts, &schema);
+
+        assert_eq!(rts.len(), 3, "union splits into 3 disjoint segments");
+        // [1, 2) @100
+        assert_eq!(rts[0].1.start, ClusteringBound::Inclusive(ck(1)));
+        assert_eq!(rts[0].1.end, ClusteringBound::Exclusive(ck(2)));
+        assert_eq!(rts[0].1.deletion_time, 100);
+        // [2, 3] @200 (the newer inner range wins the overlap)
+        assert_eq!(rts[1].1.start, ClusteringBound::Inclusive(ck(2)));
+        assert_eq!(rts[1].1.end, ClusteringBound::Inclusive(ck(3)));
+        assert_eq!(rts[1].1.deletion_time, 200);
+        // (3, 5] @100
+        assert_eq!(rts[2].1.start, ClusteringBound::Exclusive(ck(3)));
+        assert_eq!(rts[2].1.end, ClusteringBound::Inclusive(ck(5)));
+        assert_eq!(rts[2].1.deletion_time, 100);
+
+        // Every emitted segment is a valid, well-ordered, non-overlapping range:
+        // each end is >= its start and each start is > the previous end.
+        for i in 0..rts.len() {
+            let s = KWayMerger::range_start_cut(&rts[i].1.start);
+            let e = KWayMerger::range_end_cut(&rts[i].1.end);
+            assert_ne!(
+                KWayMerger::cut_cmp(&s, &e, &schema),
+                Ordering::Greater,
+                "segment {i} start must not exceed its end"
+            );
+            if i > 0 {
+                // Non-overlap: the previous end cut must not exceed this start
+                // cut. Equality is fine and expected — an exclusive end and an
+                // inclusive start at the same value share one boundary cut while
+                // covering complementary value sets (e.g. `< 2` then `>= 2`).
+                let prev_e = KWayMerger::range_end_cut(&rts[i - 1].1.end);
+                assert_ne!(
+                    KWayMerger::cut_cmp(&prev_e, &s, &schema),
+                    Ordering::Greater,
+                    "segment {i} must not overlap the previous segment"
+                );
+            }
+        }
+    }
+
+    /// Identical bounds across inputs collapse to one range at the newest
+    /// deletion (the old `canonicalize` behavior is subsumed).
+    #[test]
+    fn identical_bounds_collapse_to_newest() {
+        let schema = schema_int_ck(Default::default());
+        let mut rts = vec![
+            (
+                dk(1),
+                rt(
+                    ClusteringBound::Inclusive(ck(1)),
+                    ClusteringBound::Inclusive(ck(3)),
+                    100,
+                ),
+            ),
+            (
+                dk(1),
+                rt(
+                    ClusteringBound::Inclusive(ck(1)),
+                    ClusteringBound::Inclusive(ck(3)),
+                    200,
+                ),
+            ),
+        ];
+        KWayMerger::coalesce_range_tombstones(&mut rts, &schema);
+        assert_eq!(rts.len(), 1);
+        assert_eq!(rts[0].1.deletion_time, 200);
+        assert_eq!(rts[0].1.start, ClusteringBound::Inclusive(ck(1)));
+        assert_eq!(rts[0].1.end, ClusteringBound::Inclusive(ck(3)));
+    }
+
+    /// Adjacent (touching) ranges at the SAME deletion merge into one.
+    #[test]
+    fn adjacent_same_deletion_ranges_merge() {
+        let schema = schema_int_ck(Default::default());
+        let mut rts = vec![
+            (
+                dk(1),
+                rt(
+                    ClusteringBound::Inclusive(ck(1)),
+                    ClusteringBound::Inclusive(ck(3)),
+                    100,
+                ),
+            ),
+            (
+                dk(1),
+                rt(
+                    ClusteringBound::Exclusive(ck(3)),
+                    ClusteringBound::Inclusive(ck(5)),
+                    100,
+                ),
+            ),
+        ];
+        KWayMerger::coalesce_range_tombstones(&mut rts, &schema);
+        assert_eq!(rts.len(), 1, "touching equal-deletion ranges coalesce");
+        assert_eq!(rts[0].1.start, ClusteringBound::Inclusive(ck(1)));
+        assert_eq!(rts[0].1.end, ClusteringBound::Inclusive(ck(5)));
+    }
+
+    /// Distinct partition keys are coalesced independently (never merged).
+    #[test]
+    fn distinct_partitions_not_merged() {
+        let schema = schema_int_ck(Default::default());
+        let mut rts = vec![
+            (
+                dk(1),
+                rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
+            ),
+            (
+                dk(2),
+                rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
+            ),
+        ];
+        KWayMerger::coalesce_range_tombstones(&mut rts, &schema);
+        assert_eq!(rts.len(), 2);
+        assert_ne!(rts[0].0.key, rts[1].0.key);
+    }
+
+    /// High #2: a complex deletion NEWER than the covering range survives as a
+    /// metadata carrier when the row is otherwise fully shadowed.
+    #[test]
+    fn newer_complex_deletion_survives_full_range_shadow() {
+        let schema = schema_int_ck(Default::default());
+        // Row at ck=2 with only its clustering pseudo-cell (no live data) plus a
+        // collection deletion @200; covered by a whole-partition range @100.
+        let entry = MergeEntry::new(
+            0,
+            dk(1),
+            Some(ck(2)),
+            50,
+            RowData::Live {
+                cells: vec![CellData::new("ck".to_string(), Value::Integer(2), 50)],
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "v".to_string(),
+            marked_for_delete_at: 200,
+            local_deletion_time: 0,
+        }]);
+        let range = vec![(
+            dk(1),
+            rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
+        )];
+
+        let out = KWayMerger::apply_range_shadowing(entry, &range, &schema)
+            .expect("a complex deletion newer than the range must survive");
+        assert_eq!(
+            out.complex_deletions.len(),
+            1,
+            "the newer collection deletion is preserved"
+        );
+        assert_eq!(out.complex_deletions[0].marked_for_delete_at, 200);
+        match out.row_data {
+            RowData::Live { cells } => assert!(cells.is_empty(), "carrier holds no data cells"),
+            other => panic!("expected an empty Live carrier, got {other:?}"),
+        }
+    }
+
+    /// A complex deletion OLDER than the covering range is subsumed and dropped,
+    /// leaving nothing for the re-emitted range marker to duplicate.
+    #[test]
+    fn older_complex_deletion_subsumed_by_range() {
+        let schema = schema_int_ck(Default::default());
+        let entry = MergeEntry::new(
+            0,
+            dk(1),
+            Some(ck(2)),
+            50,
+            RowData::Live {
+                cells: vec![CellData::new("ck".to_string(), Value::Integer(2), 50)],
+            },
+        )
+        .with_complex_deletions(vec![ComplexDeletion {
+            column: "v".to_string(),
+            marked_for_delete_at: 50,
+            local_deletion_time: 0,
+        }]);
+        let range = vec![(
+            dk(1),
+            rt(ClusteringBound::Bottom, ClusteringBound::Top, 100),
+        )];
+
+        assert!(
+            KWayMerger::apply_range_shadowing(entry, &range, &schema).is_none(),
+            "an older complex deletion is subsumed; nothing survives"
         );
     }
 }
