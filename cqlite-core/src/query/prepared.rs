@@ -208,9 +208,47 @@ impl PreparedQuery {
         self.execute(&positional_params).await
     }
 
-    /// Execute with execution context
+    /// Execute with execution context.
+    ///
+    /// Issue #961 (Finding 2): when this prepared statement is a SELECT it owns a
+    /// [`PreparedSelect`] pipeline, and the context's `positional_params` must be
+    /// bound and run through the same SELECT optimizer + executor as
+    /// [`Self::execute`]. Previously this method ignored the pipeline and ran the
+    /// legacy `QueryExecutor` plan with the parameters silently dropped, so a
+    /// prepared `WHERE pk = ?` executed through the context API never bound its
+    /// params and never engaged the partition-targeted fast path — inconsistent
+    /// with `execute`.
+    ///
+    /// The legacy `ExecutionHints` (`force_index`, `timeout_ms`, `parallelism`)
+    /// are properties of the legacy `QueryPlan` and have no representation in the
+    /// SELECT pipeline. Rather than silently ignore a caller-supplied hint, a
+    /// SELECT prepared statement that is handed any hint returns a clear error.
+    /// SELECTs with no hints bind their params and run through the pipeline,
+    /// matching `execute(context.positional_params)`.
     pub async fn execute_with_context(&self, context: &PreparedContext) -> Result<QueryResult> {
         let hints = &context.hints;
+
+        #[cfg(feature = "state_machine")]
+        if let Some(pipeline) = &self.select_pipeline {
+            if hints.force_index.is_some()
+                || hints.timeout_ms.is_some()
+                || hints.parallelism.is_some()
+            {
+                return Err(Error::query_execution(
+                    "Execution hints (force_index/timeout_ms/parallelism) are not supported for \
+                     prepared SELECT statements; they apply only to the legacy plan path. Re-run \
+                     without hints to bind parameters and use the partition-targeted SELECT path.",
+                ));
+            }
+            // Bind the context's positional params and run the same SELECT
+            // optimizer + executor as `execute`, so the fast path engages.
+            self.validate_params(&context.positional_params)?;
+            let mut statement = pipeline.statement.clone();
+            statement.bind_parameters(&context.positional_params)?;
+            let optimized = pipeline.optimizer.optimize(statement).await?;
+            return pipeline.executor.execute(optimized).await;
+        }
+
         // Avoid cloning the plan if no hints would override it.
         if hints.force_index.is_none() && hints.timeout_ms.is_none() && hints.parallelism.is_none()
         {

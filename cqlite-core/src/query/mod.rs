@@ -50,7 +50,8 @@ pub use m2_select_validator::{M2SelectValidator, SelectValidationResult, Unsuppo
 pub use parser::QueryParser;
 pub use planner::{ExecutionStep, IndexSelection, PlanType, QueryHints, QueryPlan, QueryPlanner};
 pub use prepared::{
-    ExecutionHints, ParameterMetadata, PreparedQuery, PreparedQueryBuilder, PreparedQueryStats,
+    ExecutionHints, ParameterMetadata, PreparedContext, PreparedQuery, PreparedQueryBuilder,
+    PreparedQueryStats,
 };
 pub use result::{
     cql_type_to_data_type, ColumnInfo, PerformanceMetrics, QueryMetadata, QueryResult,

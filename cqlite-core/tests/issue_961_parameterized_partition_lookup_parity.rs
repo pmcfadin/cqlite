@@ -37,7 +37,9 @@ use std::path::{Path, PathBuf};
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::access_path::{self, AccessPath};
 use cqlite_core::query::result::QueryRow;
+use cqlite_core::query::{ExecutionHints, PreparedContext};
 use cqlite_core::{Database, Value};
+use std::collections::HashMap;
 
 /// Serializes tests that read the process-global access-path probe
 /// (`access_path::last()`), mirroring the #960 test harness.
@@ -542,6 +544,275 @@ async fn param_count_mismatch_is_rejected() {
     assert!(
         prep_too_few.is_err(),
         "Issue #961: prepared execute with too few params must error",
+    );
+}
+
+// ===========================================================================
+// 6. Finding 1: a zero-marker `execute_with_params(sql, &[])` routes EXACTLY
+//    like a literal `execute(sql)` — same rows AND same access path — including
+//    the simple `WHERE id = <literal>` case that `execute` keeps on the legacy /
+//    simple-id point-lookup path. This proves the two APIs cannot diverge for
+//    markerless statements.
+// ===========================================================================
+
+#[tokio::test]
+async fn zero_marker_params_route_like_literal_execute_scan() {
+    let _guard = PROBE_LOCK.lock().await;
+    let db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let sql = "SELECT id, name, age FROM test_basic.simple_table";
+
+    access_path::reset();
+    let via_execute = db.execute(sql).await.expect("execute scan must succeed");
+    let execute_path = access_path::last();
+
+    access_path::reset();
+    let via_params = db
+        .execute_with_params(sql, &[])
+        .await
+        .expect("zero-marker execute_with_params must succeed");
+    let params_path = access_path::last();
+
+    assert_eq!(
+        fingerprints(&via_params.rows),
+        fingerprints(&via_execute.rows),
+        "Finding 1: zero-marker execute_with_params must return the SAME rows as execute()",
+    );
+    assert_eq!(
+        params_path, execute_path,
+        "Finding 1: zero-marker execute_with_params must take the SAME access path as execute()",
+    );
+    assert_eq!(
+        via_params.metadata.access_path, via_execute.metadata.access_path,
+        "Finding 1: reported access_path must match between the two APIs",
+    );
+}
+
+#[tokio::test]
+async fn zero_marker_params_route_like_literal_execute_simple_id_lookup() {
+    let _guard = PROBE_LOCK.lock().await;
+    let db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+    let probe = db
+        .execute("SELECT id FROM test_basic.simple_table LIMIT 1")
+        .await
+        .expect("scan must succeed");
+    let Some(Value::Uuid(id)) = first_value(&probe.rows, "id") else {
+        eprintln!("Skipping: simple_table returned 0 rows or id not uuid");
+        return;
+    };
+
+    // `SELECT * FROM <table> WHERE id = <uuid>` is <= 8 whitespace tokens, which
+    // is exactly the simple-id point lookup that `execute` keeps on the legacy
+    // executor for INSERT/SELECT key compatibility. The zero-marker
+    // `execute_with_params` MUST delegate to `execute` and hit the same path.
+    let sql = format!(
+        "SELECT * FROM test_basic.simple_table WHERE id = {}",
+        uuid_to_literal(&id)
+    );
+    assert!(
+        sql.split_whitespace().count() <= 8,
+        "test setup: query must hit the simple-id legacy path (<= 8 tokens)",
+    );
+
+    access_path::reset();
+    let via_execute = db
+        .execute(&sql)
+        .await
+        .expect("literal execute must succeed");
+    let execute_path = access_path::last();
+
+    access_path::reset();
+    let via_params = db
+        .execute_with_params(&sql, &[])
+        .await
+        .expect("zero-marker execute_with_params must succeed");
+    let params_path = access_path::last();
+
+    assert_eq!(
+        fingerprints(&via_params.rows),
+        fingerprints(&via_execute.rows),
+        "Finding 1: zero-marker simple-id execute_with_params must return the SAME rows as execute()",
+    );
+    assert_eq!(
+        params_path, execute_path,
+        "Finding 1: zero-marker simple-id execute_with_params must take the SAME (legacy) access \
+         path as execute(); divergence here means execute_with_params(&[]) bypassed the \
+         simple-id routing",
+    );
+    assert_eq!(
+        via_params.metadata.access_path, via_execute.metadata.access_path,
+        "Finding 1: reported access_path must match between the two APIs for the simple-id case",
+    );
+}
+
+#[tokio::test]
+async fn zero_marker_query_with_stray_param_is_rejected() {
+    let db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    // No `?` placeholder, but a parameter is supplied. This is a caller bug and
+    // must be rejected (strict arity), not silently delegated.
+    let result = db
+        .execute_with_params(
+            "SELECT id FROM test_basic.simple_table",
+            &[Value::Integer(1)],
+        )
+        .await;
+    assert!(
+        result.is_err(),
+        "Finding 1: supplying a parameter for a query with 0 bind markers must error",
+    );
+}
+
+// ===========================================================================
+// 7. Finding 2: a prepared SELECT executed through the CONTEXT API
+//    (`execute_with_context` with `positional_params`) binds correctly:
+//    different params -> different partitions, and `WHERE pk = ?` reports
+//    AccessPath::PartitionLookup (not a full scan, not an unbound legacy plan).
+//    Supplying legacy hints with a prepared SELECT returns a clear error.
+// ===========================================================================
+
+#[tokio::test]
+async fn prepared_context_binds_params_and_reaches_partition_lookup() {
+    let _guard = PROBE_LOCK.lock().await;
+    let db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let full = db
+        .execute("SELECT id, name, age FROM test_basic.simple_table")
+        .await
+        .expect("full scan must succeed");
+    let mut ids: Vec<[u8; 16]> = Vec::new();
+    for row in &full.rows {
+        if let Some(Value::Uuid(b)) = row.values.get("id") {
+            if !ids.contains(b) {
+                ids.push(*b);
+            }
+        }
+        if ids.len() == 2 {
+            break;
+        }
+    }
+    if ids.len() < 2 {
+        eprintln!("Skipping: need >= 2 distinct UUID partitions");
+        return;
+    }
+
+    let prepared = db
+        .prepare("SELECT id, name, age FROM test_basic.simple_table WHERE id = ?")
+        .await
+        .expect("prepare must succeed");
+
+    let ctx0 = PreparedContext {
+        parameters: HashMap::new(),
+        positional_params: vec![Value::Uuid(ids[0])],
+        hints: ExecutionHints::default(),
+    };
+    let ctx1 = PreparedContext {
+        parameters: HashMap::new(),
+        positional_params: vec![Value::Uuid(ids[1])],
+        hints: ExecutionHints::default(),
+    };
+
+    access_path::reset();
+    let first = prepared
+        .execute_with_context(&ctx0)
+        .await
+        .expect("prepared context exec #1 must succeed");
+    assert_eq!(
+        access_path::last(),
+        Some(AccessPath::PartitionLookup),
+        "Finding 2: prepared WHERE pk = ? via context must take the partition-targeted path \
+         (not the unbound legacy plan / full scan)",
+    );
+
+    let second = prepared
+        .execute_with_context(&ctx1)
+        .await
+        .expect("prepared context exec #2 must succeed");
+
+    assert!(
+        first
+            .rows
+            .iter()
+            .all(|r| matches!(r.values.get("id"), Some(Value::Uuid(b)) if *b == ids[0])),
+        "first context result must contain only partition ids[0]",
+    );
+    assert!(
+        second
+            .rows
+            .iter()
+            .all(|r| matches!(r.values.get("id"), Some(Value::Uuid(b)) if *b == ids[1])),
+        "second context result must contain only partition ids[1]",
+    );
+    assert_ne!(
+        fingerprints(&first.rows),
+        fingerprints(&second.rows),
+        "Finding 2: different positional_params through the context API must return DIFFERENT \
+         partitions (proves the params are bound, not dropped)",
+    );
+}
+
+#[tokio::test]
+async fn prepared_context_rejects_hints_for_select() {
+    let db = match setup().await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+    let probe = db
+        .execute("SELECT id FROM test_basic.simple_table LIMIT 1")
+        .await
+        .expect("scan must succeed");
+    let Some(Value::Uuid(id)) = first_value(&probe.rows, "id") else {
+        eprintln!("Skipping: simple_table returned 0 rows or id not uuid");
+        return;
+    };
+
+    let prepared = db
+        .prepare("SELECT id, name FROM test_basic.simple_table WHERE id = ?")
+        .await
+        .expect("prepare must succeed");
+
+    // A legacy hint cannot be mapped onto the SELECT pipeline: rather than
+    // silently ignore it (and risk running the unbound legacy plan), the context
+    // API returns a clear error for a prepared SELECT carrying any hint.
+    let ctx = PreparedContext {
+        parameters: HashMap::new(),
+        positional_params: vec![Value::Uuid(id)],
+        hints: ExecutionHints {
+            timeout_ms: Some(5000),
+            ..ExecutionHints::default()
+        },
+    };
+    let result = prepared.execute_with_context(&ctx).await;
+    assert!(
+        result.is_err(),
+        "Finding 2: supplying a legacy ExecutionHint to a prepared SELECT via context must error",
     );
 }
 

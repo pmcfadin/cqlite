@@ -271,6 +271,23 @@ impl QueryEngine {
     /// CQL with parameters, or any use of named (`:name`) parameters, is rejected
     /// with a clear error (named-parameter binding is intentionally out of scope:
     /// the SELECT grammar only tokenizes positional `?`).
+    ///
+    /// # Routing parity with `execute` (Finding 1)
+    ///
+    /// When the parsed SELECT has **zero** bind markers and `params` is empty,
+    /// this delegates straight back to [`Self::execute`] so that a markerless
+    /// `execute_with_params(sql, &[])` is byte-for-byte equivalent to
+    /// `execute(sql)` — including the legacy simple-`WHERE id = <literal>` point
+    /// lookup that `execute` intentionally keeps on the normal executor for
+    /// INSERT/SELECT key compatibility. Only when markers are present (`> 0`) is
+    /// the statement bound and driven through the SELECT optimizer + executor
+    /// pipeline.
+    ///
+    /// Arity stays strict in both directions: markers `> 0` with a wrong
+    /// `params.len()` is an error, and markers `== 0` with a **non-empty**
+    /// `params` is also an error (a supplied parameter with no placeholder is a
+    /// caller bug). The latter matches [`SelectStatement::bind_parameters`]'s
+    /// contract and the documented strictness of this API.
     pub async fn execute_with_params(&self, cql: &str, params: &[Value]) -> Result<QueryResult> {
         let is_select = cql.trim().to_uppercase().starts_with("SELECT");
 
@@ -300,16 +317,37 @@ impl QueryEngine {
 
         #[cfg(feature = "state_machine")]
         {
+            // Parse once so we can count bind markers and decide routing. Parse
+            // failures here mirror `execute_select_query`, which would also fail.
+            let statement =
+                select_parser::parse_select(cql).inspect_err(|_| self.inc_total_queries())?;
+            let marker_count = statement.bind_marker_count();
+
+            // Finding 1: a markerless SELECT with no supplied params must route
+            // exactly like a literal `execute(cql)` — including the simple-id
+            // legacy point-lookup path — so the two APIs cannot diverge. A
+            // marker-free statement with stray params is, however, a caller bug:
+            // reject it for strict arity (no placeholder to bind into).
+            if marker_count == 0 {
+                if params.is_empty() {
+                    return self.execute(cql).await;
+                }
+                self.inc_total_queries();
+                self.inc_error_queries();
+                return Err(Error::query_execution(format!(
+                    "Parameter count mismatch: query has 0 bind marker(s), got {} parameter(s)",
+                    params.len()
+                )));
+            }
+
             let start_time = Instant::now();
             self.inc_total_queries();
 
-            // Always parse + bind through the SELECT pipeline so that arity is
-            // validated even when `params` is empty: a `WHERE pk = ?` with no
-            // supplied parameter is a hard error, never a silent full scan. The
+            // Markers present: bind through the SELECT pipeline. Arity is
+            // enforced by `bind_parameters` (too few / too many -> error). The
             // bound statement reaches the same optimizer + executor as a literal
             // `execute()`, so the partition-targeted fast path engages.
-            let mut statement =
-                select_parser::parse_select(cql).inspect_err(|_| self.inc_error_queries())?;
+            let mut statement = statement;
             statement
                 .bind_parameters(params)
                 .inspect_err(|_| self.inc_error_queries())?;
