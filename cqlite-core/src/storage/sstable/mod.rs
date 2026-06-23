@@ -855,7 +855,7 @@ impl SSTableManager {
             if reader_list.len() > 1 {
                 if let Some(schema) = schema {
                     match self
-                        .merge_generations_for_read(reader_list, schema, limit)
+                        .merge_generations_for_read(reader_list, schema, start_key, end_key, limit)
                         .await
                     {
                         Ok(merged) => {
@@ -1019,7 +1019,9 @@ impl SSTableManager {
         if candidates.len() > 1 {
             if let Some(schema) = schema {
                 match self
-                    .merge_generations_for_read(&candidates, schema, None)
+                    // Partition-targeted: no key range; `retain(matches_key)` below
+                    // is a stricter single-partition filter than any range bound.
+                    .merge_generations_for_read(&candidates, schema, None, None, None)
                     .await
                 {
                     Ok(mut merged) => {
@@ -1155,14 +1157,29 @@ impl SSTableManager {
     /// Requires a schema (cells carry no column names on disk) and the
     /// `write-support` feature (the merger lives in the write engine). Callers
     /// fall back to concatenation when either is unavailable.
+    ///
+    /// `start_key`/`end_key` bound the merged output to the same inclusive
+    /// `[start_key, end_key]` key range the per-reader [`scan`](reader::SSTableReader::scan)
+    /// applies (skip `key < start`, skip `key > end`, using `RowKey`'s `Ord`), so a
+    /// bounded multi-generation read returns only the requested range rather than the
+    /// full reconciled table (Issue #957). The range filter runs before `limit`, matching
+    /// the per-reader scan order (range then limit). With `None`/`None` bounds the output
+    /// is byte-for-byte the full reconciled set, unchanged from before.
     #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
     async fn merge_generations_for_read(
         &self,
         reader_list: &[Arc<reader::SSTableReader>],
         schema: &crate::schema::TableSchema,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
         limit: Option<usize>,
     ) -> Result<Vec<(RowKey, Value)>> {
         use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
+
+        // Own the bounds so the merge body (and any later filtering) can use them
+        // without borrowing across the await; cheap clone of the key bytes.
+        let start_key = start_key.cloned();
+        let end_key = end_key.cloned();
 
         // The merger expects inputs ordered newest → oldest (run_index 0 = newest)
         // for its stable tie-break; the reader Vec order is discovery-dependent, so
@@ -1176,6 +1193,22 @@ impl SSTableManager {
             let mut merger = KWayMerger::new(paths, &schema)?;
             let mut out = Vec::new();
             while let MergeStep::Partition { key, rows } = merger.step()? {
+                // Enforce the same inclusive `[start_key, end_key]` range the
+                // per-reader scan applies (Issue #957): skip `key < start` and
+                // `key > end`, comparing with the identical `RowKey` ordering used
+                // for the final sort. Filtering at the partition key drops every
+                // out-of-range row before it is materialized.
+                let row_key = RowKey(key.key.clone());
+                if let Some(ref start) = start_key {
+                    if &row_key < start {
+                        continue;
+                    }
+                }
+                if let Some(ref end) = end_key {
+                    if &row_key > end {
+                        continue;
+                    }
+                }
                 for entry in rows {
                     match entry.row_data {
                         RowData::Live { cells } => {
@@ -1187,7 +1220,7 @@ impl SSTableManager {
                                 .map(|c| (Value::Text(c.column), c.value))
                                 .collect();
                             if !map.is_empty() {
-                                out.push((RowKey(key.key.clone()), Value::Map(map)));
+                                out.push((row_key.clone(), Value::Map(map)));
                             }
                         }
                         // Row tombstone: the row is deleted across all
@@ -1529,7 +1562,7 @@ impl SSTableManager {
         if readers.len() > 1 {
             if let Some(schema) = schema {
                 match self
-                    .merge_generations_for_read(&readers, schema, None)
+                    .merge_generations_for_read(&readers, schema, start_key, end_key, None)
                     .await
                 {
                     Ok(merged) => {
