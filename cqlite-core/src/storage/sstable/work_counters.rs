@@ -36,6 +36,22 @@
 //!   0 (absent key) or the number of rows that partition holds; it never scales
 //!   with the table's total partition count, which a full scan would.
 //!
+//! - [`chunks_decompressed`] — incremented **once per compression chunk the
+//!   single-candidate seek path actually decompresses** while buffering the
+//!   target partition's bytes (Issue #953 / #951). Where `partitions_decoded`
+//!   proves we returned only one partition, this proves the seek bounded its
+//!   *decompression I/O* to that partition's chunk span rather than reading the
+//!   whole `Data.db` to EOF. A head-of-file point lookup must NOT decompress the
+//!   tail chunks of a large SSTable: a regression that stitches to EOF (the bug
+//!   the bound replaces) bumps this by the file's whole chunk count, which the
+//!   `issue_953` bound test catches even though `partitions_decoded` stays 1.
+//!   Incremented at the seek's single decompression site
+//!   (`SSTableReader::bti_pull_decompressed_chunk`), so every chunk the seek
+//!   materializes — BIG (`nb`, bounded by the `Index.db` size) or BTI (`da`,
+//!   bounded by the next-partition boundary) — is counted exactly once. The
+//!   whole-section `stitch_all_chunks` fallback does **not** bump it (it is the
+//!   unbounded path the seek avoids when chunk targeting is possible).
+//!
 //! - [`partitions_decoded`] — incremented **once per partition actually decoded
 //!   out of `Data.db`** by the single-candidate *seek* path (Issue #953). Where
 //!   `sstables_scanned` proves we touched few SSTables, this proves that *within*
@@ -75,6 +91,10 @@ static PARTITIONS_PARSED: AtomicU64 = AtomicU64::new(0);
 /// seek path since the last [`reset`]. See module docs (Issue #953).
 static PARTITIONS_DECODED: AtomicU64 = AtomicU64::new(0);
 
+/// Count of compression chunks the single-candidate seek path has DECOMPRESSED
+/// since the last [`reset`]. See module docs (Issue #953 / #951).
+static CHUNKS_DECOMPRESSED: AtomicU64 = AtomicU64::new(0);
+
 /// Record that `count` candidate SSTables were parsed by a partition-targeted
 /// lookup. Called once per `scan_partition` invocation with the number of
 /// surviving (post-prune) candidates whose `Data.db` is parsed.
@@ -109,6 +129,20 @@ pub(crate) fn add_partition_decoded() {
     PARTITIONS_DECODED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record that one compression chunk was DECOMPRESSED by the single-candidate
+/// seek path (Issue #953 / #951). Called once per chunk the seek materializes
+/// into its decompressed window while buffering the target partition; the bound
+/// (BIG `Index.db` size, BTI next-partition boundary) stops the loop so this
+/// stays O(partition chunk span), never the file's whole chunk count.
+///
+/// Gated on `not(tombstones)` like the other seek-path mutators: only the
+/// default build reaches the seek (`bti_pull_decompressed_chunk`); under
+/// `tombstones` the full-scan fallback never seeks, so the counter stays 0.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) fn add_chunk_decompressed() {
+    CHUNKS_DECOMPRESSED.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Number of candidate SSTables parsed by partition-targeted lookups since the
 /// last [`reset`].
 ///
@@ -135,6 +169,18 @@ pub fn partitions_decoded() -> u64 {
     PARTITIONS_DECODED.load(Ordering::Relaxed)
 }
 
+/// Number of compression chunks DECOMPRESSED by the single-candidate seek path
+/// since the last [`reset`] (Issue #953 / #951).
+///
+/// Tests assert this stays bounded by the target partition's chunk span — a
+/// small constant for a point lookup — so a regression that stitches the
+/// `Data.db` section to EOF (decompressing every chunk after the target,
+/// including the whole tail of a large file for a head-of-file lookup) fails the
+/// `issue_953` bound, even though `partitions_decoded` would still read 1.
+pub fn chunks_decompressed() -> u64 {
+    CHUNKS_DECOMPRESSED.load(Ordering::Relaxed)
+}
+
 /// Clear both counters. Tests call this before a query so a stale value from an
 /// earlier query cannot satisfy a later assertion. Because the probe is
 /// process-global, a test that asserts on it must run without a concurrent query
@@ -143,6 +189,7 @@ pub fn reset() {
     SSTABLES_SCANNED.store(0, Ordering::Relaxed);
     PARTITIONS_PARSED.store(0, Ordering::Relaxed);
     PARTITIONS_DECODED.store(0, Ordering::Relaxed);
+    CHUNKS_DECOMPRESSED.store(0, Ordering::Relaxed);
 }
 
 #[cfg(all(test, not(feature = "tombstones")))]
@@ -155,16 +202,22 @@ mod tests {
         assert_eq!(sstables_scanned(), 0);
         assert_eq!(partitions_parsed(), 0);
         assert_eq!(partitions_decoded(), 0);
+        assert_eq!(chunks_decompressed(), 0);
         add_sstables_scanned(2);
         add_partitions_parsed(5);
         add_partition_decoded();
         add_partition_decoded();
+        add_chunk_decompressed();
+        add_chunk_decompressed();
+        add_chunk_decompressed();
         assert_eq!(sstables_scanned(), 2);
         assert_eq!(partitions_parsed(), 5);
         assert_eq!(partitions_decoded(), 2);
+        assert_eq!(chunks_decompressed(), 3);
         reset();
         assert_eq!(sstables_scanned(), 0);
         assert_eq!(partitions_parsed(), 0);
         assert_eq!(partitions_decoded(), 0);
+        assert_eq!(chunks_decompressed(), 0);
     }
 }
