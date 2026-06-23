@@ -67,6 +67,7 @@ use tokio::sync::Mutex;
 use source::{BlockSource, ScanSource};
 
 use crate::{
+    config::{DiskAccessMode, PrefetchMode},
     parser::{header::CassandraVersion, SSTableHeader, SSTableParser},
     platform::Platform,
     schema::TableSchema,
@@ -107,63 +108,189 @@ fn parse_truthy_env(value: &str) -> bool {
     )
 }
 
+/// Parse a [`DiskAccessMode`] from a string (`auto`/`buffered`/`mmap`/`direct`,
+/// case-insensitive). Returns `None` for unrecognized values so callers can
+/// keep the configured default. Pure for unit-testing without env mutation.
+fn parse_disk_access_mode(value: &str) -> Option<DiskAccessMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "auto" => Some(DiskAccessMode::Auto),
+        "buffered" | "buffer" => Some(DiskAccessMode::Buffered),
+        "mmap" | "mapped" => Some(DiskAccessMode::Mmap),
+        "direct" | "directio" | "direct_io" | "o_direct" => Some(DiskAccessMode::Direct),
+        _ => None,
+    }
+}
+
+/// Parse a [`PrefetchMode`] from a string (`off`/`sequential`/`willneed`/`auto`).
+/// Returns `None` for unrecognized values. Pure for unit-testing.
+fn parse_prefetch_mode(value: &str) -> Option<PrefetchMode> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "off" | "none" | "no" => Some(PrefetchMode::Off),
+        "sequential" | "seq" => Some(PrefetchMode::Sequential),
+        "willneed" | "will_need" | "will-need" => Some(PrefetchMode::WillNeed),
+        "auto" => Some(PrefetchMode::Auto),
+        _ => None,
+    }
+}
+
+/// `CQLITE_DISK_ACCESS_MODE` override, if set to a recognized value.
+fn disk_access_mode_via_env() -> Option<DiskAccessMode> {
+    std::env::var("CQLITE_DISK_ACCESS_MODE")
+        .ok()
+        .as_deref()
+        .and_then(parse_disk_access_mode)
+}
+
+/// `CQLITE_PREFETCH` override, if set to a recognized value.
+fn prefetch_mode_via_env() -> Option<PrefetchMode> {
+    std::env::var("CQLITE_PREFETCH")
+        .ok()
+        .as_deref()
+        .and_then(parse_prefetch_mode)
+}
+
+/// Best-effort total physical RAM in bytes, or `None` when it cannot be
+/// determined on this platform. Used by [`DiskAccessMode::Auto`] to decide when
+/// a file is large enough to warrant page-cache-bypassing direct I/O.
+fn system_memory_bytes() -> Option<u64> {
+    #[cfg(unix)]
+    {
+        // SAFETY: `sysconf` is a pure query with no pointer arguments.
+        let pages = unsafe { libc::sysconf(libc::_SC_PHYS_PAGES) };
+        let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+        if pages > 0 && page_size > 0 {
+            return Some((pages as u64).saturating_mul(page_size as u64));
+        }
+        None
+    }
+    #[cfg(not(unix))]
+    {
+        None
+    }
+}
+
+/// Decide which disk-access backend to use for a Data.db file.
+///
+/// Pure function (system memory injected) so the [`DiskAccessMode::Auto`]
+/// heuristic can be unit-tested deterministically. Resolution rules:
+/// - explicit `Buffered`/`Mmap`/`Direct` are returned unchanged (the caller
+///   applies graceful fallback if the OS refuses the backend);
+/// - `Auto` returns `Buffered` for files below `mmap_min_size_bytes`, `Direct`
+///   when the file exceeds `memory_fraction` of `system_memory` (and memory is
+///   known and direct I/O is available on this platform), otherwise `Mmap`.
+///
+/// The deprecated `use_mmap` flag / `CQLITE_USE_MMAP` env is folded in by the
+/// caller (it promotes a `Buffered` request to `Mmap`), so it is not an input
+/// here; an explicit mode always takes precedence.
+fn resolve_disk_access_mode(
+    configured: DiskAccessMode,
+    file_size: u64,
+    mmap_min_size_bytes: u64,
+    memory_fraction: f64,
+    system_memory: Option<u64>,
+    direct_io_available: bool,
+) -> DiskAccessMode {
+    // Zero-length files cannot be mapped and have nothing to read directly;
+    // always use buffered I/O for them regardless of the requested mode.
+    if file_size == 0 {
+        return DiskAccessMode::Buffered;
+    }
+    match configured {
+        DiskAccessMode::Buffered => DiskAccessMode::Buffered,
+        DiskAccessMode::Mmap => DiskAccessMode::Mmap,
+        DiskAccessMode::Direct => DiskAccessMode::Direct,
+        DiskAccessMode::Auto => {
+            if file_size < mmap_min_size_bytes {
+                return DiskAccessMode::Buffered;
+            }
+            let fraction = if memory_fraction.is_finite() && memory_fraction > 0.0 {
+                memory_fraction.min(1.0)
+            } else {
+                0.5
+            };
+            if direct_io_available {
+                if let Some(mem) = system_memory {
+                    let threshold = (mem as f64 * fraction) as u64;
+                    if file_size > threshold {
+                        return DiskAccessMode::Direct;
+                    }
+                }
+            }
+            DiskAccessMode::Mmap
+        }
+    }
+}
+
+/// Whether the direct-I/O backend is compiled in for this platform.
+const fn direct_io_available() -> bool {
+    cfg!(all(
+        unix,
+        any(
+            target_os = "linux",
+            target_os = "android",
+            target_os = "macos"
+        )
+    ))
+}
+
+/// Resolve [`PrefetchMode::Auto`] into the concrete advice the mmap backend
+/// should issue, or `None` for "no advice".
+fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
+    match prefetch {
+        PrefetchMode::Off => None,
+        // Sequential is the right default for full-file scans: aggressive
+        // read-ahead plus drop-behind so a scan does not pin the whole file.
+        PrefetchMode::Sequential | PrefetchMode::Auto => Some(memmap2::Advice::Sequential),
+        PrefetchMode::WillNeed => Some(memmap2::Advice::WillNeed),
+    }
+}
+
 impl SSTableReader {
     /// Open an SSTable file for reading
     pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
-        // Honor the caller's storage config for the mmap decision. Memory
-        // mapping is opt-in (buffered I/O is the portable default); it can be
-        // turned on via `config.storage.use_mmap` or the `CQLITE_USE_MMAP`
-        // environment variable. See `Config::storage.use_mmap` for the
-        // platform/filesystem safety constraints.
+        // Resolve the disk-access backend (buffered / mmap / direct, or auto)
+        // from config + environment overrides. See `Config::storage.disk_access_mode`.
         let mut reader_config = SSTableReaderConfig::default();
         reader_config.use_mmap = config.storage.use_mmap || mmap_enabled_via_env();
         reader_config.mmap_min_size_bytes = config.storage.mmap_min_size_bytes;
 
         let file_size = tokio::fs::metadata(path).await?.len();
 
-        // Select the backing store for block I/O. Memory-map the file when mmap
-        // is enabled and the file is large enough to be worth it; otherwise use
-        // buffered file I/O. Mapping a zero-length file is invalid, so empty
-        // files always fall back to buffered reads.
-        let use_mmap = reader_config.use_mmap
-            && file_size > 0
-            && file_size >= reader_config.mmap_min_size_bytes as u64;
+        // The explicit mode comes from env > config. The legacy `use_mmap` flag
+        // is folded in by promoting an otherwise-`Buffered` request to `Mmap` so
+        // the old opt-in keeps working (`Auto` and explicit non-buffered modes
+        // are left untouched, so a real backend decision always wins).
+        let configured_mode = disk_access_mode_via_env().unwrap_or(config.storage.disk_access_mode);
+        let configured_mode =
+            if reader_config.use_mmap && matches!(configured_mode, DiskAccessMode::Buffered) {
+                DiskAccessMode::Mmap
+            } else {
+                configured_mode
+            };
+
+        let resolved_mode = resolve_disk_access_mode(
+            configured_mode,
+            file_size,
+            reader_config.mmap_min_size_bytes as u64,
+            config.storage.direct_io_memory_fraction,
+            system_memory_bytes(),
+            direct_io_available(),
+        );
+
         // Build both the shared point-read source and the per-scan factory from
         // the same backend decision so concurrent scans get independent cursors
         // (issue #815). `ScanSource::Mapped` shares the same `Arc<Mmap>` so no
-        // extra mapping is created per scan.
-        let (source, scan_source) = if use_mmap {
-            match Self::map_file(path) {
-                Ok(mmap) => {
-                    log::debug!(
-                        "Opened {} via memory map ({} bytes)",
-                        path.display(),
-                        file_size
-                    );
-                    let mmap = Arc::new(mmap);
-                    (BlockSource::mapped(mmap.clone()), ScanSource::Mapped(mmap))
-                }
-                Err(e) => {
-                    // Memory mapping can fail on some filesystems (e.g. certain
-                    // network mounts). Degrade gracefully to buffered I/O rather
-                    // than failing the open outright.
-                    log::warn!(
-                        "Memory-mapping {} failed ({}); falling back to buffered I/O",
-                        path.display(),
-                        e
-                    );
-                    (
-                        BlockSource::buffered(File::open(path).await?),
-                        ScanSource::Buffered,
-                    )
-                }
-            }
-        } else {
-            (
-                BlockSource::buffered(File::open(path).await?),
-                ScanSource::Buffered,
-            )
-        };
+        // extra mapping is created per scan. Every non-buffered backend degrades
+        // gracefully to buffered I/O if the OS/filesystem refuses it.
+        let prefetch = prefetch_mode_via_env().unwrap_or(config.storage.prefetch);
+        let (source, scan_source) = Self::build_block_sources(
+            path,
+            file_size,
+            resolved_mode,
+            prefetch,
+            config.storage.direct_io_prefetch_bytes,
+        )
+        .await?;
         let file = Arc::new(Mutex::new(source));
 
         // Parse header - read available bytes, not a fixed size
@@ -450,6 +577,122 @@ impl SSTableReader {
     #[cfg(test)]
     pub(crate) async fn is_mmap_backed(&self) -> bool {
         self.file.lock().await.is_mmap()
+    }
+
+    /// Whether this reader's block source is backed by direct I/O.
+    ///
+    /// Test-only hook used to verify the `disk_access_mode` config / env wiring
+    /// selects the direct-I/O backend (issue: directio prefetch config).
+    #[cfg(all(test, unix))]
+    pub(crate) async fn is_direct_backed(&self) -> bool {
+        self.file.lock().await.is_direct()
+    }
+
+    /// Open a buffered point-read source and its per-scan factory. Shared by the
+    /// buffered backend and as the graceful fallback for mmap/direct.
+    async fn open_buffered_sources(path: &Path) -> Result<(BlockSource, ScanSource)> {
+        Ok((
+            BlockSource::buffered(File::open(path).await?),
+            ScanSource::Buffered,
+        ))
+    }
+
+    /// Build the shared point-read [`BlockSource`] and the per-scan
+    /// [`ScanSource`] for a resolved [`DiskAccessMode`].
+    ///
+    /// `prefetch` selects read-ahead advice for mmap and (together with
+    /// `prefetch_bytes`) the direct-I/O read-ahead window. Each non-buffered
+    /// backend degrades gracefully to buffered I/O if the OS or filesystem
+    /// refuses it (mmap can fail on network mounts; direct I/O is unsupported on
+    /// some platforms/filesystems), so opening never fails purely because a
+    /// faster backend is unavailable.
+    async fn build_block_sources(
+        path: &Path,
+        file_size: u64,
+        mode: DiskAccessMode,
+        prefetch: PrefetchMode,
+        prefetch_bytes: usize,
+    ) -> Result<(BlockSource, ScanSource)> {
+        // With prefetch off, use the minimal aligned read-ahead the direct
+        // backend still requires (a single block, rounded up inside the cursor).
+        let direct_window = if matches!(prefetch, PrefetchMode::Off) {
+            1
+        } else {
+            prefetch_bytes
+        };
+        match mode {
+            DiskAccessMode::Buffered => Self::open_buffered_sources(path).await,
+            DiskAccessMode::Mmap => match Self::map_file(path) {
+                Ok(mmap) => {
+                    log::debug!(
+                        "Opened {} via memory map ({} bytes)",
+                        path.display(),
+                        file_size
+                    );
+                    // Best-effort read-ahead advice; failure is non-fatal.
+                    if let Some(advice) = mmap_advice_for(prefetch) {
+                        if let Err(e) = mmap.advise(advice) {
+                            log::debug!(
+                                "madvise({:?}) on {} failed: {}",
+                                advice,
+                                path.display(),
+                                e
+                            );
+                        }
+                    }
+                    let mmap = Arc::new(mmap);
+                    Ok((BlockSource::mapped(mmap.clone()), ScanSource::Mapped(mmap)))
+                }
+                Err(e) => {
+                    log::warn!(
+                        "Memory-mapping {} failed ({}); falling back to buffered I/O",
+                        path.display(),
+                        e
+                    );
+                    Self::open_buffered_sources(path).await
+                }
+            },
+            DiskAccessMode::Direct => {
+                #[cfg(unix)]
+                {
+                    match source::DirectCursor::open(path, direct_window) {
+                        Ok(cursor) => {
+                            log::debug!(
+                                "Opened {} via direct I/O ({} bytes, {}-byte window)",
+                                path.display(),
+                                file_size,
+                                direct_window
+                            );
+                            Ok((
+                                BlockSource::direct(cursor),
+                                ScanSource::Direct {
+                                    window: direct_window,
+                                },
+                            ))
+                        }
+                        Err(e) => {
+                            log::warn!(
+                                "Direct I/O on {} failed ({}); falling back to buffered I/O",
+                                path.display(),
+                                e
+                            );
+                            Self::open_buffered_sources(path).await
+                        }
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = direct_window;
+                    log::warn!(
+                        "Direct I/O is unavailable on this platform; using buffered I/O for {}",
+                        path.display()
+                    );
+                    Self::open_buffered_sources(path).await
+                }
+            }
+            // `resolve_disk_access_mode` never yields `Auto`; handle defensively.
+            DiskAccessMode::Auto => Self::open_buffered_sources(path).await,
+        }
     }
 
     /// Memory-map an SSTable file read-only.

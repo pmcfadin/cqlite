@@ -564,11 +564,146 @@ mod tests {
         }
     }
 
-    /// End-to-end: the `use_mmap` storage config flag drives backend selection.
-    /// Defaults to buffered (opt-in); flipping the flag maps the file.
+    #[test]
+    fn test_disk_access_mode_parsing() {
+        use super::super::parse_disk_access_mode;
+        use crate::config::DiskAccessMode;
+        assert_eq!(parse_disk_access_mode("auto"), Some(DiskAccessMode::Auto));
+        assert_eq!(
+            parse_disk_access_mode(" Buffered "),
+            Some(DiskAccessMode::Buffered)
+        );
+        assert_eq!(parse_disk_access_mode("MMAP"), Some(DiskAccessMode::Mmap));
+        assert_eq!(
+            parse_disk_access_mode("direct"),
+            Some(DiskAccessMode::Direct)
+        );
+        assert_eq!(
+            parse_disk_access_mode("o_direct"),
+            Some(DiskAccessMode::Direct)
+        );
+        assert_eq!(parse_disk_access_mode("nonsense"), None);
+    }
+
+    #[test]
+    fn test_prefetch_mode_parsing() {
+        use super::super::parse_prefetch_mode;
+        use crate::config::PrefetchMode;
+        assert_eq!(parse_prefetch_mode("off"), Some(PrefetchMode::Off));
+        assert_eq!(
+            parse_prefetch_mode("Sequential"),
+            Some(PrefetchMode::Sequential)
+        );
+        assert_eq!(
+            parse_prefetch_mode("willneed"),
+            Some(PrefetchMode::WillNeed)
+        );
+        assert_eq!(parse_prefetch_mode("auto"), Some(PrefetchMode::Auto));
+        assert_eq!(parse_prefetch_mode("???"), None);
+    }
+
+    /// The `Auto` heuristic: tiny → buffered, sub-RAM → mmap, > fraction of
+    /// RAM → direct (when memory is known and direct I/O is compiled in).
+    #[test]
+    fn test_resolve_disk_access_mode_auto() {
+        use super::super::resolve_disk_access_mode;
+        use crate::config::DiskAccessMode;
+
+        let gib: u64 = 1024 * 1024 * 1024;
+        let min = 4096u64;
+
+        // Empty file is always buffered, even if a backend is requested.
+        assert_eq!(
+            resolve_disk_access_mode(DiskAccessMode::Direct, 0, min, 0.5, Some(8 * gib), true),
+            DiskAccessMode::Buffered
+        );
+
+        // Below mmap_min_size_bytes → buffered.
+        assert_eq!(
+            resolve_disk_access_mode(DiskAccessMode::Auto, 100, min, 0.5, Some(8 * gib), true),
+            DiskAccessMode::Buffered
+        );
+
+        // Comfortably sub-RAM → mmap.
+        assert_eq!(
+            resolve_disk_access_mode(DiskAccessMode::Auto, gib, min, 0.5, Some(8 * gib), true),
+            DiskAccessMode::Mmap
+        );
+
+        // Larger than half of RAM → direct.
+        assert_eq!(
+            resolve_disk_access_mode(DiskAccessMode::Auto, 5 * gib, min, 0.5, Some(8 * gib), true),
+            DiskAccessMode::Direct
+        );
+
+        // Larger than half of RAM but direct I/O unavailable → mmap.
+        assert_eq!(
+            resolve_disk_access_mode(
+                DiskAccessMode::Auto,
+                5 * gib,
+                min,
+                0.5,
+                Some(8 * gib),
+                false
+            ),
+            DiskAccessMode::Mmap
+        );
+
+        // Unknown system memory → never escalates to direct.
+        assert_eq!(
+            resolve_disk_access_mode(DiskAccessMode::Auto, 100 * gib, min, 0.5, None, true),
+            DiskAccessMode::Mmap
+        );
+
+        // A non-finite/zero fraction falls back to the 0.5 default.
+        assert_eq!(
+            resolve_disk_access_mode(DiskAccessMode::Auto, 5 * gib, min, 0.0, Some(8 * gib), true),
+            DiskAccessMode::Direct
+        );
+    }
+
+    /// Explicit modes are returned unchanged (subject to the empty-file guard).
+    #[test]
+    fn test_resolve_disk_access_mode_explicit() {
+        use super::super::resolve_disk_access_mode;
+        use crate::config::DiskAccessMode;
+        let gib: u64 = 1024 * 1024 * 1024;
+        for mode in [
+            DiskAccessMode::Buffered,
+            DiskAccessMode::Mmap,
+            DiskAccessMode::Direct,
+        ] {
+            assert_eq!(
+                resolve_disk_access_mode(mode, gib, 4096, 0.5, Some(8 * gib), true),
+                mode,
+                "explicit {mode:?} must be honored"
+            );
+            // A zero-length file always falls back to buffered, even when an
+            // explicit non-buffered backend is requested (empty map / direct
+            // read is invalid).
+            assert_eq!(
+                resolve_disk_access_mode(mode, 0, 4096, 0.5, Some(8 * gib), true),
+                DiskAccessMode::Buffered,
+                "explicit {mode:?} on an empty file must fall back to buffered"
+            );
+            // Explicit Mmap/Direct are NOT gated by mmap_min_size_bytes: a tiny
+            // (but non-empty) file is still honored, unlike Auto.
+            assert_eq!(
+                resolve_disk_access_mode(mode, 100, 4096, 0.5, Some(8 * gib), true),
+                mode,
+                "explicit {mode:?} must ignore mmap_min_size_bytes for a non-empty file"
+            );
+        }
+    }
+
+    /// End-to-end: `disk_access_mode` drives backend selection. The default
+    /// `Auto` mode maps a small (sub-RAM) Data.db file; an explicit `Buffered`
+    /// mode and the `mmap_min_size_bytes` threshold both force buffered I/O; the
+    /// legacy `use_mmap` flag still selects mmap.
     #[tokio::test]
     async fn test_config_drives_mmap_backend() -> crate::Result<()> {
         use super::super::SSTableReader;
+        use crate::config::DiskAccessMode;
         use crate::{Config, Platform};
         use std::path::Path;
         use std::sync::Arc;
@@ -590,14 +725,22 @@ mod tests {
         let mut config = Config::default();
         let platform = Arc::new(Platform::new(&config).await?);
 
-        // Default config: buffered backend (mmap is opt-in).
+        // Default config (Auto): a >4KiB file far below system RAM is mapped.
         let reader = SSTableReader::open(&data_file, &config, platform.clone()).await?;
         assert!(
-            !reader.is_mmap_backed().await,
-            "default config must use buffered I/O, not mmap"
+            reader.is_mmap_backed().await,
+            "Auto must map a small (sub-RAM) file"
         );
 
-        // Opt in via config: file (>4096 bytes) is now mapped.
+        // Explicit Buffered mode forces buffered I/O.
+        config.storage.disk_access_mode = DiskAccessMode::Buffered;
+        let buffered = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        assert!(
+            !buffered.is_mmap_backed().await,
+            "explicit Buffered mode must not map"
+        );
+
+        // Legacy opt-in still selects mmap even with mode left at Buffered.
         config.storage.use_mmap = true;
         let mapped = SSTableReader::open(&data_file, &config, platform.clone()).await?;
         assert!(
@@ -605,12 +748,66 @@ mod tests {
             "use_mmap=true must select the mmap backend for a >4KiB file"
         );
 
-        // A min-size threshold above the file size forces buffered even when on.
+        // A min-size threshold above the file size forces buffered under Auto.
+        config.storage.use_mmap = false;
+        config.storage.disk_access_mode = DiskAccessMode::Auto;
         config.storage.mmap_min_size_bytes = usize::MAX;
-        let buffered = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        let small = SSTableReader::open(&data_file, &config, platform.clone()).await?;
         assert!(
-            !buffered.is_mmap_backed().await,
+            !small.is_mmap_backed().await,
             "files below mmap_min_size_bytes must stay buffered"
+        );
+
+        Ok(())
+    }
+
+    /// End-to-end: explicit `Direct` mode selects the direct-I/O backend (or
+    /// gracefully falls back to buffered where the filesystem refuses O_DIRECT).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn test_config_drives_direct_backend() -> crate::Result<()> {
+        use super::super::SSTableReader;
+        use crate::config::DiskAccessMode;
+        use crate::{Config, Platform};
+        use std::path::Path;
+        use std::sync::Arc;
+
+        let test_dir = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(root) => Path::new(&root)
+                .join("sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9"),
+            Err(_) => {
+                eprintln!("CQLITE_DATASETS_ROOT not set, skipping test");
+                return Ok(());
+            }
+        };
+        let data_file = test_dir.join("nb-1-big-Data.db");
+        if !data_file.exists() {
+            eprintln!("Test data file not found at {:?}, skipping test", data_file);
+            return Ok(());
+        }
+
+        let mut config = Config::default();
+        config.storage.disk_access_mode = DiskAccessMode::Direct;
+        let platform = Arc::new(Platform::new(&config).await?);
+
+        // Direct mode must open successfully and read correctly. Depending on the
+        // filesystem (tmpfs/overlayfs in CI often reject O_DIRECT) it is either
+        // the direct backend or the buffered fallback — both are valid; the key
+        // invariant is that the reader opens and is queryable.
+        let reader = SSTableReader::open(&data_file, &config, platform.clone()).await?;
+        let direct = reader.is_direct_backed().await;
+        let mapped = reader.is_mmap_backed().await;
+        assert!(
+            !mapped,
+            "explicit Direct mode must never silently choose mmap"
+        );
+        eprintln!(
+            "Direct mode resolved to {} backend",
+            if direct {
+                "direct"
+            } else {
+                "buffered (fallback)"
+            }
         );
 
         Ok(())

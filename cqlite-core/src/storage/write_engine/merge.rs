@@ -823,18 +823,24 @@ impl SSTableRowIteratorAdapter {
         // producer owns its single-purpose runtime, so the blocking
         // `SyncSender::send` inside the emit callback never stalls a shared
         // runtime, and there is no nested `block_on` / `Handle::current`.
-        // use_mmap = false (Issue #591): the file must not be memory-mapped
-        // because finalize_merge_async may delete it after the merge completes.
+        // Buffered I/O (Issue #591): the file must not be memory-mapped OR read
+        // via direct I/O because finalize_merge_async may delete it after the
+        // merge completes. The default disk-access mode is `Auto`, which would
+        // otherwise map (or direct-read) inputs above the size thresholds, so we
+        // force `Buffered` explicitly here — clearing `use_mmap` alone is no
+        // longer sufficient now that `Auto` ignores that legacy flag.
         // Clone the sender for the error path: the streaming closure moves one
         // clone for per-entry sends, leaving this one to report a fatal error.
         let error_sender = sender.clone();
         let stream_result = (|| -> Result<()> {
+            use crate::config::DiskAccessMode;
             use crate::platform::Platform;
             use crate::Config;
             use std::sync::Arc;
 
             let mut config = Config::default();
             config.storage.use_mmap = false;
+            config.storage.disk_access_mode = DiskAccessMode::Buffered;
             // Cloned so the async block can take it by move while the outer
             // `schema` stays available for build_merge_entry below.
             let schema_for_reader = schema.clone();

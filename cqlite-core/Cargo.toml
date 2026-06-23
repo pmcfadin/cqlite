@@ -98,6 +98,11 @@ wasm-bindgen = { workspace = true, optional = true }
 js-sys = { workspace = true, optional = true }
 web-sys = { workspace = true, features = ["console"], optional = true }
 
+# Direct-I/O backend and system-memory probing need libc on Unix only
+# (O_DIRECT / F_NOCACHE, sysconf). Non-Unix targets fall back to buffered I/O.
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 # Heap profiling harness (examples/heap_profile.rs). The dhat allocator is only

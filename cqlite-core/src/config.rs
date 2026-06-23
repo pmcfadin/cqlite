@@ -101,6 +101,97 @@ pub struct StorageConfig {
     /// `#[serde(default)]` for backward compatibility with older payloads.
     #[serde(default = "default_mmap_min_size_bytes")]
     pub mmap_min_size_bytes: usize,
+
+    /// How the SSTable read path accesses Data.db on disk.
+    ///
+    /// Defaults to [`DiskAccessMode::Auto`], which sizes each Data.db file
+    /// against system RAM and picks the backend automatically:
+    /// - files below [`Self::mmap_min_size_bytes`] use buffered I/O (mapping a
+    ///   tiny file is not worth the setup cost);
+    /// - files up to [`Self::direct_io_memory_fraction`] of system memory are
+    ///   **memory-mapped**, so repeated scans stay resident in the page cache;
+    /// - files larger than that fraction use **direct I/O** (`O_DIRECT` on
+    ///   Linux, `F_NOCACHE` on macOS), which bypasses the page cache so a
+    ///   single huge scan does not evict everything else the host has cached.
+    ///
+    /// Set an explicit [`DiskAccessMode::Buffered`], [`DiskAccessMode::Mmap`],
+    /// or [`DiskAccessMode::Direct`] to override the heuristic. The legacy
+    /// [`Self::use_mmap`] flag still forces mmap when `Auto` would otherwise
+    /// pick buffered, for backward compatibility.
+    ///
+    /// Can also be set at runtime via `CQLITE_DISK_ACCESS_MODE`
+    /// (`auto` / `buffered` / `mmap` / `direct`).
+    #[serde(default)]
+    pub disk_access_mode: DiskAccessMode,
+
+    /// Fraction of total system memory above which [`DiskAccessMode::Auto`]
+    /// switches a file from memory-mapped to direct I/O. Defaults to `0.5`
+    /// (half of RAM). Clamped to `(0.0, 1.0]`; values outside that range fall
+    /// back to the default. Ignored when system memory cannot be determined
+    /// (in which case `Auto` never escalates to direct I/O).
+    #[serde(default = "default_direct_io_memory_fraction")]
+    pub direct_io_memory_fraction: f64,
+
+    /// Read-ahead / prefetch strategy applied to the chosen backend.
+    ///
+    /// Defaults to [`PrefetchMode::Auto`], which advises the kernel for
+    /// sequential access on the mmap backend and uses a prefetch window of
+    /// [`Self::direct_io_prefetch_bytes`] on the direct-I/O backend. Set
+    /// [`PrefetchMode::Off`] to disable explicit hints (relying only on default
+    /// kernel read-ahead / single-block direct reads). Can also be set via
+    /// `CQLITE_PREFETCH` (`off` / `sequential` / `willneed` / `auto`).
+    #[serde(default)]
+    pub prefetch: PrefetchMode,
+
+    /// Size in bytes of the read-ahead window used by the direct-I/O backend
+    /// (and the buffered backend's reader capacity hint). Rounded up to the
+    /// I/O alignment. Defaults to 1 MiB. Only takes effect when
+    /// [`Self::prefetch`] is not [`PrefetchMode::Off`].
+    #[serde(default = "default_direct_io_prefetch_bytes")]
+    pub direct_io_prefetch_bytes: usize,
+}
+
+/// Selects which backend the SSTable read path uses for Data.db I/O.
+///
+/// See [`StorageConfig::disk_access_mode`] for the per-variant semantics and
+/// the [`DiskAccessMode::Auto`] sizing heuristic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DiskAccessMode {
+    /// Size each file against system RAM and pick buffered / mmap / direct.
+    #[default]
+    Auto,
+    /// Always use buffered file I/O through the OS page cache.
+    Buffered,
+    /// Always memory-map the file. Unlike the [`DiskAccessMode::Auto`] heuristic,
+    /// this honors the user's explicit request and is **not** gated by
+    /// [`StorageConfig::mmap_min_size_bytes`] (the size threshold only steers
+    /// `Auto`); a zero-length file still falls back to buffered I/O since an
+    /// empty map is invalid.
+    Mmap,
+    /// Always use direct I/O, bypassing the OS page cache.
+    Direct,
+}
+
+/// Selects the read-ahead hint applied to the active disk-access backend.
+///
+/// See [`StorageConfig::prefetch`]. `Sequential` / `WillNeed` map to the
+/// corresponding `madvise(2)` advice on the mmap backend; on the direct-I/O
+/// backend any non-`Off` value enables the [`StorageConfig::direct_io_prefetch_bytes`]
+/// read-ahead window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum PrefetchMode {
+    /// No explicit prefetch hint; rely on default kernel behaviour.
+    Off,
+    /// Hint sequential access (aggressive read-ahead, drop-behind).
+    Sequential,
+    /// Hint that the mapped/region bytes will be needed soon (eager fault-in).
+    WillNeed,
+    /// Let the backend choose: sequential advice for mmap, windowed read-ahead
+    /// for direct I/O.
+    #[default]
+    Auto,
 }
 
 /// Default for [`StorageConfig::use_mmap`]: mmap is opt-in, so buffered I/O.
@@ -111,6 +202,16 @@ fn default_use_mmap() -> bool {
 /// Default for [`StorageConfig::mmap_min_size_bytes`]: one page.
 fn default_mmap_min_size_bytes() -> usize {
     4096
+}
+
+/// Default for [`StorageConfig::direct_io_memory_fraction`]: half of RAM.
+fn default_direct_io_memory_fraction() -> f64 {
+    0.5
+}
+
+/// Default for [`StorageConfig::direct_io_prefetch_bytes`]: 1 MiB.
+fn default_direct_io_prefetch_bytes() -> usize {
+    1024 * 1024
 }
 
 impl Default for StorageConfig {
@@ -129,6 +230,10 @@ impl Default for StorageConfig {
             // the serde defaults so the two can never drift.
             use_mmap: default_use_mmap(),
             mmap_min_size_bytes: default_mmap_min_size_bytes(),
+            disk_access_mode: DiskAccessMode::default(),
+            direct_io_memory_fraction: default_direct_io_memory_fraction(),
+            prefetch: PrefetchMode::default(),
+            direct_io_prefetch_bytes: default_direct_io_prefetch_bytes(),
         }
     }
 }
@@ -773,6 +878,58 @@ mod tests {
         let restored: StorageConfig = serde_json::from_str(&json).unwrap();
         assert!(restored.use_mmap);
         assert_eq!(restored.mmap_min_size_bytes, 8192);
+    }
+
+    #[test]
+    fn test_disk_access_defaults() {
+        // The new fields default to the size-aware Auto backend with Auto
+        // prefetch, a half-RAM direct-I/O threshold, and a 1 MiB window.
+        let config = StorageConfig::default();
+        assert_eq!(config.disk_access_mode, DiskAccessMode::Auto);
+        assert_eq!(config.prefetch, PrefetchMode::Auto);
+        assert_eq!(config.direct_io_memory_fraction, 0.5);
+        assert_eq!(config.direct_io_prefetch_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_storage_config_deserializes_without_disk_access_fields() {
+        // Backward compatibility: a payload predating the disk-access fields must
+        // still deserialize, defaulting to Auto / Auto / 0.5 / 1 MiB.
+        let mut value = serde_json::to_value(StorageConfig::default()).unwrap();
+        let obj = value.as_object_mut().unwrap();
+        for key in [
+            "disk_access_mode",
+            "direct_io_memory_fraction",
+            "prefetch",
+            "direct_io_prefetch_bytes",
+        ] {
+            obj.remove(key);
+        }
+
+        let restored: StorageConfig =
+            serde_json::from_value(value).expect("old payload must still deserialize");
+        assert_eq!(restored.disk_access_mode, DiskAccessMode::Auto);
+        assert_eq!(restored.prefetch, PrefetchMode::Auto);
+        assert_eq!(restored.direct_io_memory_fraction, 0.5);
+        assert_eq!(restored.direct_io_prefetch_bytes, 1024 * 1024);
+    }
+
+    #[test]
+    fn test_disk_access_fields_roundtrip() {
+        // Explicit selections round-trip, including the lowercase enum encoding.
+        let mut config = StorageConfig::default();
+        config.disk_access_mode = DiskAccessMode::Direct;
+        config.prefetch = PrefetchMode::WillNeed;
+        config.direct_io_memory_fraction = 0.25;
+        config.direct_io_prefetch_bytes = 2 * 1024 * 1024;
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("\"direct\""), "enum must serialize lowercase");
+        assert!(json.contains("\"willneed\""));
+        let restored: StorageConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.disk_access_mode, DiskAccessMode::Direct);
+        assert_eq!(restored.prefetch, PrefetchMode::WillNeed);
+        assert_eq!(restored.direct_io_memory_fraction, 0.25);
+        assert_eq!(restored.direct_io_prefetch_bytes, 2 * 1024 * 1024);
     }
 
     #[test]
