@@ -1482,6 +1482,30 @@ impl SSTableManager {
     /// pending entry per SSTable. Live heap is bounded by `buffer_size` plus the
     /// number of SSTables, independent of total row count — the streaming analog
     /// of the materializing [`scan`](Self::scan) (concat + stable sort by key).
+    ///
+    /// # Multi-generation correctness (Issue #957)
+    ///
+    /// The lazy per-reader k-way merge above is only the streaming analog of
+    /// `scan`'s **concat + sort** path, which is correct for a single generation.
+    /// When a table directory holds more than one SSTable generation, the same
+    /// `(partition, clustering)` row can live in several generations and a
+    /// row/cell tombstone in a newer generation suppresses only its own
+    /// generation's copy — so a pure key-ordered merge would emit overwritten
+    /// rows twice and resurrect rows deleted in a later generation. `scan` avoids
+    /// this by routing the multi-generation case through
+    /// [`merge_generations_for_read`](Self::merge_generations_for_read) (the same
+    /// LWW + tombstone-shadowing k-way merge compaction uses); this streaming path
+    /// must reconcile identically or `execute()` and `execute_streaming()` diverge.
+    ///
+    /// So, mirroring the `tombstones`-variant `scan_stream` (which delegates
+    /// wholesale to the materializing `scan`), the multi-generation case here
+    /// materializes the reconciled rows via `merge_generations_for_read` and
+    /// forwards them through the same bounded channel. This trades the O(rows)
+    /// streaming memory win for cross-generation correctness; a fully-streaming,
+    /// generation-aware merge (preserving the bounded-memory property across
+    /// generations) is a larger follow-up. The single-generation /
+    /// no-schema / no-`write-support` cases keep the lazy streaming merge, which
+    /// already matches `scan`'s concat path exactly and preserves LIMIT/backpressure.
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan_stream(
         &self,
@@ -1492,6 +1516,53 @@ impl SSTableManager {
         buffer_size: usize,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> {
         let readers = self.resolve_table_readers(table_id).await;
+
+        // Issue #957: keep the materializing `scan` and this streaming path
+        // definitionally in lockstep. Reuse the EXACT guard `scan` uses for
+        // cross-generation reconciliation (`reader_list.len() > 1 && schema present`,
+        // write-support only) and the same merger, then forward the reconciled rows
+        // through the streaming channel. Without this, a partition spread across
+        // generations duplicates overwritten rows and resurrects deleted ones in the
+        // stream while `scan` returns the merged, deduplicated, tombstone-honouring
+        // result.
+        #[cfg(feature = "write-support")]
+        if readers.len() > 1 {
+            if let Some(schema) = schema {
+                match self
+                    .merge_generations_for_read(&readers, schema, None)
+                    .await
+                {
+                    Ok(merged) => {
+                        log::debug!(
+                            "SSTableManager::scan_stream - cross-generation merge produced {} rows \
+                             (materialized for streaming)",
+                            merged.len()
+                        );
+                        let (tx, rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
+                        tokio::spawn(async move {
+                            for entry in merged {
+                                if tx.send(Ok(entry)).await.is_err() {
+                                    break; // consumer dropped
+                                }
+                            }
+                        });
+                        return Ok(rx);
+                    }
+                    Err(e) => {
+                        // Never fail a read because the merge path hit an
+                        // unsupported format; fall back to the lazy streaming
+                        // merge, matching `scan`'s fall-back-to-concatenation.
+                        log::warn!(
+                            "SSTableManager::scan_stream - cross-generation merge failed for '{}' ({}); \
+                             falling back to lazy per-reader streaming merge",
+                            table_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
         let (out_tx, out_rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
 
         // Own everything the background merge task needs.
