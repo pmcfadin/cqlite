@@ -8,8 +8,10 @@ sidebar:
 
 # Roadmap
 
-CQLite is at **v0.11.0**. The read path, CLI, output writers (including Parquet),
-Python and Node.js bindings, and write support with STCS compaction are
+CQLite is at **v0.12.0**. The read path, CLI, output writers (including Parquet),
+Python and Node.js bindings, and write support with STCS compaction — now with
+**byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino
+connector, canonical BTI (`da`) write/read, and CDC-style delta export — are
 production-ready. This page is what comes next.
 
 The roadmap is community-driven. The fastest way to move something up the list is to
@@ -17,7 +19,7 @@ The roadmap is community-driven. The fastest way to move something up the list i
 use case — and to [**star the repo**](https://github.com/pmcfadin/cqlite) so the
 project's reach is visible.
 
-_Last reviewed: 2026-06-16 (v0.11.0)._
+_Last reviewed: 2026-06-22 (v0.12.0)._
 
 ## Milestones
 
@@ -33,43 +35,37 @@ _Last reviewed: 2026-06-16 (v0.11.0)._
 
 ## In-flight epics
 
-These are the active workstreams between v0.11.0 and v1.0. Each links to its GitHub
+These are the active workstreams between v0.12.0 and v1.0. Each links to its GitHub
 epic with the child tasks.
 
-### Query engine completeness ([#756](https://github.com/pmcfadin/cqlite/issues/756))
+> Query-engine completeness (#756), `WRITETIME()`/`TTL()` in `SELECT` (#689), writer
+> format fidelity (#762), wide-partition performance (#751), BTI (`da`) end-to-end
+> read (#660), and the CDC delta-scan envelope (#696) all **shipped in v0.12.0** —
+> see the [changelog](https://github.com/pmcfadin/cqlite/blob/main/CHANGELOG.md).
 
-`PER PARTITION LIMIT`, static-column tracking, clustering-order (`ASC`/`DESC`)
-extraction, and query-plan metadata (`indexes_used`). Closes the gap between CQLite's
-`SELECT` support and CQL semantics.
+### Wire storage capabilities into the query path ([#951](https://github.com/pmcfadin/cqlite/issues/951))
 
-### `WRITETIME()` and `TTL()` in `SELECT` ([#689](https://github.com/pmcfadin/cqlite/issues/689))
+CQLite's storage layer already has bloom filters, `Index.db`, the BTI `Partitions.db`
+trie, and a point-lookup path — but parts of the CQL query engine still scan every
+SSTable instead of using them. This epic audits for that pattern, wires the gaps
+(within-SSTable partition seeks, clustering-key pushdown, `IN`/token-range lookups),
+and adds regression guards so single-partition reads scale with candidate SSTables,
+not total count.
 
-Surface per-cell write timestamps and TTLs through the parser, executor, output
-formats, and bindings — a common need for debugging and migration workflows.
+### Read-path performance & I/O backend ([#906](https://github.com/pmcfadin/cqlite/issues/906))
 
-### Writer format fidelity ([#762](https://github.com/pmcfadin/cqlite/issues/762))
+Parallel reads on a single `SSTableReader` (landed) plus a benchmark-first spike on an
+io_uring read backend for Linux.
 
-`> 64`-column serialization headers, explicit deletion-time semantics, `DURATION`
-comparator parsing, and phase 1 of BTI **index writing** for SSTables CQLite produces.
+### Compaction byte-parity follow-ups ([#938](https://github.com/pmcfadin/cqlite/issues/938))
 
-### Wide-partition & memory performance ([#751](https://github.com/pmcfadin/cqlite/issues/751))
+Edge cases deferred from the v0.12.0 parity work: range tombstones end-to-end through
+the compaction writer, and a handful of writer/reconciliation refinements.
 
-Promoted-index writing for wide partitions, streamed index/merge writers to drop the
-in-memory buffer, and BTI-payload Data.db offsets for O(log n) partition seeks. This
-also closes the wide-partition scan listed in
-[Known Issues](/cqlite/user-docs/known-issues/).
+### CLI & bindings polish ([#907](https://github.com/pmcfadin/cqlite/issues/907))
 
-### BTI (`da`) end-to-end read support ([#660](https://github.com/pmcfadin/cqlite/issues/660))
-
-A dedicated read path for trie-indexed SSTables — full trie walk, `ByteComparable`
-decode, and Data.db chaining — so `da`-format files are read instead of rejected.
-Fixtures and `sstabledump` goldens already ship in the test corpus.
-
-### Delta-scan envelope for CDC-style Parquet ([#696](https://github.com/pmcfadin/cqlite/issues/696))
-
-A streaming `scan_delta` API and `cqlite delta-export` subcommand that emit
-upserts, tombstones, and per-cell metadata as Parquet for change-data-capture and
-reconciliation pipelines.
+Developer-experience cleanup: export progress/statistics, clearer
+unsupported-platform errors in the Node loader, and output-mode tidying.
 
 ## Influencing the roadmap
 

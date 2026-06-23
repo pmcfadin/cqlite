@@ -8,7 +8,7 @@ sidebar:
 
 # Known Issues
 
-This page tracks **active bugs and sharp edges** in the current release (`v0.11.0`).
+This page tracks **active bugs and sharp edges** in the current release (`v0.12.0`).
 It is deliberately short and honest: if something here bites you, you are not doing
 it wrong.
 
@@ -19,7 +19,7 @@ it wrong.
   [**Open an issue**](https://github.com/pmcfadin/cqlite/issues/new/choose) — that is
   the single most useful thing you can do for the project.
 
-_Last reviewed: 2026-06-17 (v0.11.0)._
+_Last reviewed: 2026-06-22 (v0.12.0)._
 
 ## Python bindings
 
