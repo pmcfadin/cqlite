@@ -75,8 +75,9 @@ body:
         A feature is not "done" when a low-level helper works in isolation — it is done when
         the intended USER-FACING path exercises the new capability. Name that path and the
         call chain that must reach it. (See issue #949/#963: helpers shipped green tests while
-        the public path stayed unwired.)
-      value: |
+        the public path stayed unwired.) Fill in every section below — this field is required
+        and the placeholder scaffold is NOT submitted, so an empty answer will be rejected.
+      placeholder: |
         ## Intended caller surface(s)
         <!-- Which user-facing entry point(s) must exercise this? Check all that apply -->
         - [ ] CQL `execute` (one-shot / `--query` / `--execute`)

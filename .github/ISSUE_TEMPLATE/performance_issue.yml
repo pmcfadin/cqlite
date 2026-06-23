@@ -80,8 +80,10 @@ body:
       description: |
         A perf fix is only real if the intended USER-FACING path actually takes the faster
         route — not just an isolated benchmark of a helper. Name the public path and how a
-        reviewer can prove the optimization is on it. (See issue #949/#963.)
-      value: |
+        reviewer can prove the optimization is on it. (See issue #949/#963.) Fill in every
+        section below — this field is required and the placeholder scaffold is NOT submitted,
+        so an empty answer will be rejected.
+      placeholder: |
         ## Intended caller surface(s)
         <!-- Which user-facing entry point(s) must get faster? Check all that apply -->
         - [ ] CQL `execute` (one-shot / `--query` / `--execute`)

@@ -47,9 +47,22 @@ done
 
 # Build the list of files to scan.
 if [ "$DIFF_MODE" -eq 1 ]; then
-  BASE="origin/main"
-  git rev-parse --verify "$BASE" >/dev/null 2>&1 || BASE="main"
-  FILES=$(git -C "$REPO_ROOT" diff --name-only --diff-filter=ACMR "$BASE"...HEAD 2>/dev/null \
+  # A missing/invalid base must FAIL loudly rather than silently scan nothing and
+  # report a false-clean (exit 0). Resolve and verify the base before diffing.
+  if ! git -C "$REPO_ROOT" rev-parse --git-dir >/dev/null 2>&1; then
+    echo "audit-inert-surfaces: --diff requires a git repository." >&2
+    exit 1
+  fi
+  if git -C "$REPO_ROOT" rev-parse --verify -q "origin/main^{commit}" >/dev/null 2>&1; then
+    BASE="origin/main"
+  elif git -C "$REPO_ROOT" rev-parse --verify -q "main^{commit}" >/dev/null 2>&1; then
+    BASE="main"
+  else
+    echo "audit-inert-surfaces: --diff base not found (neither origin/main nor main resolves)." >&2
+    echo "  fetch the base or run without --diff to scan all tracked Rust files." >&2
+    exit 1
+  fi
+  FILES=$(git -C "$REPO_ROOT" diff --name-only --diff-filter=ACMR "$BASE"...HEAD \
             | grep -E '\.rs$' || true)
 elif [ -n "$PATHS" ]; then
   # shellcheck disable=SC2086
