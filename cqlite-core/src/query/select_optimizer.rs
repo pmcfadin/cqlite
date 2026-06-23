@@ -317,9 +317,11 @@ fn column_comparison_to_predicate(
 }
 
 /// Convert a `token(col, ...) <op> <bound>` comparison to a token predicate
-/// (Issue #955). The bound must be an integer literal (the i64 token value);
-/// `token(...) = ?`, `IN`, and `BETWEEN` are not supported (Cassandra only
-/// allows inequalities on a token restriction), so they fall through to `None`.
+/// (Issue #955). The bound must be an integer literal (the i64 token value).
+/// `token(...) = ?` lowers to a token `Equal` predicate (an exact-token
+/// restriction that `evaluate_leaf` evaluates by hashing the row key); `IN` and
+/// `BETWEEN` are not supported (Cassandra does not allow them on a token
+/// restriction), so they fall through to `None`.
 fn token_comparison_to_predicate(
     func: &FunctionCall,
     comp: &ComparisonExpression,
@@ -342,8 +344,13 @@ fn token_comparison_to_predicate(
         ComparisonOperator::GreaterThanOrEqual => Op::Gte,
         ComparisonOperator::LessThan => Op::Lt,
         ComparisonOperator::LessThanOrEqual => Op::Lte,
-        // `token(pk) = ?` is legal CQL but is an exact-token restriction; we do
-        // not currently special-case it (it falls back to a full scan + filter).
+        // `token(pk) = ?` is an exact-token restriction. Previously this was
+        // DROPPED (fell through to `None`); when combined with another pushed
+        // predicate the optimizer skipped the residual Filter step, so the
+        // restriction was silently ignored and wrong rows leaked. Lower it to a
+        // token `Equal` predicate so `evaluate_leaf`'s `Equal` arm hashes the
+        // row key and compares it to the bound (Issue #955 follow-up).
+        ComparisonOperator::Equal => Op::Equal,
         _ => return None,
     };
     let ComparisonRightSide::Value(value_expr) = &comp.right else {
@@ -596,5 +603,62 @@ mod tests {
             .find(|p| matches!(p.operation, SSTableFilterOp::Lt))
             .expect("a Lt token bound");
         assert_eq!(upper.values, vec![Value::BigInt(5000)]);
+    }
+
+    /// FINDING 1 (Issue #955 follow-up): `token(pk) = <t>` must lower to a token
+    /// `Equal` predicate — NOT be dropped. Previously it fell through to `None`,
+    /// so when combined with another pushed predicate the residual Filter step
+    /// was skipped and the exact-token restriction was silently ignored.
+    #[test]
+    fn token_equal_lowers_to_token_equal_predicate() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) = 4242")
+            .expect("token-equal query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        let predicates = collect_sstable_predicates(&where_clause);
+
+        assert_eq!(
+            predicates.len(),
+            1,
+            "token(pk) = ? must produce exactly one predicate (not be dropped); got {predicates:?}"
+        );
+        let p = &predicates[0];
+        assert!(p.is_token(), "must be a token predicate; got {p:?}");
+        assert!(
+            matches!(p.operation, SSTableFilterOp::Equal),
+            "token(pk) = ? must lower to a token Equal op; got {:?}",
+            p.operation
+        );
+        assert_eq!(
+            p.token_columns.as_deref(),
+            Some(["pk".to_string()].as_slice())
+        );
+        assert_eq!(p.values, vec![Value::BigInt(4242)]);
+    }
+
+    /// FINDING 1: when `token(pk) = ?` is combined with another pushed predicate,
+    /// BOTH must survive `collect_sstable_predicates`. The original bug dropped
+    /// the token equality, and (because at least one predicate remained) the
+    /// optimizer skipped the residual Filter, silently ignoring the token bound.
+    #[test]
+    fn token_equal_combined_with_other_predicate_keeps_both() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) = 7 AND ck > 0")
+            .expect("combined token-equal query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        let predicates = collect_sstable_predicates(&where_clause);
+
+        assert!(
+            predicates
+                .iter()
+                .any(|p| p.is_token() && matches!(p.operation, SSTableFilterOp::Equal)),
+            "the token(pk) = 7 restriction must be pushed as a token Equal; got {predicates:?}"
+        );
+        assert!(
+            predicates.iter().any(|p| !p.is_token() && p.column == "ck"),
+            "the ck > 0 restriction must also be pushed; got {predicates:?}"
+        );
     }
 }

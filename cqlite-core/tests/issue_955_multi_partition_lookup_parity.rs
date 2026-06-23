@@ -516,6 +516,166 @@ async fn token_range_equals_full_scan_filtered_by_token() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// D') token(pk) = <t>: exact-token restriction (FINDING 1). Previously DROPPED;
+//     must now equal a full scan filtered to token == t, including when combined
+//     with another pushed predicate.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_equal_equals_full_scan_filtered_by_token() {
+    let db = match setup("wide-table-bti.cql", "/test_da/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let full = db
+        .execute(&format!("SELECT pk, ck FROM {WIDE_TABLE}"))
+        .await
+        .expect("full scan must succeed");
+    if full.rows.is_empty() {
+        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
+        return;
+    }
+
+    // Pick one real partition's exact token (pk = 2).
+    let target_pk = 2i32;
+    let t = cassandra_murmur3_token(&target_pk.to_be_bytes());
+
+    let expected: Vec<QueryRow> = full
+        .rows
+        .iter()
+        .filter(|r| match r.values.get("pk") {
+            Some(Value::Integer(pk)) => cassandra_murmur3_token(&pk.to_be_bytes()) == t,
+            _ => false,
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !expected.is_empty(),
+        "the chosen exact token must match at least pk = {target_pk}'s rows"
+    );
+
+    let result = db
+        .execute(&format!(
+            "SELECT pk, ck FROM {WIDE_TABLE} WHERE token(pk) = {t}"
+        ))
+        .await
+        .expect("token-equal query must succeed");
+
+    assert_eq!(
+        fingerprints(&result.rows),
+        fingerprints(&expected),
+        "FINDING 1: token(pk) = t must equal a full scan filtered to token == t",
+    );
+    // No other partition leaked in.
+    assert!(
+        result
+            .rows
+            .iter()
+            .all(|r| r.values.get("pk") == Some(&Value::Integer(target_pk))),
+        "only the partition whose token equals t may appear",
+    );
+}
+
+#[tokio::test]
+async fn token_equal_combined_with_clustering_predicate_is_not_ignored() {
+    let db = match setup("wide-table-bti.cql", "/test_da/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let full = db
+        .execute(&format!("SELECT pk, ck FROM {WIDE_TABLE}"))
+        .await
+        .expect("full scan must succeed");
+    if full.rows.is_empty() {
+        eprintln!("Skipping: wide_table returned 0 rows (Data.db not fetched?)");
+        return;
+    }
+
+    // token(pk) = t(pk=2) AND ck >= 10. The bug: when combined with another
+    // pushed predicate the optimizer skipped the residual Filter, so the token
+    // equality was silently ignored and rows from OTHER partitions leaked in.
+    let target_pk = 2i32;
+    let t = cassandra_murmur3_token(&target_pk.to_be_bytes());
+
+    let expected: Vec<QueryRow> = full
+        .rows
+        .iter()
+        .filter(|r| {
+            let token_ok = matches!(
+                r.values.get("pk"),
+                Some(Value::Integer(pk)) if cassandra_murmur3_token(&pk.to_be_bytes()) == t
+            );
+            let ck_ok = matches!(r.values.get("ck"), Some(Value::Integer(ck)) if *ck >= 10);
+            token_ok && ck_ok
+        })
+        .cloned()
+        .collect();
+    assert!(
+        !expected.is_empty(),
+        "the combined filter must match some rows"
+    );
+
+    let result = db
+        .execute(&format!(
+            "SELECT pk, ck FROM {WIDE_TABLE} WHERE token(pk) = {t} AND ck >= 10"
+        ))
+        .await
+        .expect("combined token-equal query must succeed");
+
+    assert_eq!(
+        fingerprints(&result.rows),
+        fingerprints(&expected),
+        "FINDING 1: token(pk) = t AND ck >= 10 must apply BOTH restrictions (the token \
+         equality must not be silently dropped when combined with another predicate)",
+    );
+    assert!(
+        result
+            .rows
+            .iter()
+            .all(|r| r.values.get("pk") == Some(&Value::Integer(target_pk))),
+        "no other partition may leak in when the token equality is enforced",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 2: token() on the wrong column / wrong order is rejected, not
+//            silently evaluated against the real partition key.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_on_non_partition_key_column_is_rejected() {
+    let db = match setup("wide-table-bti.cql", "/test_da/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    // `ck` is a clustering column, NOT the partition key. token(ck) would, before
+    // the fix, hash the real partition key (pk) and silently return wrong rows.
+    let err = db
+        .execute(&format!(
+            "SELECT pk, ck FROM {WIDE_TABLE} WHERE token(ck) > 0"
+        ))
+        .await
+        .err();
+    assert!(
+        err.is_some(),
+        "FINDING 2: token(ck) on a non-partition-key column must be rejected, not silently \
+         evaluated against the real pk token",
+    );
+}
+
 #[tokio::test]
 async fn token_single_lower_bound_filters_correctly() {
     let db = match setup("wide-table-bti.cql", "/test_da/").await {

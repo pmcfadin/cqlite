@@ -533,14 +533,31 @@ fn classify_partition_lookup(
         per_column_values.push(predicate.values.clone());
     }
 
-    // Cartesian product of the per-column value sets = the full set of complete
-    // partition keys to probe. With all-`=` columns this is a single tuple.
-    let combinations = cartesian_product(&per_column_values);
-
-    // Bound the targeted fan-out; a huge `IN` is better served by one full scan.
-    if combinations.len() > MAX_IN_TARGETED_LOOKUPS {
-        return PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyNotFullyConstrained);
+    // FINDING 3: bound the fan-out with CHECKED arithmetic BEFORE materializing
+    // the product. A composite `IN` over several multi-value columns can have a
+    // product that is astronomically large (e.g. 1000 x 1000 x ...); expanding
+    // it first would allocate far more than the cap before we ever check it.
+    // `checked_mul` over the per-column counts saturates to "too big" on
+    // overflow, so we fall back without over-allocating.
+    let product_size = per_column_values
+        .iter()
+        .try_fold(1usize, |acc, vals| acc.checked_mul(vals.len()));
+    match product_size {
+        Some(n) if n <= MAX_IN_TARGETED_LOOKUPS => {}
+        // Over the cap (or overflowed `usize`): a single full scan + in-memory
+        // `IN` filter is preferred over a huge targeted fan-out.
+        _ => {
+            return PartitionLookupOutcome::Fallback(
+                FallbackReason::PartitionKeyNotFullyConstrained,
+            );
+        }
     }
+
+    // Cartesian product of the per-column value sets = the full set of complete
+    // partition keys to probe. With all-`=` columns this is a single tuple. The
+    // product size is bounded by `MAX_IN_TARGETED_LOOKUPS` above, so this
+    // allocation is safe.
+    let combinations = cartesian_product(&per_column_values);
 
     // Encode each combination to on-disk key bytes, deduplicating (first
     // occurrence wins so input order is preserved). An encoding failure for any
@@ -569,6 +586,63 @@ fn classify_partition_lookup(
         1 => PartitionLookupOutcome::Targeted(keys.into_iter().next().unwrap_or_default()),
         _ => PartitionLookupOutcome::MultiTargeted(keys),
     }
+}
+
+/// Validate that every `token(...)` predicate's argument columns match the
+/// table's FULL partition-key column list, in declared order (Issue #955
+/// follow-up, FINDING 2).
+///
+/// `evaluate_leaf` evaluates a token predicate by hashing the row's *raw
+/// partition key* — it does NOT recompute a token over the columns named in the
+/// predicate. So a `token(col, ...)` whose columns are not exactly the partition
+/// key (a non-pk column, a strict subset, or a reordering) would be evaluated
+/// against the real partition-key token, silently returning rows for a different
+/// expression than the user wrote.
+///
+/// Cassandra rejects `token()` on anything other than the full partition key in
+/// declared order, so we do the same: reject with a clear error rather than
+/// trust `token_columns`. With no schema we cannot know the partition key, so we
+/// also reject (we cannot prove the columns are correct).
+fn validate_token_predicates(
+    predicates: &[SSTablePredicate],
+    schema: Option<&crate::schema::TableSchema>,
+) -> Result<()> {
+    let token_predicates: Vec<&SSTablePredicate> =
+        predicates.iter().filter(|p| p.is_token()).collect();
+    if token_predicates.is_empty() {
+        return Ok(());
+    }
+
+    let Some(schema) = schema else {
+        return Err(Error::query_execution(
+            "token() restriction requires a known table schema to validate its argument \
+             against the partition key"
+                .to_string(),
+        ));
+    };
+
+    // The partition key in declared order (positions are 0-based and dense).
+    let mut pk_cols: Vec<&crate::schema::KeyColumn> = schema.partition_keys.iter().collect();
+    pk_cols.sort_by_key(|c| c.position);
+    let expected: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
+
+    for predicate in token_predicates {
+        let cols = predicate.token_columns.as_deref().unwrap_or(&[]);
+        let matches = cols.len() == expected.len()
+            && cols
+                .iter()
+                .zip(expected.iter())
+                .all(|(got, want)| got == want);
+        if !matches {
+            return Err(Error::query_execution(format!(
+                "token() must be applied to the entire partition key in declared order \
+                 ({}); got token({})",
+                expected.join(", "),
+                cols.join(", "),
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Stable-sort scan results by their partition token, then by raw key bytes —
@@ -1338,6 +1412,11 @@ impl SelectExecutor {
                         .find_schema_by_table(&keyspace, &table_name)
                         .await;
 
+                    // FINDING 2 (Issue #955 follow-up): reject a `token(...)` whose
+                    // columns are not the full partition key in declared order
+                    // before scanning (same rule as the materializing path).
+                    validate_token_predicates(predicates, schema_opt.as_ref())?;
+
                     // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
                     // partition-targeted lookup that prunes SSTables via bloom/BTI,
                     // instead of streaming a scan over every SSTable. The resulting
@@ -1567,6 +1646,12 @@ impl SelectExecutor {
                 table_name
             ),
         }
+
+        // FINDING 2 (Issue #955 follow-up): a `token(...)` predicate is evaluated
+        // by hashing the row's raw partition key, so its argument columns MUST be
+        // the full partition key in declared order or the result is silently
+        // wrong. Reject (Cassandra-style) before scanning/evaluating.
+        validate_token_predicates(predicates, schema_opt.as_ref())?;
 
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
@@ -2608,6 +2693,185 @@ mod tests {
             ),
             "an IN list exactly at the cap must still be MultiTargeted",
         );
+    }
+
+    /// Build a two-column composite partition-key schema (`a`, `b` in declared
+    /// order). Used by the FINDING 2/3 token-validation and composite-IN tests.
+    fn composite_pk_schema(
+        first: (&str, &str),
+        second: (&str, &str),
+    ) -> crate::schema::TableSchema {
+        crate::schema::TableSchema {
+            keyspace: "ks".to_string(),
+            table: "t".to_string(),
+            partition_keys: vec![
+                crate::schema::KeyColumn {
+                    name: first.0.to_string(),
+                    data_type: first.1.to_string(),
+                    position: 0,
+                },
+                crate::schema::KeyColumn {
+                    name: second.0.to_string(),
+                    data_type: second.1.to_string(),
+                    position: 1,
+                },
+            ],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
+        }
+    }
+
+    /// FINDING 2: a `token(...)` over the FULL partition key in declared order is
+    /// accepted (validation passes), so the existing token fast-path/evaluation
+    /// behaviour is preserved.
+    #[test]
+    fn validate_token_predicates_accepts_full_key_in_order() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = composite_pk_schema(("a", "int"), ("b", "int"));
+        let pred = SSTablePredicate::token(
+            vec!["a".to_string(), "b".to_string()],
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&pred), Some(&schema)).is_ok(),
+            "token(a, b) over the full partition key in declared order must be accepted",
+        );
+
+        // Single-column key: token(id) is the full key.
+        let single = single_pk_schema("id", "int");
+        let pred_single = SSTablePredicate::token(
+            vec!["id".to_string()],
+            SSTableFilterOp::Gte,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&pred_single), Some(&single)).is_ok(),
+            "token(id) over a single-column partition key must be accepted",
+        );
+    }
+
+    /// FINDING 2: `token(non_pk_col)` must be REJECTED — `evaluate_leaf` would
+    /// otherwise hash the real partition key and silently return rows for a
+    /// different expression than the user wrote.
+    #[test]
+    fn validate_token_predicates_rejects_non_pk_column() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = single_pk_schema("id", "int");
+        let pred = SSTablePredicate::token(
+            vec!["not_the_pk".to_string()],
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&pred), Some(&schema)).is_err(),
+            "token(non_pk_col) must be rejected, not evaluated against the real pk token",
+        );
+    }
+
+    /// FINDING 2: `token(b, a)` on a `(a, b)` key — right columns, WRONG order —
+    /// must be rejected (Cassandra requires declared order).
+    #[test]
+    fn validate_token_predicates_rejects_reordered_composite() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = composite_pk_schema(("a", "int"), ("b", "int"));
+        let reordered = SSTablePredicate::token(
+            vec!["b".to_string(), "a".to_string()],
+            SSTableFilterOp::Lt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&reordered), Some(&schema)).is_err(),
+            "token(b, a) on a (a, b) key must be rejected (wrong order)",
+        );
+
+        // A strict subset (missing the second column) is also rejected.
+        let subset = SSTablePredicate::token(
+            vec!["a".to_string()],
+            SSTableFilterOp::Lt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&subset), Some(&schema)).is_err(),
+            "token(a) on a (a, b) key must be rejected (partial key)",
+        );
+    }
+
+    /// FINDING 2: with no schema we cannot prove the token columns are the
+    /// partition key, so any token predicate is rejected (never trusted).
+    #[test]
+    fn validate_token_predicates_rejects_without_schema() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let pred = SSTablePredicate::token(
+            vec!["id".to_string()],
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&pred), None).is_err(),
+            "a token predicate with no schema must be rejected",
+        );
+        // Ordinary column predicates are unaffected by token validation.
+        let col = SSTablePredicate::column("id", SSTableFilterOp::Equal, vec![Value::Integer(1)]);
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&col), None).is_ok(),
+            "non-token predicates must pass token validation even without a schema",
+        );
+    }
+
+    /// FINDING 3: a composite `IN` whose cartesian product EXCEEDS the cap must
+    /// fall back BEFORE materializing the product (checked arithmetic), and still
+    /// reports the honest `PartitionKeyNotFullyConstrained` fallback. The product
+    /// here (1000 x 1000 = 1_000_000) is far over `MAX_IN_TARGETED_LOOKUPS`;
+    /// expanding it first would allocate a million combinations.
+    #[test]
+    fn classify_partition_lookup_composite_in_over_cap_falls_back_without_overalloc() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = composite_pk_schema(("a", "int"), ("b", "int"));
+        let a_vals: Vec<Value> = (0..1000).map(Value::Integer).collect();
+        let b_vals: Vec<Value> = (0..1000).map(Value::Integer).collect();
+        let preds = vec![
+            SSTablePredicate::column("a", SSTableFilterOp::In, a_vals),
+            SSTablePredicate::column("b", SSTableFilterOp::In, b_vals),
+        ];
+        assert!(
+            matches!(
+                classify_partition_lookup(&preds, Some(&schema)),
+                PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyNotFullyConstrained)
+            ),
+            "a composite IN whose product exceeds the cap must fall back to a full scan",
+        );
+    }
+
+    /// FINDING 3: a composite `IN` whose product is WITHIN the cap is still
+    /// served by a targeted MultiTargeted lookup (the checked-arithmetic guard
+    /// must not over-reject). 4 x 4 = 16 <= 64.
+    #[test]
+    fn classify_partition_lookup_composite_in_within_cap_is_targeted() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = composite_pk_schema(("a", "int"), ("b", "int"));
+        let a_vals: Vec<Value> = (0..4).map(Value::Integer).collect();
+        let b_vals: Vec<Value> = (0..4).map(Value::Integer).collect();
+        let preds = vec![
+            SSTablePredicate::column("a", SSTableFilterOp::In, a_vals),
+            SSTablePredicate::column("b", SSTableFilterOp::In, b_vals),
+        ];
+        match classify_partition_lookup(&preds, Some(&schema)) {
+            PartitionLookupOutcome::MultiTargeted(keys) => assert_eq!(
+                keys.len(),
+                16,
+                "4 x 4 composite IN must yield 16 targeted keys (the full product)"
+            ),
+            other => panic!("composite IN within the cap must be MultiTargeted, got {other:?}"),
+        }
     }
 
     /// Issue #955: a `token(pk)` range restriction does NOT engage the targeted
