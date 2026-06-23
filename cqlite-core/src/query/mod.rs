@@ -16,6 +16,7 @@
 // This implements CQL v3.4.3+ for Apache Cassandra 5.0+
 // CQL is NOT SQL - it's a query language specifically designed for Cassandra's distributed architecture.
 
+pub mod access_path;
 pub mod engine;
 pub mod executor;
 pub mod m2_select_validator;
@@ -37,6 +38,7 @@ pub mod select_optimizer;
 #[cfg(feature = "state_machine")]
 pub mod select_parser;
 
+pub use access_path::{AccessPath, FallbackReason};
 pub use engine::{
     AnalyzeResult, CacheStats, ExplainResult, QueryCacheEntry, QueryEngine as AdvancedQueryEngine,
     SchemaStatus,

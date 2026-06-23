@@ -11,6 +11,7 @@
 //! - Collection operations (list[index], map['key'])
 
 use super::{
+    access_path::{AccessPath, FallbackReason},
     result::{
         cql_type_to_data_type, ColumnInfo, ProjectionFlags, QueryMetadata, QueryResult,
         QueryResultIterator, QueryRow, StreamingConfig,
@@ -402,40 +403,70 @@ pub fn build_row_from_scan(
     })
 }
 
-/// If the pushed-down predicates fully constrain the partition key with
-/// equality, return the raw on-disk partition-key bytes so the scan can be
-/// turned into a partition-targeted lookup (Issue #949).
+/// Outcome of classifying whether a SELECT can use a partition-targeted lookup.
 ///
-/// Returns `None` — and the caller falls back to a full table scan — when:
-/// - no schema is available (we cannot identify the partition-key columns),
-/// - any partition-key column is missing an `=` predicate (partial key, or an
-///   `IN`/range restriction — those still require the scan path today), or
-/// - the constrained values cannot be encoded to the on-disk key form (e.g. a
-///   type mismatch), in which case a full scan is the safe, correct fallback.
+/// Issue #960: this replaces the previous `Option<Vec<u8>>` so the caller can
+/// record the *honest* reason a full scan was chosen, rather than collapsing all
+/// fallback causes into `None`.
+enum PartitionLookupOutcome {
+    /// A fully-constrained partition key; carries its on-disk bytes for the lookup.
+    Targeted(Vec<u8>),
+    /// No targeted lookup is possible; carries the documented reason for the scan.
+    Fallback(FallbackReason),
+}
+
+/// Classify whether the pushed-down predicates fully constrain the partition key
+/// with equality (Issue #949), returning the on-disk key bytes when they do or a
+/// documented [`FallbackReason`] when they do not (Issue #960).
+///
+/// Returns a fallback — and the caller falls back to a full table scan — when:
+/// - no schema is available ([`FallbackReason::NoSchema`]): we cannot identify
+///   the partition-key columns,
+/// - any partition-key column is missing an `=` predicate
+///   ([`FallbackReason::PartitionKeyNotFullyConstrained`]): partial key, or an
+///   `IN`/range restriction (those still require the scan path today), or
+/// - the constrained values cannot be encoded to the on-disk key form
+///   ([`FallbackReason::PartitionKeyEncodingFailed`], e.g. a type mismatch), in
+///   which case a full scan is the safe, correct fallback.
 ///
 /// Only an all-equality restriction over the complete partition key qualifies,
 /// mirroring Cassandra's requirement for a single-partition read.
-fn full_partition_key_lookup(
+fn classify_partition_lookup(
     predicates: &[SSTablePredicate],
     schema: Option<&crate::schema::TableSchema>,
-) -> Option<Vec<u8>> {
+) -> PartitionLookupOutcome {
     use super::select_optimizer::SSTableFilterOp;
 
-    let schema = schema?;
+    let Some(schema) = schema else {
+        return PartitionLookupOutcome::Fallback(FallbackReason::NoSchema);
+    };
     if schema.partition_keys.is_empty() {
-        return None;
+        return PartitionLookupOutcome::Fallback(FallbackReason::NoSchema);
     }
 
     let mut values = Vec::with_capacity(schema.partition_keys.len());
     for pk in &schema.partition_keys {
         let predicate = predicates
             .iter()
-            .find(|p| p.column == pk.name && matches!(p.operation, SSTableFilterOp::Equal))?;
+            .find(|p| p.column == pk.name && matches!(p.operation, SSTableFilterOp::Equal));
+        let Some(predicate) = predicate else {
+            return PartitionLookupOutcome::Fallback(
+                FallbackReason::PartitionKeyNotFullyConstrained,
+            );
+        };
         // An `Equal` predicate always carries exactly one value.
-        values.push(predicate.values.first()?.clone());
+        let Some(value) = predicate.values.first() else {
+            return PartitionLookupOutcome::Fallback(
+                FallbackReason::PartitionKeyNotFullyConstrained,
+            );
+        };
+        values.push(value.clone());
     }
 
-    crate::storage::partition_key_codec::encode_partition_key_columns(&values, schema).ok()
+    match crate::storage::partition_key_codec::encode_partition_key_columns(&values, schema) {
+        Ok(bytes) => PartitionLookupOutcome::Targeted(bytes),
+        Err(_) => PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyEncodingFailed),
+    }
 }
 
 /// Apply an `ArithmeticOperator` to two same-typed numeric `Value`s.
@@ -790,6 +821,10 @@ impl SelectExecutor {
 
     /// Execute an optimized query plan
     pub async fn execute(&self, plan: OptimizedQueryPlan) -> Result<QueryResult> {
+        // Issue #960: clear the global access-path probe so a stale value from a
+        // previous query cannot satisfy a test assertion against this one.
+        crate::query::access_path::reset();
+
         let table_id = if let Some(ref from_clause) = plan.statement.from_clause {
             self.extract_table_id(from_clause)?
         } else {
@@ -950,6 +985,9 @@ impl SelectExecutor {
                 plan_info: None,
                 performance: Default::default(),
                 warnings: vec![],
+                // Issue #960: surface the access path the SSTable-scan step chose
+                // on the result, in addition to the test-accessible global probe.
+                access_path: crate::query::access_path::last(),
             },
         })
     }
@@ -985,6 +1023,10 @@ impl SelectExecutor {
         plan: OptimizedQueryPlan,
         config: StreamingConfig,
     ) -> Result<QueryResultIterator> {
+        // Issue #960: clear the global access-path probe so a stale value from a
+        // previous query cannot satisfy a test assertion against this one.
+        crate::query::access_path::reset();
+
         // Check if query requires full materialization (ORDER BY, GROUP BY, aggregates)
         if self.requires_materialization(&plan) {
             log::info!("Query requires materialization (ORDER BY/GROUP BY/aggregates), using execute-then-stream");
@@ -1043,6 +1085,12 @@ impl SelectExecutor {
             plan_info: None,
             performance: Default::default(),
             warnings: vec![],
+            // Issue #960: the streaming scan runs in the spawned task above, so the
+            // access path is not yet recorded when this iterator is constructed.
+            // Streaming surfaces report the path via the global probe
+            // (`crate::query::access_path::last()`) after at least one row is
+            // pulled, not on the iterator metadata.
+            access_path: None,
         };
 
         Ok(QueryResultIterator::new(rx, metadata))
@@ -1163,11 +1211,13 @@ impl SelectExecutor {
                     // materializing `scan()` (last-write-wins + tombstone shadowing),
                     // which is the authoritative read semantics; it does not merely
                     // mirror `scan_stream`'s per-key merge.
-                    if let Some(pk_bytes) =
-                        full_partition_key_lookup(predicates, schema_opt.as_ref())
-                    {
+                    let lookup = classify_partition_lookup(predicates, schema_opt.as_ref());
+                    if let PartitionLookupOutcome::Targeted(ref pk_bytes) = lookup {
+                        // Issue #960: the streaming analogue of the materializing
+                        // partition-targeted lookup.
+                        crate::query::access_path::record(AccessPath::StreamingPartitionLookup);
                         let rows = storage
-                            .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                            .scan_partition(table, pk_bytes, schema_opt.as_ref())
                             .await?;
                         for (key, value) in rows {
                             let part_sig = per_partition_limit.map(|_| key.0.clone());
@@ -1205,6 +1255,14 @@ impl SelectExecutor {
                         }
                         // This SSTableScan step is fully served by the lookup.
                         continue;
+                    }
+
+                    // Issue #960: the streaming path did not take the targeted
+                    // lookup; report the honest fallback reason. `lookup` is the
+                    // `Fallback` arm here (the `Targeted` arm returned above via
+                    // `continue`).
+                    if let PartitionLookupOutcome::Fallback(reason) = lookup {
+                        crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
                     }
 
                     // Issue #790: pull rows lazily from a bounded streaming scan
@@ -1326,6 +1384,14 @@ impl SelectExecutor {
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
         let mut results = Vec::new();
         if context.projection_flags.include_cell_metadata {
+            // Issue #960: the WRITETIME/TTL metadata path always full-scans today
+            // (it passes `None, None` to `scan_with_cell_metadata`). Report this
+            // honestly as a fallback so it cannot masquerade as a targeted lookup;
+            // #962 will flip it to `AccessPath::MetadataPartitionLookup` once the
+            // metadata scan accepts a partition-targeted lookup.
+            crate::query::access_path::record(AccessPath::FallbackFullScan {
+                reason: FallbackReason::MetadataScanPath,
+            });
             let scan_results = self
                 .storage
                 .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
@@ -1365,21 +1431,27 @@ impl SelectExecutor {
             // pinned or can't be encoded. The per-row predicate evaluation below is
             // unchanged, so clustering predicates and the pk equality itself are
             // still applied (and any over-inclusion is filtered out).
-            let scan_results = if let Some(pk_bytes) =
-                full_partition_key_lookup(predicates, schema_opt.as_ref())
-            {
-                log::info!(
-                    "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
-                    pk_bytes.len(),
-                    table
-                );
-                self.storage
-                    .scan_partition(table, &pk_bytes, schema_opt.as_ref())
-                    .await?
-            } else {
-                self.storage
-                    .scan(table, None, None, None, schema_opt.as_ref())
-                    .await?
+            let scan_results = match classify_partition_lookup(predicates, schema_opt.as_ref()) {
+                PartitionLookupOutcome::Targeted(pk_bytes) => {
+                    log::info!(
+                        "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
+                        pk_bytes.len(),
+                        table
+                    );
+                    // Issue #960: a fully-constrained `WHERE pk = ?` served by a
+                    // partition-targeted lookup that prunes SSTables.
+                    crate::query::access_path::record(AccessPath::PartitionLookup);
+                    self.storage
+                        .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                        .await?
+                }
+                PartitionLookupOutcome::Fallback(reason) => {
+                    // Issue #960: report the honest reason a full scan was chosen.
+                    crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
+                    self.storage
+                        .scan(table, None, None, None, schema_opt.as_ref())
+                        .await?
+                }
             };
 
             log::info!("Scan returned {} rows", scan_results.len());
@@ -1826,6 +1898,8 @@ impl SelectExecutor {
                 plan_info: None,
                 performance: crate::query::result::PerformanceMetrics::default(),
                 warnings: Vec::new(),
+                // Constant queries (e.g. `SELECT 1`) touch no SSTable.
+                access_path: None,
             },
         })
     }
@@ -2159,12 +2233,12 @@ mod tests {
 
     /// Issue #956: a `WHERE id = <uuid-literal>` against a single UUID partition
     /// key must engage the #949 partition-targeted fast path, i.e.
-    /// `full_partition_key_lookup` returns `Some` with the raw 16-byte key. This
-    /// is the unit-level evidence that the parser's new `Value::Uuid` literal
-    /// flows all the way into the fast path (the e2e parity test proves the rows
-    /// it returns are correct).
+    /// `classify_partition_lookup` returns `Targeted` with the raw 16-byte key.
+    /// This is the unit-level evidence that the parser's new `Value::Uuid`
+    /// literal flows all the way into the fast path (the e2e parity test proves
+    /// the rows it returns are correct).
     #[test]
-    fn full_partition_key_lookup_engages_for_uuid_literal() {
+    fn classify_partition_lookup_targets_uuid_literal() {
         use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
 
         let uuid = [
@@ -2178,20 +2252,25 @@ mod tests {
             values: vec![Value::Uuid(uuid)],
         };
 
-        let pk_bytes = full_partition_key_lookup(std::slice::from_ref(&predicate), Some(&schema))
-            .expect("Issue #956: UUID-literal `=` predicate must engage the partition fast path");
-        assert_eq!(
-            pk_bytes,
-            uuid.to_vec(),
-            "fast path must encode the UUID literal to the raw 16-byte on-disk key"
-        );
+        match classify_partition_lookup(std::slice::from_ref(&predicate), Some(&schema)) {
+            PartitionLookupOutcome::Targeted(pk_bytes) => assert_eq!(
+                pk_bytes,
+                uuid.to_vec(),
+                "fast path must encode the UUID literal to the raw 16-byte on-disk key"
+            ),
+            PartitionLookupOutcome::Fallback(reason) => panic!(
+                "Issue #956: UUID-literal `=` predicate must engage the partition fast path, \
+                 got fallback {reason:?}"
+            ),
+        }
     }
 
-    /// A non-equality (or partial) restriction must NOT engage the fast path,
-    /// so the executor falls back to a full scan. Guards against the UUID change
-    /// accidentally widening fast-path eligibility.
+    /// A non-equality (or partial) restriction must NOT engage the fast path, so
+    /// the executor falls back to a full scan with the documented
+    /// `PartitionKeyNotFullyConstrained` reason (Issue #960). Guards against the
+    /// UUID change accidentally widening fast-path eligibility.
     #[test]
-    fn full_partition_key_lookup_skips_uuid_range_predicate() {
+    fn classify_partition_lookup_falls_back_for_uuid_range_predicate() {
         use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
 
         let uuid = [1u8; 16];
@@ -2203,8 +2282,25 @@ mod tests {
         };
 
         assert!(
-            full_partition_key_lookup(std::slice::from_ref(&predicate), Some(&schema)).is_none(),
-            "a range restriction on the partition key must not take the equality fast path",
+            matches!(
+                classify_partition_lookup(std::slice::from_ref(&predicate), Some(&schema)),
+                PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyNotFullyConstrained)
+            ),
+            "a range restriction on the partition key must report the \
+             PartitionKeyNotFullyConstrained fallback, not a targeted lookup",
+        );
+    }
+
+    /// Issue #960: no schema means we cannot identify the partition-key columns,
+    /// so the classifier reports the `NoSchema` fallback reason.
+    #[test]
+    fn classify_partition_lookup_falls_back_without_schema() {
+        assert!(
+            matches!(
+                classify_partition_lookup(&[], None),
+                PartitionLookupOutcome::Fallback(FallbackReason::NoSchema)
+            ),
+            "no schema must report the NoSchema fallback reason",
         );
     }
 

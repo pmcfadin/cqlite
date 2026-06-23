@@ -97,6 +97,15 @@ pub struct QueryMetadata {
     pub performance: PerformanceMetrics,
     /// Warnings generated during execution
     pub warnings: Vec<String>,
+    /// Access path selected by the SSTable-scan step (Issue #960).
+    ///
+    /// `Some` when a SELECT ran through the modern `SelectExecutor` (materializing
+    /// or streaming); `None` for surfaces that do not yet report a path (e.g. the
+    /// legacy executor and non-SELECT queries). This is the result-attached half
+    /// of the access-path signal; the test-accessible probe is
+    /// `crate::query::access_path::last()`.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub access_path: Option<crate::query::access_path::AccessPath>,
 }
 
 /// Information about a column in the result set

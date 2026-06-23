@@ -131,6 +131,7 @@ fn contract_query_metadata_full() {
         }),
         performance: PerformanceMetrics::default(),
         warnings: vec!["test warning".to_string()],
+        access_path: None,
     };
     insta::assert_json_snapshot!(metadata);
 }
