@@ -239,6 +239,30 @@ impl StorageEngine {
             .await
     }
 
+    /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
+    ///
+    /// Like [`scan_partition`](Self::scan_partition) but pushes a single-column
+    /// clustering-key restriction (`ck </>/= ?` / two-bound range) down to a
+    /// within-partition seek when the candidate's authoritative row index supports
+    /// it, so a wide-partition slice decodes O(matched rows + index) rather than
+    /// the whole partition. Returns `(rows, clustering_seek_engaged)`: the rows are
+    /// the full partition (or a clustering-narrowed superset) so the caller's
+    /// post-scan filter yields byte-identical output, and the bool reports whether
+    /// the clustering narrowing actually engaged (for the `ClusteringSlice` access
+    /// path). Delegates to [`SSTableManager::scan_partition_clustering`].
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition_clustering(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        clustering: Option<&crate::storage::sstable::reader::ClusteringSlice>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+        self.sstables
+            .scan_partition_clustering(table_id, partition_key, clustering, schema)
+            .await
+    }
+
     /// Scan a table and return per-cell write metadata alongside row values.
     ///
     /// Delegates to [`SSTableManager::scan_with_cell_metadata`].  Used when

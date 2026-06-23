@@ -95,6 +95,11 @@ static PARTITIONS_DECODED: AtomicU64 = AtomicU64::new(0);
 /// since the last [`reset`]. See module docs (Issue #953 / #951).
 static CHUNKS_DECOMPRESSED: AtomicU64 = AtomicU64::new(0);
 
+/// Count of individual rows DECODED from `Data.db` within a partition by the
+/// single-candidate seek path since the last [`reset`]. See module docs (Issue
+/// #954).
+static ROWS_DECODED: AtomicU64 = AtomicU64::new(0);
+
 /// Record that `count` candidate SSTables were parsed by a partition-targeted
 /// lookup. Called once per `scan_partition` invocation with the number of
 /// surviving (post-prune) candidates whose `Data.db` is parsed.
@@ -143,6 +148,26 @@ pub(crate) fn add_chunk_decompressed() {
     CHUNKS_DECOMPRESSED.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Record that one row was DECODED from `Data.db` within a partition by the
+/// single-candidate seek path (Issue #954). Called once per row the partition
+/// decoder actually parses out of the (clustering-narrowed) byte window — the
+/// row-granularity signal that proves a `WHERE pk = ? AND ck </>/= ?` slice
+/// query decodes O(matched rows + index block slack), not the whole partition.
+///
+/// Where [`add_partition_decoded`] counts WHICH partition was touched (1 for a
+/// hit), this counts HOW MANY of its clustering rows were parsed: a regression
+/// that reverts the clustering seek to a full-partition decode bumps this by the
+/// partition's whole row count, failing the `issue_954` bound even though
+/// `partitions_decoded` stays 1.
+///
+/// Gated on `not(tombstones)` like the other seek-path mutators: only the
+/// default build reaches the seek; under `tombstones` the full-scan fallback
+/// never seeks, so the counter stays 0.
+#[cfg(not(feature = "tombstones"))]
+pub(crate) fn add_rows_decoded(count: u64) {
+    ROWS_DECODED.fetch_add(count, Ordering::Relaxed);
+}
+
 /// Number of candidate SSTables parsed by partition-targeted lookups since the
 /// last [`reset`].
 ///
@@ -181,6 +206,19 @@ pub fn chunks_decompressed() -> u64 {
     CHUNKS_DECOMPRESSED.load(Ordering::Relaxed)
 }
 
+/// Number of individual partition rows DECODED from `Data.db` by the
+/// single-candidate seek path since the last [`reset`] (Issue #954).
+///
+/// Tests assert this stays bounded by the requested clustering slice (plus one
+/// index block of block-granularity slack) for a `WHERE pk = ? AND ck </>/= ?`
+/// query — proving the within-partition seek decodes O(slice), not the whole
+/// partition. A regression that decodes every clustering row of the partition
+/// (then post-filters) bumps this by the partition's full row count and fails
+/// the bound, even though `partitions_decoded` would still read 1.
+pub fn rows_decoded() -> u64 {
+    ROWS_DECODED.load(Ordering::Relaxed)
+}
+
 /// Clear both counters. Tests call this before a query so a stale value from an
 /// earlier query cannot satisfy a later assertion. Because the probe is
 /// process-global, a test that asserts on it must run without a concurrent query
@@ -190,6 +228,7 @@ pub fn reset() {
     PARTITIONS_PARSED.store(0, Ordering::Relaxed);
     PARTITIONS_DECODED.store(0, Ordering::Relaxed);
     CHUNKS_DECOMPRESSED.store(0, Ordering::Relaxed);
+    ROWS_DECODED.store(0, Ordering::Relaxed);
 }
 
 #[cfg(all(test, not(feature = "tombstones")))]
@@ -203,6 +242,7 @@ mod tests {
         assert_eq!(partitions_parsed(), 0);
         assert_eq!(partitions_decoded(), 0);
         assert_eq!(chunks_decompressed(), 0);
+        assert_eq!(rows_decoded(), 0);
         add_sstables_scanned(2);
         add_partitions_parsed(5);
         add_partition_decoded();
@@ -210,14 +250,17 @@ mod tests {
         add_chunk_decompressed();
         add_chunk_decompressed();
         add_chunk_decompressed();
+        add_rows_decoded(7);
         assert_eq!(sstables_scanned(), 2);
         assert_eq!(partitions_parsed(), 5);
         assert_eq!(partitions_decoded(), 2);
         assert_eq!(chunks_decompressed(), 3);
+        assert_eq!(rows_decoded(), 7);
         reset();
         assert_eq!(sstables_scanned(), 0);
         assert_eq!(partitions_parsed(), 0);
         assert_eq!(partitions_decoded(), 0);
         assert_eq!(chunks_decompressed(), 0);
+        assert_eq!(rows_decoded(), 0);
     }
 }

@@ -1042,6 +1042,50 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         schema: Option<&TableSchema>,
         reader: &super::super::types::SSTableReader,
+        emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut((TableId, RowKey, Value)) -> Result<std::ops::ControlFlow<()>>,
+    {
+        // Whole-block decode: no within-partition row-body window narrowing.
+        self.parse_block_emit_windowed(data, schema, reader, None, emit)
+    }
+
+    /// Within-partition clustering-slice variant of [`parse_block_emit`] (Issue
+    /// #954, Epic #951).
+    ///
+    /// When `row_body_window` is `Some((body_start, body_end))` (byte offsets
+    /// into `data`, in the SAME domain as `data` indices) the FIRST partition's
+    /// row-body parse is bounded to that window:
+    ///   - after the partition header is decoded, the row cursor is fast-forwarded
+    ///     to `max(after_header, body_start)` (skipping rows that precede the
+    ///     requested clustering slice), and
+    ///   - the row loop stops once the cursor reaches `body_end` (skipping rows
+    ///     after the slice).
+    ///
+    /// `body_start`/`body_end` are the byte extent of the row-index block(s) that
+    /// the authoritative BTI row index resolved as covering the requested
+    /// clustering range, so this decodes O(matched rows + index-block slack)
+    /// rather than the whole partition. The post-scan `evaluate_leaf` backstop
+    /// trims the block-granularity over-read, so the returned rows are a SUPERSET
+    /// of the exact slice and the final query output is byte-identical.
+    ///
+    /// The start fast-forward is only applied when the schema has NO static
+    /// columns (the caller enforces this): a static row precedes the clustering
+    /// rows and must be merged into each clustering row, so skipping past it would
+    /// drop static values. The end bound is always safe to apply.
+    ///
+    /// Every row this method actually decodes bumps the `work_counters`
+    /// `rows_decoded` counter so a test can prove the decode was bounded to the
+    /// slice. With `row_body_window == None` this is byte-for-byte
+    /// [`parse_block_emit`]'s original behaviour, and the counter is still bumped
+    /// (the seek path reports its full-partition decode too).
+    pub fn parse_block_emit_windowed<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        row_body_window: Option<(usize, usize)>,
         mut emit: F,
     ) -> Result<()>
     where
@@ -1173,6 +1217,24 @@ impl V5CompressedLegacyParser {
                     let header_size = new_offset - offset;
                     offset = new_offset;
 
+                    // Issue #954: when a within-partition clustering-slice window is
+                    // supplied, fast-forward the row cursor of the FIRST partition to
+                    // the first row-index block covering the slice (skipping rows
+                    // before it). Applied only to `partition_index == 0` because the
+                    // seek decodes exactly one target partition. The end bound
+                    // (`body_end`) stops the row loop below. The caller guarantees a
+                    // start fast-forward is only requested when the schema has no
+                    // static columns, so this never skips a static prefix.
+                    let row_body_end = match row_body_window {
+                        Some((body_start, body_end)) if partition_index == 0 => {
+                            if body_start > offset && body_start <= data.len() {
+                                offset = body_start;
+                            }
+                            Some(body_end)
+                        }
+                        _ => None,
+                    };
+
                     log::debug!(
                         "V5CompressedLegacy: Partition {} - Parsed partition key: {} bytes (header consumed {} bytes, now at offset {})",
                         partition_index,
@@ -1219,6 +1281,18 @@ impl V5CompressedLegacyParser {
                     let mut static_cells: HashMap<String, Value> = HashMap::new();
                     let mut row_count = 0;
                     loop {
+                        // Issue #954: stop at the clustering-slice end bound. The
+                        // row-index block extent (`body_end`) is the authoritative
+                        // upper byte bound of the rows that may fall in the requested
+                        // clustering range; rows past it are outside the slice, so we
+                        // stop decoding (the post-scan backstop already trims any
+                        // block-granularity over-read within the window).
+                        if let Some(body_end) = row_body_end {
+                            if offset >= body_end {
+                                break;
+                            }
+                        }
+
                         // Issue #229 FIX: Check for END_OF_PARTITION marker BEFORE attempting row parse
                         //
                         // Per Cassandra's UnfilteredSerializer.java (lines 102, 730-732):
@@ -1400,6 +1474,16 @@ impl V5CompressedLegacyParser {
                                         });
                                         Value::Map(map_entries)
                                     };
+
+                                    // Issue #954: count each clustering row actually
+                                    // decoded out of Data.db so a slice query can be
+                                    // proven to decode O(matched rows + index block),
+                                    // not the whole partition. Counted at the row
+                                    // grain (here), distinct from the per-partition
+                                    // `partitions_decoded`. Gated `not(tombstones)`
+                                    // because the mutator is compiled only there.
+                                    #[cfg(not(feature = "tombstones"))]
+                                    crate::storage::sstable::work_counters::add_rows_decoded(1);
 
                                     match emit((
                                         table_id.clone(),

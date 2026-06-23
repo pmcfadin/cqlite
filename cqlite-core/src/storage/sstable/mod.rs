@@ -968,7 +968,7 @@ impl SSTableManager {
     /// point-lookup path) this seeks directly to the partition's `Data.db` offset
     /// — resolved via the BTI Partitions.db trie or the BIG `Index.db` — and
     /// decodes ONLY that partition via
-    /// [`scan_single_partition`](reader::SSTableReader::scan_single_partition),
+    /// [`scan_single_partition_clustering`](reader::SSTableReader::scan_single_partition_clustering),
     /// instead of full-parsing the candidate and retaining one partition. The
     /// decode reuses the scan path's `parse_block_emit`, so its output is
     /// byte-for-byte identical to `scan(...).retain(matches_key)`; when the offset
@@ -984,11 +984,44 @@ impl SSTableManager {
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Vec<(RowKey, Value)>> {
+        Ok(self
+            .scan_partition_clustering(table_id, partition_key, None, schema)
+            .await?
+            .0)
+    }
+
+    /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
+    ///
+    /// Identical to [`scan_partition`](Self::scan_partition) but, when `clustering`
+    /// is `Some(slice)` AND exactly one candidate SSTable admits the key AND that
+    /// candidate's single-partition seek can use its authoritative row index, the
+    /// within-partition decode is bounded to the row-index block(s) covering the
+    /// requested clustering range — so a `WHERE pk = ? AND ck </>/= ?` slice over a
+    /// wide partition decodes O(matched rows + index block), not the whole
+    /// partition.
+    ///
+    /// Returns `(rows, clustering_seek_engaged)`. `clustering_seek_engaged` is
+    /// `true` only when the within-partition clustering narrowing actually bounded
+    /// the decode (so the caller may report
+    /// [`AccessPath::ClusteringSlice`](crate::query::access_path::AccessPath::ClusteringSlice));
+    /// it is `false` for the multi-candidate / merge / full-decode fallbacks,
+    /// which still return correct rows for the honest `PartitionLookup` path. The
+    /// rows are ALWAYS the full partition (or its clustering-narrowed superset):
+    /// the caller's post-scan `evaluate_leaf` applies the exact clustering bound,
+    /// so output is byte-identical regardless of whether the seek engaged.
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition_clustering(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        clustering: Option<&reader::ClusteringSlice>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
 
         let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         };
 
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
@@ -1007,7 +1040,7 @@ impl SSTableManager {
         );
 
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
 
         let matches_key = |entry: &(RowKey, Value)| entry.0.as_bytes() == partition_key;
@@ -1031,7 +1064,10 @@ impl SSTableManager {
                         // exactly the partitions this lookup returns.
                         work_counters::add_sstables_scanned(candidates.len() as u64);
                         work_counters::add_partitions_parsed(merged.len() as u64);
-                        return Ok(merged);
+                        // The cross-generation merge decodes full partitions; the
+                        // clustering seek does not engage here (#954). Correct rows
+                        // via the post-scan backstop; honest non-engaged signal.
+                        return Ok((merged, false));
                     }
                     Err(e) => {
                         log::warn!(
@@ -1056,6 +1092,7 @@ impl SSTableManager {
         // optimization). The multi-candidate concat fallback below is unchanged —
         // only the single-candidate path gets the seek.
         let mut all_results = Vec::new();
+        let mut clustering_engaged = false;
         for reader in &candidates {
             // Work-counter gate (Issue #958): one real Data.db touch per surviving
             // candidate. Counted here (not at prune time) so the counter reflects
@@ -1063,13 +1100,20 @@ impl SSTableManager {
             work_counters::add_sstables_scanned(1);
 
             let mut results = if candidates.len() == 1 {
+                // Issue #954: thread the clustering slice into the seek so it can
+                // narrow the within-partition decode via the authoritative row
+                // index. `engaged` records whether the clustering narrowing
+                // actually bounded the decode (vs a full-partition decode).
                 match reader
-                    .scan_single_partition(table_id, partition_key, schema)
+                    .scan_single_partition_clustering(table_id, partition_key, clustering, schema)
                     .await
                 {
                     // Seek resolved authoritatively: use its rows directly. They
                     // already match exactly this partition's key, so no retain.
-                    Ok(Some(rows)) => rows,
+                    Ok(Some((rows, engaged))) => {
+                        clustering_engaged = engaged;
+                        rows
+                    }
                     // Seek not applicable (Constraint #4): full scan + retain.
                     Ok(None) => {
                         let mut r = reader.scan(table_id, None, None, None, schema).await?;
@@ -1093,7 +1137,7 @@ impl SSTableManager {
             all_results.sort_by(|a, b| a.0.cmp(&b.0));
         }
         work_counters::add_partitions_parsed(all_results.len() as u64);
-        Ok(all_results)
+        Ok((all_results, clustering_engaged))
     }
 
     /// `tombstones`-build counterpart of [`scan_partition`](Self::scan_partition).

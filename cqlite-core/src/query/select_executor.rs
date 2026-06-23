@@ -588,6 +588,181 @@ fn classify_partition_lookup(
     }
 }
 
+/// Classify whether the pushed-down predicates carry a SINGLE-COLUMN clustering
+/// restriction on the FIRST clustering column that can be pushed down to a
+/// within-partition seek (Issue #954, Epic #951).
+///
+/// Returns `Some(slice)` for `ck </>/=/<=/>= ?`, a two-bound contiguous range
+/// (`ck >= a AND ck < b`, lowered by the optimizer to a separate `Gte`/`Gt` and
+/// `Lt`/`Lte` pair), a `BETWEEN`-lowered `Range`, or `ck = ?` (`Equal`) on the
+/// FIRST clustering column — the shapes `evaluate_leaf` already enforces. The
+/// lower and upper bounds of a two-bound query arrive as TWO predicates on the
+/// same column (Issue #788 lowers `>=`/`<` independently, NOT as a `Range`), so
+/// this MERGES all bounds on the first clustering column into one slice — without
+/// the merge a `ck >= a AND ck < b` would pick only one bound and decode far more
+/// than the slice.
+///
+/// Returns `None` (decode the whole partition, report `PartitionLookup`) when:
+/// - there is no schema or no clustering key,
+/// - no predicate names the first clustering column,
+/// - the restriction is a shape outside the single-column scope (`In`, `Prefix`,
+///   or any restriction on a NON-first clustering column — multi-column prefixes
+///   are a documented follow-up), or
+/// - a bound value is missing.
+///
+/// This NEVER changes correctness: the slice only narrows the seek's decode, and
+/// the caller's post-scan `evaluate_leaf` applies the exact predicate. A `None`
+/// result simply decodes the full partition.
+/// Coerce a clustering bound `Value` to the clustering column's declared CQL type
+/// so it encodes to the SAME byte-comparable separator form the `Rows.db` row
+/// index stores (Issue #954).
+///
+/// The optimizer widens an integer literal (`100`) to `Value::Integer`/`BigInt`
+/// without regard to the column's narrower type, so an `int` clustering column's
+/// `100` can arrive as `BigInt(100)` and encode to 8 bytes while the on-disk
+/// separator is the 4-byte `int` form — a width mismatch that selects no block.
+/// This narrows/normalises the common comparable types to the column type. A type
+/// that cannot be safely coerced returns `None` (the caller then decodes the
+/// whole partition — correctness preserved, just no narrowing).
+#[cfg(not(feature = "tombstones"))]
+fn coerce_clustering_value(value: &Value, cql_type: &str) -> Option<Value> {
+    use crate::schema::CqlType;
+
+    let ty = CqlType::parse(cql_type).ok()?;
+    // Extract an integer from any integer-ish Value for the integer target types.
+    let as_i128 = |v: &Value| -> Option<i128> {
+        match v {
+            Value::TinyInt(i) => Some(*i as i128),
+            Value::SmallInt(i) => Some(*i as i128),
+            Value::Integer(i) => Some(*i as i128),
+            Value::BigInt(i) | Value::Counter(i) | Value::Timestamp(i) => Some(*i as i128),
+            _ => None,
+        }
+    };
+    match ty {
+        CqlType::TinyInt => Some(Value::TinyInt(i8::try_from(as_i128(value)?).ok()?)),
+        CqlType::SmallInt => Some(Value::SmallInt(i16::try_from(as_i128(value)?).ok()?)),
+        CqlType::Int => Some(Value::Integer(i32::try_from(as_i128(value)?).ok()?)),
+        CqlType::BigInt | CqlType::Counter => {
+            Some(Value::BigInt(i64::try_from(as_i128(value)?).ok()?))
+        }
+        CqlType::Timestamp => Some(Value::Timestamp(i64::try_from(as_i128(value)?).ok()?)),
+        // Already-correct comparable types pass through unchanged.
+        CqlType::Text | CqlType::Varchar | CqlType::Ascii => match value {
+            Value::Text(_) => Some(value.clone()),
+            _ => None,
+        },
+        CqlType::Uuid | CqlType::TimeUuid => match value {
+            Value::Uuid(_) => Some(value.clone()),
+            _ => None,
+        },
+        CqlType::Boolean => match value {
+            Value::Boolean(_) => Some(value.clone()),
+            _ => None,
+        },
+        CqlType::Blob => match value {
+            Value::Blob(_) => Some(value.clone()),
+            _ => None,
+        },
+        // Any other clustering type is out of the encodable scope for now.
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "tombstones"))]
+fn classify_clustering_slice(
+    predicates: &[SSTablePredicate],
+    schema: Option<&crate::schema::TableSchema>,
+) -> Option<crate::storage::sstable::reader::ClusteringSlice> {
+    use super::select_optimizer::SSTableFilterOp;
+    use crate::storage::sstable::reader::ClusteringSlice;
+
+    let schema = schema?;
+    let first_ck = schema.clustering_keys.first()?;
+    let ck_type = first_ck.data_type.as_str();
+    let coerce = |v: &Value| coerce_clustering_value(v, ck_type);
+
+    // Any restriction on a NON-first clustering column is a multi-column prefix —
+    // out of single-column scope (#954). Bail so the whole partition is decoded.
+    let non_first_ck_restricted = schema.clustering_keys.iter().skip(1).any(|ck| {
+        predicates
+            .iter()
+            .any(|p| !p.is_token() && p.column == ck.name)
+    });
+    if non_first_ck_restricted {
+        return None;
+    }
+
+    // Collect every restriction on the FIRST clustering column and fold them into
+    // a single (start, end) slice.
+    let mut start: Vec<Value> = Vec::new();
+    let mut start_inclusive = false;
+    let mut end: Vec<Value> = Vec::new();
+    let mut end_inclusive = false;
+    let mut saw_supported = false;
+
+    for p in predicates
+        .iter()
+        .filter(|p| !p.is_token() && p.column == first_ck.name)
+    {
+        match &p.operation {
+            SSTableFilterOp::Equal => {
+                let v = coerce(p.values.first()?)?;
+                start = vec![v.clone()];
+                start_inclusive = true;
+                end = vec![v];
+                end_inclusive = true;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Gt => {
+                start = vec![coerce(p.values.first()?)?];
+                start_inclusive = false;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Gte => {
+                start = vec![coerce(p.values.first()?)?];
+                start_inclusive = true;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Lt => {
+                end = vec![coerce(p.values.first()?)?];
+                end_inclusive = false;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Lte => {
+                end = vec![coerce(p.values.first()?)?];
+                end_inclusive = true;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Range => {
+                if p.values.len() < 2 {
+                    return None;
+                }
+                start = vec![coerce(&p.values[0])?];
+                start_inclusive = true;
+                end = vec![coerce(&p.values[1])?];
+                end_inclusive = true;
+                saw_supported = true;
+            }
+            // `In`/`Prefix`/`BloomFilter` on the clustering column are out of
+            // single-column-slice scope; decode the whole partition.
+            SSTableFilterOp::In | SSTableFilterOp::Prefix | SSTableFilterOp::BloomFilter => {
+                return None;
+            }
+        }
+    }
+
+    if !saw_supported {
+        return None;
+    }
+    Some(ClusteringSlice {
+        start,
+        start_inclusive,
+        end,
+        end_inclusive,
+    })
+}
+
 /// Validate that every `token(...)` predicate's argument columns match the
 /// table's FULL partition-key column list, in declared order (Issue #955
 /// follow-up, FINDING 2).
@@ -1736,13 +1911,46 @@ impl SelectExecutor {
                         pk_bytes.len(),
                         table
                     );
-                    // Issue #960: a fully-constrained `WHERE pk = ?` served by a
-                    // partition-targeted lookup that prunes SSTables.
-                    context.access_path = Some(AccessPath::PartitionLookup);
-                    crate::query::access_path::record(AccessPath::PartitionLookup);
-                    self.storage
-                        .scan_partition(table, &pk_bytes, schema_opt.as_ref())
-                        .await?
+                    // Issue #954: when a single-column clustering restriction is
+                    // present, push it down to a within-partition seek so a wide
+                    // partition's slice decodes O(matched rows + index), not the
+                    // whole partition. The seek reports whether the clustering
+                    // narrowing actually engaged; the per-row backstop below applies
+                    // the exact bound so output is byte-identical either way.
+                    //
+                    // Issue #960: report the HONEST access path — `ClusteringSlice`
+                    // only when the seek engaged, else `PartitionLookup`. The
+                    // clustering seek exists only on the default build; the
+                    // `tombstones` build uses the plain partition lookup.
+                    #[cfg(not(feature = "tombstones"))]
+                    {
+                        let clustering = classify_clustering_slice(predicates, schema_opt.as_ref());
+                        let (rows, engaged) = self
+                            .storage
+                            .scan_partition_clustering(
+                                table,
+                                &pk_bytes,
+                                clustering.as_ref(),
+                                schema_opt.as_ref(),
+                            )
+                            .await?;
+                        let path = if engaged {
+                            AccessPath::ClusteringSlice
+                        } else {
+                            AccessPath::PartitionLookup
+                        };
+                        context.access_path = Some(path.clone());
+                        crate::query::access_path::record(path);
+                        rows
+                    }
+                    #[cfg(feature = "tombstones")]
+                    {
+                        context.access_path = Some(AccessPath::PartitionLookup);
+                        crate::query::access_path::record(AccessPath::PartitionLookup);
+                        self.storage
+                            .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                            .await?
+                    }
                 }
                 PartitionLookupOutcome::MultiTargeted(pk_keys) => {
                     log::info!(
