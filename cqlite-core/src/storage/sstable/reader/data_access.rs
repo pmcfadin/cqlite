@@ -307,30 +307,40 @@ impl SSTableReader {
         //    whether THIS path's "decoded nothing" is authoritative absence (BTI
         //    trie) or merely inconclusive (BIG Index.db).
         let is_bti = self.bti_partitions_db.is_some();
-        // `size_hint` is the AUTHORITATIVE uncompressed byte length of the target
-        // partition when the index provides it (BIG `Index.db`). It bounds the
-        // decompression window EXACTLY to `[offset, offset + size)` so a
-        // head-of-file point lookup never decompresses the file's tail. The BTI
-        // trie carries no size, so its window is bounded by next-partition
-        // boundary detection instead (see `bti_decompress_and_parse_target_all`).
-        let (offset, size_hint) = if is_bti {
+        // Resolve the target partition's UNCOMPRESSED `Data.db` start offset.
+        let offset = if is_bti {
             match self.lookup_partition_via_bti_trie(partition_key)? {
                 // Trie hit: candidate uncompressed offset (re-verified on decode).
-                Some(off) => (off as usize, None),
+                Some(off) => off,
                 // Trie miss is AUTHORITATIVE absence for BTI.
                 None => return Ok(Some(Vec::new())),
             }
         } else {
             match self.lookup_partition_with_index(partition_key).await? {
-                // Index.db hit: a candidate offset into the data section plus the
-                // partition's authoritative uncompressed byte size (#953 bound).
-                Some((off, size)) => (off as usize, Some(size as usize)),
+                // Index.db hit: a candidate offset into the data section. (The
+                // `data_size` is 0 in writer-produced Index.db, so we do NOT use it
+                // as a bound — the successor offset below is the authoritative end.)
+                Some((off, _size)) => off,
                 // No Index.db hit: cannot seek authoritatively (the index may be
                 // digest-keyed / incomplete, exactly the get() #517 rationale).
                 // Fall back to a full scan.
                 None => return Ok(None),
             }
         };
+
+        // AUTHORITATIVE end bound (issue #953 / #951 MEDIUM): the target partition
+        // occupies `[offset, end)`, where `end` is the SUCCESSOR partition's start
+        // offset (next trie/index entry). Decompressing exactly the chunks covering
+        // that half-open range materializes every byte of the target partition —
+        // including a row/cell that SPANS multiple compression chunks — without
+        // reading the next partition. This replaces the previous next-partition
+        // *boundary-scan* heuristic (a row-count-stability guard that could falsely
+        // accept a boundary mid-partition); see `bti_decompress_and_parse_target_all`.
+        //
+        // `None` means `offset` is the LAST partition (no successor): the callee
+        // bounds the end with the authoritative data-section length, or falls back
+        // to the safe full-scan path when that length is unknown.
+        let end_bound = self.successor_partition_offset(offset)?.map(|e| e as usize);
 
         // 2. Decode ONLY the target partition at the resolved offset, using the
         //    SAME parser the scan path uses. `bti_decompress_and_parse_target_all`
@@ -339,24 +349,33 @@ impl SSTableReader {
         //    O(1) PARTITIONS decoded regardless of the SSTable's partition count.
         //
         //    Issue #953 correctness fix: this collects EVERY clustering row of the
-        //    one target partition (stopping at the next-partition boundary), not
-        //    just the first row, so a `WHERE pk = ?` over a multi-clustering-row
+        //    one target partition (bounded by the authoritative successor offset /
+        //    data-section length), not just the first row, so a `WHERE pk = ?`
+        //    over a multi-clustering-row
         //    partition returns all rows — byte-identical to filtering the full
         //    scan down to `partition_key`. The single-row `*_target` decoder is
         //    still used by the `get()` point-lookup path, which returns one Value.
         let schema_opt = self.get_table_schema(schema);
         let parser = self.build_v5_parser();
         let key = RowKey::from(partition_key.to_vec());
-        let decoded_rows = self
+        let decoded_rows = match self
             .bti_decompress_and_parse_target_all(
-                offset,
-                size_hint,
+                offset as usize,
+                end_bound,
                 &key,
                 table_id,
                 schema_opt.as_ref(),
                 &parser,
             )
-            .await?;
+            .await?
+        {
+            // Authoritatively bounded decode (rows may be empty for an absent key).
+            Some(rows) => rows,
+            // The seek could not bound the target partition authoritatively (the
+            // LAST partition with an unknown data-section length): fall back to the
+            // safe full scan + retain for correctness, per the #953 mandate.
+            None => return Ok(None),
+        };
 
         // 3. Record the per-partition decode (Issue #953 / #958): exactly ONE
         //    partition is decoded for a hit regardless of how many clustering rows
@@ -700,59 +719,61 @@ impl SSTableReader {
     /// whole-section fallback), the identical prefix-collision key re-verification,
     /// and the identical `parse_block_emit` decode that the user-facing scan path
     /// runs — but instead of breaking after the first row it COLLECTS every row the
-    /// parser emits for the ONE target partition and stops at the next partition
-    /// boundary. Concretely the emit closure:
-    ///   - keeps each `Value` whose decoded key equals the queried key (and whose
-    ///     table id matches), and
-    ///   - `Break`s the instant the parser emits a row with a DIFFERENT partition
-    ///     key — that row belongs to the NEXT partition, which proves the target
-    ///     partition was fully decoded (definitive completeness, even mid-window).
+    /// parser emits for the ONE target partition. The emit closure keeps each
+    /// `Value` whose decoded key equals the queried key (and whose table id
+    /// matches) and `Break`s the instant the parser emits a row with a DIFFERENT
+    /// partition key.
     ///
-    /// Bounding the decompression window (Issue #953 MEDIUM fix). The seek must
-    /// materialize ONLY the chunks covering the target partition — never stitch to
-    /// EOF, which for a head-of-file point lookup on a large SSTable would
-    /// decompress nearly the whole `Data.db` (full-table I/O for one partition).
-    /// Two authoritative bounds replace the old to-EOF stitch:
+    /// Bounding the decompression window (Issue #953 / #951 MEDIUM fix). The seek
+    /// must materialize ONLY the chunks covering the target partition — never
+    /// stitch to EOF (for a head-of-file point lookup on a large SSTable that would
+    /// decompress nearly the whole `Data.db`, full-table I/O for one partition).
+    /// The bound is AUTHORITATIVE, not a heuristic boundary scan:
     ///
-    ///   - **`size_hint = Some(size)` (BIG `nb`)** — `Index.db` gives the target
-    ///     partition's exact uncompressed byte length. The partition occupies
-    ///     `window[within .. within + size]`, so we pull chunks only until
-    ///     `window.len() >= within + size` (or EOF) and then parse once over a
-    ///     window that fully contains the partition. This is the exact bound: the
-    ///     last chunk pulled is the one holding the partition's final byte.
+    ///   - **`end_bound = Some(end)`** — the caller resolved the SUCCESSOR
+    ///     partition's uncompressed start offset (next trie/index entry). The
+    ///     target partition occupies `[offset, end)`, so we pull chunks only until
+    ///     `window.len() >= end - window_base` (or EOF) and then parse ONCE over a
+    ///     window that fully contains the partition. Because the WHOLE `[offset,
+    ///     end)` extent is decompressed before parsing, a row/cell that spans
+    ///     multiple compression chunks is present in full — no mid-stream
+    ///     truncation, no boundary guessing. This is the exact bound for every
+    ///     non-last partition in both BTI (`da`) and BIG (`nb`).
     ///
-    ///   - **`size_hint = None` (BTI `da`)** — the trie carries no size, so the
-    ///     window is bounded by NEXT-PARTITION-BOUNDARY detection. After each
-    ///     appended chunk we re-parse from scratch (deterministic, re-collected
-    ///     each attempt, so no duplication) and ask `bti_collect_partition_rows`
-    ///     whether it reached a DEFINITIVE boundary: either a row with a different
-    ///     partition key whose header is FULLY present (a real next partition, not
-    ///     a truncated tail), or a clean end-of-data within the buffered bytes. If
-    ///     the parse ended ambiguously (buffer truncated mid-row/mid-header, so a
-    ///     boundary cannot be told from truncation) we pull ONE more chunk and
-    ///     retry; we stop at the first definitive boundary OR EOF — never reading
-    ///     past the partition we need. This avoids the truncation bug (a row cut at
-    ///     the buffer tail tripping a bogus boundary) WITHOUT reading to EOF.
+    ///   - **`end_bound = None`** — `offset` is the LAST partition (no successor).
+    ///     The end is then the authoritative data-section length
+    ///     (`CompressionInfo.data_length`); we buffer to that length (or EOF) and
+    ///     parse once. If that length is unavailable (no usable `CompressionInfo`),
+    ///     we CANNOT bound the last partition authoritatively, so we return
+    ///     `Ok(None)` and the caller falls back to the safe full-scan + retain path
+    ///     (correctness over optimization). The previous row-count *stability
+    ///     guard* — itself a heuristic that could falsely accept a next-partition
+    ///     boundary while the target partition was incomplete (a single large
+    ///     multi-chunk cell, static/range-marker regions, or a truncated tail
+    ///     parsed as garbage headers) — has been REMOVED entirely.
     ///
-    /// In both cases a row with a different partition key terminates collection,
-    /// and the whole-section fallback (uncompressed BTI) already has every byte so
-    /// its first parse is authoritative. This yields byte-for-byte the same rows as
-    /// the full-scan path filtered down to `partition_key`.
+    /// The whole-section fallback (uncompressed BTI) already has every byte so its
+    /// first parse is authoritative regardless of the bound. This yields
+    /// byte-for-byte the same rows as the full-scan path filtered down to
+    /// `partition_key`.
     ///
-    /// Returns the partition's rows as `Vec<Value>` (empty when the trie/index
-    /// candidate was a prefix collision for an absent key); the caller wraps each
-    /// in a `(RowKey, Value)` keyed by the queried partition key and applies the
-    /// same tombstone suppression the scan path applies.
+    /// Returns:
+    /// - `Ok(Some(rows))` — the partition's rows (empty when the trie/index
+    ///   candidate was a prefix collision for an absent key). The caller wraps each
+    ///   in a `(RowKey, Value)` and applies the same tombstone suppression the scan
+    ///   path applies.
+    /// - `Ok(None)` — could not bound the (last) partition authoritatively; the
+    ///   caller must fall back to a full scan + retain.
     #[cfg(not(feature = "tombstones"))]
     async fn bti_decompress_and_parse_target_all(
         &self,
         offset: usize,
-        size_hint: Option<usize>,
+        end_bound: Option<usize>,
         key: &RowKey,
         table_id: &TableId,
         schema_opt: Option<&crate::schema::TableSchema>,
         parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
-    ) -> Result<Vec<Value>> {
+    ) -> Result<Option<Vec<Value>>> {
         // Issue #815: each lookup uses its own cursor so concurrent lookups on
         // this reader never share a mutable file position / chunk index.
         let cursor = self.new_scan_cursor().await?;
@@ -809,11 +830,38 @@ impl SSTableReader {
         let within = offset - window_base;
         let chunk_targeted = chunk_length.is_some();
 
-        // Step 1 (chunk-targeted only): buffer enough chunks to expose the
-        // partition header, then run the prefix-collision / chunk-straddle gate.
-        // This bails out cheaply (without decompressing the rest of the file) when
-        // the trie/index candidate is a prefix collision for an absent key.
         if chunk_targeted {
+            // Resolve the AUTHORITATIVE exclusive end of the target partition in
+            // the UNCOMPRESSED offset domain. Non-last partitions are bounded by
+            // the successor partition's start (`end_bound`); the LAST partition is
+            // bounded by the data-section length. When NEITHER is known we cannot
+            // bound the last partition without re-introducing a heuristic, so we
+            // return `Ok(None)` and let the caller fall back to a full scan.
+            let end_offset = match end_bound {
+                Some(end) => end,
+                None => match self
+                    .compression_info
+                    .as_ref()
+                    .map(|ci| ci.data_length as usize)
+                    .filter(|&len| len > offset)
+                {
+                    Some(len) => len,
+                    None => {
+                        debug!(
+                            "BTI single-partition seek: last partition at offset {} has no \
+                             authoritative end (no successor, no usable data_length); falling \
+                             back to full scan",
+                            offset
+                        );
+                        return Ok(None);
+                    }
+                },
+            };
+
+            // Step 1: buffer enough chunks to expose the partition header, then run
+            // the prefix-collision / chunk-straddle gate. This bails out cheaply
+            // (without decompressing the rest of the partition) when the trie/index
+            // candidate is a prefix collision for an absent key.
             loop {
                 // Pull a chunk if the header is not yet (fully) buffered.
                 if within + 2 > window.len()
@@ -827,7 +875,7 @@ impl SSTableReader {
                         false => {
                             // EOF before the header is buffered: nothing decodable
                             // at the resolved offset.
-                            return Ok(Vec::new());
+                            return Ok(Some(Vec::new()));
                         }
                     }
                 }
@@ -839,87 +887,32 @@ impl SSTableReader {
                          (prefix collision); treating as absent",
                         offset
                     );
-                    return Ok(Vec::new());
+                    return Ok(Some(Vec::new()));
                 }
                 break; // header buffered AND key matches
             }
 
-            // Step 2: buffer ONLY the chunks covering the target partition — never
-            // stitch to EOF (the #953 MEDIUM finding: a head-of-file lookup would
-            // otherwise decompress the whole file).
-            //
-            // Authoritative-size fast path: when the index supplies a NON-ZERO
-            // partition byte length, the partition occupies
-            // window[within .. within+size]; buffer exactly that range (or EOF — a
-            // stale size never reads past EOF) and parse once. NOTE: the BIG (`nb`)
-            // `Index.db` parser does NOT store this size (it is left 0 — see
-            // `parse_big_index_entry`), so in practice `size_hint` is `Some(0)`
-            // there and we fall through to boundary detection below. The branch is
-            // kept (gated on `size > 0`) so that if a future index populates the
-            // size we use the exact bound without code change. Using a 0 size as a
-            // bound would truncate the window to the partition start and drop every
-            // row, so the `> 0` guard is load-bearing, not cosmetic.
-            if let Some(size) = size_hint.filter(|&s| s > 0) {
-                let needed = within.saturating_add(size);
-                while window.len() < needed {
-                    if !self
-                        .bti_pull_decompressed_chunk(&cursor, &mut window)
-                        .await?
-                    {
-                        break; // EOF: window holds all available bytes.
-                    }
-                }
-                return self
-                    .bti_collect_partition_rows(&window, within, key, table_id, schema_opt, parser)
-                    .map(|(rows, _complete)| rows);
-            }
-
-            // Size-free bound (BTI `da`, and BIG `nb` whose index carries no size):
-            // bound by NEXT-PARTITION detection WITH a row-count stability guard
-            // that is robust against the truncation bug.
-            //
-            // The hazard (why a single different-key row is NOT enough): when the
-            // buffer truncates mid-row, the parser's row loop fails and the outer
-            // loop scans the truncated tail byte-by-byte, which can decode garbage
-            // into a bogus "different-key" partition — a FALSE boundary that would
-            // drop the rest of the target partition (the bug the old to-EOF stitch
-            // worked around by reading everything).
-            //
-            // The guard: only stop when BOTH hold —
-            //   (a) a different-key row was emitted (a candidate next-partition
-            //       boundary), AND
-            //   (b) the count of TARGET-key rows did NOT grow when the latest chunk
-            //       was appended (the partition stopped growing).
-            // A stable count means the newly added chunk contributed no target-key
-            // row, so every target row is already buffered: stopping cannot lose a
-            // row. Truncation garbage fails this guard — while the target partition
-            // is still being read, each appended chunk adds more target rows, so the
-            // count keeps growing and the bogus boundary is rejected until the real
-            // end (or EOF) is reached. Re-parsing from scratch each iteration is
-            // deterministic (rows re-collected), so no duplication.
-            let mut prev_target_rows: Option<usize> = None;
-            loop {
-                let (rows, saw_next_partition) = self.bti_collect_partition_rows(
-                    &window, within, key, table_id, schema_opt, parser,
-                )?;
-                let count_stable = prev_target_rows == Some(rows.len());
-                if saw_next_partition && count_stable {
-                    // Real boundary: a next partition is present AND the target
-                    // partition stopped growing — every target row is buffered.
-                    return Ok(rows);
-                }
-                prev_target_rows = Some(rows.len());
-
-                // Not yet definitively complete: pull one more chunk and re-parse.
+            // Step 2: buffer EXACTLY the chunks covering `[offset, end_offset)` —
+            // never stitch to EOF (the #953 MEDIUM finding: a head-of-file lookup
+            // would otherwise decompress the whole file). `end_offset` is in the
+            // same uncompressed-offset domain as `window_base + window.len()`, so
+            // the window holds the whole partition once `window.len()` reaches
+            // `end_offset - window_base` (or EOF — a stale end never reads past
+            // EOF). Decompressing the FULL extent before parsing means a row/cell
+            // that spans multiple compression chunks is present in full, so the
+            // single parse below collects every target row without truncation.
+            let needed = end_offset.saturating_sub(window_base);
+            while window.len() < needed {
                 if !self
                     .bti_pull_decompressed_chunk(&cursor, &mut window)
                     .await?
                 {
-                    // EOF: the whole tail is buffered, so the collected rows are the
-                    // complete (last) partition regardless of the boundary guard.
-                    return Ok(rows);
+                    break; // EOF: window holds all available bytes.
                 }
             }
+            return self
+                .bti_collect_partition_rows(&window, within, key, table_id, schema_opt, parser)
+                .map(|(rows, _complete)| Some(rows));
         }
 
         // Whole-section fallback (uncompressed BTI): every byte is already present,
@@ -932,7 +925,7 @@ impl SSTableReader {
             )));
         }
         self.bti_collect_partition_rows(&window, within, key, table_id, schema_opt, parser)
-            .map(|(rows, _complete)| rows)
+            .map(|(rows, _complete)| Some(rows))
     }
 
     /// Read the next compressed chunk from `cursor`, decompress it (if the reader
@@ -980,26 +973,23 @@ impl SSTableReader {
     /// Parse the buffered `window` from `within`, collecting every row of the
     /// FIRST (target) partition and stopping at the next partition boundary.
     ///
-    /// Returns `(rows, complete)`:
+    /// Returns `(rows, saw_next_partition)`:
     /// - `rows` — the target partition's row `Value`s (those whose decoded key
     ///   equals `key` and whose table id matches, issue #831 wrong-table guard),
     ///   in on-disk order.
-    /// - `complete` — `true` iff a DEFINITIVE next-partition boundary was reached:
-    ///   the parser emitted a fully-decoded row whose partition key DIFFERS from
-    ///   `key`. Because `parse_block_emit` only emits a row after decoding its
-    ///   entire header + cells, a different-key emission proves the next
-    ///   partition's header is FULLY present in the buffer — a real boundary, not a
-    ///   tail truncation. `complete == false` means the parse consumed the buffer
-    ///   without seeing a different-key row, which is AMBIGUOUS: either the target
-    ///   is the last partition in the buffer (truly complete once EOF is reached)
-    ///   or the buffer truncated mid-partition. The caller resolves the ambiguity
-    ///   by pulling another chunk and re-parsing, or by treating EOF as complete.
+    /// - `saw_next_partition` — `true` iff the parser emitted a fully-decoded row
+    ///   whose partition key DIFFERS from `key`, at which point collection stops.
     ///
-    /// This is the bounding primitive for the BTI (`da`) seek, which has no
-    /// authoritative partition size: it lets the caller stop the moment the next
-    /// partition appears instead of stitching to EOF (Issue #953). The BIG (`nb`)
-    /// and whole-section callers already have a complete window and ignore the
-    /// flag.
+    /// Because the caller now decompresses the partition's AUTHORITATIVE byte
+    /// extent `[offset, end)` before parsing (the successor offset / data-section
+    /// length, issue #953 / #951), the window always fully contains the target
+    /// partition — there is no mid-partition truncation to resolve. The
+    /// `Break`-on-different-key behaviour is defence in depth: when the window's
+    /// final chunk overruns slightly into the next partition (chunks are
+    /// fixed-size, so the extent rounds up to a chunk boundary), the first
+    /// different-key row terminates collection so no next-partition row is ever
+    /// kept. The returned flag is currently informational; the caller does not loop
+    /// on it (the bound is authoritative, not boundary-scanned).
     #[cfg(not(feature = "tombstones"))]
     fn bti_collect_partition_rows(
         &self,
@@ -1025,9 +1015,10 @@ impl SSTableReader {
                     }
                     Ok(std::ops::ControlFlow::Continue(()))
                 } else {
-                    // First row of the NEXT partition — fully decoded, so its
-                    // header is entirely present (a real boundary, not a truncation
-                    // artifact). The target partition is definitively complete.
+                    // First row of the NEXT partition (the authoritative extent
+                    // can overrun into it by up to one chunk). Stop here so no
+                    // next-partition row is collected; the target partition's rows
+                    // are already complete because its whole extent was buffered.
                     saw_next_partition = true;
                     Ok(std::ops::ControlFlow::Break(()))
                 }

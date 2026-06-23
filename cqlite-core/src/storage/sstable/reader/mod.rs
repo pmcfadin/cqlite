@@ -572,6 +572,7 @@ impl SSTableReader {
             version_gates,
             bti_partitions_db,
             bti_rows_db,
+            bti_partition_offsets: std::sync::OnceLock::new(),
         })
     }
 
