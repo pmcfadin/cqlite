@@ -59,6 +59,58 @@ pub struct SSTablePredicate {
     pub column: String,
     pub operation: SSTableFilterOp,
     pub values: Vec<Value>,
+    /// When `Some`, this predicate constrains the Murmur3 *token* of the
+    /// partition key formed by these columns (e.g. `WHERE token(pk) >= ?`),
+    /// rather than a stored column value (Issue #955, Epic #951). The bound(s)
+    /// in [`Self::values`] are `Value::BigInt` token values, and evaluation
+    /// hashes the row's raw partition key with `cassandra_murmur3_token` and
+    /// compares it to the bound — Cassandra's `Murmur3Partitioner` semantics.
+    ///
+    /// `None` for ordinary column predicates. Carries the partition-key column
+    /// names (in declared order) so a multi-column `token(a, b)` is supported,
+    /// keeping the representation typed rather than encoding intent in
+    /// [`Self::column`].
+    pub token_columns: Option<Vec<String>>,
+}
+
+impl SSTablePredicate {
+    /// Construct an ordinary column predicate (`token_columns: None`).
+    pub fn column(
+        column: impl Into<String>,
+        operation: SSTableFilterOp,
+        values: Vec<Value>,
+    ) -> Self {
+        Self {
+            column: column.into(),
+            operation,
+            values,
+            token_columns: None,
+        }
+    }
+
+    /// Construct a token predicate over `token_columns` (the partition-key
+    /// columns, in declared order). `column` is a human-readable label
+    /// (`"token(a, b)"`) used only for diagnostics; evaluation never reads a
+    /// stored column with that name — it hashes the row key instead.
+    pub fn token(
+        token_columns: Vec<String>,
+        operation: SSTableFilterOp,
+        values: Vec<Value>,
+    ) -> Self {
+        let label = format!("token({})", token_columns.join(", "));
+        Self {
+            column: label,
+            operation,
+            values,
+            token_columns: Some(token_columns),
+        }
+    }
+
+    /// True if this predicate constrains the partition-key token rather than a
+    /// stored column (Issue #955).
+    pub fn is_token(&self) -> bool {
+        self.token_columns.is_some()
+    }
 }
 
 /// SSTable filter operations
@@ -207,70 +259,103 @@ fn collect_sstable_predicates(expr: &WhereExpression) -> Vec<SSTablePredicate> {
 }
 
 fn comparison_to_sstable_predicate(comp: &ComparisonExpression) -> Option<SSTablePredicate> {
-    let SelectExpression::Column(col_ref) = &comp.left else {
-        return None;
-    };
-    let column = col_ref.column.clone();
-
-    match (&comp.operator, &comp.right) {
-        (ComparisonOperator::Equal, ComparisonRightSide::Value(value_expr)) => {
-            let value = literal_value(value_expr)?;
-            Some(SSTablePredicate {
-                column,
-                operation: SSTableFilterOp::Equal,
-                values: vec![value],
-            })
+    // The left side is either a bare column or a `token(col, ...)` call. A
+    // `token(...)` predicate constrains the partition-key token, not a stored
+    // column, so it gets a token predicate (Issue #955); anything else only
+    // supports the bare-column form (Issue #788's existing behaviour).
+    match &comp.left {
+        SelectExpression::Column(col_ref) => {
+            column_comparison_to_predicate(col_ref.column.clone(), comp)
         }
+        SelectExpression::Function(func) if func.name.eq_ignore_ascii_case("token") => {
+            token_comparison_to_predicate(func, comp)
+        }
+        _ => None,
+    }
+}
+
+/// Convert a bare-column comparison (`col <op> ...`) to a pushed-down predicate.
+fn column_comparison_to_predicate(
+    column: String,
+    comp: &ComparisonExpression,
+) -> Option<SSTablePredicate> {
+    use SSTableFilterOp as Op;
+    match (&comp.operator, &comp.right) {
+        (ComparisonOperator::Equal, ComparisonRightSide::Value(value_expr)) => Some(
+            SSTablePredicate::column(column, Op::Equal, vec![literal_value(value_expr)?]),
+        ),
         (ComparisonOperator::In, ComparisonRightSide::ValueList(value_exprs)) => {
             let values: Vec<Value> = value_exprs.iter().filter_map(literal_value).collect();
-            (!values.is_empty()).then_some(SSTablePredicate {
-                column,
-                operation: SSTableFilterOp::In,
-                values,
-            })
+            (!values.is_empty()).then(|| SSTablePredicate::column(column, Op::In, values))
         }
         (ComparisonOperator::Between, ComparisonRightSide::Range(start_expr, end_expr)) => {
             let start = literal_value(start_expr)?;
             let end = literal_value(end_expr)?;
-            Some(SSTablePredicate {
+            Some(SSTablePredicate::column(
                 column,
-                operation: SSTableFilterOp::Range,
-                values: vec![start, end],
-            })
+                Op::Range,
+                vec![start, end],
+            ))
         }
         // Single-bound clustering inequalities. Without these arms the operators
         // fall through to `None` and the restriction is silently dropped, so the
         // whole partition is returned instead of the requested slice (Issue #788).
-        (ComparisonOperator::GreaterThan, ComparisonRightSide::Value(value_expr)) => {
-            Some(SSTablePredicate {
-                column,
-                operation: SSTableFilterOp::Gt,
-                values: vec![literal_value(value_expr)?],
-            })
-        }
-        (ComparisonOperator::GreaterThanOrEqual, ComparisonRightSide::Value(value_expr)) => {
-            Some(SSTablePredicate {
-                column,
-                operation: SSTableFilterOp::Gte,
-                values: vec![literal_value(value_expr)?],
-            })
-        }
-        (ComparisonOperator::LessThan, ComparisonRightSide::Value(value_expr)) => {
-            Some(SSTablePredicate {
-                column,
-                operation: SSTableFilterOp::Lt,
-                values: vec![literal_value(value_expr)?],
-            })
-        }
-        (ComparisonOperator::LessThanOrEqual, ComparisonRightSide::Value(value_expr)) => {
-            Some(SSTablePredicate {
-                column,
-                operation: SSTableFilterOp::Lte,
-                values: vec![literal_value(value_expr)?],
-            })
-        }
+        (ComparisonOperator::GreaterThan, ComparisonRightSide::Value(v)) => Some(
+            SSTablePredicate::column(column, Op::Gt, vec![literal_value(v)?]),
+        ),
+        (ComparisonOperator::GreaterThanOrEqual, ComparisonRightSide::Value(v)) => Some(
+            SSTablePredicate::column(column, Op::Gte, vec![literal_value(v)?]),
+        ),
+        (ComparisonOperator::LessThan, ComparisonRightSide::Value(v)) => Some(
+            SSTablePredicate::column(column, Op::Lt, vec![literal_value(v)?]),
+        ),
+        (ComparisonOperator::LessThanOrEqual, ComparisonRightSide::Value(v)) => Some(
+            SSTablePredicate::column(column, Op::Lte, vec![literal_value(v)?]),
+        ),
         _ => None,
     }
+}
+
+/// Convert a `token(col, ...) <op> <bound>` comparison to a token predicate
+/// (Issue #955). The bound must be an integer literal (the i64 token value);
+/// `token(...) = ?`, `IN`, and `BETWEEN` are not supported (Cassandra only
+/// allows inequalities on a token restriction), so they fall through to `None`.
+fn token_comparison_to_predicate(
+    func: &FunctionCall,
+    comp: &ComparisonExpression,
+) -> Option<SSTablePredicate> {
+    use SSTableFilterOp as Op;
+    // Collect the partition-key column names the token() is computed over.
+    let mut token_columns = Vec::with_capacity(func.args.len());
+    for arg in &func.args {
+        match arg {
+            SelectExpression::Column(col_ref) => token_columns.push(col_ref.column.clone()),
+            _ => return None,
+        }
+    }
+    if token_columns.is_empty() {
+        return None;
+    }
+
+    let op = match comp.operator {
+        ComparisonOperator::GreaterThan => Op::Gt,
+        ComparisonOperator::GreaterThanOrEqual => Op::Gte,
+        ComparisonOperator::LessThan => Op::Lt,
+        ComparisonOperator::LessThanOrEqual => Op::Lte,
+        // `token(pk) = ?` is legal CQL but is an exact-token restriction; we do
+        // not currently special-case it (it falls back to a full scan + filter).
+        _ => return None,
+    };
+    let ComparisonRightSide::Value(value_expr) = &comp.right else {
+        return None;
+    };
+    // The token bound is an i64; the parser emits integer literals as BigInt.
+    let bound = match literal_value(value_expr)? {
+        Value::BigInt(n) => Value::BigInt(n),
+        Value::Integer(n) => Value::BigInt(n as i64),
+        _ => return None,
+    };
+    Some(SSTablePredicate::token(token_columns, op, vec![bound]))
 }
 
 fn literal_value(expr: &SelectExpression) -> Option<Value> {
@@ -454,5 +539,62 @@ mod tests {
             3,
             "all three restrictions must be captured; got {predicates:?}"
         );
+    }
+
+    /// Issue #955: `WHERE pk IN (1, 2, 3)` parses end-to-end and pushes down a
+    /// single `In` predicate carrying all three literal values, so the executor
+    /// can fan it out to targeted lookups.
+    #[test]
+    fn query_plan_carries_in_predicate() {
+        use crate::query::select_parser::parse_select;
+
+        let statement =
+            parse_select("SELECT * FROM ks.t WHERE pk IN (1, 2, 3)").expect("IN query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        let predicates = collect_sstable_predicates(&where_clause);
+
+        assert_eq!(predicates.len(), 1, "one IN predicate; got {predicates:?}");
+        let p = &predicates[0];
+        assert_eq!(p.column, "pk");
+        assert!(matches!(p.operation, SSTableFilterOp::In));
+        assert!(!p.is_token());
+        assert_eq!(
+            p.values,
+            vec![Value::BigInt(1), Value::BigInt(2), Value::BigInt(3)]
+        );
+    }
+
+    /// Issue #955: a `token(pk)` range restriction parses to typed token
+    /// predicates (NOT bare-column predicates), carrying i64 bounds — including
+    /// a negative lower bound (tokens span the full i64 range).
+    #[test]
+    fn query_plan_carries_token_range_predicate() {
+        use crate::query::select_parser::parse_select;
+
+        let statement =
+            parse_select("SELECT * FROM ks.t WHERE token(pk) >= -100 AND token(pk) < 5000")
+                .expect("token-range query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        let predicates = collect_sstable_predicates(&where_clause);
+
+        assert_eq!(predicates.len(), 2, "two token bounds; got {predicates:?}");
+        assert!(
+            predicates.iter().all(|p| p.is_token()),
+            "both predicates must be token predicates; got {predicates:?}"
+        );
+        let lower = predicates
+            .iter()
+            .find(|p| matches!(p.operation, SSTableFilterOp::Gte))
+            .expect("a Gte token bound");
+        assert_eq!(
+            lower.token_columns.as_deref(),
+            Some(["pk".to_string()].as_slice())
+        );
+        assert_eq!(lower.values, vec![Value::BigInt(-100)]);
+        let upper = predicates
+            .iter()
+            .find(|p| matches!(p.operation, SSTableFilterOp::Lt))
+            .expect("a Lt token bound");
+        assert_eq!(upper.values, vec![Value::BigInt(5000)]);
     }
 }

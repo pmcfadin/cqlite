@@ -796,6 +796,27 @@ impl SelectParser {
             return self.parse_writetime_ttl_call(function);
         }
 
+        // Unary minus on a numeric literal (e.g. `token(pk) >= -1000`). Partition
+        // tokens span the full i64 range, so negative bounds are essential for
+        // token-range restrictions (Issue #955). Only a bare negative number is
+        // supported here; arbitrary unary-minus expressions are out of scope.
+        if matches!(self.peek(), Token::Minus) {
+            self.advance()?;
+            return match self.current_token.clone() {
+                Some(Token::Integer(n)) => {
+                    self.advance()?;
+                    Ok(SelectExpression::Literal(Value::BigInt(-n)))
+                }
+                Some(Token::Float(f)) => {
+                    self.advance()?;
+                    Ok(SelectExpression::Literal(Value::Float(-f)))
+                }
+                other => Err(Error::cql_parse(format!(
+                    "Expected a numeric literal after unary minus, found: {other:?}"
+                ))),
+            };
+        }
+
         // Take ownership/copy of literal payloads up front so we can call &mut self.
         match self.current_token.clone() {
             Some(Token::Identifier(name)) => {
