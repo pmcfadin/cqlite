@@ -62,8 +62,15 @@ if [ "$DIFF_MODE" -eq 1 ]; then
     echo "  fetch the base or run without --diff to scan all tracked Rust files." >&2
     exit 1
   fi
-  FILES=$(git -C "$REPO_ROOT" diff --name-only --diff-filter=ACMR "$BASE"...HEAD \
-            | grep -E '\.rs$' || true)
+  # Capture diff output and status BEFORE piping to grep, so a diff failure
+  # (e.g. shallow checkout with no merge base) is a hard error, not a false-clean.
+  if ! DIFF_OUT=$(git -C "$REPO_ROOT" diff --name-only --diff-filter=ACMR "$BASE"...HEAD 2>&1); then
+    echo "audit-inert-surfaces: 'git diff $BASE...HEAD' failed:" >&2
+    echo "$DIFF_OUT" >&2
+    echo "  (shallow clone? run 'git fetch --unshallow' or fetch the base, or drop --diff.)" >&2
+    exit 1
+  fi
+  FILES=$(printf '%s\n' "$DIFF_OUT" | grep -E '\.rs$' || true)
 elif [ -n "$PATHS" ]; then
   # shellcheck disable=SC2086
   FILES=$(git -C "$REPO_ROOT" ls-files $PATHS 2>/dev/null | grep -E '\.rs$' || true)
