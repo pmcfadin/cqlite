@@ -19,6 +19,7 @@ pub mod performance_benchmarks;
 pub mod reader;
 pub mod summary_reader;
 pub mod version_gate;
+pub mod work_counters;
 pub use reader::SSTableReader;
 pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;
@@ -1015,6 +1016,11 @@ impl SSTableManager {
                 {
                     Ok(mut merged) => {
                         merged.retain(matches_key);
+                        // Work-counter gate (Issue #958): the k-way merge parsed
+                        // every surviving candidate, and `merged` (post-retain) is
+                        // exactly the partitions this lookup returns.
+                        work_counters::add_sstables_scanned(candidates.len() as u64);
+                        work_counters::add_partitions_parsed(merged.len() as u64);
                         return Ok(merged);
                     }
                     Err(e) => {
@@ -1033,6 +1039,10 @@ impl SSTableManager {
         // candidate and keep only the target partition's rows.
         let mut all_results = Vec::new();
         for reader in &candidates {
+            // Work-counter gate (Issue #958): one real Data.db parse per surviving
+            // candidate. Counted here (not at prune time) so the counter reflects
+            // SSTables actually opened/scanned, the cost a regression would balloon.
+            work_counters::add_sstables_scanned(1);
             let mut results = reader.scan(table_id, None, None, None, schema).await?;
             results.retain(matches_key);
             all_results.extend(results);
@@ -1042,6 +1052,7 @@ impl SSTableManager {
         if candidates.len() > 1 {
             all_results.sort_by(|a, b| a.0.cmp(&b.0));
         }
+        work_counters::add_partitions_parsed(all_results.len() as u64);
         Ok(all_results)
     }
 

@@ -33,7 +33,7 @@ constraints:
 
 | Tool | Measures | How it's wired in |
 |------|----------|-------------------|
-| **Criterion** (existing) | wall time, throughput, regression deltas | `cqlite-core/benches/{read,write,partition_lookup,m1_performance}.rs`, gated by `benches/perf-gate.json` |
+| **Criterion** (existing) | wall time, throughput, regression deltas | `cqlite-core/benches/{read,write,partition_lookup,partition_lookup_scaling,m1_performance}.rs`, gated by `benches/perf-gate.json` (the strict subset) |
 | **pprof-rs** (`pprof` crate) | CPU call stacks → flamegraph SVG per bench | attached to every bench via `benches/profiling/mod.rs`; activates only with `--profile-time` |
 | **dhat-rs** (`dhat` crate) | allocation counts, churn, peak heap vs 128 MiB budget | `cqlite-core/examples/heap_profile.rs` behind the `dhat-heap` feature |
 
@@ -71,6 +71,8 @@ fixtures, same seeded RNG, so two profile runs are comparable:
 - `write/ingest_wal_off` (CPU-bound, strictly gated), `write/ingest_wal_on`
   (fsync-bound, advisory), `write/flush` — the write engine.
 - `partition_lookup/*` — Index.db lookup micro-benches.
+- `partition_lookup_scaling/sstables_{4,8,16,32}` — single-partition
+  `WHERE pk = ?` latency vs SSTable count (Issue #958, see below).
 - `concurrent_scan/{buffered,mmap}/n{1,2,4,8}` — aggregate throughput of N
   concurrent full scans on a *single* `SSTableReader` (Issue #917). Documents
   the read-path concurrency scaling unlocked by #815; **not** part of the
@@ -115,6 +117,39 @@ This bench is intentionally **excluded from `perf-gate.json`**: concurrent
 scaling is IO/scheduler-bound and noisy on shared CI runners, so it documents
 the curve and guards against re-serialization locally (via `./scripts/profile.sh`)
 without wiring a flaky timing threshold into CI.
+
+### Single-partition lookup scaling (Issue #958, Epic #951)
+
+`partition_lookup_scaling` measures `SSTableManager::scan_partition` latency for
+one fixed, fully-constrained `WHERE pk = ?` key against a table backed by an
+increasing number of SSTable generations (4, 8, 16, 32). The fixture is built
+deterministically in a temp dir via the public write API — one `flush()` per
+generation, no compaction, one disjoint partition per generation — so the target
+key lives in exactly one SSTable and the other generations must be pruned by the
+bloom filter before any `Data.db` is parsed.
+
+The intended observation is **sub-linear scaling**: because #949 prunes
+non-candidate SSTables, per-lookup latency should grow far slower than the
+generation count (ideally near-flat, modulo the O(N) bloom checks). A regression
+to a full scan would show latency growing roughly linearly with the generation
+count — the same regression the `issue_958_partition_lookup_work_bound`
+integration test fails on as a hard gate. The bench is the *trend* companion to
+that test: it quantifies how the latency curve bends, where the test only
+asserts a discrete work bound.
+
+Read it by comparing the `sstables_4 → sstables_32` medians in the criterion
+report: a < 8× spread across an 8× generation increase confirms the prune is
+working. Like `concurrent_scan`, this bench is **excluded from
+`perf-gate.json`** (it is a documentation/trend signal, not a strict timing
+gate); it is still picked up by `./scripts/profile.sh bench` (it is in
+`BENCH_TARGETS`) so a baseline is saved alongside the gated benches. Run it
+directly with:
+
+```bash
+cargo bench --package cqlite-core \
+  --features write-support,state_machine \
+  --bench partition_lookup_scaling
+```
 
 ---
 
