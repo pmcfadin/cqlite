@@ -271,7 +271,7 @@ async fn within_sstable_seek_decodes_o1_partitions() {
              the seek, which would mean the BIG seek path is never exercised",
         );
         assert!(
-            decoded >= 1 && decoded <= MAX_PARTITIONS_DECODED,
+            (1..=MAX_PARTITIONS_DECODED).contains(&decoded),
             "BIG: a seek-positive key must decode exactly the one target partition (got {decoded})",
         );
 
@@ -313,7 +313,7 @@ async fn within_sstable_seek_decodes_o1_partitions() {
             "Issue #953 (BTI): expected at least one key the trie-resolved seek decodes directly",
         );
         assert!(
-            decoded >= 1 && decoded <= MAX_PARTITIONS_DECODED,
+            (1..=MAX_PARTITIONS_DECODED).contains(&decoded),
             "BTI: a seek-positive key must decode exactly the one target partition (got {decoded})",
         );
 

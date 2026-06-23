@@ -284,12 +284,14 @@ impl SSTableReader {
     ///   re-checks via a full scan rather than risk a false negative.
     ///
     /// Prefix-collision / wrong-offset guard: the decode
-    /// ([`bti_decompress_and_parse_target`]) re-verifies the decoded partition key
-    /// equals `partition_key` before emitting, so a BTI prefix-collision candidate
-    /// or a stale/mismatched index offset decodes to nothing and is reported as
-    /// absent — never a wrong partition.
+    /// ([`bti_decompress_and_parse_target_all`]) re-verifies the decoded partition
+    /// key equals `partition_key` before collecting any row, so a BTI
+    /// prefix-collision candidate or a stale/mismatched index offset decodes to
+    /// nothing and is reported as absent — never a wrong partition. Every
+    /// clustering row of the matched partition is collected (not just the first),
+    /// so a multi-row partition returns all rows.
     ///
-    /// [`bti_decompress_and_parse_target`]: Self::bti_decompress_and_parse_target
+    /// [`bti_decompress_and_parse_target_all`]: Self::bti_decompress_and_parse_target_all
     ///
     /// Compiled only for the default (`not(tombstones)`) build: the manager's
     /// seek-driven `scan_partition` exists only there, so under `tombstones` this
@@ -324,47 +326,67 @@ impl SSTableReader {
         };
 
         // 2. Decode ONLY the target partition at the resolved offset, using the
-        //    SAME parser the scan path uses. `bti_decompress_and_parse_target`
+        //    SAME parser the scan path uses. `bti_decompress_and_parse_target_all`
         //    chunk-targets the decompression (decodes just the chunk window that
         //    holds the partition) and re-verifies the decoded key, so this is
-        //    O(1) partitions decoded regardless of the SSTable's partition count.
+        //    O(1) PARTITIONS decoded regardless of the SSTable's partition count.
+        //
+        //    Issue #953 correctness fix: this collects EVERY clustering row of the
+        //    one target partition (stopping at the next-partition boundary), not
+        //    just the first row, so a `WHERE pk = ?` over a multi-clustering-row
+        //    partition returns all rows — byte-identical to filtering the full
+        //    scan down to `partition_key`. The single-row `*_target` decoder is
+        //    still used by the `get()` point-lookup path, which returns one Value.
         let schema_opt = self.get_table_schema(schema);
         let parser = self.build_v5_parser();
         let key = RowKey::from(partition_key.to_vec());
-        let decoded = self
-            .bti_decompress_and_parse_target(offset, &key, table_id, schema_opt.as_ref(), &parser)
+        let decoded_rows = self
+            .bti_decompress_and_parse_target_all(
+                offset,
+                &key,
+                table_id,
+                schema_opt.as_ref(),
+                &parser,
+            )
             .await?;
 
-        // 3. Record the per-partition decode (Issue #953): exactly one partition is
-        //    decoded for a hit. This is the signal that proves the within-SSTable
-        //    seek (vs a full parse-then-retain).
-        match decoded {
-            Some(value) => {
-                super::super::work_counters::add_partition_decoded();
-                // Tombstone suppression matches the user-facing scan path
-                // (`sequential_scan`/`bti_scan_with_metadata` both apply it).
-                if self.filter_tombstone(&value) {
-                    Ok(Some(vec![(key, value)]))
-                } else {
-                    Ok(Some(Vec::new()))
-                }
-            }
-            // Decoded nothing at the resolved offset. Whether that is authoritative
-            // depends on HOW the offset was resolved (Constraint #4: never return a
-            // wrong/empty result from an unsupported/inconclusive seek):
-            //
-            // - **BTI** — the trie is the authoritative present/absent oracle and
-            //   the decode re-verified the key, so "decoded nothing" means the trie
-            //   candidate was a prefix-collision for an absent key. AUTHORITATIVE
-            //   empty: the caller does NOT fall back.
-            // - **BIG** — the `Index.db` offset is only a candidate position; its
-            //   promoted-index / chunk layout is not as load-bearing as the BTI
-            //   trie, so a failed decode at the resolved offset is INCONCLUSIVE (a
-            //   partition that straddles a chunk boundary, or a stale offset, can
-            //   fail the chunk-targeted decode yet be found by a full parse).
-            //   Fall back to a full scan rather than risk a false negative.
-            None if is_bti => Ok(Some(Vec::new())),
-            None => Ok(None),
+        // 3. Record the per-partition decode (Issue #953 / #958): exactly ONE
+        //    partition is decoded for a hit regardless of how many clustering rows
+        //    it yields — `partitions_decoded` counts partitions, not rows. This is
+        //    the signal that proves the within-SSTable seek (vs a full
+        //    parse-then-retain). A non-empty decode means the partition exists.
+        if !decoded_rows.is_empty() {
+            super::super::work_counters::add_partition_decoded();
+            // Tombstone suppression matches the user-facing scan path
+            // (`sequential_scan`/`bti_scan_with_metadata` both apply it),
+            // applied per-row so a row tombstone is dropped while live rows in
+            // the same partition survive.
+            let rows: Vec<(RowKey, Value)> = decoded_rows
+                .into_iter()
+                .filter(|value| self.filter_tombstone(value))
+                .map(|value| (key.clone(), value))
+                .collect();
+            return Ok(Some(rows));
+        }
+
+        // Decoded nothing at the resolved offset. Whether that is authoritative
+        // depends on HOW the offset was resolved (Constraint #4: never return a
+        // wrong/empty result from an unsupported/inconclusive seek):
+        //
+        // - **BTI** — the trie is the authoritative present/absent oracle and the
+        //   decode re-verified the key, so "decoded nothing" means the trie
+        //   candidate was a prefix-collision for an absent key. AUTHORITATIVE
+        //   empty: the caller does NOT fall back.
+        // - **BIG** — the `Index.db` offset is only a candidate position; its
+        //   promoted-index / chunk layout is not as load-bearing as the BTI trie,
+        //   so a failed decode at the resolved offset is INCONCLUSIVE (a partition
+        //   that straddles a chunk boundary, or a stale offset, can fail the
+        //   chunk-targeted decode yet be found by a full parse). Fall back to a
+        //   full scan rather than risk a false negative.
+        if is_bti {
+            Ok(Some(Vec::new()))
+        } else {
+            Ok(None)
         }
     }
 
@@ -653,6 +675,250 @@ impl SSTableReader {
                 }
             }
         }
+    }
+
+    /// Collect-ALL-rows variant of [`bti_decompress_and_parse_target`] for the
+    /// within-SSTable seek (`scan_single_partition`, Issue #953 / #951).
+    ///
+    /// [`bti_decompress_and_parse_target`] stops after the FIRST emitted row of the
+    /// decoded partition — correct for a `get()` point lookup that returns a single
+    /// `Value`, but WRONG for `scan_partition`, which must hand the query layer
+    /// EVERY clustering row of the partition so it can apply clustering predicates.
+    /// A `WHERE pk = ?` over a table with multiple clustering rows per partition
+    /// would otherwise drop every row after the first whenever the seek succeeds
+    /// (the original #953 bug — see the multi-row regression test).
+    ///
+    /// This variant reuses the identical window-building (chunk targeting or
+    /// whole-section fallback), the identical prefix-collision key re-verification,
+    /// and the identical `parse_block_emit` decode that the user-facing scan path
+    /// runs — but instead of breaking after the first row it COLLECTS every row the
+    /// parser emits for the ONE target partition and stops at the next partition
+    /// boundary. Concretely the emit closure:
+    ///   - keeps each `Value` whose decoded key equals the queried key (and whose
+    ///     table id matches), and
+    ///   - `Break`s the instant the parser emits a row with a DIFFERENT partition
+    ///     key — that row belongs to the NEXT partition, which proves the target
+    ///     partition was fully decoded (definitive completeness, even mid-window).
+    ///
+    /// Completeness when the next partition is NOT yet in the window (the target is
+    /// the last/only partition in the buffered chunks): `parse_block_emit` returns
+    /// `Ok` without a different-key row. For the chunk-targeted path we then pull
+    /// the next chunk and re-parse from scratch (the parse is deterministic and we
+    /// re-collect each attempt, so no duplication), until either a different-key
+    /// row appears or `read_next_block` reaches EOF — at EOF the whole tail is
+    /// buffered, so the collected rows are the complete partition. For the
+    /// whole-section fallback every byte is already present, so the first parse is
+    /// authoritative. This yields byte-for-byte the same rows as the full-scan
+    /// path filtered down to `partition_key`.
+    ///
+    /// Returns the partition's rows as `Vec<Value>` (empty when the trie/index
+    /// candidate was a prefix collision for an absent key); the caller wraps each
+    /// in a `(RowKey, Value)` keyed by the queried partition key and applies the
+    /// same tombstone suppression the scan path applies.
+    #[cfg(not(feature = "tombstones"))]
+    async fn bti_decompress_and_parse_target_all(
+        &self,
+        offset: usize,
+        key: &RowKey,
+        table_id: &TableId,
+        schema_opt: Option<&crate::schema::TableSchema>,
+        parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+    ) -> Result<Vec<Value>> {
+        // Issue #815: each lookup uses its own cursor so concurrent lookups on
+        // this reader never share a mutable file position / chunk index.
+        let cursor = self.new_scan_cursor().await?;
+
+        // Determine the chunk-targeting parameters. `chunk_length == 0` (or no
+        // CompressionInfo) means we cannot chunk-target -> whole-section fallback.
+        let chunk_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.chunk_length as usize)
+            .filter(|&len| len > 0);
+
+        let (target_chunk, window_base, mut window) = match chunk_length {
+            Some(len) => {
+                let (target_chunk, window_base, _within) = Self::bti_chunk_target(offset, len);
+                let chunk_start = self
+                    .compression_info
+                    .as_ref()
+                    .and_then(|ci| ci.compressed_chunk_offset(target_chunk))
+                    .ok_or_else(|| {
+                        Error::corruption(format!(
+                            "BTI single-partition seek: no compressed offset for target chunk {} \
+                             (offset {}, chunk_length {})",
+                            target_chunk, offset, len
+                        ))
+                    })?;
+                {
+                    let mut file_guard = cursor.file.lock().await;
+                    file_guard.seek(SeekFrom::Start(chunk_start)).await?;
+                }
+                cursor
+                    .chunk_index
+                    .store(target_chunk, std::sync::atomic::Ordering::Relaxed);
+                (target_chunk, window_base, Vec::<u8>::new())
+            }
+            None => {
+                // Whole-section fallback (uncompressed BTI, or chunk_length absent/0).
+                let header_size = self.calculate_header_size();
+                {
+                    let mut file_guard = cursor.file.lock().await;
+                    file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+                }
+                let whole = self.stitch_all_chunks(&cursor).await?;
+                (0usize, 0usize, whole)
+            }
+        };
+
+        if offset < window_base {
+            return Err(Error::corruption(format!(
+                "BTI single-partition seek: resolved offset {} precedes window base {} (chunk {})",
+                offset, window_base, target_chunk
+            )));
+        }
+        let within = offset - window_base;
+        let chunk_targeted = chunk_length.is_some();
+
+        // Step 1 (chunk-targeted only): buffer enough chunks to expose the
+        // partition header, then run the prefix-collision / chunk-straddle gate.
+        // This bails out cheaply (without decompressing the rest of the file) when
+        // the trie/index candidate is a prefix collision for an absent key.
+        if chunk_targeted {
+            loop {
+                // Pull a chunk if the header is not yet (fully) buffered.
+                if within + 2 > window.len()
+                    || !Self::bti_partition_key_bytes_available(&window, within, key.as_bytes())
+                {
+                    match self
+                        .bti_pull_decompressed_chunk(&cursor, &mut window)
+                        .await?
+                    {
+                        true => continue, // chunk appended; re-check the header
+                        false => {
+                            // EOF before the header is buffered: nothing decodable
+                            // at the resolved offset.
+                            return Ok(Vec::new());
+                        }
+                    }
+                }
+
+                let key_matches = self.bti_partition_key_matches(&window, within, key.as_bytes());
+                if !key_matches {
+                    debug!(
+                        "BTI seek candidate at offset {} did not match queried key \
+                         (prefix collision); treating as absent",
+                        offset
+                    );
+                    return Ok(Vec::new());
+                }
+                break; // header buffered AND key matches
+            }
+
+            // Step 2: the partition can span many chunks. Buffer the ENTIRE tail
+            // from the target chunk to EOF, then parse ONCE over a never-truncated
+            // window. Re-parsing a partially buffered window is unsafe — a row
+            // truncated at the buffer tail can trip the parser's structural
+            // next-partition detection and emit a bogus boundary, dropping the rest
+            // of the partition. Stitching to EOF eliminates that ambiguity while
+            // still skipping every chunk BEFORE the target partition (issue #831
+            // perf intent for the leading chunks is preserved).
+            while self
+                .bti_pull_decompressed_chunk(&cursor, &mut window)
+                .await?
+            {}
+        } else if within >= window.len() {
+            // Whole-section fallback: the resolved offset is past the data.
+            return Err(Error::corruption(format!(
+                "BTI trie resolved Data.db offset {} beyond decompressed data section ({} bytes)",
+                offset,
+                window.len()
+            )));
+        }
+
+        // Step 3: parse the complete (never-truncated) window and collect every
+        // row of the ONE target partition, stopping at the next partition.
+        self.bti_collect_partition_rows(&window, within, key, table_id, schema_opt, parser)
+    }
+
+    /// Read the next compressed chunk from `cursor`, decompress it (if the reader
+    /// has a compression algorithm), and append the decompressed bytes to
+    /// `window`. Returns `true` when a chunk was appended, `false` at EOF.
+    ///
+    /// Shared by the chunk-targeted seek so the header-buffering and
+    /// stitch-to-EOF loops use one decompression code path.
+    #[cfg(not(feature = "tombstones"))]
+    async fn bti_pull_decompressed_chunk(
+        &self,
+        cursor: &ScanCursor,
+        window: &mut Vec<u8>,
+    ) -> Result<bool> {
+        use crate::storage::sstable::compression::Compression;
+        match self.read_next_block(cursor).await? {
+            Some(compressed_chunk) => {
+                let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader
+                {
+                    let compression = Compression::new(*compression_reader.algorithm())?;
+                    compression.decompress(&compressed_chunk).map_err(|e| {
+                        Error::corruption(format!(
+                            "BTI single-partition seek: failed to decompress chunk: {}",
+                            e
+                        ))
+                    })?
+                } else {
+                    // No compression reader despite CompressionInfo: treat the raw
+                    // chunk bytes as already-decompressed data.
+                    compressed_chunk
+                };
+                window.extend_from_slice(&decompressed_chunk);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Parse the fully buffered `window` from `within` and collect every row of
+    /// the FIRST (target) partition, stopping at the next partition boundary.
+    ///
+    /// PRECONDITION: `window[within..]` holds the COMPLETE target partition (the
+    /// caller stitched chunks to EOF, or it is the whole-section buffer). Because
+    /// the window is never truncated mid-partition, a row whose decoded key
+    /// differs from the queried key is unambiguously the first row of the NEXT
+    /// partition, so the parse is stopped there. Rows whose key equals the queried
+    /// key and whose table id matches (issue #831 wrong-table guard) are collected
+    /// in on-disk order.
+    #[cfg(not(feature = "tombstones"))]
+    fn bti_collect_partition_rows(
+        &self,
+        window: &[u8],
+        within: usize,
+        key: &RowKey,
+        table_id: &TableId,
+        schema_opt: Option<&crate::schema::TableSchema>,
+        parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+    ) -> Result<Vec<Value>> {
+        let mut rows: Vec<Value> = Vec::new();
+        parser.parse_block_emit(
+            &window[within..],
+            schema_opt,
+            self,
+            |(tid, entry_key, entry_value)| {
+                if entry_key.as_bytes() == key.as_bytes() {
+                    // A row of the TARGET partition. Verify the table id matches
+                    // (a wrong-table query never returns a row, issue #831).
+                    if table_ids_match_strict(&tid, table_id) {
+                        rows.push(entry_value);
+                    }
+                    Ok(std::ops::ControlFlow::Continue(()))
+                } else {
+                    // First row of the NEXT partition — the target partition is
+                    // fully decoded (the window is complete, so this is a real
+                    // boundary, not a truncation artifact). Stop the parse.
+                    Ok(std::ops::ControlFlow::Break(()))
+                }
+            },
+        )?;
+        Ok(rows)
     }
 
     /// Returns true when the `[flags][key_len: u8][key bytes]` prefix at `within`
