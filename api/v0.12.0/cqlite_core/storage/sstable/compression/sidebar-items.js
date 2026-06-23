@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["CompressionAlgorithm","CompressionPriority"],"struct":["ChunkInfo","ChunkedDecompressionConfig","Compression","CompressionInfo","CompressionReader","CompressionStats","StreamingDecompressor"]};

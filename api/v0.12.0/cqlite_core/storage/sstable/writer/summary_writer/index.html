@@ -1,0 +1,47 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Summary.db writer - writes sampled index entries"><title>cqlite_core::storage::sstable::writer::summary_writer - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../../../" data-static-root-path="../../../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module summary_writer</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.12.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module summary_<wbr>writer</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#summarydb-format" title="Summary.db Format">Summary.db Format</a></li><li><a href="#header-format-24-bytes-big-endian" title="Header Format (24 bytes, big-endian)">Header Format (24 bytes, big-endian)</a></li><li><a href="#entry-format" title="Entry Format">Entry Format</a></li><li><a href="#serialized-keys-file-end" title="Serialized Keys (File End)">Serialized Keys (File End)</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#constants" title="Constants">Constants</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>storage::<wbr>sstable::<wbr>writer</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../../../index.html">cqlite_core</a>::<wbr><a href="../../../index.html">storage</a>::<wbr><a href="../../index.html">sstable</a>::<wbr><a href="../index.html">writer</a></div><h1>Module <span>summary_<wbr>writer</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../../../src/cqlite_core/storage/sstable/writer/summary_writer.rs.html#1-1082">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Summary.db writer - writes sampled index entries</p>
+<p>Generates the Summary.db component by sampling Index.db entries.
+Used for efficient partition key range scanning without reading full index.</p>
+<p>Critical requirements:</p>
+<ul>
+<li>Little-endian offsets (ONLY LE component in SSTable!)</li>
+<li>Sampling every N entries (default: 128)</li>
+<li>First and last keys always included</li>
+</ul>
+<h3 id="summarydb-format"><a class="doc-anchor" href="#summarydb-format">§</a>Summary.db Format</h3><div class="example-wrap"><pre class="language-text"><code>+------------------------+
+| Header (24 bytes)      |
++------------------------+
+| Offset Table (LE u32[])| &lt;- Little-endian!
++------------------------+
+| Entry Data             |
+|   key + position (BE)  |
++------------------------+
+| First Key (serialized) |
++------------------------+
+| Last Key (serialized)  |
++------------------------+</code></pre></div><h3 id="header-format-24-bytes-big-endian"><a class="doc-anchor" href="#header-format-24-bytes-big-endian">§</a>Header Format (24 bytes, big-endian)</h3><div class="example-wrap"><pre class="language-c"><code>struct summary_header {
+    be32 min_index_interval;      // Minimum partitions between entries (usually 128)
+    be32 entries_count;           // Number of sampled entries
+    be64 summary_entries_size;    // Size of offset table + entry data
+    be32 sampling_level;          // Downsampling level (1–128). For a freshly written
+                                  // SSTable this is always BASE_SAMPLING_LEVEL (128).
+                                  // It only decreases when Cassandra downsamples during
+                                  // compaction. It does NOT equal min_index_interval.
+                                  // Source: IndexSummary.java:88-94, 226-229 (Cassandra 5.0.8)
+    be32 size_at_full_sampling;   // Estimated entry count if sampled at BASE_SAMPLING_LEVEL.
+                                  // = total_partition_count / min_index_interval.
+                                  // Source: IndexSummary.java:235-237 (getMaxNumberOfEntries())
+};</code></pre></div><h3 id="entry-format"><a class="doc-anchor" href="#entry-format">§</a>Entry Format</h3>
+<p>Entries have no length prefix. Key boundaries are determined by offset differences.</p>
+<div class="example-wrap"><pre class="language-c"><code>struct summary_entry {
+    byte key[];        // Variable length - no prefix!
+    be64 position;     // Position in Index.db file (big-endian)
+};</code></pre></div><h3 id="serialized-keys-file-end"><a class="doc-anchor" href="#serialized-keys-file-end">§</a>Serialized Keys (File End)</h3><div class="example-wrap"><pre class="language-c"><code>struct serialized_key {
+    be32 size;        // Big-endian length
+    byte key[size];
+};</code></pre></div>
+<p>References:</p>
+<ul>
+<li><code>docs/sstables-definitive-guide/chapters/06-index-and-summary.md</code></li>
+<li><code>cqlite-core/src/storage/sstable/summary_reader.rs</code> - Format parser</li>
+</ul>
+</div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.SummaryWriter.html" title="struct cqlite_core::storage::sstable::writer::summary_writer::SummaryWriter">Summary<wbr>Writer</a></dt><dd>Summary.db component writer</dd></dl><h2 id="constants" class="section-header">Constants<a href="#constants" class="anchor">§</a></h2><dl class="item-table"><dt><a class="constant" href="constant.BASE_SAMPLING_LEVEL.html" title="constant cqlite_core::storage::sstable::writer::summary_writer::BASE_SAMPLING_LEVEL">BASE_<wbr>SAMPLING_<wbr>LEVEL</a></dt><dd><code>sampling_level</code> written for a freshly constructed SSTable.</dd></dl></section></div></main></body></html>

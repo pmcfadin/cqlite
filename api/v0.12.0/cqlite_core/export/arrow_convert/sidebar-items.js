@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["ArrowConvertError"],"fn":["build_arrow_schema","rows_to_record_batch"]};

@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["SchemaAwareReaderError"],"struct":["SchemaAwareReader","SchemaAwareReaderConfig","SchemaAwareStats"]};

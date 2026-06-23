@@ -1,0 +1,1 @@
+window.SIDEBAR_ITEMS = {"enum":["FileHealthStatus"],"struct":["CacheStatistics","CachedDataEntry","DataRow","KeyspaceInfo","RowMetadata","SSTableDataManager","SSTableDataManagerConfig","SSTableFileInfo","TableDiscovery","TableInfo"]};
