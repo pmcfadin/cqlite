@@ -43,6 +43,10 @@ use std::sync::Mutex;
 /// #958 (work counters) and #962 (fast-path unification); do not rename without
 /// updating those consumers and `docs/access-paths.md`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// snake_case so the serialized tag matches the documented stable `label()` form
+// (e.g. "partition_lookup", "fallback_full_scan") rather than the Rust variant
+// name. Keep this in lockstep with `label()` and `docs/access-paths.md`.
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum AccessPath {
     /// Every SSTable for the table is scanned and rows are filtered in memory.
@@ -128,6 +132,9 @@ impl AccessPath {
 /// a targeted path. It must never be used to paper over an unexpected fallback —
 /// an unexpected fallback should surface as a failing access-path assertion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+// snake_case so the serialized form matches the documented stable `label()`
+// (e.g. "metadata_scan_path"). Keep in lockstep with `label()`.
+#[serde(rename_all = "snake_case")]
 #[non_exhaustive]
 pub enum FallbackReason {
     /// No schema was available, so the partition-key columns cannot be
@@ -247,6 +254,31 @@ mod tests {
         assert!(AccessPath::PartitionLookup.is_targeted());
         assert!(!AccessPath::PartitionLookup.is_full_scan());
         assert_eq!(AccessPath::PartitionLookup.label(), "partition_lookup");
+    }
+
+    #[test]
+    fn serde_tag_matches_label() {
+        // The serialized form must equal the documented stable label(), not the
+        // Rust variant name. A simple variant serializes as a bare JSON string.
+        assert_eq!(
+            serde_json::to_string(&AccessPath::PartitionLookup).unwrap(),
+            "\"partition_lookup\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AccessPath::MetadataPartitionLookup).unwrap(),
+            "\"metadata_partition_lookup\""
+        );
+        // FallbackReason tag also matches its label().
+        assert_eq!(
+            serde_json::to_string(&FallbackReason::MetadataScanPath).unwrap(),
+            "\"metadata_scan_path\""
+        );
+        // Round-trips.
+        let p = AccessPath::FallbackFullScan {
+            reason: FallbackReason::PartitionKeyNotFullyConstrained,
+        };
+        let json = serde_json::to_string(&p).unwrap();
+        assert_eq!(serde_json::from_str::<AccessPath>(&json).unwrap(), p);
     }
 
     #[test]

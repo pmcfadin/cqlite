@@ -136,6 +136,39 @@ fn contract_query_metadata_full() {
     insta::assert_json_snapshot!(metadata);
 }
 
+/// Issue #960: pins the serialized wire form of a populated `access_path`. The
+/// tag must be the documented stable lowercase `label()` form, NOT the Rust
+/// variant name, and `FallbackFullScan` must carry its `reason` (also lowercase).
+#[test]
+fn contract_query_metadata_access_path_wire_form() {
+    use cqlite_core::query::access_path::{AccessPath, FallbackReason};
+
+    let targeted = QueryMetadata {
+        access_path: Some(AccessPath::PartitionLookup),
+        ..QueryMetadata::default()
+    };
+    let v = serde_json::to_value(&targeted).unwrap();
+    assert_eq!(v["access_path"], serde_json::json!("partition_lookup"));
+
+    let fallback = QueryMetadata {
+        access_path: Some(AccessPath::FallbackFullScan {
+            reason: FallbackReason::MetadataScanPath,
+        }),
+        ..QueryMetadata::default()
+    };
+    let v = serde_json::to_value(&fallback).unwrap();
+    assert_eq!(
+        v["access_path"],
+        serde_json::json!({ "fallback_full_scan": { "reason": "metadata_scan_path" } })
+    );
+
+    // `None` is omitted from the wire form (serde skip) so existing snapshots
+    // stay byte-stable.
+    let none = QueryMetadata::default();
+    let v = serde_json::to_value(&none).unwrap();
+    assert!(v.get("access_path").is_none());
+}
+
 // =============================================================================
 // ColumnInfo Contract Tests
 // =============================================================================

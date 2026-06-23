@@ -100,6 +100,14 @@ struct ExecutionContext {
     /// select item is detected during planning so the reader can thread
     /// per-cell write metadata.
     pub projection_flags: ProjectionFlags,
+    /// Access path chosen by the SSTable-scan step for THIS query (Issue #960).
+    ///
+    /// Per-query state, set where the scan step decides its path. The
+    /// result-attached `QueryMetadata.access_path` is read from here, NOT from
+    /// the process-global probe, so concurrent SELECTs cannot overwrite each
+    /// other's reported path between `record()` and the result build. The global
+    /// probe (`access_path::record/last`) remains for test assertions only.
+    pub access_path: Option<AccessPath>,
 }
 
 /// Aggregation state for GROUP BY operations
@@ -849,6 +857,7 @@ impl SelectExecutor {
             columns: self.get_result_columns(&plan.statement).await?,
             rows_processed: 0,
             projection_flags,
+            access_path: None,
         };
 
         // Handle queries without FROM clause (like SELECT 1)
@@ -986,8 +995,9 @@ impl SelectExecutor {
                 performance: Default::default(),
                 warnings: vec![],
                 // Issue #960: surface the access path the SSTable-scan step chose
-                // on the result, in addition to the test-accessible global probe.
-                access_path: crate::query::access_path::last(),
+                // on the result from PER-QUERY state (not the global probe), so a
+                // concurrent SELECT cannot overwrite it between record() and here.
+                access_path: context.access_path.clone(),
             },
         })
     }
@@ -1389,9 +1399,11 @@ impl SelectExecutor {
             // honestly as a fallback so it cannot masquerade as a targeted lookup;
             // #962 will flip it to `AccessPath::MetadataPartitionLookup` once the
             // metadata scan accepts a partition-targeted lookup.
-            crate::query::access_path::record(AccessPath::FallbackFullScan {
+            let metadata_path = AccessPath::FallbackFullScan {
                 reason: FallbackReason::MetadataScanPath,
-            });
+            };
+            context.access_path = Some(metadata_path.clone());
+            crate::query::access_path::record(metadata_path);
             let scan_results = self
                 .storage
                 .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
@@ -1440,6 +1452,7 @@ impl SelectExecutor {
                     );
                     // Issue #960: a fully-constrained `WHERE pk = ?` served by a
                     // partition-targeted lookup that prunes SSTables.
+                    context.access_path = Some(AccessPath::PartitionLookup);
                     crate::query::access_path::record(AccessPath::PartitionLookup);
                     self.storage
                         .scan_partition(table, &pk_bytes, schema_opt.as_ref())
@@ -1447,6 +1460,7 @@ impl SelectExecutor {
                 }
                 PartitionLookupOutcome::Fallback(reason) => {
                     // Issue #960: report the honest reason a full scan was chosen.
+                    context.access_path = Some(AccessPath::FallbackFullScan { reason });
                     crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
                     self.storage
                         .scan(table, None, None, None, schema_opt.as_ref())
