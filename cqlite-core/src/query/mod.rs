@@ -129,6 +129,11 @@ impl QueryEngine {
         self.advanced_engine.execute(cql).await
     }
 
+    /// Execute a SELECT with positional `?` parameters (Issue #961).
+    pub async fn execute_with_params(&self, cql: &str, params: &[Value]) -> Result<QueryResult> {
+        self.advanced_engine.execute_with_params(cql, params).await
+    }
+
     /// Prepare a query for repeated execution
     pub async fn prepare(&self, cql: &str) -> Result<Arc<PreparedQuery>> {
         self.advanced_engine.prepare(cql).await

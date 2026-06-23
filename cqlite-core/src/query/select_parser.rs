@@ -29,6 +29,10 @@ pub struct SelectParser {
     current_token: Option<Token>,
     /// Tokenizer for the input
     tokenizer: Tokenizer,
+    /// Next 0-based positional index to assign to a `?` bind marker (Issue #961).
+    /// Markers are numbered left-to-right in source order, matching CQL's
+    /// positional-parameter binding.
+    next_bind_index: usize,
 }
 
 /// Token types for CQL parsing
@@ -568,6 +572,7 @@ impl SelectParser {
         Ok(Self {
             current_token,
             tokenizer,
+            next_bind_index: 0,
         })
     }
 
@@ -842,6 +847,16 @@ impl SelectParser {
             Some(Token::Null) => {
                 self.advance()?;
                 Ok(SelectExpression::Literal(Value::Null))
+            }
+            // Positional `?` bind marker (Issue #961). Allowed anywhere a value
+            // expression is — the RHS of a comparison, an IN value list, a
+            // BETWEEN range bound, or a SELECT-list literal. The 0-based index is
+            // assigned left-to-right in source order and resolved at bind time.
+            Some(Token::Question) => {
+                let index = self.next_bind_index;
+                self.next_bind_index += 1;
+                self.advance()?;
+                Ok(SelectExpression::BindMarker(index))
             }
             Some(Token::LeftParen) => {
                 self.advance()?;
@@ -1648,6 +1663,84 @@ mod tests {
         // `0` must remain an integer literal (the blob probe only fires on `0x`).
         let v = where_equal_literal("SELECT * FROM ks.tbl WHERE age = 0");
         assert_eq!(v, Value::BigInt(0));
+    }
+
+    // --- Positional bind marker (`?`) parser tests (Issue #961) ---
+
+    #[test]
+    fn test_single_bind_marker_in_where() {
+        let stmt = parse_select("SELECT * FROM ks.tbl WHERE id = ?").expect("must parse");
+        assert_eq!(stmt.bind_marker_count(), 1);
+        let where_expr = stmt.where_clause.expect("WHERE expected");
+        match where_expr {
+            WhereExpression::Comparison(ComparisonExpression {
+                operator: ComparisonOperator::Equal,
+                right: ComparisonRightSide::Value(SelectExpression::BindMarker(idx)),
+                ..
+            }) => assert_eq!(idx, 0),
+            other => panic!("expected `= ?` comparison with BindMarker(0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_bind_markers_numbered_left_to_right() {
+        let stmt = parse_select("SELECT * FROM ks.tbl WHERE a = ? AND b = ?").expect("must parse");
+        assert_eq!(stmt.bind_marker_count(), 2);
+        // Collect marker indices from both comparisons in order.
+        let WhereExpression::And(exprs) = stmt.where_clause.expect("WHERE expected") else {
+            panic!("expected AND of two comparisons");
+        };
+        let indices: Vec<usize> = exprs
+            .iter()
+            .map(|e| match e {
+                WhereExpression::Comparison(ComparisonExpression {
+                    right: ComparisonRightSide::Value(SelectExpression::BindMarker(idx)),
+                    ..
+                }) => *idx,
+                other => panic!("expected BindMarker comparison, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_bind_marker_binds_to_literal() {
+        let mut stmt = parse_select("SELECT * FROM ks.tbl WHERE id = ?").expect("must parse");
+        stmt.bind_parameters(&[Value::Integer(42)])
+            .expect("binding must succeed");
+        let where_expr = stmt.where_clause.expect("WHERE expected");
+        match where_expr {
+            WhereExpression::Comparison(ComparisonExpression {
+                right: ComparisonRightSide::Value(SelectExpression::Literal(v)),
+                ..
+            }) => assert_eq!(v, Value::Integer(42)),
+            other => panic!("expected bound literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bind_marker_in_list_count() {
+        let stmt = parse_select("SELECT * FROM ks.tbl WHERE id IN (?, ?, ?)").expect("must parse");
+        assert_eq!(stmt.bind_marker_count(), 3);
+    }
+
+    #[test]
+    fn test_bind_marker_count_mismatch_errors() {
+        let mut stmt = parse_select("SELECT * FROM ks.tbl WHERE id = ?").expect("must parse");
+        assert!(stmt.bind_parameters(&[]).is_err(), "too few must error");
+        let mut stmt2 = parse_select("SELECT * FROM ks.tbl WHERE id = ?").expect("must parse");
+        assert!(
+            stmt2
+                .bind_parameters(&[Value::Integer(1), Value::Integer(2)])
+                .is_err(),
+            "too many must error"
+        );
+    }
+
+    #[test]
+    fn test_no_bind_markers_count_zero() {
+        let stmt = parse_select("SELECT * FROM ks.tbl WHERE id = 5").expect("must parse");
+        assert_eq!(stmt.bind_marker_count(), 0);
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! Covers projections, WHERE expressions, aggregates, GROUP BY/HAVING,
 //! ORDER BY, LIMIT/OFFSET, collection access, and arithmetic expressions.
 
-use crate::{TableId, Value};
+use crate::{Error, Result, TableId, Value};
 use serde::{Deserialize, Serialize};
 
 /// Complete SELECT statement AST
@@ -60,6 +60,16 @@ pub enum SelectExpression {
     WriteTimeTtl(WriteTimeTtlCall),
     /// Literal value
     Literal(Value),
+    /// Positional bind marker (`?`) carrying its 0-based index in the statement.
+    ///
+    /// Issue #961: produced by the SELECT parser whenever it encounters a `?`
+    /// placeholder in a value position (e.g. the RHS of a WHERE comparison). It
+    /// is a *transient* node: parameter binding
+    /// (`bind_parameters`) rewrites every `BindMarker(i)` into the corresponding
+    /// `Literal(params[i])` before the statement reaches the optimizer or
+    /// executor. Reaching execution with an unbound marker is a logic error and
+    /// surfaces as a query-execution error rather than a panic.
+    BindMarker(usize),
     /// Collection access (list[0], map['key'])
     CollectionAccess(CollectionAccessExpression),
     /// Arithmetic expression
@@ -323,6 +333,60 @@ impl SelectStatement {
         }
     }
 
+    /// Count the positional `?` bind markers in this statement.
+    ///
+    /// Issue #961: the marker indices are assigned left-to-right by the parser,
+    /// so the highest index plus one equals the required parameter count. Used by
+    /// `execute_with_params` / prepared execution to enforce a strict arity check
+    /// before binding.
+    pub fn bind_marker_count(&self) -> usize {
+        let mut max_plus_one = 0usize;
+        if let SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) = &self.select_clause {
+            for expr in exprs {
+                expr.scan_bind_markers(&mut max_plus_one);
+            }
+        }
+        if let Some(where_expr) = &self.where_clause {
+            where_expr.scan_bind_markers(&mut max_plus_one);
+        }
+        if let Some(having) = &self.having_clause {
+            having.scan_bind_markers(&mut max_plus_one);
+        }
+        max_plus_one
+    }
+
+    /// Substitute positional `?` bind markers with `params`, in place.
+    ///
+    /// Issue #961: each `SelectExpression::BindMarker(i)` is rewritten to
+    /// `SelectExpression::Literal(params[i].clone())`. The supplied parameter
+    /// count must exactly equal `bind_marker_count()`; too few or too many is a
+    /// hard error (strict CQL arity). Binding happens *before* optimization, so
+    /// the bound literals participate in partition-key classification, encoding,
+    /// and typed coercion exactly as if they had been written inline.
+    pub fn bind_parameters(&mut self, params: &[Value]) -> Result<()> {
+        let expected = self.bind_marker_count();
+        if params.len() != expected {
+            return Err(Error::query_execution(format!(
+                "Parameter count mismatch: query has {expected} bind marker(s), got {} parameter(s)",
+                params.len()
+            )));
+        }
+        if let SelectClause::Columns(exprs) | SelectClause::Distinct(exprs) =
+            &mut self.select_clause
+        {
+            for expr in exprs.iter_mut() {
+                expr.bind_parameters(params)?;
+            }
+        }
+        if let Some(where_expr) = &mut self.where_clause {
+            where_expr.bind_parameters(params)?;
+        }
+        if let Some(having) = &mut self.having_clause {
+            having.bind_parameters(params)?;
+        }
+        Ok(())
+    }
+
     /// Get all referenced columns (for query planning).
     ///
     /// `SELECT *` contributes nothing here; the projection is resolved later
@@ -364,6 +428,83 @@ impl SelectExpression {
         matches!(self, SelectExpression::Aggregate(_))
     }
 
+    /// Update `max_plus_one` to `max(current, marker_index + 1)` over every
+    /// `BindMarker` reachable from this expression (Issue #961).
+    fn scan_bind_markers(&self, max_plus_one: &mut usize) {
+        match self {
+            SelectExpression::BindMarker(idx) => *max_plus_one = (*max_plus_one).max(idx + 1),
+            SelectExpression::Aggregate(agg) => {
+                for arg in &agg.args {
+                    arg.scan_bind_markers(max_plus_one);
+                }
+            }
+            SelectExpression::Function(func) => {
+                for arg in &func.args {
+                    arg.scan_bind_markers(max_plus_one);
+                }
+            }
+            SelectExpression::CollectionAccess(access) => {
+                let (_, sub) = match access {
+                    CollectionAccessExpression::ListIndex(c, e)
+                    | CollectionAccessExpression::MapKey(c, e)
+                    | CollectionAccessExpression::SetContains(c, e) => (c, e),
+                };
+                sub.scan_bind_markers(max_plus_one);
+            }
+            SelectExpression::Arithmetic(arith) => {
+                arith.left.scan_bind_markers(max_plus_one);
+                arith.right.scan_bind_markers(max_plus_one);
+            }
+            SelectExpression::Aliased(expr, _) => expr.scan_bind_markers(max_plus_one),
+            SelectExpression::Column(_)
+            | SelectExpression::Literal(_)
+            | SelectExpression::WriteTimeTtl(_) => {}
+        }
+    }
+
+    /// Replace each `BindMarker(i)` reachable from this expression with
+    /// `Literal(params[i])` (Issue #961). Caller guarantees `params` covers every
+    /// marker index (`SelectStatement::bind_parameters` validates the count).
+    fn bind_parameters(&mut self, params: &[Value]) -> Result<()> {
+        match self {
+            SelectExpression::BindMarker(idx) => {
+                let value = params.get(*idx).ok_or_else(|| {
+                    Error::query_execution(format!(
+                        "Bind marker index {idx} has no corresponding parameter"
+                    ))
+                })?;
+                *self = SelectExpression::Literal(value.clone());
+            }
+            SelectExpression::Aggregate(agg) => {
+                for arg in agg.args.iter_mut() {
+                    arg.bind_parameters(params)?;
+                }
+            }
+            SelectExpression::Function(func) => {
+                for arg in func.args.iter_mut() {
+                    arg.bind_parameters(params)?;
+                }
+            }
+            SelectExpression::CollectionAccess(access) => {
+                let sub = match access {
+                    CollectionAccessExpression::ListIndex(_, e)
+                    | CollectionAccessExpression::MapKey(_, e)
+                    | CollectionAccessExpression::SetContains(_, e) => e,
+                };
+                sub.bind_parameters(params)?;
+            }
+            SelectExpression::Arithmetic(arith) => {
+                arith.left.bind_parameters(params)?;
+                arith.right.bind_parameters(params)?;
+            }
+            SelectExpression::Aliased(expr, _) => expr.bind_parameters(params)?,
+            SelectExpression::Column(_)
+            | SelectExpression::Literal(_)
+            | SelectExpression::WriteTimeTtl(_) => {}
+        }
+        Ok(())
+    }
+
     /// Get all column references in this expression
     pub fn get_column_refs(&self) -> Vec<ColumnRef> {
         match self {
@@ -389,7 +530,7 @@ impl SelectExpression {
                 refs
             }
             SelectExpression::Aliased(expr, _) => expr.get_column_refs(),
-            SelectExpression::Literal(_) => Vec::new(),
+            SelectExpression::Literal(_) | SelectExpression::BindMarker(_) => Vec::new(),
         }
     }
 }
@@ -430,6 +571,68 @@ impl WhereExpression {
                 expr.get_column_refs()
             }
         }
+    }
+
+    /// Update `max_plus_one` to cover every `BindMarker` in this WHERE tree
+    /// (Issue #961). Markers may appear on either side of a comparison.
+    fn scan_bind_markers(&self, max_plus_one: &mut usize) {
+        match self {
+            WhereExpression::Comparison(comp) => {
+                comp.left.scan_bind_markers(max_plus_one);
+                match &comp.right {
+                    ComparisonRightSide::Value(expr) => expr.scan_bind_markers(max_plus_one),
+                    ComparisonRightSide::ValueList(exprs) => {
+                        for expr in exprs {
+                            expr.scan_bind_markers(max_plus_one);
+                        }
+                    }
+                    ComparisonRightSide::Range(start, end) => {
+                        start.scan_bind_markers(max_plus_one);
+                        end.scan_bind_markers(max_plus_one);
+                    }
+                }
+            }
+            WhereExpression::And(exprs) | WhereExpression::Or(exprs) => {
+                for expr in exprs {
+                    expr.scan_bind_markers(max_plus_one);
+                }
+            }
+            WhereExpression::Not(expr) | WhereExpression::Parentheses(expr) => {
+                expr.scan_bind_markers(max_plus_one)
+            }
+        }
+    }
+
+    /// Replace each `BindMarker(i)` in this WHERE tree with `Literal(params[i])`
+    /// (Issue #961). Markers may appear on either side of a comparison and inside
+    /// `IN` value lists / `BETWEEN` ranges.
+    fn bind_parameters(&mut self, params: &[Value]) -> Result<()> {
+        match self {
+            WhereExpression::Comparison(comp) => {
+                comp.left.bind_parameters(params)?;
+                match &mut comp.right {
+                    ComparisonRightSide::Value(expr) => expr.bind_parameters(params)?,
+                    ComparisonRightSide::ValueList(exprs) => {
+                        for expr in exprs.iter_mut() {
+                            expr.bind_parameters(params)?;
+                        }
+                    }
+                    ComparisonRightSide::Range(start, end) => {
+                        start.bind_parameters(params)?;
+                        end.bind_parameters(params)?;
+                    }
+                }
+            }
+            WhereExpression::And(exprs) | WhereExpression::Or(exprs) => {
+                for expr in exprs.iter_mut() {
+                    expr.bind_parameters(params)?;
+                }
+            }
+            WhereExpression::Not(expr) | WhereExpression::Parentheses(expr) => {
+                expr.bind_parameters(params)?
+            }
+        }
+        Ok(())
     }
 
     /// Check if this WHERE expression can be pushed down to SSTable level.

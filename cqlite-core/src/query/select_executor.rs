@@ -1603,6 +1603,14 @@ impl SelectExecutor {
                 })
             }
             SelectExpression::Literal(value) => Ok(value.clone()),
+            // Issue #961: a `?` placeholder must be bound to a concrete value
+            // before execution. Reaching here means binding was skipped, which is
+            // an internal logic error rather than user input — report it instead
+            // of panicking.
+            SelectExpression::BindMarker(idx) => Err(Error::query_execution(format!(
+                "Unbound parameter placeholder ?{idx} reached execution; \
+                 parameters must be bound before the query runs"
+            ))),
             SelectExpression::CollectionAccess(access) => {
                 self.evaluate_collection_access(access, row)
             }
