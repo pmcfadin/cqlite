@@ -833,3 +833,97 @@ async fn token_in_is_rejected_on_both_paths() {
         "FINDING 2: token(pk) BETWEEN must be a planning error",
     );
 }
+
+// ---------------------------------------------------------------------------
+// roborev FINDING (whole-tree): a token() restriction under OR/NOT was never
+// traversed by the pushdown walk, so it was neither pushed nor enforced by a
+// residual filter — silently ignored. The whole-tree validation pass in
+// optimize() now guarantees no token() restriction is ever dropped: it is
+// pushed (top-level / AND), or it errors (unsupported form anywhere, or any
+// token form under OR/NOT). These must hold on BOTH execute and
+// execute_streaming, since both go through optimize().
+// ---------------------------------------------------------------------------
+
+/// `WHERE ck > 0 AND NOT token(pk) IN (1, 2)` — the exact roborev scenario: an
+/// unsupported token() form under NOT, combined with a pushable `ck > 0`.
+/// Previously `ck > 0` was pushed, the residual Filter omitted, and the invalid
+/// token IN restriction silently ignored. Must now error on both paths.
+#[tokio::test]
+async fn token_in_under_not_rejected_on_both_paths() {
+    let db = match setup("wide-table-bti.cql", "/test_da/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let sql = format!("SELECT pk, ck FROM {WIDE_TABLE} WHERE ck > 0 AND NOT token(pk) IN (1, 2)");
+    assert!(
+        db.execute(&sql).await.is_err(),
+        "whole-tree: `ck > 0 AND NOT token(pk) IN (1, 2)` must error on execute(), \
+         not silently ignore the token restriction",
+    );
+    assert!(
+        db.execute_streaming(&sql, StreamingConfig::default())
+            .await
+            .is_err(),
+        "whole-tree: same query must error on execute_streaming() (not an empty iterator)",
+    );
+}
+
+/// `token(pk) IN (...) OR ck = 3` — unsupported token() form under OR must be a
+/// planning error on both paths.
+#[tokio::test]
+async fn token_in_under_or_rejected_on_both_paths() {
+    let db = match setup("wide-table-bti.cql", "/test_da/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let sql = format!("SELECT pk, ck FROM {WIDE_TABLE} WHERE token(pk) IN (1, 2) OR ck = 3");
+    assert!(
+        db.execute(&sql).await.is_err(),
+        "whole-tree: token(pk) IN (...) OR ck = 3 must error on execute()",
+    );
+    assert!(
+        db.execute_streaming(&sql, StreamingConfig::default())
+            .await
+            .is_err(),
+        "whole-tree: token(pk) IN (...) OR ck = 3 must error on execute_streaming()",
+    );
+}
+
+/// `token(pk) > 5 OR ck = 3` — a SUPPORTED token range, but under OR it can be
+/// neither pushed down nor evaluated by the row-level WHERE evaluator (which has
+/// no token() support). Per the documented decision it must be a CLEAR planning
+/// error rather than silently ignoring the token bound. Asserted on both paths.
+#[tokio::test]
+async fn supported_token_range_under_or_rejected_on_both_paths() {
+    let db = match setup("wide-table-bti.cql", "/test_da/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let sql = format!("SELECT pk, ck FROM {WIDE_TABLE} WHERE token(pk) > 5 OR ck = 3");
+    let err = db
+        .execute(&sql)
+        .await
+        .expect_err("whole-tree: a supported token range under OR must error, not be ignored");
+    assert!(
+        err.to_string().contains("token()"),
+        "error must explain the token() restriction; got: {err}",
+    );
+    assert!(
+        db.execute_streaming(&sql, StreamingConfig::default())
+            .await
+            .is_err(),
+        "whole-tree: supported token range under OR must error on execute_streaming() too",
+    );
+}

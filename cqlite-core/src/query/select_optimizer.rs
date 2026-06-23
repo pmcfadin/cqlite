@@ -169,6 +169,13 @@ impl SelectOptimizer {
         };
 
         if let Some(where_clause) = &statement.where_clause {
+            // Validate EVERY token() restriction in the WHERE tree before pushdown
+            // (roborev FINDING: token() under OR/NOT was never traversed, so an
+            // unsupported or non-pushable token restriction was silently dropped
+            // while a sibling pushable predicate suppressed the residual Filter).
+            // This whole-tree pass guarantees no token() restriction is ever
+            // ignored: it is pushed, or it errors here.
+            validate_token_forms_whole_tree(where_clause, true)?;
             plan.sstable_predicates = collect_sstable_predicates(where_clause)?;
         }
 
@@ -259,6 +266,88 @@ fn collect_sstable_predicates(expr: &WhereExpression) -> Result<Vec<SSTablePredi
     }
     walk(expr, &mut out)?;
     Ok(out)
+}
+
+/// Whole-WHERE-tree validation that NO `token(...)` restriction is ever silently
+/// dropped, regardless of its position (top-level, AND, OR, NOT, parenthesized).
+///
+/// `collect_sstable_predicates` only descends pushable AND branches, so a
+/// `token(...)` comparison under OR/NOT was previously never inspected: an
+/// unsupported form (IN/BETWEEN/non-literal RHS/non-pk args) was not rejected,
+/// and even a *supported* range/equality token form could not be pushed there.
+/// In both cases, if a sibling predicate was pushable, the optimizer dropped the
+/// residual Filter and the token restriction was ignored — wrong results
+/// (roborev FINDING).
+///
+/// This pass visits every branch. At each `token(...)` comparison it:
+///   * runs the full token-form validation (`token_comparison_to_predicate`),
+///     so an UNSUPPORTED form is a planning error anywhere in the tree; and
+///   * if the comparison is in a NON-PUSHABLE position (`pushable == false`,
+///     i.e. under OR/NOT), rejects even a SUPPORTED token form with a clear
+///     planning error.
+///
+/// Why reject supported token() forms under OR/NOT rather than evaluate them as
+/// a residual filter: the row-level WHERE evaluator (`evaluate_select_expression`
+/// in `select_executor.rs`) returns "Function expressions not yet implemented"
+/// for `SelectExpression::Function`, so it CANNOT compute
+/// `cassandra_murmur3_token(row key)` at the row level. Token evaluation exists
+/// only in `evaluate_leaf` over pushed `SSTablePredicate`s, which are fed solely
+/// by pushable AND branches. A token() leaf under OR/NOT can therefore be neither
+/// pushed nor evaluated — so the only honest outcome is a clear error, never a
+/// dropped restriction. This is a narrow, documented limitation
+/// (`token()` under OR/NOT is unsupported).
+///
+/// `pushable` starts `true` at the root and at AND children (the positions
+/// `collect_sstable_predicates` actually descends) and flips to `false` under
+/// OR and NOT. `Parentheses` is transparent and preserves the current value.
+fn validate_token_forms_whole_tree(expr: &WhereExpression, pushable: bool) -> Result<()> {
+    match expr {
+        WhereExpression::Comparison(comp) => {
+            if is_token_comparison(comp) {
+                // Reject unsupported token() forms regardless of position. The
+                // returned predicate is discarded here; pushable positions are
+                // lowered separately by `collect_sstable_predicates`.
+                let _supported = comparison_to_sstable_predicate(comp)?;
+                if !pushable {
+                    return Err(Error::query_execution(
+                        "token() restriction is only supported at the top level or within an \
+                         AND conjunction; token() under OR/NOT cannot be pushed down and the \
+                         row-level evaluator cannot compute a token, so it is rejected rather \
+                         than silently ignored"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+        // AND children remain in a pushable position (the same branches
+        // `collect_sstable_predicates` descends).
+        WhereExpression::And(exprs) => {
+            for e in exprs {
+                validate_token_forms_whole_tree(e, pushable)?;
+            }
+        }
+        // OR/NOT children are not pushed down; a token() inside them cannot be
+        // enforced, so mark the subtree non-pushable.
+        WhereExpression::Or(exprs) => {
+            for e in exprs {
+                validate_token_forms_whole_tree(e, false)?;
+            }
+        }
+        WhereExpression::Not(inner) => validate_token_forms_whole_tree(inner, false)?,
+        // Parentheses are transparent: they neither create nor remove a pushable
+        // position, so the current `pushable` flag carries through.
+        WhereExpression::Parentheses(inner) => validate_token_forms_whole_tree(inner, pushable)?,
+    }
+    Ok(())
+}
+
+/// True when a comparison's left side is a `token(...)` call (case-insensitive),
+/// i.e. it denotes a partition-key token restriction rather than a column.
+fn is_token_comparison(comp: &ComparisonExpression) -> bool {
+    matches!(
+        &comp.left,
+        SelectExpression::Function(func) if func.name.eq_ignore_ascii_case("token")
+    )
 }
 
 /// Returns `Ok(Some(pred))` for a pushable predicate, `Ok(None)` for a
@@ -753,6 +842,117 @@ mod tests {
             err.to_string().contains("token()"),
             "error must explain the token() restriction; got: {err}"
         );
+    }
+
+    /// roborev FINDING (whole-tree): an UNSUPPORTED token() form under `NOT`
+    /// (`ck > 0 AND NOT token(pk) IN (1, 2)`) must be a PLANNING ERROR. The
+    /// pushdown walk never descends NOT, so previously the token IN restriction
+    /// was not validated; `ck > 0` was pushed, the residual Filter was omitted,
+    /// and the invalid token restriction was silently ignored.
+    #[test]
+    fn token_in_under_not_is_a_planning_error() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE ck > 0 AND NOT token(pk) IN (1, 2)")
+            .expect("token-IN-under-NOT query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        let err = validate_token_forms_whole_tree(&where_clause, true)
+            .expect_err("token(pk) IN under NOT must be rejected, not silently dropped");
+        assert!(
+            err.to_string().contains("token()"),
+            "error must explain the token() restriction; got: {err}"
+        );
+    }
+
+    /// roborev FINDING (whole-tree): an UNSUPPORTED token() form under `OR`
+    /// (`token(pk) IN (...) OR ck = 3`) must be a planning error regardless of
+    /// position.
+    #[test]
+    fn token_in_under_or_is_a_planning_error() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) IN (1, 2) OR ck = 3")
+            .expect("token-IN-under-OR query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        assert!(
+            validate_token_forms_whole_tree(&where_clause, true).is_err(),
+            "token(pk) IN (...) under OR must error, not silently ignore the token restriction"
+        );
+    }
+
+    /// roborev FINDING (whole-tree): `token(pk) BETWEEN a AND b` under `OR` must
+    /// also be rejected wherever it appears.
+    #[test]
+    fn token_between_under_or_is_a_planning_error() {
+        use crate::query::select_parser::parse_select;
+
+        let statement =
+            parse_select("SELECT * FROM ks.t WHERE token(pk) BETWEEN 1 AND 9 OR ck = 3")
+                .expect("token-BETWEEN-under-OR query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        assert!(
+            validate_token_forms_whole_tree(&where_clause, true).is_err(),
+            "token() BETWEEN under OR must error"
+        );
+    }
+
+    /// roborev FINDING (whole-tree): a SUPPORTED token range under `OR`
+    /// (`token(pk) > 5 OR ck = 3`) cannot be pushed down, and the row-level WHERE
+    /// evaluator cannot compute a token, so it must be a CLEAR planning error
+    /// rather than silently ignored. (Decision: reject; see
+    /// `validate_token_forms_whole_tree` rationale.)
+    #[test]
+    fn supported_token_range_under_or_is_a_planning_error() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) > 5 OR ck = 3")
+            .expect("token-range-under-OR query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        let err = validate_token_forms_whole_tree(&where_clause, true).expect_err(
+            "a supported token range under OR must error (cannot be pushed nor row-evaluated)",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("token()") && msg.contains("OR/NOT"),
+            "error must explain the OR/NOT limitation; got: {msg}"
+        );
+    }
+
+    /// roborev FINDING (whole-tree): a SUPPORTED token range under `NOT` must
+    /// likewise be a clear planning error.
+    #[test]
+    fn supported_token_range_under_not_is_a_planning_error() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE ck = 3 AND NOT token(pk) > 5")
+            .expect("token-range-under-NOT query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        assert!(
+            validate_token_forms_whole_tree(&where_clause, true).is_err(),
+            "a supported token range under NOT must error"
+        );
+    }
+
+    /// roborev FINDING (whole-tree) guard: top-level / AND-conjoined SUPPORTED
+    /// token forms must STILL pass the whole-tree validation (they are pushed
+    /// down by `collect_sstable_predicates`), so the pass must not over-reject.
+    #[test]
+    fn supported_token_forms_pass_whole_tree_validation() {
+        use crate::query::select_parser::parse_select;
+
+        for q in [
+            "SELECT * FROM ks.t WHERE token(pk) > 0",
+            "SELECT * FROM ks.t WHERE token(pk) >= -100 AND token(pk) < 5000",
+            "SELECT * FROM ks.t WHERE token(pk) = 4242",
+            "SELECT * FROM ks.t WHERE token(pk) = 7 AND ck > 0",
+            // Nested AND inside parentheses stays pushable.
+            "SELECT * FROM ks.t WHERE (token(pk) > 0 AND ck > 1)",
+        ] {
+            let statement = parse_select(q).unwrap_or_else(|e| panic!("{q} must parse: {e}"));
+            let where_clause = statement.where_clause.expect("WHERE present");
+            validate_token_forms_whole_tree(&where_clause, true)
+                .unwrap_or_else(|e| panic!("{q} must pass whole-tree validation: {e}"));
+        }
     }
 
     /// roborev FINDING 2 guard: supported token range/equality restrictions must
