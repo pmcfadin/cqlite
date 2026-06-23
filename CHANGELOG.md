@@ -7,6 +7,139 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [v0.12.0] - 2026-06-22
+
+The compaction release. CQLite now rewrites and compacts Cassandra 5.0 SSTables
+with **byte-for-byte parity against Apache Cassandra**, verified by a differential
+harness that compacts the same inputs with both engines and compares the output
+bytes plus an end-to-end Cassandra readback (Epic #842 → #921 → #938). Reaching
+parity required modelling compaction the way Cassandra does — per-element/per-cell
+merge reconciliation (#886, #899) rather than whole-cell/row-timestamp granularity —
+and then implementing the full reconciliation rule set: complex-deletion
+strict-supersede and shadow-before-purge (#887), tombstone-vs-expiring tie-breaks
+(#848), `gc_grace`/`gcBefore` purging with overlap-aware partial-compaction safety
+(#845, #935), range-tombstone shadowing (#846), per-cell and dropped-column purging
+(#922, #847), row-deletion/live-cell coexistence (#932), row-tombstone
+`localDeletionTime` preservation (#873), clustering identity through row tombstones
+(#912), non-frozen UDT multi-cell read+write (#927, #929), and static-row presence
+read from input headers (#850).
+
+Beyond compaction, this release adds an **Arrow Flight server + Trino connector**
+for querying SSTables as a federated source with predicate, token-range, and
+aggregation pushdown (Epics #874, #918); **canonical BTI (`da`) write support** that
+emits Cassandra-format trie-indexed SSTables and end-to-end BTI read (Epics #872,
+#835); a **CDC-style delta-scan / delta-export** path that projects SSTable
+generations to Parquet envelopes with full tombstone fidelity (Epic #696);
+**`WRITETIME()` / `TTL()` in `SELECT`** (Epic #689); broad **query-engine
+completeness** (PER PARTITION LIMIT, static columns, clustering order, clustering-key
+bounds, cross-generation LWW merge, partition-targeted lookups); and **read-path
+performance** work (parallel single-reader scans, streamed writers, promoted index,
+BTI seeks). Plus crates.io OIDC trusted publishing, a Homebrew tap, and a hardened
+CI/validation pipeline.
+
+### Added
+
+- **Byte-for-byte compaction parity vs Apache Cassandra** (Epics #842, #921, #938) —
+  a `cqlite compact` command and a differential harness that compacts identical
+  inputs with CQLite and Cassandra and diffs the resulting `Data.db` bytes, wired
+  into CI alongside an E2E Cassandra readback (#854, #858, #936). The merge path was
+  re-modelled to per-element/per-cell granularity (#886, #899), enabling the full
+  reconciliation rule set: complex-deletion strict-supersede + shadow-before-purge
+  (#887), tombstone-vs-expiring(TTL) tie-break (#848), `gc_grace`/`gcBefore` purging
+  (#845) with overlap-aware partial-compaction purging via per-key
+  `maxPurgeableTimestamp` (#935), range-tombstone merge shadowing (#846), per-cell
+  dropped-column purging (#922, #847), row-deletion/live-cell coexistence (#932),
+  multi-cell collection/UDT merge per cell-path (#844), non-frozen UDT multi-cell
+  support (#927, #929), single schema-ordered emission for mixed complex writes
+  (#930), row-tombstone `localDeletionTime` preservation (#873), clustering identity
+  through row tombstones (#912), and static-row presence from input headers (#850).
+  Rules are documented in `docs/compaction/byte-parity-rules.md`.
+
+- **Arrow Flight server + Trino connector** (Epics #874, #918) — query Cassandra
+  SSTables as a federated Trino source over Arrow Flight, with predicate pushdown,
+  arbitrary nested predicates (OR/NOT), token-range SSTable pruning, and aggregation
+  pushdown (count/sum/min/max/avg + GROUP BY) including integer `avg` and float
+  min/max with Trino-exact NaN ordering (#836, #898, #919). GROUP BY pushdown has an
+  operator-configurable gate for high-cardinality cases (#937).
+
+- **Canonical BTI (`da`) write + read** (Epics #872, #835) — emit Cassandra-format
+  `da` (BTI) SSTables with a Partitions.db/Rows.db trie, drop legacy
+  Index.db/Summary.db, and validate against `sstabledump`/Cassandra readback (#914);
+  end-to-end BTI full-scan read support (#897); Data.db offset extraction from BTI
+  trie payloads for O(log n) seeks (#833); read-path completion for wide partitions
+  and BTI (#867).
+
+- **CDC-style delta-scan and `delta-export`** (Epic #696) — a `scan_delta` streaming
+  API emitting `DeltaRecord`s (upserts, static upserts, row/range/partition
+  tombstones) with an Arrow envelope schema derived from the table schema, a
+  `DeltaParquetWriter`, and a CLI `delta-export` subcommand for projecting an SSTable
+  generation to a CDC Parquet file (#869, #871, #870, #876, #877, #880, #879). Ships
+  with a DuckDB reference-merge reconciliation guide (#878) and a parity harness
+  (#881, #882).
+
+- **`WRITETIME()` and `TTL()` in `SELECT`** (Epic #689) — parse, validate, thread
+  per-cell writetime/TTL metadata from reader to query rows (opt-in), and evaluate
+  the functions in projections, with coverage across JSON/CSV/Parquet and the
+  bindings (#837, #838, #840, #855, #856).
+
+- **Query-engine completeness** (Epic #756) — `PER PARTITION LIMIT` (#859),
+  `indexes_used` in query-plan results (#861), static-column tracking in discovered
+  schemas (#862), clustering-order (ASC/DESC) discovery from the Statistics.db header
+  (#863), UDT-reference validation against the registry at load (#860), clustering-key
+  inequality bounds (`>=`, `>`, `<`, `<=`) (#791), and a partition-targeted lookup
+  for fully-constrained `WHERE pk = ?` instead of scanning every SSTable (#949).
+
+- **Read-path performance** (Epics #906, #751) — restored parallel reads on a single
+  `SSTableReader` via per-scan positioned reads (#815) with a concurrent-scan scaling
+  benchmark (#917); a size-aware disk-access backend with configurable prefetch
+  (#964); cursor/channel groundwork for a streaming K-way merge (#754); a
+  Cassandra-correct streamed promoted index for wide partitions (#752); and Index.db
+  entries streamed to disk instead of buffered (#753).
+
+- **Distribution** — crates.io publishing for `cqlite-core` + `cqlite-cli` (#782)
+  migrated to OIDC trusted publishing (#786), and a Homebrew tap for the CLI (#781).
+
+### Changed
+
+- Incremental streaming of the read/scan path instead of full materialization (#790).
+- crates.io release publishing now runs on tag via OIDC rather than a stored token
+  (#895); linux-gnu CLI binaries build under `cross` to lower the glibc floor (#864).
+- Cross-generation `SELECT *` now performs an LWW merge with tombstone suppression
+  across SSTable generations (#883), and `WRITETIME`/`TTL` metadata reconciles across
+  generations (#885).
+
+### Fixed
+
+- **Write-path / Statistics.db fidelity** (Epic #796) — populate the
+  `estimatedTombstoneDropTime` histogram (#797), compute final Statistics.db delta
+  baselines before the write loop (#799), wire real `l0_count`/`total_written` from
+  the WriteEngine (#800), and a `write_dir` file lock to prevent concurrent-write
+  corruption (#798).
+- **Bindings** — CLI emits `null` for tombstoned cells in JSON (#806); Python provides
+  a hashable representation for `SET<FROZEN<UDT>>` (#804) and thread-safe schema init
+  for concurrent queries (#805).
+- **Test & CI trustworthiness** (Epic #795) — resolve `CQLITE_DATASETS_ROOT` to
+  `sstables/` and unmask 7 silently-skipped Python failures (#773), harden
+  `agent-gate.sh` to cover the Python bindings and all integration targets (#865),
+  retire a TTL byte-scan flake for a structural assertion (#774), and build DuckDB
+  from source so the DS11 reconciliation job links on ubuntu (#916).
+
+### Contributors
+
+Thanks to everyone who contributed to this release:
+
+- **Patrick McFadin** ([@pmcfadin](https://github.com/pmcfadin)) — maintainer; the
+  bulk of compaction parity, BTI write/read, delta-scan, query engine, read-path
+  performance, write-path fidelity, CI, and release infrastructure.
+- **Jon Haddad** ([@rustyrazorblade](https://github.com/rustyrazorblade)) — the Arrow
+  Flight server + Trino connector (#836) and the compaction byte-parity foundations:
+  the rule spec + parity-auditor agent (#854) and the `cqlite compact` differential
+  harness vs Apache Cassandra (#858).
+
+Development was AI-assisted: substantial portions were implemented and reviewed with
+Claude Code under human direction and review. Reconciliation edge cases were validated
+against the `rustyrazorblade/cassandra` compaction reference.
+
 ## [v0.11.0] - 2026-06-15
 
 Minor release bundling everything merged since v0.10.0. New capability: a

@@ -16,7 +16,7 @@
   <a href="https://cassandra.apache.org"><img src="https://img.shields.io/badge/cassandra-5.0+-green.svg" alt="Cassandra"></a>
 </p>
 
-> **Status**: v0.11.0 — Core reading, CLI, output writers, Python & Node.js bindings, and write support (with STCS compaction) are production-ready. See [CHANGELOG.md](CHANGELOG.md).
+> **Status**: v0.12.0 — Core reading, CLI, output writers, Python & Node.js bindings, and write support are production-ready, now with **byte-for-byte compaction parity against Apache Cassandra**, an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. See [CHANGELOG.md](CHANGELOG.md).
 
 CQLite provides SQLite-like local access to Apache Cassandra SSTables, enabling developers to read Cassandra 5.0+ data files without cluster dependencies. Built in Rust for performance and safety.
 
@@ -296,6 +296,14 @@ cargo build -p cqlite-core --no-default-features
 - [x] Version-gated reads for the Cassandra 5.0 `oa` format; graceful handling of `da` (BTI)
 - [x] Real BTI trie node-type dispatch and schema-typed query result columns
 - [x] Published documentation site at [pmcfadin.github.io/cqlite](https://pmcfadin.github.io/cqlite/)
+
+### ✅ v0.12.0 (Jun 2026) — the compaction release
+- [x] **Byte-for-byte compaction parity vs Apache Cassandra** — `cqlite compact` + a differential harness in CI, full reconciliation rule set (complex deletions, tombstone tie-breaks, `gc_grace` purging, range tombstones, per-cell/dropped-column purging, non-frozen UDT multi-cell)
+- [x] **Arrow Flight server + Trino connector** — query SSTables as a federated source with predicate, token-range, and aggregation pushdown
+- [x] **Canonical BTI (`da`) write + end-to-end read** — emit Cassandra-format trie-indexed SSTables
+- [x] **CDC-style delta-scan / `delta-export`** — project SSTable generations to Parquet envelopes with full tombstone fidelity
+- [x] **`WRITETIME()` / `TTL()` in `SELECT`** and query-engine completeness (`PER PARTITION LIMIT`, static columns, clustering order/bounds, partition-targeted lookups)
+- [x] crates.io OIDC trusted publishing + Homebrew tap
 - See [CHANGELOG.md](CHANGELOG.md) for the full per-release detail
 
 ### 📋 Roadmap
@@ -304,18 +312,16 @@ See the [**Roadmap**](#roadmap) section below for in-flight epics and milestones
 
 ## Roadmap
 
-CQLite is at **v0.11.0** and production-ready for the use cases above. The path to
+CQLite is at **v0.12.0** and production-ready for the use cases above. The path to
 **v1.0** is tracked in the open. Full detail, with milestones, lives at
 [pmcfadin.github.io/cqlite → Roadmap](https://pmcfadin.github.io/cqlite/user-docs/roadmap/).
 
 | Workstream | Epic |
 |------------|------|
-| Query engine completeness — `PER PARTITION LIMIT`, static columns, clustering order, plan metadata | [#756](https://github.com/pmcfadin/cqlite/issues/756) |
-| `WRITETIME()` / `TTL()` in `SELECT` | [#689](https://github.com/pmcfadin/cqlite/issues/689) |
-| Writer format fidelity — `>64`-col headers, deletion-time, `DURATION`, BTI index writing | [#762](https://github.com/pmcfadin/cqlite/issues/762) |
-| Wide-partition & memory performance — promoted index, streamed writers, O(log n) seeks | [#751](https://github.com/pmcfadin/cqlite/issues/751) |
-| BTI (`da`) end-to-end **read** support | [#660](https://github.com/pmcfadin/cqlite/issues/660) |
-| Delta-scan envelope for CDC-style Parquet projections | [#696](https://github.com/pmcfadin/cqlite/issues/696) |
+| Wire storage-layer capabilities (bloom/index/BTI seeks) into the CQL query path + regression guards | [#951](https://github.com/pmcfadin/cqlite/issues/951) |
+| Read-path performance & I/O backend (parallel single-reader scans, io_uring spike) | [#906](https://github.com/pmcfadin/cqlite/issues/906) |
+| CLI & bindings polish (DX & cleanup) | [#907](https://github.com/pmcfadin/cqlite/issues/907) |
+| Compaction byte-parity follow-ups (range tombstones e2e + edge cases) | [#938](https://github.com/pmcfadin/cqlite/issues/938) |
 | M6 — WASM bindings · M7 — performance validation + **v1.0** | _planned_ |
 
 The roadmap follows real-world use. Want something prioritized?
@@ -324,7 +330,7 @@ The roadmap follows real-world use. Want something prioritized?
 
 ## Known Issues
 
-CQLite is honest about its sharp edges. The current release (`v0.11.0`) has a few
+CQLite is honest about its sharp edges. The current release (`v0.12.0`) has a few
 known gaps — none of which block the core read/export workflows. Full, dated list:
 [pmcfadin.github.io/cqlite → Known Issues](https://pmcfadin.github.io/cqlite/user-docs/known-issues/).
 
@@ -466,4 +472,4 @@ Special thanks to the Apache Cassandra community and the many contributors who m
 
 ---
 
-**Note**: M1 through M5 milestones are complete and the project is at **v0.11.0**. Core SSTable reading, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction are production-ready. Next: M6 (WASM bindings) and M7 (performance validation + v1.0).
+**Note**: M1 through M5 milestones are complete and the project is at **v0.12.0**. Core SSTable reading, CLI, output writers (including Parquet), Python and Node.js bindings, and write support with STCS compaction and **byte-for-byte compaction parity vs Apache Cassandra** are production-ready, alongside an Arrow Flight + Trino connector, canonical BTI (`da`) write/read, and CDC-style delta export. Next: M6 (WASM bindings) and M7 (performance validation + v1.0).

@@ -78,9 +78,10 @@ Welcome to the CQLite documentation hub. This directory holds technical document
 
 ## 📈 Project Status
 
-- **Current Version**: 0.11.0
-- **Cassandra Compatibility**: 5.0+ with BTI format support
+- **Current Version**: 0.12.0
+- **Cassandra Compatibility**: 5.0+ with BTI (`da`) format read **and** write support
 - **Milestones Complete**: M1 (Core Reading), M2 (CLI), M3 (Output Writers), M4 (Python & Node.js Bindings), M5 (Write Support + Compaction)
+- **v0.12.0**: Byte-for-byte compaction parity vs Apache Cassandra · Arrow Flight + Trino connector · canonical BTI write/read · CDC delta-export · `WRITETIME()`/`TTL()` in `SELECT`
 - **Next**: M6 (WebAssembly Bindings), M7 (Performance validation + v1.0)
 - **Test Pass Rate**: 100% (33/33 tables vs sstabledump, see `test-data/validation-matrix.md`)
 
