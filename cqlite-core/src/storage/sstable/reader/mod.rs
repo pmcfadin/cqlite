@@ -253,14 +253,13 @@ impl SSTableReader {
         let mut reader_config = SSTableReaderConfig::default();
         reader_config.use_mmap = config.storage.use_mmap || mmap_enabled_via_env();
         reader_config.mmap_min_size_bytes = config.storage.mmap_min_size_bytes;
-        reader_config.direct_io_memory_fraction = config.storage.direct_io_memory_fraction;
-        reader_config.prefetch = prefetch_mode_via_env().unwrap_or(config.storage.prefetch);
 
         let file_size = tokio::fs::metadata(path).await?.len();
 
         // The explicit mode comes from env > config. The legacy `use_mmap` flag
-        // is folded in by promoting a `Buffered`/`Auto` request to `Mmap` so the
-        // old opt-in keeps working; an explicit non-buffered mode always wins.
+        // is folded in by promoting an otherwise-`Buffered` request to `Mmap` so
+        // the old opt-in keeps working (`Auto` and explicit non-buffered modes
+        // are left untouched, so a real backend decision always wins).
         let configured_mode = disk_access_mode_via_env().unwrap_or(config.storage.disk_access_mode);
         let configured_mode =
             if reader_config.use_mmap && matches!(configured_mode, DiskAccessMode::Buffered) {
@@ -268,13 +267,12 @@ impl SSTableReader {
             } else {
                 configured_mode
             };
-        reader_config.disk_access_mode = configured_mode;
 
         let resolved_mode = resolve_disk_access_mode(
             configured_mode,
             file_size,
             reader_config.mmap_min_size_bytes as u64,
-            reader_config.direct_io_memory_fraction,
+            config.storage.direct_io_memory_fraction,
             system_memory_bytes(),
             direct_io_available(),
         );
@@ -284,18 +282,15 @@ impl SSTableReader {
         // (issue #815). `ScanSource::Mapped` shares the same `Arc<Mmap>` so no
         // extra mapping is created per scan. Every non-buffered backend degrades
         // gracefully to buffered I/O if the OS/filesystem refuses it.
-        let prefetch = reader_config.prefetch;
-        let direct_window = if matches!(prefetch, PrefetchMode::Off) {
-            // Minimal read-ahead: a single aligned block (rounded up inside the
-            // cursor). Still required because O_DIRECT transfers must be aligned.
-            1
-        } else {
-            config.storage.direct_io_prefetch_bytes
-        };
-
-        let (source, scan_source) =
-            Self::build_block_sources(path, file_size, resolved_mode, prefetch, direct_window)
-                .await?;
+        let prefetch = prefetch_mode_via_env().unwrap_or(config.storage.prefetch);
+        let (source, scan_source) = Self::build_block_sources(
+            path,
+            file_size,
+            resolved_mode,
+            prefetch,
+            config.storage.direct_io_prefetch_bytes,
+        )
+        .await?;
         let file = Arc::new(Mutex::new(source));
 
         // Parse header - read available bytes, not a fixed size
@@ -605,17 +600,26 @@ impl SSTableReader {
     /// Build the shared point-read [`BlockSource`] and the per-scan
     /// [`ScanSource`] for a resolved [`DiskAccessMode`].
     ///
-    /// Each non-buffered backend degrades gracefully to buffered I/O if the OS
-    /// or filesystem refuses it (mmap can fail on network mounts; direct I/O is
-    /// unsupported on some platforms/filesystems), so opening never fails purely
-    /// because a faster backend is unavailable.
+    /// `prefetch` selects read-ahead advice for mmap and (together with
+    /// `prefetch_bytes`) the direct-I/O read-ahead window. Each non-buffered
+    /// backend degrades gracefully to buffered I/O if the OS or filesystem
+    /// refuses it (mmap can fail on network mounts; direct I/O is unsupported on
+    /// some platforms/filesystems), so opening never fails purely because a
+    /// faster backend is unavailable.
     async fn build_block_sources(
         path: &Path,
         file_size: u64,
         mode: DiskAccessMode,
         prefetch: PrefetchMode,
-        direct_window: usize,
+        prefetch_bytes: usize,
     ) -> Result<(BlockSource, ScanSource)> {
+        // With prefetch off, use the minimal aligned read-ahead the direct
+        // backend still requires (a single block, rounded up inside the cursor).
+        let direct_window = if matches!(prefetch, PrefetchMode::Off) {
+            1
+        } else {
+            prefetch_bytes
+        };
         match mode {
             DiskAccessMode::Buffered => Self::open_buffered_sources(path).await,
             DiskAccessMode::Mmap => match Self::map_file(path) {
