@@ -1266,6 +1266,29 @@ impl SelectExecutor {
             plan.execution_steps.clone()
         };
 
+        // FINDING 1 (roborev, Issue #955 follow-up): synchronous preconditions
+        // that should FAIL the query must be checked BEFORE spawning the
+        // streaming task. Errors raised inside `execute_streaming_background`
+        // are only logged by the spawn closure (the channel then closes), so the
+        // caller would receive an apparently-successful iterator that yields zero
+        // rows — silently hiding an invalid `token(...)` query. Validating here
+        // surfaces the error synchronously from `execute_streaming`, matching the
+        // materializing `execute()` path. The schema must be resolved before the
+        // spawn for this, so we resolve it per scan step here.
+        for step in &execution_steps {
+            if let ExecutionStep::SSTableScan {
+                table, predicates, ..
+            } = step
+            {
+                let (keyspace, table_name) = parse_table_id(table);
+                let schema_opt = self
+                    ._schema
+                    .find_schema_by_table(&keyspace, &table_name)
+                    .await;
+                validate_token_predicates(predicates, schema_opt.as_ref())?;
+            }
+        }
+
         // Clone what we need for the background task
         let storage = Arc::clone(&self.storage);
         let schema_manager = Arc::clone(&self._schema);

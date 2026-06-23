@@ -1,7 +1,7 @@
 //! Query optimizer for SELECT statements - basic planning and predicate pushdown.
 
 use super::select_ast::*;
-use crate::{schema::SchemaManager, storage::StorageEngine, Result, TableId, Value};
+use crate::{schema::SchemaManager, storage::StorageEngine, Error, Result, TableId, Value};
 use std::sync::Arc;
 
 /// Query optimizer for SELECT statements
@@ -169,7 +169,7 @@ impl SelectOptimizer {
         };
 
         if let Some(where_clause) = &statement.where_clause {
-            plan.sstable_predicates = collect_sstable_predicates(where_clause);
+            plan.sstable_predicates = collect_sstable_predicates(where_clause)?;
         }
 
         plan.execution_steps.push(ExecutionStep::SSTableScan {
@@ -236,41 +236,54 @@ impl SelectOptimizer {
 /// Walk a WHERE expression tree, collecting comparisons that can be turned
 /// into SSTable-level predicates. OR/NOT branches are intentionally skipped:
 /// those require capabilities the SSTable filter pushdown doesn't have.
-fn collect_sstable_predicates(expr: &WhereExpression) -> Vec<SSTablePredicate> {
+fn collect_sstable_predicates(expr: &WhereExpression) -> Result<Vec<SSTablePredicate>> {
     let mut out = Vec::new();
-    fn walk(expr: &WhereExpression, out: &mut Vec<SSTablePredicate>) {
+    fn walk(expr: &WhereExpression, out: &mut Vec<SSTablePredicate>) -> Result<()> {
         match expr {
             WhereExpression::Comparison(comp) => {
-                if let Some(predicate) = comparison_to_sstable_predicate(comp) {
+                // An unsupported `token(...)` form is a planning error here, not
+                // a dropped predicate (roborev FINDING 2).
+                if let Some(predicate) = comparison_to_sstable_predicate(comp)? {
                     out.push(predicate);
                 }
             }
             WhereExpression::And(exprs) => {
                 for e in exprs {
-                    walk(e, out);
+                    walk(e, out)?;
                 }
             }
-            WhereExpression::Parentheses(inner) => walk(inner, out),
+            WhereExpression::Parentheses(inner) => walk(inner, out)?,
             WhereExpression::Or(_) | WhereExpression::Not(_) => {}
         }
+        Ok(())
     }
-    walk(expr, &mut out);
-    out
+    walk(expr, &mut out)?;
+    Ok(out)
 }
 
-fn comparison_to_sstable_predicate(comp: &ComparisonExpression) -> Option<SSTablePredicate> {
+/// Returns `Ok(Some(pred))` for a pushable predicate, `Ok(None)` for a
+/// comparison that is legitimately not pushed down (a residual Filter handles
+/// it), and `Err` for an *invalid* restriction that must fail planning. The
+/// only `Err` case is an unsupported `token(...)` form (see
+/// `token_comparison_to_predicate`): a `token()` LHS always denotes a token
+/// restriction, so an unsupported form is a query error, never a silently
+/// dropped predicate (roborev FINDING 2). Bare-column comparisons still return
+/// `Ok(None)` when not pushable.
+fn comparison_to_sstable_predicate(
+    comp: &ComparisonExpression,
+) -> Result<Option<SSTablePredicate>> {
     // The left side is either a bare column or a `token(col, ...)` call. A
     // `token(...)` predicate constrains the partition-key token, not a stored
     // column, so it gets a token predicate (Issue #955); anything else only
     // supports the bare-column form (Issue #788's existing behaviour).
     match &comp.left {
         SelectExpression::Column(col_ref) => {
-            column_comparison_to_predicate(col_ref.column.clone(), comp)
+            Ok(column_comparison_to_predicate(col_ref.column.clone(), comp))
         }
         SelectExpression::Function(func) if func.name.eq_ignore_ascii_case("token") => {
-            token_comparison_to_predicate(func, comp)
+            token_comparison_to_predicate(func, comp).map(Some)
         }
-        _ => None,
+        _ => Ok(None),
     }
 }
 
@@ -319,50 +332,76 @@ fn column_comparison_to_predicate(
 /// Convert a `token(col, ...) <op> <bound>` comparison to a token predicate
 /// (Issue #955). The bound must be an integer literal (the i64 token value).
 /// `token(...) = ?` lowers to a token `Equal` predicate (an exact-token
-/// restriction that `evaluate_leaf` evaluates by hashing the row key); `IN` and
-/// `BETWEEN` are not supported (Cassandra does not allow them on a token
-/// restriction), so they fall through to `None`.
+/// restriction that `evaluate_leaf` evaluates by hashing the row key).
+///
+/// Unsupported `token()` forms are a PLANNING ERROR rather than a dropped
+/// predicate (Issue #955 follow-up / roborev FINDING 2). Previously these
+/// returned `None`; when the same query carried another pushable predicate
+/// (e.g. `ck > 0`), the optimizer omitted the residual Filter step and the
+/// token restriction was SILENTLY IGNORED — so `token(pk) IN (...) AND ck > 0`
+/// returned all rows. Cassandra rejects `token() IN`/`BETWEEN` and non-literal
+/// RHS on a token restriction, so erroring is the correct behaviour. We only
+/// reject the unsupported token forms here; supported range/equality token
+/// restrictions still lower normally.
 fn token_comparison_to_predicate(
     func: &FunctionCall,
     comp: &ComparisonExpression,
-) -> Option<SSTablePredicate> {
+) -> Result<SSTablePredicate> {
     use SSTableFilterOp as Op;
     // Collect the partition-key column names the token() is computed over.
     let mut token_columns = Vec::with_capacity(func.args.len());
     for arg in &func.args {
         match arg {
             SelectExpression::Column(col_ref) => token_columns.push(col_ref.column.clone()),
-            _ => return None,
+            other => {
+                return Err(Error::query_execution(format!(
+                    "token() argument must be a partition-key column; got {other:?}"
+                )));
+            }
         }
     }
     if token_columns.is_empty() {
-        return None;
+        return Err(Error::query_execution(
+            "token() restriction requires at least one partition-key column argument".to_string(),
+        ));
     }
 
-    let op = match comp.operator {
+    let op = match &comp.operator {
         ComparisonOperator::GreaterThan => Op::Gt,
         ComparisonOperator::GreaterThanOrEqual => Op::Gte,
         ComparisonOperator::LessThan => Op::Lt,
         ComparisonOperator::LessThanOrEqual => Op::Lte,
-        // `token(pk) = ?` is an exact-token restriction. Previously this was
-        // DROPPED (fell through to `None`); when combined with another pushed
-        // predicate the optimizer skipped the residual Filter step, so the
-        // restriction was silently ignored and wrong rows leaked. Lower it to a
-        // token `Equal` predicate so `evaluate_leaf`'s `Equal` arm hashes the
-        // row key and compares it to the bound (Issue #955 follow-up).
+        // `token(pk) = ?` is an exact-token restriction. Lower it to a token
+        // `Equal` predicate so `evaluate_leaf`'s `Equal` arm hashes the row key
+        // and compares it to the bound (Issue #955 follow-up).
         ComparisonOperator::Equal => Op::Equal,
-        _ => return None,
+        // `token(pk) IN (...)`, `token(pk) BETWEEN ...`, and any other operator
+        // are not valid token restrictions. Reject rather than drop so the
+        // restriction is never silently ignored.
+        other => {
+            return Err(Error::query_execution(format!(
+                "unsupported token() restriction operator {other:?}; \
+                 token() supports only range bounds (<, <=, >, >=) and equality (=)"
+            )));
+        }
     };
     let ComparisonRightSide::Value(value_expr) = &comp.right else {
-        return None;
+        return Err(Error::query_execution(
+            "token() restriction requires a single integer token bound on the right-hand side"
+                .to_string(),
+        ));
     };
     // The token bound is an i64; the parser emits integer literals as BigInt.
-    let bound = match literal_value(value_expr)? {
-        Value::BigInt(n) => Value::BigInt(n),
-        Value::Integer(n) => Value::BigInt(n as i64),
-        _ => return None,
+    let bound = match literal_value(value_expr) {
+        Some(Value::BigInt(n)) => Value::BigInt(n),
+        Some(Value::Integer(n)) => Value::BigInt(n as i64),
+        _ => {
+            return Err(Error::query_execution(
+                "token() restriction bound must be an integer token value".to_string(),
+            ));
+        }
     };
-    Some(SSTablePredicate::token(token_columns, op, vec![bound]))
+    Ok(SSTablePredicate::token(token_columns, op, vec![bound]))
 }
 
 fn literal_value(expr: &SelectExpression) -> Option<Value> {
@@ -492,6 +531,7 @@ mod tests {
         for (op, expected_op) in cases {
             let comp = cmp(op.clone(), "ck", Value::Integer(200));
             let predicate = comparison_to_sstable_predicate(&comp)
+                .expect("conversion must not error")
                 .unwrap_or_else(|| panic!("operator {op:?} must convert to a predicate"));
             assert_eq!(predicate.column, "ck");
             assert!(
@@ -520,7 +560,7 @@ mod tests {
             .where_clause
             .expect("WHERE clause must be present");
 
-        let predicates = collect_sstable_predicates(&where_clause);
+        let predicates = collect_sstable_predicates(&where_clause).expect("planning must succeed");
 
         let has = |col: &str, want: &SSTableFilterOp| {
             predicates.iter().any(|p| {
@@ -558,7 +598,7 @@ mod tests {
         let statement =
             parse_select("SELECT * FROM ks.t WHERE pk IN (1, 2, 3)").expect("IN query must parse");
         let where_clause = statement.where_clause.expect("WHERE present");
-        let predicates = collect_sstable_predicates(&where_clause);
+        let predicates = collect_sstable_predicates(&where_clause).expect("planning must succeed");
 
         assert_eq!(predicates.len(), 1, "one IN predicate; got {predicates:?}");
         let p = &predicates[0];
@@ -582,7 +622,7 @@ mod tests {
             parse_select("SELECT * FROM ks.t WHERE token(pk) >= -100 AND token(pk) < 5000")
                 .expect("token-range query must parse");
         let where_clause = statement.where_clause.expect("WHERE present");
-        let predicates = collect_sstable_predicates(&where_clause);
+        let predicates = collect_sstable_predicates(&where_clause).expect("planning must succeed");
 
         assert_eq!(predicates.len(), 2, "two token bounds; got {predicates:?}");
         assert!(
@@ -616,7 +656,7 @@ mod tests {
         let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) = 4242")
             .expect("token-equal query must parse");
         let where_clause = statement.where_clause.expect("WHERE present");
-        let predicates = collect_sstable_predicates(&where_clause);
+        let predicates = collect_sstable_predicates(&where_clause).expect("planning must succeed");
 
         assert_eq!(
             predicates.len(),
@@ -648,7 +688,7 @@ mod tests {
         let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) = 7 AND ck > 0")
             .expect("combined token-equal query must parse");
         let where_clause = statement.where_clause.expect("WHERE present");
-        let predicates = collect_sstable_predicates(&where_clause);
+        let predicates = collect_sstable_predicates(&where_clause).expect("planning must succeed");
 
         assert!(
             predicates
@@ -660,5 +700,81 @@ mod tests {
             predicates.iter().any(|p| !p.is_token() && p.column == "ck"),
             "the ck > 0 restriction must also be pushed; got {predicates:?}"
         );
+    }
+
+    /// roborev FINDING 2: `token(pk) IN (...)` is not a valid token restriction.
+    /// It must surface a PLANNING ERROR rather than fall through to `None` (which
+    /// would silently drop the restriction). Cassandra rejects `token() IN`.
+    #[test]
+    fn token_in_is_a_planning_error() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) IN (1, 2, 3)")
+            .expect("token-IN query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        let err = collect_sstable_predicates(&where_clause)
+            .expect_err("token(pk) IN (...) must be rejected, not silently dropped");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("token()"),
+            "error must explain the token() restriction; got: {msg}"
+        );
+    }
+
+    /// roborev FINDING 2: combined with another pushable predicate, an unsupported
+    /// `token(pk) IN (...) AND ck > 0` previously dropped the token restriction and
+    /// (because `ck > 0` remained) skipped the residual Filter — silently returning
+    /// all rows. It must now be a planning error.
+    #[test]
+    fn token_in_combined_with_other_predicate_is_a_planning_error() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) IN (1, 2) AND ck > 0")
+            .expect("combined token-IN query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        assert!(
+            collect_sstable_predicates(&where_clause).is_err(),
+            "token(pk) IN (...) AND ck > 0 must error, not silently ignore the token restriction"
+        );
+    }
+
+    /// roborev FINDING 2: `token(pk) BETWEEN a AND b` is not a valid token
+    /// restriction and must surface a planning error rather than be dropped.
+    #[test]
+    fn token_between_is_a_planning_error() {
+        use crate::query::select_parser::parse_select;
+
+        let statement = parse_select("SELECT * FROM ks.t WHERE token(pk) BETWEEN 1 AND 9")
+            .expect("token-BETWEEN query must parse");
+        let where_clause = statement.where_clause.expect("WHERE present");
+        let err = collect_sstable_predicates(&where_clause)
+            .expect_err("token(pk) BETWEEN must be rejected, not silently dropped");
+        assert!(
+            err.to_string().contains("token()"),
+            "error must explain the token() restriction; got: {err}"
+        );
+    }
+
+    /// roborev FINDING 2 guard: supported token range/equality restrictions must
+    /// STILL plan successfully after making unsupported forms an error.
+    #[test]
+    fn token_range_and_equality_still_plan() {
+        use crate::query::select_parser::parse_select;
+
+        for q in [
+            "SELECT * FROM ks.t WHERE token(pk) > 0",
+            "SELECT * FROM ks.t WHERE token(pk) >= -100 AND token(pk) < 5000",
+            "SELECT * FROM ks.t WHERE token(pk) = 4242",
+            "SELECT * FROM ks.t WHERE token(pk) = 7 AND ck > 0",
+        ] {
+            let statement = parse_select(q).unwrap_or_else(|e| panic!("{q} must parse: {e}"));
+            let where_clause = statement.where_clause.expect("WHERE present");
+            let predicates = collect_sstable_predicates(&where_clause)
+                .unwrap_or_else(|e| panic!("{q} must plan without error: {e}"));
+            assert!(
+                predicates.iter().any(|p| p.is_token()),
+                "{q} must still push a token predicate; got {predicates:?}"
+            );
+        }
     }
 }

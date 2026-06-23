@@ -30,7 +30,7 @@ use std::path::{Path, PathBuf};
 
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::access_path::AccessPath;
-use cqlite_core::query::result::QueryRow;
+use cqlite_core::query::result::{QueryRow, StreamingConfig};
 use cqlite_core::util::cassandra_murmur3::cassandra_murmur3_token;
 use cqlite_core::{Database, Value};
 
@@ -724,5 +724,112 @@ async fn token_single_lower_bound_filters_correctly() {
         fingerprints(&result.rows),
         fingerprints(&expected),
         "Issue #955: a single-bound token(pk) > ? must filter by token (exclusive lower bound)",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 1 (roborev): the STREAMING path must surface an invalid token()
+// query as an ERROR — synchronously from execute_streaming() or as an Err item
+// from the iterator — not as a silently-empty iterator. Previously the
+// validation error was raised inside the spawned background task whose caller
+// only LOGGED it and closed the channel, so execute_streaming() returned an
+// apparently-successful iterator that just ended with no rows.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn streaming_token_on_non_partition_key_column_surfaces_error() {
+    let db = match setup("wide-table-bti.cql", "/test_da/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    let sql = format!("SELECT pk, ck FROM {WIDE_TABLE} WHERE token(ck) > 0");
+
+    // The materializing path rejects this synchronously (FINDING 2 test above).
+    // The streaming path must do the same, so an invalid query is never hidden
+    // as an empty result set.
+    let materialized_err = db.execute(&sql).await.err();
+    assert!(
+        materialized_err.is_some(),
+        "precondition: execute() must reject token(ck) on a non-pk column",
+    );
+
+    let stream = db.execute_streaming(&sql, StreamingConfig::default()).await;
+    match stream {
+        // Preferred: error returned synchronously before spawning the task.
+        Err(_) => {}
+        // Acceptable alternative: the iterator yields an Err item.
+        Ok(mut iter) => {
+            let mut saw_error = false;
+            let mut row_count = 0usize;
+            while let Some(item) = iter.next_async().await {
+                match item {
+                    Ok(_) => row_count += 1,
+                    Err(_) => {
+                        saw_error = true;
+                        break;
+                    }
+                }
+            }
+            assert!(
+                saw_error,
+                "FINDING 1: streaming token(ck) on a non-pk column must surface an ERROR, \
+                 not a silently-empty iterator (got {row_count} rows, no error)",
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// FINDING 2 (roborev): unsupported token() forms (IN / BETWEEN) must be a
+// PLANNING error on BOTH paths, including when combined with another predicate
+// — never silently ignored (which would return all rows).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn token_in_is_rejected_on_both_paths() {
+    let db = match setup("wide-table-bti.cql", "/test_da/").await {
+        Ok(db) => db,
+        Err(e) => {
+            eprintln!("Skipping: {e}");
+            return;
+        }
+    };
+
+    // Bare token(pk) IN (...).
+    let sql = format!("SELECT pk, ck FROM {WIDE_TABLE} WHERE token(pk) IN (1, 2, 3)");
+    assert!(
+        db.execute(&sql).await.is_err(),
+        "FINDING 2: token(pk) IN (...) must be a planning error on execute()",
+    );
+    assert!(
+        db.execute_streaming(&sql, StreamingConfig::default())
+            .await
+            .is_err(),
+        "FINDING 2: token(pk) IN (...) must be a planning error on execute_streaming()",
+    );
+
+    // Combined with another pushable predicate — the dangerous case that used to
+    // be silently ignored (the residual Filter was dropped, returning all rows).
+    let combined = format!("SELECT pk, ck FROM {WIDE_TABLE} WHERE token(pk) IN (1, 2) AND ck > 0");
+    assert!(
+        db.execute(&combined).await.is_err(),
+        "FINDING 2: token(pk) IN (...) AND ck > 0 must error, not silently return all rows",
+    );
+    assert!(
+        db.execute_streaming(&combined, StreamingConfig::default())
+            .await
+            .is_err(),
+        "FINDING 2: streaming token(pk) IN (...) AND ck > 0 must error, not return all rows",
+    );
+
+    // token(pk) BETWEEN is likewise rejected.
+    let between = format!("SELECT pk, ck FROM {WIDE_TABLE} WHERE token(pk) BETWEEN 1 AND 9");
+    assert!(
+        db.execute(&between).await.is_err(),
+        "FINDING 2: token(pk) BETWEEN must be a planning error",
     );
 }
