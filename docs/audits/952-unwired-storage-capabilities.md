@@ -147,11 +147,19 @@ build, and runs in well under a second.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 
-# Primitives that MUST be reachable (directly or transitively) from the query layer.
+# Primitives the query layer must reference DIRECTLY.
+# NOTE: do not list might_contain_partition here — it is reached transitively *inside*
+# SSTableManager::scan_partition (storage), never directly from cqlite-core/src/query.
+# Listing it would make this check fail immediately. Validate it on the chain instead.
 # Keep this list in sync with docs/audits/952-unwired-storage-capabilities.md §2.
 REQUIRED_IN_QUERY=(
   scan_partition
-  might_contain_partition
+)
+
+# Primitives required on the query->storage call chain but NOT directly under query/.
+# Chain proof: query references scan_partition AND scan_partition references the symbol.
+REQUIRED_ON_CHAIN=(
+  "might_contain_partition:cqlite-core/src/storage"
 )
 
 # Primitives that, once #953/#954/#962 land, must appear somewhere on the query→storage
@@ -166,6 +174,14 @@ fail=0
 for sym in "${REQUIRED_IN_QUERY[@]}"; do
   if ! rg -q "\b${sym}\b" cqlite-core/src/query; then
     echo "WIRING-FAIL: '${sym}' is no longer referenced from cqlite-core/src/query/ (regression of #949)"
+    fail=1
+  fi
+done
+
+for entry in "${REQUIRED_ON_CHAIN[@]}"; do
+  sym="${entry%%:*}"; where="${entry#*:}"
+  if ! rg -q "\b${sym}\b" "${where}"; then
+    echo "WIRING-FAIL: '${sym}' no longer referenced in ${where} (broken query->storage chain)"
     fail=1
   fi
 done
@@ -235,10 +251,20 @@ Your stated dependency model is **confirmed and refined**:
   `scan_for_key_call_count` (`data_access.rs:252`); #958's counters and #960's access-path
   reporting are what let #953/#962 *prove* the seek ran rather than a silent full scan.
 
-Added correction worth flagging to the epic: **prepared SELECTs and `execute_with_params`
-route through the legacy `QueryExecutor` (prepared.rs:98, engine.rs:264), not
-`SelectExecutor`** — so #962's "apply fast path across all SELECT surfaces" is not merely
-adding the fast path in more places; it requires *unifying* prepared/param SELECTs onto the
-modern `SelectExecutor` (or porting the fast path into the legacy executor). This is a
-larger structural change than #962's title implies and should be called out as a #961↔#962
-coupling.
+Added correction worth flagging to the epic — two *distinct* gaps, not one:
+
+1. **`execute_with_params` is parameter-binding-unwired, NOT routing-bypassed.** It calls
+   `self.execute(cql)` (engine.rs:264), which dispatches non-simple SELECTs to the modern
+   `SelectExecutor` exactly like a literal query. Its real defect is that `_params` are
+   ignored — the `?` placeholders are never bound — so the predicate value never
+   materializes. Fixing the binding (the #961 work) lets it use the #949 fast path through
+   its *existing* `SelectExecutor` routing; no re-routing is required.
+2. **Prepared SELECTs route through the legacy `QueryExecutor`** (`prepared.rs:98`), which
+   always issues a full `storage.scan(...)`. This path genuinely bypasses `SelectExecutor`
+   and the #949 fast path. Closing it (the #962 surface-unification work) requires either
+   routing prepared SELECTs onto `SelectExecutor` or porting the fast path into the legacy
+   executor — a larger structural change than #962's title implies.
+
+Net #961↔#962 coupling: #961 must bind params (and, for the prepared path, depends on #962
+unifying the prepared SELECT onto the modern executor); #962 must unify the prepared
+surface. Simple-id-lookup SELECTs also fall through to the legacy executor and share gap (2).
