@@ -138,6 +138,7 @@ fn first_value(rows: &[QueryRow], col: &str) -> Option<Value> {
 
 #[tokio::test]
 async fn param_int_pk_matches_literal() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -189,6 +190,7 @@ async fn param_int_pk_matches_literal() {
 
 #[tokio::test]
 async fn param_text_pk_matches_literal() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -229,6 +231,7 @@ async fn param_text_pk_matches_literal() {
 
 #[tokio::test]
 async fn param_uuid_pk_matches_literal() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -269,6 +272,7 @@ async fn param_uuid_pk_matches_literal() {
 
 #[tokio::test]
 async fn param_composite_pk_matches_literal() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -461,6 +465,7 @@ async fn prepared_different_params_return_different_partitions() {
 
 #[tokio::test]
 async fn binding_wrong_value_returns_no_matching_rows() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -505,6 +510,7 @@ async fn binding_wrong_value_returns_no_matching_rows() {
 
 #[tokio::test]
 async fn param_count_mismatch_is_rejected() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -659,6 +665,7 @@ async fn zero_marker_params_route_like_literal_execute_simple_id_lookup() {
 
 #[tokio::test]
 async fn zero_marker_query_with_stray_param_is_rejected() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -777,6 +784,7 @@ async fn prepared_context_binds_params_and_reaches_partition_lookup() {
 
 #[tokio::test]
 async fn prepared_context_rejects_hints_for_select() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -818,6 +826,7 @@ async fn prepared_context_rejects_hints_for_select() {
 
 #[tokio::test]
 async fn non_select_with_params_is_rejected() {
+    let _guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
