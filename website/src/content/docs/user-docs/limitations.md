@@ -47,24 +47,15 @@ BTI (trie-based index) is an opt-in feature in Cassandra 5.0, enabled with
 `Partitions.db` and `Rows.db` trie indexes instead of the standard
 `Index.db` / `Summary.db`.
 
-As of v0.11.0, CQLite **detects `da`-format SSTables and rejects them with a clear,
-graceful error** instead of misreading them:
+As of v0.12.0, CQLite **reads `da`-format (BTI) SSTables end-to-end** — a dedicated
+trie-walk read path with `ByteComparable` decode and Data.db chaining, validated
+against `sstabledump` goldens in the `datasets-v3` test set (#897). CQLite can also
+**write** canonical `da`-format SSTables with `Partitions.db`/`Rows.db` trie indexes
+(#872).
 
-```
-Unsupported format: BTI (da) read support not yet implemented. da-format SSTables
-use Partitions.db/Rows.db trie indexes instead of Index.db/Summary.db and require a
-dedicated BTI read path.
-```
-
-The version-gate work (VG5) routes `da` through this graceful-unsupported path today,
-and `da` fixtures plus `sstabledump` goldens ship in the `datasets-v3` test set so a
-real BTI read path can be validated when it lands. That dedicated reader is planned but
-not yet implemented.
-
-**In practice**: because BTI requires explicit cluster opt-in, it is rarely used in
-production. If your SSTables are `da`-format, convert them with Cassandra's
-`sstabledump` first, or use the default BIG format (`nb` / `oa`), which CQLite reads
-fully.
+**In practice**: BTI requires explicit cluster opt-in (`selected_format: bti`) and is
+less common than the default BIG format (`nb` / `oa`), but `da`-format files are now a
+first-class read and write target rather than a rejected one.
 
 ## Data type support
 
