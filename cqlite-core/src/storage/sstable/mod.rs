@@ -1267,15 +1267,32 @@ impl SSTableManager {
     ///
     /// Requires a schema and the `write-support` feature; callers fall back to
     /// per-reader concatenation when either is unavailable.
+    ///
+    /// `start_key`/`end_key` bound the merged output to the same inclusive
+    /// `[start_key, end_key]` key range as the non-metadata
+    /// [`merge_generations_for_read`](Self::merge_generations_for_read) (skip
+    /// `key < start`, skip `key > end`, using `RowKey`'s `Ord`), so a bounded
+    /// multi-generation metadata read returns only the requested range rather than
+    /// the full reconciled table (Issue #957). The range filter runs before `limit`,
+    /// matching the per-reader scan order (range then limit). With `None`/`None`
+    /// bounds the output is byte-for-byte the full reconciled set, unchanged from
+    /// before. This stays definitionally in lockstep with the plain helper.
     #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
     async fn merge_generations_for_read_with_metadata(
         &self,
         reader_list: &[Arc<reader::SSTableReader>],
         schema: &crate::schema::TableSchema,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
         limit: Option<usize>,
     ) -> Result<Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>> {
         use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
         use crate::types::TableId as CqlTableId;
+
+        // Own the bounds so the merge body can use them without borrowing across
+        // the await; cheap clone of the key bytes. Mirrors the plain helper.
+        let start_key = start_key.cloned();
+        let end_key = end_key.cloned();
 
         // Best-effort TTL source: gather each reader's own per-cell metadata and
         // keep, per (row-key bytes, column), the entry with the newest write
@@ -1316,6 +1333,23 @@ impl SSTableManager {
             let mut merger = KWayMerger::new(paths, &merge_schema)?;
             let mut out = Vec::new();
             while let MergeStep::Partition { key, rows } = merger.step()? {
+                // Enforce the same inclusive `[start_key, end_key]` range as the
+                // non-metadata `merge_generations_for_read` (Issue #957): skip
+                // `key < start` and `key > end`, comparing with the identical
+                // `RowKey` ordering used for the final sort. Filtering at the
+                // partition key drops every out-of-range row before it is
+                // materialized.
+                let row_key = RowKey(key.key.clone());
+                if let Some(ref start) = start_key {
+                    if &row_key < start {
+                        continue;
+                    }
+                }
+                if let Some(ref end) = end_key {
+                    if &row_key > end {
+                        continue;
+                    }
+                }
                 for entry in rows {
                     if let RowData::Live { cells } = entry.row_data {
                         let mut map: Vec<(Value, Value)> = Vec::with_capacity(cells.len());
@@ -1417,7 +1451,13 @@ impl SSTableManager {
             if reader_list.len() > 1 {
                 if let Some(schema) = schema {
                     match self
-                        .merge_generations_for_read_with_metadata(reader_list, schema, limit)
+                        .merge_generations_for_read_with_metadata(
+                            reader_list,
+                            schema,
+                            start_key,
+                            end_key,
+                            limit,
+                        )
                         .await
                     {
                         Ok(merged) => return Ok(merged),
