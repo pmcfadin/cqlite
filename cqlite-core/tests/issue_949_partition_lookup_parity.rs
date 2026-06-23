@@ -11,9 +11,10 @@
 //!
 //! Uses `test_timeseries.app_metrics`, whose partition key is the composite
 //! `(application_id TEXT, metric_name TEXT)` — a key the SELECT parser encodes
-//! from string literals, so the fast path actually engages end-to-end. (Tables
-//! with UUID partition keys can't be exercised through the CQL WHERE path yet:
-//! the parser has no unquoted-UUID literal, an unrelated limitation.)
+//! from string literals, so the fast path actually engages end-to-end. The
+//! UUID-partition-key path is exercised separately by
+//! `issue_956_uuid_literal_partition_lookup_parity.rs` (Issue #956 added the
+//! unquoted-UUID literal the parser previously lacked).
 //!
 //! Requires `CQLITE_DATASETS_ROOT` and the fetched binary SSTables; skipped
 //! (not failed) when the data isn't present, matching the repo's other

@@ -159,6 +159,15 @@ pub fn encode_partition_key_columns(values: &[Value], schema: &TableSchema) -> R
 /// declared type (only when the value fits); every other case is returned
 /// unchanged so an unrepresentable value falls through to a serialization error
 /// and the caller reverts to a full scan.
+///
+/// The UUID and Blob arms are explicit (rather than relying on the catch-all)
+/// to document that the SELECT parser's unquoted-UUID and `0x...` blob literals
+/// (Issue #956) are first-class fast-path inputs: a UUID literal serializes for
+/// both `uuid` and `timeuuid` partition keys (both map to
+/// [`ComparatorType::Uuid`]), and a blob literal for a `blob` key. Keeping them
+/// here as named, no-op coercions guards against a future change to the
+/// serializer silently dropping the #949 fast path for the most common
+/// Cassandra partition-key type.
 fn coerce_value_for_comparator(value: &Value, comparator: &ComparatorType) -> Value {
     match (value, comparator) {
         (Value::BigInt(n), ComparatorType::Int)
@@ -178,6 +187,10 @@ fn coerce_value_for_comparator(value: &Value, comparator: &ComparatorType) -> Va
         }
         (Value::BigInt(n), ComparatorType::Timestamp) => Value::Timestamp(*n),
         (Value::Integer(n), ComparatorType::BigInt) => Value::BigInt(*n as i64),
+        // UUID / TIMEUUID literal -> already in the serializer's expected shape.
+        (Value::Uuid(bytes), ComparatorType::Uuid) => Value::Uuid(*bytes),
+        // Blob literal (0x...) -> matches the `blob` serializer directly.
+        (Value::Blob(bytes), ComparatorType::Blob) => Value::Blob(bytes.clone()),
         _ => value.clone(),
     }
 }
@@ -519,6 +532,37 @@ mod tests {
     }
 
     #[test]
+    fn encode_uuid_literal_engages_fast_path() {
+        // Issue #956: a parsed unquoted-UUID literal (Value::Uuid) must encode to
+        // the raw 16-byte key for both `uuid` and `timeuuid` partition keys, so
+        // the #949 partition-targeted fast path engages.
+        let raw = [
+            0x55u8, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        for ty in ["uuid", "timeuuid"] {
+            let schema = schema_with_pks(&[("id", ty)]);
+            let bytes = encode_partition_key_columns(&[Value::Uuid(raw)], &schema)
+                .unwrap_or_else(|e| panic!("encode for {ty} must succeed: {e}"));
+            assert_eq!(
+                bytes, raw,
+                "UUID literal must encode to raw 16 bytes for {ty}"
+            );
+        }
+    }
+
+    #[test]
+    fn encode_blob_literal_engages_fast_path() {
+        // Issue #956: a parsed `0x...` blob literal (Value::Blob) must encode to
+        // its raw bytes for a `blob` partition key.
+        let schema = schema_with_pks(&[("data", "blob")]);
+        let bytes =
+            encode_partition_key_columns(&[Value::Blob(vec![0xde, 0xad, 0xbe, 0xef])], &schema)
+                .unwrap();
+        assert_eq!(bytes, vec![0xde, 0xad, 0xbe, 0xef]);
+    }
+
+    #[test]
     fn encode_column_count_mismatch_errors() {
         let schema = schema_with_pks(&[("a", "text"), ("b", "text")]);
         assert!(encode_partition_key_columns(&[Value::Text("a".to_string())], &schema).is_err());
@@ -545,7 +589,9 @@ mod tests {
         let uuid = [
             0u8, 35, 236, 231, 124, 78, 71, 5, 144, 104, 209, 165, 158, 197, 254, 25,
         ];
-        let cases: Vec<(Vec<(&str, &str)>, Vec<(&str, Value)>)> = vec![
+        // (partition-key column (name, type) list, expected (name, value) list).
+        type Case<'a> = (Vec<(&'a str, &'a str)>, Vec<(&'a str, Value)>);
+        let cases: Vec<Case> = vec![
             (
                 vec![("id", "text")],
                 vec![("id", Value::Text("k123".to_string()))],

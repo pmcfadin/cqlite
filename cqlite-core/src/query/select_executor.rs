@@ -2157,6 +2157,57 @@ mod tests {
         );
     }
 
+    /// Issue #956: a `WHERE id = <uuid-literal>` against a single UUID partition
+    /// key must engage the #949 partition-targeted fast path, i.e.
+    /// `full_partition_key_lookup` returns `Some` with the raw 16-byte key. This
+    /// is the unit-level evidence that the parser's new `Value::Uuid` literal
+    /// flows all the way into the fast path (the e2e parity test proves the rows
+    /// it returns are correct).
+    #[test]
+    fn full_partition_key_lookup_engages_for_uuid_literal() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let uuid = [
+            0x55u8, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        let schema = single_pk_schema("id", "uuid");
+        let predicate = SSTablePredicate {
+            column: "id".to_string(),
+            operation: SSTableFilterOp::Equal,
+            values: vec![Value::Uuid(uuid)],
+        };
+
+        let pk_bytes = full_partition_key_lookup(std::slice::from_ref(&predicate), Some(&schema))
+            .expect("Issue #956: UUID-literal `=` predicate must engage the partition fast path");
+        assert_eq!(
+            pk_bytes,
+            uuid.to_vec(),
+            "fast path must encode the UUID literal to the raw 16-byte on-disk key"
+        );
+    }
+
+    /// A non-equality (or partial) restriction must NOT engage the fast path,
+    /// so the executor falls back to a full scan. Guards against the UUID change
+    /// accidentally widening fast-path eligibility.
+    #[test]
+    fn full_partition_key_lookup_skips_uuid_range_predicate() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let uuid = [1u8; 16];
+        let schema = single_pk_schema("id", "uuid");
+        let predicate = SSTablePredicate {
+            column: "id".to_string(),
+            operation: SSTableFilterOp::Gt,
+            values: vec![Value::Uuid(uuid)],
+        };
+
+        assert!(
+            full_partition_key_lookup(std::slice::from_ref(&predicate), Some(&schema)).is_none(),
+            "a range restriction on the partition key must not take the equality fast path",
+        );
+    }
+
     /// Build a one-column `QueryRow` for predicate-evaluation tests.
     fn row_with_int(column: &str, value: i64) -> QueryRow {
         let mut values = std::collections::HashMap::new();
