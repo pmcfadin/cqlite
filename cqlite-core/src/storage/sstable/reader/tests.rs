@@ -678,6 +678,21 @@ mod tests {
                 mode,
                 "explicit {mode:?} must be honored"
             );
+            // A zero-length file always falls back to buffered, even when an
+            // explicit non-buffered backend is requested (empty map / direct
+            // read is invalid).
+            assert_eq!(
+                resolve_disk_access_mode(mode, 0, 4096, 0.5, Some(8 * gib), true),
+                DiskAccessMode::Buffered,
+                "explicit {mode:?} on an empty file must fall back to buffered"
+            );
+            // Explicit Mmap/Direct are NOT gated by mmap_min_size_bytes: a tiny
+            // (but non-empty) file is still honored, unlike Auto.
+            assert_eq!(
+                resolve_disk_access_mode(mode, 100, 4096, 0.5, Some(8 * gib), true),
+                mode,
+                "explicit {mode:?} must ignore mmap_min_size_bytes for a non-empty file"
+            );
         }
     }
 

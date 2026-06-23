@@ -163,7 +163,11 @@ pub enum DiskAccessMode {
     Auto,
     /// Always use buffered file I/O through the OS page cache.
     Buffered,
-    /// Always memory-map the file (subject to [`StorageConfig::mmap_min_size_bytes`]).
+    /// Always memory-map the file. Unlike the [`DiskAccessMode::Auto`] heuristic,
+    /// this honors the user's explicit request and is **not** gated by
+    /// [`StorageConfig::mmap_min_size_bytes`] (the size threshold only steers
+    /// `Auto`); a zero-length file still falls back to buffered I/O since an
+    /// empty map is invalid.
     Mmap,
     /// Always use direct I/O, bypassing the OS page cache.
     Direct,

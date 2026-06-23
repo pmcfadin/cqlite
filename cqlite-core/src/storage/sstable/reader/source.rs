@@ -328,7 +328,15 @@ impl DirectCursor {
         let file = Self::open_direct(path)?;
         let len = file.metadata()?.len();
         let align = DIRECT_IO_ALIGN;
-        let window = window.max(align).next_multiple_of(align);
+        // Round the window up to the alignment, but saturate instead of
+        // overflowing (a near-`usize::MAX` `direct_io_prefetch_bytes` would
+        // otherwise panic in debug / wrap to 0 in release). A huge window then
+        // simply fails the allocation below and the caller falls back to
+        // buffered I/O, rather than crashing.
+        let window = window
+            .max(align)
+            .checked_next_multiple_of(align)
+            .unwrap_or(usize::MAX & !(align - 1));
         let buf = AlignedBuf::new(window, align)?;
         Ok(Self {
             file,
