@@ -44,6 +44,9 @@ pub(crate) enum BlockSource {
     Buffered(BufReader<File>),
     /// Memory-mapped file view served directly from the page cache.
     Mapped(MmapCursor),
+    /// Direct I/O (`O_DIRECT` / `F_NOCACHE`) that bypasses the page cache.
+    #[cfg(unix)]
+    Direct(DirectCursor),
 }
 
 impl BlockSource {
@@ -57,10 +60,22 @@ impl BlockSource {
         BlockSource::Mapped(MmapCursor::new(mmap))
     }
 
+    /// Create a direct-I/O source (page-cache-bypassing) over `cursor`.
+    #[cfg(unix)]
+    pub(crate) fn direct(cursor: DirectCursor) -> Self {
+        BlockSource::Direct(cursor)
+    }
+
     /// Returns `true` when this source is backed by a memory map.
     #[cfg(test)]
     pub(crate) fn is_mmap(&self) -> bool {
         matches!(self, BlockSource::Mapped(_))
+    }
+
+    /// Returns `true` when this source is backed by direct I/O.
+    #[cfg(all(test, unix))]
+    pub(crate) fn is_direct(&self) -> bool {
+        matches!(self, BlockSource::Direct(_))
     }
 }
 
@@ -79,6 +94,13 @@ pub(crate) enum ScanSource {
     /// Share the underlying read-only memory map; each scan gets its own cursor
     /// position over the same mapped bytes (just an `Arc` clone, no new mapping).
     Mapped(Arc<Mmap>),
+    /// Reopen the file with direct I/O for each scan, giving it its own
+    /// page-cache-bypassing handle and aligned read-ahead window.
+    #[cfg(unix)]
+    Direct {
+        /// Read-ahead window (bytes) for each scan's [`DirectCursor`].
+        window: usize,
+    },
 }
 
 impl ScanSource {
@@ -87,6 +109,23 @@ impl ScanSource {
         Ok(match self {
             ScanSource::Buffered => BlockSource::buffered(File::open(path).await?),
             ScanSource::Mapped(mmap) => BlockSource::mapped(mmap.clone()),
+            #[cfg(unix)]
+            ScanSource::Direct { window } => {
+                // Reopen with O_DIRECT for this scan. If the platform/filesystem
+                // refuses direct I/O, degrade to buffered rather than failing the
+                // scan (mirrors the open()-time fallback).
+                match DirectCursor::open(path, *window) {
+                    Ok(cursor) => BlockSource::direct(cursor),
+                    Err(e) => {
+                        log::warn!(
+                            "Direct-I/O reopen of {} for scan failed ({}); using buffered I/O",
+                            path.display(),
+                            e
+                        );
+                        BlockSource::buffered(File::open(path).await?)
+                    }
+                }
+            }
         })
     }
 }
@@ -122,6 +161,8 @@ impl AsyncRead for BlockSource {
         match self.get_mut() {
             BlockSource::Buffered(r) => Pin::new(r).poll_read(cx, buf),
             BlockSource::Mapped(c) => Pin::new(c).poll_read(cx, buf),
+            #[cfg(unix)]
+            BlockSource::Direct(c) => Pin::new(c).poll_read(cx, buf),
         }
     }
 }
@@ -131,6 +172,8 @@ impl AsyncSeek for BlockSource {
         match self.get_mut() {
             BlockSource::Buffered(r) => Pin::new(r).start_seek(position),
             BlockSource::Mapped(c) => Pin::new(c).start_seek(position),
+            #[cfg(unix)]
+            BlockSource::Direct(c) => Pin::new(c).start_seek(position),
         }
     }
 
@@ -138,6 +181,8 @@ impl AsyncSeek for BlockSource {
         match self.get_mut() {
             BlockSource::Buffered(r) => Pin::new(r).poll_complete(cx),
             BlockSource::Mapped(c) => Pin::new(c).poll_complete(cx),
+            #[cfg(unix)]
+            BlockSource::Direct(c) => Pin::new(c).poll_complete(cx),
         }
     }
 }
@@ -228,6 +273,228 @@ fn offset_from(base: u64, offset: i64) -> io::Result<u64> {
         })?
     };
     Ok(result)
+}
+
+/// I/O alignment (bytes) for direct reads. `O_DIRECT` requires the file
+/// offset, transfer length, and user buffer to all be aligned to the logical
+/// block size of the underlying device. 4096 is a safe superset of the common
+/// 512/4096-byte sector sizes, so aligning to it satisfies every mainstream
+/// local filesystem.
+#[cfg(unix)]
+const DIRECT_IO_ALIGN: usize = 4096;
+
+/// A page-cache-bypassing read cursor over a file opened with direct I/O.
+///
+/// Direct I/O (`O_DIRECT` on Linux, `F_NOCACHE` on macOS) serves reads straight
+/// from the device without populating or evicting the OS page cache. This is
+/// the right backend for a single large scan (a Data.db file bigger than a
+/// configurable fraction of system RAM): it keeps that one-shot scan from
+/// thrashing the page cache and evicting everything else the host has warm.
+///
+/// Because `O_DIRECT` mandates aligned transfers, the cursor maintains its own
+/// aligned read-ahead buffer: each refill issues one aligned `pread` of up to
+/// `window` bytes, and `poll_read` copies the requested sub-range out of it.
+/// The window therefore doubles as the prefetch granularity.
+///
+/// Like [`MmapCursor`], the actual `pread` runs synchronously inside
+/// `poll_read`; direct reads are uncached disk I/O, so callers should keep this
+/// backend to the blocking-friendly contexts where the buffered/mmap backends
+/// already perform synchronous page faults.
+#[cfg(unix)]
+pub(crate) struct DirectCursor {
+    file: std::fs::File,
+    /// Total file length, used for EOF detection.
+    len: u64,
+    /// Logical read position (may sit past EOF; reads then yield zero bytes).
+    pos: u64,
+    /// Read-ahead window size (bytes), already rounded up to [`DIRECT_IO_ALIGN`].
+    window: usize,
+    /// Aligned scratch buffer holding the most recently read window.
+    buf: AlignedBuf,
+    /// File offset of `buf[0]` (always a multiple of [`DIRECT_IO_ALIGN`]).
+    buf_off: u64,
+    /// Number of valid bytes currently in `buf`.
+    buf_len: usize,
+}
+
+#[cfg(unix)]
+impl DirectCursor {
+    /// Open `path` with direct I/O and a `window`-byte aligned read-ahead buffer.
+    ///
+    /// `window` is rounded up to [`DIRECT_IO_ALIGN`] (and never less than one
+    /// alignment unit). Returns an error if the platform or filesystem does not
+    /// support direct I/O, so callers can fall back to buffered reads.
+    pub(crate) fn open(path: &Path, window: usize) -> io::Result<Self> {
+        let file = Self::open_direct(path)?;
+        let len = file.metadata()?.len();
+        let align = DIRECT_IO_ALIGN;
+        let window = window.max(align).next_multiple_of(align);
+        let buf = AlignedBuf::new(window, align)?;
+        Ok(Self {
+            file,
+            len,
+            pos: 0,
+            window,
+            buf,
+            buf_off: 0,
+            buf_len: 0,
+        })
+    }
+
+    /// Open a file handle in cache-bypassing mode for the current platform.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    fn open_direct(path: &Path) -> io::Result<std::fs::File> {
+        use std::os::unix::fs::OpenOptionsExt;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECT)
+            .open(path)
+    }
+
+    /// macOS has no `O_DIRECT`; `F_NOCACHE` is the equivalent per-fd hint that
+    /// tells the unified buffer cache not to retain data for this descriptor.
+    #[cfg(target_os = "macos")]
+    fn open_direct(path: &Path) -> io::Result<std::fs::File> {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::File::open(path)?;
+        // SAFETY: `fcntl` with `F_NOCACHE` on a freshly opened, valid fd.
+        let rc = unsafe { libc::fcntl(file.as_raw_fd(), libc::F_NOCACHE, 1) };
+        if rc == -1 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(file)
+    }
+
+    /// Other Unix targets: no portable cache-bypass primitive is wired up, so
+    /// report unsupported and let the caller fall back to buffered I/O.
+    #[cfg(all(
+        unix,
+        not(any(target_os = "linux", target_os = "android", target_os = "macos"))
+    ))]
+    fn open_direct(_path: &Path) -> io::Result<std::fs::File> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "direct I/O is not supported on this platform",
+        ))
+    }
+
+    /// Ensure the byte at `self.pos` is resident in `buf`, refilling with one
+    /// aligned `pread` if not.
+    fn ensure_buffered(&mut self) -> io::Result<()> {
+        let covered = self.buf_len > 0
+            && self.pos >= self.buf_off
+            && self.pos < self.buf_off + self.buf_len as u64;
+        if covered {
+            return Ok(());
+        }
+        let align = DIRECT_IO_ALIGN as u64;
+        let aligned_off = (self.pos / align) * align;
+        let slice = self.buf.as_mut_slice();
+        debug_assert_eq!(slice.len(), self.window);
+        // A single aligned pread. O_DIRECT returns the full window unless it
+        // straddles EOF, where it returns just the available tail (a legal
+        // short read). `read_at` does not advance the file's own offset, so
+        // concurrent cursors over reopened handles never interfere.
+        use std::os::unix::fs::FileExt;
+        let n = self.file.read_at(slice, aligned_off)?;
+        self.buf_off = aligned_off;
+        self.buf_len = n;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+impl AsyncRead for DirectCursor {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let this = self.get_mut();
+        // At or past EOF: yield zero bytes, leaving position untouched (matching
+        // `File`/`MmapCursor` semantics so `read_exact` reports `UnexpectedEof`).
+        if this.pos >= this.len {
+            return Poll::Ready(Ok(()));
+        }
+        if let Err(e) = this.ensure_buffered() {
+            return Poll::Ready(Err(e));
+        }
+        let rel = (this.pos - this.buf_off) as usize;
+        if rel >= this.buf_len {
+            // The aligned read landed entirely before `pos` (only possible at a
+            // short EOF read); nothing more to hand back.
+            return Poll::Ready(Ok(()));
+        }
+        let available = &this.buf.as_slice()[rel..this.buf_len];
+        let n = available.len().min(buf.remaining());
+        buf.put_slice(&available[..n]);
+        this.pos += n as u64;
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[cfg(unix)]
+impl AsyncSeek for DirectCursor {
+    fn start_seek(self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+        let this = self.get_mut();
+        this.pos = match position {
+            SeekFrom::Start(offset) => offset,
+            SeekFrom::End(offset) => offset_from(this.len, offset)?,
+            SeekFrom::Current(offset) => offset_from(this.pos, offset)?,
+        };
+        Ok(())
+    }
+
+    fn poll_complete(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<u64>> {
+        Poll::Ready(Ok(self.get_mut().pos))
+    }
+}
+
+/// A heap allocation whose start address is aligned to a requested boundary,
+/// as required for `O_DIRECT` transfer buffers.
+#[cfg(unix)]
+struct AlignedBuf {
+    ptr: std::ptr::NonNull<u8>,
+    layout: std::alloc::Layout,
+}
+
+// SAFETY: `AlignedBuf` uniquely owns its allocation for its whole lifetime; the
+// raw pointer is never aliased or shared, so moving it across threads is sound.
+#[cfg(unix)]
+unsafe impl Send for AlignedBuf {}
+
+#[cfg(unix)]
+impl AlignedBuf {
+    fn new(size: usize, align: usize) -> io::Result<Self> {
+        let size = size.max(align);
+        let layout = std::alloc::Layout::from_size_align(size, align)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        // SAFETY: `layout` has non-zero size (size >= align >= 1).
+        let raw = unsafe { std::alloc::alloc_zeroed(layout) };
+        let ptr = std::ptr::NonNull::new(raw)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::OutOfMemory, "aligned alloc failed"))?;
+        Ok(Self { ptr, layout })
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        // SAFETY: `ptr` is valid for `layout.size()` initialised bytes (zeroed
+        // on alloc, then overwritten by reads) and borrowed immutably here.
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.layout.size()) }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [u8] {
+        // SAFETY: `ptr` is valid for `layout.size()` bytes and uniquely borrowed.
+        unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.layout.size()) }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for AlignedBuf {
+    fn drop(&mut self) {
+        // SAFETY: `ptr`/`layout` are exactly the values returned from the
+        // matching `alloc_zeroed`, freed exactly once here.
+        unsafe { std::alloc::dealloc(self.ptr.as_ptr(), self.layout) };
+    }
 }
 
 #[cfg(test)]
@@ -410,5 +677,67 @@ mod tests {
         let n = c.read(&mut b).await.unwrap();
         assert_eq!(n, 2);
         assert_eq!(&b[..2], b"cd");
+    }
+
+    /// Direct-I/O cursor reads back exactly what was written, including across
+    /// the aligned read-ahead window boundary and at a non-aligned EOF. Skips
+    /// when the temp filesystem refuses `O_DIRECT` (common on tmpfs/overlayfs).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn direct_cursor_reads_and_seeks() {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        // A size that is NOT a multiple of the alignment, spanning multiple
+        // windows, to exercise the partial-final-block path.
+        let len = DIRECT_IO_ALIGN * 3 + 123;
+        let mut data = vec![0u8; len];
+        for (i, b) in data.iter_mut().enumerate() {
+            *b = (i % 251) as u8;
+        }
+
+        let dir = std::env::temp_dir();
+        let path = dir.join(format!("cqlite_directcursor_{}.bin", std::process::id()));
+        tokio::fs::write(&path, &data).await.unwrap();
+
+        // Small window (2 alignment units) so a full read crosses windows.
+        let mut cursor = match DirectCursor::open(&path, DIRECT_IO_ALIGN * 2) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("O_DIRECT unsupported here ({e}); skipping direct cursor test");
+                tokio::fs::remove_file(&path).await.ok();
+                return;
+            }
+        };
+
+        // Sequential read of the whole file.
+        let mut got = Vec::with_capacity(len);
+        let mut chunk = [0u8; 1000];
+        loop {
+            let n = cursor.read(&mut chunk).await.unwrap();
+            if n == 0 {
+                break;
+            }
+            got.extend_from_slice(&chunk[..n]);
+        }
+        assert_eq!(got, data, "direct sequential read must match contents");
+
+        // Seek to a non-aligned offset and read a window-crossing span.
+        cursor.seek(SeekFrom::Start(4090)).await.unwrap();
+        let mut window = [0u8; 16];
+        cursor.read_exact(&mut window).await.unwrap();
+        for (k, b) in window.iter().enumerate() {
+            assert_eq!(*b, ((4090 + k) % 251) as u8, "byte {k} after seek");
+        }
+
+        // Reading past EOF reports UnexpectedEof.
+        cursor
+            .seek(SeekFrom::Start((len - 4) as u64))
+            .await
+            .unwrap();
+        let mut tail = [0u8; 8];
+        let err = cursor.read_exact(&mut tail).await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+
+        tokio::fs::remove_file(&path).await.ok();
     }
 }

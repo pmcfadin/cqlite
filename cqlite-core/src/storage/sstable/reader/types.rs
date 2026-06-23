@@ -154,6 +154,16 @@ pub struct SSTableReaderConfig {
     pub use_bloom_filter: bool,
     /// Prefetch size for sequential reads
     pub prefetch_size: usize,
+    /// Backend used for Data.db I/O (buffered / mmap / direct, or auto).
+    ///
+    /// See [`crate::config::StorageConfig::disk_access_mode`]. When
+    /// [`crate::config::DiskAccessMode::Auto`], the file size is compared against
+    /// system RAM to pick mmap (small) or direct I/O (large).
+    pub disk_access_mode: crate::config::DiskAccessMode,
+    /// Fraction of system RAM above which `Auto` escalates a file to direct I/O.
+    pub direct_io_memory_fraction: f64,
+    /// Read-ahead strategy applied to the chosen backend.
+    pub prefetch: crate::config::PrefetchMode,
 }
 
 impl Default for SSTableReaderConfig {
@@ -166,6 +176,9 @@ impl Default for SSTableReaderConfig {
             validate_checksums: true,
             use_bloom_filter: true,
             prefetch_size: 128 * 1024, // 128KB
+            disk_access_mode: crate::config::DiskAccessMode::default(),
+            direct_io_memory_fraction: 0.5,
+            prefetch: crate::config::PrefetchMode::default(),
         }
     }
 }
