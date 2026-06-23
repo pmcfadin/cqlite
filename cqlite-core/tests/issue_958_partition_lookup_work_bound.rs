@@ -23,6 +23,11 @@
 //! fetched binary datasets. It needs `write-support` (to flush generations),
 //! `cli-helpers` + `state_machine` (the ingest/query stack).
 //!
+//! NOTE: excluded under `tombstones`. That feature switches
+//! `SSTableManager::scan_partition` to the full-scan fallback and compiles out the
+//! `work_counters` mutators, so `sstables_scanned()` would read 0 and this
+//! prune-path gate would spuriously fail under `--all-features`.
+//!
 //! Run with:
 //!   cargo test --package cqlite-core \
 //!     --features write-support,cli-helpers,state_machine \
@@ -31,7 +36,8 @@
 #![cfg(all(
     feature = "write-support",
     feature = "cli-helpers",
-    feature = "state_machine"
+    feature = "state_machine",
+    not(feature = "tombstones")
 ))]
 
 use std::sync::Arc;
