@@ -33,9 +33,10 @@ generations to Parquet envelopes with full tombstone fidelity (Epic #696);
 **`WRITETIME()` / `TTL()` in `SELECT`** (Epic #689); broad **query-engine
 completeness** (PER PARTITION LIMIT, static columns, clustering order, clustering-key
 bounds, cross-generation LWW merge, partition-targeted lookups); and **read-path
-performance** work (parallel single-reader scans, streamed writers, promoted index,
-BTI seeks). Plus crates.io OIDC trusted publishing, a Homebrew tap, and a hardened
-CI/validation pipeline.
+performance** work (parallel single-reader scans, a size-aware direct-I/O disk
+backend with configurable prefetch, streamed writers, promoted index, BTI seeks).
+Plus crates.io OIDC trusted publishing, a Homebrew tap, and a hardened CI/validation
+pipeline.
 
 ### Added
 
@@ -89,10 +90,24 @@ CI/validation pipeline.
   inequality bounds (`>=`, `>`, `<`, `<=`) (#791), and a partition-targeted lookup
   for fully-constrained `WHERE pk = ?` instead of scanning every SSTable (#949).
 
+- **Size-aware disk-access backend with direct I/O and configurable prefetch**
+  (#964) — a new `Auto` selector sizes each `Data.db` file against system RAM:
+  small files are memory-mapped (resident in the page cache for repeated scans),
+  while files larger than a configurable fraction of RAM (default half) use **true
+  direct I/O** (`O_DIRECT` on Linux, `F_NOCACHE` on macOS) so a single huge scan does
+  not thrash the page cache. New `StorageConfig` fields — `disk_access_mode`
+  (`auto`/`buffered`/`mmap`/`direct`), `direct_io_memory_fraction`, `prefetch`
+  (`off`/`sequential`/`willneed`/`auto`), and `direct_io_prefetch_bytes` — plus
+  `CQLITE_DISK_ACCESS_MODE` / `CQLITE_PREFETCH` env overrides. Prefetch is wired to
+  both paths (`madvise(SEQUENTIAL/WILLNEED)` on mmap, an aligned read-ahead window on
+  the direct path), and every non-buffered backend degrades gracefully to buffered
+  I/O when the OS/filesystem refuses it (network mounts, `O_DIRECT`-hostile
+  filesystems). All fields are serde-default for backward compatibility; the legacy
+  `use_mmap` flag still forces mmap.
+
 - **Read-path performance** (Epics #906, #751) — restored parallel reads on a single
   `SSTableReader` via per-scan positioned reads (#815) with a concurrent-scan scaling
-  benchmark (#917); a size-aware disk-access backend with configurable prefetch
-  (#964); cursor/channel groundwork for a streaming K-way merge (#754); a
+  benchmark (#917); cursor/channel groundwork for a streaming K-way merge (#754); a
   Cassandra-correct streamed promoted index for wide partitions (#752); and Index.db
   entries streamed to disk instead of buffered (#753).
 
