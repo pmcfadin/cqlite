@@ -33,6 +33,15 @@ use cqlite_core::{Database, Value};
 const QUALIFIED_TABLE: &str = "test_basic.simple_table";
 const KEYSPACE_FILTER: &str = "/test_basic/";
 
+/// Serializes the tests in this file. The access-path *probe*
+/// (`access_path::last()`) is a process-global signal that production code
+/// records into for EVERY SELECT, so two of these tests running concurrently
+/// would clobber each other's probe reads between `reset()`/the query and
+/// `last()`. A `tokio::sync::Mutex` (not `std::sync::Mutex`) so the guard can be
+/// held across `.await` without tripping `clippy::await_holding_lock`. Each test
+/// acquires it as its first statement and holds it for the whole body.
+static PROBE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn datasets_root() -> Option<PathBuf> {
     std::env::var("CQLITE_DATASETS_ROOT")
         .ok()
@@ -119,6 +128,7 @@ async fn one_present_uuid(db: &Database) -> Option<[u8; 16]> {
 
 #[tokio::test]
 async fn where_pk_eq_literal_reports_partition_lookup() {
+    let _probe_guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -165,6 +175,7 @@ async fn where_pk_eq_literal_reports_partition_lookup() {
 
 #[tokio::test]
 async fn unrestricted_select_reports_full_scan_fallback() {
+    let _probe_guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -213,6 +224,7 @@ async fn unrestricted_select_reports_full_scan_fallback() {
 
 #[tokio::test]
 async fn writetime_metadata_path_reports_metadata_scan_fallback() {
+    let _probe_guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -264,6 +276,7 @@ async fn drain(mut it: QueryResultIterator) -> usize {
 
 #[tokio::test]
 async fn streaming_where_pk_eq_literal_reports_streaming_partition_lookup() {
+    let _probe_guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
@@ -301,6 +314,7 @@ async fn streaming_where_pk_eq_literal_reports_streaming_partition_lookup() {
 
 #[tokio::test]
 async fn streaming_unrestricted_select_reports_full_scan_fallback() {
+    let _probe_guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
         Err(e) => {
