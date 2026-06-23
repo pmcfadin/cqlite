@@ -74,6 +74,36 @@ body:
       required: true
 
   - type: textarea
+    id: public-surface
+    attributes:
+      label: Public Surface & Integration Path
+      description: |
+        A perf fix is only real if the intended USER-FACING path actually takes the faster
+        route — not just an isolated benchmark of a helper. Name the public path and how a
+        reviewer can prove the optimization is on it. (See issue #949/#963.)
+      value: |
+        ## Intended caller surface(s)
+        <!-- Which user-facing entry point(s) must get faster? Check all that apply -->
+        - [ ] CQL `execute` (one-shot / `--query` / `--execute`)
+        - [ ] Streaming query API (`execute_streaming` / streaming iterators)
+        - [ ] Prepared statements / bind params (`execute_with_params`)
+        - [ ] CLI subcommand / flag
+        - [ ] REPL / TUI
+        - [ ] Python bindings
+        - [ ] Node.js bindings
+        - [ ] Internal-only (justify below)
+
+        ## Required call chain (storage/query/helper APIs)
+        <!-- The APIs on the hot path from public surface down to the optimized code. -->
+
+        ## How to prove the fast path ran
+        <!-- Work counters (partitions/rows/blocks read), bench delta from the public surface,
+             a regression guard, or a fallback-allowed note. A faster helper that the public
+             path never calls does NOT close a perf issue. -->
+    validations:
+      required: true
+
+  - type: textarea
     id: benchmark-data
     attributes:
       label: Benchmark Data

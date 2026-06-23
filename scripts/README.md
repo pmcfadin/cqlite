@@ -2,6 +2,18 @@
 
 This directory contains shell scripts for CI/CD and local development.
 
+## Wiring / Surface Audit
+
+| Script | Purpose |
+|--------|---------|
+| `audit-inert-surfaces.sh` | Advisory grep for unwired/stubbed public surfaces (issues #949/#963): `TODO: Implement`, ignored `_params`, `#[ignore]` tests, validation-only shells. Exit 2 = findings to review (not an automatic failure). Run before PRs that touch feature/perf behavior. |
+
+```bash
+scripts/audit-inert-surfaces.sh            # scan all tracked Rust sources
+scripts/audit-inert-surfaces.sh --diff     # only files changed vs origin/main
+scripts/audit-inert-surfaces.sh path/...   # scan specific paths
+```
+
 ## CI Scripts (`scripts/ci/`)
 
 Scripts used by GitHub Actions workflows.

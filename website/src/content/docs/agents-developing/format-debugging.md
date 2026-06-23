@@ -3,7 +3,7 @@ title: Format Debugging Workflow
 description: Hex dumps, the definitive-guide chapters to consult, and appendix F for known limitations — how to debug SSTable binary format issues.
 sidebar:
   label: Format debugging
-  order: 6
+  order: 7
 ---
 
 Use this workflow when parsed output is wrong and you need to trace the problem to a
