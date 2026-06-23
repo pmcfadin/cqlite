@@ -319,8 +319,10 @@ impl QueryEngine {
         {
             // Parse once so we can count bind markers and decide routing. Parse
             // failures here mirror `execute_select_query`, which would also fail.
-            let statement =
-                select_parser::parse_select(cql).inspect_err(|_| self.inc_total_queries())?;
+            let statement = select_parser::parse_select(cql).inspect_err(|_| {
+                self.inc_total_queries();
+                self.inc_error_queries();
+            })?;
             let marker_count = statement.bind_marker_count();
 
             // Finding 1: a markerless SELECT with no supplied params must route
