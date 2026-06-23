@@ -25,10 +25,13 @@ There are **two distinct SELECT execution paths** with different access-path beh
 
 - **`SelectExecutor`** (`select_executor.rs`) — the modern path. Used by
   `execute_select_query` and `execute_streaming`. This is where the #949 fast path lives.
-- **Legacy `QueryExecutor`** (`executor.rs`) — used by simple-id-lookup SELECTs, all
-  prepared SELECTs, and `execute_with_params`. It always issues full
-  `storage.scan(table, None, None, None, None)` (executor.rs:249, executor.rs:460) and
-  per-row `storage.get` for index/PK lookups (executor.rs:260, executor.rs:293).
+- **Legacy `QueryExecutor`** (`executor.rs`) — used by simple-id-lookup SELECTs and all
+  prepared SELECTs. It always issues full `storage.scan(table, None, None, None, None)`
+  (executor.rs:249, executor.rs:460) and per-row `storage.get` for index/PK lookups
+  (executor.rs:260, executor.rs:293). **`execute_with_params` is NOT in this set** — it
+  calls `self.execute(cql)` (engine.rs:264), so non-simple SELECTs reach `SelectExecutor`
+  like any literal query; its only defect is that `_params` are ignored (placeholders never
+  bound), a binding gap (#961), not a routing bypass.
 
 ### Storage scan/get surface used by the query layer
 
@@ -184,9 +187,12 @@ done
 if ! awk '
   /fn scan_partition/ { inbody=1 }
   inbody {
+    line=$0
+    sub(/\/\/.*/, "", line)            # strip line comments so a comment ref does not count
     n=gsub(/{/,"{"); depth+=n
     m=gsub(/}/,"}"); depth-=m
-    if ($0 ~ /might_contain_partition/) found=1
+    # require a CALL-shaped match: ".might_contain_partition(" (optional whitespace)
+    if (line ~ /\.[[:space:]]*might_contain_partition[[:space:]]*\(/) found=1
     if (opened && depth<=0) inbody=0
     if (depth>0) opened=1
   }
