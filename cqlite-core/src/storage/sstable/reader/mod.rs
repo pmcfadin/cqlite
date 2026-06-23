@@ -235,6 +235,11 @@ const fn direct_io_available() -> bool {
 
 /// Resolve [`PrefetchMode::Auto`] into the concrete advice the mmap backend
 /// should issue, or `None` for "no advice".
+///
+/// `memmap2::Advice` / `Mmap::advise` (madvise) are Unix-only, so this and its
+/// single call site are gated to `#[cfg(unix)]`. On non-Unix targets the mmap
+/// backend simply issues no read-ahead advice.
+#[cfg(unix)]
 fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
     match prefetch {
         PrefetchMode::Off => None,
@@ -629,7 +634,9 @@ impl SSTableReader {
                         path.display(),
                         file_size
                     );
-                    // Best-effort read-ahead advice; failure is non-fatal.
+                    // Best-effort read-ahead advice (Unix-only; madvise has no
+                    // Windows equivalent here). Failure is non-fatal.
+                    #[cfg(unix)]
                     if let Some(advice) = mmap_advice_for(prefetch) {
                         if let Err(e) = mmap.advise(advice) {
                             log::debug!(
