@@ -109,8 +109,11 @@ Legend for wiring status:
   the modern fast path: **#961 (I)** (binding) + **#962 (J)** (route prepared through the
   fast path).
 - **Apply fast path across ALL SELECT surfaces** — the #949 fast path is only on
-  `SelectExecutor`; simple-id-lookup SELECTs, prepared SELECTs, and
-  `execute_with_params` bypass it entirely: **#962 (J)**.
+  `SelectExecutor`. Two distinct gaps: (1) **simple-id-lookup SELECTs and prepared SELECTs**
+  route through the legacy `QueryExecutor` and bypass the fast path entirely — **#962 (J)**;
+  (2) **`execute_with_params` does NOT bypass `SelectExecutor`** — it calls `self.execute(cql)`
+  so non-simple SELECTs reach the modern executor, but it ignores `_params`, so the predicate
+  value is never bound — **#961 (I)** (binding), not a routing bug.
 
 ### Genuinely NEW gaps (not covered by any listed child)
 
@@ -156,11 +159,8 @@ REQUIRED_IN_QUERY=(
   scan_partition
 )
 
-# Primitives required on the query->storage call chain but NOT directly under query/.
-# Chain proof: query references scan_partition AND scan_partition references the symbol.
-REQUIRED_ON_CHAIN=(
-  "might_contain_partition:cqlite-core/src/storage"
-)
+# Manager source that hosts scan_partition (the #949 entry on the storage side).
+MANAGER_SRC="cqlite-core/src/storage/sstable/mod.rs"
 
 # Primitives that, once #953/#954/#962 land, must appear somewhere on the query→storage
 # call chain. Until then they are tracked as "known unwired" (warn, do not fail).
@@ -178,13 +178,23 @@ for sym in "${REQUIRED_IN_QUERY[@]}"; do
   fi
 done
 
-for entry in "${REQUIRED_ON_CHAIN[@]}"; do
-  sym="${entry%%:*}"; where="${entry#*:}"
-  if ! rg -q "\b${sym}\b" "${where}"; then
-    echo "WIRING-FAIL: '${sym}' no longer referenced in ${where} (broken query->storage chain)"
-    fail=1
-  fi
-done
+# Chain proof: scan_partition must still CALL might_contain_partition — not merely that
+# the method is defined somewhere. Extract the scan_partition fn body by brace-balance
+# and require a call inside it. This catches the file being pruned without the seek.
+if ! awk '
+  /fn scan_partition/ { inbody=1 }
+  inbody {
+    n=gsub(/{/,"{"); depth+=n
+    m=gsub(/}/,"}"); depth-=m
+    if ($0 ~ /might_contain_partition/) found=1
+    if (opened && depth<=0) inbody=0
+    if (depth>0) opened=1
+  }
+  END { exit(found?0:1) }
+' "$MANAGER_SRC"; then
+  echo "WIRING-FAIL: scan_partition no longer calls might_contain_partition in ${MANAGER_SRC} (file-prune lost)"
+  fail=1
+fi
 
 for sym in "${SEEK_PRIMITIVES[@]}"; do
   if rg -q "\b${sym}\b" cqlite-core/src/query; then
@@ -204,9 +214,11 @@ encodes) are:
 # (a) enumerate storage seek/prune/index/bloom primitives
 rg -n 'pub (async )?fn (lookup_|bti_|get_with_|might_contain|find_entry|scan_for_key|.*index.*|.*bloom.*)' cqlite-core/src/storage
 
-# (b) for each symbol, assert query-layer reachability (count > 0 == wired)
+# (b) assert query-layer reachability for DIRECT calls (count > 0 == wired)
 rg -l '\bscan_partition\b' cqlite-core/src/query
-rg -l '\bmight_contain_partition\b' cqlite-core/src/query
+# (c) might_contain_partition is NOT called directly from query/; validate the chain
+#     instead — prove scan_partition (in storage) still calls it (see check below).
+rg -n '\.might_contain_partition\(' cqlite-core/src/storage/sstable/mod.rs
 ```
 
 Recommended wiring point: append the `check-storage-wiring.sh` invocation to
