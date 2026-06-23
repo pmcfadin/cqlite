@@ -52,6 +52,10 @@ export default defineConfig({
           autogenerate: { directory: 'user-docs' },
         },
         {
+          label: 'Releases',
+          autogenerate: { directory: 'releases' },
+        },
+        {
           label: 'SSTable Format Guide',
           autogenerate: { directory: 'sstable-format' },
         },
