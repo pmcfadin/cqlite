@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"fn":["cql_type_to_data_type"],"struct":["ColumnInfo","ParallelizationInfo","PartitionInfo","PerformanceMetrics","PlanInfo","QueryMetadata","QueryResult","QueryResultIterator","QueryRow","RowMetadata","StreamingConfig"]};
+window.SIDEBAR_ITEMS = {"fn":["cql_type_to_data_type"],"struct":["ColumnInfo","ParallelizationInfo","PartitionInfo","PerformanceMetrics","PlanInfo","ProjectionFlags","QueryMetadata","QueryResult","QueryResultIterator","QueryRow","RowMetadata","StreamingConfig"]};

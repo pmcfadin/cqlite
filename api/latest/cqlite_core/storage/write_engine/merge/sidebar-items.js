@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["MergeStep","RowData"],"struct":["CellData","KWayMerger","MergeEntry","MergeStats"],"trait":["SSTableRowIterator"]};
+window.SIDEBAR_ITEMS = {"enum":["MergeStep","RowData"],"fn":["compact_sstables","compact_sstables_with_registry","compute_baseline_min","compute_max_purgeable_timestamp","effective_compaction_schema","udt_columns_eligible_for_normalization"],"struct":["CellData","CompactReport","ComplexDeletion","KWayMerger","MergeEntry","MergeStats","UdtNormalizationPlan"],"trait":["SSTableRowIterator"]};

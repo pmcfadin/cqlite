@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["parquet"]};
+window.SIDEBAR_ITEMS = {"mod":["arrow_convert","delta_parquet","delta_schema","parquet"]};

@@ -2,11 +2,11 @@
 <a href=#2 id=2 data-nosnippet>2</a>
 <a href=#3 id=3 data-nosnippet>3</a></span><span class="kw">use </span>std::collections::HashMap;
 <a href=#4 id=4 data-nosnippet>4</a><span class="kw">use </span>std::path::PathBuf;
-<a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span>std::sync::atomic::{AtomicU64, AtomicUsize};
+<a href=#5 id=5 data-nosnippet>5</a><span class="kw">use </span>std::sync::atomic::AtomicU64;
 <a href=#6 id=6 data-nosnippet>6</a><span class="kw">use </span>std::sync::Arc;
 <a href=#7 id=7 data-nosnippet>7</a><span class="kw">use </span>tokio::sync::Mutex;
 <a href=#8 id=8 data-nosnippet>8</a>
-<a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span><span class="kw">super</span>::source::BlockSource;
+<a href=#9 id=9 data-nosnippet>9</a><span class="kw">use </span><span class="kw">super</span>::source::{BlockSource, ScanSource};
 <a href=#10 id=10 data-nosnippet>10</a>
 <a href=#11 id=11 data-nosnippet>11</a><span class="kw">use </span>crate::{
 <a href=#12 id=12 data-nosnippet>12</a>    parser::SSTableHeader,
@@ -207,69 +207,99 @@
 <a href=#207 id=207 data-nosnippet>207</a></span><span class="kw">pub struct </span>SSTableReader {
 <a href=#208 id=208 data-nosnippet>208</a>    <span class="doccomment">/// Path to the SSTable file
 <a href=#209 id=209 data-nosnippet>209</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) file_path: PathBuf,
-<a href=#210 id=210 data-nosnippet>210</a>    <span class="doccomment">/// Backing byte source for reading (buffered file I/O or memory map)
-<a href=#211 id=211 data-nosnippet>211</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) file: Arc&lt;Mutex&lt;BlockSource&gt;&gt;,
-<a href=#212 id=212 data-nosnippet>212</a>    <span class="doccomment">/// SSTable header information
-<a href=#213 id=213 data-nosnippet>213</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) header: SSTableHeader,
-<a href=#214 id=214 data-nosnippet>214</a>    <span class="doccomment">/// Parser for SSTable format
-<a href=#215 id=215 data-nosnippet>215</a>    </span><span class="attr">#[allow(dead_code)]
-<a href=#216 id=216 data-nosnippet>216</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) parser: SSTableParser,
-<a href=#217 id=217 data-nosnippet>217</a>    <span class="doccomment">/// Index for efficient lookups
-<a href=#218 id=218 data-nosnippet>218</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) index: <span class="prelude-ty">Option</span>&lt;SSTableIndex&gt;,
-<a href=#219 id=219 data-nosnippet>219</a>    <span class="doccomment">/// Bloom filter for existence checks
-<a href=#220 id=220 data-nosnippet>220</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) bloom_filter: <span class="prelude-ty">Option</span>&lt;BloomFilter&gt;,
-<a href=#221 id=221 data-nosnippet>221</a>    <span class="doccomment">/// Compression reader
-<a href=#222 id=222 data-nosnippet>222</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) compression_reader: <span class="prelude-ty">Option</span>&lt;CompressionReader&gt;,
-<a href=#223 id=223 data-nosnippet>223</a>    <span class="doccomment">/// Block metadata cache
-<a href=#224 id=224 data-nosnippet>224</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) block_meta_cache: HashMap&lt;u64, BlockMeta&gt;,
-<a href=#225 id=225 data-nosnippet>225</a>    <span class="doccomment">/// Block data cache (LRU)
-<a href=#226 id=226 data-nosnippet>226</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) block_cache: HashMap&lt;u64, CachedBlock&gt;,
-<a href=#227 id=227 data-nosnippet>227</a>    <span class="doccomment">/// Reader configuration
-<a href=#228 id=228 data-nosnippet>228</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) config: SSTableReaderConfig,
-<a href=#229 id=229 data-nosnippet>229</a>    <span class="doccomment">/// Platform abstraction
-<a href=#230 id=230 data-nosnippet>230</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) platform: Arc&lt;Platform&gt;,
-<a href=#231 id=231 data-nosnippet>231</a>    <span class="doccomment">/// Statistics
-<a href=#232 id=232 data-nosnippet>232</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) stats: SSTableReaderStats,
-<a href=#233 id=233 data-nosnippet>233</a>    <span class="doccomment">/// Cache hit counter for accurate metrics tracking
-<a href=#234 id=234 data-nosnippet>234</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) cache_hits: AtomicU64,
-<a href=#235 id=235 data-nosnippet>235</a>    <span class="doccomment">/// Cache miss counter for accurate metrics tracking
-<a href=#236 id=236 data-nosnippet>236</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) cache_misses: AtomicU64,
-<a href=#237 id=237 data-nosnippet>237</a>    <span class="doccomment">/// Tombstone merger for deletion handling
-<a href=#238 id=238 data-nosnippet>238</a>    </span><span class="attr">#[cfg(feature = <span class="string">"tombstones"</span>)]
-<a href=#239 id=239 data-nosnippet>239</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) tombstone_merger: TombstoneMerger,
-<a href=#240 id=240 data-nosnippet>240</a>    <span class="doccomment">/// SSTable generation number (for multi-generation merging)
-<a href=#241 id=241 data-nosnippet>241</a>    </span><span class="kw">pub </span>generation: u64,
-<a href=#242 id=242 data-nosnippet>242</a>    <span class="doccomment">/// Actual header size calculated during parsing
-<a href=#243 id=243 data-nosnippet>243</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) actual_header_size: usize,
-<a href=#244 id=244 data-nosnippet>244</a>    <span class="doccomment">/// Index.db reader for partition lookup and promoted index handling
-<a href=#245 id=245 data-nosnippet>245</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) index_reader: <span class="prelude-ty">Option</span>&lt;IndexReader&gt;,
-<a href=#246 id=246 data-nosnippet>246</a>    <span class="doccomment">/// Summary.db reader for token-range iteration and sampling
-<a href=#247 id=247 data-nosnippet>247</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) summary_reader: <span class="prelude-ty">Option</span>&lt;SummaryReader&gt;,
-<a href=#248 id=248 data-nosnippet>248</a>    <span class="doccomment">/// Statistics.db reader for min/max timestamps and metadata
-<a href=#249 id=249 data-nosnippet>249</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) statistics_reader: <span class="prelude-ty">Option</span>&lt;StatisticsReader&gt;,
-<a href=#250 id=250 data-nosnippet>250</a>    <span class="doccomment">/// Schema registry for schema-driven operations (modern formats)
-<a href=#251 id=251 data-nosnippet>251</a>    </span><span class="attr">#[cfg(feature = <span class="string">"state_machine"</span>)]
-<a href=#252 id=252 data-nosnippet>252</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) schema_registry: <span class="prelude-ty">Option</span>&lt;Arc&lt;tokio::sync::RwLock&lt;<span class="kw">crate</span>::schema::SchemaRegistry&gt;&gt;&gt;,
-<a href=#253 id=253 data-nosnippet>253</a>    <span class="doccomment">/// Schema registry for schema-driven operations (modern formats) - non-state_machine builds
-<a href=#254 id=254 data-nosnippet>254</a>    </span><span class="attr">#[cfg(not(feature = <span class="string">"state_machine"</span>))]
-<a href=#255 id=255 data-nosnippet>255</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) schema_registry: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">crate</span>::schema::SchemaRegistry&gt;&gt;,
-<a href=#256 id=256 data-nosnippet>256</a>    <span class="doccomment">/// Table schema extracted from SSTable header
-<a href=#257 id=257 data-nosnippet>257</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) schema: <span class="prelude-ty">Option</span>&lt;Arc&lt;TableSchema&gt;&gt;,
-<a href=#258 id=258 data-nosnippet>258</a>    <span class="doccomment">/// UDT registry for UDT-aware parsing (cached for sync access)
-<a href=#259 id=259 data-nosnippet>259</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) udt_registry: <span class="prelude-ty">Option</span>&lt;UdtRegistry&gt;,
-<a href=#260 id=260 data-nosnippet>260</a>    <span class="doccomment">/// CompressionInfo metadata for chunked decompression (if compressed)
-<a href=#261 id=261 data-nosnippet>261</a>    </span><span class="kw">pub </span>compression_info: <span class="prelude-ty">Option</span>&lt;Arc&lt;CompressionInfo&gt;&gt;,
-<a href=#262 id=262 data-nosnippet>262</a>    <span class="doccomment">/// Current chunk index for sequential chunk reading
-<a href=#263 id=263 data-nosnippet>263</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) current_chunk_index: AtomicUsize,
-<a href=#264 id=264 data-nosnippet>264</a>    <span class="doccomment">/// Version-feature gates derived from the SSTable filename.
-<a href=#265 id=265 data-nosnippet>265</a>    ///
-<a href=#266 id=266 data-nosnippet>266</a>    /// Computed once in `SSTableReader::open` via `VersionGates::from_path` and
-<a href=#267 id=267 data-nosnippet>267</a>    /// stored here so every downstream consumer (header parsing,
-<a href=#268 id=268 data-nosnippet>268</a>    /// enhanced_statistics_parser, v5_compressed_legacy row parsing) can read the
-<a href=#269 id=269 data-nosnippet>269</a>    /// gate values without re-deriving them from the filename each time.
-<a href=#270 id=270 data-nosnippet>270</a>    ///
-<a href=#271 id=271 data-nosnippet>271</a>    /// Decision points that WILL be gated in VG3 are annotated with
-<a href=#272 id=272 data-nosnippet>272</a>    /// `// VG3: use self.version_gates.has_XXX()` comments at each call site.
-<a href=#273 id=273 data-nosnippet>273</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) version_gates: Arc&lt;VersionGates&gt;,
-<a href=#274 id=274 data-nosnippet>274</a>}
+<a href=#210 id=210 data-nosnippet>210</a>    <span class="doccomment">/// Backing byte source for point reads (buffered file I/O or memory map).
+<a href=#211 id=211 data-nosnippet>211</a>    ///
+<a href=#212 id=212 data-nosnippet>212</a>    /// Used only by positioned point-read helpers (`get_cached_data`,
+<a href=#213 id=213 data-nosnippet>213</a>    /// integrity checks) that lock, seek, read, and unlock atomically. Full
+<a href=#214 id=214 data-nosnippet>214</a>    /// scans no longer use this shared cursor — they mint their own
+<a href=#215 id=215 data-nosnippet>215</a>    /// [`ScanCursor`](super::source::ScanCursor) via [`Self::scan_source`] so
+<a href=#216 id=216 data-nosnippet>216</a>    /// they run in parallel (issue #815).
+<a href=#217 id=217 data-nosnippet>217</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) file: Arc&lt;Mutex&lt;BlockSource&gt;&gt;,
+<a href=#218 id=218 data-nosnippet>218</a>    <span class="doccomment">/// Template for minting fresh per-scan [`BlockSource`]s so concurrent scans
+<a href=#219 id=219 data-nosnippet>219</a>    /// never share a mutable file position or chunk index (issue #815).
+<a href=#220 id=220 data-nosnippet>220</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) scan_source: ScanSource,
+<a href=#221 id=221 data-nosnippet>221</a>    <span class="doccomment">/// SSTable header information
+<a href=#222 id=222 data-nosnippet>222</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) header: SSTableHeader,
+<a href=#223 id=223 data-nosnippet>223</a>    <span class="doccomment">/// Parser for SSTable format
+<a href=#224 id=224 data-nosnippet>224</a>    </span><span class="attr">#[allow(dead_code)]
+<a href=#225 id=225 data-nosnippet>225</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) parser: SSTableParser,
+<a href=#226 id=226 data-nosnippet>226</a>    <span class="doccomment">/// Index for efficient lookups
+<a href=#227 id=227 data-nosnippet>227</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) index: <span class="prelude-ty">Option</span>&lt;SSTableIndex&gt;,
+<a href=#228 id=228 data-nosnippet>228</a>    <span class="doccomment">/// Bloom filter for existence checks
+<a href=#229 id=229 data-nosnippet>229</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) bloom_filter: <span class="prelude-ty">Option</span>&lt;BloomFilter&gt;,
+<a href=#230 id=230 data-nosnippet>230</a>    <span class="doccomment">/// Compression reader
+<a href=#231 id=231 data-nosnippet>231</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) compression_reader: <span class="prelude-ty">Option</span>&lt;CompressionReader&gt;,
+<a href=#232 id=232 data-nosnippet>232</a>    <span class="doccomment">/// Block metadata cache
+<a href=#233 id=233 data-nosnippet>233</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) block_meta_cache: HashMap&lt;u64, BlockMeta&gt;,
+<a href=#234 id=234 data-nosnippet>234</a>    <span class="doccomment">/// Block data cache (LRU)
+<a href=#235 id=235 data-nosnippet>235</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) block_cache: HashMap&lt;u64, CachedBlock&gt;,
+<a href=#236 id=236 data-nosnippet>236</a>    <span class="doccomment">/// Reader configuration
+<a href=#237 id=237 data-nosnippet>237</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) config: SSTableReaderConfig,
+<a href=#238 id=238 data-nosnippet>238</a>    <span class="doccomment">/// Platform abstraction
+<a href=#239 id=239 data-nosnippet>239</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) platform: Arc&lt;Platform&gt;,
+<a href=#240 id=240 data-nosnippet>240</a>    <span class="doccomment">/// Statistics
+<a href=#241 id=241 data-nosnippet>241</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) stats: SSTableReaderStats,
+<a href=#242 id=242 data-nosnippet>242</a>    <span class="doccomment">/// Cache hit counter for accurate metrics tracking
+<a href=#243 id=243 data-nosnippet>243</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) cache_hits: AtomicU64,
+<a href=#244 id=244 data-nosnippet>244</a>    <span class="doccomment">/// Cache miss counter for accurate metrics tracking
+<a href=#245 id=245 data-nosnippet>245</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) cache_misses: AtomicU64,
+<a href=#246 id=246 data-nosnippet>246</a>    <span class="doccomment">/// Tombstone merger for deletion handling
+<a href=#247 id=247 data-nosnippet>247</a>    </span><span class="attr">#[cfg(feature = <span class="string">"tombstones"</span>)]
+<a href=#248 id=248 data-nosnippet>248</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) tombstone_merger: TombstoneMerger,
+<a href=#249 id=249 data-nosnippet>249</a>    <span class="doccomment">/// SSTable generation number (for multi-generation merging)
+<a href=#250 id=250 data-nosnippet>250</a>    </span><span class="kw">pub </span>generation: u64,
+<a href=#251 id=251 data-nosnippet>251</a>    <span class="doccomment">/// Actual header size calculated during parsing
+<a href=#252 id=252 data-nosnippet>252</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) actual_header_size: usize,
+<a href=#253 id=253 data-nosnippet>253</a>    <span class="doccomment">/// Index.db reader for partition lookup and promoted index handling
+<a href=#254 id=254 data-nosnippet>254</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) index_reader: <span class="prelude-ty">Option</span>&lt;IndexReader&gt;,
+<a href=#255 id=255 data-nosnippet>255</a>    <span class="doccomment">/// Summary.db reader for token-range iteration and sampling
+<a href=#256 id=256 data-nosnippet>256</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) summary_reader: <span class="prelude-ty">Option</span>&lt;SummaryReader&gt;,
+<a href=#257 id=257 data-nosnippet>257</a>    <span class="doccomment">/// Statistics.db reader for min/max timestamps and metadata
+<a href=#258 id=258 data-nosnippet>258</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) statistics_reader: <span class="prelude-ty">Option</span>&lt;StatisticsReader&gt;,
+<a href=#259 id=259 data-nosnippet>259</a>    <span class="doccomment">/// Schema registry for schema-driven operations (modern formats)
+<a href=#260 id=260 data-nosnippet>260</a>    </span><span class="attr">#[cfg(feature = <span class="string">"state_machine"</span>)]
+<a href=#261 id=261 data-nosnippet>261</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) schema_registry: <span class="prelude-ty">Option</span>&lt;Arc&lt;tokio::sync::RwLock&lt;<span class="kw">crate</span>::schema::SchemaRegistry&gt;&gt;&gt;,
+<a href=#262 id=262 data-nosnippet>262</a>    <span class="doccomment">/// Schema registry for schema-driven operations (modern formats) - non-state_machine builds
+<a href=#263 id=263 data-nosnippet>263</a>    </span><span class="attr">#[cfg(not(feature = <span class="string">"state_machine"</span>))]
+<a href=#264 id=264 data-nosnippet>264</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) schema_registry: <span class="prelude-ty">Option</span>&lt;Arc&lt;<span class="kw">crate</span>::schema::SchemaRegistry&gt;&gt;,
+<a href=#265 id=265 data-nosnippet>265</a>    <span class="doccomment">/// Table schema extracted from SSTable header
+<a href=#266 id=266 data-nosnippet>266</a>    </span><span class="kw">pub</span>(<span class="kw">super</span>) schema: <span class="prelude-ty">Option</span>&lt;Arc&lt;TableSchema&gt;&gt;,
+<a href=#267 id=267 data-nosnippet>267</a>    <span class="doccomment">/// UDT registry for UDT-aware parsing (cached for sync access)
+<a href=#268 id=268 data-nosnippet>268</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) udt_registry: <span class="prelude-ty">Option</span>&lt;UdtRegistry&gt;,
+<a href=#269 id=269 data-nosnippet>269</a>    <span class="doccomment">/// CompressionInfo metadata for chunked decompression (if compressed)
+<a href=#270 id=270 data-nosnippet>270</a>    </span><span class="kw">pub </span>compression_info: <span class="prelude-ty">Option</span>&lt;Arc&lt;CompressionInfo&gt;&gt;,
+<a href=#271 id=271 data-nosnippet>271</a>    <span class="doccomment">/// Version-feature gates derived from the SSTable filename.
+<a href=#272 id=272 data-nosnippet>272</a>    ///
+<a href=#273 id=273 data-nosnippet>273</a>    /// Computed once in `SSTableReader::open` via `VersionGates::from_path` and
+<a href=#274 id=274 data-nosnippet>274</a>    /// stored here so every downstream consumer (header parsing,
+<a href=#275 id=275 data-nosnippet>275</a>    /// enhanced_statistics_parser, v5_compressed_legacy row parsing) can read the
+<a href=#276 id=276 data-nosnippet>276</a>    /// gate values without re-deriving them from the filename each time.
+<a href=#277 id=277 data-nosnippet>277</a>    ///
+<a href=#278 id=278 data-nosnippet>278</a>    /// Decision points that WILL be gated in VG3 are annotated with
+<a href=#279 id=279 data-nosnippet>279</a>    /// `// VG3: use self.version_gates.has_XXX()` comments at each call site.
+<a href=#280 id=280 data-nosnippet>280</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) version_gates: Arc&lt;VersionGates&gt;,
+<a href=#281 id=281 data-nosnippet>281</a>    <span class="doccomment">/// Raw bytes of the sibling BTI `*-Partitions.db` trie, when this reader was
+<a href=#282 id=282 data-nosnippet>282</a>    /// opened on a BTI ("da") SSTable (issue #831).
+<a href=#283 id=283 data-nosnippet>283</a>    ///
+<a href=#284 id=284 data-nosnippet>284</a>    /// `Some` for BTI SSTables (Partitions.db is tiny — a single small trie),
+<a href=#285 id=285 data-nosnippet>285</a>    /// `None` for BIG-format SSTables. The BTI point-lookup path
+<a href=#286 id=286 data-nosnippet>286</a>    /// (`lookup_partition_via_bti_trie` / `bti_point_lookup`) wraps these bytes in
+<a href=#287 id=287 data-nosnippet>287</a>    /// a `std::io::Cursor` per lookup and walks the trie to resolve the
+<a href=#288 id=288 data-nosnippet>288</a>    /// uncompressed Data.db offset for a partition key — an O(log n) point lookup
+<a href=#289 id=289 data-nosnippet>289</a>    /// instead of the sequential scan used when no index is available.
+<a href=#290 id=290 data-nosnippet>290</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) bti_partitions_db: <span class="prelude-ty">Option</span>&lt;Arc&lt;Vec&lt;u8&gt;&gt;&gt;,
+<a href=#291 id=291 data-nosnippet>291</a>    <span class="doccomment">/// Raw bytes of the sibling BTI `*-Rows.db` within-partition row-index trie,
+<a href=#292 id=292 data-nosnippet>292</a>    /// when this reader was opened on a BTI ("da") SSTable (issue #909, #910).
+<a href=#293 id=293 data-nosnippet>293</a>    ///
+<a href=#294 id=294 data-nosnippet>294</a>    /// `Some` for BTI SSTables (always emitted, possibly 0 bytes for a
+<a href=#295 id=295 data-nosnippet>295</a>    /// narrow-only table), `None` for BIG-format SSTables. The BTI point-lookup
+<a href=#296 id=296 data-nosnippet>296</a>    /// path uses this to resolve a WIDE partition: the `Partitions.db` trie
+<a href=#297 id=297 data-nosnippet>297</a>    /// returns a positive `RowsOffset` pointing at the partition's
+<a href=#298 id=298 data-nosnippet>298</a>    /// `TrieIndexEntry` inside `Rows.db`; [`resolve_rows_db_entry`] then recovers
+<a href=#299 id=299 data-nosnippet>299</a>    /// the partition's uncompressed `Data.db` position (`data_position`), which is
+<a href=#300 id=300 data-nosnippet>300</a>    /// the same offset domain a NARROW partition's direct `DataOffset` uses.
+<a href=#301 id=301 data-nosnippet>301</a>    ///
+<a href=#302 id=302 data-nosnippet>302</a>    /// [`resolve_rows_db_entry`]: crate::storage::sstable::bti::resolve_rows_db_entry
+<a href=#303 id=303 data-nosnippet>303</a>    </span><span class="kw">pub</span>(<span class="kw">crate</span>) bti_rows_db: <span class="prelude-ty">Option</span>&lt;Arc&lt;Vec&lt;u8&gt;&gt;&gt;,
+<a href=#304 id=304 data-nosnippet>304</a>}
 </code></pre></div></section></main></body></html>

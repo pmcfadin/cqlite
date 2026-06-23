@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"struct":["IndexEntryInfo","IndexWriter"]};
+window.SIDEBAR_ITEMS = {"constant":["COLUMN_INDEX_SIZE_BYTES","INDEX_INFO_WIDTH_BASE"],"struct":["IndexEntryInfo","IndexWriter","PromotedIndexBlock"]};

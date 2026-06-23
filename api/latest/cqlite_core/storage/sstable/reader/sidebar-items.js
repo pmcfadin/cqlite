@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"enum":["IntegrityStatus"],"fn":["open_sstable_reader"],"struct":["BlockMeta","CachedBlock","IntegrityCheckResult","SSTableReader","SSTableReaderConfig","SSTableReaderHealthMetrics","SSTableReaderStats"]};
+window.SIDEBAR_ITEMS = {"enum":["IntegrityStatus"],"fn":["open_sstable_reader"],"mod":["compaction_row","delta_scan"],"struct":["BlockMeta","CachedBlock","IntegrityCheckResult","SSTableReader","SSTableReaderConfig","SSTableReaderHealthMetrics","SSTableReaderStats"]};

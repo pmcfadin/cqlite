@@ -1,77 +1,15 @@
-<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Parquet export writer for QueryResult (feature = “parquet”)"><title>cqlite_core::export::parquet - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module parquet</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.11.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module parquet</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#cql--arrow-type-mapping" title="CQL → Arrow type mapping">CQL → Arrow type mapping</a></li><li><a href="#list-set-and-map-mapping" title="List, Set, and Map mapping">List, Set, and Map mapping</a></li><li><a href="#udt-and-tuple-mapping-issue-678" title="UDT and Tuple mapping (Issue #678)">UDT and Tuple mapping (Issue #678)</a></li><li><a href="#recursive-builder-design" title="Recursive builder design">Recursive builder design</a></li><li><a href="#decimal-strategy" title="Decimal strategy">Decimal strategy</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>export</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">export</a></div><h1>Module <span>parquet</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/export/parquet.rs.html#1-2521">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Parquet export writer for QueryResult (feature = “parquet”)</p>
+<!DOCTYPE html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><meta name="generator" content="rustdoc"><meta name="description" content="Parquet export writer for QueryResult (feature = “parquet”)"><title>cqlite_core::export::parquet - Rust</title><script>if(window.location.protocol!=="file:")document.head.insertAdjacentHTML("beforeend","SourceSerif4-Regular-6b053e98.ttf.woff2,FiraSans-Italic-81dc35de.woff2,FiraSans-Regular-0fe48ade.woff2,FiraSans-MediumItalic-ccf7e434.woff2,FiraSans-Medium-e1aa3f0a.woff2,SourceCodePro-Regular-8badfe75.ttf.woff2,SourceCodePro-Semibold-aa29a496.ttf.woff2".split(",").map(f=>`<link rel="preload" as="font" type="font/woff2"href="../../../static.files/${f}">`).join(""))</script><link rel="stylesheet" href="../../../static.files/normalize-9960930a.css"><link rel="stylesheet" href="../../../static.files/rustdoc-17e0aaed.css"><meta name="rustdoc-vars" data-root-path="../../../" data-static-root-path="../../../static.files/" data-current-crate="cqlite_core" data-themes="" data-resource-suffix="" data-rustdoc-version="1.96.0 (ac68faa20 2026-05-25)" data-channel="1.96.0" data-search-js="search-b5634cc7.js" data-stringdex-js="stringdex-2da4960a.js" data-settings-js="settings-170eb4bf.js" ><script src="../../../static.files/storage-41dd4d93.js"></script><script defer src="../sidebar-items.js"></script><script defer src="../../../static.files/main-5013f961.js"></script><noscript><link rel="stylesheet" href="../../../static.files/noscript-f7c3ffd8.css"></noscript><link rel="alternate icon" type="image/png" href="../../../static.files/favicon-32x32-eab170b8.png"><link rel="icon" type="image/svg+xml" href="../../../static.files/favicon-044be391.svg"></head><body class="rustdoc mod"><a class="skip-main-content" href="#main-content">Skip to main content</a><!--[if lte IE 11]><div class="warning">This old browser is unsupported and will most likely display funky things.</div><![endif]--><rustdoc-topbar><h2><a href="#">Module parquet</a></h2></rustdoc-topbar><nav class="sidebar"><div class="sidebar-crate"><h2><a href="../../../cqlite_core/index.html">cqlite_<wbr>core</a><span class="version">0.12.0</span></h2></div><div class="sidebar-elems"><section id="rustdoc-toc"><h2 class="location"><a href="#">Module parquet</a></h2><h3><a href="#">Sections</a></h3><ul class="block top-toc"><li><a href="#cql--arrow-type-mapping" title="CQL → Arrow type mapping">CQL → Arrow type mapping</a></li></ul><h3><a href="#structs">Module Items</a></h3><ul class="block"><li><a href="#structs" title="Structs">Structs</a></li><li><a href="#enums" title="Enums">Enums</a></li><li><a href="#functions" title="Functions">Functions</a></li></ul></section><div id="rustdoc-modnav"><h2><a href="../index.html">In cqlite_<wbr>core::<wbr>export</a></h2></div></div></nav><div class="sidebar-resizer" title="Drag to resize sidebar"></div><main><div class="width-limiter"><section id="main-content" class="content" tabindex="-1"><div class="main-heading"><div class="rustdoc-breadcrumbs"><a href="../../index.html">cqlite_core</a>::<wbr><a href="../index.html">export</a></div><h1>Module <span>parquet</span>&nbsp;<button id="copy-path" title="Copy item path to clipboard">Copy item path</button></h1><rustdoc-toolbar></rustdoc-toolbar><span class="sub-heading"><a class="src" href="../../../src/cqlite_core/export/parquet.rs.html#1-798">Source</a> </span></div><details class="toggle top-doc" open><summary class="hideme"><span>Expand description</span></summary><div class="docblock"><p>Parquet export writer for QueryResult (feature = “parquet”)</p>
 <p>Converts CQL query results to Apache Parquet format with proper type mapping.
 Uses Snappy compression by default (Cassandra default, good speed/size balance).</p>
 <p>This module is compiled only when the <code>parquet</code> cargo feature is enabled
 (off by default, Epic #682).  CQLite produces Parquet <em>files</em>; committing
 those files to Iceberg/Delta table formats is an external committer’s job
 and is deliberately out of scope (see <code>export</code> module docs).</p>
+<p>The CQL → Arrow type mapping and array-building logic lives in the sibling
+<code>arrow_convert</code> module (feature = “arrow”), which this module re-exports.
+That separation allows a third-party Arrow IPC writer to reuse the
+conversion without depending on the <code>parquet</code> crate.</p>
 <h2 id="cql--arrow-type-mapping"><a class="doc-anchor" href="#cql--arrow-type-mapping">§</a>CQL → Arrow type mapping</h2>
-<p>When <code>ColumnInfo.cql_type</code> is <code>Some</code>, the following high-fidelity mappings are
-used instead of the flat <code>data_type</code> fallback:</p>
-<div><table><thead><tr><th>CQL type</th><th>Arrow type</th><th>Notes</th></tr></thead><tbody>
-<tr><td>date</td><td><code>Date32</code></td><td>Signed days since 1970-01-01</td></tr>
-<tr><td>time</td><td><code>Time64(Nanosecond)</code></td><td>Nanos since midnight</td></tr>
-<tr><td>decimal</td><td><code>Decimal128(38, DECIMAL_FIXED_SCALE)</code></td><td>Rescaled; see strategy below</td></tr>
-<tr><td>varint</td><td><code>Decimal128(38, 0)</code> or <code>Utf8</code></td><td><code>Utf8</code> fallback on overflow</td></tr>
-<tr><td>duration</td><td><code>Utf8</code> (CQL text form)</td><td>Parquet crate v53 NYI MonthDayNano</td></tr>
-<tr><td>uuid/timeuuid</td><td><code>FixedSizeBinary(16)</code> + UUID ext</td><td>Arrow UUID extension metadata</td></tr>
-<tr><td>inet</td><td><code>Utf8</code></td><td>Canonical textual form (deliberate)</td></tr>
-<tr><td>counter</td><td><code>Int64</code></td><td>Unchanged</td></tr>
-<tr><td>list&lt;X&gt;</td><td><code>List&lt;mapped(X)&gt;</code></td><td>Recursive element mapping</td></tr>
-<tr><td>set&lt;X&gt;</td><td><code>List&lt;mapped(X)&gt;</code></td><td>Arrow has no Set type; uses List</td></tr>
-<tr><td>map&lt;K,V&gt;</td><td><code>Map&lt;Struct(key:K,value:V)&gt;</code></td><td>Typed keys/values; nested OK</td></tr>
-<tr><td>tuple&lt;A,B,…&gt;</td><td><code>Struct(field_0:A, field_1:B, …)</code></td><td>Positional names; per-position types</td></tr>
-<tr><td>udt&lt;name&gt;</td><td><code>Struct(f1:T1, f2:T2, …)</code></td><td>Field names from schema; null OK</td></tr>
-</tbody></table>
-</div><h2 id="list-set-and-map-mapping"><a class="doc-anchor" href="#list-set-and-map-mapping">§</a>List, Set, and Map mapping</h2>
-<p>CQL <code>list&lt;X&gt;</code> and <code>set&lt;X&gt;</code> both map to Arrow <code>List</code> (Arrow has no dedicated Set
-type).  Element types are mapped recursively through the same scalar mapping
-table above, so <code>list&lt;uuid&gt;</code> produces <code>List&lt;FixedSizeBinary(16)&gt;</code>,
-<code>list&lt;timestamp&gt;</code> produces <code>List&lt;Timestamp(ms,UTC)&gt;</code>, etc.</p>
-<p>CQL <code>map&lt;K,V&gt;</code> maps to Arrow <code>Map</code> with a non-nullable struct entries field
-containing children <code>"key"</code> (non-nullable) and <code>"value"</code> (nullable), matching
-the naming convention used by the legacy string-map path (<code>build_map_array</code>).
-Both key and value types are mapped recursively, enabling nested value types
-such as <code>map&lt;text, frozen&lt;list&lt;int&gt;&gt;&gt;</code>.</p>
-<p><code>CqlType::Frozen(inner)</code> is transparent in the recursion: it unwraps and
-recurses into <code>inner</code>.  Runtime <code>Value::Frozen(inner)</code> values are also unwrapped
-before element dispatch.</p>
-<p>For nested collections (<code>list&lt;frozen&lt;list&lt;int&gt;&gt;&gt;</code>), the recursion produces
-<code>List&lt;List&lt;Int32&gt;&gt;</code> and handles element unwrapping at all levels.</p>
-<h2 id="udt-and-tuple-mapping-issue-678"><a class="doc-anchor" href="#udt-and-tuple-mapping-issue-678">§</a>UDT and Tuple mapping (Issue #678)</h2>
-<p>CQL <code>tuple&lt;A,B,…&gt;</code> maps to Arrow <code>Struct</code> with positional field names
-(<code>field_0</code>, <code>field_1</code>, …) and per-position Arrow types mapped recursively.
-CQL UDTs map to Arrow <code>Struct</code> with the UDT’s schema field names and
-recursively mapped field types.  Unset (None) UDT fields and missing
-tuple positions become null children in the output StructArray.</p>
-<p>If a UDT or Tuple has zero fields (degenerate case), the column falls back
-to <code>Utf8</code> and a note is logged in the field name to avoid an Arrow error
-(<code>StructArray</code> must have at least one child or an explicit validity bitmap,
-but zero-field structs are not representable in Parquet).</p>
-<h2 id="recursive-builder-design"><a class="doc-anchor" href="#recursive-builder-design">§</a>Recursive builder design</h2>
-<p><code>build_typed_value_array(cql_type, values)</code> is the shared recursive entry point
-used by both top-level column dispatch and nested element building.  Adding
-support for Tuple/UDT elements (#678) requires only new match arms in
-<code>cql_type_to_arrow_data_type</code> and <code>build_typed_value_array</code>.</p>
-<h2 id="decimal-strategy"><a class="doc-anchor" href="#decimal-strategy">§</a>Decimal strategy</h2>
-<p>CQL <code>decimal</code> stores a per-value scale alongside the unscaled big-endian integer.
-Arrow <code>Decimal128</code> requires a single fixed (precision, scale) pair at schema time.
-We fix <code>DECIMAL_FIXED_SCALE = 9</code> (nanosecond-like resolution, fits most Cassandra
-decimals in practice). Each value is rescaled to that fixed scale:</p>
-<ul>
-<li>If the value’s scale equals <code>DECIMAL_FIXED_SCALE</code>, no rescaling is needed.</li>
-<li>If the value’s scale is smaller (fewer decimal places), the unscaled integer
-is multiplied by <code>10^(DECIMAL_FIXED_SCALE - value_scale)</code> — a checked
-multiplication is used; on overflow the write fails with a clear error.</li>
-<li>If the value’s scale is larger, the unscaled integer is divided by
-<code>10^(value_scale - DECIMAL_FIXED_SCALE)</code> with truncation toward zero; the
-caller is warned via the error path if the value cannot be represented exactly.</li>
-<li>Precision is fixed at 38 (max for <code>Decimal128</code>).</li>
-<li>Values whose rescaled magnitude exceeds 38 decimal digits fail with a clear
-error rather than silently truncating.</li>
-</ul>
-<p>For <code>varint</code>, the big-endian signed integer is decoded and stored as
-<code>Decimal128(38, 0)</code> (integer, no fractional part).  Values that exceed 38
-decimal digits fall back to <code>Utf8</code> (the column schema will be <code>Utf8</code>; the
-value is rendered as a decimal string via <code>ValueFormatter</code>).</p>
+<p>See <a href="../arrow_convert/index.html" title="mod cqlite_core::export::arrow_convert"><code>super::arrow_convert</code></a> for the full mapping table, decimal strategy,
+and recursive builder design.</p>
 </div></details><h2 id="structs" class="section-header">Structs<a href="#structs" class="anchor">§</a></h2><dl class="item-table"><dt><a class="struct" href="struct.ParquetExportOptions.html" title="struct cqlite_core::export::parquet::ParquetExportOptions">Parquet<wbr>Export<wbr>Options</a></dt><dd>Writer-owned options for Parquet export.</dd><dt><a class="struct" href="struct.ParquetWriter.html" title="struct cqlite_core::export::parquet::ParquetWriter">Parquet<wbr>Writer</a></dt><dd>Parquet writer for QueryResult</dd><dt><a class="struct" href="struct.StreamingParquetWriter.html" title="struct cqlite_core::export::parquet::StreamingParquetWriter">Streaming<wbr>Parquet<wbr>Writer</a></dt><dd>Streaming Parquet writer for memory-efficient export of large datasets</dd></dl><h2 id="enums" class="section-header">Enums<a href="#enums" class="anchor">§</a></h2><dl class="item-table"><dt><a class="enum" href="enum.ParquetCompression.html" title="enum cqlite_core::export::parquet::ParquetCompression">Parquet<wbr>Compression</a></dt><dd>Compression codec for Parquet output.</dd><dt><a class="enum" href="enum.ParquetExportError.html" title="enum cqlite_core::export::parquet::ParquetExportError">Parquet<wbr>Export<wbr>Error</a></dt><dd>Errors produced by the Parquet export writers.</dd></dl><h2 id="functions" class="section-header">Functions<a href="#functions" class="anchor">§</a></h2><dl class="item-table"><dt><a class="fn" href="fn.create_streaming_parquet_writer.html" title="fn cqlite_core::export::parquet::create_streaming_parquet_writer">create_<wbr>streaming_<wbr>parquet_<wbr>writer</a></dt><dd>Create a StreamingParquetWriter that writes to a file.</dd></dl></section></div></main></body></html>

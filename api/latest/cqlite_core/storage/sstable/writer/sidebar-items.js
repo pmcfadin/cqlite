@@ -1,1 +1,1 @@
-window.SIDEBAR_ITEMS = {"mod":["compressed_data_writer","compression_info_writer","data_writer","digest_writer","filter_writer","index_writer","stats_writer","summary_writer","toc_writer"],"struct":["SSTableInfo","SSTableWriter"]};
+window.SIDEBAR_ITEMS = {"enum":["SSTableFormat"],"mod":["compressed_data_writer","compression_info_writer","data_writer","digest_writer","filter_writer","index_writer","partitions_writer","stats_writer","summary_writer","toc_writer"],"struct":["SSTableInfo","SSTableWriter"]};
