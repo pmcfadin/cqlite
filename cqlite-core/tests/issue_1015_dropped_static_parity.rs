@@ -66,6 +66,33 @@ use cqlite_core::storage::sstable::reader::delta_scan::{scan_delta, CellDelta, D
 use cqlite_core::types::Value;
 
 // ===========================================================================
+// require-fixtures contract (issue #972): opt-in strict mode
+// ===========================================================================
+
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode, every code path that would otherwise SKIP because the dataset
+/// root is unset or a required binary fixture is absent must PANIC instead, so a
+/// CI gate cannot false-pass on missing data.
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Skip cleanly (default) or PANIC (strict mode) when a required fixture is absent.
+/// `fixture` names the missing component; `reason` is the human-readable skip cause.
+fn skip_or_panic(fixture: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but fixture {fixture} is absent — {reason}; \
+             fetch/generate it (bash test-data/scripts/fetch-datasets.sh)"
+        );
+    }
+    eprintln!("[SKIP] {reason}");
+}
+
+// ===========================================================================
 // Dataset path helpers (SKIP-clean when missing)
 // ===========================================================================
 
@@ -364,12 +391,21 @@ fn parse_golden_partition(v: &JsonValue) -> Option<GoldenPartition> {
                     .and_then(|c| c.as_array())
                     .map(|a| a.iter().map(json_scalar).collect())
                     .unwrap_or_default();
+                // Fail-loud: a range_tombstone_bound MUST carry a parseable
+                // `marked_deleted` timestamp. Coercing a missing/unparseable value
+                // to 0 would silently weaken the tombstone deletion-time contract.
                 let marked = inner
                     .get("deletion_info")
                     .and_then(|di| di.get("marked_deleted"))
                     .and_then(|s| s.as_str())
                     .and_then(iso8601_to_micros)
-                    .unwrap_or(0);
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "#1015 golden: range_tombstone_bound (is_start={is_start}, \
+                             clustering={clustering:?}) is missing a parseable \
+                             deletion_info.marked_deleted timestamp — refusing to default to 0"
+                        )
+                    });
                 entries.push(GoldenEntry::RangeBound {
                     is_start,
                     clustering,
@@ -538,18 +574,33 @@ fn static_tombstones_schema() -> TableSchema {
 /// and surfaces the dropped cell with its OWN writetime; gen-2's header no
 /// longer declares `drop_col`. Cross-checks CQLite's binary header decode
 /// against the committed Statistics.db.txt reference (positional column sets).
+///
+/// This covers DECODE + HEADER preservation. The actual dropped-cell PURGE during
+/// merge/compaction is asserted separately by
+/// [`dropped_regular_col_per_cell_purge_on_compaction`] (which runs
+/// `compact_sstables` over the real fixture and proves `drop_col` cells are
+/// physically removed while `keep_col` survivors remain).
 #[test]
-fn dropped_regular_col_per_cell_purge_and_header() {
+fn dropped_regular_col_decode_and_header() {
     let Some(root) = test_tomb_root() else {
-        eprintln!("[SKIP] CQLITE_DATASETS_ROOT unset / test_tomb absent");
+        skip_or_panic(
+            "test_tomb dataset root",
+            "CQLITE_DATASETS_ROOT unset / test_tomb absent",
+        );
         return;
     };
     let Some(dir) = find_fixture(&root, "dropped_regular_col") else {
-        eprintln!("[SKIP] dropped_regular_col fixture not found");
+        skip_or_panic(
+            "dropped_regular_col fixture",
+            "dropped_regular_col fixture not found",
+        );
         return;
     };
     if !gen_has_data(&dir, "nb-1") {
-        eprintln!("[SKIP] dropped_regular_col nb-1 Data.db absent");
+        skip_or_panic(
+            "dropped_regular_col nb-1 Data.db",
+            "dropped_regular_col nb-1 Data.db absent",
+        );
         return;
     }
 
@@ -745,6 +796,161 @@ fn isolate_generation(dir: &Path, gen: &str) -> tempfile::TempDir {
     tmp
 }
 
+/// `cass.schema_evolution.dropped_column.per_cell_purge` (compaction half)
+///
+/// The decode/header lane proves CQLite can READ the older SSTable's `drop_col`
+/// cells using the preserved SerializationHeader. THIS lane proves the column was
+/// actually DROPPED: it compacts BOTH real `dropped_regular_col` generations with
+/// a schema whose `dropped_columns` map records `drop_col` dropped at a time
+/// strictly AFTER every `drop_col` cell's own pre-drop writetime (T_GEN1 =
+/// 2021-01-01), so every `drop_col` cell is purgeable. After compaction `drop_col`
+/// must be ABSENT from the output while the `keep_col` survivors (gen-1 ck=1..3 and
+/// gen-2 ck=4..6) remain intact.
+///
+/// Per #922 (`pre_drop_cell_purged_while_post_drop_sibling_survives`), CQLite's
+/// `compact_sstables` DOES purge dropped-column cells by each cell's own writetime,
+/// so this is a genuine purge assertion — not a gap pin.
+#[test]
+fn dropped_regular_col_per_cell_purge_on_compaction() {
+    use cqlite_core::storage::write_engine::merge::{compact_sstables, MergeStep, RowData};
+    use cqlite_core::storage::write_engine::KWayMerger;
+
+    let Some(root) = test_tomb_root() else {
+        skip_or_panic(
+            "dropped_regular_col fixture",
+            "CQLITE_DATASETS_ROOT unset / test_tomb absent",
+        );
+        return;
+    };
+    let Some(dir) = find_fixture(&root, "dropped_regular_col") else {
+        skip_or_panic(
+            "dropped_regular_col fixture",
+            "dropped_regular_col fixture directory not found",
+        );
+        return;
+    };
+    if !gen_has_data(&dir, "nb-1") {
+        skip_or_panic(
+            "dropped_regular_col nb-1 Data.db",
+            "dropped_regular_col nb-1 Data.db absent",
+        );
+        return;
+    }
+
+    // Collect the real input Data.db generations to compact (gen-1 has drop_col +
+    // keep_col; gen-2 is post-drop, keep_col only). Compaction needs a clean input
+    // directory, so isolate each generation's binary components.
+    let g1_only = isolate_generation(&dir, "nb-1");
+    let mut inputs: Vec<PathBuf> = Vec::new();
+    let mut collect_data = |d: &Path| {
+        for entry in fs::read_dir(d).expect("read isolated dir").flatten() {
+            let p = entry.path();
+            if p.file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|n| n.ends_with("Data.db"))
+            {
+                inputs.push(p);
+            }
+        }
+    };
+    collect_data(g1_only.path());
+    let g2_only = if gen_has_data(&dir, "nb-2") {
+        let g2 = isolate_generation(&dir, "nb-2");
+        collect_data(g2.path());
+        Some(g2)
+    } else {
+        None
+    };
+    assert!(
+        !inputs.is_empty(),
+        "expected at least one input Data.db to compact"
+    );
+
+    // drop_col is dropped at 2021-06-01 — strictly AFTER every drop_col cell's own
+    // writetime (T_GEN1 = 2021-01-01), so every drop_col cell is purgeable.
+    let drop_time_micros = iso8601_to_micros("2021-06-01T00:00:00Z").unwrap();
+    let schema = dropped_regular_schema(true, Some(drop_time_micros));
+
+    let out_dir = g1_only.path().join("out");
+    // purge_safe=true so the dropped-cell predicate is applied during compaction.
+    let report = block_on(compact_sstables(
+        inputs, &out_dir, &schema, 1015, None, None, true,
+    ))
+    .expect("compaction must succeed");
+
+    // Read the compacted output with a schema that still DECLARES drop_col (so the
+    // reader CAN surface it if present) but carries NO drop map (so the reader does
+    // not re-apply any filter) — reflecting what was physically written.
+    let read_schema = dropped_regular_schema(true, None);
+    let mut merger = KWayMerger::new(vec![report.output.data_path], &read_schema)
+        .expect("merger over compacted output");
+
+    let mut drop_col_survivors: Vec<(Option<String>, String)> = Vec::new(); // (ck, value)
+    let mut keep_col_survivors: Vec<(String, String)> = Vec::new(); // (ck, value)
+    loop {
+        match merger.step().expect("merge step over compacted output") {
+            MergeStep::Complete => break,
+            MergeStep::Partition { rows, .. } => {
+                for row in rows {
+                    let ck = row
+                        .clustering_key
+                        .as_ref()
+                        .and_then(|c| c.columns.first().map(|(_, v)| value_to_string(v)));
+                    if let RowData::Live { cells } = &row.row_data {
+                        for c in cells {
+                            if c.column == "drop_col" {
+                                if let Value::Text(t) = &c.value {
+                                    drop_col_survivors.push((ck.clone(), t.clone()));
+                                }
+                            } else if c.column == "keep_col" {
+                                if let Value::Text(t) = &c.value {
+                                    keep_col_survivors
+                                        .push((ck.clone().unwrap_or_default(), t.clone()));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // PURGE assertion: every drop_col cell was written at T_GEN1 < drop_time, so the
+    // compacted output must contain ZERO live drop_col cells.
+    assert!(
+        drop_col_survivors.is_empty(),
+        "#1015 per_cell_purge: dropped `drop_col` cells (all written at T_GEN1=2021-01-01, \
+         < drop_time=2021-06-01) MUST be purged during compaction, but these survived: {:?}",
+        drop_col_survivors
+    );
+
+    // keep_col survivors must remain correct. gen-1 contributes ck=1..3
+    // (keep_a_1..keep_a_3); gen-2 (if present) contributes ck=4..6 (keep_b_4..6).
+    keep_col_survivors.sort();
+    let mut expected: Vec<(String, String)> = vec![
+        ("1".to_string(), "keep_a_1".to_string()),
+        ("2".to_string(), "keep_a_2".to_string()),
+        ("3".to_string(), "keep_a_3".to_string()),
+    ];
+    if g2_only.is_some() {
+        expected.push(("4".to_string(), "keep_b_4".to_string()));
+        expected.push(("5".to_string(), "keep_b_5".to_string()));
+        expected.push(("6".to_string(), "keep_b_6".to_string()));
+    }
+    expected.sort();
+    assert_eq!(
+        keep_col_survivors, expected,
+        "#1015 per_cell_purge: keep_col survivors must remain intact after purging drop_col"
+    );
+
+    println!(
+        "[#1015 per_cell_purge ON COMPACTION] compacted dropped_regular_col with \
+         drop_col dropped@2021-06-01 (purge_safe=true): drop_col cells purged=ALL \
+         (0 survived); keep_col survivors={}",
+        keep_col_survivors.len()
+    );
+}
+
 // ===========================================================================
 // 2. static_row.dropped_static_header_preserved
 // ===========================================================================
@@ -757,15 +963,24 @@ fn isolate_generation(dir: &Path, gen: &str) -> tempfile::TempDir {
 #[test]
 fn dropped_static_col_header_preserved() {
     let Some(root) = test_tomb_root() else {
-        eprintln!("[SKIP] CQLITE_DATASETS_ROOT unset / test_tomb absent");
+        skip_or_panic(
+            "test_tomb dataset root",
+            "CQLITE_DATASETS_ROOT unset / test_tomb absent",
+        );
         return;
     };
     let Some(dir) = find_fixture(&root, "dropped_static_col") else {
-        eprintln!("[SKIP] dropped_static_col fixture not found");
+        skip_or_panic(
+            "dropped_static_col fixture",
+            "dropped_static_col fixture not found",
+        );
         return;
     };
     if !gen_has_data(&dir, "nb-1") {
-        eprintln!("[SKIP] dropped_static_col nb-1 Data.db absent");
+        skip_or_panic(
+            "dropped_static_col nb-1 Data.db",
+            "dropped_static_col nb-1 Data.db absent",
+        );
         return;
     }
 
@@ -862,15 +1077,24 @@ fn dropped_static_col_header_preserved() {
 #[test]
 fn static_with_tombstones_interactions() {
     let Some(root) = test_tomb_root() else {
-        eprintln!("[SKIP] CQLITE_DATASETS_ROOT unset / test_tomb absent");
+        skip_or_panic(
+            "test_tomb dataset root",
+            "CQLITE_DATASETS_ROOT unset / test_tomb absent",
+        );
         return;
     };
     let Some(dir) = find_fixture(&root, "static_with_tombstones") else {
-        eprintln!("[SKIP] static_with_tombstones fixture not found");
+        skip_or_panic(
+            "static_with_tombstones fixture",
+            "static_with_tombstones fixture not found",
+        );
         return;
     };
     if !gen_has_data(&dir, "nb-1") {
-        eprintln!("[SKIP] static_with_tombstones nb-1 Data.db absent");
+        skip_or_panic(
+            "static_with_tombstones nb-1 Data.db",
+            "static_with_tombstones nb-1 Data.db absent",
+        );
         return;
     }
 
@@ -916,7 +1140,16 @@ fn static_with_tombstones_interactions() {
                 } => {
                     let ck = clustering.join(",");
                     if *is_row_delete {
-                        g_row_deletes.push((ck, row_delete_micros.unwrap_or(0)));
+                        // Fail-loud: a row tombstone MUST carry a parseable
+                        // marked_deleted timestamp; defaulting to 0 would mask a
+                        // missing/unparseable deletion time.
+                        let marked = row_delete_micros.unwrap_or_else(|| {
+                            panic!(
+                                "#1015 golden: row tombstone at ck={ck} is missing a parseable \
+                                 deletion_info.marked_deleted timestamp — refusing to default to 0"
+                            )
+                        });
+                        g_row_deletes.push((ck, marked));
                     } else if cells.iter().any(|c| c.is_tombstone) {
                         g_cell_deletes.push(ck);
                     } else if cells.iter().any(|c| c.value.is_some()) {
@@ -1041,15 +1274,24 @@ fn static_row_survives_tombstone_gc_on_compaction() {
     };
 
     let Some(root) = test_tomb_root() else {
-        eprintln!("[SKIP] CQLITE_DATASETS_ROOT unset / test_tomb absent");
+        skip_or_panic(
+            "test_tomb dataset root",
+            "CQLITE_DATASETS_ROOT unset / test_tomb absent",
+        );
         return;
     };
     let Some(dir) = find_fixture(&root, "static_with_tombstones") else {
-        eprintln!("[SKIP] static_with_tombstones fixture not found");
+        skip_or_panic(
+            "static_with_tombstones fixture",
+            "static_with_tombstones fixture not found",
+        );
         return;
     };
     if !gen_has_data(&dir, "nb-1") {
-        eprintln!("[SKIP] static_with_tombstones nb-1 Data.db absent");
+        skip_or_panic(
+            "static_with_tombstones nb-1 Data.db",
+            "static_with_tombstones nb-1 Data.db absent",
+        );
         return;
     }
 
@@ -1204,15 +1446,24 @@ fn static_row_survives_tombstone_gc_on_compaction() {
 #[test]
 fn dropped_column_empty_index_block_reverse_scan_partial() {
     let Some(root) = test_tomb_root() else {
-        eprintln!("[SKIP] CQLITE_DATASETS_ROOT unset / test_tomb absent");
+        skip_or_panic(
+            "test_tomb dataset root",
+            "CQLITE_DATASETS_ROOT unset / test_tomb absent",
+        );
         return;
     };
     let Some(dir) = find_fixture(&root, "dropped_regular_col") else {
-        eprintln!("[SKIP] dropped_regular_col fixture not found");
+        skip_or_panic(
+            "dropped_regular_col fixture",
+            "dropped_regular_col fixture not found",
+        );
         return;
     };
     if !gen_has_data(&dir, "nb-1") {
-        eprintln!("[SKIP] dropped_regular_col nb-1 Data.db absent");
+        skip_or_panic(
+            "dropped_regular_col nb-1 Data.db",
+            "dropped_regular_col nb-1 Data.db absent",
+        );
         return;
     }
 

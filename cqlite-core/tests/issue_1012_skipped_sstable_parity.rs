@@ -97,6 +97,28 @@ fn schema() -> TableSchema {
     }
 }
 
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode, every code path that would otherwise SKIP because the dataset
+/// root is unset or a required binary fixture is absent must PANIC instead, so a
+/// CI gate cannot false-pass on missing data (issue #972).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Skip cleanly (default) or PANIC (strict mode) when a required fixture is absent.
+fn skip_or_panic(fixture: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but fixture {fixture} is absent — {reason}; \
+             fetch/generate it (bash test-data/scripts/fetch-datasets.sh)"
+        );
+    }
+    eprintln!("[SKIP] {reason}");
+}
+
 /// Locate the fixture directory under `CQLITE_DATASETS_ROOT`. The hash suffix is
 /// matched by PREFIX (no full-name hardcode) so a regenerated fixture still binds.
 /// Returns `None` (skip) when the env var is unset or the dir is absent.
@@ -376,14 +398,16 @@ fn merge_both_generations(dir: &Path) -> Option<Vec<MergedTuple>> {
 #[tokio::test]
 async fn gen2_partition_delete_reincluded_by_reader() {
     let Some(dir) = fixture_dir() else {
-        eprintln!(
-            "[SKIP] CQLITE_DATASETS_ROOT unset or fixture absent — skipping #1012 reader parity"
+        skip_or_panic(
+            "skipped_partition_delete fixture",
+            "CQLITE_DATASETS_ROOT unset or fixture absent — skipping #1012 reader parity",
         );
         return;
     };
     if data_db_for_gen(&dir, "1").is_none() || data_db_for_gen(&dir, "2").is_none() {
-        eprintln!(
-            "[SKIP] Data.db binaries absent (committed JSONL only) — skipping #1012 reader parity"
+        skip_or_panic(
+            "skipped_partition_delete nb-1/nb-2 Data.db",
+            "Data.db binaries absent (committed JSONL only) — skipping #1012 reader parity",
         );
         return;
     }
@@ -469,11 +493,17 @@ async fn gen2_partition_delete_reincluded_by_reader() {
 #[tokio::test]
 async fn reader_tombstone_only_partition_parses_as_deletion() {
     let Some(dir) = fixture_dir() else {
-        eprintln!("[SKIP] fixture absent — skipping #1012 tombstone-only reader");
+        skip_or_panic(
+            "skipped_partition_delete fixture",
+            "fixture absent — skipping #1012 tombstone-only reader",
+        );
         return;
     };
     if data_db_for_gen(&dir, "2").is_none() {
-        eprintln!("[SKIP] nb-2 Data.db absent — skipping #1012 tombstone-only reader");
+        skip_or_panic(
+            "skipped_partition_delete nb-2 Data.db",
+            "nb-2 Data.db absent — skipping #1012 tombstone-only reader",
+        );
         return;
     }
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -532,11 +562,17 @@ async fn reader_tombstone_only_partition_parses_as_deletion() {
 #[tokio::test]
 async fn scanner_tombstone_only_partition_surfaces_in_range() {
     let Some(dir) = fixture_dir() else {
-        eprintln!("[SKIP] fixture absent — skipping #1012 scanner range");
+        skip_or_panic(
+            "skipped_partition_delete fixture",
+            "fixture absent — skipping #1012 scanner range",
+        );
         return;
     };
     if data_db_for_gen(&dir, "2").is_none() {
-        eprintln!("[SKIP] nb-2 Data.db absent — skipping #1012 scanner range");
+        skip_or_panic(
+            "skipped_partition_delete nb-2 Data.db",
+            "nb-2 Data.db absent — skipping #1012 scanner range",
+        );
         return;
     }
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -600,11 +636,17 @@ async fn scanner_tombstone_only_partition_surfaces_in_range() {
             compaction/merge read path threads partition deletions."]
 fn merge_partition_delete_shadows_older_rows_gap() {
     let Some(dir) = fixture_dir() else {
-        eprintln!("[SKIP] fixture absent — skipping #1012 merge shadowing");
+        skip_or_panic(
+            "skipped_partition_delete fixture",
+            "fixture absent — skipping #1012 merge shadowing",
+        );
         return;
     };
     let Some(merged) = merge_both_generations(&dir) else {
-        eprintln!("[SKIP] Data.db binaries absent — skipping #1012 merge shadowing");
+        skip_or_panic(
+            "skipped_partition_delete nb-1/nb-2 Data.db",
+            "Data.db binaries absent — skipping #1012 merge shadowing",
+        );
         return;
     };
 
@@ -640,11 +682,17 @@ fn merge_partition_delete_shadows_older_rows_gap() {
             tombstones are applied during compaction."]
 fn compaction_partition_delete_shadowing_gap() {
     let Some(dir) = fixture_dir() else {
-        eprintln!("[SKIP] fixture absent — skipping #1012 compaction shadowing");
+        skip_or_panic(
+            "skipped_partition_delete fixture",
+            "fixture absent — skipping #1012 compaction shadowing",
+        );
         return;
     };
     let (Some(nb2), Some(nb1)) = (data_db_for_gen(&dir, "2"), data_db_for_gen(&dir, "1")) else {
-        eprintln!("[SKIP] Data.db binaries absent — skipping #1012 compaction shadowing");
+        skip_or_panic(
+            "skipped_partition_delete nb-1/nb-2 Data.db",
+            "Data.db binaries absent — skipping #1012 compaction shadowing",
+        );
         return;
     };
 

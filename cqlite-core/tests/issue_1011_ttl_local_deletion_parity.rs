@@ -72,6 +72,28 @@ fn datasets_root() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode, every code path that would otherwise SKIP because the dataset
+/// root is unset or a required binary fixture is absent must PANIC instead, so a
+/// CI gate cannot false-pass on missing data (issue #972).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Skip cleanly (default) or PANIC (strict mode) when a required fixture is absent.
+fn skip_or_panic(fixture: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but fixture {fixture} is absent — {reason}; \
+             fetch/generate it (bash test-data/scripts/fetch-datasets.sh)"
+        );
+    }
+    println!("[SKIP] {reason}");
+}
+
 /// Find the table directory whose name starts with `prefix` inside `<root>/<ks>`,
 /// preferring one that actually has a binary `Data.db` (some fixtures ship
 /// JSONL-only directories alongside the real one).
@@ -502,15 +524,24 @@ fn parse_stats_reference(txt: &Path) -> StatsReference {
 async fn ttl_cells_mixed_expiring_and_live() {
     let name = "ttl_cells_mixed_expiring_and_live";
     if datasets_root().is_none() {
-        println!("[SKIP] {name}: CQLITE_DATASETS_ROOT unset");
+        skip_or_panic(
+            "dataset root",
+            &format!("{name}: CQLITE_DATASETS_ROOT unset"),
+        );
         return;
     }
     let Some(dir) = find_table_dir("test_deltas", "ttl_cells-", true) else {
-        println!("[SKIP] {name}: no test_deltas/ttl_cells fixture with Data.db");
+        skip_or_panic(
+            "test_deltas/ttl_cells Data.db",
+            &format!("{name}: no test_deltas/ttl_cells fixture with Data.db"),
+        );
         return;
     };
     let Some(jsonl) = find_jsonl(&dir) else {
-        println!("[SKIP] {name}: no JSONL golden in {}", dir.display());
+        skip_or_panic(
+            "test_deltas/ttl_cells JSONL golden",
+            &format!("{name}: no JSONL golden in {}", dir.display()),
+        );
         return;
     };
 
@@ -634,15 +665,24 @@ async fn ttl_cells_mixed_expiring_and_live() {
 async fn gc_before_boundary_local_deletion_times() {
     let name = "gc_before_boundary_local_deletion_times";
     if datasets_root().is_none() {
-        println!("[SKIP] {name}: CQLITE_DATASETS_ROOT unset");
+        skip_or_panic(
+            "dataset root",
+            &format!("{name}: CQLITE_DATASETS_ROOT unset"),
+        );
         return;
     }
     let Some(dir) = find_table_dir("test_tomb", "gc_before_boundary-", true) else {
-        println!("[SKIP] {name}: no test_tomb/gc_before_boundary fixture with Data.db");
+        skip_or_panic(
+            "test_tomb/gc_before_boundary Data.db",
+            &format!("{name}: no test_tomb/gc_before_boundary fixture with Data.db"),
+        );
         return;
     };
     let Some(jsonl) = find_jsonl(&dir) else {
-        println!("[SKIP] {name}: no JSONL golden in {}", dir.display());
+        skip_or_panic(
+            "test_tomb/gc_before_boundary JSONL golden",
+            &format!("{name}: no JSONL golden in {}", dir.display()),
+        );
         return;
     };
 
@@ -767,7 +807,10 @@ async fn gc_before_boundary_local_deletion_times() {
 /// binary was present and compared, false if it was skipped.
 fn assert_encoding_stats_parity(name: &str, keyspace: &str, prefix: &str) -> bool {
     let Some(dir) = find_table_dir(keyspace, prefix, false) else {
-        println!("[SKIP] {name}: no {keyspace}/{prefix} fixture dir");
+        skip_or_panic(
+            &format!("{keyspace}/{prefix} fixture dir"),
+            &format!("{name}: no {keyspace}/{prefix} fixture dir"),
+        );
         return false;
     };
     let txt = find_statistics_txt(&dir).unwrap_or_else(|| {
@@ -779,9 +822,9 @@ fn assert_encoding_stats_parity(name: &str, keyspace: &str, prefix: &str) -> boo
     let reference = parse_stats_reference(&txt);
 
     let Some(db) = find_statistics_db(&dir) else {
-        println!(
-            "[SKIP] {name}: binary Statistics.db absent in {}",
-            dir.display()
+        skip_or_panic(
+            &format!("{keyspace}/{prefix} Statistics.db"),
+            &format!("{name}: binary Statistics.db absent in {}", dir.display()),
         );
         return false;
     };
@@ -819,7 +862,10 @@ fn assert_encoding_stats_parity(name: &str, keyspace: &str, prefix: &str) -> boo
 async fn statistics_encoding_stats_local_deletion_parity() {
     let name = "statistics_encoding_stats_local_deletion_parity";
     if datasets_root().is_none() {
-        println!("[SKIP] {name}: CQLITE_DATASETS_ROOT unset");
+        skip_or_panic(
+            "dataset root",
+            &format!("{name}: CQLITE_DATASETS_ROOT unset"),
+        );
         return;
     }
 
@@ -875,14 +921,20 @@ async fn statistics_encoding_stats_local_deletion_parity() {
 async fn statistics_tombstone_histogram_and_max_ldt_reference_facts() {
     let name = "statistics_tombstone_histogram_and_max_ldt_reference_facts";
     if datasets_root().is_none() {
-        println!("[SKIP] {name}: CQLITE_DATASETS_ROOT unset");
+        skip_or_panic(
+            "dataset root",
+            &format!("{name}: CQLITE_DATASETS_ROOT unset"),
+        );
         return;
     }
 
     // --- (1) tombstone_histogram fixture: non-empty drop-times histogram. ---
     {
         let Some(dir) = find_table_dir("test_tomb", "tombstone_histogram-", false) else {
-            println!("[SKIP] {name}: no tombstone_histogram fixture dir");
+            skip_or_panic(
+                "test_tomb/tombstone_histogram fixture dir",
+                &format!("{name}: no tombstone_histogram fixture dir"),
+            );
             return;
         };
         let txt = find_statistics_txt(&dir).unwrap_or_else(|| {
@@ -927,9 +979,12 @@ async fn statistics_tombstone_histogram_and_max_ldt_reference_facts() {
                  total count {total_count}; CQLite decode succeeds (histogram not yet exposed — GAP)"
             );
         } else {
-            println!(
-                "[INFO] {name}: tombstone-drop histogram reference has {bucket_count} bucket(s), \
-                 total {total_count}; binary Statistics.db absent (decode not exercised)"
+            skip_or_panic(
+                "test_tomb/tombstone_histogram Statistics.db",
+                &format!(
+                    "{name}: tombstone-drop histogram reference has {bucket_count} bucket(s), \
+                     total {total_count}; binary Statistics.db absent (decode not exercised)"
+                ),
             );
         }
     }
@@ -937,7 +992,10 @@ async fn statistics_tombstone_histogram_and_max_ldt_reference_facts() {
     // --- (2) ttl_test_table fixture: real SSTable max local deletion time. ---
     {
         let Some(dir) = find_table_dir("test_basic", "ttl_test_table-", false) else {
-            println!("[SKIP] {name}: no ttl_test_table fixture dir");
+            skip_or_panic(
+                "test_basic/ttl_test_table fixture dir",
+                &format!("{name}: no ttl_test_table fixture dir"),
+            );
             return;
         };
         let txt = find_statistics_txt(&dir)
@@ -984,7 +1042,10 @@ async fn statistics_tombstone_histogram_and_max_ldt_reference_facts() {
                 reference.enc_min_local_deletion_time, stats.timestamp_stats.max_deletion_time
             );
         } else {
-            println!("[INFO] {name}: ttl_test_table reference max LDT={max_ldt}; binary absent");
+            skip_or_panic(
+                "test_basic/ttl_test_table Statistics.db",
+                &format!("{name}: ttl_test_table reference max LDT={max_ldt}; binary absent"),
+            );
         }
     }
 }

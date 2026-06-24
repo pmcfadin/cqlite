@@ -70,6 +70,17 @@ use cqlite_core::types::Value;
 // Fixture discovery (glob by prefix, no name heuristics on the hash suffix)
 // ============================================================================
 
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode, every code path that would otherwise SKIP because the dataset
+/// root is unset or a required binary fixture is absent must PANIC instead, so a
+/// CI gate cannot false-pass on missing data (issue #972).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// Resolve the `test_tomb` fixture directory for `wide_range_tombstone-*`.
 /// Returns `None` (→ SKIP) when the dataset root is unset or the fixture/binary
 /// is absent.
@@ -516,17 +527,27 @@ fn fixture_or_skip() -> Option<PathBuf> {
     let dir = match fixture_dir() {
         Some(d) => d,
         None => {
-            eprintln!(
-                "SKIP issue_1013: CQLITE_DATASETS_ROOT unset or wide_range_tombstone-* fixture absent"
-            );
+            let reason = "CQLITE_DATASETS_ROOT unset or wide_range_tombstone-* fixture absent";
+            if require_fixtures_strict() {
+                panic!(
+                    "CQLITE_REQUIRE_FIXTURES=1 but fixture wide_range_tombstone is absent — \
+                     {reason}; fetch/generate it (bash test-data/scripts/fetch-datasets.sh)"
+                );
+            }
+            eprintln!("SKIP issue_1013: {reason}");
             return None;
         }
     };
     if !has_data_db(&dir) {
-        eprintln!(
-            "SKIP issue_1013: Data.db binary absent in {:?} (fresh checkout, dataset not fetched)",
-            dir
-        );
+        let reason =
+            format!("Data.db binary absent in {dir:?} (fresh checkout, dataset not fetched)");
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but fixture wide_range_tombstone Data.db is absent — \
+                 {reason}; fetch/generate it (bash test-data/scripts/fetch-datasets.sh)"
+            );
+        }
+        eprintln!("SKIP issue_1013: {reason}");
         return None;
     }
     Some(dir)

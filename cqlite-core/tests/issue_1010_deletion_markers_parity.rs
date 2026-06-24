@@ -564,6 +564,28 @@ fn datasets_root() -> Option<PathBuf> {
     Some(PathBuf::from(root).join("sstables").join("test_deltas"))
 }
 
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode, every code path that would otherwise SKIP because the dataset
+/// root is unset or a required binary fixture is absent must PANIC instead, so a
+/// CI gate cannot false-pass on missing data (issue #972).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
+/// Skip cleanly (default) or PANIC (strict mode) when a required fixture is absent.
+fn skip_or_panic(fixture: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!(
+            "CQLITE_REQUIRE_FIXTURES=1 but fixture {fixture} is absent — {reason}; \
+             fetch/generate it (bash test-data/scripts/generate-deltas.sh)"
+        );
+    }
+    println!("[SKIP] {reason}");
+}
+
 /// Find the fixture directory for `table` that has a binary `Data.db` (not the
 /// `.jsonl` golden). Returns `None` when no binary is present.
 fn fixture_dir_with_binary(root: &Path, table: &str) -> Option<PathBuf> {
@@ -802,15 +824,18 @@ async fn run_fixture(table: &str) -> Option<MatchCounts> {
     let root = match datasets_root() {
         Some(r) if r.exists() => r,
         Some(r) => {
-            println!(
-                "[SKIP] {r:?} not present — set CQLITE_DATASETS_ROOT and run \
-                 bash test-data/scripts/generate-deltas.sh; skipping '{table}'"
+            skip_or_panic(
+                &format!("test_deltas dataset dir ({r:?})"),
+                &format!("{r:?} not present — skipping '{table}'"),
             );
             return None;
         }
         None => {
-            println!(
-                "[SKIP] CQLITE_DATASETS_ROOT unset — skipping deletion-marker parity for '{table}'"
+            skip_or_panic(
+                "test_deltas dataset root",
+                &format!(
+                    "CQLITE_DATASETS_ROOT unset — skipping deletion-marker parity for '{table}'"
+                ),
             );
             return None;
         }
@@ -819,9 +844,9 @@ async fn run_fixture(table: &str) -> Option<MatchCounts> {
     let fixture = match fixture_dir_with_binary(&root, table) {
         Some(d) => d,
         None => {
-            println!(
-                "[SKIP] no binary Data.db for table '{table}' under {root:?} — \
-                 run bash test-data/scripts/generate-deltas.sh"
+            skip_or_panic(
+                &format!("{table} Data.db"),
+                &format!("no binary Data.db for table '{table}' under {root:?}"),
             );
             return None;
         }

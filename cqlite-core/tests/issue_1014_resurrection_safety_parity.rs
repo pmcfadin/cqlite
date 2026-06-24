@@ -86,17 +86,42 @@ fn gen_data_db(dir: &Path, gen: u32) -> Option<PathBuf> {
     p.exists().then_some(p)
 }
 
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode, every code path that would otherwise SKIP because the dataset
+/// root is unset or a required binary fixture is absent must PANIC instead, so a
+/// CI gate cannot false-pass on missing data (issue #972).
+fn require_fixtures_strict() -> bool {
+    matches!(
+        std::env::var("CQLITE_REQUIRE_FIXTURES").as_deref(),
+        Ok("1") | Ok("true")
+    )
+}
+
 /// SKIP guard: returns `Some((dir, nb1, nb2))` when both generations' binaries are
-/// present, else logs a skip reason and returns `None`.
+/// present, else logs a skip reason and returns `None`. In `CQLITE_REQUIRE_FIXTURES`
+/// strict mode, an absent fixture/binary PANICs instead of skipping (issue #972).
 fn require_fixture(prefix: &str) -> Option<(PathBuf, PathBuf, PathBuf)> {
     let Some(dir) = fixture_dir(prefix) else {
-        eprintln!(
-            "[skip] fixture {prefix}-* not found (CQLITE_DATASETS_ROOT unset or dir missing)"
-        );
+        let reason =
+            format!("fixture {prefix}-* not found (CQLITE_DATASETS_ROOT unset or dir missing)");
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but fixture {prefix} is absent — {reason}; \
+                 fetch/generate it (bash test-data/scripts/fetch-datasets.sh)"
+            );
+        }
+        eprintln!("[skip] {reason}");
         return None;
     };
     let (Some(nb1), Some(nb2)) = (gen_data_db(&dir, 1), gen_data_db(&dir, 2)) else {
-        eprintln!("[skip] {prefix}: nb-1/nb-2 Data.db absent (binaries not fetched)");
+        let reason = format!("{prefix}: nb-1/nb-2 Data.db absent (binaries not fetched)");
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but fixture {prefix} nb-1/nb-2 Data.db is absent — \
+                 {reason}; fetch/generate it (bash test-data/scripts/fetch-datasets.sh)"
+            );
+        }
+        eprintln!("[skip] {reason}");
         return None;
     };
     Some((dir, nb1, nb2))
