@@ -1855,20 +1855,42 @@ impl SelectExecutor {
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
         let mut results = Vec::new();
         if context.projection_flags.include_cell_metadata {
-            // Issue #960: the WRITETIME/TTL metadata path always full-scans today
-            // (it passes `None, None` to `scan_with_cell_metadata`). Report this
-            // honestly as a fallback so it cannot masquerade as a targeted lookup;
-            // #962 will flip it to `AccessPath::MetadataPartitionLookup` once the
-            // metadata scan accepts a partition-targeted lookup.
-            let metadata_path = AccessPath::FallbackFullScan {
-                reason: FallbackReason::MetadataScanPath,
+            // Issue #962: route a fully-constrained `WHERE pk = ?` WRITETIME/TTL
+            // projection through a partition-targeted metadata lookup that prunes
+            // SSTables (bloom/BTI) before decoding, instead of full-scanning every
+            // SSTable for the table. Reuses the SAME `classify_partition_lookup`
+            // decision the non-metadata path uses (the shared resolved
+            // partition-lookup representation). The per-row predicate evaluation
+            // below is unchanged, so the pk equality itself is still applied as a
+            // correctness backstop and any bloom/BTI over-inclusion is filtered out.
+            let scan_results = match classify_partition_lookup(predicates, schema_opt.as_ref()) {
+                PartitionLookupOutcome::Targeted(pk_bytes) => {
+                    log::info!(
+                        "SSTableScan(metadata): partition-key point lookup (key len={}) for \"{}\"",
+                        pk_bytes.len(),
+                        table
+                    );
+                    context.access_path = Some(AccessPath::MetadataPartitionLookup);
+                    crate::query::access_path::record(AccessPath::MetadataPartitionLookup);
+                    self.storage
+                        .scan_partition_with_cell_metadata(table, &pk_bytes, schema_opt.as_ref())
+                        .await?
+                }
+                // Issue #962: `WHERE pk IN (...)` on the metadata path is NOT yet
+                // fanned out to N targeted metadata lookups; it still full-scans.
+                // Report that honestly (MetadataScanPath) rather than faking a
+                // targeted path — the IN-metadata fan-out is a documented follow-up.
+                PartitionLookupOutcome::MultiTargeted(_) | PartitionLookupOutcome::Fallback(_) => {
+                    let metadata_path = AccessPath::FallbackFullScan {
+                        reason: FallbackReason::MetadataScanPath,
+                    };
+                    context.access_path = Some(metadata_path.clone());
+                    crate::query::access_path::record(metadata_path);
+                    self.storage
+                        .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
+                        .await?
+                }
             };
-            context.access_path = Some(metadata_path.clone());
-            crate::query::access_path::record(metadata_path);
-            let scan_results = self
-                .storage
-                .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
-                .await?;
 
             log::info!("Scan (with metadata) returned {} rows", scan_results.len());
 

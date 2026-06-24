@@ -990,6 +990,165 @@ impl SSTableManager {
             .0)
     }
 
+    /// Metadata-carrying partition-targeted scan (Issue #962, Epic #951).
+    ///
+    /// The WRITETIME/TTL-projection sibling of [`scan_partition`](Self::scan_partition):
+    /// it returns only the rows for the single partition identified by the raw
+    /// `partition_key` bytes, WITH per-cell write metadata
+    /// ([`CellWriteMetadata`] — write timestamp / TTL), while still PRUNING the
+    /// SSTable set down to the candidates whose bloom filter / BTI trie admit the
+    /// key. A `SELECT WRITETIME(col), TTL(col) ... WHERE pk = ?` therefore opens
+    /// only the handful of SSTables that can hold the partition, never all N — the
+    /// SSTable-level prune is the must-have that distinguishes this from the
+    /// full-table [`scan_with_cell_metadata`](Self::scan_with_cell_metadata).
+    ///
+    /// Output is identical to filtering `scan_with_cell_metadata(table, ..)` down to
+    /// `partition_key`: the same per-reader metadata decode and the same
+    /// cross-generation reconciliation run, just over the pruned candidate set, so
+    /// the caller's post-scan predicate evaluation is a pure correctness backstop
+    /// (it removes any bloom/BTI false-positive over-inclusion).
+    ///
+    /// Reconciliation mirrors `scan_partition`:
+    /// - More than one candidate generation (write-support + schema): drive the
+    ///   authoritative k-way merge via
+    ///   [`merge_generations_for_read_with_metadata`](Self::merge_generations_for_read_with_metadata)
+    ///   over JUST the candidates, then retain this partition's rows. This preserves
+    ///   per-cell cross-generation LWW / tombstone shadowing for WRITETIME/TTL
+    ///   (Issue #885) on the targeted path.
+    /// - Otherwise: decode each candidate via the reader's metadata path and retain
+    ///   this partition's rows, concatenating across candidates.
+    ///
+    /// Within-SSTable decode currently full-decodes each surviving candidate's
+    /// metadata and retains the partition; the SSTable-level prune (avoiding the
+    /// full TABLE/SSTable scan) is the property #962 requires. A within-partition
+    /// metadata seek (bounding the decode to the partition's `Data.db` offset, as
+    /// `scan_single_partition_clustering` does for the plain path) is a documented
+    /// follow-up.
+    ///
+    /// Gated on `not(tombstones)` to match the `scan_partition` variant it parallels.
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>> {
+        let table_readers = self.table_readers.read().await;
+        let table_name = table_id.name();
+
+        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+            return Ok(Vec::new());
+        };
+
+        // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
+        // This is the property #962 requires — only candidates are opened, never N.
+        let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
+            .iter()
+            .filter(|r| r.might_contain_partition(partition_key))
+            .cloned()
+            .collect();
+
+        log::debug!(
+            "SSTableManager::scan_partition_with_cell_metadata - {}/{} SSTables admit partition \
+             key (len={}) for '{}'",
+            candidates.len(),
+            reader_list.len(),
+            partition_key.len(),
+            table_id
+        );
+
+        if candidates.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let matches_key = |entry: &(RowKey, Value, HashMap<String, CellWriteMetadata>)| {
+            entry.0.as_bytes() == partition_key
+        };
+
+        // Multiple candidate generations may hold the same partition; reconcile
+        // with the same authoritative metadata-aware k-way merge the full metadata
+        // scan uses (write-support only, schema present), then keep just this
+        // partition's rows. This preserves per-cell cross-generation WRITETIME/TTL.
+        #[cfg(feature = "write-support")]
+        if candidates.len() > 1 {
+            if let Some(schema) = schema {
+                match self
+                    .merge_generations_for_read_with_metadata(&candidates, schema, None, None, None)
+                    .await
+                {
+                    Ok(mut merged) => {
+                        merged.retain(matches_key);
+                        // Work-counter gate (Issue #958): the merge parsed every
+                        // surviving candidate; `merged` (post-retain) is exactly the
+                        // partitions this lookup returns.
+                        work_counters::add_sstables_scanned(candidates.len() as u64);
+                        work_counters::add_partitions_parsed(merged.len() as u64);
+                        return Ok(merged);
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "SSTableManager::scan_partition_with_cell_metadata - cross-generation \
+                             metadata merge failed for '{}' ({}); falling back to per-reader \
+                             concatenation",
+                            table_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Single candidate (common case) or the multi-candidate concat fallback:
+        // decode each candidate's metadata and retain this partition's rows.
+        let mut all_results = Vec::new();
+        for reader in &candidates {
+            // Work-counter gate (Issue #958): one real Data.db touch per surviving
+            // candidate. Counted here (not at prune time) so the counter reflects
+            // SSTables actually opened/scanned.
+            work_counters::add_sstables_scanned(1);
+
+            let mut results = reader
+                .scan_with_cell_metadata(table_id, None, None, None, schema)
+                .await?;
+            results.retain(matches_key);
+            all_results.append(&mut results);
+        }
+        // A single candidate's rows already come back in on-disk key order; only
+        // concatenating more than one candidate needs a re-sort to merge them.
+        if candidates.len() > 1 {
+            all_results.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        work_counters::add_partitions_parsed(all_results.len() as u64);
+        Ok(all_results)
+    }
+
+    /// `tombstones`-build counterpart of
+    /// [`scan_partition_with_cell_metadata`](Self::scan_partition_with_cell_metadata).
+    ///
+    /// That build has no bloom-prune metadata path, so a fully-constrained
+    /// `WHERE pk = ?` WRITETIME/TTL read is served by scanning with metadata and
+    /// filtering to the partition key, matching the `not(tombstones)` output while
+    /// keeping the query executor free of `tombstones` cfg branching.
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_partition_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<
+        Vec<(
+            RowKey,
+            Value,
+            HashMap<String, crate::types::CellWriteMetadata>,
+        )>,
+    > {
+        let mut rows = self
+            .scan_with_cell_metadata(table_id, None, None, None, schema)
+            .await?;
+        rows.retain(|entry| entry.0.as_bytes() == partition_key);
+        Ok(rows)
+    }
+
     /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
     ///
     /// Identical to [`scan_partition`](Self::scan_partition) but, when `clustering`

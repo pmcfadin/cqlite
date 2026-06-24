@@ -17,7 +17,7 @@ The signal is defined in `cqlite-core/src/query/access_path.rs`.
 | `PartitionLookup` | A single fully-constrained `WHERE pk = ?` served by a partition-targeted lookup that prunes SSTables (bloom/BTI presence). | Materializing `SelectExecutor` (#949 fast path) |
 | `MultiPartitionLookup` | Several fully-constrained partitions (`IN` / token fan-out) via repeated targeted lookups. | Reserved for #955 (not yet produced) |
 | `ClusteringSlice` | Partition targeted + clustering-key predicate prunes rows within the partition. | Reserved for #954 (not yet produced) |
-| `MetadataPartitionLookup` | WRITETIME/TTL metadata projection resolved a single partition via a targeted lookup. | Reserved for #962 (today the metadata path reports `FallbackFullScan { MetadataScanPath }`) |
+| `MetadataPartitionLookup` | WRITETIME/TTL metadata projection resolved a single fully-constrained partition via a targeted lookup that prunes SSTables (bloom/BTI) before decoding per-cell metadata. | Materializing `SelectExecutor` metadata branch (#962) |
 | `StreamingPartitionLookup` | The streaming analogue of `PartitionLookup`. | Streaming `SelectExecutor` background task |
 | `FallbackFullScan { reason }` | A targeted path was not selected; carries a documented `FallbackReason`. | All honest fallbacks |
 
@@ -36,7 +36,7 @@ assertion in a test, not a silently "successful" full scan.
 | `NoSchema` | No schema available, so partition-key columns cannot be identified. | — |
 | `PartitionKeyNotFullyConstrained` | WHERE does not fully constrain the partition key with equality (partial key, no restriction, or a range/`IN`). Mirrors Cassandra's single-partition-read rule. | #955 widens (`IN`/token), #954 (clustering) |
 | `PartitionKeyEncodingFailed` | The constrained values could not be encoded to the on-disk key form (e.g. type mismatch). Full scan is the safe fallback. | — |
-| `MetadataScanPath` | The WRITETIME/TTL metadata projection always full-scans today; it does not yet route through a targeted lookup. | #962 (flip to `MetadataPartitionLookup`) |
+| `MetadataScanPath` | The WRITETIME/TTL metadata projection falls back to a full scan when the partition key is NOT fully constrained by equality — e.g. `WRITETIME(col)` with an `IN`-list partition key (the IN-metadata fan-out is a documented follow-up) or no/partial restriction. A fully-constrained `WHERE pk = ?` metadata projection is now targeted (`MetadataPartitionLookup`, #962). | #962 (IN-metadata fan-out follow-up) |
 | `LegacyExecutorPath` | The legacy `QueryExecutor` (simple-id-lookup and prepared SELECTs) issues an unconditional `storage.scan`. | #962 (route through modern executor) + #961 (param binding) |
 
 ## How the signal is exposed
@@ -62,7 +62,8 @@ Two observable surfaces, both from the modern `SelectExecutor`:
 | Materializing, no/partial/range restriction | `SelectExecutor::execute` | `FallbackFullScan { PartitionKeyNotFullyConstrained }` |
 | Materializing, PK value won't encode | `SelectExecutor::execute` | `FallbackFullScan { PartitionKeyEncodingFailed }` |
 | Materializing, no schema | `SelectExecutor::execute` | `FallbackFullScan { NoSchema }` |
-| Materializing, `WRITETIME(col)`/`TTL(col)` | `SelectExecutor::execute` (metadata branch) | `FallbackFullScan { MetadataScanPath }` (still full-scans; #962) |
+| Materializing, `WRITETIME(col)`/`TTL(col)` + `WHERE pk = ?` (full PK, `=`) | `SelectExecutor::execute` (metadata branch) | `MetadataPartitionLookup` (#962 — prunes SSTables before decoding metadata) |
+| Materializing, `WRITETIME(col)`/`TTL(col)` with `IN` / no / partial restriction | `SelectExecutor::execute` (metadata branch) | `FallbackFullScan { MetadataScanPath }` (IN-metadata fan-out is a follow-up) |
 | Streaming `WHERE pk = ?` (full PK, `=`) | `SelectExecutor::execute_streaming` | `StreamingPartitionLookup` (via probe) |
 | Streaming, no/partial restriction | `SelectExecutor::execute_streaming` | `FallbackFullScan { ... }` (via probe) |
 | Legacy `QueryExecutor` (simple-id-lookup, prepared) | `engine.rs` legacy route / `prepared.rs` | **does not report yet** — see below |
@@ -77,8 +78,8 @@ reports `FullScan` / `FallbackFullScan`, and a test pins that current reality so
 `cqlite-core/tests/issue_960_access_path_signal.rs` pins:
 - `WHERE pk = <uuid>` ⇒ `PartitionLookup` (NOT a full scan),
 - unrestricted SELECT ⇒ `FallbackFullScan { PartitionKeyNotFullyConstrained }`,
-- `WRITETIME(col)` + `WHERE pk = ?` ⇒ `FallbackFullScan { MetadataScanPath }`
-  (the metadata path's current full-scan reality, for #962 to flip),
+- `WRITETIME(col)` + `WHERE pk = ?` ⇒ `MetadataPartitionLookup` (#962 flipped this
+  from the old `FallbackFullScan { MetadataScanPath }`),
 - streaming `WHERE pk = ?` ⇒ `StreamingPartitionLookup`.
 
 ## Paths NOT yet threaded (for #962 to pick up)
@@ -91,11 +92,11 @@ reports `FullScan` / `FallbackFullScan`, and a test pins that current reality so
   modern `SelectExecutor`, or port the fast path into the legacy executor), and
   recording in a soon-to-be-replaced path adds churn. The `LegacyExecutorPath`
   reason and the enum are already defined so #962 can wire it in one place.
-- **`MetadataPartitionLookup`** — defined but not yet produced; #962 flips the
-  metadata branch from `MetadataScanPath` to this once
-  `scan_with_cell_metadata` accepts a partition-targeted lookup.
-- **`MultiPartitionLookup`** (#955) and **`ClusteringSlice`** (#954) — defined
-  for downstream consumers; not produced by any surface yet.
+- **IN-metadata fan-out** — `WRITETIME(col)`/`TTL(col)` with a `WHERE pk IN (...)`
+  partition key still full-scans (`MetadataScanPath`); fanning it out to N
+  targeted metadata lookups (the metadata analogue of `MultiPartitionLookup`) is a
+  documented follow-up. The single-key case is targeted via #962's
+  `Storage::scan_partition_with_cell_metadata`.
 
 ## `EXPLAIN`
 

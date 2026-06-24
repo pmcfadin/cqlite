@@ -217,13 +217,14 @@ async fn unrestricted_select_reports_full_scan_fallback() {
 }
 
 // ---------------------------------------------------------------------------
-// 3. A known fallback case reports FallbackFullScan with a documented reason.
-//    The WRITETIME/TTL metadata path still full-scans today (#962 will flip it
-//    to MetadataPartitionLookup). Pin that reality so the flip is noticed.
+// 3. The WRITETIME/TTL metadata projection path is now partition-targeted for a
+//    fully-constrained `WHERE pk = ?` (Issue #962 flipped this from the old
+//    MetadataScanPath fallback). It must report MetadataPartitionLookup — the
+//    metadata analogue of PartitionLookup — and NOT a full scan.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn writetime_metadata_path_reports_metadata_scan_fallback() {
+async fn writetime_metadata_path_reports_metadata_partition_lookup() {
     let _probe_guard = PROBE_LOCK.lock().await;
     let db = match setup().await {
         Ok(db) => db,
@@ -238,8 +239,9 @@ async fn writetime_metadata_path_reports_metadata_scan_fallback() {
     };
     let literal = uuid_to_literal(&id);
 
-    // WRITETIME(name) forces the metadata-carrying scan, which always full-scans
-    // today even with a fully-constrained partition key.
+    // WRITETIME(name) forces the metadata-carrying scan. With a fully-constrained
+    // partition key, #962 routes it through a partition-targeted metadata lookup
+    // that prunes SSTables before decoding.
     let result = db
         .execute(&format!(
             "SELECT id, WRITETIME(name) FROM {QUALIFIED_TABLE} WHERE id = {literal}"
@@ -249,14 +251,21 @@ async fn writetime_metadata_path_reports_metadata_scan_fallback() {
 
     assert_eq!(
         result.metadata.access_path,
-        Some(AccessPath::FallbackFullScan {
-            reason: FallbackReason::MetadataScanPath,
-        }),
-        "Issue #960: the WRITETIME/TTL metadata projection path still full-scans today and MUST \
-         report MetadataScanPath honestly (not a targeted lookup). #962 will flip this to \
-         MetadataPartitionLookup; this assertion pins the current reality so that flip is \
-         noticed. Got {:?}",
+        Some(AccessPath::MetadataPartitionLookup),
+        "Issue #962: a fully-constrained WHERE pk = <uuid> WRITETIME/TTL projection must report \
+         MetadataPartitionLookup (the metadata analogue of PartitionLookup), not a full scan. \
+         #960 pinned the old MetadataScanPath fallback; #962 flips it here. Got {:?}",
         result.metadata.access_path
+    );
+    assert_eq!(
+        access_path::last(),
+        Some(AccessPath::MetadataPartitionLookup),
+        "Issue #962: the access-path probe must record MetadataPartitionLookup for a \
+         WHERE pk = <uuid> WRITETIME query",
+    );
+    assert!(
+        !result.metadata.access_path.as_ref().unwrap().is_full_scan(),
+        "a metadata partition-targeted lookup must NOT be classified as a full scan",
     );
 }
 

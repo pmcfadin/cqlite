@@ -263,6 +263,35 @@ impl StorageEngine {
             .await
     }
 
+    /// Partition-targeted, metadata-carrying scan for a fully-constrained
+    /// `WHERE pk = ?` WRITETIME/TTL projection (Issue #962).
+    ///
+    /// The metadata sibling of [`scan_partition`](Self::scan_partition): returns
+    /// only the rows for the single partition identified by the raw
+    /// `partition_key` bytes, WITH per-cell write metadata, after pruning the
+    /// SSTable set down to the candidates whose bloom filter / BTI trie admit the
+    /// key — so a `SELECT WRITETIME(col) ... WHERE pk = ?` never opens all N
+    /// SSTables. Output matches filtering the full
+    /// [`scan_with_cell_metadata`](Self::scan_with_cell_metadata) result to the
+    /// partition; cross-generation reconciliation runs over the pruned candidates.
+    /// Delegates to [`SSTableManager::scan_partition_with_cell_metadata`].
+    pub async fn scan_partition_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<
+        Vec<(
+            RowKey,
+            Value,
+            std::collections::HashMap<String, CellWriteMetadata>,
+        )>,
+    > {
+        self.sstables
+            .scan_partition_with_cell_metadata(table_id, partition_key, schema)
+            .await
+    }
+
     /// Scan a table and return per-cell write metadata alongside row values.
     ///
     /// Delegates to [`SSTableManager::scan_with_cell_metadata`].  Used when
