@@ -31,9 +31,12 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sign
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 
-# Logging and tracing
+# Logging and tracing.
+# Issue #1033: the CLI now installs a unified `tracing_subscriber` registry
+# (fmt -> stderr, EnvFilter, log->tracing bridge) instead of `env_logger`.
+# `log` stays a direct dep: existing `log::*` call sites flow through the bridge,
+# and the TUI suppresses output via `log::set_max_level`.
 log = { workspace = true }
-env_logger = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
@@ -149,3 +152,10 @@ write-support = ["state_machine", "cqlite-core/write-support"]
 # Enables cqlite-core/delta-scan (DeltaRecord types, scan_delta API) and
 # cqlite-core/parquet (DeltaParquetWriter, arrow/parquet crates).
 delta-export = ["state_machine", "cqlite-core/delta-scan", "cqlite-core/parquet"]
+# Issue #1033 / Epic #1031: OpenTelemetry wiring for the CLI.
+# Enables cqlite-core/observability so cqlite_core::observability::tracing_layer()
+# and the OTel exporter/runtime are available. NOT in default features; when off
+# the CLI keeps its plain tracing-subscriber stderr logging (the OTel layer
+# composition is compiled out). Config plumbing (CQLITE_OTEL_*/--otel-*) is
+# always available because ObservabilityConfig/init() are always compiled.
+observability = ["cqlite-core/observability"]

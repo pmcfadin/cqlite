@@ -59,6 +59,14 @@ fn create_cli_with_flags(
         mutation: Vec::new(),
         mutations_file: None,
         flush: false,
+        // Issue #1033: Observability / OpenTelemetry flags
+        otel_enabled: None,
+        otel_endpoint: None,
+        otel_protocol: None,
+        otel_service_name: None,
+        otel_service_version: None,
+        otel_sampling_ratio: None,
+        otel_timeout_ms: None,
         command: None,
     }
 }

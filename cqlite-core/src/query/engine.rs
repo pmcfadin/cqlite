@@ -137,6 +137,22 @@ impl QueryEngine {
     }
 
     /// Execute a CQL query
+    ///
+    /// This is the parent of the query span tree (epic #1031, issue #1035): the
+    /// `query.execute` span created here is the context every read-path span
+    /// (issue #1034) and SELECT sub-span nests under. Bounded span attributes
+    /// (plan type, access path, rows returned) are recorded once the result is
+    /// known via [`Self::update_execution_stats`]; the query text is never
+    /// attached.
+    #[tracing::instrument(
+        name = "query.execute",
+        skip(self, cql),
+        fields(
+            cqlite.query.plan_type = tracing::field::Empty,
+            cqlite.query.access_path = tracing::field::Empty,
+            cqlite.query.rows = tracing::field::Empty,
+        )
+    )]
     pub async fn execute(&self, cql: &str) -> Result<QueryResult> {
         let start_time = Instant::now();
         self.inc_total_queries();
@@ -161,22 +177,29 @@ impl QueryEngine {
             self.record_cache_hit();
             cached_entry.hit_count += 1;
 
-            let mut result = self.executor.execute(&cached_entry.plan).await?;
+            let mut result = crate::observability::record_result(
+                "query",
+                self.executor.execute(&cached_entry.plan).await,
+            )?;
             self.update_execution_stats(&mut result, start_time);
             return Ok(result);
         }
 
-        let parsed_query = self
-            .parser
-            .parse(cql)
-            .inspect_err(|_| self.inc_error_queries())?;
-        let plan = self.planner.plan(&parsed_query).await?;
+        let parsed_query = self.parser.parse(cql).inspect_err(|e| {
+            self.inc_error_queries();
+            crate::observability::record_error(e, "query");
+        })?;
+        let plan = crate::observability::record_result(
+            "query",
+            self.planner.plan(&parsed_query).await,
+        )?;
 
         if self.config.query.query_cache_size.unwrap_or(0) > 0 {
             self.cache_query_plan(cql, parsed_query, plan.clone());
         }
 
-        let mut result = self.executor.execute(&plan).await?;
+        let mut result =
+            crate::observability::record_result("query", self.executor.execute(&plan).await)?;
         self.update_execution_stats(&mut result, start_time);
         Ok(result)
     }
@@ -233,7 +256,10 @@ impl QueryEngine {
                 self.record_cache_hit();
                 cached_entry.hit_count += 1;
 
-                let mut result = self.executor.execute(&cached_entry.plan).await?;
+                let mut result = crate::observability::record_result(
+                    "query",
+                    self.executor.execute(&cached_entry.plan).await,
+                )?;
                 self.update_execution_stats(&mut result, start_time);
                 return Ok(result);
             }
@@ -250,10 +276,18 @@ impl QueryEngine {
 
         #[cfg(feature = "state_machine")]
         {
-            let select_statement =
-                select_parser::parse_select(cql).inspect_err(|_| self.inc_error_queries())?;
-            let optimized_plan = self.select_optimizer.optimize(select_statement).await?;
-            let mut result = self.select_executor.execute(optimized_plan).await?;
+            let select_statement = select_parser::parse_select(cql).inspect_err(|e| {
+                self.inc_error_queries();
+                crate::observability::record_error(e, "query");
+            })?;
+            let optimized_plan = crate::observability::record_result(
+                "query",
+                self.select_optimizer.optimize(select_statement).await,
+            )?;
+            let mut result = crate::observability::record_result(
+                "query",
+                self.select_executor.execute(optimized_plan).await,
+            )?;
             self.update_execution_stats(&mut result, start_time);
             Ok(result)
         }
@@ -603,8 +637,20 @@ impl QueryEngine {
         }
     }
 
-    /// Update execution statistics
+    /// Update execution statistics.
+    ///
+    /// This is the single chokepoint every materializing query path (cache hit,
+    /// parsed-plan, SELECT, parameterized, prepared) funnels through once its
+    /// result is known, so it is also where observability emits the end-to-end
+    /// query signals exactly once (issue #1035): the [`catalog::QUERY_DURATION`]
+    /// histogram and the [`catalog::QUERY_ROWS`] counter, both dimensioned by the
+    /// bounded access path the SELECT chose (when available). It also records the
+    /// bounded span attributes on the active `query.execute` span so the parent of
+    /// the read-path span tree is self-describing. Durations are reported in
+    /// seconds, per the catalog convention.
     fn update_execution_stats(&self, result: &mut QueryResult, start_time: Instant) {
+        use crate::observability::{self as obs, catalog, AttrValue};
+
         let execution_time = start_time.elapsed();
         // Ensure any non-zero execution time is at least 1ms for reporting
         result.execution_time_ms = if execution_time.is_zero() {
@@ -612,6 +658,50 @@ impl QueryEngine {
         } else {
             std::cmp::max(1, execution_time.as_millis() as u64)
         };
+
+        // Bounded access-path dimension, sourced from the honest per-query signal
+        // the modern SelectExecutor attaches to the result (epic #951/#960). We
+        // CONSUME that existing label rather than reinventing it; `None` (legacy
+        // executor / non-SELECT) is reported as "unknown" to keep the dimension
+        // bounded without fabricating a path.
+        let access_path_label: &'static str = result
+            .metadata
+            .access_path
+            .as_ref()
+            .map(|p| p.label())
+            .unwrap_or("unknown");
+        let plan_type_label: &'static str = result
+            .metadata
+            .plan_info
+            .as_ref()
+            .map(|p| Self::plan_type_label(&p.plan_type))
+            .unwrap_or("unknown");
+
+        // Emit the end-to-end query metrics exactly once, here.
+        obs::record_histogram(
+            catalog::QUERY_DURATION,
+            execution_time.as_secs_f64(),
+            &[
+                (catalog::attr::SUBSYSTEM, AttrValue::StaticStr("query")),
+                (catalog::attr::ACCESS_PATH, AttrValue::StaticStr(access_path_label)),
+                (catalog::attr::PLAN_TYPE, AttrValue::StaticStr(plan_type_label)),
+            ],
+        );
+        obs::add_counter(
+            catalog::QUERY_ROWS,
+            result.rows.len() as u64,
+            &[
+                (catalog::attr::ACCESS_PATH, AttrValue::StaticStr(access_path_label)),
+                (catalog::attr::PLAN_TYPE, AttrValue::StaticStr(plan_type_label)),
+            ],
+        );
+
+        // Record bounded attributes on the active `query.execute` span (parent of
+        // the read-path span tree). Never attach the query text or key values.
+        let span = tracing::Span::current();
+        span.record(catalog::attr::PLAN_TYPE, plan_type_label);
+        span.record(catalog::attr::ACCESS_PATH, access_path_label);
+        span.record("cqlite.query.rows", result.rows.len());
 
         let new_time_us = execution_time.as_micros() as u64;
         let mut stats = self.stats.write();
@@ -622,6 +712,23 @@ impl QueryEngine {
                 / stats.total_queries
         };
         stats.rows_affected += result.rows_affected;
+    }
+
+    /// Map a `PlanInfo.plan_type` (an executor `Debug`-formatted plan family such
+    /// as `"TableScan"`) onto a bounded, lower-snake label suitable as a metric
+    /// dimension and span attribute (issue #1035). Falls back to `"other"` for
+    /// any value outside the known taxonomy so the dimension stays bounded.
+    fn plan_type_label(plan_type: &str) -> &'static str {
+        match plan_type {
+            "TableScan" => "table_scan",
+            "IndexScan" => "index_scan",
+            "PointLookup" => "point_lookup",
+            "RangeScan" => "range_scan",
+            "Join" => "join",
+            "Aggregation" => "aggregation",
+            "Subquery" => "subquery",
+            _ => "other",
+        }
     }
 }
 

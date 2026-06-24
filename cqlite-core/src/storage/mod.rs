@@ -60,6 +60,11 @@ impl StorageEngine {
     ///
     /// NOTE: Issue #176 removed write infrastructure (compaction, manifest).
     /// This is now a read-only storage layer focused on SSTable access.
+    #[tracing::instrument(
+        name = "storage.engine.open",
+        skip(path, config, platform),
+        fields(sstables = tracing::field::Empty, bytes = tracing::field::Empty)
+    )]
     pub async fn open(
         path: &Path,
         config: &Config,
@@ -69,10 +74,14 @@ impl StorageEngine {
         >,
     ) -> Result<Self> {
         // Create storage directory if it doesn't exist
-        platform.fs().create_dir_all(path).await?;
+        crate::observability::record_result(
+            "reader",
+            platform.fs().create_dir_all(path).await,
+        )?;
 
         // Initialize SSTable manager with schema registry
-        let sstables = Arc::new(
+        let sstables = Arc::new(crate::observability::record_result(
+            "reader",
             sstable::SSTableManager::new(
                 path,
                 config,
@@ -80,8 +89,10 @@ impl StorageEngine {
                 #[cfg(feature = "state_machine")]
                 schema_registry.clone(),
             )
-            .await?,
-        );
+            .await,
+        )?);
+
+        Self::record_discovery_metrics(&sstables).await;
 
         Ok(Self {
             sstables,
@@ -90,6 +101,26 @@ impl StorageEngine {
             #[cfg(feature = "state_machine")]
             schema_registry: Arc::new(RwLock::new(schema_registry)),
         })
+    }
+
+    /// Emit SSTable-discovery telemetry (issue #1034) for a freshly built
+    /// manager: total SSTables discovered, their on-disk byte total, and the
+    /// number of logical tables. Best-effort — a stats failure is logged and the
+    /// open continues, since telemetry must never change open behaviour.
+    async fn record_discovery_metrics(sstables: &sstable::SSTableManager) {
+        use crate::observability::{self as obs, catalog};
+        match sstables.stats().await {
+            Ok(stats) => {
+                tracing::Span::current().record("sstables", stats.sstable_count as u64);
+                tracing::Span::current().record("bytes", stats.total_size);
+                obs::add_counter(catalog::STORAGE_OPEN_SSTABLES, stats.sstable_count as u64, &[]);
+                obs::add_counter(catalog::STORAGE_OPEN_BYTES, stats.total_size, &[]);
+                obs::add_counter(catalog::STORAGE_OPEN_TABLES, stats.total_tables, &[]);
+            }
+            Err(e) => {
+                log::debug!("storage.engine.open: discovery metrics unavailable: {}", e);
+            }
+        }
     }
 
     /// Open a storage engine with pre-discovered SSTable table directories
@@ -133,6 +164,11 @@ impl StorageEngine {
     /// # Ok(())
     /// # }
     /// ```
+    #[tracing::instrument(
+        name = "storage.engine.open",
+        skip(path, discovered_table_dirs, config, platform),
+        fields(sstables = tracing::field::Empty, bytes = tracing::field::Empty)
+    )]
     pub async fn open_with_sstables(
         path: &Path,
         discovered_table_dirs: Vec<PathBuf>,
@@ -143,10 +179,14 @@ impl StorageEngine {
         >,
     ) -> Result<Self> {
         // Create storage directory if it doesn't exist
-        platform.fs().create_dir_all(path).await?;
+        crate::observability::record_result(
+            "reader",
+            platform.fs().create_dir_all(path).await,
+        )?;
 
         // Initialize SSTable manager with pre-discovered paths and schema registry
-        let sstables = Arc::new(
+        let sstables = Arc::new(crate::observability::record_result(
+            "reader",
             sstable::SSTableManager::new_from_discovered_paths(
                 path,
                 discovered_table_dirs,
@@ -155,8 +195,10 @@ impl StorageEngine {
                 #[cfg(feature = "state_machine")]
                 schema_registry.clone(),
             )
-            .await?,
-        );
+            .await,
+        )?);
+
+        Self::record_discovery_metrics(&sstables).await;
 
         Ok(Self {
             sstables,
