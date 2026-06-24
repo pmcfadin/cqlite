@@ -61,6 +61,100 @@ struct ClusteringRowWindow {
 #[cfg(not(feature = "tombstones"))]
 const MAX_OSS50_BOUND_SENTINEL_LEN: usize = 64;
 
+/// Normalize a CQL [`ClusteringSlice`] into the `(physical_lower, physical_upper)`
+/// byte-comparable bounds that [`select_row_index_blocks_for_range`] consumes
+/// (issue #954 High-severity correctness fix).
+///
+/// [`select_row_index_blocks_for_range`] selects blocks purely in **physical**
+/// (on-disk, byte-comparable) order — the order `Rows.db` separators are stored
+/// in. The encoder ([`encode_clustering_bound_oss50_with_order`]) already inverts
+/// every byte of a DESC component (`ReversedType` / `ByteSource.invert`), so for a
+/// DESC first clustering column an ASCENDING byte order corresponds to a
+/// DESCENDING CQL value order. The consequence:
+///
+/// - **ASC** (`is_reversed[0] == false`): CQL `start` (the `>=`/`>` lower value
+///   bound) IS the physical-lower bound and CQL `end` (the `<=`/`<` upper value
+///   bound) IS the physical-upper bound. No swap.
+/// - **DESC** (`is_reversed[0] == true`): the CQL lower-value bound encodes to the
+///   physically GREATER bytes and the CQL upper-value bound to the physically
+///   SMALLER bytes, so the roles SWAP. A CQL `ck >= v` (lower) selects the rows
+///   with the largest values, which sit at the physical-LOW byte side through
+///   `enc(v)`; a CQL `ck < v` (upper) selects the physical-HIGH side. The open
+///   sentinels swap accordingly: an open CQL lower (`-∞` value) maps to physical
+///   `+∞` and an open CQL upper (`+∞` value) maps to physical `-∞`.
+///
+/// Block selection is over-inclusive by block granularity and the post-scan
+/// `evaluate_leaf` backstop re-applies the exact CQL bound by VALUE, so the
+/// inclusivity of each bound does not need separate handling here — the physical
+/// window only has to be a SUPERSET of the matching rows. (Swapping the roles is
+/// what guarantees the superset for DESC; the previous code built
+/// `[enc(lower), +∞]` for DESC, which excluded the matching low-byte rows and the
+/// backstop could not recover rows that were never decoded.)
+///
+/// Returns:
+/// - `Ok(Some((lower, upper)))` — usable physical bounds.
+/// - `Ok(None)` — a bound's type is not byte-comparable-encodable here, so the
+///   narrowing is unsafe and the caller must decode the whole partition.
+/// - `Err(_)` — never (kept `Result` for call-site symmetry); reserved.
+#[cfg(not(feature = "tombstones"))]
+fn physical_byte_bounds_for_slice(
+    slice: &ClusteringSlice,
+    is_reversed: &[bool],
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    use crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order;
+
+    // The physical-low sentinel: empty sorts before every separator (-∞).
+    let neg_inf = Vec::<u8>::new();
+    // The physical-high sentinel: an all-0xFF run sorts after every separator (+∞).
+    let pos_inf = || vec![0xFFu8; MAX_OSS50_BOUND_SENTINEL_LEN];
+
+    // Encode a closed CQL bound to its physical byte-comparable form; `None`
+    // bubbles up as an un-encodable-bound fallback at the call site.
+    let encode = |values: &[Value]| -> Option<Vec<u8>> {
+        encode_clustering_bound_oss50_with_order(values, is_reversed).ok()
+    };
+
+    // The FIRST clustering column's order decides the value↔byte direction. A
+    // missing entry (no schema / fewer entries) is ascending, matching the encoder.
+    let first_desc = is_reversed.first().copied().unwrap_or(false);
+
+    // CQL lower bound (`>=`/`>` / equality lower) → its physical byte image.
+    let cql_lower_bytes = if slice.start.is_empty() {
+        None // open CQL lower (value -∞)
+    } else {
+        match encode(&slice.start) {
+            Some(b) => Some(b),
+            None => return Ok(None),
+        }
+    };
+    // CQL upper bound (`<=`/`<` / equality upper) → its physical byte image.
+    let cql_upper_bytes = if slice.end.is_empty() {
+        None // open CQL upper (value +∞)
+    } else {
+        match encode(&slice.end) {
+            Some(b) => Some(b),
+            None => return Ok(None),
+        }
+    };
+
+    let (phys_lower, phys_upper) = if first_desc {
+        // DESC: CQL upper-value bound → physical-lower bytes; CQL lower-value bound
+        // → physical-upper bytes. Open CQL upper → physical -∞; open CQL lower →
+        // physical +∞.
+        let lower = cql_upper_bytes.unwrap_or(neg_inf);
+        let upper = cql_lower_bytes.unwrap_or_else(pos_inf);
+        (lower, upper)
+    } else {
+        // ASC: CQL lower-value bound → physical-lower bytes; CQL upper-value bound
+        // → physical-upper bytes (the original mapping).
+        let lower = cql_lower_bytes.unwrap_or(neg_inf);
+        let upper = cql_upper_bytes.unwrap_or_else(pos_inf);
+        (lower, upper)
+    };
+
+    Ok(Some((phys_lower, phys_upper)))
+}
+
 /// Counter of `scan_for_key` invocations, used by tests to prove the BTI
 /// point-lookup path never falls through to a sequential scan (issue #831).
 ///
@@ -557,8 +651,7 @@ impl SSTableReader {
         schema: Option<&crate::schema::TableSchema>,
     ) -> Result<Option<ClusteringRowWindow>> {
         use crate::storage::sstable::bti::{
-            encode_clustering_bound_oss50_with_order, iterate_rows_for_partition,
-            lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
+            iterate_rows_for_partition, lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
             select_row_index_blocks_for_range, BtiPartitionLocation,
         };
 
@@ -615,26 +708,17 @@ impl SSTableReader {
             })
             .unwrap_or_default();
 
-        // Encode the bounds to the SAME OSS50 byte-comparable form the trie stores
-        // its separators in. An OPEN bound encodes to the extreme sentinel so the
-        // inclusive `[start, end]` block selection spans from/through it. A bound
-        // whose type is not byte-comparable-encodable here makes the narrowing
-        // unsafe → decode the whole partition (honest fallback).
-        let start_bytes = if slice.start.is_empty() {
-            Vec::new() // empty sorts before every separator (-∞)
-        } else {
-            match encode_clustering_bound_oss50_with_order(&slice.start, &is_reversed) {
-                Ok(b) => b,
-                Err(_) => return Ok(None),
-            }
-        };
-        let end_bytes = if slice.end.is_empty() {
-            vec![0xFFu8; MAX_OSS50_BOUND_SENTINEL_LEN] // sorts after every separator (+∞)
-        } else {
-            match encode_clustering_bound_oss50_with_order(&slice.end, &is_reversed) {
-                Ok(b) => b,
-                Err(_) => return Ok(None),
-            }
+        // Encode the CQL bounds into the PHYSICAL byte-comparable order the row
+        // index uses, normalizing for a DESC first clustering column (issue #954
+        // High-severity correctness fix). `select_row_index_blocks_for_range`
+        // operates purely in physical (on-disk, byte-comparable) order, so the CQL
+        // lower/upper bounds must be mapped to the physical-lower/physical-upper
+        // sides before block selection. For a DESC column those roles SWAP (see
+        // `physical_byte_bounds_for_slice`). An un-encodable bound makes the
+        // narrowing unsafe → decode the whole partition (honest fallback).
+        let Some((start_bytes, end_bytes)) = physical_byte_bounds_for_slice(slice, &is_reversed)?
+        else {
+            return Ok(None);
         };
 
         // CORRECTNESS GUARD (no-heuristics, never wrong results): a row-index block
@@ -2906,6 +2990,190 @@ mod tests {
         );
         //  - whole-section fallback cannot grow → absent.
         assert_eq!(bti_lookup_step(false, false, false), BtiLookupStep::Absent);
+    }
+
+    // =========================================================================
+    // physical_byte_bounds_for_slice — DESC clustering normalization (issue #954)
+    // =========================================================================
+
+    /// Build a [`ClusteringSlice`] over a single integer clustering column.
+    #[cfg(not(feature = "tombstones"))]
+    fn int_slice(
+        start: Option<i64>,
+        start_inclusive: bool,
+        end: Option<i64>,
+        end_inclusive: bool,
+    ) -> ClusteringSlice {
+        ClusteringSlice {
+            start: start
+                .map(|v| vec![Value::Integer(v as i32)])
+                .unwrap_or_default(),
+            start_inclusive,
+            end: end
+                .map(|v| vec![Value::Integer(v as i32)])
+                .unwrap_or_default(),
+            end_inclusive,
+        }
+    }
+
+    /// The physical byte image of a single-int clustering bound under an order.
+    #[cfg(not(feature = "tombstones"))]
+    fn enc_int(v: i32, reversed: bool) -> Vec<u8> {
+        crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order(
+            &[Value::Integer(v)],
+            &[reversed],
+        )
+        .expect("int encodes")
+    }
+
+    /// ASC: the physical bounds are the CQL bounds, no swap.
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_asc_no_swap() {
+        // ck >= 100 AND ck < 110
+        let slice = int_slice(Some(100), true, Some(110), false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(lower, enc_int(100, false), "ASC physical-lower = enc(100)");
+        assert_eq!(upper, enc_int(110, false), "ASC physical-upper = enc(110)");
+        // The physical range is well-ordered (lower <= upper) so block selection
+        // returns a non-empty window for an in-range slice.
+        assert!(lower <= upper, "ASC physical bounds must be ordered");
+    }
+
+    /// DESC: the CQL lower/upper roles SWAP into physical order, and the result is
+    /// still a well-ordered `[phys_lower, phys_upper]` (the bug produced a
+    /// REVERSED, empty-selecting range).
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_desc_swaps_roles() {
+        // ck >= 100 AND ck < 110 on a DESC column.
+        let slice = int_slice(Some(100), true, Some(110), false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+            .expect("ok")
+            .expect("encodable");
+        // Physical-lower comes from the CQL UPPER bound (enc_desc(110)); physical-
+        // upper from the CQL LOWER bound (enc_desc(100)).
+        assert_eq!(
+            lower,
+            enc_int(110, true),
+            "DESC physical-lower must come from the CQL upper bound (110)"
+        );
+        assert_eq!(
+            upper,
+            enc_int(100, true),
+            "DESC physical-upper must come from the CQL lower bound (100)"
+        );
+        // The whole point: under DESC the swapped bounds are well-ordered. With the
+        // un-swapped (buggy) mapping the range would be [enc_desc(100),
+        // enc_desc(110)] which is REVERSED (enc_desc(100) > enc_desc(110)) and
+        // `select_row_index_blocks_for_range` returns EMPTY → dropped rows.
+        assert!(
+            lower < upper,
+            "DESC swapped physical bounds must be ordered (lower < upper); \
+             got lower={lower:?} upper={upper:?}"
+        );
+        assert!(
+            enc_int(100, true) > enc_int(110, true),
+            "sanity: under DESC, enc(100) sorts AFTER enc(110) in physical bytes — \
+             the un-swapped mapping would build a reversed (empty) range"
+        );
+    }
+
+    /// DESC single-bound `ck >= v` (open CQL upper): the matching values (v and
+    /// larger) all sort to the physical-LOW byte side (DESC inverts bytes), so the
+    /// physical window is `[-∞, enc_desc(v)]`. (The buggy un-swapped code built
+    /// `[enc_desc(v), +∞]`, which EXCLUDED exactly those low-byte matching rows.)
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_desc_lower_bound_only() {
+        // ck >= 290, open above.
+        let slice = int_slice(Some(290), true, None, false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(
+            lower,
+            Vec::<u8>::new(),
+            "DESC `ck >= 290`: open CQL upper → physical -∞ (the matching large \
+             values sort to the LOW physical-byte side)"
+        );
+        assert_eq!(
+            upper,
+            enc_int(290, true),
+            "DESC `ck >= 290`: physical-upper = enc_desc(290) (the boundary value)"
+        );
+        assert!(lower < upper, "must be ordered");
+        // Crucial: enc_desc(290) sorts ABOVE enc_desc(299), so [-∞, enc_desc(290)]
+        // includes enc_desc(299) — the buggy [enc_desc(290), +∞] would NOT.
+        assert!(
+            enc_int(299, true) < enc_int(290, true),
+            "sanity: larger DESC value has smaller bytes"
+        );
+        assert!(
+            enc_int(299, true).as_slice() <= upper.as_slice(),
+            "the physical window must include enc_desc(299), a matching row"
+        );
+    }
+
+    /// DESC single-bound `ck < v` (open CQL lower): the matching values (smaller
+    /// than v) sort to the physical-HIGH byte side, so the physical window is
+    /// `[enc_desc(v), +∞]`.
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_desc_upper_bound_only() {
+        // ck < 20, open below.
+        let slice = int_slice(None, false, Some(20), false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(
+            lower,
+            enc_int(20, true),
+            "DESC `ck < 20`: physical-lower = enc_desc(20) (the boundary value)"
+        );
+        assert_eq!(
+            upper,
+            vec![0xFFu8; MAX_OSS50_BOUND_SENTINEL_LEN],
+            "DESC `ck < 20`: open CQL lower → physical +∞ sentinel"
+        );
+        assert!(lower < upper, "must be ordered");
+        // A matching small value (ck=0) has the LARGEST DESC bytes, inside the
+        // window; the buggy [-∞, enc_desc(20)] mapping would exclude it.
+        assert!(
+            enc_int(0, true).as_slice() >= lower.as_slice(),
+            "the physical window must include enc_desc(0), a matching row"
+        );
+    }
+
+    /// DESC equality `ck = v`: start == end == [v]; physical bounds collapse to
+    /// [enc_desc(v), enc_desc(v)] (a single-point range, identical to ASC since
+    /// the swap of equal endpoints is a no-op).
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_desc_equality_is_point() {
+        let slice = int_slice(Some(150), true, Some(150), true);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(lower, enc_int(150, true));
+        assert_eq!(upper, enc_int(150, true));
+        assert_eq!(lower, upper, "equality is a single physical point");
+    }
+
+    /// Absent schema / empty `is_reversed` is treated as ASC (no swap), matching
+    /// the encoder's default.
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_no_order_defaults_ascending() {
+        let slice = int_slice(Some(5), true, Some(50), false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(lower, enc_int(5, false));
+        assert_eq!(upper, enc_int(50, false));
+        assert!(lower < upper);
     }
 
     #[test]
