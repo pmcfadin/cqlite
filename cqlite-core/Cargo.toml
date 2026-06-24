@@ -211,6 +211,7 @@ observability = [
 # enabled it keeps building, and now resolves to the real observability stack.
 metrics = ["observability"]
 
+# Other features
 pest = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]
 
