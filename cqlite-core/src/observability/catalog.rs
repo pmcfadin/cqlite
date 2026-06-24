@@ -211,10 +211,13 @@ pub const COMPACTION_SSTABLES_IN: &str = "cqlite.compaction.sstables_in";
 /// attributes.
 pub const COMPACTION_SSTABLES_OUT: &str = "cqlite.compaction.sstables_out";
 
-/// `cqlite.compaction.tombstones_purged` — counter `{row}`.
+/// `cqlite.compaction.tombstones_purged` — counter `{tombstone}`.
 ///
-/// Total tombstones purged (gc_grace / overlap-safe) during compaction. No
-/// high-cardinality attributes.
+/// Total tombstones GENUINELY PURGED (gc_grace / overlap-safe) during compaction,
+/// summed across cell tombstones, whole-row tombstones, range-tombstone markers,
+/// and complex-deletion (collection/UDT) markers. Counted only at the actual
+/// purge decision points in the merge/reconcile logic; ordinary last-write-wins
+/// reconciliation collapse is NOT counted. No high-cardinality attributes.
 pub const COMPACTION_TOMBSTONES_PURGED: &str = "cqlite.compaction.tombstones_purged";
 
 /// `cqlite.compaction.lag` — gauge `{sstable}`.

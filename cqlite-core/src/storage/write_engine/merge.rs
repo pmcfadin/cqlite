@@ -2066,6 +2066,39 @@ pub async fn compact_sstables_with_registry(
     Ok(CompactReport { output, stats })
 }
 
+/// Tally of tombstones GENUINELY PURGED during a partition merge (issue #1037).
+///
+/// Accumulated only at the true gc_grace / overlap-safe purge decision points in
+/// [`KWayMerger::reconcile_cluster_with_overlap_counted`] and
+/// [`KWayMerger::merge_partition_rows`] — never from a coarse input-vs-output
+/// entry-count diff. Last-write-wins reconciliation collapse (e.g. two duplicate
+/// row tombstones merging to one) is deliberately NOT counted, since that is
+/// ordinary deduplication rather than a gc/overlap-safe purge. Backs the
+/// `cqlite.compaction.tombstones_purged` counter.
+#[cfg(feature = "write-support")]
+#[derive(Debug, Default, Clone, Copy)]
+struct PurgeCounts {
+    /// Cell tombstones (simple cells + complex-collection elements) purged.
+    cell_tombstones: u64,
+    /// Whole-row tombstones purged.
+    row_tombstones: u64,
+    /// Range-tombstone markers purged.
+    range_tombstones: u64,
+    /// Complex-deletion (collection/UDT) markers purged.
+    complex_deletions: u64,
+}
+
+#[cfg(feature = "write-support")]
+impl PurgeCounts {
+    /// Total tombstones purged across every category.
+    fn total(self) -> u64 {
+        self.cell_tombstones
+            .saturating_add(self.row_tombstones)
+            .saturating_add(self.range_tombstones)
+            .saturating_add(self.complex_deletions)
+    }
+}
+
 #[cfg(feature = "write-support")]
 impl KWayMerger {
     /// Create a new k-way merger from input SSTable paths
@@ -2387,11 +2420,12 @@ impl KWayMerger {
     fn merge_partition_rows(&self, rows: Vec<MergeEntry>) -> Result<Vec<MergeEntry>> {
         use std::collections::BTreeMap;
 
-        // Tombstone-purge accounting (issue #1037): count tombstone-bearing
-        // input entries up front so we can report how many were dropped by
-        // reconciliation/gc purging below. Read-only over the input — does not
-        // change any merge decision.
-        let input_tombstones = rows.iter().filter(|e| Self::entry_is_tombstone(e)).count();
+        // Tombstone-purge accounting (issue #1037). Accumulated at the ACTUAL
+        // gc/overlap-safe purge decision points (not derived from an input-vs-
+        // output entry-count diff, which both missed cell/complex purges and
+        // mis-counted last-write-wins collapse as a purge). See the comment on
+        // `COMPACTION_TOMBSTONES_PURGED` emission at the end of this method.
+        let mut purges = PurgeCounts::default();
 
         // Overlap-safety gate for tombstone purging (#921 finding 1, #935):
         // decide BOTH the effective gc_grace cutoff and the overlap-aware
@@ -2450,12 +2484,13 @@ impl KWayMerger {
 
         let mut merged = Vec::new();
         for (ck, cluster_rows) in clustered_rows {
-            if let Some(entry) = Self::reconcile_cluster_with_overlap(
+            if let Some(entry) = Self::reconcile_cluster_with_overlap_counted(
                 ck,
                 cluster_rows,
                 &self.schema.dropped_columns,
                 effective_gc_before,
                 max_purgeable_timestamp,
+                &mut purges,
             ) {
                 // Issue #933: shadow cells covered by a range tombstone. The merge
                 // must do this per-cell (not just per-row at the writer) because a
@@ -2481,6 +2516,10 @@ impl KWayMerger {
         for (key, rt) in range_tombstones {
             if let Some(gc_before) = effective_gc_before {
                 if i64::from(rt.local_deletion_time as u32) < gc_before {
+                    // True gc-safe purge of a range-tombstone marker (issue
+                    // #1037): the covered cells were already removed above, so
+                    // dropping the now-redundant marker is a genuine purge.
+                    purges.range_tombstones += 1;
                     continue;
                 }
             }
@@ -2513,28 +2552,33 @@ impl KWayMerger {
             }
         });
 
-        // Emit the count of tombstones dropped during reconciliation/purge
-        // (issue #1037). A positive delta means tombstones disappeared from the
-        // input (gc-purged or collapsed by last-write-wins). Saturating so the
-        // counter is never negative.
-        let output_tombstones = merged.iter().filter(|e| Self::entry_is_tombstone(e)).count();
-        let purged = input_tombstones.saturating_sub(output_tombstones);
+        // Emit the count of tombstones GENUINELY PURGED during this merge (issue
+        // #1037).
+        //
+        // `COMPACTION_TOMBSTONES_PURGED` now counts ONLY true gc_grace /
+        // overlap-safe purges, accumulated at the exact decision points where a
+        // tombstone is dropped because it is safe to drop:
+        //   - cell tombstones (simple + complex-element) removed by the Step 3c
+        //     gc/overlap retain in `reconcile_cluster_with_overlap_counted`;
+        //   - row tombstones cleared by that same gc/overlap gate;
+        //   - complex-deletion markers removed by that gate;
+        //   - range-tombstone markers dropped by the gc-grace gate in the
+        //     re-emit loop above.
+        // It explicitly does NOT count last-write-wins reconciliation collapse
+        // (e.g. two duplicate row tombstones merging to one), which is ordinary
+        // deduplication, not a purge. When no gc cutoff applies (partial
+        // compaction without an overlap bound) the purge stages are no-ops and
+        // this counter stays at zero.
+        let purged = purges.total();
         if purged > 0 {
             crate::observability::add_counter(
                 crate::observability::catalog::COMPACTION_TOMBSTONES_PURGED,
-                purged as u64,
+                purged,
                 &[],
             );
         }
 
         Ok(merged)
-    }
-
-    /// Whether a merge entry carries a tombstone (row tombstone or a range
-    /// deletion marker). Used only for the tombstone-purge metric (issue #1037);
-    /// never influences merge output.
-    fn entry_is_tombstone(entry: &MergeEntry) -> bool {
-        matches!(entry.row_data, RowData::Tombstone { .. }) || entry.range_deletion.is_some()
     }
 
     /// True when an entry exists ONLY to carry a range-tombstone marker (issue
@@ -3103,7 +3147,40 @@ impl KWayMerger {
     /// Reconcile a clustering-key group with an explicit overlap-aware
     /// max-purgeable timestamp (#935). See [`Self::reconcile_cluster`] for the base
     /// reconciliation rules.
+    ///
+    /// Thin wrapper over [`Self::reconcile_cluster_with_overlap_counted`] that
+    /// discards the tombstone-purge tally. The production merge path
+    /// (`merge_partition_rows`) calls the `_counted` form directly to accumulate
+    /// genuine gc/overlap-safe purges for `COMPACTION_TOMBSTONES_PURGED` (#1037);
+    /// this wrapper keeps the simpler signature for tests and other callers.
+    #[cfg(test)]
     fn reconcile_cluster_with_overlap(
+        clustering_key: Option<ClusteringKey>,
+        cluster_rows: Vec<MergeEntry>,
+        dropped_columns: &std::collections::HashMap<String, i64>,
+        gc_before_secs: Option<i64>,
+        max_purgeable_timestamp: i64,
+    ) -> Option<MergeEntry> {
+        let mut sink = PurgeCounts::default();
+        Self::reconcile_cluster_with_overlap_counted(
+            clustering_key,
+            cluster_rows,
+            dropped_columns,
+            gc_before_secs,
+            max_purgeable_timestamp,
+            &mut sink,
+        )
+    }
+
+    /// Reconcile a clustering-key group, accumulating genuine gc/overlap-safe
+    /// tombstone purges into `purges` (issue #1037).
+    ///
+    /// Identical merge OUTPUT to [`Self::reconcile_cluster_with_overlap`]; the
+    /// only addition is that each true purge decision (a cell tombstone, row
+    /// tombstone, or complex deletion dropped because it is gc/overlap-safe to
+    /// drop in Step 3c) increments the matching `purges` field. Last-write-wins
+    /// reconciliation collapse is NOT counted.
+    fn reconcile_cluster_with_overlap_counted(
         clustering_key: Option<ClusteringKey>,
         cluster_rows: Vec<MergeEntry>,
         dropped_columns: &std::collections::HashMap<String, i64>,
@@ -3126,6 +3203,9 @@ impl KWayMerger {
         // compaction; `i64::MIN` when purging is disabled (`gc_before_secs` is then
         // `None`, so this is unused).
         max_purgeable_timestamp: i64,
+        // Tombstone-purge tally accumulated at the true purge decision points
+        // (issue #1037). Never read here; only incremented.
+        purges: &mut PurgeCounts,
     ) -> Option<MergeEntry> {
         use std::collections::HashMap;
 
@@ -3449,7 +3529,13 @@ impl KWayMerger {
                     // every gc-purgeable tombstone through unchanged.
                     let overlap_purgeable = cell.timestamp < max_purgeable_timestamp;
                     // RETAIN unless BOTH gates allow the purge.
-                    !(gc_purgeable && overlap_purgeable)
+                    let keep = !(gc_purgeable && overlap_purgeable);
+                    if !keep {
+                        // True gc/overlap-safe purge of a cell tombstone (simple
+                        // or complex-element), issue #1037.
+                        purges.cell_tombstones += 1;
+                    }
+                    keep
                 } else {
                     true
                 }
@@ -3477,6 +3563,8 @@ impl KWayMerger {
                 && row_del.is_some_and(|d| d < max_purgeable_timestamp)
             {
                 row_del = None;
+                // True gc/overlap-safe purge of a row tombstone (issue #1037).
+                purges.row_tombstones += 1;
             }
 
             // (c) Complex-deletion markers: drop each purgeable marker. The
@@ -3487,7 +3575,13 @@ impl KWayMerger {
             complex_deletions.retain(|cd| {
                 let gc_purgeable = i64::from(cd.local_deletion_time as u32) < gc_before;
                 let overlap_purgeable = cd.marked_for_delete_at < max_purgeable_timestamp;
-                !(gc_purgeable && overlap_purgeable)
+                let keep = !(gc_purgeable && overlap_purgeable);
+                if !keep {
+                    // True gc/overlap-safe purge of a complex-deletion marker
+                    // (issue #1037).
+                    purges.complex_deletions += 1;
+                }
+                keep
             });
         }
 

@@ -760,17 +760,22 @@ impl WriteEngine {
 
         let trimmed = statement.trim();
 
-        // BATCH statements produce multiple mutations
+        // BATCH statements produce multiple mutations.
+        //
+        // Single-boundary error recording (issue #1036): call the *unrecorded*
+        // `write_inner` here rather than the public `write`. `execute` already
+        // wraps this method in `record_result`, so the escaping error is counted
+        // exactly once at the public boundary instead of twice.
         if trimmed.len() >= 5 && trimmed.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") {
             let mutations =
                 cql_to_mutation::convert_cql_to_mutations(trimmed, &self.config.schema)?;
             for mutation in mutations {
-                self.write(mutation)?;
+                self.write_inner(mutation)?;
             }
             Ok(())
         } else {
             let mutation = self.parse_cql_to_mutation(statement)?;
-            self.write(mutation)
+            self.write_inner(mutation)
         }
     }
 
@@ -790,14 +795,25 @@ impl WriteEngine {
     /// - Engine has been closed
     /// - SSTable write fails
     /// - WAL truncate fails
+    #[tracing::instrument(name = "flush.public", skip(self))]
     pub async fn flush(&mut self) -> Result<Option<SSTableInfo>> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(Error::InvalidInput(
-                "WriteEngine has been closed".to_string(),
-            ));
-        }
+        // Single-boundary error recording (issue #1036): `flush` is a public API
+        // entry point, so it records here. The nested `flush_internal_async`
+        // helper is intentionally *unrecorded* to avoid double-counting when the
+        // write/close paths trigger a flush internally.
+        crate::observability::record_result(
+            "write",
+            async {
+                if self.closed.load(Ordering::SeqCst) {
+                    return Err(Error::InvalidInput(
+                        "WriteEngine has been closed".to_string(),
+                    ));
+                }
 
-        self.flush_internal_async().await
+                self.flush_internal_async().await
+            }
+            .await,
+        )
     }
 
     /// Internal synchronous flush helper.
@@ -810,13 +826,15 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Internal async flush implementation
+    /// Internal async flush implementation.
+    ///
+    /// This is an *unrecorded* inner helper (issue #1036): it never calls
+    /// `record_error`/`record_result` itself. Error counting happens exactly once
+    /// at the public boundary that invoked it (`flush`, `close`, or the
+    /// `write`/`write_async` auto-flush path, all of which wrap their work in
+    /// `record_result`).
     #[tracing::instrument(name = "flush.memtable", skip(self))]
     async fn flush_internal_async(&mut self) -> Result<Option<SSTableInfo>> {
-        crate::observability::record_result("write", self.flush_internal_async_impl().await)
-    }
-
-    async fn flush_internal_async_impl(&mut self) -> Result<Option<SSTableInfo>> {
         // Check if memtable is empty
         if self.memtable.is_empty() {
             return Ok(None);
@@ -954,6 +972,10 @@ impl WriteEngine {
                 Err(e) => {
                     // If flush fails, log error and return it
                     log::error!("Failed to flush memtable during close: {}", e);
+                    // Single-boundary error recording (issue #1036): `close` is a
+                    // public entry point and `flush_internal_async` is unrecorded,
+                    // so record the escaping flush failure here, exactly once.
+                    crate::observability::record_error(&e, "write");
                     // Reset closed flag since we failed to close cleanly
                     self.closed.store(false, Ordering::SeqCst);
                     return Err(e);
@@ -1761,12 +1783,14 @@ impl WriteEngine {
     ///
     /// If any step 2 rename fails, the partially-renamed output components are
     /// cleaned up and an error is returned. The input SSTables remain intact.
+    ///
+    /// Single-boundary error recording (issue #1037): this is an *unrecorded*
+    /// inner helper. Any error returned here escapes through
+    /// `maintenance_step_inner` to the public `maintenance_step`, which wraps the
+    /// whole step in `record_result("compaction", ..)` and counts it exactly
+    /// once. Recording here too would double-count finalize failures.
     #[tracing::instrument(name = "compaction.finalize", skip(self, report))]
     async fn finalize_merge_async(&mut self, report: &mut MaintenanceReport) -> Result<()> {
-        crate::observability::record_result("compaction", self.finalize_merge_async_impl(report).await)
-    }
-
-    async fn finalize_merge_async_impl(&mut self, report: &mut MaintenanceReport) -> Result<()> {
         let merge = match self.active_merge.take() {
             Some(m) => m,
             None => return Ok(()),
