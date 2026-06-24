@@ -17,7 +17,7 @@
 //! | Offset Table (LE u32[])| <- Little-endian!
 //! +------------------------+
 //! | Entry Data             |
-//! |   key + position (BE)  |
+//! |   key + position (LE)  |
 //! +------------------------+
 //! | First Key (serialized) |
 //! +------------------------+
@@ -50,7 +50,7 @@
 //! ```c
 //! struct summary_entry {
 //!     byte key[];        // Variable length - no prefix!
-//!     be64 position;     // Position in Index.db file (big-endian)
+//!     le64 position;     // Position in Index.db file (little-endian)
 //! };
 //! ```
 //!
@@ -308,8 +308,9 @@ impl SummaryWriter {
             // Write key bytes (no length prefix!)
             entry_data.extend_from_slice(&entry.key);
 
-            // Write position (big-endian u64)
-            entry_data.extend_from_slice(&entry.index_position.to_be_bytes());
+            // Write position (little-endian u64, matching Cassandra's on-disk
+            // Summary.db layout).
+            entry_data.extend_from_slice(&entry.index_position.to_le_bytes());
         }
 
         let summary_entries_size = (offset_table_size + entry_data.len()) as u64;
@@ -542,10 +543,10 @@ mod tests {
 
         // Verify entry 2 data
         assert_eq!(&bytes[42..45], &[0xCC, 0xDD, 0xEE]); // key
-                                                         // position = 1024 (0x0000000000000400)
+                                                         // position = 1024 (LE: 0x00 0x04 ...)
         assert_eq!(
             &bytes[45..53],
-            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x00]
+            &[0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
 
         // Verify first key (2 bytes)
@@ -687,10 +688,10 @@ mod tests {
         let bytes = writer.finish().unwrap();
 
         // Position is at offset: 24 (header) + 4 (offset table) + 1 (key) = 29
-        // Position: 0x0000000040000000 (1GB in big-endian)
+        // Position: 1GB = 0x0000000040000000, little-endian on disk.
         assert_eq!(
             &bytes[29..37],
-            &[0x00, 0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00]
+            &[0x00, 0x00, 0x00, 0x40, 0x00, 0x00, 0x00, 0x00]
         );
     }
 
@@ -706,10 +707,10 @@ mod tests {
         let bytes = writer.finish().unwrap();
 
         // Position is at: 24 (header) + 4 (offset) + 1 (key) = 29
-        // 12381 in big-endian u64: 0x000000000000305D
+        // 12381 = 0x000000000000305D, little-endian on disk.
         assert_eq!(
             &bytes[29..37],
-            &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x30, 0x5D]
+            &[0x5D, 0x30, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
         );
     }
 

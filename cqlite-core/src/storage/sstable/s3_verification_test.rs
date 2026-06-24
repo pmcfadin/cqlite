@@ -282,9 +282,9 @@ mod s3_verification {
         // BE interpretation of same bytes = 0x20000000 (536870912) — wrong!
         assert_ne!(be_value, 32, "big-endian would misread the offset");
 
-        // The Summary.db offset table is the ONLY little-endian component in the
-        // entire SSTable format.  All other fields (header, entry positions, key
-        // lengths) are big-endian.
+        // Within Summary.db the offset table is little-endian, and so is each
+        // entry's trailing Index.db position (u64). The header fields and the
+        // length-prefixed first/last keys remain big-endian.
         assert_eq!(
             u32::from_le_bytes([0x18, 0x00, 0x00, 0x00]),
             24,
@@ -559,7 +559,7 @@ mod s3_verification {
 
         // summary_entries_size: offset_table (3*4=12) + entry_data (3*(2+8)=30) = 42
         let key_size: u64 = 2; // 2-byte keys
-        let entry_size: u64 = key_size + 8; // key + be_u64 position
+        let entry_size: u64 = key_size + 8; // key + le_u64 position
         let offset_table_size: u64 = entries_count as u64 * 4;
         let entry_data_size: u64 = entries_count as u64 * entry_size;
         let summary_entries_size: u64 = offset_table_size + entry_data_size;

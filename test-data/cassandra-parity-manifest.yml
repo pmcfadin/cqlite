@@ -273,6 +273,357 @@ scenarios:
         Publish Summary.db reference dumps and enable strict first/last-key
         boundary comparison in the sstable_parity_summary_db_big suite.
 
+  # ---- Strict Summary.db byte parity (epic #968 / issue #984) ----------------
+  - id: cass.summary_db.IndexSummaryTest.serialization_round_trip
+    title: Summary.db header + entry serialization round-trip (BIG)
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - IndexSummaryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_summary_db_big
+        tests:
+          - cqlite-core/tests/sstabledump_parity_summary.rs
+        notes: >-
+          strict::test_summary_db_strict_byte_parity re-decodes every committed
+          BIG Summary.db image from raw bytes (header fields, sampling metadata,
+          offset table, entries, first/last keys) and asserts equality with the
+          production SummaryReader; the SummaryWriter round-trip tests
+          (test_summary_header_roundtrip, test_summary_offset_table_encoding)
+          cover the write path.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Summary.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_summary strict::
+      normalization: >-
+        24-byte big-endian header and length-prefixed first/last keys decoded
+        from raw bytes; the little-endian offset table is decoded independently
+        and cross-checked against SummaryReader.
+      reference_paths:
+        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+      known_limitations: >-
+        Skip-on-absence: a fixture is only validated when its sibling Data.db is
+        present (binary images are not committed to git).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.summary_db.IndexSummaryTest.first_last_key_boundaries
+    title: Summary.db first/last decorated-key boundaries (BIG)
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - IndexSummaryTest.java
+        - SSTableReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_summary_db_big
+        tests:
+          - cqlite-core/tests/sstabledump_parity_summary.rs
+        notes: >-
+          strict::test_summary_db_strict_byte_parity decodes the trailing
+          length-prefixed first/last keys and byte-compares them to
+          SummaryReader, and requires the first sampled entry key to equal the
+          SSTable's first decorated key.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Summary.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_summary strict::
+      reference_paths:
+        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+      known_limitations: >-
+        Skip-on-absence: validated only when the sibling Data.db is present.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.summary_db.IndexSummaryTest.offset_table_entries
+    title: Summary.db little-endian offset table + entry ordering (BIG)
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - IndexSummaryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_summary_db_big
+        tests:
+          - cqlite-core/tests/sstabledump_parity_summary.rs
+        notes: >-
+          strict::test_summary_db_strict_byte_parity decodes the little-endian
+          offset table independently and asserts its length equals
+          entries_count, offsets are strictly increasing and bounded by
+          summary_entries_size, and the first offset equals the offset-table
+          byte length (Cassandra absolute-offset layout); entries are reordered
+          by ascending offset and ascending Index.db position.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Summary.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_summary strict::
+      reference_paths:
+        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+      known_limitations: >-
+        Skip-on-absence: validated only when the sibling Data.db is present.
+        Multi-entry images (e.g. test_timeseries/app_metrics) exercise the
+        offset table; single-entry images degenerate to a single offset.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.summary_db.big.index_offset_references
+    title: Summary.db sampled positions resolve to Index.db partition entries (BIG)
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableReaderTest.java
+        - SSTableScannerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_summary_db_big
+        tests:
+          - cqlite-core/tests/sstabledump_parity_summary.rs
+        notes: >-
+          strict::test_summary_db_strict_byte_parity reads each sampled
+          (little-endian) Index.db position, seeks Index.db at that byte offset,
+          and asserts the be16-length-prefixed partition key stored there
+          byte-matches the key recorded in the summary entry — proving the
+          reference is byte-correct, not merely in-bounds. Also surfaces that the
+          production SummaryReader currently decodes the trailing position as
+          big-endian (latent; positions are unused for lookups today).
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Summary.db + Index.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_summary strict::
+      normalization: >-
+        Sampled positions are decoded little-endian (the on-disk truth verified
+        against Index.db) and matched to be16-length-prefixed Index.db keys.
+      reference_paths:
+        - test-data/datasets/sstables/test_timeseries/app_metrics-6c87b890a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+      known_limitations: >-
+        Skip-on-absence: validated only when the sibling Data.db/Index.db are
+        present. SummaryReader/SummaryWriter encode the entry position as
+        big-endian rather than Cassandra's little-endian; this is latent because
+        summary positions are not consumed for partition lookups, and is flagged
+        for a separate parser/writer fix.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.summary_db.bti.summary_discovery_classification
+    title: BTI SSTables carry no Summary.db (trie Partitions.db replaces it)
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_summary_db_big
+        tests:
+          - cqlite-core/tests/sstabledump_parity_summary.rs
+        notes: >-
+          strict::test_bti_summary_discovery_classification parses every
+          committed TOC.txt with the authoritative descriptor (big/bti, no
+          heuristics) and asserts BIG declares Summary.db + Index.db while BTI
+          declares Partitions.db and never a Summary.db component, with the
+          Summary.db image also physically absent for BTI.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da, big, bti]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # emits BIG (nb/oa) and BTI (da) TOC.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_summary strict::
+      normalization: >-
+        TOC.txt component manifests are parsed strictly; format is taken from the
+        descriptor filename, never inferred from contents.
+      reference_paths:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+      failure_artifacts:
+        - validation_artifacts/sstabledump/summary/summary_parity_report.md
+      known_limitations: >-
+        Skip-on-absence: requires committed TOC.txt fixtures (always present for
+        the dataset). BTI summary classification is a presence/absence check;
+        BTI has no Summary.db to byte-compare by design.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries
+    title: Downsampled Summary.db entries (sampling_level < 128)
+    status: planned
+    capability: index_summary
+    priority: P1
+    risk: p2_coverage
+    cassandra:
+      category: sstable-io
+      relevance: med
+      files:
+        - IndexSummaryRedistributionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_summary_db_big
+        tests: []
+        notes: >-
+          The strict suite asserts sampling metadata (sampling_level in (0,128],
+          size_at_full_sampling) but all committed fixtures are flushed at full
+          sampling (level 128). A downsampled fixture is required to exercise the
+          sampling_level < 128 / size_at_full_sampling > entries_count path.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, big]
+      known_limitations: >-
+        No downsampled Summary.db fixture is published; Cassandra only emits one
+        on index-summary redistribution, which the committed dataset does not
+        trigger.
+    ci:
+      tier: manual_debug
+    scope:
+      gap: No downsampled (sampling_level < 128) Summary.db fixture exists.
+      next_step: >-
+        Publish a redistributed Summary.db fixture and extend the strict suite to
+        assert downsampled offset tables and size_at_full_sampling > entry count.
+      target_suite: sstable_parity_summary_db_big
+
+  - id: cass.summary_db.IndexSummaryManagerTest.memory_constrained_summary_reload
+    title: Runtime index-summary redistribution / memory-constrained reload
+    status: out_of_scope
+    capability: index_summary
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: sstable-io
+      relevance: low
+      files:
+        - IndexSummaryManagerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_summary_db_big
+        notes: >-
+          IndexSummaryManager schedules live downsampling/upsampling of
+          in-memory index summaries under a memory budget. CQLite reads
+          Summary.db images; it does not run a node-side redistribution
+          scheduler or memory pool.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: out_of_scope
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+    ci:
+      tier: manual_debug
+    scope:
+      out_of_scope_category: not_sstable_reader_writer_compactor
+      rationale: >-
+        Runtime summary redistribution scheduling and memory-pool management are
+        node lifecycle behaviors, explicitly listed out of scope by issue #984.
+      cqlite_boundary: >-
+        CQLite parses and validates the on-disk Summary.db component; it does not
+        manage the live IndexSummaryManager budget or reload cadence.
+      safe_claim: >-
+        CQLite reads any Summary.db Cassandra wrote (including downsampled ones,
+        pending a fixture); it does not reproduce the redistribution scheduler.
+      related_in_scope_scenarios:
+        - cass.summary_db.IndexSummaryTest.serialization_round_trip
+        - cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries
+
   # ----------------------------------------------------------------------------
   # statistics_metadata / schema_evolution
   # ----------------------------------------------------------------------------

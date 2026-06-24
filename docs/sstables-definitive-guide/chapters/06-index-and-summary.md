@@ -193,9 +193,16 @@ Entries have **no length prefix**. Key boundaries are determined by offset diffe
 ```c
 struct summary_entry {
     byte key[];        // Variable length - no prefix!
-    be64 position;     // Position in Index.db file
+    le64 position;     // Position in Index.db file (LITTLE-endian, like the offset table)
 };
 ```
+
+> **Endianness note**: Unlike the header and the length-prefixed first/last keys
+> (which are big-endian), the entry's `position` is stored **little-endian** on
+> disk, matching the little-endian offset table. Reading it big-endian yields an
+> out-of-range Index.db offset. Verified byte-for-byte against Cassandra 5.0
+> Summary.db files (the LE value lands exactly on the matching Index.db partition
+> entry).
 
 Key length calculation:
 ```
@@ -398,7 +405,7 @@ Summary entries have **no length prefix**. Key boundaries are determined by offs
 ```c
 struct summary_entry {
     byte key[];        // Variable length partition key bytes (no prefix!)
-    be64 position;     // Position in Index.db file (big-endian)
+    le64 position;     // Position in Index.db file (little-endian)
 };
 ```
 
@@ -407,8 +414,8 @@ Entry serialization:
 // Write key bytes (no length prefix!)
 buffer.extend_from_slice(&key_bytes);
 
-// Write position (big-endian u64)
-buffer.extend_from_slice(&index_position.to_be_bytes());
+// Write position (little-endian u64, matching Cassandra's on-disk layout)
+buffer.extend_from_slice(&index_position.to_le_bytes());
 ```
 
 ### Summary.db Offset Table
