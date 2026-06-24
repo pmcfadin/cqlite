@@ -317,7 +317,14 @@ impl SSTableReader {
                     &[(catalog::attr::SSTABLE_FORMAT, format.into())],
                 );
             }
-            Err(e) => obs::record_error(e, "reader"),
+            Err(e) => {
+                // Record the error WHILE the open span is current so
+                // `mark_span_error` marks THIS `sstable.reader.open` span. The
+                // instrumented future has already completed here, so the span is
+                // no longer entered; `in_scope` re-enters it for the duration of
+                // the error-recording call.
+                span.in_scope(|| obs::record_error(e, "reader"));
+            }
         }
         result
     }

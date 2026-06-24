@@ -136,6 +136,29 @@ impl SSTableReader {
             }
         };
 
+        // The BTI Partitions.db trie IS the presence oracle for a BTI SSTable
+        // (BTI has no bloom filter). Emit READ_BLOOM_CHECKS exactly ONCE here — the
+        // single common path every BTI presence/point lookup funnels through
+        // (get / get_with_spec_readers / get_with_schema_context / point lookup /
+        // might_contain_partition). `cqlite.result` is hit for a trie HIT
+        // (maybe-present/found: a DataOffset/RowsOffset, possibly a prefix-collision
+        // candidate the caller re-verifies) and miss for a trie MISS (definitive
+        // absence). A trie parse error returns above without an outcome and is
+        // counted as an error, not a bloom check, so this never double counts.
+        // Emitting before the per-arm handling (which can still error on a missing
+        // Rows.db for a wide partition) guarantees a single emission per call.
+        obs::add_counter(
+            catalog::READ_BLOOM_CHECKS,
+            1,
+            &[
+                (
+                    catalog::attr::RESULT,
+                    if lookup.is_some() { "hit" } else { "miss" }.into(),
+                ),
+                (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+            ],
+        );
+
         match lookup {
             Some(BtiPartitionLocation::DataOffset(off)) => {
                 span.record("partition_shape", "narrow");
@@ -386,40 +409,39 @@ impl SSTableReader {
 
         if self.bti_partitions_db.is_some() {
             // BTI: trie miss is authoritative absence; any error is conservative.
-            let present = matches!(
+            // `lookup_partition_via_bti_trie` is the single common path that emits
+            // READ_BLOOM_CHECKS for the BTI presence check — do NOT emit again here
+            // or the metric would be double counted.
+            return matches!(
                 self.lookup_partition_via_bti_trie(partition_key),
                 Ok(Some(_)) | Err(_)
             );
-            obs::add_counter(
-                catalog::READ_BLOOM_CHECKS,
-                1,
-                &[
-                    (
-                        catalog::attr::RESULT,
-                        if present { "hit" } else { "miss" }.into(),
-                    ),
-                    (catalog::attr::SSTABLE_FORMAT, "bti".into()),
-                ],
-            );
-            return present;
         }
-        let format = self.sstable_format_label();
-        let present = match &self.bloom_filter {
-            Some(bloom) => bloom.might_contain(partition_key),
+        // BIG: only record READ_BLOOM_CHECKS when a bloom filter actually exists.
+        // With no filter loaded we cannot prune, so we conservatively return `true`
+        // WITHOUT recording a check (a no-filter "hit" is not a real bloom check and
+        // would inflate the metric).
+        match &self.bloom_filter {
+            Some(bloom) => {
+                let present = bloom.might_contain(partition_key);
+                obs::add_counter(
+                    catalog::READ_BLOOM_CHECKS,
+                    1,
+                    &[
+                        (
+                            catalog::attr::RESULT,
+                            if present { "hit" } else { "miss" }.into(),
+                        ),
+                        (
+                            catalog::attr::SSTABLE_FORMAT,
+                            self.sstable_format_label().into(),
+                        ),
+                    ],
+                );
+                present
+            }
             None => true,
-        };
-        obs::add_counter(
-            catalog::READ_BLOOM_CHECKS,
-            1,
-            &[
-                (
-                    catalog::attr::RESULT,
-                    if present { "hit" } else { "miss" }.into(),
-                ),
-                (catalog::attr::SSTABLE_FORMAT, format.into()),
-            ],
-        );
-        present
+        }
     }
 
     /// Enhanced partition lookup using schema-driven key digest computation
