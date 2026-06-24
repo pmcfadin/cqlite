@@ -358,6 +358,358 @@ scenarios:
     scope: {}
 
   # ----------------------------------------------------------------------------
+  # statistics_db (strict core-metadata parity, issue #985 / epic #968)
+  # ----------------------------------------------------------------------------
+  - id: cass.statistics_db.MetadataSerializerTest.metadata_components
+    title: Statistics.db metadata-component TOC byte parity (count + ordered types)
+    status: mirrored
+    capability: statistics_metadata
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - MetadataSerializerTest.java
+        - SSTableMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_statistics_db_strict_test.rs
+        notes: >-
+          statistics_db_strict_core_metadata_parity validates the Statistics.db
+          Table of Contents byte-for-byte: component count == 4 and the ordered
+          MetadataType entries VALIDATION/COMPACTION/STATS/HEADER with strictly
+          increasing offsets, across nb/oa/da fixtures.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes Statistics.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_statistics_db_strict_test
+        statistics_db_strict_core_metadata_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/statistics-db-toc-mismatch.log
+      known_limitations: >-
+        The fetched *-Statistics.db binary is required; when absent that fixture
+        is skipped (never a silent pass) and the committed *-Statistics.db.txt
+        reference presence is still enforced fail-closed.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.statistics_db.core_metadata_checksums
+    title: Statistics.db embedded CRC32 checksum byte parity
+    status: mirrored
+    capability: statistics_metadata
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: checksum
+      relevance: high
+      files:
+        - MetadataSerializerTest.java
+        - VerifyTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_statistics_db_strict_test.rs
+        notes: >-
+          Validates both embedded CRC32s byte-for-byte: the crc32(num_components)
+          marker (0x26291b05) and the accumulated TOC CRC32 at byte 40. Corrupting
+          any TOC byte breaks the accumulated CRC; the corruption lane
+          (statistics_db_strict_corruption_fails_closed) proves it fails closed.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes Statistics.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_statistics_db_strict_test
+      reference_paths:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/statistics-db-crc-mismatch.log
+      known_limitations: >-
+        Validates the metadata-TOC CRC32s Cassandra embeds in Statistics.db; the
+        per-component STATS-section internal checksum is not separately decoded.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.statistics_db.SSTableMetadataTrackingTest.timestamp_and_ttl_metadata
+    title: Statistics.db min timestamp / local-deletion-time / TTL byte parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SSTableMetadataTrackingTest.java
+        - SSTableMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_statistics_db_strict_test.rs
+        notes: >-
+          The EncodingStats baselines CQLite delta-decodes (minTimestamp,
+          minLocalDeletionTime, minTTL) are asserted equal to the exact integers
+          in the Statistics.db.txt dump, exercising a >0 TTL fixture and a real
+          (non-epoch) local-deletion-time fixture.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstablemetadata emit Statistics.db.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_statistics_db_strict_test
+        statistics_db_strict_core_metadata_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/statistics-db-encodingstats-mismatch.log
+      known_limitations: >-
+        Asserts the authoritative EncodingStats min baselines decoded from real
+        bytes; max timestamp / max local-deletion-time are not yet decoded by the
+        minimal Statistics parser (see cass.statistics_db.SSTableMetadataTest.max_local_deletion_time).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.statistics_db.SerializationHeaderTest.schema_evolution_header
+    title: Statistics.db serialization-header column metadata byte parity
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_statistics_db_strict_test.rs
+        notes: >-
+          The regular-column name set CQLite recovers from the embedded
+          SerializationHeader is compared against the RegularColumns line of the
+          reference dump across primitive, collection, UDT, and static schemas;
+          partition-key and clustering-key arity are asserted for non-composite
+          keys.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/udt_table-4b9f738064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstablemetadata emit Statistics.db.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_statistics_db_strict_test
+        statistics_db_strict_core_metadata_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/static_columns_table-6b0425d0a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/udt_table-4b9f738064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/statistics-db-header-mismatch.log
+      known_limitations: >-
+        Composite partition keys are folded into a single synthetic column by the
+        minimal SerializationHeader decoder, so composite partition-key arity is
+        required only to be >= 1 rather than the exact component count.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.statistics_db.SerializationMirrorTest.column_ordering_metadata
+    title: Statistics.db clustering-key ordering / ReversedType byte parity
+    status: mirrored
+    capability: schema_evolution
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_statistics_db_strict_test.rs
+        notes: >-
+          Clustering-key arity and the count of DESC (ReversedType-wrapped)
+          clustering columns CQLite decodes from the SerializationHeader are
+          asserted equal to the ClusteringTypes line of the reference dump,
+          exercised by a reversed-clustering fixture.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstablemetadata emit Statistics.db.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_statistics_db_strict_test
+        statistics_db_strict_core_metadata_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/statistics-db-ordering-mismatch.log
+      known_limitations: >-
+        Compares clustering arity and DESC count; the per-column comparator class
+        bytes are decoded to CQL types rather than compared as raw marshal-class
+        strings.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.statistics_db.SSTableMetadataTest.max_local_deletion_time
+    title: Statistics.db max local-deletion-time / max timestamp byte parity
+    status: planned
+    capability: statistics_metadata
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SSTableMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+    fixtures: {}
+    evidence:
+      type: partial
+      known_limitations: >-
+        The minimal nb/oa/da Statistics parser decodes the EncodingStats min
+        baselines but not the STATS-section max timestamp / max local-deletion-time;
+        decoding the full STATS component is required before these can be compared.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 985
+      gap: STATS-section max timestamp / max local-deletion-time not yet decoded.
+      next_step: >-
+        Decode the STATS MetadataType component and assert max timestamp / max
+        local-deletion-time against the reference dump.
+
+  - id: cass.statistics_db.clustering_key_bounds
+    title: Statistics.db covered-clustering (min/max clustering) bounds byte parity
+    status: planned
+    capability: statistics_metadata
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SSTableMetadataTest.java
+        - SSTableMetadataTrackingTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+    fixtures: {}
+    evidence:
+      type: partial
+      known_limitations: >-
+        The "Covered clusterings" min/max clustering bounds live in the STATS
+        component, which the minimal Statistics parser does not yet decode.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 985
+      gap: Covered-clustering min/max bounds not yet decoded from the STATS component.
+      next_step: >-
+        Decode the STATS-section clustering bounds and compare against the
+        "Covered clusterings" reference line.
+
+  - id: cass.statistics_db.histograms_and_estimates
+    title: Statistics.db estimated histograms and partition/row estimates byte parity
+    status: planned
+    capability: statistics_metadata
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: serialization
+      relevance: med
+      files:
+        - SSTableMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+    fixtures: {}
+    evidence:
+      type: partial
+      known_limitations: >-
+        EstimatedHistogram partition-size / column-count buckets, estimated
+        cardinality, totalRows and totalColumnsSet live in the STATS component and
+        are populated as placeholders by the minimal Statistics parser.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 985
+      gap: STATS-section histograms and partition/row estimates not yet decoded.
+      next_step: >-
+        Decode the STATS-section EstimatedHistograms and count estimates and
+        compare bucket boundaries against the reference dump.
+
+  # ----------------------------------------------------------------------------
   # compression_checksum
   # ----------------------------------------------------------------------------
   - id: cass.compression_checksum.chunk_offsets_and_crc
