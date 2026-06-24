@@ -103,7 +103,10 @@ jobs:
             --test sstabledump_parity_data \
             --test sstabledump_parity_index \
             --test sstabledump_parity_statistics \
-            --test sstabledump_parity_summary
+            --test sstabledump_parity_summary \
+            --test sstable_parity_toc_component_test \
+            --test sstable_parity_index_db_test \
+            --test sstable_parity_statistics_db_strict_test
 
       - name: Run Data.db parity tests
         id: data_parity
@@ -138,6 +141,30 @@ jobs:
             --test sstabledump_parity_statistics \
             -- --nocapture
 
+      - name: Run TOC.txt + Digest.crc32 strict parity tests
+        id: toc_component_parity
+        continue-on-error: true
+        run: |
+          cargo test --package cqlite-core --features write-support \
+            --test sstable_parity_toc_component_test \
+            -- --nocapture
+
+      - name: Run Index.db strict parity tests
+        id: index_db_strict_parity
+        continue-on-error: true
+        run: |
+          cargo test --package cqlite-core --features write-support \
+            --test sstable_parity_index_db_test \
+            -- --nocapture
+
+      - name: Run Statistics.db strict parity tests
+        id: statistics_db_strict_parity
+        continue-on-error: true
+        run: |
+          cargo test --package cqlite-core --features write-support \
+            --test sstable_parity_statistics_db_strict_test \
+            -- --nocapture
+
       - name: Generate parity summary
         if: always()
         run: |
@@ -148,6 +175,9 @@ jobs:
           - Index.db: ${{ steps.index_parity.outcome }}
           - Summary.db: ${{ steps.summary_parity.outcome }}
           - Statistics.db: ${{ steps.statistics_parity.outcome }}
+          - TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}
+          - Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}
+          - Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}
 
           Dataset:
           - Tag: ${{ env.DATASET_TAG }}
@@ -169,7 +199,7 @@ jobs:
           retention-days: 30
 
       - name: Comment on PR (Success)
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success'
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success' && steps.toc_component_parity.outcome == 'success' && steps.index_db_strict_parity.outcome == 'success' && steps.statistics_db_strict_parity.outcome == 'success'
         uses: actions/github-script@v8
         with:
           script: |
@@ -181,8 +211,11 @@ jobs:
             - Index.db: success
             - Summary.db: success
             - Statistics.db: success
+            - TOC/Digest.crc32 (strict): success
+            - Index.db (strict): success
+            - Statistics.db (strict): success
 
-            Issue #440 remains green only while all four dataset-backed parity checks stay green.`;
+            Issue #440 remains green only while all dataset-backed parity checks stay green.`;
 
             github.rest.issues.createComment({
               issue_number: context.issue.number,
@@ -192,7 +225,7 @@ jobs:
             });
 
       - name: Comment on PR (Failure)
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success')
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success')
         uses: actions/github-script@v8
         with:
           script: |
@@ -204,6 +237,9 @@ jobs:
             - Index.db: ${{ steps.index_parity.outcome }}
             - Summary.db: ${{ steps.summary_parity.outcome }}
             - Statistics.db: ${{ steps.statistics_parity.outcome }}
+            - TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}
+            - Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}
+            - Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}
 
             Download the uploaded parity artifacts and reproduce locally with:
 
@@ -213,6 +249,9 @@ jobs:
             cargo test --package cqlite-core --features write-support --test sstabledump_parity_index -- --nocapture
             cargo test --package cqlite-core --features write-support --test sstabledump_parity_summary -- --nocapture
             cargo test --package cqlite-core --features write-support --test sstabledump_parity_statistics -- --nocapture
+            cargo test --package cqlite-core --features write-support --test sstable_parity_toc_component_test -- --nocapture
+            cargo test --package cqlite-core --features write-support --test sstable_parity_index_db_test -- --nocapture
+            cargo test --package cqlite-core --features write-support --test sstable_parity_statistics_db_strict_test -- --nocapture
             \`\`\``;
 
             github.rest.issues.createComment({
@@ -223,11 +262,14 @@ jobs:
             });
 
       - name: Fail build on parity differences
-        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success')
+        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success')
         run: |
           echo "❌ M5 parity gate failed"
           echo "Data.db: ${{ steps.data_parity.outcome }}"
           echo "Index.db: ${{ steps.index_parity.outcome }}"
           echo "Summary.db: ${{ steps.summary_parity.outcome }}"
           echo "Statistics.db: ${{ steps.statistics_parity.outcome }}"
+          echo "TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}"
+          echo "Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}"
+          echo "Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}"
           exit 1
