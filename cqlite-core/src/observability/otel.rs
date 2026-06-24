@@ -194,37 +194,37 @@ pub fn init(cfg: ObservabilityConfig) -> Result<ObservabilityGuard> {
     })
 }
 
-/// Return the `tracing` layer that bridges spans/events into OpenTelemetry.
+/// Return the `tracing` layer that bridges spans/events into OpenTelemetry, or
+/// `None` if observability has not been initialised.
 ///
-/// Compose it into your own subscriber registry, e.g.:
+/// **Call [`init`] before composing this layer.** The layer is bound at
+/// construction time to the exporting tracer provider that `init` installs, so
+/// it can only be built once that provider exists. When `init` has not run (or
+/// ran with a disabled config), this returns `None` — an honestly inert result —
+/// rather than a layer permanently bound to a non-exporting provider. `Option<L>`
+/// itself implements `Layer`, so the `None` case is a no-op and callers compose
+/// it directly:
 ///
 /// ```ignore
 /// use tracing_subscriber::prelude::*;
-/// let _guard = cqlite_core::observability::init(cfg)?;
+/// let _guard = cqlite_core::observability::init(cfg)?;   // installs the provider
 /// tracing_subscriber::registry()
 ///     .with(tracing_subscriber::fmt::layer())
 ///     .with(tracing_subscriber::EnvFilter::from_default_env())
-///     .with(cqlite_core::observability::tracing_layer())
+///     .with(cqlite_core::observability::tracing_layer())  // Some(..) after init, else None
 ///     .init();
 /// ```
-///
-/// The layer is bound to the global tracer provider installed by [`init`]; if
-/// `init` was not called (or was inert), spans simply are not exported.
-pub fn tracing_layer<S>() -> impl tracing_subscriber::Layer<S>
+pub fn tracing_layer<S>() -> Option<impl tracing_subscriber::Layer<S>>
 where
     S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
-    // Use the provider installed by `init` if present. If `init` has not run
-    // yet, build an EPHEMERAL no-export provider for this layer WITHOUT storing
-    // it — otherwise a later enabled `init` would be unable to install its
-    // exporting provider. The SdkTracer keeps the provider's shared state alive,
-    // so dropping the local handle is fine; this layer simply drops spans until
-    // (and unless) `init` runs. Callers should `init` before composing.
-    let tracer = match TRACER_PROVIDER.get() {
-        Some(provider) => provider.tracer(SCOPE),
-        None => SdkTracerProvider::builder().build().tracer(SCOPE),
-    };
-    tracing_opentelemetry::layer().with_tracer(tracer)
+    // Only build a layer once `init` has installed the exporting provider. No
+    // ephemeral fallback: a layer bound to a throwaway no-export provider can
+    // never start exporting, so returning `None` (inert) is the correct
+    // behaviour when uninitialised.
+    let provider = TRACER_PROVIDER.get()?;
+    let tracer = provider.tracer(SCOPE);
+    Some(tracing_opentelemetry::layer().with_tracer(tracer))
 }
 
 /// The global CQLite [`Meter`], cached after first use.
