@@ -86,6 +86,12 @@ jobs:
       - name: Check Docker available
         run: docker info
 
+      - name: Fetch published datasets (test_basic ttl_test_table, etc.)
+        # issue_1011 asserts test_basic/ttl_test_table Statistics.db, which is NOT
+        # produced by the Docker generators below. Under CQLITE_REQUIRE_FIXTURES=1
+        # the test panics if it is absent, so fetch the published bundle first.
+        run: bash test-data/scripts/fetch-datasets.sh
+
       - name: Generate delta fixtures (test_deltas, issue #701)
         run: bash test-data/scripts/generate-deltas.sh
 

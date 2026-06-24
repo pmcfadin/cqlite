@@ -275,15 +275,18 @@ try:
     #    values are captured by the committed JSONL golden.
     # -------------------------------------------------------------------
     print("[1] gc_before_boundary", flush=True)
-    # ck=1: TTL=86400 -> localDeletionTime = nowInSeconds + 86400
+    # ck=1 (TTL=86400) and ck=2 (TTL=86401) are written in ONE batch so they
+    # share a single coordinator nowInSeconds. localDeletionTime is wall-clock
+    # derived (nowInSeconds + TTL), so issuing them as separate round-trips could
+    # straddle a one-second boundary and yield a 2s delta; the batch guarantees
+    # the deterministic invariant LDT_86401 == LDT_86400 + 1.
     session.execute(
+        "BEGIN BATCH "
         f"INSERT INTO gc_before_boundary (pk, ck, val) VALUES (1, 1, 'at_boundary') "
-        f"USING TIMESTAMP {T_GEN1} AND TTL 86400"
-    )
-    # ck=2: TTL=86401 -> localDeletionTime = nowInSeconds + 86401 (== ck=1 LDT + 1s)
-    session.execute(
+        f"USING TIMESTAMP {T_GEN1} AND TTL 86400; "
         f"INSERT INTO gc_before_boundary (pk, ck, val) VALUES (1, 2, 'past_boundary') "
-        f"USING TIMESTAMP {T_GEN1} AND TTL 86401"
+        f"USING TIMESTAMP {T_GEN1} AND TTL 86401; "
+        "APPLY BATCH"
     )
     # A non-TTL control row (no expiration) for contrast.
     session.execute(

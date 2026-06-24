@@ -854,13 +854,21 @@ fn dropped_regular_col_per_cell_purge_on_compaction() {
         }
     };
     collect_data(g1_only.path());
-    let g2_only = if gen_has_data(&dir, "nb-2") {
-        let g2 = isolate_generation(&dir, "nb-2");
-        collect_data(g2.path());
-        Some(g2)
-    } else {
-        None
-    };
+    // Both generations are mandatory for this mirrored two-generation scenario:
+    // gen-1 carries the pre-drop drop_col cells to be purged; gen-2 carries the
+    // post-drop keep_col survivors (ck=4..6). Skipping gen-2 would silently
+    // degrade this into a single-generation test, so require it (panics under
+    // CQLITE_REQUIRE_FIXTURES=1, skips cleanly otherwise).
+    if !gen_has_data(&dir, "nb-2") {
+        skip_or_panic(
+            "dropped_regular_col nb-2 Data.db",
+            "dropped_regular_col nb-2 (post-drop) Data.db absent — both generations \
+             are required for the two-generation dropped-column purge scenario",
+        );
+        return;
+    }
+    let g2_only = isolate_generation(&dir, "nb-2");
+    collect_data(g2_only.path());
     assert!(
         !inputs.is_empty(),
         "expected at least one input Data.db to compact"
@@ -925,18 +933,18 @@ fn dropped_regular_col_per_cell_purge_on_compaction() {
     );
 
     // keep_col survivors must remain correct. gen-1 contributes ck=1..3
-    // (keep_a_1..keep_a_3); gen-2 (if present) contributes ck=4..6 (keep_b_4..6).
+    // (keep_a_1..keep_a_3); gen-2 (always present, asserted above) contributes
+    // ck=4..6 (keep_b_4..6).
+    let _ = &g2_only; // keep the isolated gen-2 dir alive until the merge completes
     keep_col_survivors.sort();
     let mut expected: Vec<(String, String)> = vec![
         ("1".to_string(), "keep_a_1".to_string()),
         ("2".to_string(), "keep_a_2".to_string()),
         ("3".to_string(), "keep_a_3".to_string()),
+        ("4".to_string(), "keep_b_4".to_string()),
+        ("5".to_string(), "keep_b_5".to_string()),
+        ("6".to_string(), "keep_b_6".to_string()),
     ];
-    if g2_only.is_some() {
-        expected.push(("4".to_string(), "keep_b_4".to_string()));
-        expected.push(("5".to_string(), "keep_b_5".to_string()));
-        expected.push(("6".to_string(), "keep_b_6".to_string()));
-    }
     expected.sort();
     assert_eq!(
         keep_col_survivors, expected,
