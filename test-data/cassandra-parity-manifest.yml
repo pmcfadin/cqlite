@@ -2376,8 +2376,8 @@ scenarios:
         Canonical-semantic equivalence of the partition deletion fact; not a Data.db
         byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.deletion_markers.row_delete
@@ -2421,8 +2421,8 @@ scenarios:
         Canonical-semantic equivalence of the row deletion fact; not a Data.db byte
         comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.deletion_markers.cell_delete
@@ -2466,8 +2466,8 @@ scenarios:
         Canonical-semantic equivalence of the cell deletion fact; not a Data.db byte
         comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.deletion_markers.range_delete_bounds
@@ -2512,8 +2512,8 @@ scenarios:
         Canonical-semantic equivalence of the range-tombstone bound facts; not a
         Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.deletion_markers.range_tombstone_boundary
@@ -2558,8 +2558,8 @@ scenarios:
         Canonical-semantic equivalence of the adjacent-range boundary facts; not a
         Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   # --- #1011 TTL / local deletion time --------------------------------------
@@ -2604,8 +2604,8 @@ scenarios:
         Canonical-semantic equivalence of the expiring-cell liveness fields; not a
         Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live
@@ -2650,8 +2650,8 @@ scenarios:
         Canonical-semantic equivalence of per-cell liveness; not a Data.db byte
         comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.ttl_expiry.gc_before_boundary
@@ -2696,8 +2696,8 @@ scenarios:
         Canonical-semantic equivalence of expiry facts at the gc boundary; not a
         Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.statistics_metadata.max_local_deletion_time.tombstones_ttl
@@ -2739,8 +2739,8 @@ scenarios:
         SSTable max local deletion time, returning a placeholder equal to the min
         baseline; only the min local-deletion-time baseline is asserted equal.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         CQLite's minimal Statistics parser does not decode the STATS-component
@@ -2748,7 +2748,7 @@ scenarios:
         baseline.
       next_step: >-
         Decode the STATS max local-deletion-time field and assert it byte-equal to
-        the sstablemetadata reference; file a follow-up issue.
+        the sstablemetadata reference; tracked by follow-up issue #1073.
 
   - id: cass.statistics_metadata.tombstone_histogram.deletion_times
     title: Statistics.db estimated tombstone-drop-times histogram parity
@@ -2788,15 +2788,15 @@ scenarios:
         The estimated-tombstone-drop-times histogram is not decoded or exposed by
         the minimal Statistics parser, so histogram-bucket parity is not asserted.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         The estimated-tombstone-drop-times histogram in Statistics.db is not decoded
         or exposed by CQLite.
       next_step: >-
         Decode the estimated-tombstone-drop-times histogram and assert bucket parity
-        against the sstablemetadata reference; file a follow-up issue.
+        against the sstablemetadata reference; tracked by follow-up issue #1073.
 
   # --- #1012 skipped-sstable / partition delete across generations ----------
   - id: cass.sstable_io.reader.tombstone_only_partition
@@ -2842,8 +2842,8 @@ scenarios:
         Canonical-semantic equivalence of the tombstone-only partition; not a
         Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.sstable_io.scanner.tombstone_only_partition_ranges
@@ -2888,8 +2888,8 @@ scenarios:
         Canonical-semantic equivalence of the range-scan output; not a Data.db byte
         comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded
@@ -2932,16 +2932,16 @@ scenarios:
         discards partition-level deletions, so a merged read does not yet honor the
         skipped-SSTable partition delete.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         The cross-generation MERGE read path (KWayMerger /
         parse_one_partition_for_compaction) discards partition-level deletions, so a
         partition delete from a skipped SSTable is not honored on a merged read.
       next_step: >-
-        Thread partition deletions through the compaction-merge read path; file a
-        follow-up issue.
+        Thread partition deletions through the compaction-merge read path; tracked
+        by follow-up issue #1072.
 
   - id: cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows
     title: Skipped-SSTable partition delete shadows older live rows
@@ -2983,15 +2983,16 @@ scenarios:
         leaves the 10 pk=1 rows live instead of 0, because the compaction-merge read
         path drops partition-level deletions.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         Merging a higher-timestamp gen-2 partition delete over gen-1 leaves the 10
         pk=1 rows live instead of 0 (P0 resurrection).
       next_step: >-
         Thread partition deletions through the compaction-merge read path so the
-        skipped-SSTable partition delete shadows older rows; file a follow-up issue.
+        skipped-SSTable partition delete shadows older rows; tracked by follow-up
+        issue #1072.
 
   - id: cass.compaction_merge.partition_delete_shadowing_across_skipped_sources
     title: Compaction partition-delete shadowing across skipped sources
@@ -3033,15 +3034,15 @@ scenarios:
         by the merge read path) and also drops the tombstone-only pk=2, so partition
         shadowing across skipped sources is not yet correct.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         Compaction resurrects pk=1 and drops the tombstone-only pk=2 because the
         compaction-merge read path discards partition-level deletions.
       next_step: >-
         Apply partition deletions in the compaction-merge read path so shadowing and
-        tombstone retention match Cassandra; file a follow-up issue.
+        tombstone retention match Cassandra; tracked by follow-up issue #1072.
 
   # --- #1013 range-tombstone index-block markers ----------------------------
   - id: cass.tombstone_ttl.range_tombstone.index_block_first_marker
@@ -3086,8 +3087,8 @@ scenarios:
         Canonical-semantic equivalence of the index-block boundary markers; not a
         Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.range_tombstone.index_block_last_marker
@@ -3131,8 +3132,8 @@ scenarios:
         Canonical-semantic equivalence of the index-block boundary markers; not a
         Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.range_tombstone.open_ended_middle_block
@@ -3179,8 +3180,8 @@ scenarios:
         Canonical-semantic equivalence of the interior-block-spanning range; the
         fixture range is closed rather than truly open-ended.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.range_tombstone.closed_last_block
@@ -3225,8 +3226,8 @@ scenarios:
         Canonical-semantic equivalence of the last-block close marker; not a Data.db
         byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.index_summary.column_index.range_tombstone_boundary_big_bti
@@ -3267,8 +3268,8 @@ scenarios:
         Only the BIG (nb) format is covered. There is no da/BTI tombstone fixture
         generator yet, so the BTI range-tombstone-at-block-edge path is not asserted.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         BTI (da) range-tombstone-at-block-edge fixtures are not yet generated (no da
@@ -3318,8 +3319,8 @@ scenarios:
         partition-tombstone sub-case is broken and pinned with an ignored test
         because the compaction-merge read path drops partition deletions.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         The partition-tombstone never-purge sub-case is broken (pinned ignored)
@@ -3327,7 +3328,7 @@ scenarios:
         path.
       next_step: >-
         Apply partition tombstones in the compaction-merge read path so never_purge
-        retains partition deletions; file a follow-up issue.
+        retains partition deletions; tracked by follow-up issue #1072.
 
   - id: cass.tombstone_ttl.gc_grace.partition_row_cell
     title: gc_grace read-merge parity for partition/row/cell tombstones
@@ -3372,15 +3373,15 @@ scenarios:
         the partition sub-case is broken and gc_grace is not yet surfaced from disk
         (Statistics.db) by CQLite.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         The partition-tombstone read-merge sub-case is broken and gc_grace is not
         surfaced from the Statistics.db on read.
       next_step: >-
         Apply partition tombstones in the read-merge path and surface gc_grace from
-        disk; file a follow-up issue.
+        disk; tracked by follow-up issue #1072.
 
   - id: cass.tombstone_ttl.repaired_unrepaired_purge_gate
     title: Repaired vs unrepaired purge gate parity
@@ -3423,8 +3424,8 @@ scenarios:
         the test only asserts the fixtures are unrepaired and does not claim
         repaired-data purge behavior.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         repairedAt / pendingRepair parsing is not implemented (gated on #968/#988),
@@ -3473,15 +3474,16 @@ scenarios:
         sub-case is broken and pinned with an ignored test because partition
         deletions are dropped by the compaction-merge read path.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         The partition-tombstone resurrection-safety sub-case is broken (pinned
         ignored) because partition deletions are dropped during compaction merge.
       next_step: >-
         Apply partition tombstones in the compaction-merge read path so overlapping
-        sources do not resurrect partition-deleted data; file a follow-up issue.
+        sources do not resurrect partition-deleted data; tracked by follow-up issue
+        #1072.
 
   - id: cass.compaction_merge.partial_source_retains_tombstones
     title: Partial-source compaction retains row/cell tombstones
@@ -3527,8 +3529,8 @@ scenarios:
         passes); partition-tombstone retention is untested due to the
         compaction-merge read-path partition-deletion gap.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   # --- #1015 dropped-column / static-row ------------------------------------
@@ -3577,8 +3579,8 @@ scenarios:
         Canonical-semantic equivalence of the surviving cells and dropped-column
         header; not a full Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.schema_evolution.dropped_column.empty_index_block_reverse_scan
@@ -3620,8 +3622,8 @@ scenarios:
         reverse scan is not yet generated, so the empty-index-block reverse-scan path
         is not exhaustively asserted.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope:
       gap: >-
         A wide dropped-column empty-index-block reverse-scan fixture is not yet
@@ -3671,8 +3673,8 @@ scenarios:
         Canonical-semantic equivalence of the static row plus tombstones; not a
         Data.db byte comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.tombstone_ttl.static_row.dropped_static_header_preserved
@@ -3719,8 +3721,8 @@ scenarios:
         The dropped static column metadata is asserted byte-for-byte from the
         SerializationHeader; the dropped-cell data purge is covered separately.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/sstabledump-parity-gate.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
 
   - id: cass.compaction_merge.static_row.survives_tombstone_gc
@@ -3765,6 +3767,6 @@ scenarios:
         Canonical-semantic equivalence of static-row survival through compaction; not
         a byte-for-byte compaction output comparison.
     ci:
-      tier: required_parity
-      workflow: .github/workflows/compaction-parity.yml
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}

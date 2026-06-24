@@ -216,8 +216,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 ## Gaps and next steps
 
 - `cass.compaction_merge.byte_for_byte_output` (planned): No gated byte-for-byte comparison of compaction output. → _Promote the debug byte tier in compaction-parity to a gated comparison once writer output is byte-stable._
-- `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` (partial): Compaction resurrects pk=1 and drops the tombstone-only pk=2 because the compaction-merge read path discards partition-level deletions. → _Apply partition deletions in the compaction-merge read path so shadowing and tombstone retention match Cassandra; file a follow-up issue._
-- `cass.compaction_merge.resurrection_safety.overlapping_sources` (partial): The partition-tombstone resurrection-safety sub-case is broken (pinned ignored) because partition deletions are dropped during compaction merge. → _Apply partition tombstones in the compaction-merge read path so overlapping sources do not resurrect partition-deleted data; file a follow-up issue._
+- `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` (partial): Compaction resurrects pk=1 and drops the tombstone-only pk=2 because the compaction-merge read path discards partition-level deletions. → _Apply partition deletions in the compaction-merge read path so shadowing and tombstone retention match Cassandra; tracked by follow-up issue #1072._
+- `cass.compaction_merge.resurrection_safety.overlapping_sources` (partial): The partition-tombstone resurrection-safety sub-case is broken (pinned ignored) because partition deletions are dropped during compaction merge. → _Apply partition tombstones in the compaction-merge read path so overlapping sources do not resurrect partition-deleted data; tracked by follow-up issue #1072._
 - `cass.compression_checksum.checksum_trailer_detection` (partial): No gated byte comparison of Digest.crc32 against the Cassandra reference. → _Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify suite._
 - `cass.corruption_verify.component_corruption_detection` (planned): No scrub/verify parity pass implemented. → _Implement a verify pass and compare detected-corruption outcomes against Cassandra VerifyTest/ScrubTest scenarios._
 - `cass.delta_scan.tombstone_liveness_facts` (partial): test_deltas dataset asset not published/enforced (#701). → _Publish and enforce the test_deltas dataset in delta-roundtrip CI._
@@ -230,15 +230,15 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.statistics_db.SSTableMetadataTest.max_local_deletion_time` (planned): STATS-section max timestamp / max local-deletion-time not yet decoded. → _Decode the STATS MetadataType component and assert max timestamp / max local-deletion-time against the reference dump._
 - `cass.statistics_db.clustering_key_bounds` (planned): Covered-clustering min/max bounds not yet decoded from the STATS component. → _Decode the STATS-section clustering bounds and compare against the "Covered clusterings" reference line._
 - `cass.statistics_db.histograms_and_estimates` (planned): STATS-section histograms and partition/row estimates not yet decoded. → _Decode the STATS-section EstimatedHistograms and count estimates and compare bucket boundaries against the reference dump._
-- `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` (partial): CQLite's minimal Statistics parser does not decode the STATS-component SSTable max local deletion time and returns a placeholder equal to the min baseline. → _Decode the STATS max local-deletion-time field and assert it byte-equal to the sstablemetadata reference; file a follow-up issue._
-- `cass.statistics_metadata.tombstone_histogram.deletion_times` (partial): The estimated-tombstone-drop-times histogram in Statistics.db is not decoded or exposed by CQLite. → _Decode the estimated-tombstone-drop-times histogram and assert bucket parity against the sstablemetadata reference; file a follow-up issue._
+- `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` (partial): CQLite's minimal Statistics parser does not decode the STATS-component SSTable max local deletion time and returns a placeholder equal to the min baseline. → _Decode the STATS max local-deletion-time field and assert it byte-equal to the sstablemetadata reference; tracked by follow-up issue #1073._
+- `cass.statistics_metadata.tombstone_histogram.deletion_times` (partial): The estimated-tombstone-drop-times histogram in Statistics.db is not decoded or exposed by CQLite. → _Decode the estimated-tombstone-drop-times histogram and assert bucket parity against the sstablemetadata reference; tracked by follow-up issue #1073._
 - `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` (planned): No downsampled (sampling_level < 128) Summary.db fixture exists. → _Publish a redistributed Summary.db fixture and extend the strict suite to assert downsampled offset tables and size_at_full_sampling > entry count._
-- `cass.tombstone_ttl.gc_grace.partition_row_cell` (partial): The partition-tombstone read-merge sub-case is broken and gc_grace is not surfaced from the Statistics.db on read. → _Apply partition tombstones in the read-merge path and surface gc_grace from disk; file a follow-up issue._
-- `cass.tombstone_ttl.never_purge.cell_row_partition` (partial): The partition-tombstone never-purge sub-case is broken (pinned ignored) because partition deletions are not applied in the compaction-merge read path. → _Apply partition tombstones in the compaction-merge read path so never_purge retains partition deletions; file a follow-up issue._
+- `cass.tombstone_ttl.gc_grace.partition_row_cell` (partial): The partition-tombstone read-merge sub-case is broken and gc_grace is not surfaced from the Statistics.db on read. → _Apply partition tombstones in the read-merge path and surface gc_grace from disk; tracked by follow-up issue #1072._
+- `cass.tombstone_ttl.never_purge.cell_row_partition` (partial): The partition-tombstone never-purge sub-case is broken (pinned ignored) because partition deletions are not applied in the compaction-merge read path. → _Apply partition tombstones in the compaction-merge read path so never_purge retains partition deletions; tracked by follow-up issue #1072._
 - `cass.tombstone_ttl.range_tombstone_boundaries` (partial): test_deltas dataset asset not published/enforced in CI (#701). → _Publish the test_deltas dataset and enforce scan_delta parity in CI._
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` (partial): repairedAt / pendingRepair parsing is not implemented (gated on #968/#988), so the repaired-vs-unrepaired purge gate is only partially exercised. → _Parse repairedAt / pendingRepair from Statistics.db and gate purge on repair status (#968/#988)._
-- `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` (partial): The cross-generation MERGE read path (KWayMerger / parse_one_partition_for_compaction) discards partition-level deletions, so a partition delete from a skipped SSTable is not honored on a merged read. → _Thread partition deletions through the compaction-merge read path; file a follow-up issue._
-- `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` (partial): Merging a higher-timestamp gen-2 partition delete over gen-1 leaves the 10 pk=1 rows live instead of 0 (P0 resurrection). → _Thread partition deletions through the compaction-merge read path so the skipped-SSTable partition delete shadows older rows; file a follow-up issue._
+- `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` (partial): The cross-generation MERGE read path (KWayMerger / parse_one_partition_for_compaction) discards partition-level deletions, so a partition delete from a skipped SSTable is not honored on a merged read. → _Thread partition deletions through the compaction-merge read path; tracked by follow-up issue #1072._
+- `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` (partial): Merging a higher-timestamp gen-2 partition delete over gen-1 leaves the 10 pk=1 rows live instead of 0 (P0 resurrection). → _Thread partition deletions through the compaction-merge read path so the skipped-SSTable partition delete shadows older rows; tracked by follow-up issue #1072._
 
 ## Out-of-scope taxonomy
 
@@ -294,10 +294,10 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.commitlog_replay.recovery_out_of_scope` | fast_pr | — |
 | `cass.compaction_merge.byte_for_byte_output` | manual_debug | — |
 | `cass.compaction_merge.load_path_validity` | required_parity | .github/workflows/compaction-parity.yml |
-| `cass.compaction_merge.partial_source_retains_tombstones` | required_parity | .github/workflows/compaction-parity.yml |
-| `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` | required_parity | .github/workflows/compaction-parity.yml |
-| `cass.compaction_merge.resurrection_safety.overlapping_sources` | required_parity | .github/workflows/compaction-parity.yml |
-| `cass.compaction_merge.static_row.survives_tombstone_gc` | required_parity | .github/workflows/compaction-parity.yml |
+| `cass.compaction_merge.partial_source_retains_tombstones` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.compaction_merge.resurrection_safety.overlapping_sources` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.compaction_merge.static_row.survives_tombstone_gc` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.compaction_merge.tombstone_ttl_shadowing` | required_parity | .github/workflows/compaction-parity.yml |
 | `cass.compression_checksum.checksum_trailer_detection` | fast_pr | — |
 | `cass.compression_checksum.chunk_offsets_and_crc` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -315,19 +315,19 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.index_db.big.wide_partition_promoted_entries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_db.bti.index_component_discovery` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.index_summary.big_index_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.index_summary.column_index.range_tombstone_boundary_big_bti` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.index_summary.column_index.range_tombstone_boundary_big_bti` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.index_summary.summary_boundaries` | fast_pr | — |
 | `cass.nodetool_jmx_metrics.operational_out_of_scope` | fast_pr | — |
 | `cass.read_repair_coordinator.out_of_scope` | fast_pr | — |
 | `cass.repair_coordinator.anti_entropy_out_of_scope` | fast_pr | — |
 | `cass.sai_sasi_query.secondary_index_out_of_scope` | fast_pr | — |
-| `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.schema_evolution.dropped_column.per_cell_purge` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.schema_evolution.dropped_column.per_cell_purge` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.schema_evolution.serialization_header_column_order` | fast_pr | — |
 | `cass.sstable_format.descriptor_component_resolution` | fast_pr | — |
 | `cass.sstable_format.toc_component_manifest` | fast_pr | — |
-| `cass.sstable_io.reader.tombstone_only_partition` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.sstable_io.scanner.tombstone_only_partition_ranges` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.sstable_io.reader.tombstone_only_partition` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.sstable_io.scanner.tombstone_only_partition_ranges` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.statistics_db.MetadataSerializerTest.metadata_components` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.statistics_db.SSTableMetadataTest.max_local_deletion_time` | manual_debug | — |
 | `cass.statistics_db.SSTableMetadataTrackingTest.timestamp_and_ttl_metadata` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
@@ -336,9 +336,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.statistics_db.clustering_key_bounds` | manual_debug | — |
 | `cass.statistics_db.core_metadata_checksums` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.statistics_db.histograms_and_estimates` | manual_debug | — |
-| `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.statistics_metadata.serialization_header` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.statistics_metadata.tombstone_histogram.deletion_times` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.statistics_metadata.tombstone_histogram.deletion_times` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.streaming_protocol.node_lifecycle_out_of_scope` | fast_pr | — |
 | `cass.summary_db.IndexSummaryManagerTest.memory_constrained_summary_reload` | manual_debug | — |
 | `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` | manual_debug | — |
@@ -347,27 +347,27 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.summary_db.IndexSummaryTest.serialization_round_trip` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.summary_db.big.index_offset_references` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.summary_db.bti.summary_discovery_classification` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.deletion_markers.cell_delete` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.deletion_markers.partition_delete` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.deletion_markers.range_delete_bounds` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.deletion_markers.range_tombstone_boundary` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.deletion_markers.row_delete` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.gc_grace.partition_row_cell` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.never_purge.cell_row_partition` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.range_tombstone.closed_last_block` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.range_tombstone.index_block_first_marker` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.range_tombstone.index_block_last_marker` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.range_tombstone.open_ended_middle_block` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.deletion_markers.cell_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.deletion_markers.partition_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.deletion_markers.range_delete_bounds` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.deletion_markers.range_tombstone_boundary` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.deletion_markers.row_delete` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.gc_grace.partition_row_cell` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.never_purge.cell_row_partition` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.range_tombstone.closed_last_block` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.range_tombstone.index_block_first_marker` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.range_tombstone.index_block_last_marker` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.range_tombstone.open_ended_middle_block` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.range_tombstone_boundaries` | required_parity | .github/workflows/delta-roundtrip.yml |
-| `cass.tombstone_ttl.repaired_unrepaired_purge_gate` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.static_row.dropped_static_header_preserved` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.static_row.with_row_cell_range_tombstones` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.repaired_unrepaired_purge_gate` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.static_row.dropped_static_header_preserved` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.static_row.with_row_cell_range_tombstones` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.tombstone_ttl.ttl_and_local_deletion_time` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.ttl_cells.local_deletion_time` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
-| `cass.tombstone_ttl.ttl_expiry.gc_before_boundary` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.tombstone_ttl.ttl_cells.local_deletion_time` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.tombstone_ttl.ttl_expiry.gc_before_boundary` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | required_parity | .github/workflows/cassandra-validation.yml |
 
 ## Fixture and reference mapping

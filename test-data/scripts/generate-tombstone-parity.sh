@@ -28,14 +28,23 @@
 #
 #   gc_before TTL boundary (table gc_before_boundary, issue #1011)
 #   --------------------------------------------------------------
-#   Cells written with writetime-seconds = BASE_EPOCH_SECONDS (1609459200).
-#   localDeletionTime = writetime_seconds + TTL.  Documented boundary:
-#       GC_BOUNDARY_LDT = 1609545600   (2021-01-02T00:00:00Z = base + 86400s)
-#   so:
-#       TTL = 86400  -> localDeletionTime == 1609545600  (EXACTLY at boundary)
-#       TTL = 86401  -> localDeletionTime == 1609545601  (one second PAST boundary)
-#   Both cells share writetime T_GEN1, so the only varying field is the TTL,
-#   which lands localDeletionTime on / just past the chosen boundary.
+#   IMPORTANT — localDeletionTime is NOT derived from USING TIMESTAMP.
+#   Cassandra computes a TTL'd cell's localDeletionTime (expiration) from the
+#   COORDINATOR WALL CLOCK at write time: localDeletionTime = nowInSeconds + TTL,
+#   where nowInSeconds is the server's real clock when the mutation is applied.
+#   USING TIMESTAMP only sets the cell's writetime; it does NOT control the
+#   expiration / localDeletionTime.  Consequently the committed golden shows
+#   ~2026 localDeletionTime values, and those absolute values CHANGE every time
+#   the fixtures are regenerated.  There is no fixed 2021 boundary.
+#
+#   The ONLY deterministic facts for this table are:
+#       * the two TTL values themselves: 86400 and 86401, and
+#       * the resulting 1-second relative delta between the two cells'
+#         localDeletionTime (LDT_86401 == LDT_86400 + 1), since both cells are
+#         written within the same coordinator second.
+#   The committed JSONL golden captures whatever wall-clock localDeletionTime
+#   Cassandra emitted at generation time; parity tests compare against that
+#   committed golden and NEVER against a hardcoded epoch.
 #
 # =====================================================================
 # TABLE -> ISSUE / MANIFEST-ID -> GENERATIONS
@@ -82,7 +91,11 @@ KEYSPACE="test_tomb"
 T_GEN1=1609459200000000   # 2021-01-01T00:00:00Z
 T_GEN2=1609545600000000   # 2021-01-02T00:00:00Z (base + 1 day)
 T_GEN3=1609632000000000   # 2021-01-03T00:00:00Z (base + 2 days)
-GC_BOUNDARY_LDT=1609545600 # localDeletionTime boundary for gc_before_boundary
+# NOTE: there is intentionally NO GC_BOUNDARY_LDT constant. A TTL cell's
+# localDeletionTime is wall-clock-derived (nowInSeconds + TTL) at write time, so
+# it cannot be pinned by USING TIMESTAMP. The only deterministic facts are the
+# TTL values (86400 vs 86401) and their 1-second relative delta; the committed
+# JSONL golden captures the actual wall-clock localDeletionTime values.
 
 # ---------------------------------------------------------------------------
 # Parse CLI flags
@@ -214,8 +227,8 @@ run_gen1() {
   log "=== Generation 1: live data + single-flush tombstone shapes ==="
   if [[ "$DRY_RUN" -eq 1 ]]; then
     echo "[dry-run] would insert gen-1 rows via python3 cassandra-driver heredoc (USING TIMESTAMP $T_GEN1 / $T_GEN2)"
-    echo "[dry-run]   gc_before_boundary: INSERT ... USING TIMESTAMP $T_GEN1 AND TTL 86400 (LDT == $GC_BOUNDARY_LDT)"
-    echo "[dry-run]   gc_before_boundary: INSERT ... USING TIMESTAMP $T_GEN1 AND TTL 86401 (LDT == $((GC_BOUNDARY_LDT + 1)))"
+    echo "[dry-run]   gc_before_boundary: INSERT ... USING TIMESTAMP $T_GEN1 AND TTL 86400 (LDT = wall-clock nowInSeconds + 86400)"
+    echo "[dry-run]   gc_before_boundary: INSERT ... USING TIMESTAMP $T_GEN1 AND TTL 86401 (LDT = wall-clock nowInSeconds + 86401, == prev LDT + 1s)"
     echo "[dry-run]   tombstone_histogram: INSERT live rows USING TIMESTAMP $T_GEN1; DELETE row+cell USING TIMESTAMP $T_GEN2 (gc_grace_seconds=0)"
     echo "[dry-run]   skipped_partition_delete: INSERT pk=1 ck 1..10 USING TIMESTAMP $T_GEN1"
     echo "[dry-run]   resurrection_gc0 / resurrection_gc_positive: INSERT pk=1 ck 1..5 and pk=2 ck 1..3 USING TIMESTAMP $T_GEN1"
@@ -255,16 +268,19 @@ try:
 
     # -------------------------------------------------------------------
     # 1. gc_before_boundary  (#1011)
-    #    Two TTL'd cells sharing writetime T_GEN1; TTLs 86400/86401 land
-    #    localDeletionTime exactly AT and one second PAST the boundary.
+    #    Two TTL'd cells sharing writetime T_GEN1; TTLs 86400/86401.
+    #    localDeletionTime is wall-clock-derived (nowInSeconds + TTL), NOT
+    #    controlled by USING TIMESTAMP. The deterministic fact is the 1-second
+    #    relative delta between the two cells' localDeletionTime; absolute
+    #    values are captured by the committed JSONL golden.
     # -------------------------------------------------------------------
     print("[1] gc_before_boundary", flush=True)
-    # ck=1: TTL=86400 -> localDeletionTime == GC_BOUNDARY_LDT (1609545600)
+    # ck=1: TTL=86400 -> localDeletionTime = nowInSeconds + 86400
     session.execute(
         f"INSERT INTO gc_before_boundary (pk, ck, val) VALUES (1, 1, 'at_boundary') "
         f"USING TIMESTAMP {T_GEN1} AND TTL 86400"
     )
-    # ck=2: TTL=86401 -> localDeletionTime == GC_BOUNDARY_LDT + 1 (just past)
+    # ck=2: TTL=86401 -> localDeletionTime = nowInSeconds + 86401 (== ck=1 LDT + 1s)
     session.execute(
         f"INSERT INTO gc_before_boundary (pk, ck, val) VALUES (1, 2, 'past_boundary') "
         f"USING TIMESTAMP {T_GEN1} AND TTL 86401"
@@ -588,7 +604,7 @@ fi
 log "Starting $KEYSPACE generation (epic #972)"
 log "Output directory: $OUT_DIR"
 log "Fixed timestamps: T_GEN1=$T_GEN1 T_GEN2=$T_GEN2 T_GEN3=$T_GEN3"
-log "gc_before boundary localDeletionTime: $GC_BOUNDARY_LDT (TTL 86400 == boundary, 86401 == one past)"
+log "gc_before_boundary TTLs: 86400 vs 86401 (localDeletionTime is wall-clock-derived; only the 1s relative delta is deterministic, golden captures absolute values)"
 
 SSTABLES_DIR="$OUT_DIR/sstables"
 
@@ -642,6 +658,11 @@ flush_generation "gen-2"
 # ---------------------------------------------------------------------------
 log "=== Exporting $KEYSPACE SSTables from container ==="
 
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "[dry-run] would rm -rf $SSTABLES_DIR/$KEYSPACE (clear stale tables) before re-export"
+  echo "[dry-run] would tar-stream /var/lib/cassandra/data/$KEYSPACE from container into $SSTABLES_DIR/$KEYSPACE"
+fi
+
 if [[ "$DRY_RUN" -eq 0 ]]; then
   mkdir -p "$SSTABLES_DIR"
 
@@ -652,6 +673,13 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   if $ENGINE exec "$CONTAINER_NAME" bash -lc 'tar -C /var/lib/cassandra -cf - data' \
       | tar -C "$TMPDIR_EXPORT" -xf -; then
     if [[ -d "$TMPDIR_EXPORT/data/$KEYSPACE" ]]; then
+      # Clear any prior export of this keyspace so reruns do not accumulate
+      # stale table-UUID directories (which downstream JSONL / Statistics
+      # generation would otherwise scan). Recreate fresh before copying.
+      if [[ -d "$SSTABLES_DIR/$KEYSPACE" ]]; then
+        log "Removing stale $SSTABLES_DIR/$KEYSPACE before re-export..."
+      fi
+      rm -rf "$SSTABLES_DIR/$KEYSPACE"
       mkdir -p "$SSTABLES_DIR/$KEYSPACE"
       cp -r "$TMPDIR_EXPORT/data/$KEYSPACE/." "$SSTABLES_DIR/$KEYSPACE/"
       log "$KEYSPACE SSTables placed in $SSTABLES_DIR/$KEYSPACE"

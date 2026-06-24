@@ -99,20 +99,14 @@ jobs:
 
       - name: Build parity test targets
         run: |
-          cargo test --no-run --package cqlite-core --features "delta-scan write-support" \
+          cargo test --no-run --package cqlite-core --features write-support \
             --test sstabledump_parity_data \
             --test sstabledump_parity_index \
             --test sstabledump_parity_statistics \
             --test sstabledump_parity_summary \
             --test sstable_parity_toc_component_test \
             --test sstable_parity_index_db_test \
-            --test sstable_parity_statistics_db_strict_test \
-            --test issue_1010_deletion_markers_parity \
-            --test issue_1011_ttl_local_deletion_parity \
-            --test issue_1012_skipped_sstable_parity \
-            --test issue_1013_rt_index_block_parity \
-            --test issue_1014_resurrection_safety_parity \
-            --test issue_1015_dropped_static_parity
+            --test sstable_parity_statistics_db_strict_test
 
       - name: Run Data.db parity tests
         id: data_parity
@@ -171,19 +165,6 @@ jobs:
             --test sstable_parity_statistics_db_strict_test \
             -- --nocapture
 
-      - name: Run tombstone/TTL parity tests (epic #972)
-        id: tombstone_ttl_parity
-        continue-on-error: true
-        run: |
-          cargo test --package cqlite-core --features "delta-scan write-support" \
-            --test issue_1010_deletion_markers_parity \
-            --test issue_1011_ttl_local_deletion_parity \
-            --test issue_1012_skipped_sstable_parity \
-            --test issue_1013_rt_index_block_parity \
-            --test issue_1014_resurrection_safety_parity \
-            --test issue_1015_dropped_static_parity \
-            -- --nocapture
-
       - name: Generate parity summary
         if: always()
         run: |
@@ -197,7 +178,6 @@ jobs:
           - TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}
           - Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}
           - Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}
-          - Tombstone/TTL (epic #972): ${{ steps.tombstone_ttl_parity.outcome }}
 
           Dataset:
           - Tag: ${{ env.DATASET_TAG }}
@@ -219,7 +199,7 @@ jobs:
           retention-days: 30
 
       - name: Comment on PR (Success)
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success' && steps.toc_component_parity.outcome == 'success' && steps.index_db_strict_parity.outcome == 'success' && steps.statistics_db_strict_parity.outcome == 'success' && steps.tombstone_ttl_parity.outcome == 'success'
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success' && steps.toc_component_parity.outcome == 'success' && steps.index_db_strict_parity.outcome == 'success' && steps.statistics_db_strict_parity.outcome == 'success'
         uses: actions/github-script@v8
         with:
           script: |
@@ -234,7 +214,6 @@ jobs:
             - TOC/Digest.crc32 (strict): success
             - Index.db (strict): success
             - Statistics.db (strict): success
-            - Tombstone/TTL (epic #972): success
 
             Issue #440 remains green only while all dataset-backed parity checks stay green.`;
 
@@ -246,7 +225,7 @@ jobs:
             });
 
       - name: Comment on PR (Failure)
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.tombstone_ttl_parity.outcome != 'success')
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success')
         uses: actions/github-script@v8
         with:
           script: |
@@ -261,7 +240,6 @@ jobs:
             - TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}
             - Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}
             - Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}
-            - Tombstone/TTL (epic #972): ${{ steps.tombstone_ttl_parity.outcome }}
 
             Download the uploaded parity artifacts and reproduce locally with:
 
@@ -274,7 +252,6 @@ jobs:
             cargo test --package cqlite-core --features write-support --test sstable_parity_toc_component_test -- --nocapture
             cargo test --package cqlite-core --features write-support --test sstable_parity_index_db_test -- --nocapture
             cargo test --package cqlite-core --features write-support --test sstable_parity_statistics_db_strict_test -- --nocapture
-            cargo test --package cqlite-core --features "delta-scan write-support" --test issue_1010_deletion_markers_parity --test issue_1011_ttl_local_deletion_parity --test issue_1012_skipped_sstable_parity --test issue_1013_rt_index_block_parity --test issue_1014_resurrection_safety_parity --test issue_1015_dropped_static_parity -- --nocapture
             \`\`\``;
 
             github.rest.issues.createComment({
@@ -285,7 +262,7 @@ jobs:
             });
 
       - name: Fail build on parity differences
-        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.tombstone_ttl_parity.outcome != 'success')
+        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success')
         run: |
           echo "❌ M5 parity gate failed"
           echo "Data.db: ${{ steps.data_parity.outcome }}"
@@ -295,5 +272,4 @@ jobs:
           echo "TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}"
           echo "Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}"
           echo "Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}"
-          echo "Tombstone/TTL (epic #972): ${{ steps.tombstone_ttl_parity.outcome }}"
           exit 1
