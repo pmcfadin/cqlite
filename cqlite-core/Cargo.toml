@@ -164,6 +164,10 @@ harness = false
 name = "concurrent_scan"
 harness = false
 
+[[bench]]
+name = "observability_overhead"
+harness = false
+
 [features]
 # M2+ production defaults: Full query engine + write path enabled.
 # write-support is a pure first-party code-gating flag (no extra dependencies),
@@ -210,6 +214,15 @@ observability = [
 # gated any code; it is retained as an alias so any out-of-tree consumer that
 # enabled it keeps building, and now resolves to the real observability stack.
 metrics = ["observability"]
+
+# Observability test harness (issue #1043) — enables the in-memory OTLP
+# exporters (`InMemorySpanExporter` / `InMemoryMetricExporter`) the SDK only
+# exposes under its own `testing` feature, and compiles the shared
+# `observability::testing` capture fixture + the correctness/sampling tests.
+# NOT in defaults and NOT implied by `observability`: production builds never
+# link the SDK's testing surface. Enable explicitly to run the #1043 tests:
+#   cargo test -p cqlite-core --features observability-testing
+observability-testing = ["observability", "opentelemetry_sdk?/testing"]
 
 pest = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]

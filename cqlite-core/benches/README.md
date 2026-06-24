@@ -91,6 +91,37 @@ env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
 | `fixtures_smoke` | added (#537) | Smoke/acceptance bench proving the fixture loaders are deterministic (seeded RNG + stable scan row count). Read/write portions activate under `cli-helpers` / `write-support`. |
 | `read` | added (#538) | Read suite (needs `--features cli-helpers`): `point_lookup`, `clustering_slice`, `full_scan`, `type_heavy` over the fixtures via the public query API. |
 | `write` | added (#539, #574) | Write suite (needs `--features write-support`): `ingest_wal_on`, `ingest_wal_off`, and `flush` — see below. |
+| `observability_overhead` | added (#1043) | Zero-overhead-when-disabled gate: `read_scan` (needs `cli-helpers`) and `write_merge` (needs `write-support`). The SAME bench source runs under the default build vs `--features observability` with export disabled; the two arms are compared by `scripts/ci/observability_overhead.sh` — see below. |
+
+### `observability_overhead` two-build comparison (Issue #1043)
+
+`benches/observability_overhead.rs` runs an identical read/scan (and write/merge)
+workload that carries the production `#[tracing::instrument]` spans and catalog
+metric calls. It proves the observability contract: when the feature is OFF — or
+ON but export disabled (`init` never called) — instrumentation costs effectively
+nothing.
+
+A single `cargo bench` process compiles one feature set, so the two builds run as
+two invocations of the **same** bench, compared on the same runner (immune to
+cross-machine variance, like the perf-regression gate):
+
+```bash
+# Runs both arms and fails if export-disabled overhead exceeds the threshold.
+OVERHEAD_THRESHOLD_PCT=2.0 \
+  CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+  scripts/ci/observability_overhead.sh
+```
+
+- **Arm 1 (default):** `--features cli-helpers,write-support` → baseline `obs_default_off`.
+- **Arm 2 (export disabled):** `--features cli-helpers,write-support,observability`
+  → baseline `obs_export_disabled`. OTel is linked but no provider/exporter exists.
+- **Threshold:** `OVERHEAD_THRESHOLD_PCT` (default **2%**), documented as
+  `OVERHEAD_THRESHOLD_PCT` in the bench source. The comparison reads each arm's
+  Criterion median from `target/criterion/<id>/<baseline>/estimates.json`.
+
+CI wiring lives in `.github/workflows/observability-gate.yml`, which also runs the
+`cargo-tree` no-OTel guard (`scripts/ci/observability_no_otel_default.sh`) and the
+in-memory-OTLP correctness/sampling tests.
 
 ### `write` bench breakdown
 

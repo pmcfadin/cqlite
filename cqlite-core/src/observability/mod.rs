@@ -68,6 +68,17 @@ mod otel;
 #[cfg(feature = "observability")]
 pub use otel::{init, tracing_layer, ObservabilityGuard};
 
+/// Shared in-memory OTLP capture harness for observability tests (issue #1043).
+///
+/// Gated behind the `observability-testing` feature, which pulls in the OTel
+/// SDK's in-memory exporters (`InMemorySpanExporter` / `InMemoryMetricExporter`)
+/// via `opentelemetry_sdk/testing`. Public so integration tests and future child
+/// issues can reuse the same fixture API to assert span trees and metric
+/// names/units/attributes. Production `observability` builds never compile this,
+/// so they never link the SDK's testing surface.
+#[cfg(feature = "observability-testing")]
+pub mod testing;
+
 /// A bounded attribute value for catalog metrics.
 ///
 /// Mirrors the small set of types OpenTelemetry attributes accept, but is always
