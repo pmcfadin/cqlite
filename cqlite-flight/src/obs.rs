@@ -20,6 +20,7 @@
 //! fixed `FlightService` method name and an `ok`/`error` status — never tickets,
 //! keys, queries, or payloads.
 
+use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::Instant;
 
 use cqlite_core::observability::{self as obs, catalog, AttrValue};
@@ -74,28 +75,32 @@ pub fn rpc_span<T>(method: &'static str, request: &Request<T>) -> tracing::Span 
 /// decremented in-flight gauge.
 pub struct RpcMetrics {
     method: &'static str,
+    /// Index into [`IN_FLIGHT`] for `method`, resolved once at `start`. The
+    /// decrement on completion targets this same shared atomic, so it is correct
+    /// even when Tokio moves the RPC future to a different worker thread across an
+    /// `.await` (the increment and decrement are not thread-bound).
+    method_idx: usize,
     started: Instant,
     status: &'static str,
     rows: u64,
     bytes: u64,
-    /// Tracks the current in-flight count so the gauge decrements correctly. A
-    /// process-wide atomic per method would be ideal, but bounded methods + a
-    /// single shared counter keeps it simple; we record +1 on start and 0-delta
-    /// is fine because the gauge is observed as a level, set on each change.
     finished: bool,
 }
 
 impl RpcMetrics {
-    /// Begin recording an RPC. Increments the in-flight gauge for `method`.
-    /// `method` must be a `&'static str` from the `FlightService` method set.
+    /// Begin recording an RPC. Increments the process-wide in-flight gauge for
+    /// `method`. `method` must be a `&'static str` from the `FlightService`
+    /// method set (see [`method_index`]).
     pub fn start(method: &'static str) -> Self {
-        IN_FLIGHT.with(|cell| {
-            let v = cell.get() + 1;
-            cell.set(v);
-            obs::record_gauge(catalog::RPC_IN_FLIGHT, v, &[method_attr(method)]);
-        });
+        let method_idx = method_index(method);
+        // Increment the shared per-method counter and observe the level. Because
+        // the counter is process-wide (not thread-local), the matching decrement
+        // in `finish` stays correct under Tokio worker-thread hopping.
+        let v = IN_FLIGHT[method_idx].fetch_add(1, Ordering::Relaxed) + 1;
+        obs::record_gauge(catalog::RPC_IN_FLIGHT, v, &[method_attr(method)]);
         Self {
             method,
+            method_idx,
             started: Instant::now(),
             status: STATUS_ERROR,
             rows: 0,
@@ -136,11 +141,13 @@ impl RpcMetrics {
         if self.bytes > 0 {
             obs::add_counter(catalog::RPC_BYTES, self.bytes, &[method.clone()]);
         }
-        IN_FLIGHT.with(|cell| {
-            let v = cell.get().saturating_sub(1);
-            cell.set(v);
-            obs::record_gauge(catalog::RPC_IN_FLIGHT, v, &[method]);
-        });
+        // Decrement the SAME shared per-method counter incremented in `start`.
+        // `fetch_sub` returns the previous value, so the new level is `prev - 1`;
+        // a `max(0)` floor guards against an unexpected underflow without ever
+        // recording a negative gauge.
+        let prev = IN_FLIGHT[self.method_idx].fetch_sub(1, Ordering::Relaxed);
+        let level = (prev - 1).max(0);
+        obs::record_gauge(catalog::RPC_IN_FLIGHT, level, &[method]);
     }
 }
 
@@ -150,12 +157,59 @@ impl Drop for RpcMetrics {
     }
 }
 
-thread_local! {
-    /// Per-thread in-flight RPC count, used to drive the in-flight gauge as a
-    /// level. The gRPC reactor schedules handlers across worker threads, so this
-    /// is an approximation; cardinality and cost stay bounded and it avoids a
-    /// shared atomic on the hot path.
-    static IN_FLIGHT: std::cell::Cell<i64> = const { std::cell::Cell::new(0) };
+/// Fixed, bounded set of `FlightService` RPC method names, in the order used to
+/// index [`IN_FLIGHT`]. Cardinality is exactly the gRPC method set — no ticket,
+/// key, query, or payload ever appears here.
+const RPC_METHODS: [&str; 11] = [
+    "get_flight_info",
+    "get_schema",
+    "do_get",
+    "handshake",
+    "list_flights",
+    "poll_flight_info",
+    "do_put",
+    "do_exchange",
+    "do_action",
+    "list_actions",
+    // Catch-all slot for any method name not in the fixed set above. Keeping a
+    // bounded fallback means an unexpected `method` never panics or allocates and
+    // the gauge cardinality is still capped.
+    "other",
+];
+
+/// Index of the catch-all slot in [`RPC_METHODS`] / [`IN_FLIGHT`].
+const OTHER_IDX: usize = RPC_METHODS.len() - 1;
+
+/// Process-wide, per-method in-flight RPC counters used to drive the in-flight
+/// gauge as a level. A single shared atomic per method means the increment (on
+/// RPC entry) and the matching decrement (on completion, via `RpcMetrics::Drop`)
+/// always target the same counter even when Tokio moves the RPC future between
+/// worker threads across `.await`. Cardinality is bounded by [`RPC_METHODS`].
+static IN_FLIGHT: [AtomicI64; RPC_METHODS.len()] = {
+    // `AtomicI64` is not `Copy`, so the array is built from a const initializer.
+    [
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+        AtomicI64::new(0),
+    ]
+};
+
+/// Resolve an RPC `method` name to its index in [`IN_FLIGHT`]. Unknown names map
+/// to the bounded catch-all slot, so the gauge cardinality stays capped and the
+/// lookup never panics.
+fn method_index(method: &str) -> usize {
+    RPC_METHODS
+        .iter()
+        .position(|m| *m == method)
+        .unwrap_or(OTHER_IDX)
 }
 
 fn method_attr(method: &'static str) -> (&'static str, AttrValue) {
@@ -228,6 +282,65 @@ mod tests {
         m.add_rows_bytes(5, 1024);
         m.ok();
         drop(m);
+    }
+
+    #[test]
+    fn method_index_maps_known_and_unknown() {
+        // Every fixed FlightService method resolves to a distinct in-bounds slot.
+        for (i, name) in RPC_METHODS.iter().enumerate().take(OTHER_IDX) {
+            assert_eq!(method_index(name), i, "{name} maps to its own slot");
+        }
+        // Unknown names fall into the bounded catch-all slot (no panic, no growth).
+        assert_eq!(method_index("not_a_real_method"), OTHER_IDX);
+    }
+
+    #[test]
+    fn in_flight_gauge_balances_under_thread_hopping() {
+        // Simulate Tokio moving an RPC future across worker threads: increment on
+        // one thread (RpcMetrics::start), drop on another (the decrement). Because
+        // the counter is a process-wide atomic keyed by method — not thread-local
+        // — the per-method count must return to its starting level. The balance
+        // property holds regardless of other concurrently-running tests, since
+        // every start is paired with exactly one drop on the same shared counter.
+        //
+        // Use `poll_flight_info`, a method no other unit test exercises, so the
+        // pre/post snapshots are stable under the parallel test runner.
+        let idx = method_index("poll_flight_info");
+        let base = IN_FLIGHT[idx].load(Ordering::Relaxed);
+
+        // Start on this thread, hand the recorder to another thread to drop it.
+        let m = RpcMetrics::start("poll_flight_info");
+        std::thread::spawn(move || drop(m))
+            .join()
+            .expect("drop thread joins");
+
+        assert_eq!(
+            IN_FLIGHT[idx].load(Ordering::Relaxed),
+            base,
+            "increment + decrement-on-another-thread balances the shared counter"
+        );
+    }
+
+    #[test]
+    fn rpc_metrics_increments_shared_counter_on_start() {
+        // `start` must bump the process-wide per-method counter (and `Drop` must
+        // restore it). Serialise on a dedicated method slot so the +1 assertion is
+        // deterministic: no other unit test creates `do_exchange` metrics.
+        let idx = method_index("do_exchange");
+        let base = IN_FLIGHT[idx].load(Ordering::Relaxed);
+        {
+            let _m = RpcMetrics::start("do_exchange");
+            assert_eq!(
+                IN_FLIGHT[idx].load(Ordering::Relaxed),
+                base + 1,
+                "start increments the shared per-method counter"
+            );
+        }
+        assert_eq!(
+            IN_FLIGHT[idx].load(Ordering::Relaxed),
+            base,
+            "drop decrements the shared per-method counter back to base"
+        );
     }
 
     #[test]
