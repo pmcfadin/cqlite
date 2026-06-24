@@ -155,25 +155,34 @@ static GUARD: OnceLock<ObservabilityGuard> = OnceLock::new();
 /// Always safe to call. With telemetry disabled or the feature off it installs
 /// an inert guard and a plain subscriber, so behaviour is unchanged.
 pub fn init_once(opts: Option<&OtelOptions>) {
-    if GUARD.get().is_some() {
-        return;
-    }
+    // Serialise the ENTIRE init path through `get_or_init`: the foundation
+    // `obs::init` (which mutates global OTel providers) and the subscriber
+    // install run AT MOST ONCE for the process, even under concurrent
+    // `Database.open()` from multiple worker threads. Computing the guard inside
+    // the closure means the winning thread's guard is the one stored, and no
+    // guard that owns live exporters is ever constructed-then-dropped while the
+    // globals still reference it: only the single closure run touches the
+    // foundation. Losing threads block until the winner finishes, then observe
+    // the already-initialised guard and do nothing.
+    GUARD.get_or_init(|| {
+        let cfg = match opts {
+            Some(o) => o.to_core(),
+            None => ObservabilityConfig::from_env(),
+        };
 
-    let cfg = match opts {
-        Some(o) => o.to_core(),
-        None => ObservabilityConfig::from_env(),
-    };
+        // `init` returns an inert guard for a disabled config and never installs
+        // a global subscriber itself, so it is safe to call unconditionally. A
+        // misconfigured exporter must never take down the host process: on error
+        // we fall back to an inert guard and continue without export.
+        let guard = obs::init(cfg).unwrap_or_else(|_| inert_guard());
 
-    // `init` returns an inert guard for a disabled config and never installs a
-    // global subscriber itself, so it is safe to call unconditionally. A
-    // misconfigured exporter must never take down the host process: on error we
-    // fall back to an inert guard and continue without export.
-    let guard = obs::init(cfg).unwrap_or_else(|_| inert_guard());
+        // Install the bridging subscriber from inside the same once-only closure
+        // so the provider set by `init` above is visible to `tracing_layer()`,
+        // and so the install also happens exactly once.
+        install_subscriber();
 
-    // If another thread won the race between the `get` check and here, keep the
-    // first guard; ours is simply dropped.
-    let _ = GUARD.set(guard);
-    install_subscriber();
+        guard
+    });
 }
 
 /// Build an inert guard for the error fall-back path. `init` on a disabled
@@ -184,26 +193,73 @@ fn inert_guard() -> ObservabilityGuard {
     obs::init(disabled).unwrap_or_else(|_| inert_guard())
 }
 
+/// Default per-layer filter for the OTLP span layer when `RUST_LOG` is unset.
+///
+/// Spans we want exported are emitted at INFO on the node crate
+/// (`node.execute` / `node.execute_streaming`) and at DEBUG/INFO on
+/// `cqlite_core` (read/write/compaction instrumentation). To guarantee those
+/// reach the OTel layer with no `RUST_LOG`, this allows DEBUG on both targets
+/// while leaving everything else `off`. It is applied ONLY to the OTel layer
+/// (via `with_filter`), never as a global registry filter — so it cannot gate
+/// any other layer, and since no fmt layer is attached, stdout/stderr stay quiet
+/// regardless. `OTEL_NODE_TARGET` matches this crate's compiled name (`-`→`_`).
+#[cfg(any(feature = "observability", test))]
+const OTEL_NODE_TARGET: &str = "cqlite_node";
+#[cfg(any(feature = "observability", test))]
+const OTEL_CORE_TARGET: &str = "cqlite_core";
+
+/// Build the directive string that allows the binding + core span targets at the
+/// level their spans are emitted, with everything else off.
+#[cfg(any(feature = "observability", test))]
+fn default_otel_directives() -> String {
+    format!("off,{OTEL_CORE_TARGET}=debug,{OTEL_NODE_TARGET}=debug")
+}
+
 /// Install the bridging `tracing` subscriber once. With the `observability`
 /// feature on, the OTel layer (live only after a successful `init`) is composed
 /// in so the per-call spans reach the OTLP exporter. `try_init` tolerates an
 /// already-installed subscriber (e.g. set by a host or a test).
+///
+/// The filter is attached as a PER-LAYER filter on the OTel layer rather than as
+/// a global registry filter, so it never gates other layers and — critically —
+/// the spans reach the OTel layer even when `RUST_LOG` is unset (a global `off`
+/// filter would otherwise drop every span before the layer could export it).
+/// `RUST_LOG`, when set, still overrides the default directives. No fmt layer is
+/// attached, so the Node process's stdout/stderr stay quiet by default.
 fn install_subscriber() {
-    use tracing_subscriber::layer::SubscriberExt;
     use tracing_subscriber::util::SubscriberInitExt;
-    use tracing_subscriber::EnvFilter;
-
-    // Honour RUST_LOG; otherwise stay quiet (the host owns log routing). We do
-    // not attach an fmt layer by default to avoid writing to the Node process's
-    // stderr unless the operator explicitly opts in via RUST_LOG.
-    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("off"));
-
-    let registry = tracing_subscriber::registry().with(env_filter);
 
     #[cfg(feature = "observability")]
-    let registry = registry.with(cqlite_core::observability::tracing_layer());
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::Layer;
 
-    let _ = registry.try_init();
+        // RUST_LOG overrides; otherwise default to allowing the binding + core
+        // span targets so the per-call/per-stream spans are exported with no
+        // RUST_LOG set.
+        let env_filter = env_filter_or_default();
+
+        let registry = tracing_subscriber::registry()
+            .with(cqlite_core::observability::tracing_layer().with_filter(env_filter));
+
+        let _ = registry.try_init();
+    }
+
+    // Without the `observability` feature the OTLP layer is compiled out and
+    // there is nothing to bridge; install a bare registry (no fmt layer) so the
+    // process stays quiet and the macros at the binding boundary remain no-ops.
+    #[cfg(not(feature = "observability"))]
+    {
+        let _ = tracing_subscriber::registry().try_init();
+    }
+}
+
+/// `RUST_LOG` when set, otherwise the default directives that allow the binding
+/// and core span targets so spans are exported even with no `RUST_LOG`.
+#[cfg(feature = "observability")]
+fn env_filter_or_default() -> tracing_subscriber::EnvFilter {
+    use tracing_subscriber::EnvFilter;
+    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_otel_directives()))
 }
 
 /// Force-flush pending telemetry. Called from `Database.close()` so a graceful
@@ -328,5 +384,60 @@ mod tests {
         let err = cqlite_core::Error::corruption("x");
         record_boundary_error(&err);
         flush();
+    }
+
+    /// Finding 1: with no `RUST_LOG`, the default OTel directives MUST enable the
+    /// binding + core span targets at the level the spans are emitted, so the
+    /// per-call/per-stream spans reach the OTel layer (otherwise enabling `otel`
+    /// would export nothing). We install the default-directive `EnvFilter` as the
+    /// active subscriber and assert, via `tracing::enabled!`, that the binding's
+    /// INFO span target and a core DEBUG span target are enabled — while an
+    /// unrelated target is NOT — proving no blanket `off` filter swallows them.
+    #[test]
+    fn default_directives_enable_binding_and_core_spans_without_rust_log() {
+        use tracing::Level;
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::EnvFilter;
+
+        // Build the subscriber exactly as `install_subscriber` would when
+        // RUST_LOG is unset (the filter applied to the span layer). We attach the
+        // filter at the registry level here ONLY for the probe — it makes
+        // `tracing::enabled!` consult these directives without a live OTel layer.
+        let subscriber =
+            tracing_subscriber::registry().with(EnvFilter::new(default_otel_directives()));
+
+        tracing::subscriber::with_default(subscriber, || {
+            // node.execute / node.execute_streaming are emitted at INFO on the
+            // node crate target.
+            assert!(
+                tracing::enabled!(target: "cqlite_node", Level::INFO),
+                "node INFO span target must be enabled with default directives (no RUST_LOG)"
+            );
+            // Core read/write/compaction instrumentation includes DEBUG spans.
+            assert!(
+                tracing::enabled!(target: "cqlite_core", Level::DEBUG),
+                "core DEBUG span target must be enabled with default directives"
+            );
+            // Everything else stays off so we do not export unrelated noise.
+            assert!(
+                !tracing::enabled!(target: "some_other_crate", Level::INFO),
+                "unrelated targets must remain off under the default directives"
+            );
+        });
+    }
+
+    /// Finding 2: `init_once` must run the foundation init + subscriber install
+    /// at most once, even when called repeatedly (the production hazard is
+    /// concurrent `Database.open()`). A second call must be a no-op that leaves
+    /// the same guard installed.
+    #[test]
+    fn init_once_is_idempotent() {
+        // Default (disabled) config -> inert guard, no global providers touched.
+        init_once(None);
+        let first = GUARD.get().map(|g| g as *const _);
+        init_once(None);
+        let second = GUARD.get().map(|g| g as *const _);
+        assert!(first.is_some(), "guard installed after first init_once");
+        assert_eq!(first, second, "second init_once must not replace the guard");
     }
 }
