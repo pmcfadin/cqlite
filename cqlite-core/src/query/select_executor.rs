@@ -1225,7 +1225,25 @@ impl SelectExecutor {
         }
     }
 
-    /// Execute an optimized query plan
+    /// Execute an optimized query plan.
+    ///
+    /// Instrumented as `query.select.plan` (issue #1035): this span covers the
+    /// modern SELECT pipeline — SSTable scan, filtering, projection, aggregation,
+    /// and WRITETIME/TTL metadata extraction — and is the parent under which the
+    /// read-path spans (issue #1034) nest. On completion it emits
+    /// [`catalog::QUERY_ROWS_SCANNED`] (rows the scan step examined) dimensioned by
+    /// the honest access path, so the rows-scanned vs rows-returned gap is
+    /// observable. The bounded access-path attribute is recorded on the span; the
+    /// query text and key values never are.
+    #[tracing::instrument(
+        name = "query.select.plan",
+        skip_all,
+        fields(
+            cqlite.query.access_path = tracing::field::Empty,
+            cqlite.query.rows_scanned = tracing::field::Empty,
+            cqlite.query.rows = tracing::field::Empty,
+        )
+    )]
     pub async fn execute(&self, plan: OptimizedQueryPlan) -> Result<QueryResult> {
         // Issue #960: clear the global access-path probe so a stale value from a
         // previous query cannot satisfy a test assertion against this one.
