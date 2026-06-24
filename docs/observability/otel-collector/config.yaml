@@ -1,0 +1,51 @@
+# OpenTelemetry Collector config for the CQLite local stack (issue #1042).
+#
+# Receives OTLP traces + metrics from CQLite (any surface: CLI, Python, Node,
+# Arrow Flight), exports traces to Jaeger and metrics to a Prometheus scrape
+# endpoint.
+
+receivers:
+  # CQLite's OTLP exporter targets this receiver. gRPC is the default
+  # (CQLITE_OTEL_PROTOCOL=grpc, port 4317); HTTP/protobuf is on 4318.
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  # Small batches keep the local UI responsive for ad-hoc runs.
+  batch:
+    timeout: 1s
+
+exporters:
+  # Traces -> Jaeger (OTLP gRPC into the all-in-one's collector port).
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics -> Prometheus pull endpoint scraped by the prometheus service.
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Keep CQLite's dotted metric names intact (cqlite.read.rows) — Prometheus
+    # itself sanitises them to cqlite_read_rows for queries; the dashboards use
+    # the sanitised form.
+    resource_to_telemetry_conversion:
+      enabled: true
+
+  # Handy when debugging the pipeline locally.
+  debug:
+    verbosity: normal
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus, debug]

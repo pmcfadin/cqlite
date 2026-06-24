@@ -1,0 +1,16 @@
+# Grafana dashboard provisioning for the CQLite local stack (issue #1042).
+# Auto-loads every dashboard JSON found under /var/lib/grafana/dashboards.
+
+apiVersion: 1
+
+providers:
+  - name: cqlite
+    orgId: 1
+    folder: CQLite
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 10
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
