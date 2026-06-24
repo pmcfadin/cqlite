@@ -2582,7 +2582,7 @@ scenarios:
           - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -2596,7 +2596,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features "delta-scan write-support" --test issue_1011_ttl_local_deletion_parity
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
       normalization: >-
         scan_delta expiring-cell ttl + localDeletionTime are mapped to the
         sstabledump JSONL ttl/expires_at cell facts and compared.
@@ -2627,7 +2627,7 @@ scenarios:
           - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -2641,7 +2641,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --features "delta-scan write-support" --test issue_1011_ttl_local_deletion_parity
       reference_paths:
-        - test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
       normalization: >-
         For rows mixing expiring and non-expiring cells, the per-cell ttl/expires_at
         presence is mapped to the sstabledump JSONL cell facts so that only the
