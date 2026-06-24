@@ -1,0 +1,74 @@
+# Local OpenTelemetry stack for CQLite runtime observability (epic #1031, issue #1042).
+#
+# One command brings up a complete, working telemetry backend wired to the OTLP
+# endpoint CQLite exports to:
+#
+#   docker compose -f docs/observability/docker-compose.yml up
+#
+# Components:
+#   - otel-collector : receives OTLP (gRPC 4317 / HTTP 4318) from CQLite, fans
+#                      traces out to Jaeger and exposes metrics for Prometheus.
+#   - jaeger         : trace UI at http://localhost:16686
+#   - prometheus     : scrapes the collector's Prometheus exporter; UI at
+#                      http://localhost:9090
+#   - grafana        : dashboards at http://localhost:3000 (anonymous admin),
+#                      Prometheus + Jaeger datasources and the CQLite dashboards
+#                      auto-provisioned.
+#
+# Point CQLite at the collector with:
+#   CQLITE_OTEL_ENABLED=true CQLITE_OTEL_ENDPOINT=http://localhost:4317
+# (the default endpoint is already http://localhost:4317, gRPC).
+#
+# Image versions are pinned for reproducibility.
+
+services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: cqlite-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC  (CQLITE_OTEL_PROTOCOL=grpc, the default)
+      - "4318:4318"   # OTLP HTTP  (CQLITE_OTEL_PROTOCOL=http)
+      - "8889:8889"   # Prometheus exporter (scraped by Prometheus)
+    depends_on:
+      - jaeger
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    container_name: cqlite-jaeger
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686" # Jaeger UI
+      # 4317/4318 are owned by the collector above; the collector forwards
+      # traces to Jaeger over its internal OTLP port 4317 (see collector config).
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: cqlite-prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"   # Prometheus UI
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana:11.3.0
+    container_name: cqlite-grafana
+    environment:
+      # Anonymous access so the dashboards open without a login prompt locally.
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ORG_ROLE=Admin
+      - GF_AUTH_DISABLE_LOGIN_FORM=true
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"   # Grafana UI
+    depends_on:
+      - prometheus

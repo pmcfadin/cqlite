@@ -46,6 +46,11 @@ Welcome to the CQLite documentation hub. This directory holds technical document
 - **[Performance Methodology](performance.md)** - Benchmark reproducibility and the CI perf gate
 - **[Profiling Guide](profiling.md)** - Flamegraphs, heap profiling, and the `scripts/profile.sh` improvement loop
 
+### 📡 Runtime Observability
+- **[Observability Overview](observability/README.md)** - One-command local OTel stack (Collector + Jaeger + Prometheus + Grafana)
+- **[Observability Quickstart](observability/quickstart.md)** - End-to-end: bring up the stack, run a query, view traces and dashboards
+- **[Observability Configuration Reference](observability/configuration.md)** - `CQLITE_OTEL_*` env vars, per-surface config, and the metric naming/units catalog
+
 ### 💻 Development Documentation
 - **[Contributing Guide](development/contributing.md)** - How to contribute to CQLite
 - **[Development Guide](development/DEVELOPMENT.md)** - Local development workflow

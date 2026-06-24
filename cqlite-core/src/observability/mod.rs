@@ -229,6 +229,30 @@ pub fn record_result<T>(subsystem: &'static str, result: Result<T>) -> Result<T>
     result
 }
 
+/// Parent a `tracing` span under a remote trace described by a W3C
+/// [`traceparent`](https://www.w3.org/TR/trace-context/#traceparent-header)
+/// header string (issues #1039/#1040/#1041).
+///
+/// Hosts (the Python/Node bindings, the Flight server) frequently receive an
+/// incoming `traceparent` from a caller's tracer and want the per-call CQLite
+/// span to attach to that remote trace. This helper extracts the W3C trace
+/// context with the standard [`TraceContextPropagator`] and sets it as the
+/// parent of `span` via `tracing-opentelemetry`'s `set_parent`.
+///
+/// It is always callable: when the `observability` feature is off — or when
+/// `traceparent` is `None`/empty/unparseable — it is a no-op, so call sites
+/// stay identical across builds. Pass the per-open or per-call traceparent
+/// straight from the binding boundary; never synthesise one.
+#[inline]
+pub fn set_span_parent_from_traceparent(span: &tracing::Span, traceparent: Option<&str>) {
+    #[cfg(feature = "observability")]
+    otel::set_span_parent_from_traceparent(span, traceparent);
+    #[cfg(not(feature = "observability"))]
+    {
+        let _ = (span, traceparent);
+    }
+}
+
 /// Inert observability guard returned by [`init`] when the `observability`
 /// feature is disabled. Flushes and installs nothing.
 #[cfg(not(feature = "observability"))]
