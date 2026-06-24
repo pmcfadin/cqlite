@@ -875,8 +875,11 @@ impl ConfigBuilder {
         // `otel_enabled` is carried as a raw string for the same reason as the
         // numeric flags below: a malformed `CQLITE_OTEL_ENABLED` env value must
         // not abort `Cli::parse()`. Parse it leniently here, accepting the same
-        // truthy/falsy spellings as `ObservabilityConfig::from_env`; unrecognized
-        // values keep the existing/default value rather than erroring.
+        // truthy/falsy spellings as `ObservabilityConfig::from_env`. Unlike the
+        // numeric flags (which keep any lower-precedence value on bad input), an
+        // unrecognized value for this MASTER switch resets it to the core default
+        // (disabled) — fail safe to "off" — rather than leaving a lower-precedence
+        // config-file `enabled = true` active. None of these cases error.
         if let Some(ref raw) = cli.otel_enabled {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => self.config.observability.enabled = Some(true),
