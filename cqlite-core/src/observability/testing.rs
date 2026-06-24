@@ -25,6 +25,20 @@
 //! call [`MetricsCapture::reset`] + [`MetricsCapture::flush_and_collect`] around
 //! their own flow rather than installing a fresh provider each time.
 //!
+//! ## Metric isolation guarantee
+//!
+//! The shared exporter is configured with **DELTA** temporality
+//! ([`Temporality::Delta`]). Each [`MetricsCapture::flush_and_collect`] therefore
+//! reports only the values aggregated *since the previous collect*, not a
+//! running cumulative total. [`MetricsCapture::reset`] force-flushes (draining and
+//! discarding any prior deltas) and clears the exporter buffer, so a subsequent
+//! `flush_and_collect` reflects **only the work done between `reset` and
+//! `flush_and_collect`** — never metrics accumulated by an earlier flow or test.
+//! This holds even under parallel test execution: although the meter provider is
+//! process-global, all metric assertions run inside a single serial test (see
+//! `tests/observability_correctness.rs`), and DELTA temporality means that test
+//! never re-observes another flow's already-collected counters.
+//!
 //! Spans, by contrast, flow through `tracing`, so a test can install its own
 //! tracer + subscriber for the duration of a flow via [`capture_spans`] and get
 //! perfectly isolated span trees with no global state.
@@ -56,7 +70,10 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::Value;
 use opentelemetry_sdk::metrics::data::AggregatedMetrics;
 use opentelemetry_sdk::metrics::data::MetricData;
-use opentelemetry_sdk::metrics::{InMemoryMetricExporter, PeriodicReader, SdkMeterProvider};
+use opentelemetry_sdk::metrics::{
+    InMemoryMetricExporter, InMemoryMetricExporterBuilder, PeriodicReader, SdkMeterProvider,
+    Temporality,
+};
 use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
 use tracing_subscriber::prelude::*;
 
@@ -306,8 +323,15 @@ impl MetricsCapture {
     /// Drop everything collected so far so the next
     /// [`flush_and_collect`](Self::flush_and_collect) reflects only the flow run
     /// after this call. Call this immediately before your flow.
+    ///
+    /// This force-flushes first (draining the SDK's pending DELTA aggregation so
+    /// any straggler deltas land in the exporter), then clears the exporter
+    /// buffer. Because the exporter uses DELTA temporality, the *next* collect
+    /// starts a fresh aggregation window — no cumulative state from before this
+    /// `reset` can leak into a later `flush_and_collect`.
     pub fn reset(&self) {
-        // Flush first so any straggler exports land, then clear.
+        // Flush first so any straggler deltas land, then clear the buffer. With
+        // DELTA temporality this also resets the aggregation window.
         let _ = self.provider.force_flush();
         self.exporter.reset();
     }
@@ -342,7 +366,13 @@ pub fn metrics_capture() -> MetricsCapture {
     static CAPTURE: OnceLock<MetricsCapture> = OnceLock::new();
     CAPTURE
         .get_or_init(|| {
-            let exporter = InMemoryMetricExporter::default();
+            // DELTA temporality so each `flush_and_collect` returns only the
+            // values recorded since the previous collect (see the module-level
+            // "Metric isolation guarantee"). This prevents an earlier flow/test's
+            // cumulative counters from re-appearing in a later collect.
+            let exporter = InMemoryMetricExporterBuilder::new()
+                .with_temporality(Temporality::Delta)
+                .build();
             let reader = PeriodicReader::builder(exporter.clone()).build();
             let provider = SdkMeterProvider::builder().with_reader(reader).build();
             opentelemetry::global::set_meter_provider(provider.clone());

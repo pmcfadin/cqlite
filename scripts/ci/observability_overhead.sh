@@ -58,9 +58,12 @@ import json, os, sys
 crit_dir, base_off, base_disabled, threshold = sys.argv[1:5]
 threshold = float(threshold)
 
-# Bench IDs produced by benches/observability_overhead.rs. write_merge is only
-# present when write-support is on (it is, in both arms here); read_scan needs
-# cli-helpers (also on). Missing baselines are reported as SKIP, never a failure.
+# Bench IDs produced by benches/observability_overhead.rs. write_merge needs
+# write-support and read_scan needs cli-helpers — BOTH are enabled in BOTH arms
+# above, so BOTH baselines MUST exist. A missing baseline means the bench was
+# renamed, gated out, or its ID drifted from this list, which would silently let
+# the overhead gate pass without measuring anything — so we FAIL (not skip) on a
+# missing expected baseline.
 BENCH_IDS = ["observability_overhead/read_scan", "observability_overhead/write_merge"]
 
 def median_ns(bench_id, baseline):
@@ -77,7 +80,16 @@ for bid in BENCH_IDS:
     off = median_ns(bid, base_off)
     dis = median_ns(bid, base_disabled)
     if off is None or dis is None:
-        print(f"{bid:40} {'-':>14} {'-':>14} {'-':>12}  SKIP (baseline missing)")
+        missing = []
+        if off is None:
+            missing.append(base_off)
+        if dis is None:
+            missing.append(base_disabled)
+        fail = 1
+        print(
+            f"{bid:40} {'-':>14} {'-':>14} {'-':>12}  "
+            f"FAIL (expected baseline missing: {', '.join(missing)})"
+        )
         continue
     overhead_pct = (dis - off) / off * 100.0
     ok = overhead_pct <= threshold
@@ -88,7 +100,10 @@ for bid in BENCH_IDS:
 
 print("-" * 90)
 if fail:
-    print(f"FAIL: export-disabled observability overhead exceeded {threshold}% on at least one bench.")
+    print(
+        f"FAIL: export-disabled observability overhead exceeded {threshold}% on at least "
+        "one bench, or an expected bench baseline was missing (renamed/gated-out bench?)."
+    )
 else:
     print(f"OK: all benches within the {threshold}% overhead threshold.")
 sys.exit(fail)

@@ -17,6 +17,14 @@ on:
     branches: [main]
     paths:
       - "cqlite-core/src/observability/**"
+      # Instrumented PRODUCTION paths: these define the spans/metrics the gate's
+      # tests guard, so a regression here must run the gate. (Without these the
+      # gate would never fire on the code it actually protects.)
+      - "cqlite-core/src/query/**"
+      - "cqlite-core/src/storage/**"
+      # Binding/flight surfaces are also instrumented (per-query/RPC spans + metrics).
+      - "bindings/**"
+      - "cqlite-flight/**"
       - "cqlite-core/benches/observability_overhead.rs"
       - "cqlite-core/tests/observability_correctness.rs"
       - "cqlite-core/tests/observability_no_otel_default.rs"

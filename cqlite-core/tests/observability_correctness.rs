@@ -223,6 +223,16 @@ fn catalog_metrics_have_expected_names_units_and_error_labels() {
     let mc = testing::metrics_capture();
     mc.reset();
 
+    // Defense-in-depth against cross-test metric bleed: the in-memory exporter is
+    // process-global and uses DELTA temporality (so each collect returns only the
+    // values recorded since `reset`). To stay correct even if another test's
+    // instrumented flow emits into the same DELTA window concurrently, every
+    // assertion here keys on a UNIQUE per-test attribute value so it only ever
+    // observes ITS OWN time series. The subsystem label below is unique to this
+    // test, and the counter/gauge/histogram assertions check presence/units (not
+    // exact totals across shared series).
+    let unique_subsystem = "obs_correctness_self_test";
+
     // Emit one of each instrument kind via the production helpers.
     obs::add_counter(
         catalog::READ_ROWS,
@@ -232,10 +242,12 @@ fn catalog_metrics_have_expected_names_units_and_error_labels() {
     obs::record_histogram(catalog::QUERY_DURATION, 0.005, &[]);
     obs::record_gauge(catalog::SSTABLES_OPEN, 3, &[]);
 
-    // Induce an error so errors.total increments with bounded labels.
+    // Induce an error so errors.total increments with bounded labels. Tag it with
+    // a subsystem value unique to this test so the labeled-sum assertion below
+    // matches only this emission, never another flow's `errors.total`.
     let err: Error = Error::corruption("induced for test");
     let expected_category = err.obs_category().as_str();
-    obs::record_error(&err, "reader");
+    obs::record_error(&err, unique_subsystem);
 
     let metrics = mc.flush_and_collect();
 
@@ -276,13 +288,15 @@ fn catalog_metrics_have_expected_names_units_and_error_labels() {
         catalog::ERRORS_TOTAL,
         &[
             (catalog::attr::ERROR_CATEGORY, expected_category),
-            (catalog::attr::SUBSYSTEM, "reader"),
+            (catalog::attr::SUBSYSTEM, unique_subsystem),
         ],
     );
+    // The unique subsystem label means this matches only this test's emission, so
+    // the DELTA-window count is exactly one regardless of concurrent flows.
     assert!(
-        labeled >= 1.0,
-        "cqlite.errors.total{{category={expected_category},subsystem=reader}} must increment; \
-         saw entries: {:?}",
+        (labeled - 1.0).abs() < f64::EPSILON,
+        "cqlite.errors.total{{category={expected_category},subsystem={unique_subsystem}}} must \
+         increment exactly once; saw entries: {:?}",
         metrics.find(catalog::ERRORS_TOTAL)
     );
 
@@ -391,6 +405,8 @@ fn span_names(spans: &testing::CapturedSpans) -> Vec<String> {
     spans.iter().map(|s| s.name.clone()).collect()
 }
 
+// Only used by the cli-helpers read/query span test.
+#[cfg(feature = "cli-helpers")]
 fn span_tree(spans: &testing::CapturedSpans) -> Vec<(String, String)> {
     spans
         .iter()
