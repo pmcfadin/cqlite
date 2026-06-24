@@ -1,0 +1,2 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":18,"clustering":[2],"deletion_info":{"marked_deleted":"2021-01-02T00:00:00Z","local_delete_time":"2026-06-24T22:59:14Z"},"cells":[]},{"type":"row","position":29,"clustering":[3],"cells":[{"name":"val","deletion_info":{"local_delete_time":"2026-06-24T22:59:14Z"},"tstamp":"2021-01-02T00:00:00Z"}]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":41,"deletion_info":{"marked_deleted":"2021-01-02T00:00:00Z","local_delete_time":"2026-06-24T22:59:14Z"}},"rows":[]}
