@@ -129,6 +129,16 @@ impl QueryResult {
 }
 
 impl QueryResult {
+    /// Number of materialised rows (for SELECT spans, issue #1039).
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Number of rows affected (for DML spans, issue #1039).
+    pub(crate) fn rows_affected_value(&self) -> i64 {
+        self.rows_affected as i64
+    }
+
     /// Create a minimal QueryResult for a DML operation (INSERT/UPDATE/DELETE).
     ///
     /// The result has no rows but reflects the number of mutations applied.
@@ -429,14 +439,68 @@ impl ColumnInfo {
 pub struct StreamingIterator {
     /// The wrapped core iterator (Mutex for interior mutability without &mut self)
     inner: Mutex<cqlite_core::query::result::QueryResultIterator>,
+    /// Per-call observability span (`python.execute_streaming`, issue #1039).
+    ///
+    /// The span is kept alive for the whole iteration so the streamed rows are
+    /// attributed to the caller's trace. The total rows yielded is recorded into
+    /// the span's `cqlite.rows` field exactly once, when the stream finalizes —
+    /// whichever comes first of: normal exhaustion (`StopIteration` from
+    /// `__next__`), or `Drop` (garbage collection / early `break`).
+    ///
+    /// Wrapped in `Mutex<Option<..>>` so it can be finalized idempotently from
+    /// `&self` (`__next__`) as well as `&mut self` (`Drop`): the first finalize
+    /// `.take()`s the span (recording the count and ending it), and any later
+    /// finalize is a no-op. This guarantees that a fully-exhausted-but-still-
+    /// referenced iterator has already exported its span before a later
+    /// `Database.close()` flushes telemetry.
+    span: Mutex<Option<tracing::Span>>,
 }
 
 impl StreamingIterator {
-    /// Create a new streaming iterator from a core QueryResultIterator.
+    /// Create a new streaming iterator from a core QueryResultIterator with no
+    /// observability span (used where instrumentation is not wired).
     pub fn new(iter: cqlite_core::query::result::QueryResultIterator) -> Self {
+        Self::with_span(iter, tracing::Span::none())
+    }
+
+    /// Create a streaming iterator that records into `span` as rows are yielded.
+    pub fn with_span(
+        iter: cqlite_core::query::result::QueryResultIterator,
+        span: tracing::Span,
+    ) -> Self {
         Self {
             inner: Mutex::new(iter),
+            span: Mutex::new(Some(span)),
         }
+    }
+
+    /// Finalize the streaming span exactly once.
+    ///
+    /// Records the authoritative total row count into `cqlite.rows` and ends the
+    /// span by dropping it. Called from both the exhaustion branch of `__next__`
+    /// and from `Drop`; the `.take()` makes the second caller a no-op, so the
+    /// count is never recorded twice. Poisoned locks are skipped rather than
+    /// risking a double panic.
+    fn finalize_span(&self) {
+        let Ok(mut span_slot) = self.span.lock() else {
+            return;
+        };
+        if let Some(span) = span_slot.take() {
+            if let Ok(iter) = self.inner.lock() {
+                span.record("cqlite.rows", iter.rows_received() as i64);
+            }
+            // Dropping `span` here ends it so the span (with its final row count)
+            // is exported now, before any later Database.close()/flush.
+        }
+    }
+}
+
+impl Drop for StreamingIterator {
+    fn drop(&mut self) {
+        // Finalize the span if it has not already been finalized at exhaustion
+        // (i.e. the iterator was GC'd or abandoned via `break`). Idempotent: if
+        // `__next__` already finalized on StopIteration, this is a no-op.
+        self.finalize_span();
     }
 }
 
@@ -470,7 +534,16 @@ impl StreamingIterator {
                 Py::new(py, py_row)
             }
             Some(Err(e)) => Err(to_py_err(e)),
-            None => Err(PyStopIteration::new_err(())),
+            None => {
+                // Stream exhausted. Finalize the span now (idempotently) so the
+                // per-stream span and its final row count are exported even if
+                // the exhausted iterator stays alive until a later
+                // Database.close()/flush. Release the `inner` lock first because
+                // finalize_span() re-acquires it.
+                drop(iter);
+                self.finalize_span();
+                Err(PyStopIteration::new_err(()))
+            }
         }
     }
 

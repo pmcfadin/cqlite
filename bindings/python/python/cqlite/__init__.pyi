@@ -127,7 +127,12 @@ class Database:
         """True if the database connection is closed."""
         ...
 
-    def execute(self, query: str) -> "QueryResult":
+    def execute(
+        self,
+        query: str,
+        *,
+        traceparent: str | None = None,
+    ) -> "QueryResult":
         """Execute a CQL query or DML statement.
 
         For SELECT queries, reads from the SSTable data on disk and returns
@@ -141,6 +146,12 @@ class Database:
 
         Args:
             query: CQL SELECT, INSERT, UPDATE, or DELETE statement.
+            traceparent: Optional W3C ``traceparent`` header value
+                (``00-<trace-id>-<span-id>-01``). When supplied, the
+                ``python.execute`` span emitted for this call is parented to that
+                trace so it correlates with the caller's OpenTelemetry trace,
+                overriding any ``traceparent`` passed to :func:`open`. Ignored
+                when observability is not enabled. Malformed values are ignored.
 
         Returns:
             QueryResult containing rows (for SELECT) or rows_affected (for DML).
@@ -165,6 +176,8 @@ class Database:
         self,
         query: str,
         config: StreamingConfig | None = None,
+        *,
+        traceparent: str | None = None,
     ) -> "StreamingIterator":
         """Execute a CQL query with streaming results.
 
@@ -173,6 +186,11 @@ class Database:
         Args:
             query: CQL SELECT query string
             config: Optional streaming configuration
+            traceparent: Optional W3C ``traceparent`` header value. When supplied,
+                the ``python.execute_streaming`` span is parented to that trace.
+                The span tracks the total rows yielded across iteration and is
+                finalised when the iterator is exhausted, garbage collected, or
+                abandoned. Ignored when observability is not enabled.
 
         Returns:
             StreamingIterator for iterating over rows
@@ -336,6 +354,8 @@ def open(
     config: Config | None = None,
     writable: bool = False,
     write_dir: str | Path | None = None,
+    otel_config: dict[str, object] | None = None,
+    traceparent: str | None = None,
 ) -> Database:
     """Open a database connection to SSTable data.
 
@@ -355,6 +375,21 @@ def open(
                    directory are **not** protected by file locks and will corrupt
                    each other's WAL and SSTable files.  File locking is planned for
                    a future release (see issue #485).
+        otel_config: Optional OpenTelemetry configuration dict, layered over the
+                     ``CQLITE_OTEL_*`` environment. Initialises telemetry once per
+                     process (the first ``open`` wins; later opens reuse it).
+                     Recognised keys (all optional): ``enabled`` (bool),
+                     ``endpoint`` (str), ``protocol`` (``"grpc"`` | ``"http"``),
+                     ``service_name`` (str), ``service_version`` (str),
+                     ``sampling_ratio`` (float, ``[0.0, 1.0]``), ``timeout_ms``
+                     (int). Unknown keys raise ``ValueError``. Telemetry is only
+                     exported when the extension is built with the
+                     ``observability`` feature; otherwise this is accepted but
+                     inert. A bad exporter config never fails ``open``.
+        traceparent: Optional W3C ``traceparent`` header value used as the default
+                     parent for every per-call span on this database (overridable
+                     per call). Correlates the bindings' Rust spans with the
+                     caller's OpenTelemetry trace.
 
     Returns:
         A Database instance
