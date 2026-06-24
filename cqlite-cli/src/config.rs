@@ -1191,11 +1191,7 @@ mod tests {
         env::set_var("CQLITE_OTEL_ENABLED", "true");
         env::set_var("CQLITE_OTEL_ENDPOINT", "http://from-env:4317");
 
-        let cli = Cli::parse_from(&[
-            "cqlite",
-            "--otel-endpoint",
-            "http://from-flag:4317",
-        ]);
+        let cli = Cli::parse_from(&["cqlite", "--otel-endpoint", "http://from-flag:4317"]);
         let config = Config::load(None, &cli).unwrap();
 
         // clap merged env into otel_enabled (no flag) -> Some(true);

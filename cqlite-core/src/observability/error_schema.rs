@@ -216,10 +216,7 @@ mod tests {
         assert_eq!(Error::concurrency("c").obs_category(), Concurrency);
         assert_eq!(Error::transaction("t").obs_category(), Concurrency);
 
-        assert_eq!(
-            Error::constraint_violation("c").obs_category(),
-            Constraints
-        );
+        assert_eq!(Error::constraint_violation("c").obs_category(), Constraints);
         assert_eq!(Error::already_exists("a").obs_category(), Constraints);
 
         assert_eq!(Error::query_execution("q").obs_category(), Query);

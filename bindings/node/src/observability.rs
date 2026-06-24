@@ -361,10 +361,7 @@ mod tests {
         assert!(!cfg.endpoint.trim().is_empty());
         assert!(!cfg.service_name.trim().is_empty());
         // Bad protocol ignored -> default grpc kept.
-        assert_eq!(
-            cfg.protocol,
-            cqlite_core::observability::OtelProtocol::Grpc
-        );
+        assert_eq!(cfg.protocol, cqlite_core::observability::OtelProtocol::Grpc);
         // Non-finite ratio ignored -> sane finite value.
         assert!(cfg.sampling_ratio.is_finite());
     }

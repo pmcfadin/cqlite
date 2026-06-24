@@ -80,15 +80,11 @@ fn query_execute_span_parents_read_path() {
     // At least one read-path span (the query.* sub-spans or storage/sstable
     // spans) must nest under query.execute. We assert the SELECT plan span, which
     // is created inside execute for SELECTs.
-    let read_child = spans
-        .iter()
-        .map(|s| s.name.as_str())
-        .find(|n| {
-            n.starts_with("query.")
-                && *n != "query.execute"
-                || n.starts_with("sstable.")
-                || n.starts_with("storage.")
-        });
+    let read_child = spans.iter().map(|s| s.name.as_str()).find(|n| {
+        n.starts_with("query.") && *n != "query.execute"
+            || n.starts_with("sstable.")
+            || n.starts_with("storage.")
+    });
     assert!(
         read_child.is_some(),
         "expected a read-path child span under query.execute; saw: {:?}",
@@ -120,11 +116,12 @@ fn write_flow_emits_write_spans() {
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let mut engine = write_helpers::open_engine(tmp.path());
         engine
-            .execute(
-                "INSERT INTO obs_ks.items (id, name, score) VALUES (1, 'one', 10)",
-            )
+            .execute("INSERT INTO obs_ks.items (id, name, score) VALUES (1, 'one', 10)")
             .expect("write row");
-        let info = rt.block_on(engine.flush()).expect("flush").expect("sstable");
+        let info = rt
+            .block_on(engine.flush())
+            .expect("flush")
+            .expect("sstable");
         assert!(info.data_path.exists(), "flush must produce a Data.db");
     });
 
@@ -170,7 +167,8 @@ fn compaction_flow_emits_compaction_spans() {
             .expect("current-thread runtime");
         let tmp = tempfile::TempDir::new().expect("temp dir");
         let mut engine = write_helpers::open_engine(tmp.path());
-        engine.set_merge_policy(Box::new(write_helpers::policy()))
+        engine
+            .set_merge_policy(Box::new(write_helpers::policy()))
             .expect("set policy");
 
         // Three small SSTables so STCS(min_threshold=3) selects them.
@@ -183,7 +181,9 @@ fn compaction_flow_emits_compaction_spans() {
                     ))
                     .expect("write row");
             }
-            rt.block_on(engine.flush()).expect("flush").expect("sstable");
+            rt.block_on(engine.flush())
+                .expect("flush")
+                .expect("sstable");
         }
 
         // maintenance_step uses an internal block_on; safe here because we run it
@@ -303,7 +303,9 @@ fn catalog_metrics_have_expected_names_units_and_error_labels() {
     // The induced category must be one of the bounded taxonomy values, never a
     // raw message.
     assert!(
-        ErrorCategory::ALL.iter().any(|c| c.as_str() == expected_category),
+        ErrorCategory::ALL
+            .iter()
+            .any(|c| c.as_str() == expected_category),
         "induced error category {expected_category} must be a bounded taxonomy value"
     );
 }
