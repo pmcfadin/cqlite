@@ -449,9 +449,11 @@ async fn slice_results_equal_full_scan_filtered_baseline() {
 //   * Found  -> ingest it, pick a real partition key (via a full scan), and
 //               assert PARITY (`pk = ? AND ck >= a AND ck < b`, a single bound,
 //               and `ck = ?` each return EXACTLY the full-scan-in-memory-filtered
-//               rows), plus an HONEST access path (ClusteringSlice if the seek
-//               engaged, else PartitionLookup — both acceptable; the load-bearing
-//               assertion for DESC is correctness/parity).
+//               rows), plus the access path: a discovered fixture has a non-empty
+//               `da-*-Rows.db` (a wide partition with a row index), so the seek
+//               MUST engage and report `ClusteringSlice` — accepting
+//               `PartitionLookup` would let a DESC-pushdown regression pass via
+//               full-partition decode + post-filter.
 //   * Absent -> skip (not fail) AFTER the real scan reported no matching table.
 //
 // FIXTURE STATUS: as of this change no DESC BTI fixture is present (the only BTI
@@ -646,17 +648,33 @@ fn has_nonempty_bti_rows_db(keyspace: &str, table: &str) -> bool {
     false
 }
 
-/// Genuinely detect a DESC-first-clustering BTI table: scan every schema `.cql`,
-/// parse each `CREATE TABLE`, and return the FIRST table whose first clustering
-/// column is DESC AND whose on-disk dir has a non-empty `da-*-Rows.db`.
+/// Recursively collect every `.cql` file under `dir` (including subdirectories
+/// such as `schemas/legacy/`).
+fn collect_cql_files(dir: &Path, out: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cql_files(&path, out);
+        } else if path.extension().map(|e| e == "cql").unwrap_or(false) {
+            out.push(path);
+        }
+    }
+}
+
+/// Genuinely detect a DESC-first-clustering BTI table: scan every schema `.cql`
+/// (recursively), parse each `CREATE TABLE`, and return the FIRST table whose
+/// first clustering column is DESC AND whose on-disk dir has a non-empty
+/// `da-*-Rows.db`.
 fn find_desc_bti_table() -> Option<DescBtiTable> {
     let dir = schemas_dir()?;
-    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
-        .ok()?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.extension().map(|e| e == "cql").unwrap_or(false))
-        .collect();
+    // Walk recursively: schema `.cql` files also live in subdirectories
+    // (e.g. test-data/schemas/legacy/), so a flat read_dir would miss DESC
+    // fixtures added there.
+    let mut files: Vec<PathBuf> = Vec::new();
+    collect_cql_files(&dir, &mut files);
     files.sort();
 
     for path in files {
@@ -968,9 +986,9 @@ async fn desc_clustering_slice_correct_or_documented_skip() {
         assert!(
             matches!(
                 path,
-                Some(AccessPath::ClusteringSlice) | Some(AccessPath::PartitionLookup)
+                Some(AccessPath::ClusteringSlice)
             ),
-            "Issue #954 DESC: access path must be honest (ClusteringSlice or PartitionLookup), got {path:?}",
+            "Issue #954 DESC: access path must be ClusteringSlice (discovered fixture has a non-empty da-*-Rows.db, so the seek must engage), got {path:?}",
         );
         eprintln!(
             "DESC two-bound [{}, {}): returned {} rows, path {:?}",
@@ -1003,10 +1021,7 @@ async fn desc_clustering_slice_correct_or_documented_skip() {
              a missing DESC bound-swap would silently drop the low-physical-byte matches",
         );
         assert!(
-            matches!(
-                path,
-                Some(AccessPath::ClusteringSlice) | Some(AccessPath::PartitionLookup)
-            ),
+            matches!(path, Some(AccessPath::ClusteringSlice)),
             "Issue #954 DESC: access path must be honest, got {path:?}",
         );
         eprintln!(
@@ -1037,10 +1052,7 @@ async fn desc_clustering_slice_correct_or_documented_skip() {
             "Issue #954 DESC: `{where_clause}` (equality) must equal the baseline",
         );
         assert!(
-            matches!(
-                path,
-                Some(AccessPath::ClusteringSlice) | Some(AccessPath::PartitionLookup)
-            ),
+            matches!(path, Some(AccessPath::ClusteringSlice)),
             "Issue #954 DESC: access path must be honest, got {path:?}",
         );
         eprintln!(
