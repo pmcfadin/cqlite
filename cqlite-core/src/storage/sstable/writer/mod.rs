@@ -544,6 +544,7 @@ impl SSTableWriter {
     /// ];
     /// writer.write_partition(key, mutations)?;
     /// ```
+    #[tracing::instrument(name = "writer.write_partition", skip(self, key, mutations))]
     pub fn write_partition(&mut self, key: DecoratedKey, mutations: Vec<Mutation>) -> Result<()> {
         // Validate token ordering
         if let Some(last_token) = self.last_token {
@@ -829,6 +830,13 @@ impl SSTableWriter {
         self.partition_count += 1;
         self.stats.increment_partition_count();
 
+        // Partitions-written counter (issue #1036). One per successful partition.
+        crate::observability::add_counter(
+            crate::observability::catalog::WRITE_PARTITIONS,
+            1,
+            &[],
+        );
+
         Ok(())
     }
 
@@ -1006,6 +1014,7 @@ impl SSTableWriter {
     /// let info = writer.finish().await?;
     /// println!("SSTable written to {}", info.data_path.display());
     /// ```
+    #[tracing::instrument(name = "writer.finish", skip(self))]
     pub async fn finish(mut self) -> Result<SSTableInfo> {
         // Create keyspace/table subdirectory structure so the reader can
         // extract the table name from the parent directory path. Owned clone so
@@ -1231,6 +1240,14 @@ impl SSTableWriter {
             components.push(ComponentEntry::new(SSTableComponent::Rows));
         }
         toc_writer.write(&components)?;
+
+        // Data.db bytes written by this SSTable writer (issue #1036). Counts
+        // flush and compaction output alike; finalize sums all components.
+        crate::observability::add_counter(
+            crate::observability::catalog::WRITE_BYTES,
+            data_size,
+            &[],
+        );
 
         Ok(SSTableInfo {
             data_path,

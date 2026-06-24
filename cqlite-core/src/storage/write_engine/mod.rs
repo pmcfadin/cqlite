@@ -564,7 +564,12 @@ impl WriteEngine {
     /// - WAL append fails
     /// - Memtable insert fails
     /// - Automatic flush fails (sync context only)
+    #[tracing::instrument(name = "write.mutation", skip(self, mutation))]
     pub fn write(&mut self, mutation: Mutation) -> Result<()> {
+        crate::observability::record_result("write", self.write_inner(mutation))
+    }
+
+    fn write_inner(&mut self, mutation: Mutation) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -597,6 +602,8 @@ impl WriteEngine {
         // 4. Increment the cumulative rows-written counter (Issue #486).
         //    Done after a successful insert so that failed writes are not counted.
         self.rows_written += 1;
+        crate::observability::add_counter(crate::observability::catalog::WRITE_MUTATIONS, 1, &[]);
+        self.record_memtable_gauges();
 
         // 5. Check if memtable should be flushed (only in non-async context)
         if self
@@ -639,7 +646,12 @@ impl WriteEngine {
     /// - WAL append fails
     /// - Memtable insert fails
     /// - Automatic flush fails
+    #[tracing::instrument(name = "write.mutation", skip(self, mutation))]
     pub async fn write_async(&mut self, mutation: Mutation) -> Result<()> {
+        crate::observability::record_result("write", self.write_async_inner(mutation).await)
+    }
+
+    async fn write_async_inner(&mut self, mutation: Mutation) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -672,6 +684,8 @@ impl WriteEngine {
         // 4. Increment the cumulative rows-written counter (Issue #486).
         //    Done after a successful insert so that failed writes are not counted.
         self.rows_written += 1;
+        crate::observability::add_counter(crate::observability::catalog::WRITE_MUTATIONS, 1, &[]);
+        self.record_memtable_gauges();
 
         // 5. Check if memtable should be flushed
         if self
@@ -687,6 +701,21 @@ impl WriteEngine {
         }
 
         Ok(())
+    }
+
+    /// Emit the current memtable size/row gauges (issue #1036). No-op when the
+    /// `observability` feature is off.
+    fn record_memtable_gauges(&self) {
+        crate::observability::record_gauge(
+            crate::observability::catalog::MEMTABLE_SIZE_BYTES,
+            self.memtable.size_bytes() as i64,
+            &[],
+        );
+        crate::observability::record_gauge(
+            crate::observability::catalog::MEMTABLE_ROWS,
+            self.memtable.row_count() as i64,
+            &[],
+        );
     }
 
     /// Execute a CQL statement (INSERT, UPDATE, DELETE)
@@ -717,7 +746,12 @@ impl WriteEngine {
     /// engine.execute("UPDATE users SET name = 'Bob' WHERE id = 1")?;
     /// engine.execute("DELETE FROM users WHERE id = 1")?;
     /// ```
+    #[tracing::instrument(name = "write.cql_execute", skip(self, statement))]
     pub fn execute(&mut self, statement: &str) -> Result<()> {
+        crate::observability::record_result("write", self.execute_inner(statement))
+    }
+
+    fn execute_inner(&mut self, statement: &str) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -726,17 +760,22 @@ impl WriteEngine {
 
         let trimmed = statement.trim();
 
-        // BATCH statements produce multiple mutations
+        // BATCH statements produce multiple mutations.
+        //
+        // Single-boundary error recording (issue #1036): call the *unrecorded*
+        // `write_inner` here rather than the public `write`. `execute` already
+        // wraps this method in `record_result`, so the escaping error is counted
+        // exactly once at the public boundary instead of twice.
         if trimmed.len() >= 5 && trimmed.as_bytes()[..5].eq_ignore_ascii_case(b"BEGIN") {
             let mutations =
                 cql_to_mutation::convert_cql_to_mutations(trimmed, &self.config.schema)?;
             for mutation in mutations {
-                self.write(mutation)?;
+                self.write_inner(mutation)?;
             }
             Ok(())
         } else {
             let mutation = self.parse_cql_to_mutation(statement)?;
-            self.write(mutation)
+            self.write_inner(mutation)
         }
     }
 
@@ -756,14 +795,25 @@ impl WriteEngine {
     /// - Engine has been closed
     /// - SSTable write fails
     /// - WAL truncate fails
+    #[tracing::instrument(name = "flush.public", skip(self))]
     pub async fn flush(&mut self) -> Result<Option<SSTableInfo>> {
-        if self.closed.load(Ordering::SeqCst) {
-            return Err(Error::InvalidInput(
-                "WriteEngine has been closed".to_string(),
-            ));
-        }
+        // Single-boundary error recording (issue #1036): `flush` is a public API
+        // entry point, so it records here. The nested `flush_internal_async`
+        // helper is intentionally *unrecorded* to avoid double-counting when the
+        // write/close paths trigger a flush internally.
+        crate::observability::record_result(
+            "write",
+            async {
+                if self.closed.load(Ordering::SeqCst) {
+                    return Err(Error::InvalidInput(
+                        "WriteEngine has been closed".to_string(),
+                    ));
+                }
 
-        self.flush_internal_async().await
+                self.flush_internal_async().await
+            }
+            .await,
+        )
     }
 
     /// Internal synchronous flush helper.
@@ -776,12 +826,22 @@ impl WriteEngine {
         Ok(())
     }
 
-    /// Internal async flush implementation
+    /// Internal async flush implementation.
+    ///
+    /// This is an *unrecorded* inner helper (issue #1036): it never calls
+    /// `record_error`/`record_result` itself. Error counting happens exactly once
+    /// at the public boundary that invoked it (`flush`, `close`, or the
+    /// `write`/`write_async` auto-flush path, all of which wrap their work in
+    /// `record_result`).
+    #[tracing::instrument(name = "flush.memtable", skip(self))]
     async fn flush_internal_async(&mut self) -> Result<Option<SSTableInfo>> {
         // Check if memtable is empty
         if self.memtable.is_empty() {
             return Ok(None);
         }
+
+        let flush_start = Instant::now();
+        let rows_to_flush = self.memtable.row_count() as u64;
 
         log::info!(
             "Flushing memtable: {} partitions, {} rows, {} bytes",
@@ -855,6 +915,23 @@ impl WriteEngine {
         // Increment generation for next flush
         self.generation += 1;
 
+        // Flush metrics (issue #1036): latency in seconds, rows/bytes flushed,
+        // and one L0 SSTable created. Emit the post-clear memtable gauges (now
+        // zero) and the current compaction lag (L0 pending) gauge.
+        {
+            use crate::observability::{self as obs, catalog};
+            obs::record_histogram(
+                catalog::FLUSH_DURATION,
+                flush_start.elapsed().as_secs_f64(),
+                &[],
+            );
+            obs::add_counter(catalog::FLUSH_ROWS, rows_to_flush, &[]);
+            obs::add_counter(catalog::FLUSH_BYTES, info.data_size, &[]);
+            obs::add_counter(catalog::FLUSH_SSTABLES, 1, &[]);
+            obs::record_gauge(catalog::COMPACTION_LAG, self.l0_count as i64, &[]);
+        }
+        self.record_memtable_gauges();
+
         Ok(Some(info))
     }
 
@@ -895,6 +972,10 @@ impl WriteEngine {
                 Err(e) => {
                     // If flush fails, log error and return it
                     log::error!("Failed to flush memtable during close: {}", e);
+                    // Single-boundary error recording (issue #1036): `close` is a
+                    // public entry point and `flush_internal_async` is unrecorded,
+                    // so record the escaping flush failure here, exactly once.
+                    crate::observability::record_error(&e, "write");
                     // Reset closed flag since we failed to close cleanly
                     self.closed.store(false, Ordering::SeqCst);
                     return Err(e);
@@ -1128,7 +1209,37 @@ impl WriteEngine {
     ///     println!("Merged {} rows in {:?}", report.rows_merged, report.time_spent);
     /// }
     /// ```
+    #[tracing::instrument(name = "compaction.maintenance_step", skip(self))]
     pub fn maintenance_step(&mut self, budget: Duration) -> Result<MaintenanceReport> {
+        // Budget requested for this step (issue #1037). Compared with the
+        // consumed budget below (the scheduler honors a ~10% tolerance).
+        crate::observability::record_histogram(
+            crate::observability::catalog::COMPACTION_BUDGET_REQUESTED,
+            budget.as_secs_f64(),
+            &[],
+        );
+
+        let result = self.maintenance_step_inner(budget);
+
+        // Budget consumed + lifetime-throughput counters (issue #1037). Recorded
+        // for every step (even a no-op one) so the budget-tolerance signal is
+        // complete; rows-merged is per-step and feeds the throughput rate when
+        // combined with COMPACTION_DURATION at finalize.
+        if let Ok(report) = &result {
+            use crate::observability::{self as obs, catalog};
+            obs::record_histogram(
+                catalog::COMPACTION_BUDGET_CONSUMED,
+                report.time_spent.as_secs_f64(),
+                &[],
+            );
+            obs::add_counter(catalog::COMPACTION_ROWS_MERGED, report.rows_merged, &[]);
+            obs::record_gauge(catalog::COMPACTION_LAG, self.l0_count as i64, &[]);
+        }
+
+        crate::observability::record_result("compaction", result)
+    }
+
+    fn maintenance_step_inner(&mut self, budget: Duration) -> Result<MaintenanceReport> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -1401,6 +1512,7 @@ impl WriteEngine {
         }
     }
 
+    #[tracing::instrument(name = "compaction.scan_candidates", skip(self))]
     fn scan_sstable_candidates(&self) -> Result<Vec<PathBuf>> {
         let mut candidates = Vec::new();
 
@@ -1482,6 +1594,7 @@ impl WriteEngine {
     /// SSTables — see [`merge::compute_max_purgeable_timestamp`]. When `Some`, a
     /// tombstone older than every outside SSTable is purged even in a partial
     /// compaction; `None` keeps the conservative #921 behavior (no purging).
+    #[tracing::instrument(name = "compaction.start_merge", skip(self, input_paths, max_purgeable_timestamp), fields(inputs = input_paths.len()))]
     fn start_merge(
         &mut self,
         input_paths: Vec<PathBuf>,
@@ -1670,12 +1783,21 @@ impl WriteEngine {
     ///
     /// If any step 2 rename fails, the partially-renamed output components are
     /// cleaned up and an error is returned. The input SSTables remain intact.
+    ///
+    /// Single-boundary error recording (issue #1037): this is an *unrecorded*
+    /// inner helper. Any error returned here escapes through
+    /// `maintenance_step_inner` to the public `maintenance_step`, which wraps the
+    /// whole step in `record_result("compaction", ..)` and counts it exactly
+    /// once. Recording here too would double-count finalize failures.
+    #[tracing::instrument(name = "compaction.finalize", skip(self, report))]
     async fn finalize_merge_async(&mut self, report: &mut MaintenanceReport) -> Result<()> {
         let merge = match self.active_merge.take() {
             Some(m) => m,
             None => return Ok(()),
         };
 
+        let input_count = merge.input_paths.len() as u64;
+        let merge_rows = merge.rows_merged;
         let elapsed = merge.started_at.elapsed();
         log::info!(
             "Finalizing compaction merge: {} rows, {:?} elapsed",
@@ -1764,6 +1886,8 @@ impl WriteEngine {
 
         // Perform the renames. On failure, remove any already-renamed files so
         // we don't leave a half-published SSTable, then return the error.
+        // Time the rename/publication-barrier phase (issue #1037).
+        let finalize_start = Instant::now();
         let mut renamed: Vec<PathBuf> = Vec::with_capacity(renames.len());
         let mut rename_error: Option<Error> = None;
 
@@ -1796,6 +1920,14 @@ impl WriteEngine {
             let _ = std::fs::remove_dir_all(&merge.tmp_dir);
             return Err(err);
         }
+
+        // Finalize/rename latency in seconds (issue #1037): the atomic
+        // publication barrier just completed successfully.
+        crate::observability::record_histogram(
+            crate::observability::catalog::COMPACTION_FINALIZE_DURATION,
+            finalize_start.elapsed().as_secs_f64(),
+            &[],
+        );
 
         // Step 3: All renames succeeded. The new SSTable is now visible.
         // Delete input SSTable files. If deletion fails we log a warning but do
@@ -1883,6 +2015,20 @@ impl WriteEngine {
         self.cumulative_stats.bytes_written += total_bytes_written;
         self.cumulative_stats.rows_merged += merge.rows_merged;
         self.cumulative_stats.total_time += elapsed;
+
+        // Compaction completion metrics (issue #1037): full-compaction duration
+        // (pairs with COMPACTION_ROWS_MERGED — emitted incrementally per
+        // maintenance step — for rows/sec throughput), bytes written across all
+        // output components, and SSTables in/out. Rows are NOT re-counted here to
+        // avoid double-counting the per-step COMPACTION_ROWS_MERGED increments.
+        let _ = merge_rows;
+        {
+            use crate::observability::{self as obs, catalog};
+            obs::record_histogram(catalog::COMPACTION_DURATION, elapsed.as_secs_f64(), &[]);
+            obs::add_counter(catalog::COMPACTION_BYTES_WRITTEN, total_bytes_written, &[]);
+            obs::add_counter(catalog::COMPACTION_SSTABLES_IN, input_count, &[]);
+            obs::add_counter(catalog::COMPACTION_SSTABLES_OUT, 1, &[]);
+        }
 
         log::info!(
             "Compaction complete: merged {} inputs → 1 output ({} bytes total across all components, {} rows, {:?})",

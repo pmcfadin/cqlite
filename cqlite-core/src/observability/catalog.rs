@@ -176,6 +176,142 @@ pub const SSTABLES_OPEN: &str = "cqlite.sstables.open";
 /// attributes.
 pub const COMPACTION_DURATION: &str = "cqlite.compaction.duration";
 
+// ---------------------------------------------------------------------------
+// Write path (issue #1036) — emitted from the `write-support` write engine.
+// ---------------------------------------------------------------------------
+
+/// `cqlite.write.mutations` — counter `{row}`.
+///
+/// Total mutations accepted by the write path (one per `write`/`write_async`
+/// call that successfully inserts into the memtable). No high-cardinality
+/// attributes.
+pub const WRITE_MUTATIONS: &str = "cqlite.write.mutations";
+
+/// `cqlite.memtable.size_bytes` — gauge `By`.
+///
+/// Current approximate in-memory size of the active memtable in bytes. No
+/// high-cardinality attributes.
+pub const MEMTABLE_SIZE_BYTES: &str = "cqlite.memtable.size_bytes";
+
+/// `cqlite.memtable.rows` — gauge `{row}`.
+///
+/// Current number of buffered rows in the active memtable. No high-cardinality
+/// attributes.
+pub const MEMTABLE_ROWS: &str = "cqlite.memtable.rows";
+
+/// `cqlite.wal.sync.duration` — histogram `s`.
+///
+/// Distribution of WAL `fsync` durations in seconds. No high-cardinality
+/// attributes.
+pub const WAL_SYNC_DURATION: &str = "cqlite.wal.sync.duration";
+
+/// `cqlite.flush.duration` — histogram `s`.
+///
+/// Distribution of memtable→SSTable flush durations in seconds. No
+/// high-cardinality attributes.
+pub const FLUSH_DURATION: &str = "cqlite.flush.duration";
+
+/// `cqlite.flush.rows` — counter `{row}`.
+///
+/// Total rows flushed from the memtable to L0 SSTables. No high-cardinality
+/// attributes.
+pub const FLUSH_ROWS: &str = "cqlite.flush.rows";
+
+/// `cqlite.flush.bytes` — counter `By`.
+///
+/// Total Data.db bytes produced by memtable flushes. No high-cardinality
+/// attributes.
+pub const FLUSH_BYTES: &str = "cqlite.flush.bytes";
+
+/// `cqlite.flush.sstables` — counter `{sstable}`.
+///
+/// Total L0 SSTables created by memtable flushes. No high-cardinality
+/// attributes.
+pub const FLUSH_SSTABLES: &str = "cqlite.flush.sstables";
+
+/// `cqlite.write.partitions` — counter `{partition}`.
+///
+/// Total partitions written by the SSTable writer (flush + compaction output).
+/// No high-cardinality attributes.
+pub const WRITE_PARTITIONS: &str = "cqlite.write.partitions";
+
+/// `cqlite.write.bytes` — counter `By`.
+///
+/// Total Data.db bytes produced by the SSTable writer across all output
+/// components' Data.db. No high-cardinality attributes.
+pub const WRITE_BYTES: &str = "cqlite.write.bytes";
+
+/// `cqlite.compression.ratio` — histogram `1`.
+///
+/// Per-chunk compression ratio (compressed bytes / uncompressed bytes; ≤1.0
+/// means the chunk shrank). Bounded attributes: [`attr::COMPRESSION`].
+pub const COMPRESSION_RATIO: &str = "cqlite.compression.ratio";
+
+// ---------------------------------------------------------------------------
+// Compaction & maintenance (issue #1037) — emitted from the write engine's
+// STCS compaction/k-way-merge path (write-support).
+// ---------------------------------------------------------------------------
+
+/// `cqlite.compaction.rows_merged` — counter `{row}`.
+///
+/// Total rows emitted by the k-way merge across all compactions. Combined with
+/// [`COMPACTION_DURATION`] this yields rows-merged-per-second throughput. No
+/// high-cardinality attributes.
+pub const COMPACTION_ROWS_MERGED: &str = "cqlite.compaction.rows_merged";
+
+/// `cqlite.compaction.bytes_written` — counter `By`.
+///
+/// Total bytes written to compaction output SSTables (all components). No
+/// high-cardinality attributes.
+pub const COMPACTION_BYTES_WRITTEN: &str = "cqlite.compaction.bytes_written";
+
+/// `cqlite.compaction.sstables_in` — counter `{sstable}`.
+///
+/// Total input SSTables consumed by compactions. No high-cardinality
+/// attributes.
+pub const COMPACTION_SSTABLES_IN: &str = "cqlite.compaction.sstables_in";
+
+/// `cqlite.compaction.sstables_out` — counter `{sstable}`.
+///
+/// Total output SSTables produced by compactions. No high-cardinality
+/// attributes.
+pub const COMPACTION_SSTABLES_OUT: &str = "cqlite.compaction.sstables_out";
+
+/// `cqlite.compaction.tombstones_purged` — counter `{tombstone}`.
+///
+/// Total tombstones GENUINELY PURGED (gc_grace / overlap-safe) during compaction,
+/// summed across cell tombstones, whole-row tombstones, range-tombstone markers,
+/// and complex-deletion (collection/UDT) markers. Counted only at the actual
+/// purge decision points in the merge/reconcile logic; ordinary last-write-wins
+/// reconciliation collapse is NOT counted. No high-cardinality attributes.
+pub const COMPACTION_TOMBSTONES_PURGED: &str = "cqlite.compaction.tombstones_purged";
+
+/// `cqlite.compaction.lag` — gauge `{sstable}`.
+///
+/// Current L0 SSTables pending compaction (compaction lag). No high-cardinality
+/// attributes.
+pub const COMPACTION_LAG: &str = "cqlite.compaction.lag";
+
+/// `cqlite.compaction.finalize.duration` — histogram `s`.
+///
+/// Distribution of compaction finalize (atomic rename / publication-barrier)
+/// durations in seconds. No high-cardinality attributes.
+pub const COMPACTION_FINALIZE_DURATION: &str = "cqlite.compaction.finalize.duration";
+
+/// `cqlite.compaction.budget.requested` — histogram `s`.
+///
+/// Distribution of maintenance budget requested per `maintenance_step` call, in
+/// seconds. No high-cardinality attributes.
+pub const COMPACTION_BUDGET_REQUESTED: &str = "cqlite.compaction.budget.requested";
+
+/// `cqlite.compaction.budget.consumed` — histogram `s`.
+///
+/// Distribution of maintenance budget actually consumed per `maintenance_step`
+/// call, in seconds (compare against [`COMPACTION_BUDGET_REQUESTED`] to track
+/// the ~10% tolerance honored by the scheduler). No high-cardinality
+/// attributes.
+pub const COMPACTION_BUDGET_CONSUMED: &str = "cqlite.compaction.budget.consumed";
+
 /// `cqlite.errors.total` — counter `{error}`.
 ///
 /// Total errors observed, the canonical error-rate signal (issue #1038).
@@ -200,6 +336,28 @@ pub const ALL_METRICS: &[&str] = &[
     SSTABLES_OPEN,
     COMPACTION_DURATION,
     ERRORS_TOTAL,
+    // Write path (#1036)
+    WRITE_MUTATIONS,
+    MEMTABLE_SIZE_BYTES,
+    MEMTABLE_ROWS,
+    WAL_SYNC_DURATION,
+    FLUSH_DURATION,
+    FLUSH_ROWS,
+    FLUSH_BYTES,
+    FLUSH_SSTABLES,
+    WRITE_PARTITIONS,
+    WRITE_BYTES,
+    COMPRESSION_RATIO,
+    // Compaction & maintenance (#1037)
+    COMPACTION_ROWS_MERGED,
+    COMPACTION_BYTES_WRITTEN,
+    COMPACTION_SSTABLES_IN,
+    COMPACTION_SSTABLES_OUT,
+    COMPACTION_TOMBSTONES_PURGED,
+    COMPACTION_LAG,
+    COMPACTION_FINALIZE_DURATION,
+    COMPACTION_BUDGET_REQUESTED,
+    COMPACTION_BUDGET_CONSUMED,
 ];
 
 #[cfg(test)]
