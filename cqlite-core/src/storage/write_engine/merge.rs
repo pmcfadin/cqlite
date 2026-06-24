@@ -2516,9 +2516,14 @@ impl KWayMerger {
         for (key, rt) in range_tombstones {
             if let Some(gc_before) = effective_gc_before {
                 if i64::from(rt.local_deletion_time as u32) < gc_before {
-                    // True gc-safe purge of a range-tombstone marker (issue
-                    // #1037): the covered cells were already removed above, so
-                    // dropping the now-redundant marker is a genuine purge.
+                    // Count the range-tombstone marker purge (issue #1037). NOTE:
+                    // this branch's DROP decision is PRE-EXISTING and gated on
+                    // gc_before only — unlike the cell/row/complex purge paths it
+                    // does not also require `rt.deletion_time < max_purgeable_timestamp`.
+                    // That overlap-guard gap is a separate compaction-correctness
+                    // bug tracked in #1061; this metric faithfully counts what the
+                    // code currently drops and is NOT guaranteed overlap-safe for
+                    // range tombstones until #1061 lands.
                     purges.range_tombstones += 1;
                     continue;
                 }
