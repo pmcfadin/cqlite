@@ -159,81 +159,39 @@ async fn test_index_db_parity_comprehensive() -> CqliteResult<()> {
     // Save validation artifacts
     save_validation_artifacts(&validation_results, &report, &config).await?;
 
-    // M1 Scope (Issue #66): Minimal Index.db parsing produces digests for parity
-    // Extended validation gated behind 'extended-index-validation' feature
+    // Strict mode (Issue #983): Index.db must parse and yield real partition entries.
+    // The legacy "Format may need updates for real C5 data" placeholder-accepting path
+    // has been removed — a parse failure now errors out in validate_table_index_parity
+    // before reaching here, so any result that arrives must carry real entries.
     #[cfg(feature = "extended-index-validation")]
     {
-        // Assert perfect parity for all tables - strict mode
         for result in &validation_results {
-            if result.perfect_parity {
-                println!(
-                    "✅ Perfect parity achieved for {}.{}",
-                    result.keyspace, result.table
-                );
-            } else if result
-                .errors
-                .iter()
-                .any(|e| e.contains("Format may need updates for real C5 data"))
-            {
-                // This is acceptable - real C5 format differences
-                println!(
-                    "⚠️ Parser limitations with real C5 format for {}.{}",
-                    result.keyspace, result.table
-                );
-                println!("   Note: Basic file validation passed, parser needs C5 format updates");
-            } else {
-                // This is a real failure in strict mode
-                assert!(
-                    result.perfect_parity,
-                    "Index.db parity validation failed for {}.{}: {} errors",
-                    result.keyspace,
-                    result.table,
-                    result.errors.len()
-                );
-            }
-
-            // Check for errors - allow C5 format-related errors
-            if !result.errors.is_empty()
-                && !result
-                    .errors
-                    .iter()
-                    .any(|e| e.contains("Format may need updates for real C5 data"))
-            {
-                assert!(
-                    result.errors.is_empty(),
-                    "Validation errors found for {}.{}: {:#?}",
-                    result.keyspace,
-                    result.table,
-                    result.errors
-                );
-            }
+            assert!(
+                result.perfect_parity,
+                "Index.db parity validation failed for {}.{}: {:#?}",
+                result.keyspace, result.table, result.errors
+            );
+            assert!(
+                result.errors.is_empty(),
+                "Validation errors found for {}.{}: {:#?}",
+                result.keyspace,
+                result.table,
+                result.errors
+            );
         }
     }
 
     #[cfg(not(feature = "extended-index-validation"))]
     {
-        // M1 Minimal validation: Basic file validation + digest extraction
         for result in &validation_results {
             if result.perfect_parity {
                 println!(
-                    "✅ Minimal parity achieved for {}.{} ({} partitions)",
+                    "✅ Index.db parity for {}.{} ({} partitions)",
                     result.keyspace, result.table, result.partition_count
                 );
-            } else if result
-                .errors
-                .iter()
-                .any(|e| e.contains("Format may need updates for real C5 data"))
-            {
-                // M1: Parser limitations acceptable, file validation passed
-                println!(
-                    "✅ M1 Scope: File validation passed for {}.{}",
-                    result.keyspace, result.table
-                );
-                println!("   (Extended parsing deferred to post-M1 with 'extended-index-validation' feature)");
             } else if result.partition_count > 0 {
-                // M1: Has partitions = minimal success
                 println!(
-                    "✅ M1 Scope: Basic Index.db parsing succeeded for {}.{} ({} partitions)",
+                    "✅ Index.db parsed for {}.{} ({} partitions)",
                     result.keyspace, result.table, result.partition_count
                 );
             } else {
@@ -341,31 +299,21 @@ async fn validate_table_index_parity(
     // Parse Index.db using our reader
     let cqlite_config = Config::default();
     let platform = Arc::new(Platform::new(&cqlite_config).await?);
-    let index_reader = match IndexReader::open(&index_file, platform.clone()).await {
-        Ok(reader) => reader,
-        Err(e) => {
-            // Handle parsing failures gracefully for real C5 data
-            println!("⚠️ Index.db parsing failed with real C5 data: {}", e);
-            println!(
-                "   This indicates format differences between expected and actual C5 SSTable format"
-            );
-
-            // For real datasets, verify file exists and do basic validation
-            if let Ok(metadata) = tokio::fs::metadata(&index_file).await {
-                let file_size = metadata.len();
-                println!("   Index.db exists, size: {} bytes", file_size);
-                if file_size > 0 {
-                    validation_result.perfect_parity = false; // Can't verify full parity without parsing
-                    validation_result.errors.push(format!(
-                        "Parser failed but file is valid (size: {} bytes). Format may need updates for real C5 data.", 
-                        file_size
-                    ));
-                    return Ok(validation_result);
-                }
-            }
-            return Err(e);
-        }
-    };
+    // Strict mode (Issue #983): a parse failure on a real Cassandra Index.db is a hard
+    // failure. The lenient "Parser failed but file is valid / Format may need updates"
+    // fallback that previously let parse errors pass has been removed — strict parity
+    // never accepts a placeholder or a non-parsing index. Byte-level parity is owned by
+    // cqlite-core/tests/sstable_parity_index_db_test.rs.
+    let index_reader = IndexReader::open(&index_file, platform.clone())
+        .await
+        .map_err(|e| {
+            cqlite_core::Error::corruption(format!(
+                "STRICT: Index.db parse failed for {}.{} ({}): {e}",
+                table_info.keyspace,
+                table_info.table,
+                index_file.display(),
+            ))
+        })?;
 
     // Get partition entries from our reader
     let partition_entries = index_reader.get_partition_entries();
@@ -449,148 +397,14 @@ async fn validate_table_index_parity(
     Ok(validation_result)
 }
 
-/// Parity comparison result
-#[allow(dead_code)]
-struct ParityComparisonResult {
-    key_digest_matches: Vec<bool>,
-    offset_matches: Vec<bool>,
-    errors: Vec<String>,
-    perfect_parity: bool,
-}
-
-/// Compare Index.db outputs between our reader and sstabledump
-#[allow(dead_code)]
-async fn compare_index_outputs(
-    our_entries: &[cqlite_core::storage::sstable::index_reader::PartitionIndexEntry],
-    sstabledump_output: &str,
-) -> CqliteResult<ParityComparisonResult> {
-    let mut key_digest_matches = Vec::new();
-    let mut offset_matches = Vec::new();
-    let mut errors = Vec::new();
-
-    // Parse sstabledump output to extract index information
-    let sstabledump_entries = parse_sstabledump_index_output(sstabledump_output)?;
-
-    if our_entries.len() != sstabledump_entries.len() {
-        errors.push(format!(
-            "Partition count mismatch: our {} vs sstabledump {}",
-            our_entries.len(),
-            sstabledump_entries.len()
-        ));
-    }
-
-    // Compare entries one by one
-    let min_count = our_entries.len().min(sstabledump_entries.len());
-    for i in 0..min_count {
-        let our_entry = &our_entries[i];
-        let sstabledump_entry = &sstabledump_entries[i];
-
-        // Compare key digests
-        let digest_match = our_entry.key_digest.as_ref() == sstabledump_entry.key_digest.as_slice();
-        key_digest_matches.push(digest_match);
-        if !digest_match {
-            errors.push(format!(
-                "Key digest mismatch at index {}: our {:02x?} vs sstabledump {:02x?}",
-                i, our_entry.key_digest, sstabledump_entry.key_digest
-            ));
-        }
-
-        // Compare data offsets
-        let offset_match = our_entry.data_offset == sstabledump_entry.data_offset;
-        offset_matches.push(offset_match);
-        if !offset_match {
-            errors.push(format!(
-                "Data offset mismatch at index {}: our {} vs sstabledump {}",
-                i, our_entry.data_offset, sstabledump_entry.data_offset
-            ));
-        }
-
-        // Compare promoted index presence
-        let our_has_promoted = our_entry.promoted_index.is_some();
-        let sstabledump_has_promoted = sstabledump_entry.promoted_index.is_some();
-        if our_has_promoted != sstabledump_has_promoted {
-            errors.push(format!(
-                "Promoted index presence mismatch at index {}: our {} vs sstabledump {}",
-                i, our_has_promoted, sstabledump_has_promoted
-            ));
-        }
-    }
-
-    let perfect_parity = errors.is_empty();
-
-    Ok(ParityComparisonResult {
-        key_digest_matches,
-        offset_matches,
-        errors,
-        perfect_parity,
-    })
-}
-
-/// Simplified sstabledump index entry for comparison
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct SstabledumpIndexEntry {
-    key_digest: Vec<u8>,
-    data_offset: u64,
-    #[allow(dead_code)]
-    data_size: u32,
-    promoted_index: Option<()>, // Simplified for comparison
-}
-
-/// Parse sstabledump output to extract index entries
-#[allow(dead_code)]
-fn parse_sstabledump_index_output(output: &str) -> CqliteResult<Vec<SstabledumpIndexEntry>> {
-    let mut entries = Vec::new();
-
-    // Parse sstabledump output format (simplified parsing for demo)
-    // Real implementation would parse the actual sstabledump JSON/text format
-    for (line_num, line) in output.lines().enumerate() {
-        if line.contains("Partition") && line.contains("offset") {
-            // Example parsing - real implementation would be more robust
-            if let Some(offset_str) = extract_offset_from_line(line) {
-                if let Ok(offset) = offset_str.parse::<u64>() {
-                    entries.push(SstabledumpIndexEntry {
-                        key_digest: format!("digest_{}", line_num).into_bytes(), // Placeholder
-                        data_offset: offset,
-                        data_size: 0,         // Would be parsed from output
-                        promoted_index: None, // Would be detected from output
-                    });
-                }
-            }
-        }
-    }
-
-    // If we can't parse sstabledump output properly, create placeholder entries
-    // that match real C5 structure for testing purposes
-    if entries.is_empty() {
-        // This is a fallback for real C5 dataset testing when sstabledump unavailable
-        println!("⚠️ Could not parse sstabledump output, using C5-compatible placeholder");
-        entries.push(SstabledumpIndexEntry {
-            key_digest: b"c5_real_digest".to_vec(),
-            data_offset: 0,
-            data_size: 2048, // More realistic for real C5 data
-            promoted_index: None,
-        });
-    }
-
-    Ok(entries)
-}
-
-/// Extract offset value from sstabledump output line
-#[allow(dead_code)]
-fn extract_offset_from_line(line: &str) -> Option<&str> {
-    // Simple regex-like extraction - real implementation would use proper parsing
-    if let Some(start) = line.find("offset:") {
-        let remainder = &line[start + 7..];
-        if let Some(end) = remainder.find(|c: char| !c.is_ascii_digit()) {
-            Some(&remainder[..end])
-        } else {
-            Some(remainder)
-        }
-    } else {
-        None
-    }
-}
+// REMOVED (Issue #983): the placeholder sstabledump-output comparison helpers
+// (`ParityComparisonResult`, `compare_index_outputs`, `SstabledumpIndexEntry`,
+// `parse_sstabledump_index_output`, `run_sstabledump_on_data`) fabricated synthetic
+// "c5_real_digest" / "c5_test_digest" reference entries when sstabledump output could
+// not be parsed. Strict mode must never compare against a fabricated reference, so the
+// whole dead placeholder path has been deleted. Real byte-level Index.db parity now
+// lives in cqlite-core/tests/sstable_parity_index_db_test.rs, which diffs against the
+// committed Cassandra Data.db.jsonl references.
 
 /// Validate promoted index paths for wide partition tables
 async fn validate_promoted_index_paths(
@@ -628,55 +442,6 @@ async fn validate_promoted_index_paths(
 
     validation_result.errors.extend(promoted_path_errors);
     Ok(())
-}
-
-/// Run sstabledump on the Data.db file to get reference output (DEPRECATED - Issue #89)
-#[allow(dead_code)]
-async fn run_sstabledump_on_data(
-    data_file: &Path,
-    _config: &IndexParityConfig,
-) -> CqliteResult<String> {
-    // Try to find sstabledump in PATH
-    let sstabledump_cmd = "sstabledump";
-
-    let output = tokio::process::Command::new(sstabledump_cmd)
-        .arg("-k") // Include keys
-        .arg("-i") // Include index information
-        .arg(data_file)
-        .output()
-        .await;
-
-    match output {
-        Ok(output) if output.status.success() => {
-            Ok(String::from_utf8_lossy(&output.stdout).to_string())
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            println!(
-                "⚠️ sstabledump failed (status: {}): {}",
-                output.status, stderr
-            );
-            // Return realistic placeholder for real C5 dataset testing
-            Ok(format!(
-                "Index entries for real C5 dataset {}:\nPartition at offset: 0\nkey_digest: test_digest\ndata_size: 1024\n",
-                data_file.display()
-            ))
-        }
-        Err(e) => {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                println!(
-                    "⚠️ sstabledump not found in PATH - using placeholder for real C5 testing"
-                );
-            } else {
-                println!("⚠️ sstabledump execution error: {}", e);
-            }
-            // Generate placeholder that matches real C5 structure
-            Ok(format!(
-                "Index entries for real C5 dataset {}:\nPartition at offset: 0\nkey_digest: c5_test_digest\ndata_size: 2048\n",
-                data_file.display()
-            ))
-        }
-    }
 }
 
 /// Generate comprehensive validation report
@@ -940,17 +705,13 @@ async fn test_simple_table_index_validation() -> CqliteResult<()> {
 
     #[cfg(not(feature = "extended-index-validation"))]
     {
-        // M1: Basic validation - file exists, has partitions or parsing attempted
-        if result.partition_count > 0
-            || result
-                .errors
-                .iter()
-                .any(|e| e.contains("Format may need updates"))
-        {
-            println!("✅ M1: simple_table basic validation passed");
-        } else {
-            panic!("M1 validation failed: {:#?}", result.errors);
-        }
+        // Strict (Issue #983): the placeholder-accepting "Format may need updates"
+        // branch was removed; a parsed Index.db must carry real partition entries.
+        assert!(
+            result.partition_count > 0,
+            "simple_table Index.db parsed to zero partitions: {:#?}",
+            result.errors
+        );
     }
 
     println!("✅ simple_table Index.db validation passed");
@@ -980,17 +741,12 @@ async fn test_sensor_data_index_validation() -> CqliteResult<()> {
 
     #[cfg(not(feature = "extended-index-validation"))]
     {
-        // M1: Basic validation - file exists, has partitions or parsing attempted
-        if result.partition_count > 0
-            || result
-                .errors
-                .iter()
-                .any(|e| e.contains("Format may need updates"))
-        {
-            println!("✅ M1: sensor_data basic validation passed");
-        } else {
-            panic!("M1 validation failed: {:#?}", result.errors);
-        }
+        // Strict (Issue #983): a parsed Index.db must carry real partition entries.
+        assert!(
+            result.partition_count > 0,
+            "sensor_data Index.db parsed to zero partitions: {:#?}",
+            result.errors
+        );
     }
 
     println!("✅ sensor_data Index.db validation passed");
@@ -1030,22 +786,17 @@ async fn test_wide_partition_table_promoted_index() -> CqliteResult<()> {
 
     #[cfg(not(feature = "extended-index-validation"))]
     {
-        // M1: Basic validation - file exists, has partitions or parsing attempted
-        if result.partition_count > 0
-            || result
-                .errors
-                .iter()
-                .any(|e| e.contains("Format may need updates"))
-        {
-            println!("✅ M1: wide_partition_table basic validation passed");
-            if result.promoted_index_count > 0 {
-                println!(
-                    "   (Found {} promoted index entries)",
-                    result.promoted_index_count
-                );
-            }
-        } else {
-            panic!("M1 validation failed: {:#?}", result.errors);
+        // Strict (Issue #983): a parsed Index.db must carry real partition entries.
+        assert!(
+            result.partition_count > 0,
+            "wide_partition_table Index.db parsed to zero partitions: {:#?}",
+            result.errors
+        );
+        if result.promoted_index_count > 0 {
+            println!(
+                "   (Found {} promoted index entries)",
+                result.promoted_index_count
+            );
         }
     }
 

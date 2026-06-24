@@ -274,6 +274,424 @@ scenarios:
         boundary comparison in the sstable_parity_summary_db_big suite.
 
   # ----------------------------------------------------------------------------
+  # index_db — strict Index.db byte parity (issue #983 / epic #968)
+  # ----------------------------------------------------------------------------
+  - id: cass.index_db.RowIndexEntryTest.partition_offsets
+    title: BIG Index.db partition data offsets vs Cassandra positions
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - RowIndexEntryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/sstable_parity_index_db_test.rs
+        notes: >-
+          Strict, fail-closed lane (big_index_db_entry_byte_and_field_parity).
+          Independently re-parses every committed BIG Index.db
+          ([key_len: u16 BE][raw key][data_offset: vint][promoted_len: vint][promoted])
+          and asserts IndexReader matches the on-disk bytes field-for-field, then
+          checks data offsets are strictly increasing and that successive offset
+          deltas equal the sstabledump JSONL partition-position deltas (for
+          uniform-key-length, non-static, non-counter fixtures — conditions derived
+          authoritatively from the parsed entries and the JSONL, not heuristics).
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_index_db_test big_index_db_entry_byte_and_field_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Index.db data offsets are relative to the Data.db data section while JSONL
+        positions are absolute file offsets; the per-partition Data.db header is a
+        constant only for uniform partition-key lengths without static blocks, so
+        successive deltas (not absolute values) are compared in that case.
+      failure_artifacts:
+        - target/cassandra-parity/index-db-diff.log
+      known_limitations: >-
+        Offset-delta equality is asserted only for uniform-key-length, non-static,
+        non-counter fixtures (the structural conditions under which the Data.db
+        partition header is constant); variable-key, static-row, and counter tables
+        are covered by count + raw-key + monotonic-offset parity only.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.index_db.RowIndexEntryTest.promoted_index_entries
+    title: BIG Index.db promoted-index (wide-partition) boundary metadata
+    status: partial
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - RowIndexEntryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/sstable_parity_index_db_test.rs
+        notes: >-
+          The strict BIG lane decodes the promoted-index byte length on every
+          on-disk entry and asserts that any partition carrying a promoted block has
+          a Data.db span strictly larger than the promoted block it indexes (the
+          wide-partition boundary invariant). The aggregate promoted-byte total is
+          reported per run.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Index.db
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      known_limitations: >-
+        No committed BIG fixture has partitions wide enough to emit a non-empty
+        promoted index, so the promoted-entry invariant is exercised structurally
+        (it activates the moment a wide-partition BIG fixture is added) but not yet
+        with non-zero promoted bytes.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        No committed BIG fixture triggers promoted-index emission (all partitions
+        are below the column_index_size threshold).
+      next_step: >-
+        Generate a wide-partition BIG fixture (partition exceeding
+        column_index_size_in_kb) and assert decoded promoted-index clustering
+        boundaries against the Cassandra reference.
+
+  - id: cass.index_db.SSTableReaderTest.point_lookup_offsets
+    title: BIG Index.db point/absent-key lookup offsets
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/sstable_parity_index_db_test.rs
+        notes: >-
+          For every UUID-keyed BIG fixture the strict lane resolves the first
+          partition key through IndexReader::lookup_partition and asserts the
+          returned data offset equals the first on-disk entry, resolves the last key
+          (range boundary), and asserts a data-derived absent key (bit-flipped real
+          key, verified not present) does not resolve.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_index_db_test big_index_db_entry_byte_and_field_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/index-db-diff.log
+      known_limitations: >-
+        Lookup parity is exercised on UUID-keyed fixtures where the raw on-disk key
+        encoding is unambiguous (the 16 UUID bytes).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.index_db.SSTableScannerTest.range_boundaries
+    title: BIG Index.db key order and range boundaries
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableScannerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/sstable_parity_index_db_test.rs
+        notes: >-
+          The strict lane asserts the Index.db data offsets are strictly
+          monotonically increasing (token/key order parity) and exercises the first
+          and last partition keys as range boundaries through the live lookup table.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_index_db_test big_index_db_entry_byte_and_field_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/index-db-diff.log
+      known_limitations: >-
+        Range boundaries are validated as the first/last entries of the partition
+        index; cross-SSTable scan merge ordering is out of scope here.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.index_db.CorruptPrimaryIndexTest.big_primary_index_corruption
+    title: Truncated BIG Index.db fails explicitly
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: corruption-recovery
+      relevance: high
+      files:
+        - CorruptPrimaryIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/sstable_parity_index_db_test.rs
+        notes: >-
+          truncated_big_index_db_fails_explicitly truncates a committed BIG Index.db
+          mid-entry and asserts both the independent reparse and IndexReader surface
+          the truncation explicitly (error or a strictly smaller entry count) rather
+          than silently returning an empty set or falling back to a full scan.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Index.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_index_db_test truncated_big_index_db_fails_explicitly
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/index-db-diff.log
+      known_limitations: >-
+        Exercises mid-entry truncation; byte-flip corruption of individual VInt
+        offsets is not yet a distinct case.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.index_db.big.raw_partition_keys_and_offsets
+    title: BIG Index.db raw partition-key bytes and entry-byte parity
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - RowIndexEntryTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/sstable_parity_index_db_test.rs
+        notes: >-
+          Core entry-byte parity: every BIG Index.db is re-parsed independently and
+          IndexReader must match the on-disk key_len/raw-key/data_offset bytes
+          field-for-field. For UUID-keyed fixtures the raw key bytes are additionally
+          diffed against the 16-byte UUID encoding decoded from the sstabledump
+          JSONL partition key, and the partition count is asserted exactly equal.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_index_db_test big_index_db_entry_byte_and_field_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl
+      normalization: >-
+        JSONL single-column partition keys are decoded to their raw on-disk byte
+        encoding (UUID text -> 16 bytes) before comparison; composite-key byte
+        decoding is not attempted (those fixtures are covered by entry-byte +
+        count + offset parity).
+      failure_artifacts:
+        - target/cassandra-parity/index-db-diff.log
+      known_limitations: >-
+        Raw-key byte parity against the JSONL is asserted for single-UUID-keyed
+        fixtures; composite/text-keyed fixtures are covered by the reader-vs-disk
+        entry-byte parity and exact count parity.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.index_db.big.wide_partition_promoted_entries
+    title: BIG Index.db wide-partition promoted entries
+    status: partial
+    capability: index_summary
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - RowIndexEntryTest.java
+        - PartitionIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/sstable_parity_index_db_test.rs
+        notes: >-
+          The strict BIG lane decodes and validates the promoted-index byte length
+          per entry and the wide-partition span invariant; it reports the aggregate
+          promoted-byte count. No committed BIG fixture currently emits a non-empty
+          promoted index.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # needs a partition > column_index_size_in_kb
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      known_limitations: >-
+        Promoted-index clustering-boundary decoding is not yet compared against a
+        Cassandra reference because no committed BIG fixture is wide enough to emit
+        promoted entries.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        No committed wide BIG fixture exercises promoted clustering boundaries.
+      next_step: >-
+        Add a BIG fixture with a partition exceeding column_index_size_in_kb and
+        compare decoded promoted clustering boundaries to the Cassandra reference.
+
+  - id: cass.index_db.bti.index_component_discovery
+    title: BTI index-component discovery and classification
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - PartitionIndexTest.java
+        - IndexSummaryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_bti_partitions_rows
+        tests:
+          - cqlite-core/tests/sstable_parity_index_db_test.rs
+        notes: >-
+          bti_index_component_discovery parses the authoritative TOC for every BTI
+          (da) fixture and asserts the BTI primary-index components (Partitions.db +
+          Rows.db) are present and classified bti_specific, that the BIG Index.db /
+          Summary.db are absent on disk and never classified for a BTI fixture, and
+          that BTI is routed through a BTI-specific path rather than BIG primary-index
+          assumptions. The local-only test_da/wide_table fixture is skipped only when
+          its Data.db is absent (fail-closed otherwise).
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 BTI flush emits Partitions.db/Rows.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_index_db_test bti_index_component_discovery
+      reference_paths:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+      failure_artifacts:
+        - target/cassandra-parity/index-db-diff.log
+      known_limitations: >-
+        Validates BTI index-component discovery/classification and BIG/BTI
+        non-mixing; byte parity of the BTI Partitions.db/Rows.db trie payloads is a
+        separate scenario.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
   # statistics_metadata / schema_evolution
   # ----------------------------------------------------------------------------
   - id: cass.statistics_metadata.serialization_header
