@@ -636,6 +636,19 @@ impl SSTableReader {
     ) -> Result<Option<Value>> {
         use crate::observability::{self as obs, catalog};
 
+        // Issue #1034: BTI ("da") readers resolve partitions via the Partitions.db
+        // trie, which is the AUTHORITATIVE presence oracle. Branch to the trie path
+        // FIRST and skip the bloom/Index.db pre-check entirely. This mirrors `get()`
+        // (which routes BTI to `bti_point_lookup` → `lookup_partition_via_bti_trie`)
+        // and is required for correctness: a BTI bloom false negative must never
+        // short-circuit the trie lookup. Routing through `get()` also guarantees the
+        // BTI presence check emits READ_BLOOM_CHECKS exactly once (from
+        // `lookup_partition_via_bti_trie`) instead of being counted here AND again on
+        // the fallback path. BIG readers keep the bloom → Index.db behavior below.
+        if self.bti_partitions_db.is_some() {
+            return self.get(table_id, key).await;
+        }
+
         // Step 1: Use bloom filter for existence check
         if let Some(bloom_filter) = &self.bloom_filter {
             let present = bloom_filter.might_contain(key.as_bytes());
@@ -678,6 +691,19 @@ impl SSTableReader {
         parsing_context: &ParsingContext,
     ) -> Result<Option<Value>> {
         use crate::observability::{self as obs, catalog};
+
+        // Issue #1034: BTI ("da") readers resolve partitions via the Partitions.db
+        // trie keyed on RAW partition-key bytes, not Index.db key digests, so the
+        // schema-driven digest path below does not apply. Branch to the trie path
+        // FIRST and skip the bloom/Index.db pre-check entirely, mirroring `get()`
+        // (which routes BTI to `bti_point_lookup` → `lookup_partition_via_bti_trie`).
+        // This keeps BTI correct (a bloom false negative can never short-circuit the
+        // authoritative trie lookup) and ensures the BTI presence check emits
+        // READ_BLOOM_CHECKS exactly once instead of being double counted across this
+        // helper and its fallback. BIG readers keep the bloom → Index.db behavior.
+        if self.bti_partitions_db.is_some() {
+            return self.get(table_id, key).await;
+        }
 
         // Step 1: Use bloom filter for existence check
         if let Some(bloom_filter) = &self.bloom_filter {
