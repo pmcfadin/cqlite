@@ -2508,22 +2508,30 @@ impl KWayMerger {
         // Re-emit the surviving range tombstones as carrier entries so the writer
         // persists the markers (otherwise the shadowing above would resurrect the
         // covered rows from a non-compacted SSTable — issue #933 / roborev #959
-        // High #2). gc_grace purges a marker only when this compaction is
-        // overlap-safe AND the marker's `localDeletionTime` is strictly below
-        // `gcBefore` (coordinate with #845); the covered cells were already removed
-        // above, so dropping the now-redundant marker cannot resurrect data within
-        // this overlap-safe set.
+        // High #2). gc_grace purges a marker only when BOTH conditions hold,
+        // matching the cell/row/complex purge paths (issue #1061):
+        //   1. the marker's `localDeletionTime` is strictly below `gcBefore`
+        //      (gc-grace expired — coordinate with #845), AND
+        //   2. the marker's own deletion timestamp is strictly below
+        //      `max_purgeable_timestamp` (the min write timestamp of every
+        //      non-included overlapping SSTable — #935), proving it shadows
+        //      nothing outside the compaction set.
+        // For a full / overlap-safe compaction `max_purgeable_timestamp` is
+        // `i64::MAX`, which lets every gc-purgeable marker through unchanged for
+        // any realistic deletion timestamp (the same strict-`<`-against-`i64::MAX`
+        // convention the cell/row/complex gates use above). For a PARTIAL
+        // compaction with a finite overlap bound,
+        // condition 2 RETAINS a marker at/above the bound — without it the
+        // marker could be dropped while still shadowing data in a non-included
+        // SSTable, resurrecting that data (issue #1061).
         for (key, rt) in range_tombstones {
             if let Some(gc_before) = effective_gc_before {
-                if i64::from(rt.local_deletion_time as u32) < gc_before {
-                    // Count the range-tombstone marker purge (issue #1037). NOTE:
-                    // this branch's DROP decision is PRE-EXISTING and gated on
-                    // gc_before only — unlike the cell/row/complex purge paths it
-                    // does not also require `rt.deletion_time < max_purgeable_timestamp`.
-                    // That overlap-guard gap is a separate compaction-correctness
-                    // bug tracked in #1061; this metric faithfully counts what the
-                    // code currently drops and is NOT guaranteed overlap-safe for
-                    // range tombstones until #1061 lands.
+                if i64::from(rt.local_deletion_time as u32) < gc_before
+                    && rt.deletion_time < max_purgeable_timestamp
+                {
+                    // Count the range-tombstone marker purge (issue #1037). The
+                    // DROP is now overlap-safe: gated on gc_before AND the
+                    // overlap bound, like the other tombstone categories (#1061).
                     purges.range_tombstones += 1;
                     continue;
                 }
@@ -10186,7 +10194,7 @@ mod issue_873_preserve_row_tombstone_ldt {
 mod issue_845_gc_grace_purge {
     use super::*;
     use crate::schema::{KeyColumn, TableSchema};
-    use crate::storage::write_engine::mutation::DecoratedKey;
+    use crate::storage::write_engine::mutation::{ClusteringBound, DecoratedKey};
     use crate::types::{TombstoneInfo, TombstoneType};
     use std::collections::HashMap;
 
@@ -10682,6 +10690,102 @@ mod issue_845_gc_grace_purge {
         assert!(
             major.is_empty(),
             "a major (overlap-safe) compaction must PURGE the ancient tombstone"
+        );
+    }
+
+    /// #1061 (SAFETY-CRITICAL): the surviving-range-tombstone re-emit loop in
+    /// `merge_partition_rows` must gate a marker purge on BOTH `gc_before` AND
+    /// the overlap bound (`rt.deletion_time < max_purgeable_timestamp`), exactly
+    /// like the cell/row/complex purge paths. In a PARTIAL compaction with a
+    /// finite overlap bound, a range tombstone at/above that bound may still
+    /// shadow data in a non-included SSTable, so dropping it would resurrect
+    /// that data. This drives the gate through the real `merge_partition_rows`.
+    #[test]
+    fn issue_1061_range_tombstone_purge_respects_overlap_bound() {
+        const GC_BEFORE: i64 = 1_700_000_000;
+        // Old enough for the gc_grace condition to be satisfied on its own.
+        let ancient_ldt = (GC_BEFORE - 1) as i32;
+        // Finite overlap bound (min write timestamp of a non-included SSTable).
+        const BOUND: i64 = 2_000;
+
+        // Build a merger exactly like #921's: no runs, gc_before set, toggle
+        // `purge_safe` and `max_purgeable_timestamp`.
+        let merger = |purge_safe: bool, bound: Option<i64>| KWayMerger {
+            runs: vec![],
+            heap: BinaryHeap::new(),
+            current_partition: None,
+            schema: unclustered_schema(),
+            gc_before_secs: Some(GC_BEFORE),
+            now_secs: None,
+            purge_safe,
+            max_purgeable_timestamp: bound,
+        };
+
+        // A whole-partition range-tombstone CARRIER entry (issue #933): empty
+        // live row whose only payload is the range deletion.
+        let carrier = |deletion_time: i64| {
+            let rt = RangeTombstone {
+                start: ClusteringBound::Bottom,
+                end: ClusteringBound::Top,
+                deletion_time,
+                local_deletion_time: ancient_ldt,
+            };
+            MergeEntry::new(
+                0,
+                dk(1),
+                None,
+                deletion_time,
+                RowData::Live { cells: vec![] },
+            )
+            .with_range_deletion(rt)
+        };
+
+        // (1) PARTIAL compaction, marker AT the bound (`deletion_time == BOUND`):
+        // RETAINED. `BOUND < BOUND` is false, so the overlap guard blocks the
+        // purge even though the gc_grace condition (`ancient_ldt < gcBefore`) holds.
+        let at_bound = merger(false, Some(BOUND))
+            .merge_partition_rows(vec![carrier(BOUND)])
+            .expect("merge must succeed");
+        assert_eq!(
+            at_bound.len(),
+            1,
+            "a range tombstone AT the overlap bound must be RETAINED (#1061)"
+        );
+        assert!(
+            at_bound[0].range_deletion.is_some(),
+            "the retained entry must still carry the range-tombstone marker"
+        );
+
+        // (2) PARTIAL compaction, marker ABOVE the bound: also RETAINED.
+        let above_bound = merger(false, Some(BOUND))
+            .merge_partition_rows(vec![carrier(BOUND + 1_000)])
+            .expect("merge must succeed");
+        assert_eq!(
+            above_bound.len(),
+            1,
+            "a range tombstone ABOVE the overlap bound must be RETAINED (#1061)"
+        );
+
+        // (3) Control: PARTIAL compaction, marker strictly BELOW the bound AND
+        // gc_grace-expired: PURGED — proving the overlap guard does not disable
+        // purging wholesale.
+        let below_bound = merger(false, Some(BOUND))
+            .merge_partition_rows(vec![carrier(BOUND - 1)])
+            .expect("merge must succeed");
+        assert!(
+            below_bound.is_empty(),
+            "a gc-expired range tombstone strictly BELOW the overlap bound is purgeable"
+        );
+
+        // (4) Control: a MAJOR/overlap-safe compaction (`purge_safe = true`,
+        // bound collapses to i64::MAX) purges the same at-bound marker — the fix
+        // does not weaken the overlap-safe purge path.
+        let overlap_safe = merger(true, None)
+            .merge_partition_rows(vec![carrier(BOUND)])
+            .expect("merge must succeed");
+        assert!(
+            overlap_safe.is_empty(),
+            "an overlap-safe (major) compaction still purges the gc-expired marker"
         );
     }
 
