@@ -32,8 +32,10 @@ use futures::StreamExt;
 use tonic::{Request, Response, Status, Streaming};
 
 use cqlite_core::schema::{parse_cql_schema, TableSchema};
+use tracing::Instrument;
 
 use crate::filter::{FilterError, ScanSpec};
+use crate::obs::{rpc_span, RpcMetrics};
 use crate::producer::{DirSource, MergeProducer, ProducerError};
 use crate::ticket::{FlightTicket, TicketError};
 
@@ -137,6 +139,172 @@ impl FlightService for CqliteFlightService {
         &self,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
+        let span = rpc_span("get_flight_info", &request);
+        let mut metrics = RpcMetrics::start("get_flight_info");
+        // Run the body AND finish() inside the RPC span so error/status recording
+        // (record_status_error → Span::current()) tags THIS span, not whatever
+        // span happens to be current after `.instrument` has completed.
+        async {
+            let result = self.get_flight_info_inner(request).await;
+            finish(&mut metrics, result)
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn get_schema(
+        &self,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<SchemaResult>, Status> {
+        let span = rpc_span("get_schema", &request);
+        let mut metrics = RpcMetrics::start("get_schema");
+        async {
+            let result = self.get_schema_inner(request).await;
+            finish(&mut metrics, result)
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn do_get(
+        &self,
+        request: Request<Ticket>,
+    ) -> Result<Response<Self::DoGetStream>, Status> {
+        let span = rpc_span("do_get", &request);
+        let mut metrics = RpcMetrics::start("do_get");
+        // Run the read body AND finish() within the RPC span so the core
+        // query.execute / read-path spans nest under `flight.do_get`, and so
+        // error/status recording in finish() tags this span (not a stale current
+        // span after `.instrument` completes). The merge eagerly drains SSTables
+        // into memory, so the row/byte totals are known here and attributed here.
+        async {
+            let result = self.do_get_inner(request, &mut metrics).await;
+            finish(&mut metrics, result)
+        }
+        .instrument(span)
+        .await
+    }
+
+    async fn handshake(
+        &self,
+        request: Request<Streaming<HandshakeRequest>>,
+    ) -> Result<Response<Self::HandshakeStream>, Status> {
+        let span = rpc_span("handshake", &request);
+        let mut metrics = RpcMetrics::start("handshake");
+        // Enter the span so finish()'s error recording tags THIS RPC span.
+        span.in_scope(|| {
+            finish(
+                &mut metrics,
+                Err(Status::unimplemented("handshake is not supported")),
+            )
+        })
+    }
+
+    async fn list_flights(
+        &self,
+        request: Request<Criteria>,
+    ) -> Result<Response<Self::ListFlightsStream>, Status> {
+        let span = rpc_span("list_flights", &request);
+        let mut metrics = RpcMetrics::start("list_flights");
+        span.in_scope(|| {
+            finish(
+                &mut metrics,
+                Err(Status::unimplemented("list_flights is not yet supported")),
+            )
+        })
+    }
+
+    async fn poll_flight_info(
+        &self,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<PollInfo>, Status> {
+        let span = rpc_span("poll_flight_info", &request);
+        let mut metrics = RpcMetrics::start("poll_flight_info");
+        span.in_scope(|| {
+            finish(
+                &mut metrics,
+                Err(Status::unimplemented("poll_flight_info is not supported")),
+            )
+        })
+    }
+
+    async fn do_put(
+        &self,
+        request: Request<Streaming<FlightData>>,
+    ) -> Result<Response<Self::DoPutStream>, Status> {
+        let span = rpc_span("do_put", &request);
+        let mut metrics = RpcMetrics::start("do_put");
+        span.in_scope(|| {
+            finish(
+                &mut metrics,
+                Err(Status::unimplemented(
+                    "do_put is not supported (read-only server)",
+                )),
+            )
+        })
+    }
+
+    async fn do_exchange(
+        &self,
+        request: Request<Streaming<FlightData>>,
+    ) -> Result<Response<Self::DoExchangeStream>, Status> {
+        let span = rpc_span("do_exchange", &request);
+        let mut metrics = RpcMetrics::start("do_exchange");
+        span.in_scope(|| {
+            finish(
+                &mut metrics,
+                Err(Status::unimplemented("do_exchange is not supported")),
+            )
+        })
+    }
+
+    async fn do_action(
+        &self,
+        request: Request<Action>,
+    ) -> Result<Response<Self::DoActionStream>, Status> {
+        let span = rpc_span("do_action", &request);
+        let mut metrics = RpcMetrics::start("do_action");
+        span.in_scope(|| {
+            finish(
+                &mut metrics,
+                Err(Status::unimplemented("do_action is not supported")),
+            )
+        })
+    }
+
+    async fn list_actions(
+        &self,
+        request: Request<Empty>,
+    ) -> Result<Response<Self::ListActionsStream>, Status> {
+        let span = rpc_span("list_actions", &request);
+        let mut metrics = RpcMetrics::start("list_actions");
+        span.in_scope(|| {
+            finish(
+                &mut metrics,
+                Err(Status::unimplemented("list_actions is not supported")),
+            )
+        })
+    }
+}
+
+/// Finalise a handler: on success, mark the metrics OK; on error, record the
+/// error-rate signal (subsystem `flight`). `RpcMetrics` emits the request
+/// counter, latency histogram, and in-flight gauge on drop, so returning the
+/// result here (which drops `metrics` at the call site) closes the RPC.
+fn finish<T>(metrics: &mut RpcMetrics, result: Result<T, Status>) -> Result<T, Status> {
+    match &result {
+        Ok(_) => metrics.ok(),
+        Err(status) => crate::obs::record_status_error(status),
+    }
+    result
+}
+
+impl CqliteFlightService {
+    /// Body of [`FlightService::get_flight_info`], run inside the RPC span.
+    async fn get_flight_info_inner(
+        &self,
+        request: Request<FlightDescriptor>,
+    ) -> Result<Response<FlightInfo>, Status> {
         let descriptor = request.into_inner();
         let ticket = FlightTicket::from_bytes(&descriptor.cmd)?;
         let arrow_schema = self.arrow_schema_for(&ticket)?;
@@ -150,7 +318,8 @@ impl FlightService for CqliteFlightService {
         Ok(Response::new(info))
     }
 
-    async fn get_schema(
+    /// Body of [`FlightService::get_schema`], run inside the RPC span.
+    async fn get_schema_inner(
         &self,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<SchemaResult>, Status> {
@@ -165,10 +334,13 @@ impl FlightService for CqliteFlightService {
         Ok(Response::new(schema_result))
     }
 
-    async fn do_get(
+    /// Body of [`FlightService::do_get`], run inside the RPC span. Reports the
+    /// rows + payload bytes produced by the merge into `metrics`.
+    async fn do_get_inner(
         &self,
         request: Request<Ticket>,
-    ) -> Result<Response<Self::DoGetStream>, Status> {
+        metrics: &mut RpcMetrics,
+    ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let ticket = FlightTicket::from_bytes(&request.into_inner().ticket)?;
         let producer = self.build_producer(&ticket)?;
         let schema_ref = Arc::new(producer.arrow_schema()?);
@@ -187,6 +359,16 @@ impl FlightService for CqliteFlightService {
             .await
             .map_err(|e| Status::internal(format!("merge task panicked: {e}")))??;
 
+        // Attribute rows + in-memory payload bytes to this RPC. `get_array_memory_size`
+        // is the buffer footprint of the batch (pre-IPC framing) — a bounded, cheap
+        // count, never the payload contents.
+        let rows: u64 = batches.iter().map(|b| b.num_rows() as u64).sum();
+        let bytes: u64 = batches
+            .iter()
+            .map(|b| b.get_array_memory_size() as u64)
+            .sum();
+        metrics.add_rows_bytes(rows, bytes);
+
         // `with_schema` emits the Arrow schema as the first Flight message even
         // when no record batches follow, so an empty result still carries the schema.
         let input = futures::stream::iter(batches.into_iter().map(Ok::<RecordBatch, FlightError>));
@@ -196,57 +378,6 @@ impl FlightService for CqliteFlightService {
             .map(|res| res.map_err(|e| Status::internal(e.to_string())));
 
         Ok(Response::new(Box::pin(encoded)))
-    }
-
-    async fn handshake(
-        &self,
-        _request: Request<Streaming<HandshakeRequest>>,
-    ) -> Result<Response<Self::HandshakeStream>, Status> {
-        Err(Status::unimplemented("handshake is not supported"))
-    }
-
-    async fn list_flights(
-        &self,
-        _request: Request<Criteria>,
-    ) -> Result<Response<Self::ListFlightsStream>, Status> {
-        Err(Status::unimplemented("list_flights is not yet supported"))
-    }
-
-    async fn poll_flight_info(
-        &self,
-        _request: Request<FlightDescriptor>,
-    ) -> Result<Response<PollInfo>, Status> {
-        Err(Status::unimplemented("poll_flight_info is not supported"))
-    }
-
-    async fn do_put(
-        &self,
-        _request: Request<Streaming<FlightData>>,
-    ) -> Result<Response<Self::DoPutStream>, Status> {
-        Err(Status::unimplemented(
-            "do_put is not supported (read-only server)",
-        ))
-    }
-
-    async fn do_exchange(
-        &self,
-        _request: Request<Streaming<FlightData>>,
-    ) -> Result<Response<Self::DoExchangeStream>, Status> {
-        Err(Status::unimplemented("do_exchange is not supported"))
-    }
-
-    async fn do_action(
-        &self,
-        _request: Request<Action>,
-    ) -> Result<Response<Self::DoActionStream>, Status> {
-        Err(Status::unimplemented("do_action is not supported"))
-    }
-
-    async fn list_actions(
-        &self,
-        _request: Request<Empty>,
-    ) -> Result<Response<Self::ListActionsStream>, Status> {
-        Err(Status::unimplemented("list_actions is not supported"))
     }
 }
 
