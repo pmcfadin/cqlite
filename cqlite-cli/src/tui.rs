@@ -22,9 +22,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 pub async fn start_tui_mode(db_path: &Path, config: &Config, database: Database) -> Result<()> {
-    // CRITICAL: Disable all logging to prevent messages from bleeding into TUI display
-    // env_logger is already initialized in main.rs, so we can't reinitialize it.
-    // Instead, set the global max log level to Off to suppress all log output.
+    // CRITICAL: Disable log output to prevent messages from bleeding into the
+    // TUI display. The unified tracing subscriber is already installed in
+    // main.rs (Issue #1033) and cannot be replaced, so we suppress at the `log`
+    // facade level — this silences the `log::*` call sites bridged into tracing.
     log::set_max_level(log::LevelFilter::Off);
 
     // Initialize the database

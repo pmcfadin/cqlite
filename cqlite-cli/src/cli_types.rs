@@ -151,6 +151,42 @@ pub struct Cli {
     #[arg(long, requires = "writable")]
     pub flush: bool,
 
+    // ---- Observability / OpenTelemetry (Issue #1033, Epic #1031) ----
+    // These flags carry `env = "CQLITE_OTEL_*"` fallbacks so a value can come
+    // from either the flag or the env var (explicit flag wins). They map into
+    // `cqlite_core::observability::ObservabilityConfig` via the config layer.
+    // When the CLI is built without the `observability` feature these still
+    // parse and configure init(), but OTel export is a no-op (the foundation's
+    // inert guard), preserving today's behavior.
+    /// Enable OpenTelemetry export (true/false). Requires an OTLP collector at
+    /// --otel-endpoint and a build with `--features observability` to export.
+    #[arg(long, value_name = "BOOL", env = "CQLITE_OTEL_ENABLED")]
+    pub otel_enabled: Option<bool>,
+
+    /// OTLP collector endpoint (gRPC endpoint or HTTP base URL).
+    #[arg(long, value_name = "URL", env = "CQLITE_OTEL_ENDPOINT")]
+    pub otel_endpoint: Option<String>,
+
+    /// OTLP wire protocol: grpc or http.
+    #[arg(long, value_name = "PROTO", env = "CQLITE_OTEL_PROTOCOL")]
+    pub otel_protocol: Option<String>,
+
+    /// OpenTelemetry service.name resource attribute.
+    #[arg(long, value_name = "NAME", env = "CQLITE_OTEL_SERVICE_NAME")]
+    pub otel_service_name: Option<String>,
+
+    /// OpenTelemetry service.version resource attribute.
+    #[arg(long, value_name = "VER", env = "CQLITE_OTEL_SERVICE_VERSION")]
+    pub otel_service_version: Option<String>,
+
+    /// Trace sampling ratio in [0.0, 1.0].
+    #[arg(long, value_name = "RATIO", env = "CQLITE_OTEL_SAMPLING_RATIO")]
+    pub otel_sampling_ratio: Option<f64>,
+
+    /// OTLP exporter timeout in milliseconds.
+    #[arg(long, value_name = "MS", env = "CQLITE_OTEL_TIMEOUT_MS")]
+    pub otel_timeout_ms: Option<u64>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

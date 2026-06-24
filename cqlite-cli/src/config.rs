@@ -15,6 +15,8 @@ pub struct Config {
     #[serde(default)]
     pub logging: LoggingConfig,
     #[serde(default)]
+    pub observability: ObservabilityConfig,
+    #[serde(default)]
     pub repl: ReplConfig,
     pub data_directory: Option<PathBuf>,
     pub default_keyspace: Option<String>,
@@ -142,6 +144,79 @@ pub enum LogFormat {
     Pretty,
 }
 
+/// OpenTelemetry / observability settings (Issue #1033, Epic #1031).
+///
+/// Mirrors `LoggingConfig` in spirit: a file/env/flag-driven section that the
+/// precedence chain (user -> project -> --config -> env -> flag) populates and
+/// `main` maps into `cqlite_core::observability::ObservabilityConfig` before
+/// calling `observability::init`. All fields are optional so that an unset
+/// field falls through to the core defaults (disabled, localhost:4317, grpc,
+/// service name "cqlite", full sampling).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ObservabilityConfig {
+    /// Master enable switch. When `None`, defers to the core default (disabled).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    /// OTLP collector endpoint (gRPC endpoint or HTTP base URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// Wire protocol: `grpc` or `http`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
+    /// `service.name` resource attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_name: Option<String>,
+    /// `service.version` resource attribute.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_version: Option<String>,
+    /// Trace-ID-ratio sampling probability in `[0.0, 1.0]`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sampling_ratio: Option<f64>,
+    /// Exporter export timeout in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
+impl ObservabilityConfig {
+    /// Map the merged CLI observability settings into the core
+    /// `cqlite_core::observability::ObservabilityConfig`.
+    ///
+    /// Starts from the core defaults and overrides only the fields that were
+    /// explicitly set somewhere in the precedence chain. An unrecognised
+    /// protocol string is ignored (the core default `grpc` is kept) rather than
+    /// erroring, matching the foundation's lenient `from_env` semantics.
+    pub fn to_core(&self) -> cqlite_core::observability::ObservabilityConfig {
+        use cqlite_core::observability::{ObservabilityConfig as CoreObs, OtelProtocol};
+        use std::time::Duration;
+
+        let mut builder = CoreObs::builder();
+        if let Some(enabled) = self.enabled {
+            builder = builder.enabled(enabled);
+        }
+        if let Some(ref endpoint) = self.endpoint {
+            builder = builder.endpoint(endpoint.clone());
+        }
+        if let Some(ref protocol) = self.protocol {
+            if let Some(p) = OtelProtocol::parse(protocol) {
+                builder = builder.protocol(p);
+            }
+        }
+        if let Some(ref name) = self.service_name {
+            builder = builder.service_name(name.clone());
+        }
+        if let Some(ref version) = self.service_version {
+            builder = builder.service_version(version.clone());
+        }
+        if let Some(ratio) = self.sampling_ratio {
+            builder = builder.sampling_ratio(ratio);
+        }
+        if let Some(ms) = self.timeout_ms {
+            builder = builder.timeout(Duration::from_millis(ms));
+        }
+        builder.build()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReplConfig {
     pub enable_history: bool,
@@ -164,6 +239,7 @@ impl Default for Config {
             output: OutputSettings::default(),
             performance: PerformanceConfig::default(),
             logging: LoggingConfig::default(),
+            observability: ObservabilityConfig::default(),
             repl: ReplConfig::default(),
             data_directory: None,
             default_keyspace: None,
@@ -557,6 +633,33 @@ fn merge_partial_config(base: Config, overlay: Config) -> Config {
         },
         performance: overlay.performance,
         logging: overlay.logging,
+        observability: ObservabilityConfig {
+            enabled: overlay.observability.enabled.or(base.observability.enabled),
+            endpoint: overlay
+                .observability
+                .endpoint
+                .or(base.observability.endpoint),
+            protocol: overlay
+                .observability
+                .protocol
+                .or(base.observability.protocol),
+            service_name: overlay
+                .observability
+                .service_name
+                .or(base.observability.service_name),
+            service_version: overlay
+                .observability
+                .service_version
+                .or(base.observability.service_version),
+            sampling_ratio: overlay
+                .observability
+                .sampling_ratio
+                .or(base.observability.sampling_ratio),
+            timeout_ms: overlay
+                .observability
+                .timeout_ms
+                .or(base.observability.timeout_ms),
+        },
 
         // Legacy fields (backward compat)
         enable_history: overlay.enable_history.or(base.enable_history),
@@ -701,6 +804,15 @@ impl ConfigBuilder {
             self.config.output_mode = Some(val);
         }
 
+        // CQLITE_OTEL_* (Issue #1033, Epic #1031)
+        //
+        // The `--otel-*` clap flags carry `env = "CQLITE_OTEL_*"` fallbacks, so
+        // clap already merges env -> explicit flag (explicit flag wins) into the
+        // parsed `Cli`. That merged value is applied in `with_flags`, which runs
+        // after this step and therefore correctly overrides any config-file
+        // value. We deliberately do NOT read the OTEL env vars again here to
+        // avoid two sources fighting; precedence stays file < env < flag.
+
         Ok(self)
     }
 
@@ -754,6 +866,32 @@ impl ConfigBuilder {
         // Cassandra version hint (Issue #130)
         if let Some(ref version) = cli.cassandra_version {
             self.config.cassandra_version = Some(version.clone());
+        }
+
+        // Observability / OpenTelemetry (Issue #1033, Epic #1031).
+        // Each `--otel-*` flag already carries its `CQLITE_OTEL_*` env fallback
+        // (resolved by clap, explicit flag winning), so applying the parsed
+        // value here gives the documented file < env < flag precedence.
+        if let Some(enabled) = cli.otel_enabled {
+            self.config.observability.enabled = Some(enabled);
+        }
+        if let Some(ref endpoint) = cli.otel_endpoint {
+            self.config.observability.endpoint = Some(endpoint.clone());
+        }
+        if let Some(ref protocol) = cli.otel_protocol {
+            self.config.observability.protocol = Some(protocol.clone());
+        }
+        if let Some(ref name) = cli.otel_service_name {
+            self.config.observability.service_name = Some(name.clone());
+        }
+        if let Some(ref version) = cli.otel_service_version {
+            self.config.observability.service_version = Some(version.clone());
+        }
+        if let Some(ratio) = cli.otel_sampling_ratio {
+            self.config.observability.sampling_ratio = Some(ratio);
+        }
+        if let Some(ms) = cli.otel_timeout_ms {
+            self.config.observability.timeout_ms = Some(ms);
         }
 
         self
@@ -949,6 +1087,96 @@ mod tests {
         let config = Config::default();
         assert_eq!(config.cassandra_version, None);
         assert_eq!(config.resolved_version, None);
+    }
+
+    // Observability config tests (Issue #1033, Epic #1031)
+
+    #[test]
+    fn test_observability_default_maps_to_core_disabled_defaults() {
+        // An all-None CLI observability section must yield the core defaults:
+        // disabled, localhost:4317, grpc, service "cqlite", full sampling.
+        let obs = ObservabilityConfig::default();
+        let core = obs.to_core();
+        assert!(!core.enabled);
+        assert_eq!(
+            core.endpoint,
+            cqlite_core::observability::config::DEFAULT_ENDPOINT
+        );
+        assert_eq!(
+            core.protocol,
+            cqlite_core::observability::OtelProtocol::Grpc
+        );
+        assert_eq!(
+            core.service_name,
+            cqlite_core::observability::config::DEFAULT_SERVICE_NAME
+        );
+        assert_eq!(core.sampling_ratio, 1.0);
+    }
+
+    #[test]
+    fn test_observability_to_core_applies_set_fields() {
+        let obs = ObservabilityConfig {
+            enabled: Some(true),
+            endpoint: Some("http://collector:4318".to_string()),
+            protocol: Some("http".to_string()),
+            service_name: Some("svc".to_string()),
+            service_version: Some("9.9.9".to_string()),
+            sampling_ratio: Some(0.5),
+            timeout_ms: Some(2500),
+        };
+        let core = obs.to_core();
+        assert!(core.enabled);
+        assert_eq!(core.endpoint, "http://collector:4318");
+        assert_eq!(
+            core.protocol,
+            cqlite_core::observability::OtelProtocol::Http
+        );
+        assert_eq!(core.service_name, "svc");
+        assert_eq!(core.service_version, "9.9.9");
+        assert_eq!(core.sampling_ratio, 0.5);
+        assert_eq!(core.timeout, std::time::Duration::from_millis(2500));
+    }
+
+    #[test]
+    fn test_observability_to_core_ignores_unparseable_protocol() {
+        // A bad protocol string keeps the core default (grpc) rather than erroring.
+        let obs = ObservabilityConfig {
+            protocol: Some("carrier-pigeon".to_string()),
+            ..Default::default()
+        };
+        let core = obs.to_core();
+        assert_eq!(
+            core.protocol,
+            cqlite_core::observability::OtelProtocol::Grpc
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_observability_flag_overrides_env_and_file_precedence() {
+        use std::env;
+
+        // env sets the endpoint; the --otel-endpoint flag must win.
+        env::set_var("CQLITE_OTEL_ENABLED", "true");
+        env::set_var("CQLITE_OTEL_ENDPOINT", "http://from-env:4317");
+
+        let cli = Cli::parse_from(&[
+            "cqlite",
+            "--otel-endpoint",
+            "http://from-flag:4317",
+        ]);
+        let config = Config::load(None, &cli).unwrap();
+
+        // clap merged env into otel_enabled (no flag) -> Some(true);
+        // explicit --otel-endpoint flag wins over the env value.
+        assert_eq!(config.observability.enabled, Some(true));
+        assert_eq!(
+            config.observability.endpoint.as_deref(),
+            Some("http://from-flag:4317")
+        );
+
+        env::remove_var("CQLITE_OTEL_ENABLED");
+        env::remove_var("CQLITE_OTEL_ENDPOINT");
     }
 
     #[test]
