@@ -151,6 +151,62 @@ pub struct Cli {
     #[arg(long, requires = "writable")]
     pub flush: bool,
 
+    // ---- Observability / OpenTelemetry (Issue #1033, Epic #1031) ----
+    // These flags carry `env = "CQLITE_OTEL_*"` fallbacks so a value can come
+    // from either the flag or the env var (explicit flag wins). They map into
+    // `cqlite_core::observability::ObservabilityConfig` via the config layer.
+    // When the CLI is built without the `observability` feature these still
+    // parse and configure init(), but OTel export is a no-op (the foundation's
+    // inert guard), preserving today's behavior.
+    /// Enable OpenTelemetry export (true/false). Requires an OTLP collector at
+    /// --otel-endpoint and a build with `--features observability` to export.
+    ///
+    /// Held as a raw string (not a clap-parsed `bool`) so that a malformed
+    /// `CQLITE_OTEL_ENABLED` env value never aborts `Cli::parse()` for the whole
+    /// CLI (including builds without the `observability` feature). Parsed
+    /// leniently in the config layer (`config.rs`), matching
+    /// `ObservabilityConfig::from_env`: unrecognized values fall back to the
+    /// default rather than erroring.
+    #[arg(long, value_name = "BOOL", env = "CQLITE_OTEL_ENABLED")]
+    pub otel_enabled: Option<String>,
+
+    /// OTLP collector endpoint (gRPC endpoint or HTTP base URL).
+    #[arg(long, value_name = "URL", env = "CQLITE_OTEL_ENDPOINT")]
+    pub otel_endpoint: Option<String>,
+
+    /// OTLP wire protocol: grpc or http.
+    #[arg(long, value_name = "PROTO", env = "CQLITE_OTEL_PROTOCOL")]
+    pub otel_protocol: Option<String>,
+
+    /// OpenTelemetry service.name resource attribute.
+    #[arg(long, value_name = "NAME", env = "CQLITE_OTEL_SERVICE_NAME")]
+    pub otel_service_name: Option<String>,
+
+    /// OpenTelemetry service.version resource attribute.
+    #[arg(long, value_name = "VER", env = "CQLITE_OTEL_SERVICE_VERSION")]
+    pub otel_service_version: Option<String>,
+
+    /// Trace sampling ratio in [0.0, 1.0].
+    ///
+    /// Held as a raw string (not a clap-parsed `f64`) so that a malformed
+    /// `CQLITE_OTEL_SAMPLING_RATIO` env value never aborts `Cli::parse()` for
+    /// the entire CLI. The value is parsed leniently in the config layer
+    /// (`config.rs`), matching `ObservabilityConfig::from_env` semantics: bad
+    /// input (NaN/inf/garbage) silently falls back to the default rather than
+    /// erroring. A bad value passed explicitly on the command line is also
+    /// tolerated this way.
+    #[arg(long, value_name = "RATIO", env = "CQLITE_OTEL_SAMPLING_RATIO")]
+    pub otel_sampling_ratio: Option<String>,
+
+    /// OTLP exporter timeout in milliseconds.
+    ///
+    /// Held as a raw string (not a clap-parsed `u64`) for the same reason as
+    /// `otel_sampling_ratio`: a malformed `CQLITE_OTEL_TIMEOUT_MS` env value
+    /// must not abort the whole CLI at parse time. Parsed leniently in the
+    /// config layer, falling back to the default on bad input.
+    #[arg(long, value_name = "MS", env = "CQLITE_OTEL_TIMEOUT_MS")]
+    pub otel_timeout_ms: Option<String>,
+
     #[command(subcommand)]
     pub command: Option<Commands>,
 }

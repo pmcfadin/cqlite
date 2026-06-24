@@ -46,7 +46,7 @@ impl SSTableReader {
                     1,
                     &[
                         (catalog::attr::RESULT, "hit".into()),
-                        (catalog::attr::ACCESS_PATH, "index".into()),
+                        (catalog::attr::LOOKUP_ROUTE, "index".into()),
                         (catalog::attr::SSTABLE_FORMAT, format.into()),
                     ],
                 );
@@ -65,7 +65,7 @@ impl SSTableReader {
             1,
             &[
                 (catalog::attr::RESULT, "miss".into()),
-                (catalog::attr::ACCESS_PATH, "index".into()),
+                (catalog::attr::LOOKUP_ROUTE, "index".into()),
                 (catalog::attr::SSTABLE_FORMAT, format.into()),
             ],
         );
@@ -167,7 +167,7 @@ impl SSTableReader {
                     1,
                     &[
                         (catalog::attr::RESULT, "hit".into()),
-                        (catalog::attr::ACCESS_PATH, "bti_trie".into()),
+                        (catalog::attr::LOOKUP_ROUTE, "bti_trie".into()),
                         (catalog::attr::SSTABLE_FORMAT, "bti".into()),
                     ],
                 );
@@ -223,7 +223,7 @@ impl SSTableReader {
                     1,
                     &[
                         (catalog::attr::RESULT, "hit".into()),
-                        (catalog::attr::ACCESS_PATH, "bti_trie".into()),
+                        (catalog::attr::LOOKUP_ROUTE, "bti_trie".into()),
                         (catalog::attr::SSTABLE_FORMAT, "bti".into()),
                     ],
                 );
@@ -243,7 +243,7 @@ impl SSTableReader {
                     1,
                     &[
                         (catalog::attr::RESULT, "miss".into()),
-                        (catalog::attr::ACCESS_PATH, "bti_trie".into()),
+                        (catalog::attr::LOOKUP_ROUTE, "bti_trie".into()),
                         (catalog::attr::SSTABLE_FORMAT, "bti".into()),
                     ],
                 );

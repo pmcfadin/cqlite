@@ -62,9 +62,26 @@ impl QueryExecutor {
         }
     }
 
-    /// Execute a query plan
+    /// Execute a query plan.
+    ///
+    /// Instrumented as `query.execute` (issue #1035) so that surfaces which reach
+    /// the legacy executor directly — notably prepared/parameterized statements
+    /// that bypass `QueryEngine::execute` — still root a query span tree under
+    /// which the per-branch sub-spans (`query.point_lookup`, `query.table_scan`,
+    /// …) and the read-path spans (issue #1034) nest. When invoked via
+    /// `QueryEngine::execute` this nests under that span. The bounded plan-type
+    /// attribute is recorded; the query text and key values never are.
+    #[tracing::instrument(
+        name = "query.execute",
+        skip_all,
+        fields(cqlite.query.plan_type = tracing::field::Empty),
+    )]
     pub async fn execute(&self, plan: &QueryPlan) -> Result<QueryResult> {
         let start_time = Instant::now();
+        tracing::Span::current().record(
+            crate::observability::catalog::attr::PLAN_TYPE,
+            Self::plan_type_label(&plan.plan_type),
+        );
 
         // Classify the plan once so subsequent dispatch is a single match.
         let has_insert_step = plan
@@ -144,6 +161,22 @@ impl QueryExecutor {
     }
 
     // -- helpers ------------------------------------------------------------
+
+    /// Bounded, lower-snake label for a [`super::planner::PlanType`], used as a
+    /// span attribute (issue #1035). The value space is the closed `PlanType`
+    /// taxonomy, so it is safe as a telemetry dimension.
+    fn plan_type_label(plan_type: &super::planner::PlanType) -> &'static str {
+        use super::planner::PlanType;
+        match plan_type {
+            PlanType::TableScan => "table_scan",
+            PlanType::IndexScan => "index_scan",
+            PlanType::PointLookup => "point_lookup",
+            PlanType::RangeScan => "range_scan",
+            PlanType::Join => "join",
+            PlanType::Aggregation => "aggregation",
+            PlanType::Subquery => "subquery",
+        }
+    }
 
     /// Report the access path(s) the executor *actually consulted* for `plan`,
     /// for the `indexes_used` field of [`super::result::PlanInfo`] (issue #760,
@@ -271,6 +304,7 @@ impl QueryExecutor {
     // -- plan executors -----------------------------------------------------
 
     /// Execute point lookup plan
+    #[tracing::instrument(name = "query.point_lookup", skip_all)]
     async fn execute_point_lookup(&self, plan: &QueryPlan) -> Result<QueryResult> {
         let table = self.require_table(plan)?;
 
@@ -298,6 +332,7 @@ impl QueryExecutor {
     }
 
     /// Execute index scan plan
+    #[tracing::instrument(name = "query.index_scan", skip_all)]
     async fn execute_index_scan(&self, plan: &QueryPlan) -> Result<QueryResult> {
         let table = self.require_table(plan)?;
 
@@ -330,6 +365,7 @@ impl QueryExecutor {
     }
 
     /// Execute range scan plan
+    #[tracing::instrument(name = "query.range_scan", skip_all)]
     async fn execute_range_scan(&self, plan: &QueryPlan) -> Result<QueryResult> {
         let table = self.require_table(plan)?;
 
@@ -341,6 +377,7 @@ impl QueryExecutor {
     }
 
     /// Execute table scan plan
+    #[tracing::instrument(name = "query.table_scan", skip_all)]
     async fn execute_table_scan(&self, plan: &QueryPlan) -> Result<QueryResult> {
         let table = self.require_table(plan)?;
 
@@ -436,6 +473,7 @@ impl QueryExecutor {
     /// receiver deduplicates implicitly by virtue of preserving emission order;
     /// this matches the behavior present before refactoring. A real parallel
     /// scan would partition the key range across workers.
+    #[tracing::instrument(name = "query.parallel_table_scan", skip_all)]
     async fn execute_parallel_table_scan(
         &self,
         table: &TableId,

@@ -67,7 +67,21 @@ pub mod attr {
     pub const RESULT: &str = "cqlite.result";
     /// Read-path access route for a partition lookup, e.g. `"index"` (BIG
     /// Index.db) or `"bti_trie"` (BTI Partitions.db). Bounded by the code.
-    pub const ACCESS_PATH: &str = "cqlite.access_path";
+    /// Distinct from [`ACCESS_PATH`], which is the query-engine SELECT access
+    /// path (#1035); this is the storage-layer lookup route (#1034).
+    pub const LOOKUP_ROUTE: &str = "cqlite.read.lookup_route";
+    /// Access path a `SELECT` chose for its SSTable-scan step (issue #1035).
+    ///
+    /// Values come from [`crate::query::access_path::AccessPath::label`] — a
+    /// closed set such as `"full_scan"`, `"partition_lookup"`,
+    /// `"multi_partition_lookup"`, `"clustering_slice"`,
+    /// `"fallback_full_scan"`. Bounded by the `AccessPath` enum itself, so it is
+    /// safe as a metric dimension and span attribute. NEVER carries key values.
+    pub const ACCESS_PATH: &str = "cqlite.query.access_path";
+    /// Query plan family chosen by the planner / executor, e.g. `"table_scan"`,
+    /// `"point_lookup"`, `"index_scan"`, `"range_scan"`, `"aggregation"`
+    /// (issue #1035). Bounded by the executor's plan-type taxonomy.
+    pub const PLAN_TYPE: &str = "cqlite.query.plan_type";
 }
 
 /// `cqlite.read.rows` — counter `{row}`.
@@ -137,9 +151,18 @@ pub const QUERY_DURATION: &str = "cqlite.query.duration";
 
 /// `cqlite.query.rows` — counter `{row}`.
 ///
-/// Total rows returned to callers by the query engine. No high-cardinality
-/// attributes.
+/// Total rows returned to callers by the query engine. Bounded attributes:
+/// [`attr::ACCESS_PATH`], [`attr::PLAN_TYPE`]. No high-cardinality attributes.
 pub const QUERY_ROWS: &str = "cqlite.query.rows";
+
+/// `cqlite.query.rows_scanned` — counter `{row}`.
+///
+/// Total rows materialised/examined by the SELECT scan step before predicate
+/// filtering, projection, and `LIMIT` (issue #1035). The gap between this and
+/// [`QUERY_ROWS`] is the read-amplification of a query — large for a
+/// `full_scan`, ~1 for a `partition_lookup`. Bounded attributes:
+/// [`attr::ACCESS_PATH`]. Emitted by the modern `SelectExecutor` only.
+pub const QUERY_ROWS_SCANNED: &str = "cqlite.query.rows_scanned";
 
 /// `cqlite.sstables.open` — gauge `{sstable}`.
 ///
@@ -173,6 +196,7 @@ pub const ALL_METRICS: &[&str] = &[
     STORAGE_OPEN_TABLES,
     QUERY_DURATION,
     QUERY_ROWS,
+    QUERY_ROWS_SCANNED,
     SSTABLES_OPEN,
     COMPACTION_DURATION,
     ERRORS_TOTAL,
@@ -203,7 +227,9 @@ mod tests {
             attr::SSTABLE_FORMAT,
             attr::COMPRESSION,
             attr::RESULT,
+            attr::LOOKUP_ROUTE,
             attr::ACCESS_PATH,
+            attr::PLAN_TYPE,
         ] {
             assert!(key.starts_with("cqlite."), "attr {key} must be namespaced");
         }
