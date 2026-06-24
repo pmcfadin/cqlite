@@ -10,6 +10,7 @@
 
 pub mod agg;
 pub mod filter;
+pub mod obs;
 pub mod producer;
 pub mod service;
 pub mod ticket;

@@ -82,6 +82,14 @@ pub mod attr {
     /// `"point_lookup"`, `"index_scan"`, `"range_scan"`, `"aggregation"`
     /// (issue #1035). Bounded by the executor's plan-type taxonomy.
     pub const PLAN_TYPE: &str = "cqlite.query.plan_type";
+    /// Arrow Flight RPC method name (issue #1041), e.g. `"do_get"`,
+    /// `"get_flight_info"`, `"get_schema"`, `"handshake"`. Bounded by the
+    /// `FlightService` trait's fixed set of methods — never a request payload.
+    pub const RPC_METHOD: &str = "cqlite.rpc.method";
+    /// Arrow Flight RPC outcome (issue #1041), exactly `"ok"` or `"error"`.
+    /// Bounded to two values so a single metric series carries both arms for
+    /// success/error-rate dashboards.
+    pub const RPC_STATUS: &str = "cqlite.rpc.status";
 }
 
 /// `cqlite.read.rows` — counter `{row}`.
@@ -319,6 +327,43 @@ pub const COMPACTION_BUDGET_CONSUMED: &str = "cqlite.compaction.budget.consumed"
 /// The raw error message is never attached.
 pub const ERRORS_TOTAL: &str = "cqlite.errors.total";
 
+// ---------------------------------------------------------------------------
+// Arrow Flight gRPC service (issue #1041) — emitted from `cqlite-flight`.
+// ---------------------------------------------------------------------------
+
+/// `cqlite.rpc.requests` — counter `1`.
+///
+/// Total Arrow Flight RPC requests served, one increment per completed RPC.
+/// Bounded attributes: [`attr::RPC_METHOD`] (fixed `FlightService` method set)
+/// and [`attr::RPC_STATUS`] (`ok`/`error`) so a dashboard computes per-method
+/// error rate from one series. NEVER carries request payloads or ticket data.
+pub const RPC_REQUESTS: &str = "cqlite.rpc.requests";
+
+/// `cqlite.rpc.duration` — histogram `s`.
+///
+/// Distribution of Arrow Flight RPC handler durations in seconds (handler entry
+/// to response/stream construction). Bounded attributes: [`attr::RPC_METHOD`],
+/// [`attr::RPC_STATUS`].
+pub const RPC_DURATION: &str = "cqlite.rpc.duration";
+
+/// `cqlite.rpc.in_flight` — gauge `1`.
+///
+/// Number of Arrow Flight RPCs currently being handled (incremented on entry,
+/// decremented on completion). Bounded attributes: [`attr::RPC_METHOD`].
+pub const RPC_IN_FLIGHT: &str = "cqlite.rpc.in_flight";
+
+/// `cqlite.rpc.rows` — counter `{row}`.
+///
+/// Total rows returned to clients by `do_get` (summed across emitted record
+/// batches). Bounded attributes: [`attr::RPC_METHOD`].
+pub const RPC_ROWS: &str = "cqlite.rpc.rows";
+
+/// `cqlite.rpc.bytes` — counter `By`.
+///
+/// Total record-batch payload bytes streamed to clients by `do_get` (in-memory
+/// Arrow batch size, pre-IPC-framing). Bounded attributes: [`attr::RPC_METHOD`].
+pub const RPC_BYTES: &str = "cqlite.rpc.bytes";
+
 /// All catalog metric names, for tests and registration sanity checks.
 pub const ALL_METRICS: &[&str] = &[
     READ_ROWS,
@@ -358,6 +403,12 @@ pub const ALL_METRICS: &[&str] = &[
     COMPACTION_FINALIZE_DURATION,
     COMPACTION_BUDGET_REQUESTED,
     COMPACTION_BUDGET_CONSUMED,
+    // Arrow Flight gRPC service (#1041)
+    RPC_REQUESTS,
+    RPC_DURATION,
+    RPC_IN_FLIGHT,
+    RPC_ROWS,
+    RPC_BYTES,
 ];
 
 #[cfg(test)]
@@ -388,6 +439,8 @@ mod tests {
             attr::LOOKUP_ROUTE,
             attr::ACCESS_PATH,
             attr::PLAN_TYPE,
+            attr::RPC_METHOD,
+            attr::RPC_STATUS,
         ] {
             assert!(key.starts_with("cqlite."), "attr {key} must be namespaced");
         }

@@ -27,6 +27,31 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
+# Observability / OpenTelemetry — optional, behind the `observability` feature.
+# Used for incoming W3C `traceparent` extraction (global text-map propagator)
+# and parenting per-RPC spans to the extracted remote context. The catalog
+# metric helpers and span macros do NOT need these crates here — they go
+# through `cqlite_core::observability`, which is no-op when its own feature is
+# off. These are required only for cross-process trace-context propagation.
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+[features]
+# Off by default: the Flight server is normally run without an OTLP collector,
+# and enabling OTel pulls in the exporter stack. Turn it on explicitly with
+# `--features observability` (and set CQLITE_OTEL_ENABLED=1 at runtime). This
+# also activates cqlite-core's `observability` feature so the shared metric
+# helpers and `tracing_layer()` export, and pulls in the propagator crates used
+# for incoming `traceparent` parenting.
+default = []
+observability = [
+    "cqlite-core/observability",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:tracing-opentelemetry",
+]
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
