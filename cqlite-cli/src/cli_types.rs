@@ -160,8 +160,15 @@ pub struct Cli {
     // inert guard), preserving today's behavior.
     /// Enable OpenTelemetry export (true/false). Requires an OTLP collector at
     /// --otel-endpoint and a build with `--features observability` to export.
+    ///
+    /// Held as a raw string (not a clap-parsed `bool`) so that a malformed
+    /// `CQLITE_OTEL_ENABLED` env value never aborts `Cli::parse()` for the whole
+    /// CLI (including builds without the `observability` feature). Parsed
+    /// leniently in the config layer (`config.rs`), matching
+    /// `ObservabilityConfig::from_env`: unrecognized values fall back to the
+    /// default rather than erroring.
     #[arg(long, value_name = "BOOL", env = "CQLITE_OTEL_ENABLED")]
-    pub otel_enabled: Option<bool>,
+    pub otel_enabled: Option<String>,
 
     /// OTLP collector endpoint (gRPC endpoint or HTTP base URL).
     #[arg(long, value_name = "URL", env = "CQLITE_OTEL_ENDPOINT")]

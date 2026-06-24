@@ -872,8 +872,17 @@ impl ConfigBuilder {
         // Each `--otel-*` flag already carries its `CQLITE_OTEL_*` env fallback
         // (resolved by clap, explicit flag winning), so applying the parsed
         // value here gives the documented file < env < flag precedence.
-        if let Some(enabled) = cli.otel_enabled {
-            self.config.observability.enabled = Some(enabled);
+        // `otel_enabled` is carried as a raw string for the same reason as the
+        // numeric flags below: a malformed `CQLITE_OTEL_ENABLED` env value must
+        // not abort `Cli::parse()`. Parse it leniently here, accepting the same
+        // truthy/falsy spellings as `ObservabilityConfig::from_env`; unrecognized
+        // values keep the existing/default value rather than erroring.
+        if let Some(ref raw) = cli.otel_enabled {
+            match raw.trim().to_ascii_lowercase().as_str() {
+                "1" | "true" | "yes" | "on" => self.config.observability.enabled = Some(true),
+                "0" | "false" | "no" | "off" => self.config.observability.enabled = Some(false),
+                _ => {}
+            }
         }
         if let Some(ref endpoint) = cli.otel_endpoint {
             self.config.observability.endpoint = Some(endpoint.clone());
@@ -1233,6 +1242,15 @@ mod tests {
         let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
         assert_eq!(config.observability.sampling_ratio, Some(0.25));
         assert_eq!(config.observability.timeout_ms, Some(2500));
+
+        // A malformed CQLITE_OTEL_ENABLED must likewise not abort Cli::parse()
+        // and must fall back to the default (None) rather than erroring.
+        env::set_var("CQLITE_OTEL_ENABLED", "maybe");
+        let cli = Cli::parse_from(&["cqlite"]);
+        assert_eq!(cli.otel_enabled.as_deref(), Some("maybe"));
+        let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
+        assert_eq!(config.observability.enabled, None);
+        env::remove_var("CQLITE_OTEL_ENABLED");
 
         env::remove_var("CQLITE_OTEL_SAMPLING_RATIO");
         env::remove_var("CQLITE_OTEL_TIMEOUT_MS");
