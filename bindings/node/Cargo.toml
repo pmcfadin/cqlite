@@ -15,6 +15,12 @@ crate-type = ["cdylib"]
 [features]
 default = []
 write-support = ["cqlite-core/write-support"]
+# OpenTelemetry export for the Node.js bindings (epic #1031, issue #1040).
+# OFF by default: enabling it pulls the OTel exporter stack into cqlite-core and
+# lets `tracing_layer()`/OTLP wiring compile. With it off, every observability
+# call site here is an inert no-op (config plumbing, span macros, and the metric
+# helpers stay available), so the binding builds and behaves identically.
+observability = ["cqlite-core/observability"]
 
 [dependencies]
 cqlite-core = { path = "../../cqlite-core", features = ["state_machine", "all-compression", "cli-helpers", "parquet"] }
@@ -27,6 +33,11 @@ chrono = { workspace = true }
 uuid = { version = "1.6", features = ["v4"] }
 base64 = "0.22"
 hex = "0.4"
+# Always-on: span macros (`tracing::info_span!`, `.instrument`) are used at the
+# binding boundary regardless of the `observability` feature. The OTel layer
+# that bridges these spans to OTLP is only composed when `observability` is on.
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 [build-dependencies]
 napi-build = { workspace = true }

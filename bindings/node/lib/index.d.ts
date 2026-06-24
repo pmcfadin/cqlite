@@ -374,6 +374,100 @@ export interface DatabaseOptions {
    * ```
    */
   writeDir?: string;
+
+  /**
+   * OpenTelemetry export options (epic #1031, issue #1040).
+   *
+   * When omitted, the `CQLITE_OTEL_*` environment variables are consulted.
+   * Telemetry stays disabled unless `enabled: true` is set (here or via env)
+   * AND the native addon was built with the `observability` Cargo feature.
+   *
+   * Observability is initialised **once per process** on the first
+   * `Database.open()`, so passing different `otel` options to a later open has
+   * no effect.
+   *
+   * @example
+   * ```typescript
+   * const db = await Database.open('/data', {
+   *   schema: 'schema.cql',
+   *   otel: { enabled: true, endpoint: 'http://collector:4317', protocol: 'grpc' },
+   * });
+   * ```
+   */
+  otel?: OtelOptions;
+
+  /**
+   * Incoming W3C `traceparent` header to parent this handle's per-call and
+   * per-stream spans under a remote trace (distributed-tracing propagation).
+   *
+   * Applied as the default parent for every `execute`, `executeNative`, and
+   * `executeStreaming` on the returned handle. Invalid/empty values are
+   * ignored. Only meaningful when telemetry is enabled and the addon was built
+   * with the `observability` feature.
+   *
+   * @example
+   * ```typescript
+   * const db = await Database.open('/data', {
+   *   schema: 'schema.cql',
+   *   otel: { enabled: true },
+   *   traceparent: '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01',
+   * });
+   * ```
+   */
+  traceparent?: string;
+}
+
+/**
+ * OpenTelemetry export options for the Node.js bindings (epic #1031, issue
+ * #1040).
+ *
+ * Any field left unset falls back to the corresponding `CQLITE_OTEL_*`
+ * environment variable, then to the foundation default. Exporters are only
+ * installed when the effective config has `enabled: true` AND the native addon
+ * was built with the `observability` feature.
+ */
+export interface OtelOptions {
+  /**
+   * Master enable switch. Unset defers to `CQLITE_OTEL_ENABLED`, then `false`.
+   */
+  enabled?: boolean;
+
+  /**
+   * OTLP collector endpoint: a gRPC endpoint or HTTP base URL.
+   * Unset defers to `CQLITE_OTEL_ENDPOINT`, then `http://localhost:4317`.
+   */
+  endpoint?: string;
+
+  /**
+   * Wire protocol: `"grpc"` (default) or `"http"`. Unrecognised values are
+   * ignored (the default/env value is kept).
+   */
+  protocol?: string;
+
+  /**
+   * `service.name` resource attribute.
+   * Unset defers to `CQLITE_OTEL_SERVICE_NAME`, then `cqlite`.
+   */
+  serviceName?: string;
+
+  /**
+   * `service.version` resource attribute.
+   * Unset defers to `CQLITE_OTEL_SERVICE_VERSION`, then the crate version.
+   */
+  serviceVersion?: string;
+
+  /**
+   * Trace-ID-ratio sampling probability in `[0.0, 1.0]` (clamped; non-finite
+   * values fall back to full sampling).
+   * Unset defers to `CQLITE_OTEL_SAMPLING_RATIO`, then `1.0`.
+   */
+  samplingRatio?: number;
+
+  /**
+   * Exporter export timeout in milliseconds.
+   * Unset defers to `CQLITE_OTEL_TIMEOUT_MS`, then `10000`.
+   */
+  timeoutMs?: number;
 }
 
 // ============================================================================
