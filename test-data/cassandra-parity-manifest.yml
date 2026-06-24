@@ -1689,10 +1689,14 @@ scenarios:
           - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
         notes: >-
           The decoded chunk-offset table is asserted strictly ascending, starting
-          at Data.db byte 0, with length == ceil(data_length / chunk_length) — the
-          Cassandra chunk-count invariant proving offsets, data_length, and
-          chunk_length were decoded mutually consistently. A multi-chunk fixture is
-          required so real offset boundaries are exercised, not just single-chunk.
+          at Data.db byte 0, with length >= ceil(data_length / chunk_length) — a
+          lower bound only, not equality and with no upper bound: a forced flush/close
+          can add chunks beyond the ceiling and even append empty trailing chunks (so
+          for tiny files chunk_count can exceed data_length). The exact total is
+          cross-checked end-to-end by decompressing every chunk and asserting the sum
+          equals data_length, which is what catches over-read metadata. A genuinely
+          multi-chunk fixture (data_length > chunk_length) is required so real offset
+          boundaries between addressable chunks are exercised, not just single-chunk.
     fixtures:
       references:
         - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
