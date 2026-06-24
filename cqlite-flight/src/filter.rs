@@ -372,6 +372,9 @@ fn to_sstable_predicate(
         column: p.column.clone(),
         operation,
         values,
+        // Flight pushes only ordinary column predicates, never token() ranges
+        // (Epic #951 / #955 added this field for the CQL token-range path).
+        token_columns: None,
     })
 }
 
@@ -508,6 +511,7 @@ mod tests {
             column: "score".into(),
             operation: SSTableFilterOp::Gt,
             values: vec![Value::Integer(n as i32)],
+            token_columns: None,
         })
     }
 
@@ -774,6 +778,7 @@ mod tests {
                 column: "score".into(),
                 operation: SSTableFilterOp::Lt,
                 values: vec![Value::Integer(0)],
+                token_columns: None,
             })
         }; // False for score=20
         let u = || FilterExpr::Leaf(score_pred_on_missing()); // Unknown
@@ -810,6 +815,7 @@ mod tests {
                 column: "score".into(),
                 operation: SSTableFilterOp::Lt,
                 values: vec![Value::Integer(0)],
+                token_columns: None,
             })
         };
         let u = || FilterExpr::Leaf(score_pred_on_missing());
@@ -850,6 +856,7 @@ mod tests {
             column: "absent_column".into(),
             operation: SSTableFilterOp::Gt,
             values: vec![Value::Integer(0)],
+            token_columns: None,
         }
     }
 }

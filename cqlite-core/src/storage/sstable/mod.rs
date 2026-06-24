@@ -19,6 +19,7 @@ pub mod performance_benchmarks;
 pub mod reader;
 pub mod summary_reader;
 pub mod version_gate;
+pub mod work_counters;
 pub use reader::SSTableReader;
 pub mod schema_aware_reader;
 pub use schema_aware_reader::SchemaAwareReader;
@@ -854,7 +855,7 @@ impl SSTableManager {
             if reader_list.len() > 1 {
                 if let Some(schema) = schema {
                     match self
-                        .merge_generations_for_read(reader_list, schema, limit)
+                        .merge_generations_for_read(reader_list, schema, start_key, end_key, limit)
                         .await
                     {
                         Ok(merged) => {
@@ -963,23 +964,249 @@ impl SSTableManager {
     /// which match the bytes the bloom filter, Index.db/BTI trie, and scan RowKeys
     /// are keyed on.
     ///
-    /// Note: within a surviving SSTable this still performs a full parse (then keeps
-    /// only the matching partition). Seeking directly to the partition's Data.db
-    /// offset via Index.db/BTI for the single-candidate case is a follow-up; the
-    /// dominant win for the "thousands of SSTables" scenario is the cross-SSTable
-    /// pruning above.
+    /// Within-SSTable seek (Issue #953): for the SINGLE-candidate case (the common
+    /// point-lookup path) this seeks directly to the partition's `Data.db` offset
+    /// — resolved via the BTI Partitions.db trie or the BIG `Index.db` — and
+    /// decodes ONLY that partition via
+    /// [`scan_single_partition_clustering`](reader::SSTableReader::scan_single_partition_clustering),
+    /// instead of full-parsing the candidate and retaining one partition. The
+    /// decode reuses the scan path's `parse_block_emit`, so its output is
+    /// byte-for-byte identical to `scan(...).retain(matches_key)`; when the offset
+    /// cannot be resolved authoritatively (no `Index.db` hit, or an unsupported
+    /// format) it falls back to the full scan + retain for that candidate. The
+    /// MULTI-candidate path is unchanged: it still reconciles via the k-way merge
+    /// (or the per-candidate concat fallback), so cross-generation LWW / tombstone
+    /// shadowing (#883) is preserved.
+    ///
+    /// Returns `(rows, engaged)`. On this build `engaged` is always `true`: the
+    /// underlying [`scan_partition_clustering`](Self::scan_partition_clustering)
+    /// prunes the SSTable set via `might_contain_partition` before decoding, so a
+    /// caller may honestly report a partition-targeted access path. The
+    /// `tombstones`-build counterpart returns `false` because it has no prune
+    /// (Epic #951, honest access paths).
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan_partition(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+        // The clustering-aware path always prunes via the bloom/BTI candidate
+        // filter, so the partition-targeted access path is genuinely engaged
+        // regardless of whether the within-partition clustering seek narrowed.
+        let (rows, _clustering_engaged) = self
+            .scan_partition_clustering(table_id, partition_key, None, schema)
+            .await?;
+        Ok((rows, true))
+    }
+
+    /// Metadata-carrying partition-targeted scan (Issue #962, Epic #951).
+    ///
+    /// The WRITETIME/TTL-projection sibling of [`scan_partition`](Self::scan_partition):
+    /// it returns only the rows for the single partition identified by the raw
+    /// `partition_key` bytes, WITH per-cell write metadata
+    /// ([`CellWriteMetadata`] — write timestamp / TTL), while still PRUNING the
+    /// SSTable set down to the candidates whose bloom filter / BTI trie admit the
+    /// key. A `SELECT WRITETIME(col), TTL(col) ... WHERE pk = ?` therefore opens
+    /// only the handful of SSTables that can hold the partition, never all N — the
+    /// SSTable-level prune is the must-have that distinguishes this from the
+    /// full-table [`scan_with_cell_metadata`](Self::scan_with_cell_metadata).
+    ///
+    /// Output is identical to filtering `scan_with_cell_metadata(table, ..)` down to
+    /// `partition_key`: the same per-reader metadata decode and the same
+    /// cross-generation reconciliation run, just over the pruned candidate set, so
+    /// the caller's post-scan predicate evaluation is a pure correctness backstop
+    /// (it removes any bloom/BTI false-positive over-inclusion).
+    ///
+    /// Reconciliation mirrors `scan_partition`:
+    /// - More than one candidate generation (write-support + schema): drive the
+    ///   authoritative k-way merge via
+    ///   [`merge_generations_for_read_with_metadata`](Self::merge_generations_for_read_with_metadata)
+    ///   over JUST the candidates, then retain this partition's rows. This preserves
+    ///   per-cell cross-generation LWW / tombstone shadowing for WRITETIME/TTL
+    ///   (Issue #885) on the targeted path.
+    /// - Otherwise: decode each candidate via the reader's metadata path and retain
+    ///   this partition's rows, concatenating across candidates.
+    ///
+    /// Within-SSTable decode currently full-decodes each surviving candidate's
+    /// metadata and retains the partition; the SSTable-level prune (avoiding the
+    /// full TABLE/SSTable scan) is the property #962 requires. A within-partition
+    /// metadata seek (bounding the decode to the partition's `Data.db` offset, as
+    /// `scan_single_partition_clustering` does for the plain path) is a documented
+    /// follow-up.
+    ///
+    /// Gated on `not(tombstones)` to match the `scan_partition` variant it parallels.
+    ///
+    /// Returns `(rows, engaged)`. On this build `engaged` is always `true`: the
+    /// candidate set is pruned via `might_contain_partition` before any decode, so
+    /// the partition-targeted metadata access path is genuinely engaged. The
+    /// `tombstones`-build counterpart returns `false` (no prune; full metadata
+    /// scan + retain) so the caller reports an honest fallback (Epic #951).
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<(
+        Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>,
+        bool,
+    )> {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
 
         let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
+        };
+
+        // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
+        // This is the property #962 requires — only candidates are opened, never N.
+        let candidates: Vec<Arc<reader::SSTableReader>> = reader_list
+            .iter()
+            .filter(|r| r.might_contain_partition(partition_key))
+            .cloned()
+            .collect();
+
+        log::debug!(
+            "SSTableManager::scan_partition_with_cell_metadata - {}/{} SSTables admit partition \
+             key (len={}) for '{}'",
+            candidates.len(),
+            reader_list.len(),
+            partition_key.len(),
+            table_id
+        );
+
+        if candidates.is_empty() {
+            return Ok((Vec::new(), true));
+        }
+
+        let matches_key = |entry: &(RowKey, Value, HashMap<String, CellWriteMetadata>)| {
+            entry.0.as_bytes() == partition_key
+        };
+
+        // Multiple candidate generations may hold the same partition; reconcile
+        // with the same authoritative metadata-aware k-way merge the full metadata
+        // scan uses (write-support only, schema present), then keep just this
+        // partition's rows. This preserves per-cell cross-generation WRITETIME/TTL.
+        #[cfg(feature = "write-support")]
+        if candidates.len() > 1 {
+            if let Some(schema) = schema {
+                match self
+                    .merge_generations_for_read_with_metadata(&candidates, schema, None, None, None)
+                    .await
+                {
+                    Ok(mut merged) => {
+                        merged.retain(matches_key);
+                        // Work-counter gate (Issue #958): the merge parsed every
+                        // surviving candidate; `merged` (post-retain) is exactly the
+                        // partitions this lookup returns.
+                        work_counters::add_sstables_scanned(candidates.len() as u64);
+                        work_counters::add_partitions_parsed(merged.len() as u64);
+                        return Ok((merged, true));
+                    }
+                    Err(e) => {
+                        log::warn!(
+                            "SSTableManager::scan_partition_with_cell_metadata - cross-generation \
+                             metadata merge failed for '{}' ({}); falling back to per-reader \
+                             concatenation",
+                            table_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
+        // Single candidate (common case) or the multi-candidate concat fallback:
+        // decode each candidate's metadata and retain this partition's rows.
+        let mut all_results = Vec::new();
+        for reader in &candidates {
+            // Work-counter gate (Issue #958): one real Data.db touch per surviving
+            // candidate. Counted here (not at prune time) so the counter reflects
+            // SSTables actually opened/scanned.
+            work_counters::add_sstables_scanned(1);
+
+            let mut results = reader
+                .scan_with_cell_metadata(table_id, None, None, None, schema)
+                .await?;
+            results.retain(matches_key);
+            all_results.append(&mut results);
+        }
+        // A single candidate's rows already come back in on-disk key order; only
+        // concatenating more than one candidate needs a re-sort to merge them.
+        if candidates.len() > 1 {
+            all_results.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+        work_counters::add_partitions_parsed(all_results.len() as u64);
+        Ok((all_results, true))
+    }
+
+    /// `tombstones`-build counterpart of
+    /// [`scan_partition_with_cell_metadata`](Self::scan_partition_with_cell_metadata).
+    ///
+    /// That build has no bloom-prune metadata path, so a fully-constrained
+    /// `WHERE pk = ?` WRITETIME/TTL read is served by scanning with metadata and
+    /// filtering to the partition key, matching the `not(tombstones)` output while
+    /// keeping the query executor free of `tombstones` cfg branching.
+    ///
+    /// Returns `(rows, engaged)` with `engaged == false`: this is a full metadata
+    /// scan + retain with NO SSTable prune, so the caller MUST report an honest
+    /// fallback access path (`FallbackReason::TombstonesBuildNoPrune`) rather than a
+    /// targeted label, even though the rows are byte-identical to the pruned build
+    /// (Epic #951, honest access paths).
+    #[cfg(feature = "tombstones")]
+    pub async fn scan_partition_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<(
+        Vec<(
+            RowKey,
+            Value,
+            HashMap<String, crate::types::CellWriteMetadata>,
+        )>,
+        bool,
+    )> {
+        let mut rows = self
+            .scan_with_cell_metadata(table_id, None, None, None, schema)
+            .await?;
+        rows.retain(|entry| entry.0.as_bytes() == partition_key);
+        Ok((rows, false))
+    }
+
+    /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
+    ///
+    /// Identical to [`scan_partition`](Self::scan_partition) but, when `clustering`
+    /// is `Some(slice)` AND exactly one candidate SSTable admits the key AND that
+    /// candidate's single-partition seek can use its authoritative row index, the
+    /// within-partition decode is bounded to the row-index block(s) covering the
+    /// requested clustering range — so a `WHERE pk = ? AND ck </>/= ?` slice over a
+    /// wide partition decodes O(matched rows + index block), not the whole
+    /// partition.
+    ///
+    /// Returns `(rows, clustering_seek_engaged)`. `clustering_seek_engaged` is
+    /// `true` only when the within-partition clustering narrowing actually bounded
+    /// the decode (so the caller may report
+    /// [`AccessPath::ClusteringSlice`](crate::query::access_path::AccessPath::ClusteringSlice));
+    /// it is `false` for the multi-candidate / merge / full-decode fallbacks,
+    /// which still return correct rows for the honest `PartitionLookup` path. The
+    /// rows are ALWAYS the full partition (or its clustering-narrowed superset):
+    /// the caller's post-scan `evaluate_leaf` applies the exact clustering bound,
+    /// so output is byte-identical regardless of whether the seek engaged.
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition_clustering(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        clustering: Option<&reader::ClusteringSlice>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+        let table_readers = self.table_readers.read().await;
+        let table_name = table_id.name();
+
+        let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
+            return Ok((Vec::new(), false));
         };
 
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
@@ -998,7 +1225,7 @@ impl SSTableManager {
         );
 
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), false));
         }
 
         let matches_key = |entry: &(RowKey, Value)| entry.0.as_bytes() == partition_key;
@@ -1010,12 +1237,22 @@ impl SSTableManager {
         if candidates.len() > 1 {
             if let Some(schema) = schema {
                 match self
-                    .merge_generations_for_read(&candidates, schema, None)
+                    // Partition-targeted: no key range; `retain(matches_key)` below
+                    // is a stricter single-partition filter than any range bound.
+                    .merge_generations_for_read(&candidates, schema, None, None, None)
                     .await
                 {
                     Ok(mut merged) => {
                         merged.retain(matches_key);
-                        return Ok(merged);
+                        // Work-counter gate (Issue #958): the k-way merge parsed
+                        // every surviving candidate, and `merged` (post-retain) is
+                        // exactly the partitions this lookup returns.
+                        work_counters::add_sstables_scanned(candidates.len() as u64);
+                        work_counters::add_partitions_parsed(merged.len() as u64);
+                        // The cross-generation merge decodes full partitions; the
+                        // clustering seek does not engage here (#954). Correct rows
+                        // via the post-scan backstop; honest non-engaged signal.
+                        return Ok((merged, false));
                     }
                     Err(e) => {
                         log::warn!(
@@ -1029,20 +1266,63 @@ impl SSTableManager {
             }
         }
 
-        // Single candidate (the common case), or the concat fallback: parse each
-        // candidate and keep only the target partition's rows.
+        // Single candidate (the common case): SEEK directly to the partition's
+        // Data.db offset and decode ONLY that partition (Issue #953), instead of a
+        // full parse-then-retain. The seek resolves the offset via the BTI trie /
+        // Index.db and runs the same per-partition decode the scan path uses, so
+        // its output is byte-for-byte identical to `scan(...).retain(matches_key)`.
+        // If the seek is not applicable for this reader (no authoritative offset,
+        // or an unsupported format), it returns `Ok(None)` and we FALL BACK to the
+        // full scan + retain for that candidate (Constraint #4: correctness over
+        // optimization). The multi-candidate concat fallback below is unchanged —
+        // only the single-candidate path gets the seek.
         let mut all_results = Vec::new();
+        let mut clustering_engaged = false;
         for reader in &candidates {
-            let mut results = reader.scan(table_id, None, None, None, schema).await?;
-            results.retain(matches_key);
-            all_results.extend(results);
+            // Work-counter gate (Issue #958): one real Data.db touch per surviving
+            // candidate. Counted here (not at prune time) so the counter reflects
+            // SSTables actually opened/scanned, the cost a regression would balloon.
+            work_counters::add_sstables_scanned(1);
+
+            let mut results = if candidates.len() == 1 {
+                // Issue #954: thread the clustering slice into the seek so it can
+                // narrow the within-partition decode via the authoritative row
+                // index. `engaged` records whether the clustering narrowing
+                // actually bounded the decode (vs a full-partition decode).
+                match reader
+                    .scan_single_partition_clustering(table_id, partition_key, clustering, schema)
+                    .await
+                {
+                    // Seek resolved authoritatively: use its rows directly. They
+                    // already match exactly this partition's key, so no retain.
+                    Ok(Some((rows, engaged))) => {
+                        clustering_engaged = engaged;
+                        rows
+                    }
+                    // Seek not applicable (Constraint #4): full scan + retain.
+                    Ok(None) => {
+                        let mut r = reader.scan(table_id, None, None, None, schema).await?;
+                        r.retain(matches_key);
+                        r
+                    }
+                    Err(e) => return Err(e),
+                }
+            } else {
+                // Multi-candidate concat fallback (merge unavailable): preserve the
+                // existing full-scan + retain behaviour per candidate (Constraint #2).
+                let mut r = reader.scan(table_id, None, None, None, schema).await?;
+                r.retain(matches_key);
+                r
+            };
+            all_results.append(&mut results);
         }
         // A single candidate's rows already come back in on-disk key order; only
         // concatenating more than one candidate needs a re-sort to merge them.
         if candidates.len() > 1 {
             all_results.sort_by(|a, b| a.0.cmp(&b.0));
         }
-        Ok(all_results)
+        work_counters::add_partitions_parsed(all_results.len() as u64);
+        Ok((all_results, clustering_engaged))
     }
 
     /// `tombstones`-build counterpart of [`scan_partition`](Self::scan_partition).
@@ -1053,16 +1333,21 @@ impl SSTableManager {
     /// [`scan`](Self::scan) — identical to what the `not(tombstones)`
     /// `scan_partition` returns — which keeps the query executor free of any
     /// `tombstones` cfg branching.
+    ///
+    /// Returns `(rows, engaged)` with `engaged == false`: this is a full scan +
+    /// retain with NO SSTable prune, so the caller MUST report an honest fallback
+    /// access path (`FallbackReason::TombstonesBuildNoPrune`) rather than a targeted
+    /// label, even though the rows match the pruned build byte-for-byte (Epic #951).
     #[cfg(feature = "tombstones")]
     pub async fn scan_partition(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
         let mut rows = self.scan(table_id, None, None, None, schema).await?;
         rows.retain(|entry| entry.0.as_bytes() == partition_key);
-        Ok(rows)
+        Ok((rows, false))
     }
 
     /// Resolve the reader list for a table id, trying the fully-qualified
@@ -1106,14 +1391,29 @@ impl SSTableManager {
     /// Requires a schema (cells carry no column names on disk) and the
     /// `write-support` feature (the merger lives in the write engine). Callers
     /// fall back to concatenation when either is unavailable.
+    ///
+    /// `start_key`/`end_key` bound the merged output to the same inclusive
+    /// `[start_key, end_key]` key range the per-reader [`scan`](reader::SSTableReader::scan)
+    /// applies (skip `key < start`, skip `key > end`, using `RowKey`'s `Ord`), so a
+    /// bounded multi-generation read returns only the requested range rather than the
+    /// full reconciled table (Issue #957). The range filter runs before `limit`, matching
+    /// the per-reader scan order (range then limit). With `None`/`None` bounds the output
+    /// is byte-for-byte the full reconciled set, unchanged from before.
     #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
     async fn merge_generations_for_read(
         &self,
         reader_list: &[Arc<reader::SSTableReader>],
         schema: &crate::schema::TableSchema,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
         limit: Option<usize>,
     ) -> Result<Vec<(RowKey, Value)>> {
         use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
+
+        // Own the bounds so the merge body (and any later filtering) can use them
+        // without borrowing across the await; cheap clone of the key bytes.
+        let start_key = start_key.cloned();
+        let end_key = end_key.cloned();
 
         // The merger expects inputs ordered newest → oldest (run_index 0 = newest)
         // for its stable tie-break; the reader Vec order is discovery-dependent, so
@@ -1127,6 +1427,22 @@ impl SSTableManager {
             let mut merger = KWayMerger::new(paths, &schema)?;
             let mut out = Vec::new();
             while let MergeStep::Partition { key, rows } = merger.step()? {
+                // Enforce the same inclusive `[start_key, end_key]` range the
+                // per-reader scan applies (Issue #957): skip `key < start` and
+                // `key > end`, comparing with the identical `RowKey` ordering used
+                // for the final sort. Filtering at the partition key drops every
+                // out-of-range row before it is materialized.
+                let row_key = RowKey(key.key.clone());
+                if let Some(ref start) = start_key {
+                    if &row_key < start {
+                        continue;
+                    }
+                }
+                if let Some(ref end) = end_key {
+                    if &row_key > end {
+                        continue;
+                    }
+                }
                 for entry in rows {
                     match entry.row_data {
                         RowData::Live { cells } => {
@@ -1138,7 +1454,7 @@ impl SSTableManager {
                                 .map(|c| (Value::Text(c.column), c.value))
                                 .collect();
                             if !map.is_empty() {
-                                out.push((RowKey(key.key.clone()), Value::Map(map)));
+                                out.push((row_key.clone(), Value::Map(map)));
                             }
                         }
                         // Row tombstone: the row is deleted across all
@@ -1185,15 +1501,32 @@ impl SSTableManager {
     ///
     /// Requires a schema and the `write-support` feature; callers fall back to
     /// per-reader concatenation when either is unavailable.
+    ///
+    /// `start_key`/`end_key` bound the merged output to the same inclusive
+    /// `[start_key, end_key]` key range as the non-metadata
+    /// [`merge_generations_for_read`](Self::merge_generations_for_read) (skip
+    /// `key < start`, skip `key > end`, using `RowKey`'s `Ord`), so a bounded
+    /// multi-generation metadata read returns only the requested range rather than
+    /// the full reconciled table (Issue #957). The range filter runs before `limit`,
+    /// matching the per-reader scan order (range then limit). With `None`/`None`
+    /// bounds the output is byte-for-byte the full reconciled set, unchanged from
+    /// before. This stays definitionally in lockstep with the plain helper.
     #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
     async fn merge_generations_for_read_with_metadata(
         &self,
         reader_list: &[Arc<reader::SSTableReader>],
         schema: &crate::schema::TableSchema,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
         limit: Option<usize>,
     ) -> Result<Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>> {
         use crate::storage::write_engine::merge::{KWayMerger, MergeStep, RowData};
         use crate::types::TableId as CqlTableId;
+
+        // Own the bounds so the merge body can use them without borrowing across
+        // the await; cheap clone of the key bytes. Mirrors the plain helper.
+        let start_key = start_key.cloned();
+        let end_key = end_key.cloned();
 
         // Best-effort TTL source: gather each reader's own per-cell metadata and
         // keep, per (row-key bytes, column), the entry with the newest write
@@ -1234,6 +1567,23 @@ impl SSTableManager {
             let mut merger = KWayMerger::new(paths, &merge_schema)?;
             let mut out = Vec::new();
             while let MergeStep::Partition { key, rows } = merger.step()? {
+                // Enforce the same inclusive `[start_key, end_key]` range as the
+                // non-metadata `merge_generations_for_read` (Issue #957): skip
+                // `key < start` and `key > end`, comparing with the identical
+                // `RowKey` ordering used for the final sort. Filtering at the
+                // partition key drops every out-of-range row before it is
+                // materialized.
+                let row_key = RowKey(key.key.clone());
+                if let Some(ref start) = start_key {
+                    if &row_key < start {
+                        continue;
+                    }
+                }
+                if let Some(ref end) = end_key {
+                    if &row_key > end {
+                        continue;
+                    }
+                }
                 for entry in rows {
                     if let RowData::Live { cells } = entry.row_data {
                         let mut map: Vec<(Value, Value)> = Vec::with_capacity(cells.len());
@@ -1335,7 +1685,13 @@ impl SSTableManager {
             if reader_list.len() > 1 {
                 if let Some(schema) = schema {
                     match self
-                        .merge_generations_for_read_with_metadata(reader_list, schema, limit)
+                        .merge_generations_for_read_with_metadata(
+                            reader_list,
+                            schema,
+                            start_key,
+                            end_key,
+                            limit,
+                        )
                         .await
                     {
                         Ok(merged) => return Ok(merged),
@@ -1433,6 +1789,30 @@ impl SSTableManager {
     /// pending entry per SSTable. Live heap is bounded by `buffer_size` plus the
     /// number of SSTables, independent of total row count — the streaming analog
     /// of the materializing [`scan`](Self::scan) (concat + stable sort by key).
+    ///
+    /// # Multi-generation correctness (Issue #957)
+    ///
+    /// The lazy per-reader k-way merge above is only the streaming analog of
+    /// `scan`'s **concat + sort** path, which is correct for a single generation.
+    /// When a table directory holds more than one SSTable generation, the same
+    /// `(partition, clustering)` row can live in several generations and a
+    /// row/cell tombstone in a newer generation suppresses only its own
+    /// generation's copy — so a pure key-ordered merge would emit overwritten
+    /// rows twice and resurrect rows deleted in a later generation. `scan` avoids
+    /// this by routing the multi-generation case through
+    /// [`merge_generations_for_read`](Self::merge_generations_for_read) (the same
+    /// LWW + tombstone-shadowing k-way merge compaction uses); this streaming path
+    /// must reconcile identically or `execute()` and `execute_streaming()` diverge.
+    ///
+    /// So, mirroring the `tombstones`-variant `scan_stream` (which delegates
+    /// wholesale to the materializing `scan`), the multi-generation case here
+    /// materializes the reconciled rows via `merge_generations_for_read` and
+    /// forwards them through the same bounded channel. This trades the O(rows)
+    /// streaming memory win for cross-generation correctness; a fully-streaming,
+    /// generation-aware merge (preserving the bounded-memory property across
+    /// generations) is a larger follow-up. The single-generation /
+    /// no-schema / no-`write-support` cases keep the lazy streaming merge, which
+    /// already matches `scan`'s concat path exactly and preserves LIMIT/backpressure.
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan_stream(
         &self,
@@ -1443,6 +1823,53 @@ impl SSTableManager {
         buffer_size: usize,
     ) -> Result<tokio::sync::mpsc::Receiver<Result<(RowKey, Value)>>> {
         let readers = self.resolve_table_readers(table_id).await;
+
+        // Issue #957: keep the materializing `scan` and this streaming path
+        // definitionally in lockstep. Reuse the EXACT guard `scan` uses for
+        // cross-generation reconciliation (`reader_list.len() > 1 && schema present`,
+        // write-support only) and the same merger, then forward the reconciled rows
+        // through the streaming channel. Without this, a partition spread across
+        // generations duplicates overwritten rows and resurrects deleted ones in the
+        // stream while `scan` returns the merged, deduplicated, tombstone-honouring
+        // result.
+        #[cfg(feature = "write-support")]
+        if readers.len() > 1 {
+            if let Some(schema) = schema {
+                match self
+                    .merge_generations_for_read(&readers, schema, start_key, end_key, None)
+                    .await
+                {
+                    Ok(merged) => {
+                        log::debug!(
+                            "SSTableManager::scan_stream - cross-generation merge produced {} rows \
+                             (materialized for streaming)",
+                            merged.len()
+                        );
+                        let (tx, rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
+                        tokio::spawn(async move {
+                            for entry in merged {
+                                if tx.send(Ok(entry)).await.is_err() {
+                                    break; // consumer dropped
+                                }
+                            }
+                        });
+                        return Ok(rx);
+                    }
+                    Err(e) => {
+                        // Never fail a read because the merge path hit an
+                        // unsupported format; fall back to the lazy streaming
+                        // merge, matching `scan`'s fall-back-to-concatenation.
+                        log::warn!(
+                            "SSTableManager::scan_stream - cross-generation merge failed for '{}' ({}); \
+                             falling back to lazy per-reader streaming merge",
+                            table_id,
+                            e
+                        );
+                    }
+                }
+            }
+        }
+
         let (out_tx, out_rx) = tokio::sync::mpsc::channel(buffer_size.max(1));
 
         // Own everything the background merge task needs.

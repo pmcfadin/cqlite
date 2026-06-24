@@ -14,6 +14,147 @@ use std::io::SeekFrom;
 use tokio::io::AsyncSeekExt;
 use tokio::sync::mpsc;
 
+/// A single-column clustering-key restriction pushed down to a within-partition
+/// seek (Issue #954, Epic #951).
+///
+/// Carries the decoded clustering bound `Value`(s) for the FIRST clustering
+/// column (multi-column prefixes are a documented follow-up). Each bound is one
+/// clustering component; an empty `Vec` means that side is OPEN (unbounded). The
+/// `_inclusive` flags distinguish `>=`/`<=` (inclusive) from `>`/`<` (exclusive)
+/// — they are advisory for byte-window selection (block selection is
+/// over-inclusive by block granularity; the post-scan `evaluate_leaf` backstop
+/// applies the exact bound), so a slightly wider byte window never changes the
+/// final result.
+///
+/// `ck = v` is represented as `start == end == [v]`, both inclusive.
+#[derive(Debug, Clone)]
+pub struct ClusteringSlice {
+    /// Lower bound clustering component(s); empty = unbounded below.
+    pub start: Vec<Value>,
+    /// Whether the lower bound is inclusive (`>=`/`=`) vs exclusive (`>`).
+    pub start_inclusive: bool,
+    /// Upper bound clustering component(s); empty = unbounded above.
+    pub end: Vec<Value>,
+    /// Whether the upper bound is inclusive (`<=`/`=`) vs exclusive (`<`).
+    pub end_inclusive: bool,
+}
+
+/// The within-partition row-body byte window selected by the BTI row index for a
+/// clustering slice (Issue #954). Offsets are RELATIVE to the partition start —
+/// the same domain the parser sees for `window[within..]`.
+#[cfg(not(feature = "tombstones"))]
+#[derive(Debug, Clone, Copy)]
+struct ClusteringRowWindow {
+    /// First byte of the row body to parse (inclusive), relative to partition
+    /// start. `0` decodes from the partition body start (used when statics exist).
+    body_start_rel: usize,
+    /// Exclusive end of the row body to parse, relative to partition start;
+    /// `usize::MAX` means "to the partition end" (clamped by the caller).
+    body_end_rel: usize,
+}
+
+/// Length of the all-`0xFF` sentinel used to represent an OPEN upper clustering
+/// bound (+∞) for byte-comparable block selection (Issue #954). Any separator in
+/// `Rows.db` is shorter or sorts below an all-`0xFF` run of this length, so it
+/// reliably selects through the last block. 64 bytes comfortably exceeds any
+/// realistic single-column clustering separator width.
+#[cfg(not(feature = "tombstones"))]
+const MAX_OSS50_BOUND_SENTINEL_LEN: usize = 64;
+
+/// Normalize a CQL [`ClusteringSlice`] into the `(physical_lower, physical_upper)`
+/// byte-comparable bounds that [`select_row_index_blocks_for_range`] consumes
+/// (issue #954 High-severity correctness fix).
+///
+/// [`select_row_index_blocks_for_range`] selects blocks purely in **physical**
+/// (on-disk, byte-comparable) order — the order `Rows.db` separators are stored
+/// in. The encoder ([`encode_clustering_bound_oss50_with_order`]) already inverts
+/// every byte of a DESC component (`ReversedType` / `ByteSource.invert`), so for a
+/// DESC first clustering column an ASCENDING byte order corresponds to a
+/// DESCENDING CQL value order. The consequence:
+///
+/// - **ASC** (`is_reversed[0] == false`): CQL `start` (the `>=`/`>` lower value
+///   bound) IS the physical-lower bound and CQL `end` (the `<=`/`<` upper value
+///   bound) IS the physical-upper bound. No swap.
+/// - **DESC** (`is_reversed[0] == true`): the CQL lower-value bound encodes to the
+///   physically GREATER bytes and the CQL upper-value bound to the physically
+///   SMALLER bytes, so the roles SWAP. A CQL `ck >= v` (lower) selects the rows
+///   with the largest values, which sit at the physical-LOW byte side through
+///   `enc(v)`; a CQL `ck < v` (upper) selects the physical-HIGH side. The open
+///   sentinels swap accordingly: an open CQL lower (`-∞` value) maps to physical
+///   `+∞` and an open CQL upper (`+∞` value) maps to physical `-∞`.
+///
+/// Block selection is over-inclusive by block granularity and the post-scan
+/// `evaluate_leaf` backstop re-applies the exact CQL bound by VALUE, so the
+/// inclusivity of each bound does not need separate handling here — the physical
+/// window only has to be a SUPERSET of the matching rows. (Swapping the roles is
+/// what guarantees the superset for DESC; the previous code built
+/// `[enc(lower), +∞]` for DESC, which excluded the matching low-byte rows and the
+/// backstop could not recover rows that were never decoded.)
+///
+/// Returns:
+/// - `Ok(Some((lower, upper)))` — usable physical bounds.
+/// - `Ok(None)` — a bound's type is not byte-comparable-encodable here, so the
+///   narrowing is unsafe and the caller must decode the whole partition.
+/// - `Err(_)` — never (kept `Result` for call-site symmetry); reserved.
+#[cfg(not(feature = "tombstones"))]
+fn physical_byte_bounds_for_slice(
+    slice: &ClusteringSlice,
+    is_reversed: &[bool],
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    use crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order;
+
+    // The physical-low sentinel: empty sorts before every separator (-∞).
+    let neg_inf = Vec::<u8>::new();
+    // The physical-high sentinel: an all-0xFF run sorts after every separator (+∞).
+    let pos_inf = || vec![0xFFu8; MAX_OSS50_BOUND_SENTINEL_LEN];
+
+    // Encode a closed CQL bound to its physical byte-comparable form; `None`
+    // bubbles up as an un-encodable-bound fallback at the call site.
+    let encode = |values: &[Value]| -> Option<Vec<u8>> {
+        encode_clustering_bound_oss50_with_order(values, is_reversed).ok()
+    };
+
+    // The FIRST clustering column's order decides the value↔byte direction. A
+    // missing entry (no schema / fewer entries) is ascending, matching the encoder.
+    let first_desc = is_reversed.first().copied().unwrap_or(false);
+
+    // CQL lower bound (`>=`/`>` / equality lower) → its physical byte image.
+    let cql_lower_bytes = if slice.start.is_empty() {
+        None // open CQL lower (value -∞)
+    } else {
+        match encode(&slice.start) {
+            Some(b) => Some(b),
+            None => return Ok(None),
+        }
+    };
+    // CQL upper bound (`<=`/`<` / equality upper) → its physical byte image.
+    let cql_upper_bytes = if slice.end.is_empty() {
+        None // open CQL upper (value +∞)
+    } else {
+        match encode(&slice.end) {
+            Some(b) => Some(b),
+            None => return Ok(None),
+        }
+    };
+
+    let (phys_lower, phys_upper) = if first_desc {
+        // DESC: CQL upper-value bound → physical-lower bytes; CQL lower-value bound
+        // → physical-upper bytes. Open CQL upper → physical -∞; open CQL lower →
+        // physical +∞.
+        let lower = cql_upper_bytes.unwrap_or(neg_inf);
+        let upper = cql_lower_bytes.unwrap_or_else(pos_inf);
+        (lower, upper)
+    } else {
+        // ASC: CQL lower-value bound → physical-lower bytes; CQL upper-value bound
+        // → physical-upper bytes (the original mapping).
+        let lower = cql_lower_bytes.unwrap_or(neg_inf);
+        let upper = cql_upper_bytes.unwrap_or_else(pos_inf);
+        (lower, upper)
+    };
+
+    Ok(Some((phys_lower, phys_upper)))
+}
+
 /// Counter of `scan_for_key` invocations, used by tests to prove the BTI
 /// point-lookup path never falls through to a sequential scan (issue #831).
 ///
@@ -251,6 +392,401 @@ impl SSTableReader {
     /// scan. See [`SCAN_FOR_KEY_CALLS`].
     pub fn scan_for_key_call_count() -> u64 {
         SCAN_FOR_KEY_CALLS.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Single-partition *seek* for the partition-targeted lookup fast path,
+    /// clustering-slice-aware (Issue #953 + #954, Epic #951).
+    ///
+    /// Where [`scan`](Self::scan) decodes EVERY partition in this SSTable and the
+    /// caller retains one, this resolves the target partition's `Data.db` offset
+    /// from the authoritative index (the BTI Partitions.db trie or the BIG
+    /// `Index.db`) and decodes ONLY that partition — the same per-partition decode
+    /// `scan` runs (`parse_block_emit` over the chunk-targeted decompressed
+    /// window), so its output is byte-for-byte identical to filtering the full
+    /// `scan` result down to `partition_key`.
+    ///
+    /// Offset domains (no-heuristics: authoritative resolved offsets only):
+    /// - **BTI ("da")** — `lookup_partition_via_bti_trie` returns the UNCOMPRESSED
+    ///   `Data.db` offset; a trie miss is authoritative absence.
+    /// - **BIG (`nb`)** — `lookup_partition_with_index` returns the partition's
+    ///   offset into the (uncompressed) data section. A hit is authoritative
+    ///   present; a MISS returns `Ok(None)` (the `Index.db` may be digest-keyed or
+    ///   incomplete, exactly the `get()` fallback rationale at #517) so the caller
+    ///   re-checks via a full scan rather than risk a false negative.
+    ///
+    /// Prefix-collision / wrong-offset guard: the decode
+    /// (`bti_decompress_and_parse_target_all`) re-verifies the decoded partition
+    /// key equals `partition_key` before collecting any row, so a BTI
+    /// prefix-collision candidate or a stale/mismatched index offset decodes to
+    /// nothing and is reported as absent — never a wrong partition. Every
+    /// clustering row of the matched partition is collected (not just the first),
+    /// so a multi-row partition returns all rows.
+    ///
+    /// Compiled only for the default (`not(tombstones)`) build: the manager's
+    /// seek-driven `scan_partition` exists only there, so under `tombstones` this
+    /// would be dead code.
+    ///
+    /// When `clustering` is `Some(slice)` AND this reader is BTI (`da`) with a
+    /// per-partition row index (`Rows.db`), the target partition's authoritative
+    /// row index is consulted to resolve the byte extent of the row-index
+    /// block(s) covering the requested clustering range, and ONLY that byte window
+    /// is decoded — so a `WHERE pk = ? AND ck </>/= ?` slice over a wide partition
+    /// decodes O(matched rows + index block slack) rather than the whole
+    /// partition. The post-scan `evaluate_leaf` backstop trims the
+    /// block-granularity over-read, so the returned rows are a superset of the
+    /// exact slice and the final query output is byte-identical to the
+    /// full-partition decode + post-filter.
+    ///
+    /// Returns `Ok(Some((rows, clustering_seek_engaged)))`:
+    /// - `clustering_seek_engaged == true` only when the clustering row-index
+    ///   narrowing actually bounded the decode (BTI wide partition with a usable
+    ///   row index and an encodable bound). The caller reports
+    ///   [`AccessPath::ClusteringSlice`](crate::query::access_path::AccessPath::ClusteringSlice)
+    ///   in that case.
+    /// - `clustering_seek_engaged == false` when the partition was decoded in full
+    ///   (no clustering slice, a NARROW BTI partition with no row index, the BIG
+    ///   format, or an un-encodable bound). Results are still correct — the caller
+    ///   reports the honest `PartitionLookup` path, NOT a fake clustering slice.
+    ///
+    /// `Ok(None)` mirrors [`scan_single_partition`]: the seek is not applicable
+    /// (no authoritative offset) and the caller must fall back to a full scan +
+    /// retain.
+    #[cfg(not(feature = "tombstones"))]
+    pub(crate) async fn scan_single_partition_clustering(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        clustering: Option<&ClusteringSlice>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Option<(Vec<(RowKey, Value)>, bool)>> {
+        // 1. Resolve the partition's uncompressed Data.db offset, and record
+        //    whether THIS path's "decoded nothing" is authoritative absence (BTI
+        //    trie) or merely inconclusive (BIG Index.db).
+        let is_bti = self.bti_partitions_db.is_some();
+        // Resolve the target partition's UNCOMPRESSED `Data.db` start offset.
+        let offset = if is_bti {
+            match self.lookup_partition_via_bti_trie(partition_key)? {
+                // Trie hit: candidate uncompressed offset (re-verified on decode).
+                Some(off) => off,
+                // Trie miss is AUTHORITATIVE absence for BTI (no rows, no seek).
+                None => return Ok(Some((Vec::new(), false))),
+            }
+        } else {
+            match self.lookup_partition_with_index(partition_key).await? {
+                // Index.db hit: a candidate offset into the data section. (The
+                // `data_size` is 0 in writer-produced Index.db, so we do NOT use it
+                // as a bound — the successor offset below is the authoritative end.)
+                Some((off, _size)) => off,
+                // No Index.db hit: cannot seek authoritatively (the index may be
+                // digest-keyed / incomplete, exactly the get() #517 rationale).
+                // Fall back to a full scan.
+                None => return Ok(None),
+            }
+        };
+
+        // AUTHORITATIVE end bound (issue #953 / #951 MEDIUM): the target partition
+        // occupies `[offset, end)`, where `end` is the SUCCESSOR partition's start
+        // offset (next trie/index entry). Decompressing exactly the chunks covering
+        // that half-open range materializes every byte of the target partition —
+        // including a row/cell that SPANS multiple compression chunks — without
+        // reading the next partition. This replaces the previous next-partition
+        // *boundary-scan* heuristic (a row-count-stability guard that could falsely
+        // accept a boundary mid-partition); see `bti_decompress_and_parse_target_all`.
+        //
+        // `None` means `offset` is the LAST partition (no successor): the callee
+        // bounds the end with the authoritative data-section length, or falls back
+        // to the safe full-scan path when that length is unknown.
+        let end_bound = self.successor_partition_offset(offset)?.map(|e| e as usize);
+
+        let schema_opt = self.get_table_schema(schema);
+
+        // Issue #954: when a single-column clustering slice is requested AND this
+        // is a BTI (`da`) reader, consult the target partition's authoritative
+        // row index to bound BOTH the decode and the decompression to the
+        // row-index block(s) covering the requested clustering range. Returns the
+        // row-body byte window (relative to the partition start, the same domain
+        // the parser sees when it parses `window[within..]`) plus a tightened
+        // decompression end. `clustering_engaged` is `true` only when the row
+        // index actually narrowed the decode.
+        let mut clustering_engaged = false;
+        let mut row_body_window: Option<(usize, usize)> = None;
+        let mut decode_end_bound = end_bound;
+        if is_bti {
+            if let Some(slice) = clustering {
+                if let Some(narrow) =
+                    self.bti_clustering_row_window(partition_key, slice, schema_opt.as_ref())?
+                {
+                    // `narrow.body_end_rel` is relative to the partition start; the
+                    // absolute Data.db decompression end is `offset + body_end_rel`,
+                    // clamped to the authoritative partition end (`end_bound`). A
+                    // `usize::MAX` end means "to the partition end" (the last block),
+                    // so we leave `decode_end_bound` at the partition bound and only
+                    // tighten the decompression for a bounded end (the common
+                    // `ck < b` / two-bound case) — `saturating_add` guards overflow.
+                    if narrow.body_end_rel != usize::MAX {
+                        let abs_end = (offset as usize).saturating_add(narrow.body_end_rel);
+                        decode_end_bound = Some(match end_bound {
+                            Some(e) => abs_end.min(e),
+                            None => abs_end,
+                        });
+                    }
+                    row_body_window = Some((narrow.body_start_rel, narrow.body_end_rel));
+                    clustering_engaged = true;
+                }
+            }
+        }
+
+        // 2. Decode ONLY the target partition at the resolved offset, using the
+        //    SAME parser the scan path uses. `bti_decompress_and_parse_target_all`
+        //    chunk-targets the decompression (decodes just the chunk window that
+        //    holds the partition) and re-verifies the decoded key, so this is
+        //    O(1) PARTITIONS decoded regardless of the SSTable's partition count.
+        //
+        //    Issue #953 correctness fix: this collects EVERY clustering row of the
+        //    one target partition (bounded by the authoritative successor offset /
+        //    data-section length), not just the first row, so a `WHERE pk = ?`
+        //    over a multi-clustering-row
+        //    partition returns all rows — byte-identical to filtering the full
+        //    scan down to `partition_key`. The single-row `*_target` decoder is
+        //    still used by the `get()` point-lookup path, which returns one Value.
+        //
+        //    Issue #954: when `row_body_window` is set, the parse is bounded to the
+        //    clustering slice's row-index block extent so only O(slice) rows are
+        //    decoded (the post-scan backstop trims the block-granularity slack).
+        let parser = self.build_v5_parser();
+        let key = RowKey::from(partition_key.to_vec());
+        let decoded_rows = match self
+            .bti_decompress_and_parse_target_all(
+                offset as usize,
+                decode_end_bound,
+                row_body_window,
+                &key,
+                table_id,
+                schema_opt.as_ref(),
+                &parser,
+            )
+            .await?
+        {
+            // Authoritatively bounded decode (rows may be empty for an absent key).
+            Some(rows) => rows,
+            // The seek could not bound the target partition authoritatively (the
+            // LAST partition with an unknown data-section length): fall back to the
+            // safe full scan + retain for correctness, per the #953 mandate.
+            None => return Ok(None),
+        };
+
+        // 3. Record the per-partition decode (Issue #953 / #958): exactly ONE
+        //    partition is decoded for a hit regardless of how many clustering rows
+        //    it yields — `partitions_decoded` counts partitions, not rows. This is
+        //    the signal that proves the within-SSTable seek (vs a full
+        //    parse-then-retain). A non-empty decode means the partition exists.
+        if !decoded_rows.is_empty() {
+            super::super::work_counters::add_partition_decoded();
+            // Tombstone suppression matches the user-facing scan path
+            // (`sequential_scan`/`bti_scan_with_metadata` both apply it),
+            // applied per-row so a row tombstone is dropped while live rows in
+            // the same partition survive.
+            let rows: Vec<(RowKey, Value)> = decoded_rows
+                .into_iter()
+                .filter(|value| self.filter_tombstone(value))
+                .map(|value| (key.clone(), value))
+                .collect();
+            return Ok(Some((rows, clustering_engaged)));
+        }
+
+        // Decoded nothing at the resolved offset. Whether that is authoritative
+        // depends on HOW the offset was resolved (Constraint #4: never return a
+        // wrong/empty result from an unsupported/inconclusive seek):
+        //
+        // - **BTI** — the trie is the authoritative present/absent oracle and the
+        //   decode re-verified the key, so "decoded nothing" means the trie
+        //   candidate was a prefix-collision for an absent key. AUTHORITATIVE
+        //   empty: the caller does NOT fall back.
+        // - **BIG** — the `Index.db` offset is only a candidate position; its
+        //   promoted-index / chunk layout is not as load-bearing as the BTI trie,
+        //   so a failed decode at the resolved offset is INCONCLUSIVE (a partition
+        //   that straddles a chunk boundary, or a stale offset, can fail the
+        //   chunk-targeted decode yet be found by a full parse). Fall back to a
+        //   full scan rather than risk a false negative.
+        if is_bti {
+            // Authoritative absence (prefix-collision candidate for an absent key).
+            // No rows decoded, so report the clustering seek as NOT engaged.
+            Ok(Some((Vec::new(), false)))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Resolve the within-partition row-body byte window covering a single-column
+    /// clustering slice, using the target partition's authoritative BTI row index
+    /// (Issue #954, Epic #951).
+    ///
+    /// For a WIDE BTI partition the `Partitions.db` trie points at a per-partition
+    /// `TrieIndexEntry` in `Rows.db`; that entry's row-index trie maps clustering
+    /// **separators** to row-index BLOCK offsets (relative to the partition
+    /// start). [`select_row_index_blocks_for_range`] applies the authoritative
+    /// separator-floor semantics to pick exactly the blocks whose key interval
+    /// intersects `[start, end]`, so the returned byte window is the smallest
+    /// authoritative extent that can contain the requested clustering range.
+    ///
+    /// Returns `Ok(Some(window))` only when the narrowing is authoritative and
+    /// useful:
+    /// - the reader is BTI with a `Rows.db`,
+    /// - the partition is WIDE (`Partitions.db` returned a `RowsOffset`, i.e. the
+    ///   partition has a row index — a NARROW partition has no per-partition row
+    ///   index to seek within),
+    /// - the clustering bound(s) encode to the OSS50 byte-comparable form, and
+    /// - the selected block set is non-empty.
+    ///
+    /// Returns `Ok(None)` (decode the whole partition, report `PartitionLookup`)
+    /// for every other case — a NARROW partition, an empty `Rows.db`, an
+    /// un-encodable bound, or a slice that selects no block. This is the honest
+    /// fallback: correctness is preserved by decoding the full partition and
+    /// letting the post-scan backstop filter.
+    #[cfg(not(feature = "tombstones"))]
+    fn bti_clustering_row_window(
+        &self,
+        partition_key: &[u8],
+        slice: &ClusteringSlice,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<Option<ClusteringRowWindow>> {
+        use crate::storage::sstable::bti::{
+            iterate_rows_for_partition, lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry,
+            select_row_index_blocks_for_range, BtiPartitionLocation,
+        };
+
+        let (Some(partitions_db), Some(rows_db)) = (&self.bti_partitions_db, &self.bti_rows_db)
+        else {
+            return Ok(None);
+        };
+
+        // Resolve the partition's location. Only a WIDE partition (RowsOffset) has
+        // a per-partition row index we can seek within; a NARROW partition
+        // (DataOffset) has none, so decode it in full.
+        let mut cursor = std::io::Cursor::new(partitions_db.as_slice());
+        let rows_offset = match lookup_raw_key_in_bti_partitions_db(&mut cursor, partition_key)
+            .map_err(|e| {
+                Error::corruption(format!(
+                    "BTI clustering seek: Partitions.db trie lookup failed (key len={}): {}",
+                    partition_key.len(),
+                    e
+                ))
+            })? {
+            Some(BtiPartitionLocation::RowsOffset(off)) => off as usize,
+            // NARROW partition or absent key: no row index to narrow with.
+            Some(BtiPartitionLocation::DataOffset(_)) | None => return Ok(None),
+        };
+
+        // Resolve the per-partition row-index entry and enumerate its blocks in
+        // ascending byte-comparable (clustering) order.
+        let header = resolve_rows_db_entry(rows_db.as_slice(), rows_offset).map_err(|e| {
+            Error::corruption(format!(
+                "BTI clustering seek: Rows.db entry at RowsOffset({rows_offset}) unreadable: {e}"
+            ))
+        })?;
+        let (_header2, entries) = iterate_rows_for_partition(rows_db.as_slice(), rows_offset)
+            .map_err(|e| {
+                Error::corruption(format!(
+                    "BTI clustering seek: Rows.db trie at RowsOffset({rows_offset}) unreadable: {e}"
+                ))
+            })?;
+        // `iterate_rows_for_partition` re-resolves the header internally; keep the
+        // first `header` (identical) for `block_count`/`data_position`.
+        let _ = header;
+        if entries.is_empty() {
+            return Ok(None);
+        }
+
+        // Per-column reverse order for the FIRST clustering column (single-column
+        // scope per #954). A missing/absent schema treats it as ascending.
+        let is_reversed: Vec<bool> = schema
+            .map(|s| {
+                s.clustering_keys
+                    .iter()
+                    .map(|c| matches!(c.order, crate::schema::ClusteringOrder::Desc))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Encode the CQL bounds into the PHYSICAL byte-comparable order the row
+        // index uses, normalizing for a DESC first clustering column (issue #954
+        // High-severity correctness fix). `select_row_index_blocks_for_range`
+        // operates purely in physical (on-disk, byte-comparable) order, so the CQL
+        // lower/upper bounds must be mapped to the physical-lower/physical-upper
+        // sides before block selection. For a DESC column those roles SWAP (see
+        // `physical_byte_bounds_for_slice`). An un-encodable bound makes the
+        // narrowing unsafe → decode the whole partition (honest fallback).
+        let Some((start_bytes, end_bytes)) = physical_byte_bounds_for_slice(slice, &is_reversed)?
+        else {
+            return Ok(None);
+        };
+
+        // CORRECTNESS GUARD (no-heuristics, never wrong results): a row-index block
+        // carrying an `open_marker` (FLAG_OPEN_MARKER) means a range tombstone is
+        // OPEN at that block boundary — a deletion opened in an earlier block can
+        // still shadow rows inside the requested slice. Narrowing the decode skips
+        // the rows (and the range-marker bytes) before the slice, which would drop
+        // that open deletion and risk resurrecting a deleted row. The post-scan
+        // backstop only FILTERS rows, it cannot re-apply a missed range tombstone.
+        // So when ANY block in this partition's row index carries an open marker we
+        // fall back to a full-partition decode (correct, just unnarrowed). The
+        // common wide-partition slice (no range tombstones) is unaffected.
+        if entries.iter().any(|(_sep, b)| b.open_marker.is_some()) {
+            debug!(
+                "BTI clustering seek: partition row index has open range-tombstone marker(s); \
+                 decoding full partition to preserve range-deletion semantics (no narrowing)"
+            );
+            return Ok(None);
+        }
+
+        let blocks = select_row_index_blocks_for_range(&entries, &start_bytes, &end_bytes);
+        if blocks.is_empty() {
+            // No block overlaps the range. The slice may still select rows that
+            // share the floor block's separator boundary; to stay correct we fall
+            // back to a full-partition decode rather than risk dropping a row.
+            return Ok(None);
+        }
+
+        // Row-body byte window = [first selected block start, end of the LAST
+        // selected block). The block `data_offset` is relative to the partition
+        // start (the same domain the parser sees for `window[within..]`). The end
+        // is the start of the FIRST block AFTER the last selected one (or +∞ via
+        // the partition end when the last selected block is the partition's last).
+        // The static row precedes the clustering rows and must be merged into each
+        // emitted clustering row, so we may only fast-forward PAST it when the
+        // table has NO static columns. With a static column present, decode from
+        // the partition body start (`body_start_rel = 0`) so the static prefix is
+        // seen; the END bound still narrows the decode. (The acceptance fixture
+        // `test_da.wide_table` has no static columns, so the start narrows too.)
+        let has_static = schema
+            .map(|s| s.columns.iter().any(|c| c.is_static))
+            .unwrap_or(false);
+        let body_start_rel = if has_static {
+            0
+        } else {
+            blocks
+                .iter()
+                .map(|b| b.data_offset as usize)
+                .min()
+                .unwrap_or(0)
+        };
+        let last_selected_off = blocks.iter().map(|b| b.data_offset).max().unwrap_or(0);
+        // The exclusive end is the next block's start strictly greater than the
+        // last selected block; if none, the window runs to the partition end
+        // (`usize::MAX` is clamped by the caller against the authoritative
+        // partition end / data-section length).
+        let body_end_rel = entries
+            .iter()
+            .map(|(_sep, b)| b.data_offset)
+            .filter(|&off| off > last_selected_off)
+            .min()
+            .map(|off| off as usize)
+            .unwrap_or(usize::MAX);
+
+        Ok(Some(ClusteringRowWindow {
+            body_start_rel,
+            body_end_rel,
+        }))
     }
 
     /// BTI ("da") point lookup: resolve a partition key via the Partitions.db
@@ -538,6 +1074,365 @@ impl SSTableReader {
                 }
             }
         }
+    }
+
+    /// Collect-ALL-rows variant of [`bti_decompress_and_parse_target`] for the
+    /// within-SSTable seek (`scan_single_partition`, Issue #953 / #951).
+    ///
+    /// [`bti_decompress_and_parse_target`] stops after the FIRST emitted row of the
+    /// decoded partition — correct for a `get()` point lookup that returns a single
+    /// `Value`, but WRONG for `scan_partition`, which must hand the query layer
+    /// EVERY clustering row of the partition so it can apply clustering predicates.
+    /// A `WHERE pk = ?` over a table with multiple clustering rows per partition
+    /// would otherwise drop every row after the first whenever the seek succeeds
+    /// (the original #953 bug — see the multi-row regression test).
+    ///
+    /// This variant reuses the identical window-building (chunk targeting or
+    /// whole-section fallback), the identical prefix-collision key re-verification,
+    /// and the identical `parse_block_emit` decode that the user-facing scan path
+    /// runs — but instead of breaking after the first row it COLLECTS every row the
+    /// parser emits for the ONE target partition. The emit closure keeps each
+    /// `Value` whose decoded key equals the queried key (and whose table id
+    /// matches) and `Break`s the instant the parser emits a row with a DIFFERENT
+    /// partition key.
+    ///
+    /// Bounding the decompression window (Issue #953 / #951 MEDIUM fix). The seek
+    /// must materialize ONLY the chunks covering the target partition — never
+    /// stitch to EOF (for a head-of-file point lookup on a large SSTable that would
+    /// decompress nearly the whole `Data.db`, full-table I/O for one partition).
+    /// The bound is AUTHORITATIVE, not a heuristic boundary scan:
+    ///
+    ///   - **`end_bound = Some(end)`** — the caller resolved the SUCCESSOR
+    ///     partition's uncompressed start offset (next trie/index entry). The
+    ///     target partition occupies `[offset, end)`, so we pull chunks only until
+    ///     `window.len() >= end - window_base` (or EOF) and then parse ONCE over a
+    ///     window that fully contains the partition. Because the WHOLE `[offset,
+    ///     end)` extent is decompressed before parsing, a row/cell that spans
+    ///     multiple compression chunks is present in full — no mid-stream
+    ///     truncation, no boundary guessing. This is the exact bound for every
+    ///     non-last partition in both BTI (`da`) and BIG (`nb`).
+    ///
+    ///   - **`end_bound = None`** — `offset` is the LAST partition (no successor).
+    ///     The end is then the authoritative data-section length
+    ///     (`CompressionInfo.data_length`); we buffer to that length (or EOF) and
+    ///     parse once. If that length is unavailable (no usable `CompressionInfo`),
+    ///     we CANNOT bound the last partition authoritatively, so we return
+    ///     `Ok(None)` and the caller falls back to the safe full-scan + retain path
+    ///     (correctness over optimization). The previous row-count *stability
+    ///     guard* — itself a heuristic that could falsely accept a next-partition
+    ///     boundary while the target partition was incomplete (a single large
+    ///     multi-chunk cell, static/range-marker regions, or a truncated tail
+    ///     parsed as garbage headers) — has been REMOVED entirely.
+    ///
+    /// The whole-section fallback (uncompressed BTI) already has every byte so its
+    /// first parse is authoritative regardless of the bound. This yields
+    /// byte-for-byte the same rows as the full-scan path filtered down to
+    /// `partition_key`.
+    ///
+    /// Returns:
+    /// - `Ok(Some(rows))` — the partition's rows (empty when the trie/index
+    ///   candidate was a prefix collision for an absent key). The caller wraps each
+    ///   in a `(RowKey, Value)` and applies the same tombstone suppression the scan
+    ///   path applies.
+    /// - `Ok(None)` — could not bound the (last) partition authoritatively; the
+    ///   caller must fall back to a full scan + retain.
+    #[cfg(not(feature = "tombstones"))]
+    async fn bti_decompress_and_parse_target_all(
+        &self,
+        offset: usize,
+        end_bound: Option<usize>,
+        // Issue #954: when `Some((start_rel, end_rel))`, bound the partition's
+        // row-body parse to that within-partition byte window (relative to the
+        // partition start) so only the clustering slice's row-index block(s) are
+        // decoded. `None` decodes the whole partition (the #953 behaviour).
+        row_body_window: Option<(usize, usize)>,
+        key: &RowKey,
+        table_id: &TableId,
+        schema_opt: Option<&crate::schema::TableSchema>,
+        parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+    ) -> Result<Option<Vec<Value>>> {
+        // Issue #815: each lookup uses its own cursor so concurrent lookups on
+        // this reader never share a mutable file position / chunk index.
+        let cursor = self.new_scan_cursor().await?;
+
+        // Determine the chunk-targeting parameters. `chunk_length == 0` (or no
+        // CompressionInfo) means we cannot chunk-target -> whole-section fallback.
+        let chunk_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.chunk_length as usize)
+            .filter(|&len| len > 0);
+
+        let (target_chunk, window_base, mut window) = match chunk_length {
+            Some(len) => {
+                let (target_chunk, window_base, _within) = Self::bti_chunk_target(offset, len);
+                let chunk_start = self
+                    .compression_info
+                    .as_ref()
+                    .and_then(|ci| ci.compressed_chunk_offset(target_chunk))
+                    .ok_or_else(|| {
+                        Error::corruption(format!(
+                            "BTI single-partition seek: no compressed offset for target chunk {} \
+                             (offset {}, chunk_length {})",
+                            target_chunk, offset, len
+                        ))
+                    })?;
+                {
+                    let mut file_guard = cursor.file.lock().await;
+                    file_guard.seek(SeekFrom::Start(chunk_start)).await?;
+                }
+                cursor
+                    .chunk_index
+                    .store(target_chunk, std::sync::atomic::Ordering::Relaxed);
+                (target_chunk, window_base, Vec::<u8>::new())
+            }
+            None => {
+                // Whole-section fallback (uncompressed BTI, or chunk_length absent/0).
+                let header_size = self.calculate_header_size();
+                {
+                    let mut file_guard = cursor.file.lock().await;
+                    file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+                }
+                let whole = self.stitch_all_chunks(&cursor).await?;
+                (0usize, 0usize, whole)
+            }
+        };
+
+        if offset < window_base {
+            return Err(Error::corruption(format!(
+                "BTI single-partition seek: resolved offset {} precedes window base {} (chunk {})",
+                offset, window_base, target_chunk
+            )));
+        }
+        let within = offset - window_base;
+        let chunk_targeted = chunk_length.is_some();
+
+        if chunk_targeted {
+            // Resolve the AUTHORITATIVE exclusive end of the target partition in
+            // the UNCOMPRESSED offset domain. Non-last partitions are bounded by
+            // the successor partition's start (`end_bound`); the LAST partition is
+            // bounded by the data-section length. When NEITHER is known we cannot
+            // bound the last partition without re-introducing a heuristic, so we
+            // return `Ok(None)` and let the caller fall back to a full scan.
+            let end_offset = match end_bound {
+                Some(end) => end,
+                None => match self
+                    .compression_info
+                    .as_ref()
+                    .map(|ci| ci.data_length as usize)
+                    .filter(|&len| len > offset)
+                {
+                    Some(len) => len,
+                    None => {
+                        debug!(
+                            "BTI single-partition seek: last partition at offset {} has no \
+                             authoritative end (no successor, no usable data_length); falling \
+                             back to full scan",
+                            offset
+                        );
+                        return Ok(None);
+                    }
+                },
+            };
+
+            // Step 1: buffer enough chunks to expose the partition header, then run
+            // the prefix-collision / chunk-straddle gate. This bails out cheaply
+            // (without decompressing the rest of the partition) when the trie/index
+            // candidate is a prefix collision for an absent key.
+            loop {
+                // Pull a chunk if the header is not yet (fully) buffered.
+                if within + 2 > window.len()
+                    || !Self::bti_partition_key_bytes_available(&window, within, key.as_bytes())
+                {
+                    match self
+                        .bti_pull_decompressed_chunk(&cursor, &mut window)
+                        .await?
+                    {
+                        true => continue, // chunk appended; re-check the header
+                        false => {
+                            // EOF before the header is buffered: nothing decodable
+                            // at the resolved offset.
+                            return Ok(Some(Vec::new()));
+                        }
+                    }
+                }
+
+                let key_matches = self.bti_partition_key_matches(&window, within, key.as_bytes());
+                if !key_matches {
+                    debug!(
+                        "BTI seek candidate at offset {} did not match queried key \
+                         (prefix collision); treating as absent",
+                        offset
+                    );
+                    return Ok(Some(Vec::new()));
+                }
+                break; // header buffered AND key matches
+            }
+
+            // Step 2: buffer EXACTLY the chunks covering `[offset, end_offset)` —
+            // never stitch to EOF (the #953 MEDIUM finding: a head-of-file lookup
+            // would otherwise decompress the whole file). `end_offset` is in the
+            // same uncompressed-offset domain as `window_base + window.len()`, so
+            // the window holds the whole partition once `window.len()` reaches
+            // `end_offset - window_base` (or EOF — a stale end never reads past
+            // EOF). Decompressing the FULL extent before parsing means a row/cell
+            // that spans multiple compression chunks is present in full, so the
+            // single parse below collects every target row without truncation.
+            let needed = end_offset.saturating_sub(window_base);
+            while window.len() < needed {
+                if !self
+                    .bti_pull_decompressed_chunk(&cursor, &mut window)
+                    .await?
+                {
+                    break; // EOF: window holds all available bytes.
+                }
+            }
+            return self
+                .bti_collect_partition_rows(
+                    &window,
+                    within,
+                    row_body_window,
+                    key,
+                    table_id,
+                    schema_opt,
+                    parser,
+                )
+                .map(|(rows, _complete)| Some(rows));
+        }
+
+        // Whole-section fallback (uncompressed BTI): every byte is already present,
+        // so the first parse is authoritative.
+        if within >= window.len() {
+            return Err(Error::corruption(format!(
+                "BTI trie resolved Data.db offset {} beyond decompressed data section ({} bytes)",
+                offset,
+                window.len()
+            )));
+        }
+        self.bti_collect_partition_rows(
+            &window,
+            within,
+            row_body_window,
+            key,
+            table_id,
+            schema_opt,
+            parser,
+        )
+        .map(|(rows, _complete)| Some(rows))
+    }
+
+    /// Read the next compressed chunk from `cursor`, decompress it (if the reader
+    /// has a compression algorithm), and append the decompressed bytes to
+    /// `window`. Returns `true` when a chunk was appended, `false` at EOF.
+    ///
+    /// Shared by the chunk-targeted seek so the header-buffering and
+    /// partition-bounding loops use one decompression code path; each call bumps
+    /// `work_counters::chunks_decompressed` so a test can prove the seek bounded
+    /// its decompression to the target partition's chunk span (Issue #953/#951).
+    #[cfg(not(feature = "tombstones"))]
+    async fn bti_pull_decompressed_chunk(
+        &self,
+        cursor: &ScanCursor,
+        window: &mut Vec<u8>,
+    ) -> Result<bool> {
+        use crate::storage::sstable::compression::Compression;
+        match self.read_next_block(cursor).await? {
+            Some(compressed_chunk) => {
+                let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader
+                {
+                    let compression = Compression::new(*compression_reader.algorithm())?;
+                    compression.decompress(&compressed_chunk).map_err(|e| {
+                        Error::corruption(format!(
+                            "BTI single-partition seek: failed to decompress chunk: {}",
+                            e
+                        ))
+                    })?
+                } else {
+                    // No compression reader despite CompressionInfo: treat the raw
+                    // chunk bytes as already-decompressed data.
+                    compressed_chunk
+                };
+                // Issue #953/#951: count every chunk the seek materializes so a
+                // bound test can prove the decompression window is bounded to the
+                // target partition's chunk span, not stitched to EOF.
+                super::super::work_counters::add_chunk_decompressed();
+                window.extend_from_slice(&decompressed_chunk);
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    }
+
+    /// Parse the buffered `window` from `within`, collecting every row of the
+    /// FIRST (target) partition and stopping at the next partition boundary.
+    ///
+    /// Returns `(rows, saw_next_partition)`:
+    /// - `rows` — the target partition's row `Value`s (those whose decoded key
+    ///   equals `key` and whose table id matches, issue #831 wrong-table guard),
+    ///   in on-disk order.
+    /// - `saw_next_partition` — `true` iff the parser emitted a fully-decoded row
+    ///   whose partition key DIFFERS from `key`, at which point collection stops.
+    ///
+    /// Because the caller now decompresses the partition's AUTHORITATIVE byte
+    /// extent `[offset, end)` before parsing (the successor offset / data-section
+    /// length, issue #953 / #951), the window always fully contains the target
+    /// partition — there is no mid-partition truncation to resolve. The
+    /// `Break`-on-different-key behaviour is defence in depth: when the window's
+    /// final chunk overruns slightly into the next partition (chunks are
+    /// fixed-size, so the extent rounds up to a chunk boundary), the first
+    /// different-key row terminates collection so no next-partition row is ever
+    /// kept. The returned flag is currently informational; the caller does not loop
+    /// on it (the bound is authoritative, not boundary-scanned).
+    ///
+    /// Issue #954: when `row_body_window` is `Some((start_rel, end_rel))` the
+    /// parse is bounded to that within-partition byte window (relative to the
+    /// partition start, i.e. the `window[within..]` slice domain) so only the
+    /// clustering slice's row-index block(s) are decoded. `None` parses the whole
+    /// partition (the #953 behaviour).
+    #[cfg(not(feature = "tombstones"))]
+    fn bti_collect_partition_rows(
+        &self,
+        window: &[u8],
+        within: usize,
+        row_body_window: Option<(usize, usize)>,
+        key: &RowKey,
+        table_id: &TableId,
+        schema_opt: Option<&crate::schema::TableSchema>,
+        parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+    ) -> Result<(Vec<Value>, bool)> {
+        let mut rows: Vec<Value> = Vec::new();
+        let mut saw_next_partition = false;
+        // Clamp the window's end to the available bytes (`usize::MAX` means "to the
+        // partition end"); the start is already within-partition-relative, which is
+        // the same domain as `window[within..]`.
+        let clamped_window = row_body_window.map(|(start, end)| {
+            let avail = window.len().saturating_sub(within);
+            (start.min(avail), end.min(avail))
+        });
+        parser.parse_block_emit_windowed(
+            &window[within..],
+            schema_opt,
+            self,
+            clamped_window,
+            |(tid, entry_key, entry_value)| {
+                if entry_key.as_bytes() == key.as_bytes() {
+                    // A row of the TARGET partition. Verify the table id matches
+                    // (a wrong-table query never returns a row, issue #831).
+                    if table_ids_match_strict(&tid, table_id) {
+                        rows.push(entry_value);
+                    }
+                    Ok(std::ops::ControlFlow::Continue(()))
+                } else {
+                    // First row of the NEXT partition (the authoritative extent
+                    // can overrun into it by up to one chunk). Stop here so no
+                    // next-partition row is collected; the target partition's rows
+                    // are already complete because its whole extent was buffered.
+                    saw_next_partition = true;
+                    Ok(std::ops::ControlFlow::Break(()))
+                }
+            },
+        )?;
+        Ok((rows, saw_next_partition))
     }
 
     /// Returns true when the `[flags][key_len: u8][key bytes]` prefix at `within`
@@ -2095,6 +2990,190 @@ mod tests {
         );
         //  - whole-section fallback cannot grow → absent.
         assert_eq!(bti_lookup_step(false, false, false), BtiLookupStep::Absent);
+    }
+
+    // =========================================================================
+    // physical_byte_bounds_for_slice — DESC clustering normalization (issue #954)
+    // =========================================================================
+
+    /// Build a [`ClusteringSlice`] over a single integer clustering column.
+    #[cfg(not(feature = "tombstones"))]
+    fn int_slice(
+        start: Option<i64>,
+        start_inclusive: bool,
+        end: Option<i64>,
+        end_inclusive: bool,
+    ) -> ClusteringSlice {
+        ClusteringSlice {
+            start: start
+                .map(|v| vec![Value::Integer(v as i32)])
+                .unwrap_or_default(),
+            start_inclusive,
+            end: end
+                .map(|v| vec![Value::Integer(v as i32)])
+                .unwrap_or_default(),
+            end_inclusive,
+        }
+    }
+
+    /// The physical byte image of a single-int clustering bound under an order.
+    #[cfg(not(feature = "tombstones"))]
+    fn enc_int(v: i32, reversed: bool) -> Vec<u8> {
+        crate::storage::sstable::bti::encode_clustering_bound_oss50_with_order(
+            &[Value::Integer(v)],
+            &[reversed],
+        )
+        .expect("int encodes")
+    }
+
+    /// ASC: the physical bounds are the CQL bounds, no swap.
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_asc_no_swap() {
+        // ck >= 100 AND ck < 110
+        let slice = int_slice(Some(100), true, Some(110), false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[false])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(lower, enc_int(100, false), "ASC physical-lower = enc(100)");
+        assert_eq!(upper, enc_int(110, false), "ASC physical-upper = enc(110)");
+        // The physical range is well-ordered (lower <= upper) so block selection
+        // returns a non-empty window for an in-range slice.
+        assert!(lower <= upper, "ASC physical bounds must be ordered");
+    }
+
+    /// DESC: the CQL lower/upper roles SWAP into physical order, and the result is
+    /// still a well-ordered `[phys_lower, phys_upper]` (the bug produced a
+    /// REVERSED, empty-selecting range).
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_desc_swaps_roles() {
+        // ck >= 100 AND ck < 110 on a DESC column.
+        let slice = int_slice(Some(100), true, Some(110), false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+            .expect("ok")
+            .expect("encodable");
+        // Physical-lower comes from the CQL UPPER bound (enc_desc(110)); physical-
+        // upper from the CQL LOWER bound (enc_desc(100)).
+        assert_eq!(
+            lower,
+            enc_int(110, true),
+            "DESC physical-lower must come from the CQL upper bound (110)"
+        );
+        assert_eq!(
+            upper,
+            enc_int(100, true),
+            "DESC physical-upper must come from the CQL lower bound (100)"
+        );
+        // The whole point: under DESC the swapped bounds are well-ordered. With the
+        // un-swapped (buggy) mapping the range would be [enc_desc(100),
+        // enc_desc(110)] which is REVERSED (enc_desc(100) > enc_desc(110)) and
+        // `select_row_index_blocks_for_range` returns EMPTY → dropped rows.
+        assert!(
+            lower < upper,
+            "DESC swapped physical bounds must be ordered (lower < upper); \
+             got lower={lower:?} upper={upper:?}"
+        );
+        assert!(
+            enc_int(100, true) > enc_int(110, true),
+            "sanity: under DESC, enc(100) sorts AFTER enc(110) in physical bytes — \
+             the un-swapped mapping would build a reversed (empty) range"
+        );
+    }
+
+    /// DESC single-bound `ck >= v` (open CQL upper): the matching values (v and
+    /// larger) all sort to the physical-LOW byte side (DESC inverts bytes), so the
+    /// physical window is `[-∞, enc_desc(v)]`. (The buggy un-swapped code built
+    /// `[enc_desc(v), +∞]`, which EXCLUDED exactly those low-byte matching rows.)
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_desc_lower_bound_only() {
+        // ck >= 290, open above.
+        let slice = int_slice(Some(290), true, None, false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(
+            lower,
+            Vec::<u8>::new(),
+            "DESC `ck >= 290`: open CQL upper → physical -∞ (the matching large \
+             values sort to the LOW physical-byte side)"
+        );
+        assert_eq!(
+            upper,
+            enc_int(290, true),
+            "DESC `ck >= 290`: physical-upper = enc_desc(290) (the boundary value)"
+        );
+        assert!(lower < upper, "must be ordered");
+        // Crucial: enc_desc(290) sorts ABOVE enc_desc(299), so [-∞, enc_desc(290)]
+        // includes enc_desc(299) — the buggy [enc_desc(290), +∞] would NOT.
+        assert!(
+            enc_int(299, true) < enc_int(290, true),
+            "sanity: larger DESC value has smaller bytes"
+        );
+        assert!(
+            enc_int(299, true).as_slice() <= upper.as_slice(),
+            "the physical window must include enc_desc(299), a matching row"
+        );
+    }
+
+    /// DESC single-bound `ck < v` (open CQL lower): the matching values (smaller
+    /// than v) sort to the physical-HIGH byte side, so the physical window is
+    /// `[enc_desc(v), +∞]`.
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_desc_upper_bound_only() {
+        // ck < 20, open below.
+        let slice = int_slice(None, false, Some(20), false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(
+            lower,
+            enc_int(20, true),
+            "DESC `ck < 20`: physical-lower = enc_desc(20) (the boundary value)"
+        );
+        assert_eq!(
+            upper,
+            vec![0xFFu8; MAX_OSS50_BOUND_SENTINEL_LEN],
+            "DESC `ck < 20`: open CQL lower → physical +∞ sentinel"
+        );
+        assert!(lower < upper, "must be ordered");
+        // A matching small value (ck=0) has the LARGEST DESC bytes, inside the
+        // window; the buggy [-∞, enc_desc(20)] mapping would exclude it.
+        assert!(
+            enc_int(0, true).as_slice() >= lower.as_slice(),
+            "the physical window must include enc_desc(0), a matching row"
+        );
+    }
+
+    /// DESC equality `ck = v`: start == end == [v]; physical bounds collapse to
+    /// [enc_desc(v), enc_desc(v)] (a single-point range, identical to ASC since
+    /// the swap of equal endpoints is a no-op).
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_desc_equality_is_point() {
+        let slice = int_slice(Some(150), true, Some(150), true);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[true])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(lower, enc_int(150, true));
+        assert_eq!(upper, enc_int(150, true));
+        assert_eq!(lower, upper, "equality is a single physical point");
+    }
+
+    /// Absent schema / empty `is_reversed` is treated as ASC (no swap), matching
+    /// the encoder's default.
+    #[cfg(not(feature = "tombstones"))]
+    #[test]
+    fn physical_bounds_no_order_defaults_ascending() {
+        let slice = int_slice(Some(5), true, Some(50), false);
+        let (lower, upper) = physical_byte_bounds_for_slice(&slice, &[])
+            .expect("ok")
+            .expect("encodable");
+        assert_eq!(lower, enc_int(5, false));
+        assert_eq!(upper, enc_int(50, false));
+        assert!(lower < upper);
     }
 
     #[test]

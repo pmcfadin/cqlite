@@ -16,6 +16,7 @@
 // This implements CQL v3.4.3+ for Apache Cassandra 5.0+
 // CQL is NOT SQL - it's a query language specifically designed for Cassandra's distributed architecture.
 
+pub mod access_path;
 pub mod engine;
 pub mod executor;
 pub mod m2_select_validator;
@@ -37,6 +38,7 @@ pub mod select_optimizer;
 #[cfg(feature = "state_machine")]
 pub mod select_parser;
 
+pub use access_path::{AccessPath, FallbackReason};
 pub use engine::{
     AnalyzeResult, CacheStats, ExplainResult, QueryCacheEntry, QueryEngine as AdvancedQueryEngine,
     SchemaStatus,
@@ -48,7 +50,8 @@ pub use m2_select_validator::{M2SelectValidator, SelectValidationResult, Unsuppo
 pub use parser::QueryParser;
 pub use planner::{ExecutionStep, IndexSelection, PlanType, QueryHints, QueryPlan, QueryPlanner};
 pub use prepared::{
-    ExecutionHints, ParameterMetadata, PreparedQuery, PreparedQueryBuilder, PreparedQueryStats,
+    ExecutionHints, ParameterMetadata, PreparedContext, PreparedQuery, PreparedQueryBuilder,
+    PreparedQueryStats,
 };
 pub use result::{
     cql_type_to_data_type, ColumnInfo, PerformanceMetrics, QueryMetadata, QueryResult,
@@ -125,6 +128,11 @@ impl QueryEngine {
     /// Execute a CQL query
     pub async fn execute(&self, cql: &str) -> Result<QueryResult> {
         self.advanced_engine.execute(cql).await
+    }
+
+    /// Execute a SELECT with positional `?` parameters (Issue #961).
+    pub async fn execute_with_params(&self, cql: &str, params: &[Value]) -> Result<QueryResult> {
+        self.advanced_engine.execute_with_params(cql, params).await
     }
 
     /// Prepare a query for repeated execution

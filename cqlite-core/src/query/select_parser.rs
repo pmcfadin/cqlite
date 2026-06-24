@@ -29,6 +29,10 @@ pub struct SelectParser {
     current_token: Option<Token>,
     /// Tokenizer for the input
     tokenizer: Tokenizer,
+    /// Next 0-based positional index to assign to a `?` bind marker (Issue #961).
+    /// Markers are numbered left-to-right in source order, matching CQL's
+    /// positional-parameter binding.
+    next_bind_index: usize,
 }
 
 /// Token types for CQL parsing
@@ -88,6 +92,16 @@ pub enum Token {
     Float(f64),
     String(String),
     Boolean(bool),
+    /// Unquoted UUID literal (8-4-4-4-12 hex), e.g.
+    /// `550e8400-e29b-41d4-a716-446655440000`. Carries the 16 decoded bytes so
+    /// the parser can emit `Value::Uuid` directly (Issue #956). This is what
+    /// unblocks `WHERE <uuid_pk> = <literal>` matching and the #949
+    /// partition-targeted fast path for UUID-keyed tables.
+    Uuid([u8; 16]),
+    /// Unquoted blob literal in `0x...` hex form (an even number of hex digits,
+    /// possibly empty: `0x`). Carries the decoded bytes so the parser can emit
+    /// `Value::Blob` directly (Issue #956).
+    Blob(Vec<u8>),
 
     // Identifiers
     Identifier(String),
@@ -275,6 +289,117 @@ impl Tokenizer {
         }
     }
 
+    /// Attempt to read an unquoted UUID literal at the current position.
+    ///
+    /// A CQL UUID literal has the fixed 36-character shape
+    /// `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx` (8-4-4-4-12 ASCII hex digits, dashes
+    /// in fixed positions, case-insensitive). Because a UUID can begin with a
+    /// digit (`5...`) or a letter (`a...`), this is tried *before* the number and
+    /// identifier paths in `next_token`.
+    ///
+    /// Returns `Some(token)` and consumes exactly 36 characters only when the
+    /// full pattern matches; otherwise returns `None` and consumes nothing, so
+    /// the caller falls back to number/identifier lexing. This non-greedy,
+    /// all-or-nothing match is what keeps `5` (integer), `a716` (identifier), and
+    /// `a - b` (subtraction) lexing unchanged.
+    fn try_read_uuid(&mut self) -> Option<Token> {
+        // Fixed UUID layout: groups of hex-digit counts separated by dashes.
+        const GROUPS: [usize; 5] = [8, 4, 4, 4, 12];
+        const UUID_LEN: usize = 36; // 32 hex digits + 4 dashes
+
+        // Peek the full 36-char window without consuming.
+        let window: Vec<char> = self
+            .input
+            .get(self.position..self.position + UUID_LEN)?
+            .to_vec();
+
+        // The character immediately after the window must not extend the token
+        // (e.g. a 37th hex digit or a trailing identifier char), otherwise this
+        // is not a standalone UUID literal.
+        if let Some(next) = self.input.get(self.position + UUID_LEN) {
+            if next.is_ascii_hexdigit() || next.is_alphanumeric() || *next == '_' || *next == '-' {
+                return None;
+            }
+        }
+
+        // Validate the 8-4-4-4-12 / dash structure and decode to bytes.
+        let mut bytes = [0u8; 16];
+        let mut byte_idx = 0;
+        let mut hi: Option<u8> = None;
+        let mut idx = 0;
+        for (g, &group_len) in GROUPS.iter().enumerate() {
+            if g > 0 {
+                if window.get(idx) != Some(&'-') {
+                    return None;
+                }
+                idx += 1;
+            }
+            for _ in 0..group_len {
+                let nibble = window.get(idx)?.to_digit(16)? as u8;
+                idx += 1;
+                match hi.take() {
+                    None => hi = Some(nibble),
+                    Some(h) => {
+                        bytes[byte_idx] = (h << 4) | nibble;
+                        byte_idx += 1;
+                    }
+                }
+            }
+        }
+
+        // All 36 chars consumed, all 16 bytes filled, no dangling nibble.
+        if idx != UUID_LEN || byte_idx != 16 || hi.is_some() {
+            return None;
+        }
+
+        for _ in 0..UUID_LEN {
+            self.advance();
+        }
+        Some(Token::Uuid(bytes))
+    }
+
+    /// Read a `0x...` blob hex literal, assuming the current char is `0` and the
+    /// next is `x`/`X`. CQL requires an even number of hex digits; `0x` (empty
+    /// blob) is valid. Errors on an odd digit count or a non-hex character.
+    fn read_blob_hex(&mut self) -> Result<Token> {
+        self.advance(); // consume '0'
+        self.advance(); // consume 'x' / 'X'
+
+        let mut digits = String::new();
+        while let Some(ch) = self.current_char {
+            if ch.is_ascii_hexdigit() {
+                digits.push(ch);
+                self.advance();
+            } else {
+                break;
+            }
+        }
+
+        if digits.len() % 2 != 0 {
+            return Err(Error::cql_parse(format!(
+                "Blob literal must have an even number of hex digits, got {} in 0x{}",
+                digits.len(),
+                digits
+            )));
+        }
+
+        let mut bytes = Vec::with_capacity(digits.len() / 2);
+        let chars: Vec<char> = digits.chars().collect();
+        for pair in chars.chunks(2) {
+            let hi = pair[0]
+                .to_digit(16)
+                .ok_or_else(|| Error::cql_parse("Invalid hex digit in blob literal"))?
+                as u8;
+            let lo = pair[1]
+                .to_digit(16)
+                .ok_or_else(|| Error::cql_parse("Invalid hex digit in blob literal"))?
+                as u8;
+            bytes.push((hi << 4) | lo);
+        }
+
+        Ok(Token::Blob(bytes))
+    }
+
     fn read_identifier(&mut self) -> String {
         let mut value = String::new();
 
@@ -382,31 +507,60 @@ impl Tokenizer {
                     });
                 }
                 '\'' | '"' => return self.read_string(ch).map(Token::String),
+                // Unquoted UUID literals (8-4-4-4-12 hex) may begin with either a
+                // digit or a letter, so probe for the full 36-char pattern before
+                // falling through to number / blob / identifier lexing. The probe
+                // is all-or-nothing and consumes nothing on a miss, so it never
+                // alters how `5`, `0xff`, or bare identifiers tokenize.
+                c if c.is_ascii_hexdigit() => {
+                    if let Some(tok) = self.try_read_uuid() {
+                        return Ok(tok);
+                    }
+                    // `0x...` blob literal (only when not already matched as a UUID).
+                    if c == '0' && matches!(self.peek(), Some('x') | Some('X')) {
+                        return self.read_blob_hex();
+                    }
+                    if c.is_ascii_digit() {
+                        return self.read_number();
+                    }
+                    // Hex letter (a-f / A-F) that was not part of a UUID: it is the
+                    // start of an ordinary identifier.
+                    let identifier = self.read_identifier();
+                    return self.classify_identifier(identifier);
+                }
                 c if c.is_ascii_digit() => return self.read_number(),
                 c if c.is_alphabetic() || c == '_' => {
                     let identifier = self.read_identifier();
-                    // GROUP BY / ORDER BY are two-word keywords; resolve here so
-                    // the parser only ever sees a single GroupBy / OrderBy token.
-                    if identifier.eq_ignore_ascii_case("GROUP") {
-                        self.expect_by_keyword("GROUP")?;
-                        return Ok(Token::GroupBy);
-                    }
-                    if identifier.eq_ignore_ascii_case("ORDER") {
-                        self.expect_by_keyword("ORDER")?;
-                        return Ok(Token::OrderBy);
-                    }
-                    // PER PARTITION LIMIT is a three-word keyword; resolve it
-                    // here so the parser only ever sees a single token.
-                    if identifier.eq_ignore_ascii_case("PER") {
-                        self.expect_keyword_word("PARTITION", "PER")?;
-                        self.expect_keyword_word("LIMIT", "PER PARTITION")?;
-                        return Ok(Token::PerPartitionLimit);
-                    }
-                    return Ok(keyword_for(&identifier).unwrap_or(Token::Identifier(identifier)));
+                    return self.classify_identifier(identifier);
                 }
                 other => return Err(Error::cql_parse(format!("Unexpected character: {}", other))),
             }
         }
+    }
+
+    /// Resolve an already-read identifier into its token: a multi-word keyword
+    /// (`GROUP BY`, `ORDER BY`, `PER PARTITION LIMIT`), a single-word keyword,
+    /// or a plain [`Token::Identifier`]. Shared by the alphabetic and hex-letter
+    /// lexer branches so both treat keywords identically.
+    fn classify_identifier(&mut self, identifier: String) -> Result<Token> {
+        // GROUP BY / ORDER BY are two-word keywords; resolve here so the parser
+        // only ever sees a single GroupBy / OrderBy token.
+        if identifier.eq_ignore_ascii_case("GROUP") {
+            self.expect_by_keyword("GROUP")?;
+            return Ok(Token::GroupBy);
+        }
+        if identifier.eq_ignore_ascii_case("ORDER") {
+            self.expect_by_keyword("ORDER")?;
+            return Ok(Token::OrderBy);
+        }
+        // PER PARTITION LIMIT is a three-word keyword; resolve it here so the
+        // parser only ever sees a single token.
+        if identifier.eq_ignore_ascii_case("PER") {
+            self.expect_keyword_word("PARTITION", "PER")?;
+            self.expect_keyword_word("LIMIT", "PER PARTITION")?;
+            return Ok(Token::PerPartitionLimit);
+        }
+        Ok(keyword_for(&identifier).unwrap_or(Token::Identifier(identifier)))
     }
 }
 
@@ -418,6 +572,7 @@ impl SelectParser {
         Ok(Self {
             current_token,
             tokenizer,
+            next_bind_index: 0,
         })
     }
 
@@ -641,6 +796,27 @@ impl SelectParser {
             return self.parse_writetime_ttl_call(function);
         }
 
+        // Unary minus on a numeric literal (e.g. `token(pk) >= -1000`). Partition
+        // tokens span the full i64 range, so negative bounds are essential for
+        // token-range restrictions (Issue #955). Only a bare negative number is
+        // supported here; arbitrary unary-minus expressions are out of scope.
+        if matches!(self.peek(), Token::Minus) {
+            self.advance()?;
+            return match self.current_token.clone() {
+                Some(Token::Integer(n)) => {
+                    self.advance()?;
+                    Ok(SelectExpression::Literal(Value::BigInt(-n)))
+                }
+                Some(Token::Float(f)) => {
+                    self.advance()?;
+                    Ok(SelectExpression::Literal(Value::Float(-f)))
+                }
+                other => Err(Error::cql_parse(format!(
+                    "Expected a numeric literal after unary minus, found: {other:?}"
+                ))),
+            };
+        }
+
         // Take ownership/copy of literal payloads up front so we can call &mut self.
         match self.current_token.clone() {
             Some(Token::Identifier(name)) => {
@@ -677,6 +853,14 @@ impl SelectParser {
                 self.advance()?;
                 Ok(SelectExpression::Literal(Value::Text(s)))
             }
+            Some(Token::Uuid(bytes)) => {
+                self.advance()?;
+                Ok(SelectExpression::Literal(Value::Uuid(bytes)))
+            }
+            Some(Token::Blob(bytes)) => {
+                self.advance()?;
+                Ok(SelectExpression::Literal(Value::Blob(bytes)))
+            }
             Some(Token::Boolean(b)) => {
                 self.advance()?;
                 Ok(SelectExpression::Literal(Value::Boolean(b)))
@@ -684,6 +868,16 @@ impl SelectParser {
             Some(Token::Null) => {
                 self.advance()?;
                 Ok(SelectExpression::Literal(Value::Null))
+            }
+            // Positional `?` bind marker (Issue #961). Allowed anywhere a value
+            // expression is — the RHS of a comparison, an IN value list, a
+            // BETWEEN range bound, or a SELECT-list literal. The 0-based index is
+            // assigned left-to-right in source order and resolved at bind time.
+            Some(Token::Question) => {
+                let index = self.next_bind_index;
+                self.next_bind_index += 1;
+                self.advance()?;
+                Ok(SelectExpression::BindMarker(index))
             }
             Some(Token::LeftParen) => {
                 self.advance()?;
@@ -1369,6 +1563,205 @@ mod tests {
         // PER PARTITION LIMIT even when LIMIT is followed by OFFSET, not just
         // when it immediately follows LIMIT.
         assert!(parse_select("SELECT * FROM ks.t LIMIT 5 OFFSET 1 PER PARTITION LIMIT 2").is_err());
+    }
+
+    // --- Unquoted UUID / blob literal parser tests (Issue #956) ---
+
+    /// Pull the single literal out of a `WHERE <col> = <literal>` statement.
+    fn where_equal_literal(cql: &str) -> Value {
+        let stmt = parse_select(cql).expect("statement must parse");
+        let where_expr = stmt.where_clause.expect("WHERE clause expected");
+        match where_expr {
+            WhereExpression::Comparison(ComparisonExpression {
+                operator: ComparisonOperator::Equal,
+                right: ComparisonRightSide::Value(SelectExpression::Literal(v)),
+                ..
+            }) => v,
+            other => panic!("Expected an `= literal` comparison, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_unquoted_uuid_literal() {
+        let v = where_equal_literal(
+            "SELECT * FROM ks.tbl WHERE id = 550e8400-e29b-41d4-a716-446655440000",
+        );
+        assert_eq!(
+            v,
+            Value::Uuid([
+                0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+                0x00, 0x00,
+            ])
+        );
+    }
+
+    #[test]
+    fn test_unquoted_uuid_literal_uppercase() {
+        // UUID hex is case-insensitive; uppercase must decode to the same bytes.
+        let lower = where_equal_literal(
+            "SELECT * FROM ks.tbl WHERE id = 550e8400-e29b-41d4-a716-446655440000",
+        );
+        let upper = where_equal_literal(
+            "SELECT * FROM ks.tbl WHERE id = 550E8400-E29B-41D4-A716-446655440000",
+        );
+        assert_eq!(lower, upper);
+    }
+
+    #[test]
+    fn test_uuid_starting_with_letter() {
+        // A UUID whose first group starts with a hex *letter* must still be
+        // recognized (it would otherwise be mis-lexed as an identifier).
+        let v = where_equal_literal(
+            "SELECT * FROM ks.tbl WHERE id = abcdef01-2345-6789-abcd-ef0123456789",
+        );
+        assert!(matches!(v, Value::Uuid(_)), "got {:?}", v);
+    }
+
+    #[test]
+    fn test_uuid_does_not_break_integer_literal() {
+        // Regression guard: a bare integer must still tokenize as an integer,
+        // not get swallowed by the UUID probe.
+        let v = where_equal_literal("SELECT * FROM ks.tbl WHERE age = 5");
+        assert_eq!(v, Value::BigInt(5));
+    }
+
+    #[test]
+    fn test_uuid_does_not_break_identifier_or_minus() {
+        // `a716` is a plain identifier (column name), and `-` is subtraction;
+        // neither should be misread as part of a UUID.
+        let stmt = parse_select("SELECT a716 - 1 FROM ks.tbl").expect("must parse");
+        assert!(matches!(stmt.select_clause, SelectClause::Columns(_)));
+    }
+
+    #[test]
+    fn test_almost_uuid_too_long_is_not_uuid() {
+        // 33 hex digits in the last group (one extra) must NOT match a UUID.
+        // It also isn't a valid bare token, so parsing should fail rather than
+        // silently produce a wrong UUID.
+        let result =
+            parse_select("SELECT * FROM ks.tbl WHERE id = 550e8400-e29b-41d4-a716-4466554400000");
+        // Either a parse error or a non-UUID token — the key assertion is that
+        // it is never decoded as a (truncated) UUID literal.
+        if let Ok(stmt) = result {
+            if let Some(WhereExpression::Comparison(c)) = stmt.where_clause {
+                if let ComparisonRightSide::Value(SelectExpression::Literal(v)) = c.right {
+                    assert!(
+                        !matches!(v, Value::Uuid(_)),
+                        "33-hex-digit tail must not parse as a UUID, got {:?}",
+                        v
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_blob_hex_literal() {
+        let v = where_equal_literal("SELECT * FROM ks.tbl WHERE data = 0xdeadbeef");
+        assert_eq!(v, Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn test_blob_hex_literal_uppercase_prefix_and_digits() {
+        let v = where_equal_literal("SELECT * FROM ks.tbl WHERE data = 0XDEADBEEF");
+        assert_eq!(v, Value::Blob(vec![0xde, 0xad, 0xbe, 0xef]));
+    }
+
+    #[test]
+    fn test_empty_blob_literal() {
+        let v = where_equal_literal("SELECT * FROM ks.tbl WHERE data = 0x");
+        assert_eq!(v, Value::Blob(vec![]));
+    }
+
+    #[test]
+    fn test_blob_odd_digit_count_errors() {
+        // CQL blob literals require an even number of hex digits.
+        assert!(parse_select("SELECT * FROM ks.tbl WHERE data = 0xabc").is_err());
+    }
+
+    #[test]
+    fn test_zero_integer_still_parses() {
+        // `0` must remain an integer literal (the blob probe only fires on `0x`).
+        let v = where_equal_literal("SELECT * FROM ks.tbl WHERE age = 0");
+        assert_eq!(v, Value::BigInt(0));
+    }
+
+    // --- Positional bind marker (`?`) parser tests (Issue #961) ---
+
+    #[test]
+    fn test_single_bind_marker_in_where() {
+        let stmt = parse_select("SELECT * FROM ks.tbl WHERE id = ?").expect("must parse");
+        assert_eq!(stmt.bind_marker_count(), 1);
+        let where_expr = stmt.where_clause.expect("WHERE expected");
+        match where_expr {
+            WhereExpression::Comparison(ComparisonExpression {
+                operator: ComparisonOperator::Equal,
+                right: ComparisonRightSide::Value(SelectExpression::BindMarker(idx)),
+                ..
+            }) => assert_eq!(idx, 0),
+            other => panic!("expected `= ?` comparison with BindMarker(0), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_multiple_bind_markers_numbered_left_to_right() {
+        let stmt = parse_select("SELECT * FROM ks.tbl WHERE a = ? AND b = ?").expect("must parse");
+        assert_eq!(stmt.bind_marker_count(), 2);
+        // Collect marker indices from both comparisons in order.
+        let WhereExpression::And(exprs) = stmt.where_clause.expect("WHERE expected") else {
+            panic!("expected AND of two comparisons");
+        };
+        let indices: Vec<usize> = exprs
+            .iter()
+            .map(|e| match e {
+                WhereExpression::Comparison(ComparisonExpression {
+                    right: ComparisonRightSide::Value(SelectExpression::BindMarker(idx)),
+                    ..
+                }) => *idx,
+                other => panic!("expected BindMarker comparison, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn test_bind_marker_binds_to_literal() {
+        let mut stmt = parse_select("SELECT * FROM ks.tbl WHERE id = ?").expect("must parse");
+        stmt.bind_parameters(&[Value::Integer(42)])
+            .expect("binding must succeed");
+        let where_expr = stmt.where_clause.expect("WHERE expected");
+        match where_expr {
+            WhereExpression::Comparison(ComparisonExpression {
+                right: ComparisonRightSide::Value(SelectExpression::Literal(v)),
+                ..
+            }) => assert_eq!(v, Value::Integer(42)),
+            other => panic!("expected bound literal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bind_marker_in_list_count() {
+        let stmt = parse_select("SELECT * FROM ks.tbl WHERE id IN (?, ?, ?)").expect("must parse");
+        assert_eq!(stmt.bind_marker_count(), 3);
+    }
+
+    #[test]
+    fn test_bind_marker_count_mismatch_errors() {
+        let mut stmt = parse_select("SELECT * FROM ks.tbl WHERE id = ?").expect("must parse");
+        assert!(stmt.bind_parameters(&[]).is_err(), "too few must error");
+        let mut stmt2 = parse_select("SELECT * FROM ks.tbl WHERE id = ?").expect("must parse");
+        assert!(
+            stmt2
+                .bind_parameters(&[Value::Integer(1), Value::Integer(2)])
+                .is_err(),
+            "too many must error"
+        );
+    }
+
+    #[test]
+    fn test_no_bind_markers_count_zero() {
+        let stmt = parse_select("SELECT * FROM ks.tbl WHERE id = 5").expect("must parse");
+        assert_eq!(stmt.bind_marker_count(), 0);
     }
 
     #[test]

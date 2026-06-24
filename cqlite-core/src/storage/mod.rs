@@ -228,14 +228,78 @@ impl StorageEngine {
     /// partition. Delegates to [`SSTableManager::scan_partition`] (which has a
     /// bloom-prune implementation for the default build and a scan-and-filter
     /// fallback for the `tombstones` build, so callers need no cfg branching).
+    ///
+    /// Returns `(rows, engaged)`: `engaged` is `true` only when the call actually
+    /// pruned the SSTable set to partition candidates (the default build). The
+    /// `tombstones` build returns `false` because it full-scans and retains with no
+    /// prune, so the caller reports an honest fallback access path (Epic #951).
     pub async fn scan_partition(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
         self.sstables
             .scan_partition(table_id, partition_key, schema)
+            .await
+    }
+
+    /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
+    ///
+    /// Like [`scan_partition`](Self::scan_partition) but pushes a single-column
+    /// clustering-key restriction (`ck </>/= ?` / two-bound range) down to a
+    /// within-partition seek when the candidate's authoritative row index supports
+    /// it, so a wide-partition slice decodes O(matched rows + index) rather than
+    /// the whole partition. Returns `(rows, clustering_seek_engaged)`: the rows are
+    /// the full partition (or a clustering-narrowed superset) so the caller's
+    /// post-scan filter yields byte-identical output, and the bool reports whether
+    /// the clustering narrowing actually engaged (for the `ClusteringSlice` access
+    /// path). Delegates to [`SSTableManager::scan_partition_clustering`].
+    #[cfg(not(feature = "tombstones"))]
+    pub async fn scan_partition_clustering(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        clustering: Option<&crate::storage::sstable::reader::ClusteringSlice>,
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+        self.sstables
+            .scan_partition_clustering(table_id, partition_key, clustering, schema)
+            .await
+    }
+
+    /// Partition-targeted, metadata-carrying scan for a fully-constrained
+    /// `WHERE pk = ?` WRITETIME/TTL projection (Issue #962).
+    ///
+    /// The metadata sibling of [`scan_partition`](Self::scan_partition): returns
+    /// only the rows for the single partition identified by the raw
+    /// `partition_key` bytes, WITH per-cell write metadata, after pruning the
+    /// SSTable set down to the candidates whose bloom filter / BTI trie admit the
+    /// key — so a `SELECT WRITETIME(col) ... WHERE pk = ?` never opens all N
+    /// SSTables. Output matches filtering the full
+    /// [`scan_with_cell_metadata`](Self::scan_with_cell_metadata) result to the
+    /// partition; cross-generation reconciliation runs over the pruned candidates.
+    /// Delegates to [`SSTableManager::scan_partition_with_cell_metadata`].
+    ///
+    /// Returns `(rows, engaged)`: `engaged` is `true` only when the call pruned the
+    /// SSTable set to partition candidates (the default build). The `tombstones`
+    /// build returns `false` because it full-scans with metadata and retains with no
+    /// prune, so the caller reports an honest fallback access path (Epic #951).
+    pub async fn scan_partition_with_cell_metadata(
+        &self,
+        table_id: &TableId,
+        partition_key: &[u8],
+        schema: Option<&crate::schema::TableSchema>,
+    ) -> Result<(
+        Vec<(
+            RowKey,
+            Value,
+            std::collections::HashMap<String, CellWriteMetadata>,
+        )>,
+        bool,
+    )> {
+        self.sstables
+            .scan_partition_with_cell_metadata(table_id, partition_key, schema)
             .await
     }
 

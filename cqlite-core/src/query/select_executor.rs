@@ -11,6 +11,7 @@
 //! - Collection operations (list[index], map['key'])
 
 use super::{
+    access_path::{AccessPath, FallbackReason},
     result::{
         cql_type_to_data_type, ColumnInfo, ProjectionFlags, QueryMetadata, QueryResult,
         QueryResultIterator, QueryRow, StreamingConfig,
@@ -99,6 +100,14 @@ struct ExecutionContext {
     /// select item is detected during planning so the reader can thread
     /// per-cell write metadata.
     pub projection_flags: ProjectionFlags,
+    /// Access path chosen by the SSTable-scan step for THIS query (Issue #960).
+    ///
+    /// Per-query state, set where the scan step decides its path. The
+    /// result-attached `QueryMetadata.access_path` is read from here, NOT from
+    /// the process-global probe, so concurrent SELECTs cannot overwrite each
+    /// other's reported path between `record()` and the result build. The global
+    /// probe (`access_path::record/last`) remains for test assertions only.
+    pub access_path: Option<AccessPath>,
 }
 
 /// Aggregation state for GROUP BY operations
@@ -237,6 +246,36 @@ pub enum LeafOutcome {
 /// `BloomFilter` is always `True` (checked upstream).
 pub fn evaluate_leaf(row: &QueryRow, predicate: &SSTablePredicate) -> LeafOutcome {
     use super::select_optimizer::SSTableFilterOp;
+
+    // Issue #955: a `token(pk)` predicate constrains the partition-key token, not
+    // a stored column. Compute the Murmur3 token of the row's raw partition key
+    // (`row.key`) using the same partitioner the rest of the codebase uses, then
+    // compare against the i64 bound. An empty key cannot be hashed meaningfully
+    // (a synthesised/aggregate row); treat it as Unknown so it is rejected.
+    if predicate.is_token() {
+        if row.key.0.is_empty() {
+            return LeafOutcome::Unknown;
+        }
+        let row_token = crate::util::cassandra_murmur3::cassandra_murmur3_token(&row.key.0);
+        let Some(Value::BigInt(bound)) = predicate.values.first() else {
+            return LeafOutcome::Unknown;
+        };
+        let matches = match &predicate.operation {
+            SSTableFilterOp::Gt => row_token > *bound,
+            SSTableFilterOp::Gte => row_token >= *bound,
+            SSTableFilterOp::Lt => row_token < *bound,
+            SSTableFilterOp::Lte => row_token <= *bound,
+            SSTableFilterOp::Equal => row_token == *bound,
+            // token() only produces inequality/equality predicates upstream.
+            _ => return LeafOutcome::Unknown,
+        };
+        return if matches {
+            LeafOutcome::True
+        } else {
+            LeafOutcome::False
+        };
+    }
+
     let column_value = match row.values.get(&predicate.column) {
         // A SQL `NULL` operand (absent column or explicit `Null`) is `UNKNOWN`.
         None | Some(Value::Null) => return LeafOutcome::Unknown,
@@ -402,40 +441,438 @@ pub fn build_row_from_scan(
     })
 }
 
-/// If the pushed-down predicates fully constrain the partition key with
-/// equality, return the raw on-disk partition-key bytes so the scan can be
-/// turned into a partition-targeted lookup (Issue #949).
+/// Outcome of classifying whether a SELECT can use a partition-targeted lookup.
 ///
-/// Returns `None` — and the caller falls back to a full table scan — when:
-/// - no schema is available (we cannot identify the partition-key columns),
-/// - any partition-key column is missing an `=` predicate (partial key, or an
-///   `IN`/range restriction — those still require the scan path today), or
-/// - the constrained values cannot be encoded to the on-disk key form (e.g. a
-///   type mismatch), in which case a full scan is the safe, correct fallback.
+/// Issue #960: this replaces the previous `Option<Vec<u8>>` so the caller can
+/// record the *honest* reason a full scan was chosen, rather than collapsing all
+/// fallback causes into `None`.
+#[derive(Debug)]
+enum PartitionLookupOutcome {
+    /// A fully-constrained partition key; carries its on-disk bytes for the lookup.
+    Targeted(Vec<u8>),
+    /// Several fully-constrained partition keys (`WHERE pk IN (a, b, c)`) over the
+    /// complete partition key (Issue #955). Carries the *deduplicated* on-disk key
+    /// bytes, in the order they should be probed (input order, first occurrence
+    /// wins). Each is served by an independent partition-targeted lookup.
+    MultiTargeted(Vec<Vec<u8>>),
+    /// No targeted lookup is possible; carries the documented reason for the scan.
+    Fallback(FallbackReason),
+}
+
+/// Resolve the HONEST access path for a partition-targeted storage call (Epic
+/// #951).
 ///
-/// Only an all-equality restriction over the complete partition key qualifies,
-/// mirroring Cassandra's requirement for a single-partition read.
-fn full_partition_key_lookup(
+/// The executor decides a query *could* use a targeted lookup (`targeted` is the
+/// label it would report — `PartitionLookup`, `MultiPartitionLookup`,
+/// `MetadataPartitionLookup`, or `StreamingPartitionLookup`). But the storage
+/// call reports, via `engaged`, whether it *actually* pruned the SSTable set. On
+/// the `tombstones` build the targeted surfaces compile out the prune and become
+/// full-scan + retain fallbacks (`engaged == false`); claiming a targeted label
+/// there would dishonestly report a targeted path for a query that opened the
+/// whole table. When `engaged` is false this returns
+/// `FallbackFullScan { TombstonesBuildNoPrune }`. The returned ROWS are identical
+/// either way — this only governs the *reported* access path.
+fn honest_targeted_path(targeted: AccessPath, engaged: bool) -> AccessPath {
+    if engaged {
+        targeted
+    } else {
+        AccessPath::FallbackFullScan {
+            reason: FallbackReason::TombstonesBuildNoPrune,
+        }
+    }
+}
+
+/// Maximum number of `IN` partition keys served by independent targeted lookups
+/// before falling back to a full scan (Issue #955).
+///
+/// An `IN` list expands to one `scan_partition` per key. Each lookup prunes the
+/// SSTable set, but a pathologically large list (thousands of keys) would issue
+/// thousands of lookups and could touch every SSTable anyway, defeating the
+/// prune and risking unbounded work. Past this cap we choose a single full scan
+/// with an in-memory `IN` filter instead: one pass over the data rather than `N`
+/// pruned passes, and the per-row `IN` predicate still yields correct rows. The
+/// value is deliberately generous (real point-lookup `IN` lists are small) while
+/// bounding worst-case fan-out. Reported honestly as a fallback so the cap being
+/// hit is observable.
+const MAX_IN_TARGETED_LOOKUPS: usize = 64;
+
+/// Classify whether the pushed-down predicates fully constrain the partition key
+/// (Issue #949, extended for `IN` in Issue #955), returning the on-disk key
+/// bytes (one for `=`, several for `IN`) when they do, or a documented
+/// [`FallbackReason`] when they do not (Issue #960).
+///
+/// Returns a fallback — and the caller falls back to a full table scan — when:
+/// - no schema is available ([`FallbackReason::NoSchema`]): we cannot identify
+///   the partition-key columns,
+/// - any partition-key column is missing an `=`/`IN` predicate
+///   ([`FallbackReason::PartitionKeyNotFullyConstrained`]): partial key or a
+///   range restriction (those still require the scan path today),
+/// - the constrained values cannot be encoded to the on-disk key form
+///   ([`FallbackReason::PartitionKeyEncodingFailed`], e.g. a type mismatch), or
+/// - the expanded `IN` key set exceeds [`MAX_IN_TARGETED_LOOKUPS`]
+///   ([`FallbackReason::PartitionKeyNotFullyConstrained`]): a single full scan +
+///   in-memory `IN` filter is preferred over a huge targeted fan-out.
+///
+/// Each partition-key column must be constrained by `=` (a singleton value set)
+/// or `IN` (its value list); the targeted key set is the cartesian product of
+/// the per-column value sets — exactly the set Cassandra would read as the union
+/// of the equivalent single-key queries. A single combination yields
+/// [`PartitionLookupOutcome::Targeted`]; multiple yield
+/// [`PartitionLookupOutcome::MultiTargeted`] (deduplicated, input order
+/// preserved). Token predicates never qualify here.
+fn classify_partition_lookup(
     predicates: &[SSTablePredicate],
     schema: Option<&crate::schema::TableSchema>,
-) -> Option<Vec<u8>> {
+) -> PartitionLookupOutcome {
     use super::select_optimizer::SSTableFilterOp;
 
-    let schema = schema?;
+    let Some(schema) = schema else {
+        return PartitionLookupOutcome::Fallback(FallbackReason::NoSchema);
+    };
     if schema.partition_keys.is_empty() {
+        return PartitionLookupOutcome::Fallback(FallbackReason::NoSchema);
+    }
+
+    // Per partition-key column, collect its constrained value set: `=` is a
+    // singleton, `IN` is the list. Token predicates (`is_token`) are skipped —
+    // they never name a real partition-key column.
+    let mut per_column_values: Vec<Vec<Value>> = Vec::with_capacity(schema.partition_keys.len());
+    for pk in &schema.partition_keys {
+        let predicate = predicates.iter().find(|p| {
+            !p.is_token()
+                && p.column == pk.name
+                && matches!(p.operation, SSTableFilterOp::Equal | SSTableFilterOp::In)
+        });
+        let Some(predicate) = predicate else {
+            return PartitionLookupOutcome::Fallback(
+                FallbackReason::PartitionKeyNotFullyConstrained,
+            );
+        };
+        if predicate.values.is_empty() {
+            return PartitionLookupOutcome::Fallback(
+                FallbackReason::PartitionKeyNotFullyConstrained,
+            );
+        }
+        per_column_values.push(predicate.values.clone());
+    }
+
+    // FINDING 3: bound the fan-out with CHECKED arithmetic BEFORE materializing
+    // the product. A composite `IN` over several multi-value columns can have a
+    // product that is astronomically large (e.g. 1000 x 1000 x ...); expanding
+    // it first would allocate far more than the cap before we ever check it.
+    // `checked_mul` over the per-column counts saturates to "too big" on
+    // overflow, so we fall back without over-allocating.
+    let product_size = per_column_values
+        .iter()
+        .try_fold(1usize, |acc, vals| acc.checked_mul(vals.len()));
+    match product_size {
+        Some(n) if n <= MAX_IN_TARGETED_LOOKUPS => {}
+        // Over the cap (or overflowed `usize`): a single full scan + in-memory
+        // `IN` filter is preferred over a huge targeted fan-out.
+        _ => {
+            return PartitionLookupOutcome::Fallback(
+                FallbackReason::PartitionKeyNotFullyConstrained,
+            );
+        }
+    }
+
+    // Cartesian product of the per-column value sets = the full set of complete
+    // partition keys to probe. With all-`=` columns this is a single tuple. The
+    // product size is bounded by `MAX_IN_TARGETED_LOOKUPS` above, so this
+    // allocation is safe.
+    let combinations = cartesian_product(&per_column_values);
+
+    // Encode each combination to on-disk key bytes, deduplicating (first
+    // occurrence wins so input order is preserved). An encoding failure for any
+    // combination makes the whole lookup unsafe → full-scan fallback.
+    let mut seen: std::collections::HashSet<Vec<u8>> = std::collections::HashSet::new();
+    let mut keys: Vec<Vec<u8>> = Vec::with_capacity(combinations.len());
+    for values in &combinations {
+        match crate::storage::partition_key_codec::encode_partition_key_columns(values, schema) {
+            Ok(bytes) => {
+                if seen.insert(bytes.clone()) {
+                    keys.push(bytes);
+                }
+            }
+            Err(_) => {
+                return PartitionLookupOutcome::Fallback(
+                    FallbackReason::PartitionKeyEncodingFailed,
+                );
+            }
+        }
+    }
+
+    match keys.len() {
+        // An empty `IN` list cannot reach here (the parser drops empty `IN`,
+        // and an empty value set was rejected above), but guard defensively.
+        0 => PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyNotFullyConstrained),
+        1 => PartitionLookupOutcome::Targeted(keys.into_iter().next().unwrap_or_default()),
+        _ => PartitionLookupOutcome::MultiTargeted(keys),
+    }
+}
+
+/// Classify whether the pushed-down predicates carry a SINGLE-COLUMN clustering
+/// restriction on the FIRST clustering column that can be pushed down to a
+/// within-partition seek (Issue #954, Epic #951).
+///
+/// Returns `Some(slice)` for `ck </>/=/<=/>= ?`, a two-bound contiguous range
+/// (`ck >= a AND ck < b`, lowered by the optimizer to a separate `Gte`/`Gt` and
+/// `Lt`/`Lte` pair), a `BETWEEN`-lowered `Range`, or `ck = ?` (`Equal`) on the
+/// FIRST clustering column — the shapes `evaluate_leaf` already enforces. The
+/// lower and upper bounds of a two-bound query arrive as TWO predicates on the
+/// same column (Issue #788 lowers `>=`/`<` independently, NOT as a `Range`), so
+/// this MERGES all bounds on the first clustering column into one slice — without
+/// the merge a `ck >= a AND ck < b` would pick only one bound and decode far more
+/// than the slice.
+///
+/// Returns `None` (decode the whole partition, report `PartitionLookup`) when:
+/// - there is no schema or no clustering key,
+/// - no predicate names the first clustering column,
+/// - the restriction is a shape outside the single-column scope (`In`, `Prefix`,
+///   or any restriction on a NON-first clustering column — multi-column prefixes
+///   are a documented follow-up), or
+/// - a bound value is missing.
+///
+/// This NEVER changes correctness: the slice only narrows the seek's decode, and
+/// the caller's post-scan `evaluate_leaf` applies the exact predicate. A `None`
+/// result simply decodes the full partition.
+/// Coerce a clustering bound `Value` to the clustering column's declared CQL type
+/// so it encodes to the SAME byte-comparable separator form the `Rows.db` row
+/// index stores (Issue #954).
+///
+/// The optimizer widens an integer literal (`100`) to `Value::Integer`/`BigInt`
+/// without regard to the column's narrower type, so an `int` clustering column's
+/// `100` can arrive as `BigInt(100)` and encode to 8 bytes while the on-disk
+/// separator is the 4-byte `int` form — a width mismatch that selects no block.
+/// This narrows/normalises the common comparable types to the column type. A type
+/// that cannot be safely coerced returns `None` (the caller then decodes the
+/// whole partition — correctness preserved, just no narrowing).
+#[cfg(not(feature = "tombstones"))]
+fn coerce_clustering_value(value: &Value, cql_type: &str) -> Option<Value> {
+    use crate::schema::CqlType;
+
+    let ty = CqlType::parse(cql_type).ok()?;
+    // Extract an integer from any integer-ish Value for the integer target types.
+    let as_i128 = |v: &Value| -> Option<i128> {
+        match v {
+            Value::TinyInt(i) => Some(*i as i128),
+            Value::SmallInt(i) => Some(*i as i128),
+            Value::Integer(i) => Some(*i as i128),
+            Value::BigInt(i) | Value::Counter(i) | Value::Timestamp(i) => Some(*i as i128),
+            _ => None,
+        }
+    };
+    match ty {
+        CqlType::TinyInt => Some(Value::TinyInt(i8::try_from(as_i128(value)?).ok()?)),
+        CqlType::SmallInt => Some(Value::SmallInt(i16::try_from(as_i128(value)?).ok()?)),
+        CqlType::Int => Some(Value::Integer(i32::try_from(as_i128(value)?).ok()?)),
+        CqlType::BigInt | CqlType::Counter => {
+            Some(Value::BigInt(i64::try_from(as_i128(value)?).ok()?))
+        }
+        CqlType::Timestamp => Some(Value::Timestamp(i64::try_from(as_i128(value)?).ok()?)),
+        // Already-correct comparable types pass through unchanged.
+        CqlType::Text | CqlType::Varchar | CqlType::Ascii => match value {
+            Value::Text(_) => Some(value.clone()),
+            _ => None,
+        },
+        CqlType::Uuid | CqlType::TimeUuid => match value {
+            Value::Uuid(_) => Some(value.clone()),
+            _ => None,
+        },
+        CqlType::Boolean => match value {
+            Value::Boolean(_) => Some(value.clone()),
+            _ => None,
+        },
+        CqlType::Blob => match value {
+            Value::Blob(_) => Some(value.clone()),
+            _ => None,
+        },
+        // Any other clustering type is out of the encodable scope for now.
+        _ => None,
+    }
+}
+
+#[cfg(not(feature = "tombstones"))]
+fn classify_clustering_slice(
+    predicates: &[SSTablePredicate],
+    schema: Option<&crate::schema::TableSchema>,
+) -> Option<crate::storage::sstable::reader::ClusteringSlice> {
+    use super::select_optimizer::SSTableFilterOp;
+    use crate::storage::sstable::reader::ClusteringSlice;
+
+    let schema = schema?;
+    let first_ck = schema.clustering_keys.first()?;
+    let ck_type = first_ck.data_type.as_str();
+    let coerce = |v: &Value| coerce_clustering_value(v, ck_type);
+
+    // Any restriction on a NON-first clustering column is a multi-column prefix —
+    // out of single-column scope (#954). Bail so the whole partition is decoded.
+    let non_first_ck_restricted = schema.clustering_keys.iter().skip(1).any(|ck| {
+        predicates
+            .iter()
+            .any(|p| !p.is_token() && p.column == ck.name)
+    });
+    if non_first_ck_restricted {
         return None;
     }
 
-    let mut values = Vec::with_capacity(schema.partition_keys.len());
-    for pk in &schema.partition_keys {
-        let predicate = predicates
-            .iter()
-            .find(|p| p.column == pk.name && matches!(p.operation, SSTableFilterOp::Equal))?;
-        // An `Equal` predicate always carries exactly one value.
-        values.push(predicate.values.first()?.clone());
+    // Collect every restriction on the FIRST clustering column and fold them into
+    // a single (start, end) slice.
+    let mut start: Vec<Value> = Vec::new();
+    let mut start_inclusive = false;
+    let mut end: Vec<Value> = Vec::new();
+    let mut end_inclusive = false;
+    let mut saw_supported = false;
+
+    for p in predicates
+        .iter()
+        .filter(|p| !p.is_token() && p.column == first_ck.name)
+    {
+        match &p.operation {
+            SSTableFilterOp::Equal => {
+                let v = coerce(p.values.first()?)?;
+                start = vec![v.clone()];
+                start_inclusive = true;
+                end = vec![v];
+                end_inclusive = true;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Gt => {
+                start = vec![coerce(p.values.first()?)?];
+                start_inclusive = false;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Gte => {
+                start = vec![coerce(p.values.first()?)?];
+                start_inclusive = true;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Lt => {
+                end = vec![coerce(p.values.first()?)?];
+                end_inclusive = false;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Lte => {
+                end = vec![coerce(p.values.first()?)?];
+                end_inclusive = true;
+                saw_supported = true;
+            }
+            SSTableFilterOp::Range => {
+                if p.values.len() < 2 {
+                    return None;
+                }
+                start = vec![coerce(&p.values[0])?];
+                start_inclusive = true;
+                end = vec![coerce(&p.values[1])?];
+                end_inclusive = true;
+                saw_supported = true;
+            }
+            // `In`/`Prefix`/`BloomFilter` on the clustering column are out of
+            // single-column-slice scope; decode the whole partition.
+            SSTableFilterOp::In | SSTableFilterOp::Prefix | SSTableFilterOp::BloomFilter => {
+                return None;
+            }
+        }
     }
 
-    crate::storage::partition_key_codec::encode_partition_key_columns(&values, schema).ok()
+    if !saw_supported {
+        return None;
+    }
+    Some(ClusteringSlice {
+        start,
+        start_inclusive,
+        end,
+        end_inclusive,
+    })
+}
+
+/// Validate that every `token(...)` predicate's argument columns match the
+/// table's FULL partition-key column list, in declared order (Issue #955
+/// follow-up, FINDING 2).
+///
+/// `evaluate_leaf` evaluates a token predicate by hashing the row's *raw
+/// partition key* — it does NOT recompute a token over the columns named in the
+/// predicate. So a `token(col, ...)` whose columns are not exactly the partition
+/// key (a non-pk column, a strict subset, or a reordering) would be evaluated
+/// against the real partition-key token, silently returning rows for a different
+/// expression than the user wrote.
+///
+/// Cassandra rejects `token()` on anything other than the full partition key in
+/// declared order, so we do the same: reject with a clear error rather than
+/// trust `token_columns`. With no schema we cannot know the partition key, so we
+/// also reject (we cannot prove the columns are correct).
+fn validate_token_predicates(
+    predicates: &[SSTablePredicate],
+    schema: Option<&crate::schema::TableSchema>,
+) -> Result<()> {
+    let token_predicates: Vec<&SSTablePredicate> =
+        predicates.iter().filter(|p| p.is_token()).collect();
+    if token_predicates.is_empty() {
+        return Ok(());
+    }
+
+    let Some(schema) = schema else {
+        return Err(Error::query_execution(
+            "token() restriction requires a known table schema to validate its argument \
+             against the partition key"
+                .to_string(),
+        ));
+    };
+
+    // The partition key in declared order (positions are 0-based and dense).
+    let mut pk_cols: Vec<&crate::schema::KeyColumn> = schema.partition_keys.iter().collect();
+    pk_cols.sort_by_key(|c| c.position);
+    let expected: Vec<&str> = pk_cols.iter().map(|c| c.name.as_str()).collect();
+
+    for predicate in token_predicates {
+        let cols = predicate.token_columns.as_deref().unwrap_or(&[]);
+        let matches = cols.len() == expected.len()
+            && cols
+                .iter()
+                .zip(expected.iter())
+                .all(|(got, want)| got == want);
+        if !matches {
+            return Err(Error::query_execution(format!(
+                "token() must be applied to the entire partition key in declared order \
+                 ({}); got token({})",
+                expected.join(", "),
+                cols.join(", "),
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Stable-sort scan results by their partition token, then by raw key bytes —
+/// the on-disk storage order, so the union of several `scan_partition` lookups
+/// (`WHERE pk IN (...)`, Issue #955) equals a full scan filtered to the same
+/// keys. Uses the same `Murmur3Partitioner` token the rest of the codebase uses.
+/// Stability preserves each partition's clustering order, since one partition's
+/// rows arrive contiguously from a single `scan_partition` call.
+fn sort_rows_by_token(rows: &mut [(RowKey, Value)]) {
+    rows.sort_by(|a, b| {
+        let ta = crate::util::cassandra_murmur3::cassandra_murmur3_token(&a.0 .0);
+        let tb = crate::util::cassandra_murmur3::cassandra_murmur3_token(&b.0 .0);
+        ta.cmp(&tb).then_with(|| a.0 .0.cmp(&b.0 .0))
+    });
+}
+
+/// Cartesian product of per-column value sets, preserving column order and the
+/// input order within each column. Empty input yields a single empty tuple.
+fn cartesian_product(per_column: &[Vec<Value>]) -> Vec<Vec<Value>> {
+    let mut out: Vec<Vec<Value>> = vec![Vec::new()];
+    for column_values in per_column {
+        let mut next = Vec::with_capacity(out.len() * column_values.len());
+        for prefix in &out {
+            for value in column_values {
+                let mut combo = prefix.clone();
+                combo.push(value.clone());
+                next.push(combo);
+            }
+        }
+        out = next;
+    }
+    out
 }
 
 /// Apply an `ArithmeticOperator` to two same-typed numeric `Value`s.
@@ -790,6 +1227,10 @@ impl SelectExecutor {
 
     /// Execute an optimized query plan
     pub async fn execute(&self, plan: OptimizedQueryPlan) -> Result<QueryResult> {
+        // Issue #960: clear the global access-path probe so a stale value from a
+        // previous query cannot satisfy a test assertion against this one.
+        crate::query::access_path::reset();
+
         let table_id = if let Some(ref from_clause) = plan.statement.from_clause {
             self.extract_table_id(from_clause)?
         } else {
@@ -814,6 +1255,7 @@ impl SelectExecutor {
             columns: self.get_result_columns(&plan.statement).await?,
             rows_processed: 0,
             projection_flags,
+            access_path: None,
         };
 
         // Handle queries without FROM clause (like SELECT 1)
@@ -950,6 +1392,10 @@ impl SelectExecutor {
                 plan_info: None,
                 performance: Default::default(),
                 warnings: vec![],
+                // Issue #960: surface the access path the SSTable-scan step chose
+                // on the result from PER-QUERY state (not the global probe), so a
+                // concurrent SELECT cannot overwrite it between record() and here.
+                access_path: context.access_path.clone(),
             },
         })
     }
@@ -985,6 +1431,10 @@ impl SelectExecutor {
         plan: OptimizedQueryPlan,
         config: StreamingConfig,
     ) -> Result<QueryResultIterator> {
+        // Issue #960: clear the global access-path probe so a stale value from a
+        // previous query cannot satisfy a test assertion against this one.
+        crate::query::access_path::reset();
+
         // Check if query requires full materialization (ORDER BY, GROUP BY, aggregates)
         if self.requires_materialization(&plan) {
             log::info!("Query requires materialization (ORDER BY/GROUP BY/aggregates), using execute-then-stream");
@@ -1013,6 +1463,29 @@ impl SelectExecutor {
         } else {
             plan.execution_steps.clone()
         };
+
+        // FINDING 1 (roborev, Issue #955 follow-up): synchronous preconditions
+        // that should FAIL the query must be checked BEFORE spawning the
+        // streaming task. Errors raised inside `execute_streaming_background`
+        // are only logged by the spawn closure (the channel then closes), so the
+        // caller would receive an apparently-successful iterator that yields zero
+        // rows — silently hiding an invalid `token(...)` query. Validating here
+        // surfaces the error synchronously from `execute_streaming`, matching the
+        // materializing `execute()` path. The schema must be resolved before the
+        // spawn for this, so we resolve it per scan step here.
+        for step in &execution_steps {
+            if let ExecutionStep::SSTableScan {
+                table, predicates, ..
+            } = step
+            {
+                let (keyspace, table_name) = parse_table_id(table);
+                let schema_opt = self
+                    ._schema
+                    .find_schema_by_table(&keyspace, &table_name)
+                    .await;
+                validate_token_predicates(predicates, schema_opt.as_ref())?;
+            }
+        }
 
         // Clone what we need for the background task
         let storage = Arc::clone(&self.storage);
@@ -1043,6 +1516,12 @@ impl SelectExecutor {
             plan_info: None,
             performance: Default::default(),
             warnings: vec![],
+            // Issue #960: the streaming scan runs in the spawned task above, so the
+            // access path is not yet recorded when this iterator is constructed.
+            // Streaming surfaces report the path via the global probe
+            // (`crate::query::access_path::last()`) after at least one row is
+            // pulled, not on the iterator metadata.
+            access_path: None,
         };
 
         Ok(QueryResultIterator::new(rx, metadata))
@@ -1154,6 +1633,11 @@ impl SelectExecutor {
                         .find_schema_by_table(&keyspace, &table_name)
                         .await;
 
+                    // FINDING 2 (Issue #955 follow-up): reject a `token(...)` whose
+                    // columns are not the full partition key in declared order
+                    // before scanning (same rule as the materializing path).
+                    validate_token_predicates(predicates, schema_opt.as_ref())?;
+
                     // Issue #949: a fully-constrained `WHERE pk = ?` is served by a
                     // partition-targeted lookup that prunes SSTables via bloom/BTI,
                     // instead of streaming a scan over every SSTable. The resulting
@@ -1163,12 +1647,20 @@ impl SelectExecutor {
                     // materializing `scan()` (last-write-wins + tombstone shadowing),
                     // which is the authoritative read semantics; it does not merely
                     // mirror `scan_stream`'s per-key merge.
-                    if let Some(pk_bytes) =
-                        full_partition_key_lookup(predicates, schema_opt.as_ref())
-                    {
-                        let rows = storage
-                            .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                    let lookup = classify_partition_lookup(predicates, schema_opt.as_ref());
+                    if let PartitionLookupOutcome::Targeted(ref pk_bytes) = lookup {
+                        // Issue #960: the streaming analogue of the materializing
+                        // partition-targeted lookup. Epic #951 (honest paths): the
+                        // `tombstones` build's `scan_partition` is a full-scan +
+                        // retain with NO prune, reported via `engaged == false`; only
+                        // claim `StreamingPartitionLookup` when it really pruned.
+                        let (rows, engaged) = storage
+                            .scan_partition(table, pk_bytes, schema_opt.as_ref())
                             .await?;
+                        crate::query::access_path::record(honest_targeted_path(
+                            AccessPath::StreamingPartitionLookup,
+                            engaged,
+                        ));
                         for (key, value) in rows {
                             let part_sig = per_partition_limit.map(|_| key.0.clone());
                             let Some(row) =
@@ -1205,6 +1697,75 @@ impl SelectExecutor {
                         }
                         // This SSTableScan step is fully served by the lookup.
                         continue;
+                    }
+
+                    // Issue #955: `WHERE pk IN (...)` over the complete key is the
+                    // union of N partition-targeted lookups. Gather them, sort by
+                    // token to match full-scan order, then drive the same per-row
+                    // pipeline (predicates, PER PARTITION LIMIT, OFFSET, LIMIT).
+                    if let PartitionLookupOutcome::MultiTargeted(ref pk_keys) = lookup {
+                        // Epic #951 (honest paths): each lookup reports whether it
+                        // pruned. On the `tombstones` build every call full-scans
+                        // (`engaged == false`); claim `MultiPartitionLookup` only when
+                        // the lookups actually pruned, else report the honest fallback.
+                        let mut combined = Vec::new();
+                        let mut all_engaged = true;
+                        for pk_bytes in pk_keys {
+                            let (rows, engaged) = storage
+                                .scan_partition(table, pk_bytes, schema_opt.as_ref())
+                                .await?;
+                            all_engaged &= engaged;
+                            combined.extend(rows);
+                        }
+                        crate::query::access_path::record(honest_targeted_path(
+                            AccessPath::MultiPartitionLookup,
+                            all_engaged,
+                        ));
+                        sort_rows_by_token(&mut combined);
+                        for (key, value) in combined {
+                            let part_sig = per_partition_limit.map(|_| key.0.clone());
+                            let Some(row) =
+                                build_row_from_scan(key, value, projection, schema_opt.as_ref())
+                            else {
+                                continue;
+                            };
+                            if !evaluate_predicates(&row, predicates)? {
+                                continue;
+                            }
+                            if let (Some(cap), Some(sig)) = (per_partition_limit, part_sig) {
+                                if current_partition.as_deref() != Some(sig.as_slice()) {
+                                    current_partition = Some(sig);
+                                    partition_count = 0;
+                                }
+                                if partition_count >= cap {
+                                    continue;
+                                }
+                                partition_count += 1;
+                            }
+                            if offset_remaining > 0 {
+                                offset_remaining -= 1;
+                                continue;
+                            }
+                            if tx.send(Ok(row)).await.is_err() {
+                                return Ok(());
+                            }
+                            sent += 1;
+                            if let Some(count) = limit_count {
+                                if sent >= count {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        // This SSTableScan step is fully served by the lookups.
+                        continue;
+                    }
+
+                    // Issue #960: the streaming path did not take a targeted
+                    // lookup; report the honest fallback reason. `lookup` is the
+                    // `Fallback` arm here (the `Targeted`/`MultiTargeted` arms
+                    // returned above via `continue`).
+                    if let PartitionLookupOutcome::Fallback(reason) = lookup {
+                        crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
                     }
 
                     // Issue #790: pull rows lazily from a bounded streaming scan
@@ -1322,14 +1883,61 @@ impl SelectExecutor {
             ),
         }
 
+        // FINDING 2 (Issue #955 follow-up): a `token(...)` predicate is evaluated
+        // by hashing the row's raw partition key, so its argument columns MUST be
+        // the full partition key in declared order or the result is silently
+        // wrong. Reject (Cassandra-style) before scanning/evaluating.
+        validate_token_predicates(predicates, schema_opt.as_ref())?;
+
         // Issue #693: When WRITETIME(col) or TTL(col) is in the SELECT, use the
         // metadata-carrying scan so per-cell timestamps reach the QueryRow.
         let mut results = Vec::new();
         if context.projection_flags.include_cell_metadata {
-            let scan_results = self
-                .storage
-                .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
-                .await?;
+            // Issue #962: route a fully-constrained `WHERE pk = ?` WRITETIME/TTL
+            // projection through a partition-targeted metadata lookup that prunes
+            // SSTables (bloom/BTI) before decoding, instead of full-scanning every
+            // SSTable for the table. Reuses the SAME `classify_partition_lookup`
+            // decision the non-metadata path uses (the shared resolved
+            // partition-lookup representation). The per-row predicate evaluation
+            // below is unchanged, so the pk equality itself is still applied as a
+            // correctness backstop and any bloom/BTI over-inclusion is filtered out.
+            let scan_results = match classify_partition_lookup(predicates, schema_opt.as_ref()) {
+                PartitionLookupOutcome::Targeted(pk_bytes) => {
+                    log::info!(
+                        "SSTableScan(metadata): partition-key point lookup (key len={}) for \"{}\"",
+                        pk_bytes.len(),
+                        table
+                    );
+                    // Epic #951 (honest paths): the `tombstones` build's metadata
+                    // lookup is a full metadata scan + retain with NO prune,
+                    // reported via `engaged == false`; claim
+                    // `MetadataPartitionLookup` only when it really pruned, else
+                    // report the honest `TombstonesBuildNoPrune` fallback (the
+                    // rows are byte-identical either way).
+                    let (rows, engaged) = self
+                        .storage
+                        .scan_partition_with_cell_metadata(table, &pk_bytes, schema_opt.as_ref())
+                        .await?;
+                    let path = honest_targeted_path(AccessPath::MetadataPartitionLookup, engaged);
+                    context.access_path = Some(path.clone());
+                    crate::query::access_path::record(path);
+                    rows
+                }
+                // Issue #962: `WHERE pk IN (...)` on the metadata path is NOT yet
+                // fanned out to N targeted metadata lookups; it still full-scans.
+                // Report that honestly (MetadataScanPath) rather than faking a
+                // targeted path — the IN-metadata fan-out is a documented follow-up.
+                PartitionLookupOutcome::MultiTargeted(_) | PartitionLookupOutcome::Fallback(_) => {
+                    let metadata_path = AccessPath::FallbackFullScan {
+                        reason: FallbackReason::MetadataScanPath,
+                    };
+                    context.access_path = Some(metadata_path.clone());
+                    crate::query::access_path::record(metadata_path);
+                    self.storage
+                        .scan_with_cell_metadata(table, None, None, None, schema_opt.as_ref())
+                        .await?
+                }
+            };
 
             log::info!("Scan (with metadata) returned {} rows", scan_results.len());
 
@@ -1365,21 +1973,104 @@ impl SelectExecutor {
             // pinned or can't be encoded. The per-row predicate evaluation below is
             // unchanged, so clustering predicates and the pk equality itself are
             // still applied (and any over-inclusion is filtered out).
-            let scan_results = if let Some(pk_bytes) =
-                full_partition_key_lookup(predicates, schema_opt.as_ref())
-            {
-                log::info!(
-                    "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
-                    pk_bytes.len(),
-                    table
-                );
-                self.storage
-                    .scan_partition(table, &pk_bytes, schema_opt.as_ref())
-                    .await?
-            } else {
-                self.storage
-                    .scan(table, None, None, None, schema_opt.as_ref())
-                    .await?
+            let scan_results = match classify_partition_lookup(predicates, schema_opt.as_ref()) {
+                PartitionLookupOutcome::Targeted(pk_bytes) => {
+                    log::info!(
+                        "SSTableScan: partition-key point lookup (key len={}) for \"{}\"",
+                        pk_bytes.len(),
+                        table
+                    );
+                    // Issue #954: when a single-column clustering restriction is
+                    // present, push it down to a within-partition seek so a wide
+                    // partition's slice decodes O(matched rows + index), not the
+                    // whole partition. The seek reports whether the clustering
+                    // narrowing actually engaged; the per-row backstop below applies
+                    // the exact bound so output is byte-identical either way.
+                    //
+                    // Issue #960: report the HONEST access path — `ClusteringSlice`
+                    // only when the seek engaged, else `PartitionLookup`. The
+                    // clustering seek exists only on the default build; the
+                    // `tombstones` build uses the plain partition lookup.
+                    #[cfg(not(feature = "tombstones"))]
+                    {
+                        let clustering = classify_clustering_slice(predicates, schema_opt.as_ref());
+                        let (rows, engaged) = self
+                            .storage
+                            .scan_partition_clustering(
+                                table,
+                                &pk_bytes,
+                                clustering.as_ref(),
+                                schema_opt.as_ref(),
+                            )
+                            .await?;
+                        let path = if engaged {
+                            AccessPath::ClusteringSlice
+                        } else {
+                            AccessPath::PartitionLookup
+                        };
+                        context.access_path = Some(path.clone());
+                        crate::query::access_path::record(path);
+                        rows
+                    }
+                    #[cfg(feature = "tombstones")]
+                    {
+                        // Epic #951 (honest paths): the `tombstones` build's
+                        // `scan_partition` is a full scan + retain with NO prune,
+                        // reported via `engaged == false`. Report the honest
+                        // fallback rather than a fake `PartitionLookup`; the rows
+                        // are byte-identical to the pruned build.
+                        let (rows, engaged) = self
+                            .storage
+                            .scan_partition(table, &pk_bytes, schema_opt.as_ref())
+                            .await?;
+                        let path = honest_targeted_path(AccessPath::PartitionLookup, engaged);
+                        context.access_path = Some(path.clone());
+                        crate::query::access_path::record(path);
+                        rows
+                    }
+                }
+                PartitionLookupOutcome::MultiTargeted(pk_keys) => {
+                    log::info!(
+                        "SSTableScan: multi-partition lookup ({} keys) for \"{}\"",
+                        pk_keys.len(),
+                        table
+                    );
+                    // Issue #955/#960: `WHERE pk IN (...)` over the complete key
+                    // is the union of N independent partition-targeted lookups,
+                    // each of which prunes SSTables. Epic #951 (honest paths): on
+                    // the `tombstones` build each lookup full-scans + retains with
+                    // NO prune (`engaged == false`); report `MultiPartitionLookup`
+                    // only when the lookups actually pruned, else the honest
+                    // `TombstonesBuildNoPrune` fallback. Rows are unchanged.
+                    let mut combined = Vec::new();
+                    let mut all_engaged = true;
+                    for pk_bytes in &pk_keys {
+                        let (rows, engaged) = self
+                            .storage
+                            .scan_partition(table, pk_bytes, schema_opt.as_ref())
+                            .await?;
+                        all_engaged &= engaged;
+                        combined.extend(rows);
+                    }
+                    let path = honest_targeted_path(AccessPath::MultiPartitionLookup, all_engaged);
+                    context.access_path = Some(path.clone());
+                    crate::query::access_path::record(path);
+                    // Order the union to equal a full scan filtered to these keys:
+                    // partitions are stored token-ordered, so sort the combined
+                    // rows by (partition token, raw key bytes). A *stable* sort
+                    // keeps each partition's clustering order (rows for one key
+                    // arrive contiguously from one `scan_partition`) intact.
+                    sort_rows_by_token(&mut combined);
+                    combined
+                }
+                PartitionLookupOutcome::Fallback(reason) => {
+                    // Issue #960: report the honest reason a full scan was chosen.
+                    context.access_path = Some(AccessPath::FallbackFullScan { reason });
+                    crate::query::access_path::record(AccessPath::FallbackFullScan { reason });
+                    self.storage
+                        .scan(table, None, None, None, schema_opt.as_ref())
+                        .await?
+                }
             };
 
             log::info!("Scan returned {} rows", scan_results.len());
@@ -1517,6 +2208,14 @@ impl SelectExecutor {
                 })
             }
             SelectExpression::Literal(value) => Ok(value.clone()),
+            // Issue #961: a `?` placeholder must be bound to a concrete value
+            // before execution. Reaching here means binding was skipped, which is
+            // an internal logic error rather than user input — report it instead
+            // of panicking.
+            SelectExpression::BindMarker(idx) => Err(Error::query_execution(format!(
+                "Unbound parameter placeholder ?{idx} reached execution; \
+                 parameters must be bound before the query runs"
+            ))),
             SelectExpression::CollectionAccess(access) => {
                 self.evaluate_collection_access(access, row)
             }
@@ -1826,6 +2525,8 @@ impl SelectExecutor {
                 plan_info: None,
                 performance: crate::query::result::PerformanceMetrics::default(),
                 warnings: Vec::new(),
+                // Constant queries (e.g. `SELECT 1`) touch no SSTable.
+                access_path: None,
             },
         })
     }
@@ -2106,6 +2807,41 @@ mod tests {
         }
     }
 
+    /// Epic #951 (honest access paths): the executor's per-branch record decision
+    /// must report the TARGETED label only when the storage call actually engaged
+    /// a pruned path (`engaged == true`); when the prune is compiled out on the
+    /// `tombstones` build the call returns `engaged == false` and the reported
+    /// path MUST be the honest `FallbackFullScan { TombstonesBuildNoPrune }`. This
+    /// pins the record-decision in EVERY build (including `tombstones`, where the
+    /// integration tests that assert targeted labels are cfg'd out).
+    #[test]
+    fn honest_targeted_path_reports_fallback_when_not_engaged() {
+        // Engaged: the targeted label is reported as-is, for each targeted surface.
+        for targeted in [
+            AccessPath::PartitionLookup,
+            AccessPath::MultiPartitionLookup,
+            AccessPath::MetadataPartitionLookup,
+            AccessPath::StreamingPartitionLookup,
+        ] {
+            let engaged = honest_targeted_path(targeted.clone(), true);
+            assert_eq!(engaged, targeted, "engaged must keep the targeted label");
+            assert!(engaged.is_targeted());
+
+            // Not engaged (tombstones build / no prune): honest full-scan fallback,
+            // regardless of which targeted surface was attempted.
+            let fallback = honest_targeted_path(targeted, false);
+            assert_eq!(
+                fallback,
+                AccessPath::FallbackFullScan {
+                    reason: FallbackReason::TombstonesBuildNoPrune,
+                },
+                "a non-engaged targeted call must report the honest no-prune fallback"
+            );
+            assert!(fallback.is_full_scan());
+            assert!(!fallback.is_targeted());
+        }
+    }
+
     /// Issue #586: a single-component TEXT partition key is stored as raw bytes
     /// with NO length prefix. `build_row_from_scan` must materialise it from the
     /// `RowKey`. Before the fix the column was silently dropped (the decoder
@@ -2145,15 +2881,422 @@ mod tests {
         let schema = single_pk_schema("id", "text");
         let row = build_row_from_scan(key, value, &[], Some(&schema)).unwrap();
 
-        let predicate = SSTablePredicate {
-            column: "id".to_string(),
-            operation: SSTableFilterOp::Equal,
-            values: vec![Value::Text("k0000000000000000".to_string())],
-        };
+        let predicate = SSTablePredicate::column(
+            "id",
+            SSTableFilterOp::Equal,
+            vec![Value::Text("k0000000000000000".to_string())],
+        );
 
         assert!(
             evaluate_predicates(&row, std::slice::from_ref(&predicate)).unwrap(),
             "Issue #586: WHERE id = '<literal>' must match the reconstructed PK column"
+        );
+    }
+
+    /// Issue #956: a `WHERE id = <uuid-literal>` against a single UUID partition
+    /// key must engage the #949 partition-targeted fast path, i.e.
+    /// `classify_partition_lookup` returns `Targeted` with the raw 16-byte key.
+    /// This is the unit-level evidence that the parser's new `Value::Uuid`
+    /// literal flows all the way into the fast path (the e2e parity test proves
+    /// the rows it returns are correct).
+    #[test]
+    fn classify_partition_lookup_targets_uuid_literal() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let uuid = [
+            0x55u8, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44,
+            0x00, 0x00,
+        ];
+        let schema = single_pk_schema("id", "uuid");
+        let predicate =
+            SSTablePredicate::column("id", SSTableFilterOp::Equal, vec![Value::Uuid(uuid)]);
+
+        match classify_partition_lookup(std::slice::from_ref(&predicate), Some(&schema)) {
+            PartitionLookupOutcome::Targeted(pk_bytes) => assert_eq!(
+                pk_bytes,
+                uuid.to_vec(),
+                "fast path must encode the UUID literal to the raw 16-byte on-disk key"
+            ),
+            PartitionLookupOutcome::MultiTargeted(keys) => panic!(
+                "Issue #956: a single UUID-literal `=` must be a single Targeted lookup, not \
+                 MultiTargeted (got {} keys)",
+                keys.len()
+            ),
+            PartitionLookupOutcome::Fallback(reason) => panic!(
+                "Issue #956: UUID-literal `=` predicate must engage the partition fast path, \
+                 got fallback {reason:?}"
+            ),
+        }
+    }
+
+    /// A non-equality (or partial) restriction must NOT engage the fast path, so
+    /// the executor falls back to a full scan with the documented
+    /// `PartitionKeyNotFullyConstrained` reason (Issue #960). Guards against the
+    /// UUID change accidentally widening fast-path eligibility.
+    #[test]
+    fn classify_partition_lookup_falls_back_for_uuid_range_predicate() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let uuid = [1u8; 16];
+        let schema = single_pk_schema("id", "uuid");
+        let predicate =
+            SSTablePredicate::column("id", SSTableFilterOp::Gt, vec![Value::Uuid(uuid)]);
+
+        assert!(
+            matches!(
+                classify_partition_lookup(std::slice::from_ref(&predicate), Some(&schema)),
+                PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyNotFullyConstrained)
+            ),
+            "a range restriction on the partition key must report the \
+             PartitionKeyNotFullyConstrained fallback, not a targeted lookup",
+        );
+    }
+
+    /// Issue #955: `WHERE pk IN (a, b, c)` over the complete single-column
+    /// partition key classifies as `MultiTargeted` with one encoded key per IN
+    /// element, in input order.
+    #[test]
+    fn classify_partition_lookup_in_yields_multi_targeted() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = single_pk_schema("id", "int");
+        let predicate = SSTablePredicate::column(
+            "id",
+            SSTableFilterOp::In,
+            vec![Value::Integer(1), Value::Integer(2), Value::Integer(3)],
+        );
+        match classify_partition_lookup(std::slice::from_ref(&predicate), Some(&schema)) {
+            PartitionLookupOutcome::MultiTargeted(keys) => {
+                assert_eq!(keys.len(), 3, "one targeted key per IN element");
+                // Single int column → raw 4-byte big-endian value (1, 2, 3).
+                assert_eq!(keys[0], 1i32.to_be_bytes().to_vec());
+                assert_eq!(keys[1], 2i32.to_be_bytes().to_vec());
+                assert_eq!(keys[2], 3i32.to_be_bytes().to_vec());
+            }
+            other => panic!("IN over the complete pk must be MultiTargeted, got {other:?}"),
+        }
+    }
+
+    /// Issue #955: a single-element `IN` collapses to a single `Targeted` lookup
+    /// (not `MultiTargeted`), and duplicate IN elements are deduplicated.
+    #[test]
+    fn classify_partition_lookup_in_dedupes_and_collapses_singletons() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = single_pk_schema("id", "int");
+
+        // Single element → Targeted.
+        let one = SSTablePredicate::column("id", SSTableFilterOp::In, vec![Value::Integer(7)]);
+        assert!(
+            matches!(
+                classify_partition_lookup(std::slice::from_ref(&one), Some(&schema)),
+                PartitionLookupOutcome::Targeted(_)
+            ),
+            "a single-element IN must collapse to a single Targeted lookup",
+        );
+
+        // Duplicates collapse: IN (5, 5, 6) → two distinct keys.
+        let dup = SSTablePredicate::column(
+            "id",
+            SSTableFilterOp::In,
+            vec![Value::Integer(5), Value::Integer(5), Value::Integer(6)],
+        );
+        match classify_partition_lookup(std::slice::from_ref(&dup), Some(&schema)) {
+            PartitionLookupOutcome::MultiTargeted(keys) => {
+                assert_eq!(keys.len(), 2, "duplicate IN elements must be deduplicated");
+                assert_eq!(keys[0], 5i32.to_be_bytes().to_vec());
+                assert_eq!(keys[1], 6i32.to_be_bytes().to_vec());
+            }
+            other => panic!("IN (5,5,6) must dedupe to 2 MultiTargeted keys, got {other:?}"),
+        }
+    }
+
+    /// Issue #955: an `IN` list larger than `MAX_IN_TARGETED_LOOKUPS` falls back
+    /// to a single full scan (the per-row IN filter still yields correct rows),
+    /// reported honestly as `PartitionKeyNotFullyConstrained`.
+    #[test]
+    fn classify_partition_lookup_large_in_falls_back() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = single_pk_schema("id", "int");
+        let values: Vec<Value> = (0..(MAX_IN_TARGETED_LOOKUPS as i32 + 1))
+            .map(Value::Integer)
+            .collect();
+        let predicate = SSTablePredicate::column("id", SSTableFilterOp::In, values);
+        assert!(
+            matches!(
+                classify_partition_lookup(std::slice::from_ref(&predicate), Some(&schema)),
+                PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyNotFullyConstrained)
+            ),
+            "an IN list over the cap must fall back to a full scan",
+        );
+
+        // Exactly at the cap is still targeted.
+        let at_cap: Vec<Value> = (0..(MAX_IN_TARGETED_LOOKUPS as i32))
+            .map(Value::Integer)
+            .collect();
+        let at_cap_pred = SSTablePredicate::column("id", SSTableFilterOp::In, at_cap);
+        assert!(
+            matches!(
+                classify_partition_lookup(std::slice::from_ref(&at_cap_pred), Some(&schema)),
+                PartitionLookupOutcome::MultiTargeted(_)
+            ),
+            "an IN list exactly at the cap must still be MultiTargeted",
+        );
+    }
+
+    /// Build a two-column composite partition-key schema (`a`, `b` in declared
+    /// order). Used by the FINDING 2/3 token-validation and composite-IN tests.
+    fn composite_pk_schema(
+        first: (&str, &str),
+        second: (&str, &str),
+    ) -> crate::schema::TableSchema {
+        crate::schema::TableSchema {
+            keyspace: "ks".to_string(),
+            table: "t".to_string(),
+            partition_keys: vec![
+                crate::schema::KeyColumn {
+                    name: first.0.to_string(),
+                    data_type: first.1.to_string(),
+                    position: 0,
+                },
+                crate::schema::KeyColumn {
+                    name: second.0.to_string(),
+                    data_type: second.1.to_string(),
+                    position: 1,
+                },
+            ],
+            clustering_keys: vec![],
+            columns: vec![],
+            comments: std::collections::HashMap::new(),
+            dropped_columns: std::collections::HashMap::new(),
+        }
+    }
+
+    /// FINDING 2: a `token(...)` over the FULL partition key in declared order is
+    /// accepted (validation passes), so the existing token fast-path/evaluation
+    /// behaviour is preserved.
+    #[test]
+    fn validate_token_predicates_accepts_full_key_in_order() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = composite_pk_schema(("a", "int"), ("b", "int"));
+        let pred = SSTablePredicate::token(
+            vec!["a".to_string(), "b".to_string()],
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&pred), Some(&schema)).is_ok(),
+            "token(a, b) over the full partition key in declared order must be accepted",
+        );
+
+        // Single-column key: token(id) is the full key.
+        let single = single_pk_schema("id", "int");
+        let pred_single = SSTablePredicate::token(
+            vec!["id".to_string()],
+            SSTableFilterOp::Gte,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&pred_single), Some(&single)).is_ok(),
+            "token(id) over a single-column partition key must be accepted",
+        );
+    }
+
+    /// FINDING 2: `token(non_pk_col)` must be REJECTED — `evaluate_leaf` would
+    /// otherwise hash the real partition key and silently return rows for a
+    /// different expression than the user wrote.
+    #[test]
+    fn validate_token_predicates_rejects_non_pk_column() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = single_pk_schema("id", "int");
+        let pred = SSTablePredicate::token(
+            vec!["not_the_pk".to_string()],
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&pred), Some(&schema)).is_err(),
+            "token(non_pk_col) must be rejected, not evaluated against the real pk token",
+        );
+    }
+
+    /// FINDING 2: `token(b, a)` on a `(a, b)` key — right columns, WRONG order —
+    /// must be rejected (Cassandra requires declared order).
+    #[test]
+    fn validate_token_predicates_rejects_reordered_composite() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = composite_pk_schema(("a", "int"), ("b", "int"));
+        let reordered = SSTablePredicate::token(
+            vec!["b".to_string(), "a".to_string()],
+            SSTableFilterOp::Lt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&reordered), Some(&schema)).is_err(),
+            "token(b, a) on a (a, b) key must be rejected (wrong order)",
+        );
+
+        // A strict subset (missing the second column) is also rejected.
+        let subset = SSTablePredicate::token(
+            vec!["a".to_string()],
+            SSTableFilterOp::Lt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&subset), Some(&schema)).is_err(),
+            "token(a) on a (a, b) key must be rejected (partial key)",
+        );
+    }
+
+    /// FINDING 2: with no schema we cannot prove the token columns are the
+    /// partition key, so any token predicate is rejected (never trusted).
+    #[test]
+    fn validate_token_predicates_rejects_without_schema() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let pred = SSTablePredicate::token(
+            vec!["id".to_string()],
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(0)],
+        );
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&pred), None).is_err(),
+            "a token predicate with no schema must be rejected",
+        );
+        // Ordinary column predicates are unaffected by token validation.
+        let col = SSTablePredicate::column("id", SSTableFilterOp::Equal, vec![Value::Integer(1)]);
+        assert!(
+            validate_token_predicates(std::slice::from_ref(&col), None).is_ok(),
+            "non-token predicates must pass token validation even without a schema",
+        );
+    }
+
+    /// FINDING 3: a composite `IN` whose cartesian product EXCEEDS the cap must
+    /// fall back BEFORE materializing the product (checked arithmetic), and still
+    /// reports the honest `PartitionKeyNotFullyConstrained` fallback. The product
+    /// here (1000 x 1000 = 1_000_000) is far over `MAX_IN_TARGETED_LOOKUPS`;
+    /// expanding it first would allocate a million combinations.
+    #[test]
+    fn classify_partition_lookup_composite_in_over_cap_falls_back_without_overalloc() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = composite_pk_schema(("a", "int"), ("b", "int"));
+        let a_vals: Vec<Value> = (0..1000).map(Value::Integer).collect();
+        let b_vals: Vec<Value> = (0..1000).map(Value::Integer).collect();
+        let preds = vec![
+            SSTablePredicate::column("a", SSTableFilterOp::In, a_vals),
+            SSTablePredicate::column("b", SSTableFilterOp::In, b_vals),
+        ];
+        assert!(
+            matches!(
+                classify_partition_lookup(&preds, Some(&schema)),
+                PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyNotFullyConstrained)
+            ),
+            "a composite IN whose product exceeds the cap must fall back to a full scan",
+        );
+    }
+
+    /// FINDING 3: a composite `IN` whose product is WITHIN the cap is still
+    /// served by a targeted MultiTargeted lookup (the checked-arithmetic guard
+    /// must not over-reject). 4 x 4 = 16 <= 64.
+    #[test]
+    fn classify_partition_lookup_composite_in_within_cap_is_targeted() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = composite_pk_schema(("a", "int"), ("b", "int"));
+        let a_vals: Vec<Value> = (0..4).map(Value::Integer).collect();
+        let b_vals: Vec<Value> = (0..4).map(Value::Integer).collect();
+        let preds = vec![
+            SSTablePredicate::column("a", SSTableFilterOp::In, a_vals),
+            SSTablePredicate::column("b", SSTableFilterOp::In, b_vals),
+        ];
+        match classify_partition_lookup(&preds, Some(&schema)) {
+            PartitionLookupOutcome::MultiTargeted(keys) => assert_eq!(
+                keys.len(),
+                16,
+                "4 x 4 composite IN must yield 16 targeted keys (the full product)"
+            ),
+            other => panic!("composite IN within the cap must be MultiTargeted, got {other:?}"),
+        }
+    }
+
+    /// Issue #955: a `token(pk)` range restriction does NOT engage the targeted
+    /// fast path (partitions are token-ordered but we do not yet seek a span);
+    /// it reports the honest `PartitionKeyNotFullyConstrained` fallback and the
+    /// token predicate is applied per-row (verified by `evaluate_leaf` below).
+    #[test]
+    fn classify_partition_lookup_token_range_falls_back() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let schema = single_pk_schema("id", "int");
+        let predicate = SSTablePredicate::token(
+            vec!["id".to_string()],
+            SSTableFilterOp::Gte,
+            vec![Value::BigInt(-100)],
+        );
+        assert!(
+            matches!(
+                classify_partition_lookup(std::slice::from_ref(&predicate), Some(&schema)),
+                PartitionLookupOutcome::Fallback(FallbackReason::PartitionKeyNotFullyConstrained)
+            ),
+            "a token-range restriction must fall back honestly (no fake pruning)",
+        );
+    }
+
+    /// Issue #955: `evaluate_leaf` on a token predicate hashes the row's raw
+    /// partition key with the canonical Murmur3 partitioner and compares against
+    /// the i64 bound — matching Cassandra's token inclusivity (`>` exclusive,
+    /// `>=` inclusive, etc.).
+    #[test]
+    fn evaluate_leaf_token_predicate_filters_by_token() {
+        use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
+
+        let key = b"some-partition-key".to_vec();
+        let token = crate::util::cassandra_murmur3::cassandra_murmur3_token(&key);
+        let row = row_with_key(&key);
+
+        // token >= exact token → included; token > exact token → excluded.
+        let gte = SSTablePredicate::token(
+            vec!["id".to_string()],
+            SSTableFilterOp::Gte,
+            vec![Value::BigInt(token)],
+        );
+        assert_eq!(evaluate_leaf(&row, &gte), LeafOutcome::True);
+
+        let gt = SSTablePredicate::token(
+            vec!["id".to_string()],
+            SSTableFilterOp::Gt,
+            vec![Value::BigInt(token)],
+        );
+        assert_eq!(evaluate_leaf(&row, &gt), LeafOutcome::False);
+
+        // A bound above the row's token excludes it under `>=`.
+        let gte_above = SSTablePredicate::token(
+            vec!["id".to_string()],
+            SSTableFilterOp::Gte,
+            vec![Value::BigInt(token.saturating_add(1))],
+        );
+        assert_eq!(evaluate_leaf(&row, &gte_above), LeafOutcome::False);
+
+        // An empty key (synthesised row) is Unknown, never spuriously matched.
+        let empty = row_with_key(&[]);
+        assert_eq!(evaluate_leaf(&empty, &gte), LeafOutcome::Unknown);
+    }
+
+    /// Issue #960: no schema means we cannot identify the partition-key columns,
+    /// so the classifier reports the `NoSchema` fallback reason.
+    #[test]
+    fn classify_partition_lookup_falls_back_without_schema() {
+        assert!(
+            matches!(
+                classify_partition_lookup(&[], None),
+                PartitionLookupOutcome::Fallback(FallbackReason::NoSchema)
+            ),
+            "no schema must report the NoSchema fallback reason",
         );
     }
 
@@ -2211,11 +3354,8 @@ mod tests {
     fn inequality_predicates_apply_single_bound() {
         use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
 
-        let bound = |op: SSTableFilterOp| SSTablePredicate {
-            column: "ck".to_string(),
-            operation: op,
-            values: vec![Value::Integer(200)],
-        };
+        let bound =
+            |op: SSTableFilterOp| SSTablePredicate::column("ck", op, vec![Value::Integer(200)]);
         let eval = |op: SSTableFilterOp, ck: i64| {
             evaluate_predicates(&row_with_int("ck", ck), std::slice::from_ref(&bound(op))).unwrap()
         };
@@ -2241,11 +3381,7 @@ mod tests {
     fn evaluate_leaf_is_three_valued() {
         use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
 
-        let gt200 = SSTablePredicate {
-            column: "ck".to_string(),
-            operation: SSTableFilterOp::Gt,
-            values: vec![Value::Integer(200)],
-        };
+        let gt200 = SSTablePredicate::column("ck", SSTableFilterOp::Gt, vec![Value::Integer(200)]);
 
         // Present value → definite True/False.
         assert_eq!(
@@ -2282,12 +3418,12 @@ mod tests {
     fn evaluate_leaf_in_coerces_narrow_numeric_columns() {
         use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
 
-        let in_pred = SSTablePredicate {
-            column: "v".to_string(),
-            operation: SSTableFilterOp::In,
-            // Operands as they arrive from a Flight ticket (wide types).
-            values: vec![Value::Integer(7), Value::Integer(9)],
-        };
+        // Operands as they arrive from a Flight ticket (wide types).
+        let in_pred = SSTablePredicate::column(
+            "v",
+            SSTableFilterOp::In,
+            vec![Value::Integer(7), Value::Integer(9)],
+        );
 
         let row_of = |val: Value| {
             let mut values = std::collections::HashMap::new();
@@ -2328,16 +3464,8 @@ mod tests {
         use super::super::select_optimizer::{SSTableFilterOp, SSTablePredicate};
 
         let predicates = vec![
-            SSTablePredicate {
-                column: "ck".to_string(),
-                operation: SSTableFilterOp::Gte,
-                values: vec![Value::Integer(0)],
-            },
-            SSTablePredicate {
-                column: "ck".to_string(),
-                operation: SSTableFilterOp::Lt,
-                values: vec![Value::Integer(200)],
-            },
+            SSTablePredicate::column("ck", SSTableFilterOp::Gte, vec![Value::Integer(0)]),
+            SSTablePredicate::column("ck", SSTableFilterOp::Lt, vec![Value::Integer(200)]),
         ];
         let in_slice = |ck: i64| evaluate_predicates(&row_with_int("ck", ck), &predicates).unwrap();
 

@@ -37,6 +37,9 @@ pub use types::{
     SSTableReaderConfig, SSTableReaderHealthMetrics, SSTableReaderStats,
 };
 
+// Re-export the within-partition clustering-slice push-down spec (Issue #954).
+pub use data_access::ClusteringSlice;
+
 // Re-export the per-element compaction read contract (epic #899, Phase A).
 pub use compaction_row::{
     CompactionRow, CompactionRowData, ComplexColumn, ComplexElement, SimpleCell,
@@ -572,6 +575,7 @@ impl SSTableReader {
             version_gates,
             bti_partitions_db,
             bti_rows_db,
+            bti_partition_offsets: std::sync::OnceLock::new(),
         })
     }
 

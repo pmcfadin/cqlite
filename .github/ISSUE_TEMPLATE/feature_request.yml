@@ -68,6 +68,39 @@ body:
       required: true
 
   - type: textarea
+    id: public-surface
+    attributes:
+      label: Public Surface & Integration Path
+      description: |
+        A feature is not "done" when a low-level helper works in isolation — it is done when
+        the intended USER-FACING path exercises the new capability. Name that path and the
+        call chain that must reach it. (See issue #949/#963: helpers shipped green tests while
+        the public path stayed unwired.) Fill in every section below — this field is required
+        and the placeholder scaffold is NOT submitted, so an empty answer will be rejected.
+      placeholder: |
+        ## Intended caller surface(s)
+        <!-- Which user-facing entry point(s) must exercise this? Check all that apply -->
+        - [ ] CQL `execute` (one-shot / `--query` / `--execute`)
+        - [ ] Streaming query API (`execute_streaming` / streaming iterators)
+        - [ ] Prepared statements / bind params (`execute_with_params`)
+        - [ ] CLI subcommand / flag
+        - [ ] REPL / TUI
+        - [ ] Python bindings
+        - [ ] Node.js bindings
+        - [ ] Internal-only (justify below under "Intentionally internal")
+
+        ## Required call chain (storage/query/helper APIs)
+        <!-- The APIs that must appear in the path from public surface down to the new code.
+             e.g. SELECT execute -> QueryEngine::plan -> SSTableReader::seek_partition -> new helper -->
+
+        ## Fallback behavior
+        - [ ] A fallback path (e.g. full scan, default value) is ALLOWED if the fast path can't apply — describe when
+        - [ ] Fallback is DISALLOWED — reaching this code without the new path is a bug
+        <!-- If fallback is allowed, say how a reviewer can tell the NEW path actually ran vs. the fallback. -->
+    validations:
+      required: true
+
+  - type: textarea
     id: alternatives
     attributes:
       label: Alternative Solutions

@@ -67,12 +67,13 @@ pub struct QueryEngine {
     executor: QueryExecutor,
     /// Schema manager reference
     schema_manager: Arc<SchemaManager>,
-    /// Advanced SELECT optimizer
+    /// Advanced SELECT optimizer. `Arc` so prepared SELECTs can share the same
+    /// instance and reach the partition-targeted fast path (Issue #961).
     #[cfg(feature = "state_machine")]
-    select_optimizer: SelectOptimizer,
-    /// Advanced SELECT executor
+    select_optimizer: Arc<SelectOptimizer>,
+    /// Advanced SELECT executor (shared with prepared SELECTs, Issue #961).
     #[cfg(feature = "state_machine")]
-    select_executor: SelectExecutor,
+    select_executor: Arc<SelectExecutor>,
     /// Prepared statement cache
     prepared_cache: DashMap<String, Arc<PreparedQuery>>,
     /// Query plan cache
@@ -97,9 +98,9 @@ impl QueryEngine {
 
         // Initialize advanced SELECT components
         #[cfg(feature = "state_machine")]
-        let select_optimizer = SelectOptimizer::new(schema.clone(), storage.clone());
+        let select_optimizer = Arc::new(SelectOptimizer::new(schema.clone(), storage.clone()));
         #[cfg(feature = "state_machine")]
-        let select_executor = SelectExecutor::new(schema.clone(), storage);
+        let select_executor = Arc::new(SelectExecutor::new(schema.clone(), storage));
 
         Ok(Self {
             parser,
@@ -258,11 +259,106 @@ impl QueryEngine {
         }
     }
 
-    /// Execute a query with parameters
-    pub async fn execute_with_params(&self, cql: &str, _params: &[Value]) -> Result<QueryResult> {
-        // In a real implementation, this would substitute parameters into the query
-        // For now, we'll just execute the query as-is
-        self.execute(cql).await
+    /// Execute a query with positional `?` parameters (Issue #961).
+    ///
+    /// The supplied `params` are bound, in source order, into the `?` placeholders
+    /// of the parsed statement *before* planning and execution, so the bound
+    /// values participate in partition-key classification, encoding, and typed
+    /// coercion. A `WHERE pk = ?` therefore engages the same partition-targeted
+    /// fast path (#949/#956) as the equivalent literal query.
+    ///
+    /// Binding is currently supported for SELECT statements only. A non-SELECT
+    /// CQL with parameters, or any use of named (`:name`) parameters, is rejected
+    /// with a clear error (named-parameter binding is intentionally out of scope:
+    /// the SELECT grammar only tokenizes positional `?`).
+    ///
+    /// # Routing parity with `execute` (Finding 1)
+    ///
+    /// When the parsed SELECT has **zero** bind markers and `params` is empty,
+    /// this delegates straight back to [`Self::execute`] so that a markerless
+    /// `execute_with_params(sql, &[])` is byte-for-byte equivalent to
+    /// `execute(sql)` — including the legacy simple-`WHERE id = <literal>` point
+    /// lookup that `execute` intentionally keeps on the normal executor for
+    /// INSERT/SELECT key compatibility. Only when markers are present (`> 0`) is
+    /// the statement bound and driven through the SELECT optimizer + executor
+    /// pipeline.
+    ///
+    /// Arity stays strict in both directions: markers `> 0` with a wrong
+    /// `params.len()` is an error, and markers `== 0` with a **non-empty**
+    /// `params` is also an error (a supplied parameter with no placeholder is a
+    /// caller bug). The latter matches [`SelectStatement::bind_parameters`]'s
+    /// contract and the documented strictness of this API.
+    pub async fn execute_with_params(&self, cql: &str, params: &[Value]) -> Result<QueryResult> {
+        let is_select = cql.trim().to_uppercase().starts_with("SELECT");
+
+        if !is_select {
+            // Non-SELECT: parameter binding is not supported. With no parameters
+            // this is just a normal statement, so defer to the regular path;
+            // with parameters it is an explicit, clear error.
+            if params.is_empty() {
+                return self.execute(cql).await;
+            }
+            self.inc_total_queries();
+            self.inc_error_queries();
+            return Err(Error::query_execution(
+                "Parameterized execution currently supports SELECT statements only",
+            ));
+        }
+
+        #[cfg(not(feature = "state_machine"))]
+        {
+            let _ = params;
+            self.inc_total_queries();
+            self.inc_error_queries();
+            return Err(Error::query_execution(
+                "Parameterized SELECT execution requires the state_machine feature",
+            ));
+        }
+
+        #[cfg(feature = "state_machine")]
+        {
+            // Parse once so we can count bind markers and decide routing. Parse
+            // failures here mirror `execute_select_query`, which would also fail.
+            let statement = select_parser::parse_select(cql).inspect_err(|_| {
+                self.inc_total_queries();
+                self.inc_error_queries();
+            })?;
+            let marker_count = statement.bind_marker_count();
+
+            // Finding 1: a markerless SELECT with no supplied params must route
+            // exactly like a literal `execute(cql)` — including the simple-id
+            // legacy point-lookup path — so the two APIs cannot diverge. A
+            // marker-free statement with stray params is, however, a caller bug:
+            // reject it for strict arity (no placeholder to bind into).
+            if marker_count == 0 {
+                if params.is_empty() {
+                    return self.execute(cql).await;
+                }
+                self.inc_total_queries();
+                self.inc_error_queries();
+                return Err(Error::query_execution(format!(
+                    "Parameter count mismatch: query has 0 bind marker(s), got {} parameter(s)",
+                    params.len()
+                )));
+            }
+
+            let start_time = Instant::now();
+            self.inc_total_queries();
+
+            // Markers present: bind through the SELECT pipeline. Arity is
+            // enforced by `bind_parameters` (too few / too many -> error). The
+            // bound statement reaches the same optimizer + executor as a literal
+            // `execute()`, so the partition-targeted fast path engages.
+            let mut statement = statement;
+            statement
+                .bind_parameters(params)
+                .inspect_err(|_| self.inc_error_queries())?;
+
+            let optimized_plan = self.select_optimizer.optimize(statement).await?;
+            let mut result = self.select_executor.execute(optimized_plan).await?;
+            self.update_execution_stats(&mut result, start_time);
+            Ok(result)
+        }
     }
 
     /// Prepare a query for repeated execution
@@ -274,6 +370,33 @@ impl QueryEngine {
         let parsed_query = self.parser.parse(cql)?;
         let plan = self.planner.plan(&parsed_query).await?;
 
+        // Issue #961: when the prepared statement is a SELECT, attach the SELECT
+        // optimizer + executor pipeline so that `?` parameters are bound and the
+        // bound query reaches the partition-targeted fast path (#949/#956) — the
+        // same path a literal `execute()` takes. Non-SELECTs keep the legacy
+        // `QueryExecutor` plan path.
+        #[cfg(feature = "state_machine")]
+        let prepared = if cql.trim().to_uppercase().starts_with("SELECT") {
+            let statement = select_parser::parse_select(cql)?;
+            let marker_count = statement.bind_marker_count();
+            Arc::new(PreparedQuery::new_select(
+                parsed_query,
+                plan,
+                Arc::new(self.executor.clone()),
+                statement,
+                marker_count,
+                self.select_optimizer.clone(),
+                self.select_executor.clone(),
+            ))
+        } else {
+            Arc::new(PreparedQuery::new(
+                parsed_query,
+                plan,
+                Arc::new(self.executor.clone()),
+            ))
+        };
+
+        #[cfg(not(feature = "state_machine"))]
         let prepared = Arc::new(PreparedQuery::new(
             parsed_query,
             plan,

@@ -23,6 +23,26 @@ use crate::{Error, Result, Value};
 use std::collections::HashMap;
 use std::sync::Arc;
 
+/// SELECT-statement execution pipeline for prepared statements (Issue #961).
+///
+/// When a prepared statement is a SELECT, the engine attaches this pipeline so
+/// that `?` placeholders are bound into the parsed `SelectStatement` and the
+/// bound query runs through the *same* optimizer + `SelectExecutor` path as a
+/// literal `execute()`. This is what lets a prepared `WHERE pk = ?` engage the
+/// partition-targeted fast path (#949/#956) instead of the legacy
+/// `QueryExecutor` plan, which never bound parameters.
+#[cfg(feature = "state_machine")]
+#[derive(Debug)]
+struct PreparedSelect {
+    /// The parsed SELECT statement with unbound `?` markers. Cloned per execution
+    /// and bound positionally before optimization.
+    statement: super::select_ast::SelectStatement,
+    /// Shared optimizer (same instance the engine uses for literal SELECTs).
+    optimizer: Arc<super::select_optimizer::SelectOptimizer>,
+    /// Shared SELECT executor (same instance the engine uses for literal SELECTs).
+    executor: Arc<super::select_executor::SelectExecutor>,
+}
+
 /// Prepared query statement
 #[derive(Debug)]
 pub struct PreparedQuery {
@@ -36,6 +56,11 @@ pub struct PreparedQuery {
     pub parameters: Vec<ParameterMetadata>,
     /// Query executor
     executor: Arc<QueryExecutor>,
+    /// SELECT pipeline used to bind parameters and reach the partition-targeted
+    /// fast path. `None` for non-SELECT prepared statements, which retain the
+    /// legacy `QueryExecutor` path (Issue #961).
+    #[cfg(feature = "state_machine")]
+    select_pipeline: Option<PreparedSelect>,
 }
 
 /// Parameter metadata for prepared statements
@@ -76,7 +101,7 @@ pub struct ExecutionHints {
 }
 
 impl PreparedQuery {
-    /// Create a new prepared query
+    /// Create a new prepared query (legacy / non-SELECT path).
     pub fn new(parsed_query: ParsedQuery, plan: QueryPlan, executor: Arc<QueryExecutor>) -> Self {
         let cql = parsed_query.cql.clone();
         let parameters = Self::extract_parameters(&parsed_query);
@@ -87,12 +112,74 @@ impl PreparedQuery {
             plan,
             parameters,
             executor,
+            #[cfg(feature = "state_machine")]
+            select_pipeline: None,
         }
     }
 
-    /// Execute the prepared query with parameters
+    /// Create a prepared SELECT that binds positional `?` parameters and routes
+    /// through the SELECT optimizer + executor (Issue #961).
+    ///
+    /// `statement` is the parsed SELECT with unbound markers; `select_marker_count`
+    /// is its `?` count (used to derive strict parameter metadata). The legacy
+    /// `parsed_query`/`plan`/`executor` are still stored so the accessor methods
+    /// (`plan()`, `is_cache_friendly()`, etc.) keep working, but execution goes
+    /// through the SELECT pipeline.
+    #[cfg(feature = "state_machine")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_select(
+        parsed_query: ParsedQuery,
+        plan: QueryPlan,
+        executor: Arc<QueryExecutor>,
+        statement: super::select_ast::SelectStatement,
+        select_marker_count: usize,
+        optimizer: Arc<super::select_optimizer::SelectOptimizer>,
+        select_executor: Arc<super::select_executor::SelectExecutor>,
+    ) -> Self {
+        let cql = parsed_query.cql.clone();
+        // Strict, positional metadata: one untyped slot per `?` marker. The bound
+        // value's type is enforced downstream by the partition-key codec /
+        // coercion, so we do not over-constrain here (a UUID `?` is valid).
+        let parameters = (0..select_marker_count)
+            .map(|position| ParameterMetadata {
+                name: None,
+                position,
+                expected_type: None,
+                optional: false,
+            })
+            .collect();
+
+        Self {
+            cql,
+            parsed_query,
+            plan,
+            parameters,
+            executor,
+            select_pipeline: Some(PreparedSelect {
+                statement,
+                optimizer,
+                executor: select_executor,
+            }),
+        }
+    }
+
+    /// Execute the prepared query with positional parameters.
+    ///
+    /// Issue #961: for prepared SELECTs the parameters are bound into the parsed
+    /// statement and the bound query runs through the SELECT optimizer + executor,
+    /// so a prepared `WHERE pk = ?` engages the partition-targeted fast path.
+    /// Non-SELECT prepared statements retain the legacy executor path.
     pub async fn execute(&self, params: &[Value]) -> Result<QueryResult> {
         self.validate_params(params)?;
+
+        #[cfg(feature = "state_machine")]
+        if let Some(pipeline) = &self.select_pipeline {
+            let mut statement = pipeline.statement.clone();
+            statement.bind_parameters(params)?;
+            let optimized = pipeline.optimizer.optimize(statement).await?;
+            return pipeline.executor.execute(optimized).await;
+        }
+
         // Default execution path: no hints, so skip the plan clone in
         // execute_with_context and call the executor directly.
         self.executor.execute(&self.plan).await
@@ -121,9 +208,47 @@ impl PreparedQuery {
         self.execute(&positional_params).await
     }
 
-    /// Execute with execution context
+    /// Execute with execution context.
+    ///
+    /// Issue #961 (Finding 2): when this prepared statement is a SELECT it owns a
+    /// [`PreparedSelect`] pipeline, and the context's `positional_params` must be
+    /// bound and run through the same SELECT optimizer + executor as
+    /// [`Self::execute`]. Previously this method ignored the pipeline and ran the
+    /// legacy `QueryExecutor` plan with the parameters silently dropped, so a
+    /// prepared `WHERE pk = ?` executed through the context API never bound its
+    /// params and never engaged the partition-targeted fast path — inconsistent
+    /// with `execute`.
+    ///
+    /// The legacy `ExecutionHints` (`force_index`, `timeout_ms`, `parallelism`)
+    /// are properties of the legacy `QueryPlan` and have no representation in the
+    /// SELECT pipeline. Rather than silently ignore a caller-supplied hint, a
+    /// SELECT prepared statement that is handed any hint returns a clear error.
+    /// SELECTs with no hints bind their params and run through the pipeline,
+    /// matching `execute(context.positional_params)`.
     pub async fn execute_with_context(&self, context: &PreparedContext) -> Result<QueryResult> {
         let hints = &context.hints;
+
+        #[cfg(feature = "state_machine")]
+        if let Some(pipeline) = &self.select_pipeline {
+            if hints.force_index.is_some()
+                || hints.timeout_ms.is_some()
+                || hints.parallelism.is_some()
+            {
+                return Err(Error::query_execution(
+                    "Execution hints (force_index/timeout_ms/parallelism) are not supported for \
+                     prepared SELECT statements; they apply only to the legacy plan path. Re-run \
+                     without hints to bind parameters and use the partition-targeted SELECT path.",
+                ));
+            }
+            // Bind the context's positional params and run the same SELECT
+            // optimizer + executor as `execute`, so the fast path engages.
+            self.validate_params(&context.positional_params)?;
+            let mut statement = pipeline.statement.clone();
+            statement.bind_parameters(&context.positional_params)?;
+            let optimized = pipeline.optimizer.optimize(statement).await?;
+            return pipeline.executor.execute(optimized).await;
+        }
+
         // Avoid cloning the plan if no hints would override it.
         if hints.force_index.is_none() && hints.timeout_ms.is_none() && hints.parallelism.is_none()
         {
@@ -330,6 +455,8 @@ impl PreparedQueryBuilder {
             plan,
             parameters: self.parameters,
             executor,
+            #[cfg(feature = "state_machine")]
+            select_pipeline: None,
         }
     }
 

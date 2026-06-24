@@ -131,6 +131,10 @@ name = "partition_lookup"
 harness = false
 
 [[bench]]
+name = "partition_lookup_scaling"
+harness = false
+
+[[bench]]
 name = "m1_performance"
 harness = false
 

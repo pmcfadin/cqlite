@@ -376,6 +376,31 @@ impl Database {
         self.query.execute_streaming(sql, config).await
     }
 
+    /// Execute a SELECT with positional `?` parameters (Issue #961).
+    ///
+    /// The `params` are bound, in source order, into the statement's `?`
+    /// placeholders before planning, so they participate in partition-key
+    /// classification and encoding. A `WHERE pk = ?` therefore engages the same
+    /// partition-targeted fast path as the equivalent literal query.
+    ///
+    /// # Arguments
+    ///
+    /// * `sql` - A SELECT statement that may contain positional `?` placeholders
+    /// * `params` - Values bound positionally to the `?` placeholders
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the SQL is not a SELECT, the parameter count does not
+    /// match the number of `?` placeholders, or execution fails.
+    #[cfg(feature = "state_machine")]
+    pub async fn execute_with_params(
+        &self,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<query::result::QueryResult> {
+        self.query.execute_with_params(sql, params).await
+    }
+
     /// Prepare a SQL statement for repeated execution
     ///
     /// # Arguments

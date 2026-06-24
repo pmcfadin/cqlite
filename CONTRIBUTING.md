@@ -102,6 +102,13 @@ bash test-data/scripts/smoke-test-all-tables.sh
 - Tests pass locally
 - Documentation updated for user-facing changes
 - Commits are clean and well-described
+- For feature/perf changes: the intended **public surface** (CQL execute, streaming,
+  prepared/bind params, CLI, REPL, bindings) is named, the call chain to the new code is
+  written out, and an **end-to-end test from that surface** is included — green helper
+  unit tests alone are not enough. Run `scripts/audit-inert-surfaces.sh` and explain or
+  wire any findings. See the
+  [Wiring evidence](https://pmcfadin.github.io/cqlite/agents-developing/wiring-evidence/)
+  doctrine (issues #949/#963).
 
 ## Reporting Issues
 

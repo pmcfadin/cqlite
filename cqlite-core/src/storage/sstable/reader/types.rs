@@ -301,4 +301,15 @@ pub struct SSTableReader {
     ///
     /// [`resolve_rows_db_entry`]: crate::storage::sstable::bti::resolve_rows_db_entry
     pub(crate) bti_rows_db: Option<Arc<Vec<u8>>>,
+    /// Lazily-computed, ascending-sorted list of every partition's UNCOMPRESSED
+    /// `Data.db` start offset, enumerated authoritatively from the BTI
+    /// `Partitions.db` trie (issue #953 / #951).
+    ///
+    /// `None` until the first within-SSTable seek requests a successor offset;
+    /// computed once via [`SSTableReader::bti_partition_offsets`] (a full trie DFS
+    /// resolving WIDE-partition `RowsOffset`s through `Rows.db`) and cached so the
+    /// successor lookup is an O(log n) binary search per seek, not an O(n) DFS.
+    /// Only ever populated for BTI readers; BIG readers use the sorted `Index.db`
+    /// entries directly.
+    pub(crate) bti_partition_offsets: std::sync::OnceLock<Vec<u64>>,
 }
