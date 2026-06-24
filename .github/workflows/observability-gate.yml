@@ -1,0 +1,105 @@
+name: "CI: Observability Gate"
+
+# Validation gate for the observability stack (epic #1031, issue #1043):
+#
+#   1. Dependency isolation — the DEFAULT cqlite-core build links NO opentelemetry
+#      crates; the stack appears only under `--features observability`.
+#   2. Correctness + sampling — the in-memory-OTLP span/metric tests pass.
+#   3. Zero-overhead-when-disabled — the `observability_overhead` bench, run under
+#      the default build vs `--features observability` (export disabled) on the
+#      SAME runner, stays within the documented overhead threshold.
+#
+# Like the perf-regression gate, both bench arms run on one runner so the delta is
+# immune to cross-machine variance.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "cqlite-core/src/observability/**"
+      # Instrumented PRODUCTION paths: these define the spans/metrics the gate's
+      # tests guard, so a regression here must run the gate. (Without these the
+      # gate would never fire on the code it actually protects.)
+      - "cqlite-core/src/query/**"
+      - "cqlite-core/src/storage/**"
+      # Binding/flight surfaces are also instrumented (per-query/RPC spans + metrics).
+      - "bindings/**"
+      - "cqlite-flight/**"
+      - "cqlite-core/benches/observability_overhead.rs"
+      - "cqlite-core/tests/observability_correctness.rs"
+      - "cqlite-core/tests/observability_no_otel_default.rs"
+      - "cqlite-core/Cargo.toml"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "scripts/ci/observability_overhead.sh"
+      - "scripts/ci/observability_no_otel_default.sh"
+      - ".github/workflows/observability-gate.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: observability-gate-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DATASET_TAG: datasets-v3
+  DATASET_ASSET: cassandra5-small-full-v3.1.tar.gz
+  DATASET_SHA256: f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+  # Tolerated median overhead of the export-disabled observability build over the
+  # default build (see benches/observability_overhead.rs OVERHEAD_THRESHOLD_PCT).
+  OVERHEAD_THRESHOLD_PCT: "2.0"
+  # Keep CI bench runs short but stable.
+  BENCH_ARGS: "--sample-size 30 --warm-up-time 1 --measurement-time 5"
+
+jobs:
+  observability-gate:
+    name: Dependency isolation + correctness + overhead
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Cache Cargo registry
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-obsgate-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-obsgate-cargo-
+            ${{ runner.os }}-cargo-
+
+      - name: Cache canonical datasets
+        uses: actions/cache@v5
+        with:
+          path: test-data/datasets/
+          key: ${{ runner.os }}-datasets-${{ env.DATASET_TAG }}-${{ env.DATASET_SHA256 }}
+
+      - name: Fetch canonical datasets
+        run: bash ./test-data/scripts/fetch-datasets.sh
+
+      # 1. Dependency isolation: default build links no OTel; obs build does.
+      - name: cargo-tree no-OTel guard
+        run: bash scripts/ci/observability_no_otel_default.sh
+
+      # 2. Correctness + sampling: in-memory OTLP span/metric tests.
+      - name: Observability correctness + sampling tests
+        run: |
+          cargo test -p cqlite-core \
+            --features observability-testing,cli-helpers \
+            --test observability_correctness \
+            --test observability_no_otel_default
+
+      # 3. Zero-overhead-when-disabled: two-build bench comparison on one runner.
+      - name: Observability overhead gate
+        run: bash scripts/ci/observability_overhead.sh
