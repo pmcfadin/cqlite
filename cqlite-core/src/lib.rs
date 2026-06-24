@@ -16,6 +16,10 @@ pub mod version_hints;
 
 pub mod benchmarks;
 pub mod memory;
+// Observability foundation (epic #1031, issues #1032 + #1038). Always present;
+// the OpenTelemetry exporter wiring inside it is gated behind the optional
+// `observability` feature, and all helpers compile to no-ops when it is off.
+pub mod observability;
 pub mod platform;
 #[cfg(feature = "state_machine")]
 pub mod query;

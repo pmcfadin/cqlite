@@ -74,6 +74,15 @@ env_logger = "0.11"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
+# Observability / OpenTelemetry (opt-in via the `observability` feature on
+# cqlite-core; epic #1031). Versions pinned together because the OTel crates
+# release in lockstep and mixing minor versions breaks the trait wiring.
+opentelemetry = "0.30"
+opentelemetry_sdk = { version = "0.30", features = ["rt-tokio"] }
+opentelemetry-otlp = { version = "0.30", features = ["grpc-tonic", "http-proto", "reqwest-blocking-client", "metrics", "trace"] }
+tracing-opentelemetry = "0.31"
+opentelemetry-semantic-conventions = "0.30"
+
 # CLI dependencies
 clap = { version = "4.4", features = ["derive", "env"] }
 colored = "2.0"

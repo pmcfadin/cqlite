@@ -92,6 +92,16 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 log = "0.4"
 
+# Observability / OpenTelemetry — optional, behind the `observability` feature
+# (epic #1031, issue #1032). NONE of these are pulled into the default build:
+# `cargo tree -p cqlite-core` must show no opentelemetry deps unless
+# `--features observability` is passed.
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry-semantic-conventions = { workspace = true, optional = true }
+
 # Optional WASM support
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { workspace = true, optional = true }
@@ -183,8 +193,24 @@ arrow = ["state_machine", "dep:arrow"]
 # Depends on `arrow` for the CQL→RecordBatch conversion layer.
 parquet = ["arrow", "dep:parquet"]
 
-# Other features
-metrics = []
+# Observability (epic #1031, issues #1032 + #1038) — opt-in OpenTelemetry
+# tracing + metrics export. NOT in defaults: the helpers in
+# `crate::observability` compile to zero-cost no-ops when this is off, and no
+# opentelemetry dependency is linked. This flag supersedes the old hollow
+# `metrics = []` flag (which referenced nothing); see `metrics` below.
+observability = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry-semantic-conventions",
+]
+
+# Deprecated alias for `observability`. The original `metrics = []` flag never
+# gated any code; it is retained as an alias so any out-of-tree consumer that
+# enabled it keeps building, and now resolves to the real observability stack.
+metrics = ["observability"]
+
 pest = []
 wasm = ["wasm-bindgen", "js-sys", "web-sys"]
 
