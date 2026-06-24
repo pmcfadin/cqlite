@@ -1187,7 +1187,37 @@ impl WriteEngine {
     ///     println!("Merged {} rows in {:?}", report.rows_merged, report.time_spent);
     /// }
     /// ```
+    #[tracing::instrument(name = "compaction.maintenance_step", skip(self))]
     pub fn maintenance_step(&mut self, budget: Duration) -> Result<MaintenanceReport> {
+        // Budget requested for this step (issue #1037). Compared with the
+        // consumed budget below (the scheduler honors a ~10% tolerance).
+        crate::observability::record_histogram(
+            crate::observability::catalog::COMPACTION_BUDGET_REQUESTED,
+            budget.as_secs_f64(),
+            &[],
+        );
+
+        let result = self.maintenance_step_inner(budget);
+
+        // Budget consumed + lifetime-throughput counters (issue #1037). Recorded
+        // for every step (even a no-op one) so the budget-tolerance signal is
+        // complete; rows-merged is per-step and feeds the throughput rate when
+        // combined with COMPACTION_DURATION at finalize.
+        if let Ok(report) = &result {
+            use crate::observability::{self as obs, catalog};
+            obs::record_histogram(
+                catalog::COMPACTION_BUDGET_CONSUMED,
+                report.time_spent.as_secs_f64(),
+                &[],
+            );
+            obs::add_counter(catalog::COMPACTION_ROWS_MERGED, report.rows_merged, &[]);
+            obs::record_gauge(catalog::COMPACTION_LAG, self.l0_count as i64, &[]);
+        }
+
+        crate::observability::record_result("compaction", result)
+    }
+
+    fn maintenance_step_inner(&mut self, budget: Duration) -> Result<MaintenanceReport> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -1460,6 +1490,7 @@ impl WriteEngine {
         }
     }
 
+    #[tracing::instrument(name = "compaction.scan_candidates", skip(self))]
     fn scan_sstable_candidates(&self) -> Result<Vec<PathBuf>> {
         let mut candidates = Vec::new();
 
@@ -1541,6 +1572,7 @@ impl WriteEngine {
     /// SSTables — see [`merge::compute_max_purgeable_timestamp`]. When `Some`, a
     /// tombstone older than every outside SSTable is purged even in a partial
     /// compaction; `None` keeps the conservative #921 behavior (no purging).
+    #[tracing::instrument(name = "compaction.start_merge", skip(self, input_paths, max_purgeable_timestamp), fields(inputs = input_paths.len()))]
     fn start_merge(
         &mut self,
         input_paths: Vec<PathBuf>,
@@ -1729,12 +1761,19 @@ impl WriteEngine {
     ///
     /// If any step 2 rename fails, the partially-renamed output components are
     /// cleaned up and an error is returned. The input SSTables remain intact.
+    #[tracing::instrument(name = "compaction.finalize", skip(self, report))]
     async fn finalize_merge_async(&mut self, report: &mut MaintenanceReport) -> Result<()> {
+        crate::observability::record_result("compaction", self.finalize_merge_async_impl(report).await)
+    }
+
+    async fn finalize_merge_async_impl(&mut self, report: &mut MaintenanceReport) -> Result<()> {
         let merge = match self.active_merge.take() {
             Some(m) => m,
             None => return Ok(()),
         };
 
+        let input_count = merge.input_paths.len() as u64;
+        let merge_rows = merge.rows_merged;
         let elapsed = merge.started_at.elapsed();
         log::info!(
             "Finalizing compaction merge: {} rows, {:?} elapsed",
@@ -1823,6 +1862,8 @@ impl WriteEngine {
 
         // Perform the renames. On failure, remove any already-renamed files so
         // we don't leave a half-published SSTable, then return the error.
+        // Time the rename/publication-barrier phase (issue #1037).
+        let finalize_start = Instant::now();
         let mut renamed: Vec<PathBuf> = Vec::with_capacity(renames.len());
         let mut rename_error: Option<Error> = None;
 
@@ -1855,6 +1896,14 @@ impl WriteEngine {
             let _ = std::fs::remove_dir_all(&merge.tmp_dir);
             return Err(err);
         }
+
+        // Finalize/rename latency in seconds (issue #1037): the atomic
+        // publication barrier just completed successfully.
+        crate::observability::record_histogram(
+            crate::observability::catalog::COMPACTION_FINALIZE_DURATION,
+            finalize_start.elapsed().as_secs_f64(),
+            &[],
+        );
 
         // Step 3: All renames succeeded. The new SSTable is now visible.
         // Delete input SSTable files. If deletion fails we log a warning but do
@@ -1942,6 +1991,20 @@ impl WriteEngine {
         self.cumulative_stats.bytes_written += total_bytes_written;
         self.cumulative_stats.rows_merged += merge.rows_merged;
         self.cumulative_stats.total_time += elapsed;
+
+        // Compaction completion metrics (issue #1037): full-compaction duration
+        // (pairs with COMPACTION_ROWS_MERGED — emitted incrementally per
+        // maintenance step — for rows/sec throughput), bytes written across all
+        // output components, and SSTables in/out. Rows are NOT re-counted here to
+        // avoid double-counting the per-step COMPACTION_ROWS_MERGED increments.
+        let _ = merge_rows;
+        {
+            use crate::observability::{self as obs, catalog};
+            obs::record_histogram(catalog::COMPACTION_DURATION, elapsed.as_secs_f64(), &[]);
+            obs::add_counter(catalog::COMPACTION_BYTES_WRITTEN, total_bytes_written, &[]);
+            obs::add_counter(catalog::COMPACTION_SSTABLES_IN, input_count, &[]);
+            obs::add_counter(catalog::COMPACTION_SSTABLES_OUT, 1, &[]);
+        }
 
         log::info!(
             "Compaction complete: merged {} inputs → 1 output ({} bytes total across all components, {} rows, {:?})",

@@ -278,6 +278,7 @@ impl STCSPolicy {
 // Implement the MergePolicy trait from parent module
 #[cfg(feature = "write-support")]
 impl super::MergePolicy for STCSPolicy {
+    #[tracing::instrument(name = "compaction.policy_select", skip(self, candidates), fields(candidates = candidates.len()))]
     fn select_merge(&self, candidates: &[PathBuf]) -> Result<Vec<PathBuf>> {
         self.select_merge_internal(candidates)
     }

@@ -2111,6 +2111,7 @@ impl KWayMerger {
     /// * `schema` - Table schema for schema-aware merging
     /// * `gc_before_secs` - gc_grace cutoff (seconds since epoch), or `None` to not purge
     /// * `now_secs` - "now" (seconds since epoch) for TTL expiry, or `None` for engine default
+    #[tracing::instrument(name = "merger.new", skip(input_paths, schema, gc_before_secs, now_secs), fields(inputs = input_paths.len()))]
     pub fn new_with_gc(
         input_paths: Vec<PathBuf>,
         schema: &TableSchema,
@@ -2273,6 +2274,7 @@ impl KWayMerger {
     /// # Errors
     ///
     /// Returns an error if reading fails.
+    #[tracing::instrument(name = "merger.step", skip(self))]
     pub fn step(&mut self) -> Result<MergeStep> {
         // Initialize heap on first call
         if self.heap.is_empty() && self.current_partition.is_none() {
@@ -2384,6 +2386,12 @@ impl KWayMerger {
     ///      row stays shadowed downstream; else emit nothing.
     fn merge_partition_rows(&self, rows: Vec<MergeEntry>) -> Result<Vec<MergeEntry>> {
         use std::collections::BTreeMap;
+
+        // Tombstone-purge accounting (issue #1037): count tombstone-bearing
+        // input entries up front so we can report how many were dropped by
+        // reconciliation/gc purging below. Read-only over the input — does not
+        // change any merge decision.
+        let input_tombstones = rows.iter().filter(|e| Self::entry_is_tombstone(e)).count();
 
         // Overlap-safety gate for tombstone purging (#921 finding 1, #935):
         // decide BOTH the effective gc_grace cutoff and the overlap-aware
@@ -2505,7 +2513,28 @@ impl KWayMerger {
             }
         });
 
+        // Emit the count of tombstones dropped during reconciliation/purge
+        // (issue #1037). A positive delta means tombstones disappeared from the
+        // input (gc-purged or collapsed by last-write-wins). Saturating so the
+        // counter is never negative.
+        let output_tombstones = merged.iter().filter(|e| Self::entry_is_tombstone(e)).count();
+        let purged = input_tombstones.saturating_sub(output_tombstones);
+        if purged > 0 {
+            crate::observability::add_counter(
+                crate::observability::catalog::COMPACTION_TOMBSTONES_PURGED,
+                purged as u64,
+                &[],
+            );
+        }
+
         Ok(merged)
+    }
+
+    /// Whether a merge entry carries a tombstone (row tombstone or a range
+    /// deletion marker). Used only for the tombstone-purge metric (issue #1037);
+    /// never influences merge output.
+    fn entry_is_tombstone(entry: &MergeEntry) -> bool {
+        matches!(entry.row_data, RowData::Tombstone { .. }) || entry.range_deletion.is_some()
     }
 
     /// True when an entry exists ONLY to carry a range-tombstone marker (issue
