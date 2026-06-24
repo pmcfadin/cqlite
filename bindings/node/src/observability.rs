@@ -227,11 +227,10 @@ fn default_otel_directives() -> String {
 /// `RUST_LOG`, when set, still overrides the default directives. No fmt layer is
 /// attached, so the Node process's stdout/stderr stay quiet by default.
 fn install_subscriber() {
-    use tracing_subscriber::util::SubscriberInitExt;
-
     #[cfg(feature = "observability")]
     {
         use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
         use tracing_subscriber::Layer;
 
         // RUST_LOG overrides; otherwise default to allowing the binding + core
@@ -246,12 +245,12 @@ fn install_subscriber() {
     }
 
     // Without the `observability` feature the OTLP layer is compiled out and
-    // there is nothing to bridge; install a bare registry (no fmt layer) so the
-    // process stays quiet and the macros at the binding boundary remain no-ops.
-    #[cfg(not(feature = "observability"))]
-    {
-        let _ = tracing_subscriber::registry().try_init();
-    }
+    // there is nothing to bridge, so install NO subscriber at all. A bare
+    // `Registry` would actually ENABLE span callsites (its per-callsite interest
+    // is "always"), causing the binding/core spans to be constructed and stored
+    // on hot paths for nothing. With no global subscriber installed, the
+    // `tracing` span/event macros stay true no-ops, preserving the
+    // zero-cost-when-off contract.
 }
 
 /// `RUST_LOG` when set, otherwise the default directives that allow the binding
