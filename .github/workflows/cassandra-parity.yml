@@ -1,0 +1,64 @@
+name: Cassandra Parity Manifest
+
+# Fast PR gate (issue #976/#978): validates the parity manifest against the
+# schema + cross-field rules and fails if the generated report is stale.
+# No Docker, live Cassandra, or downloaded dataset binaries required — the tool
+# only reads the manifest, the repository tree, and the assessment report. The
+# JSONL/TOC/Digest reference files it checks are committed to the repo.
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'test-data/cassandra-parity-manifest.yml'
+      - 'test-data/cassandra-parity-manifest.schema.json'
+      - 'tools/cassandra-parity/**'
+      - 'docs/reports/cassandra-test-parity*.md'
+      - 'docs/cassandra_test_index.md'
+      - '.github/workflows/cassandra-parity.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'test-data/cassandra-parity-manifest.yml'
+      - 'test-data/cassandra-parity-manifest.schema.json'
+      - 'tools/cassandra-parity/**'
+      - 'docs/reports/cassandra-test-parity*.md'
+      - 'docs/cassandra_test_index.md'
+      - '.github/workflows/cassandra-parity.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  parity-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-parity-${{ runner.os }}-${{ hashFiles('**/Cargo.toml') }}
+
+      - name: Build cassandra-parity
+        run: cargo build -p cassandra-parity
+
+      - name: Lint manifest (schema + cross-field parity rules)
+        run: cargo run -p cassandra-parity -- lint --manifest test-data/cassandra-parity-manifest.yml
+
+      - name: Report is not stale
+        run: cargo run -p cassandra-parity -- report --manifest test-data/cassandra-parity-manifest.yml --output docs/reports/cassandra-test-parity.md --check
+
+      - name: Coverage of high-relevance Cassandra files (informational)
+        run: cargo run -p cassandra-parity -- coverage --manifest test-data/cassandra-parity-manifest.yml
+
+      - name: Unit + integration tests
+        run: cargo test -p cassandra-parity

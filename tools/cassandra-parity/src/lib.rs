@@ -1,0 +1,8 @@
+//! Library surface for the `cassandra-parity` tool so integration tests can
+//! exercise the linter, coverage, and report logic directly.
+
+pub mod coverage;
+pub mod enums;
+pub mod lint;
+pub mod model;
+pub mod report;

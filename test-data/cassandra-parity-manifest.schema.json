@@ -1,0 +1,261 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/pmcfadin/cqlite/test-data/cassandra-parity-manifest.schema.json",
+  "title": "CQLite Cassandra Parity Manifest",
+  "description": "Traceability manifest for the CQLite <-> Apache Cassandra byte-for-byte parity program (epics #966/#967). The capability and suite enums are defined by docs/reports/cassandra-test-parity-assessment.md and copied into epic #967.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["manifest_version", "cassandra_source", "program", "scenarios"],
+  "properties": {
+    "manifest_version": { "const": 1 },
+    "cassandra_source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repo", "ref", "sha", "index", "assessment_report"],
+      "properties": {
+        "repo": { "type": "string" },
+        "ref": { "type": "string" },
+        "sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+        "index": { "type": "string" },
+        "assessment_report": { "type": "string" }
+      }
+    },
+    "program": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent_epic", "reporting_epic"],
+      "properties": {
+        "parent_epic": { "type": "integer" },
+        "reporting_epic": { "type": "integer" }
+      }
+    },
+    "scenarios": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/scenario" }
+    }
+  },
+  "$defs": {
+    "scenario": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id", "title", "status", "capability", "priority", "risk",
+        "cassandra", "cqlite", "fixtures", "evidence", "ci", "scope"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^cass\\.[a-z0-9_]+(\\.[A-Za-z0-9_]+)+$",
+          "description": "Stable dotted identifier, e.g. cass.sstable_format.descriptor_component_resolution"
+        },
+        "title": { "type": "string", "minLength": 4 },
+        "status": { "enum": ["mirrored", "partial", "planned", "out_of_scope"] },
+        "capability": {
+          "enum": [
+            "sstable_format", "component_discovery", "data_db_decode",
+            "index_summary", "statistics_metadata", "compression_checksum",
+            "corruption_verify", "filter_db_bloom", "cql_types",
+            "schema_evolution", "tombstone_ttl", "delta_scan",
+            "compaction_merge", "write_load_path", "bti_big_version_matrix",
+            "cli_reporting"
+          ]
+        },
+        "priority": { "enum": ["P0", "P1", "P2"] },
+        "risk": {
+          "enum": ["p0_data_loss", "p1_correctness", "p2_coverage", "node_behavior", "tooling_only"]
+        },
+        "cassandra": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["category", "relevance", "files"],
+          "properties": {
+            "category": {
+              "enum": [
+                "sstable-format", "sstable-io", "serialization", "compression",
+                "checksum", "bloom-filter", "compaction", "tombstone-ttl",
+                "corruption-recovery", "scrub-verify", "commitlog",
+                "memtable-flush", "streaming", "repair", "read-repair",
+                "index-sai-sasi", "tools-cli", "other"
+              ]
+            },
+            "relevance": { "enum": ["high", "med", "low"] },
+            "files": {
+              "type": "array",
+              "minItems": 1,
+              "items": { "type": "string" }
+            }
+          }
+        },
+        "cqlite": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["coverage"],
+          "properties": {
+            "coverage": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "suite": {
+                  "enum": [
+                    "sstable_parity_data_db_jsonl",
+                    "sstable_parity_delta_scan",
+                    "sstable_parity_statistics_db",
+                    "sstable_parity_index_db_big",
+                    "sstable_parity_summary_db_big",
+                    "sstable_parity_bti_partitions_rows",
+                    "sstable_parity_filter_db_bloom",
+                    "sstable_parity_compression_info_chunks",
+                    "sstable_parity_corruption_verify",
+                    "sstable_parity_component_manifest",
+                    "sstable_writer_cassandra_fixture_parity",
+                    "compaction_parity_tombstone_ttl",
+                    "schema_parity_serialization_header"
+                  ]
+                },
+                "tests": {
+                  "type": "array",
+                  "items": { "type": "string" }
+                },
+                "notes": { "type": "string" }
+              }
+            }
+          }
+        },
+        "fixtures": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "sources": { "type": "array", "items": { "type": "string" } },
+            "references": { "type": "array", "items": { "type": "string" } },
+            "datasets": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "evidence": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type"],
+          "properties": {
+            "type": { "enum": ["byte_for_byte", "canonical_semantic", "smoke", "partial", "out_of_scope"] },
+            "strict": { "type": "boolean" },
+            "artifacts": {
+              "type": "array",
+              "items": {
+                "enum": ["bytes", "offsets", "checksums", "component_files", "jsonl", "logs", "generated_report"]
+              }
+            },
+            "cassandra_version": { "type": "string" },
+            "cassandra_git_sha": { "type": "string", "pattern": "^[0-9a-f]{7,40}$" },
+            "storage_format_version": {
+              "type": "array",
+              "items": { "enum": ["nb", "oa", "da", "big", "bti"] }
+            },
+            "fixture_generation_command": { "type": "string" },
+            "comparison_command": { "type": "string" },
+            "reference_paths": { "type": "array", "items": { "type": "string" } },
+            "failure_artifacts": { "type": "array", "items": { "type": "string" } },
+            "normalization": { "type": "string" },
+            "known_limitations": { "type": "string" }
+          }
+        },
+        "ci": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tier"],
+          "properties": {
+            "tier": { "enum": ["fast_pr", "required_parity", "nightly_docker", "exhaustive_regeneration", "manual_debug"] },
+            "workflow": { "type": "string" }
+          }
+        },
+        "scope": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "rationale": { "type": "string" },
+            "gap": { "type": "string" },
+            "next_step": { "type": "string" },
+            "target_issue": { "type": "integer" },
+            "target_suite": {
+              "enum": [
+                "sstable_parity_data_db_jsonl",
+                "sstable_parity_delta_scan",
+                "sstable_parity_statistics_db",
+                "sstable_parity_index_db_big",
+                "sstable_parity_summary_db_big",
+                "sstable_parity_bti_partitions_rows",
+                "sstable_parity_filter_db_bloom",
+                "sstable_parity_compression_info_chunks",
+                "sstable_parity_corruption_verify",
+                "sstable_parity_component_manifest",
+                "sstable_writer_cassandra_fixture_parity",
+                "compaction_parity_tombstone_ttl",
+                "schema_parity_serialization_header"
+              ]
+            },
+            "out_of_scope_category": {
+              "enum": [
+                "commitlog_replay", "repair_coordinator", "read_repair_coordinator",
+                "streaming_protocol", "node_lifecycle", "nodetool_jmx_metrics",
+                "distributed_consensus", "sai_sasi_query", "memtable_internals",
+                "java_tooling", "unsupported_compression_dictionary",
+                "not_sstable_reader_writer_compactor"
+              ]
+            },
+            "cqlite_boundary": { "type": "string" },
+            "safe_claim": { "type": "string" },
+            "related_in_scope_scenarios": { "type": "array", "items": { "type": "string" } }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "status": { "const": "mirrored" } } },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "cqlite": {
+                    "properties": {
+                      "coverage": {
+                        "required": ["tests"],
+                        "properties": { "tests": { "minItems": 1 } }
+                      }
+                    }
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "fixtures": {
+                    "required": ["references"],
+                    "properties": { "references": { "minItems": 1 } }
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "out_of_scope" } } },
+          "then": {
+            "properties": {
+              "scope": { "required": ["out_of_scope_category", "rationale", "cqlite_boundary", "safe_claim", "related_in_scope_scenarios"] }
+            }
+          }
+        },
+        {
+          "if": { "properties": { "status": { "const": "partial" } } },
+          "then": { "properties": { "scope": { "required": ["gap", "next_step"] } } }
+        },
+        {
+          "if": { "properties": { "status": { "const": "planned" } } },
+          "then": {
+            "properties": {
+              "scope": { "anyOf": [ { "required": ["target_issue"] }, { "required": ["target_suite"] } ] }
+            }
+          }
+        }
+      ]
+    }
+  }
+}
