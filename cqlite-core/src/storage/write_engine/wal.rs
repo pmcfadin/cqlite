@@ -576,6 +576,7 @@ impl WriteAheadLog {
     /// # Errors
     ///
     /// Returns an error if serialization fails or the write fails.
+    #[tracing::instrument(name = "wal.append", skip(self, mutation))]
     pub fn append(&mut self, mutation: &Mutation) -> Result<()> {
         // Serialize mutation using bincode
         let mutation_bytes = bincode::serialize(mutation)
@@ -615,15 +616,24 @@ impl WriteAheadLog {
     /// # Errors
     ///
     /// Returns an error if the flush or sync operation fails.
+    #[tracing::instrument(name = "wal.sync", skip(self))]
     pub fn sync(&mut self) -> Result<()> {
         self.file
             .flush()
             .map_err(|e| Error::Storage(format!("Failed to flush WAL buffer: {}", e)))?;
 
+        // Record fsync latency in seconds (issue #1036). The histogram captures
+        // only the durable-write step, which dominates WAL sync cost.
+        let fsync_start = std::time::Instant::now();
         self.file
             .get_ref()
             .sync_all()
             .map_err(|e| Error::Storage(format!("Failed to sync WAL to disk: {}", e)))?;
+        crate::observability::record_histogram(
+            crate::observability::catalog::WAL_SYNC_DURATION,
+            fsync_start.elapsed().as_secs_f64(),
+            &[],
+        );
 
         Ok(())
     }

@@ -66,6 +66,7 @@ impl Memtable {
     ///
     /// This is the primary insertion API. The caller is responsible for computing
     /// the decorated key from the partition key using the table schema.
+    #[tracing::instrument(name = "memtable.insert", skip(self, key, mutation))]
     pub fn insert_with_key(&mut self, key: DecoratedKey, mutation: Mutation) -> Result<()> {
         // Calculate mutation size (conservative estimate)
         let mutation_size = Self::estimate_mutation_size(&mutation);

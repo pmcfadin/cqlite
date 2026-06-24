@@ -277,9 +277,22 @@ impl CompressedDataWriter {
         }
     }
 
+    /// Map the active compressor to a bounded [`catalog::attr::COMPRESSION`]
+    /// value (issue #1036). Bounded set: lz4/snappy/deflate/zstd/none.
+    fn compression_attr(&self) -> &'static str {
+        match self.compressor.algorithm() {
+            CompressionAlgorithm::Lz4 => "lz4",
+            CompressionAlgorithm::Snappy => "snappy",
+            CompressionAlgorithm::Deflate => "deflate",
+            CompressionAlgorithm::Zstd => "zstd",
+            CompressionAlgorithm::None => "none",
+        }
+    }
+
     /// Write uncompressed data
     ///
     /// Data is buffered until chunk_size is reached, then compressed and written.
+    #[tracing::instrument(name = "compression.write_chunk", skip(self, data))]
     pub fn write(&mut self, data: &[u8]) -> Result<()> {
         let mut remaining = data;
 
@@ -308,10 +321,26 @@ impl CompressedDataWriter {
 
         // Record chunk offset BEFORE writing (points to start of chunk record)
         self.chunk_offsets.push(self.position);
-        self.uncompressed_length += self.buffer.len() as u64;
+        let uncompressed_len = self.buffer.len();
+        self.uncompressed_length += uncompressed_len as u64;
 
         // Compress the buffer
         let compressed = self.compressor.compress(&self.buffer)?;
+
+        // Per-chunk compression ratio (issue #1036): compressed/uncompressed,
+        // tagged with the bounded algorithm attribute. Guard against a zero
+        // divisor (flush_chunk early-returns on an empty buffer, so this is just
+        // defensive).
+        if uncompressed_len > 0 {
+            crate::observability::record_histogram(
+                crate::observability::catalog::COMPRESSION_RATIO,
+                compressed.len() as f64 / uncompressed_len as f64,
+                &[(
+                    crate::observability::catalog::attr::COMPRESSION,
+                    self.compression_attr().into(),
+                )],
+            );
+        }
 
         // Compute CRC32 of compressed data — stored INLINE in Data.db after compressed bytes.
         // Authority: CompressedSequentialWriter.java:192.

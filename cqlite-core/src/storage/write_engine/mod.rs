@@ -564,7 +564,12 @@ impl WriteEngine {
     /// - WAL append fails
     /// - Memtable insert fails
     /// - Automatic flush fails (sync context only)
+    #[tracing::instrument(name = "write.mutation", skip(self, mutation))]
     pub fn write(&mut self, mutation: Mutation) -> Result<()> {
+        crate::observability::record_result("write", self.write_inner(mutation))
+    }
+
+    fn write_inner(&mut self, mutation: Mutation) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -597,6 +602,8 @@ impl WriteEngine {
         // 4. Increment the cumulative rows-written counter (Issue #486).
         //    Done after a successful insert so that failed writes are not counted.
         self.rows_written += 1;
+        crate::observability::add_counter(crate::observability::catalog::WRITE_MUTATIONS, 1, &[]);
+        self.record_memtable_gauges();
 
         // 5. Check if memtable should be flushed (only in non-async context)
         if self
@@ -639,7 +646,12 @@ impl WriteEngine {
     /// - WAL append fails
     /// - Memtable insert fails
     /// - Automatic flush fails
+    #[tracing::instrument(name = "write.mutation", skip(self, mutation))]
     pub async fn write_async(&mut self, mutation: Mutation) -> Result<()> {
+        crate::observability::record_result("write", self.write_async_inner(mutation).await)
+    }
+
+    async fn write_async_inner(&mut self, mutation: Mutation) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -672,6 +684,8 @@ impl WriteEngine {
         // 4. Increment the cumulative rows-written counter (Issue #486).
         //    Done after a successful insert so that failed writes are not counted.
         self.rows_written += 1;
+        crate::observability::add_counter(crate::observability::catalog::WRITE_MUTATIONS, 1, &[]);
+        self.record_memtable_gauges();
 
         // 5. Check if memtable should be flushed
         if self
@@ -687,6 +701,21 @@ impl WriteEngine {
         }
 
         Ok(())
+    }
+
+    /// Emit the current memtable size/row gauges (issue #1036). No-op when the
+    /// `observability` feature is off.
+    fn record_memtable_gauges(&self) {
+        crate::observability::record_gauge(
+            crate::observability::catalog::MEMTABLE_SIZE_BYTES,
+            self.memtable.size_bytes() as i64,
+            &[],
+        );
+        crate::observability::record_gauge(
+            crate::observability::catalog::MEMTABLE_ROWS,
+            self.memtable.row_count() as i64,
+            &[],
+        );
     }
 
     /// Execute a CQL statement (INSERT, UPDATE, DELETE)
@@ -717,7 +746,12 @@ impl WriteEngine {
     /// engine.execute("UPDATE users SET name = 'Bob' WHERE id = 1")?;
     /// engine.execute("DELETE FROM users WHERE id = 1")?;
     /// ```
+    #[tracing::instrument(name = "write.cql_execute", skip(self, statement))]
     pub fn execute(&mut self, statement: &str) -> Result<()> {
+        crate::observability::record_result("write", self.execute_inner(statement))
+    }
+
+    fn execute_inner(&mut self, statement: &str) -> Result<()> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(Error::InvalidInput(
                 "WriteEngine has been closed".to_string(),
@@ -777,11 +811,19 @@ impl WriteEngine {
     }
 
     /// Internal async flush implementation
+    #[tracing::instrument(name = "flush.memtable", skip(self))]
     async fn flush_internal_async(&mut self) -> Result<Option<SSTableInfo>> {
+        crate::observability::record_result("write", self.flush_internal_async_impl().await)
+    }
+
+    async fn flush_internal_async_impl(&mut self) -> Result<Option<SSTableInfo>> {
         // Check if memtable is empty
         if self.memtable.is_empty() {
             return Ok(None);
         }
+
+        let flush_start = Instant::now();
+        let rows_to_flush = self.memtable.row_count() as u64;
 
         log::info!(
             "Flushing memtable: {} partitions, {} rows, {} bytes",
@@ -854,6 +896,23 @@ impl WriteEngine {
 
         // Increment generation for next flush
         self.generation += 1;
+
+        // Flush metrics (issue #1036): latency in seconds, rows/bytes flushed,
+        // and one L0 SSTable created. Emit the post-clear memtable gauges (now
+        // zero) and the current compaction lag (L0 pending) gauge.
+        {
+            use crate::observability::{self as obs, catalog};
+            obs::record_histogram(
+                catalog::FLUSH_DURATION,
+                flush_start.elapsed().as_secs_f64(),
+                &[],
+            );
+            obs::add_counter(catalog::FLUSH_ROWS, rows_to_flush, &[]);
+            obs::add_counter(catalog::FLUSH_BYTES, info.data_size, &[]);
+            obs::add_counter(catalog::FLUSH_SSTABLES, 1, &[]);
+            obs::record_gauge(catalog::COMPACTION_LAG, self.l0_count as i64, &[]);
+        }
+        self.record_memtable_gauges();
 
         Ok(Some(info))
     }
