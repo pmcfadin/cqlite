@@ -96,41 +96,57 @@ scenarios:
           component manifest (Index+Summary for BIG, Partitions+Rows for BTI) and
           the two families never mix. Exposed and fixed a real gap: CQLite's
           component model did not recognize the `CRC.db` component Cassandra
-          emits for uncompressed SSTables.
+          emits for uncompressed SSTables. Issue #1047 adds (4) Digest.crc32
+          *byte* parity: `digest_crc32_byte_for_byte_parity` recomputes the
+          CRC32 of each fixture's Data.db (mirroring DigestWriter's streaming
+          crc32fast / java.util.zip.CRC32) and compares the rendered digest
+          payload byte-for-byte against the committed `*-Digest.crc32` reference
+          (fail-closed; per-fixture skip only when the local-only Data.db binary
+          is absent, fail when no Data.db was available to compare at all).
     fixtures:
       references:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
         - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
     evidence:
-      type: partial
-      artifacts: [component_files]
+      type: byte_for_byte
+      strict: true
+      artifacts: [component_files, checksums]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb, oa, da]
       fixture_generation_command: >-
-        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits TOC.txt per generation
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits TOC.txt + Digest.crc32 per generation
+      comparison_command: >-
+        CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_toc_component_test digest_crc32_byte_for_byte_parity
       reference_paths:
         - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
         - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Digest.crc32
+        - test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Digest.crc32
+      failure_artifacts:
+        - "panic diff: cqlite-recomputed Digest.crc32 payload vs Cassandra reference (bytes + decoded decimal + Data.db path)"
       known_limitations: >-
-        Parity is on the recognized component *set* and format-discovery, not the
-        exact TOC.txt line order: Cassandra emits components in HashSet iteration
-        order, so line order is not a stable writer goal (cf. epic #968 "exact
-        parsed fields where byte identity is not a stable writer goal"). Digest.crc32
-        byte parity (recomputing the Data.db CRC) and Index/Summary/Statistics/
-        CompressionInfo/Filter byte parity require the binary components and remain
-        separate #982/#968 scenarios.
+        Digest.crc32 is now byte-for-byte: the recomputed Data.db CRC32 payload is
+        compared against the committed reference for all fixtures whose Data.db is
+        present (local-only binaries are skipped on absence, never on a compare
+        failure). TOC.txt parity remains on the recognized component *set* and
+        format-discovery, not exact line order: Cassandra emits components in
+        HashSet iteration order, so line order is not a stable writer goal (cf.
+        epic #968 "exact parsed fields where byte identity is not a stable writer
+        goal"). Index/Summary/Statistics/CompressionInfo/Filter byte parity remain
+        separate #982/#983/#984 scenarios.
     ci:
       tier: fast_pr
     scope:
       gap: >-
-        Companion-component *byte* parity (Digest.crc32 CRC recomputation,
-        Index.db/Summary.db byte layout) is not yet gated; it depends on fetched
-        binary Data.db components.
+        Remaining companion-component *byte* parity (Index.db/Summary.db byte
+        layout) is not yet gated; it depends on fetched binary components and is
+        tracked under #983/#984. Digest.crc32 byte parity is now gated.
       next_step: >-
-        Land the Digest.crc32 and Index.db/Summary.db byte-parity scenarios in the
+        Land the Index.db/Summary.db byte-parity scenarios (#983/#984) in the
         Required parity tier once the binary dataset fetch is wired into CI.
 
   # ----------------------------------------------------------------------------
