@@ -378,7 +378,10 @@ pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[Key
     } else if name == catalog::COMPACTION_DURATION {
         &i.compaction_duration
     } else {
-        meter().f64_histogram(name).build().record(value, attributes);
+        meter()
+            .f64_histogram(name)
+            .build()
+            .record(value, attributes);
         return;
     };
     hist.record(value, attributes);

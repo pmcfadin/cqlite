@@ -173,14 +173,11 @@ impl CapturedSpans {
     /// parent span id, sharing the same trace.
     pub fn is_parent_of(&self, parent: &str, child: &str) -> bool {
         let parents: Vec<_> = self.spans.iter().filter(|s| s.name == parent).collect();
-        self.spans
-            .iter()
-            .filter(|s| s.name == child)
-            .any(|c| {
-                parents.iter().any(|p| {
-                    p.span_id() == c.parent_span_id() && p.trace_id() == c.trace_id()
-                })
-            })
+        self.spans.iter().filter(|s| s.name == child).any(|c| {
+            parents
+                .iter()
+                .any(|p| p.span_id() == c.parent_span_id() && p.trace_id() == c.trace_id())
+        })
     }
 }
 
@@ -308,11 +305,9 @@ impl CapturedMetrics {
         m.points
             .iter()
             .filter(|p| {
-                required.iter().all(|(k, v)| {
-                    p.attributes
-                        .iter()
-                        .any(|(pk, pv)| pk == k && pv == v)
-                })
+                required
+                    .iter()
+                    .all(|(k, v)| p.attributes.iter().any(|(pk, pv)| pk == k && pv == v))
             })
             .map(|p| p.value)
             .sum()

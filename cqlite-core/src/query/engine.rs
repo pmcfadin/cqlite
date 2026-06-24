@@ -189,10 +189,8 @@ impl QueryEngine {
             self.inc_error_queries();
             crate::observability::record_error(e, "query");
         })?;
-        let plan = crate::observability::record_result(
-            "query",
-            self.planner.plan(&parsed_query).await,
-        )?;
+        let plan =
+            crate::observability::record_result("query", self.planner.plan(&parsed_query).await)?;
 
         if self.config.query.query_cache_size.unwrap_or(0) > 0 {
             self.cache_query_plan(cql, parsed_query, plan.clone());
@@ -683,16 +681,28 @@ impl QueryEngine {
             execution_time.as_secs_f64(),
             &[
                 (catalog::attr::SUBSYSTEM, AttrValue::StaticStr("query")),
-                (catalog::attr::ACCESS_PATH, AttrValue::StaticStr(access_path_label)),
-                (catalog::attr::PLAN_TYPE, AttrValue::StaticStr(plan_type_label)),
+                (
+                    catalog::attr::ACCESS_PATH,
+                    AttrValue::StaticStr(access_path_label),
+                ),
+                (
+                    catalog::attr::PLAN_TYPE,
+                    AttrValue::StaticStr(plan_type_label),
+                ),
             ],
         );
         obs::add_counter(
             catalog::QUERY_ROWS,
             result.rows.len() as u64,
             &[
-                (catalog::attr::ACCESS_PATH, AttrValue::StaticStr(access_path_label)),
-                (catalog::attr::PLAN_TYPE, AttrValue::StaticStr(plan_type_label)),
+                (
+                    catalog::attr::ACCESS_PATH,
+                    AttrValue::StaticStr(access_path_label),
+                ),
+                (
+                    catalog::attr::PLAN_TYPE,
+                    AttrValue::StaticStr(plan_type_label),
+                ),
             ],
         );
 
