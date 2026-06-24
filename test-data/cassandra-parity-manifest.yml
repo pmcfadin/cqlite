@@ -1,0 +1,1154 @@
+# CQLite ↔ Apache Cassandra parity manifest
+#
+# Single source of truth for the byte-for-byte parity program (epics #966/#967).
+# Validated by `cargo run -p cassandra-parity -- lint --manifest <this file>` and
+# rendered to docs/reports/cassandra-test-parity.md by the `report` subcommand.
+#
+# Taxonomy (capability groups, suite names, evidence bar, out-of-scope categories)
+# is defined by docs/reports/cassandra-test-parity-assessment.md and enforced by
+# test-data/cassandra-parity-manifest.schema.json. Free-text capabilities/suites
+# are rejected. See docs/development/cassandra-parity-manifest.md for the guide.
+#
+# Evidence honesty rule: a passing test does NOT upgrade evidence type. Parse/load
+# success stays `smoke`; canonical JSONL checks stay `canonical_semantic`; only
+# byte/offset/checksum/component-file diffs against a Cassandra reference are
+# `byte_for_byte`.
+
+manifest_version: 1
+
+cassandra_source:
+  repo: https://github.com/apache/cassandra
+  ref: cassandra-5.0.2
+  sha: f278f6774fc76465c182041e081982105c3e7dbb
+  index: docs/cassandra_test_index.md
+  assessment_report: docs/reports/cassandra-test-parity-assessment.md
+
+program:
+  parent_epic: 966
+  reporting_epic: 967
+
+scenarios:
+  # ----------------------------------------------------------------------------
+  # sstable_format
+  # ----------------------------------------------------------------------------
+  - id: cass.sstable_format.descriptor_component_resolution
+    title: Descriptor and on-disk version/component resolution
+    status: mirrored
+    capability: sstable_format
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - DescriptorTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_component_manifest
+        tests:
+          - cqlite-core/tests/sstable_parity_integration_test.rs
+        notes: >-
+          CQLite resolves nb/oa/da descriptors and component versions when
+          opening every dataset under test-data/datasets/sstables.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: smoke
+      artifacts: [component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 → flush → component files
+      known_limitations: >-
+        Validates that CQLite parses descriptor/version and resolves the
+        component set; this is parse/load success, not byte parity of the
+        component naming scheme.
+    ci:
+      tier: fast_pr
+    scope: {}
+
+  - id: cass.sstable_format.toc_component_manifest
+    title: TOC.txt component manifest completeness
+    status: partial
+    capability: sstable_format
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - TOCComponentTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_component_manifest
+        tests:
+          - cqlite-core/tests/sstable_parity_integration_test.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+    evidence:
+      type: partial
+      artifacts: [component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 BTI flush emits TOC.txt
+      reference_paths:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+      known_limitations: >-
+        Component set is compared as an unordered set on read; an exact
+        TOC.txt byte/line comparison against the Cassandra reference is not
+        yet a gated test.
+    ci:
+      tier: fast_pr
+    scope:
+      gap: No gated exact TOC.txt comparison against the Cassandra-produced manifest.
+      next_step: >-
+        Add a component-manifest byte comparison to the
+        sstable_parity_component_manifest suite.
+
+  # ----------------------------------------------------------------------------
+  # data_db_decode
+  # ----------------------------------------------------------------------------
+  - id: cass.data_db_decode.row_cell_flags_and_vint
+    title: Data.db row/cell flags and VInt decode parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - UnfilteredSerializerTest.java
+        - SSTableReaderTest.java
+        - SSTableScannerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/sstabledump_parity_data.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_data
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Rows and cells are normalized to the sstabledump JSONL fact model
+        (partition key, clustering, cell name/value, liveness, deletion) and
+        compared field-by-field; presentation ordering and whitespace ignored.
+      known_limitations: >-
+        Proves canonical-semantic equivalence to sstabledump output, not
+        byte-for-byte identity of the Data.db payload.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
+  # index_summary
+  # ----------------------------------------------------------------------------
+  - id: cass.index_summary.big_index_offsets
+    title: Index.db partition key digests and data offsets (BIG)
+    status: mirrored
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - RowIndexEntryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/sstabledump_parity_index.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [offsets, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_index
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Partition key digests and Data.db offsets resolved through Index.db are
+        compared against the partition order and keys derived from sstabledump
+        JSONL.
+      known_limitations: >-
+        Offsets are validated for lookup correctness; this is not a raw byte
+        comparison of the Index.db structure.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.index_summary.summary_boundaries
+    title: Summary.db sampling boundaries (BIG)
+    status: partial
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_summary_db_big
+        tests:
+          - cqlite-core/tests/sstabledump_parity_summary.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Summary.db
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      known_limitations: >-
+        Summary.db first/last key boundaries are validated on read, but the
+        Cassandra Summary.db reference dumps are not published for the full
+        dataset (references.yml records summary_txt.present=false), so strict
+        boundary comparison is not enforced.
+    ci:
+      tier: fast_pr
+    scope:
+      gap: Cassandra Summary.db reference dumps not published for all tables.
+      next_step: >-
+        Publish Summary.db reference dumps and enable strict first/last-key
+        boundary comparison in the sstable_parity_summary_db_big suite.
+
+  # ----------------------------------------------------------------------------
+  # statistics_metadata / schema_evolution
+  # ----------------------------------------------------------------------------
+  - id: cass.statistics_metadata.serialization_header
+    title: Statistics.db metadata and serialization header parity
+    status: mirrored
+    capability: statistics_metadata
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SSTableMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstabledump_parity_statistics.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [component_files, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabletool/sstabledump emit Statistics.db.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstabledump_parity_statistics
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+      normalization: >-
+        Min/max timestamps, row count, partition count and serialization-header
+        column types are compared against the Statistics.db.txt dump and
+        sstabledump JSONL.
+      known_limitations: >-
+        EstimatedHistogram bucket bytes are compared by decoded value, not by
+        raw byte layout.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.schema_evolution.serialization_header_column_order
+    title: Serialization-header column order across schema evolution
+    status: mirrored
+    capability: schema_evolution
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_921_background_compaction_dropped_column_header.rs
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: smoke
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # schema with dropped column
+      known_limitations: >-
+        Validates that the serialization-header column set/order survives a
+        dropped-column schema evolution through compaction; this is a
+        round-trip success check, not a byte comparison of the header.
+    ci:
+      tier: fast_pr
+    scope: {}
+
+  # ----------------------------------------------------------------------------
+  # compression_checksum
+  # ----------------------------------------------------------------------------
+  - id: cass.compression_checksum.chunk_offsets_and_crc
+    title: CompressionInfo.db chunk decode and row-count parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+        - CompressedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/v5_compressed_legacy_parity_test.rs
+          - cqlite-core/tests/v5_compressed_legacy_row_count_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test v5_compressed_legacy_row_count_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Decompressed chunk payloads are decoded to rows and compared (row count
+        and values) against sstabledump JSONL; chunk offset tables are used for
+        positioning.
+      known_limitations: >-
+        Validates decompressed content equivalence; a byte comparison of the
+        CompressionInfo.db chunk-offset table and per-chunk CRC is not gated.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_checksum.checksum_trailer_detection
+    title: Inline checksum / Digest.crc32 corruption detection
+    status: partial
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: checksum
+      relevance: high
+      files:
+        - ChecksumedDataTest.java
+        - ChecksummedRandomAccessReaderTest.java
+        - ChecksummedSequentialWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_corruption_verify
+        tests:
+          - cqlite-core/tests/sstable_parity_integration_test.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32
+    evidence:
+      type: partial
+      artifacts: [checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 emits Digest.crc32
+      reference_paths:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32
+      failure_artifacts:
+        - target/cassandra-parity/checksum-mismatch.log
+      known_limitations: >-
+        CQLite validates inline checksums on read and surfaces mismatches, but
+        an exact byte comparison of Digest.crc32 against the Cassandra value is
+        not yet a gated test.
+    ci:
+      tier: fast_pr
+    scope:
+      gap: No gated byte comparison of Digest.crc32 against the Cassandra reference.
+      next_step: >-
+        Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify
+        suite.
+
+  # ----------------------------------------------------------------------------
+  # corruption_verify
+  # ----------------------------------------------------------------------------
+  - id: cass.corruption_verify.component_corruption_detection
+    title: Component corruption detection, scrub, and verify
+    status: planned
+    capability: corruption_verify
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: scrub-verify
+      relevance: high
+      files:
+        - VerifyTest.java
+        - ScrubTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_corruption_verify
+    fixtures: {}
+    evidence:
+      type: partial
+      artifacts: [checksums, component_files]
+      known_limitations: >-
+        CQLite detects checksum mismatches on read but does not yet implement a
+        full scrub/verify pass with parity against Cassandra's nodetool verify.
+    ci:
+      tier: manual_debug
+    scope:
+      target_suite: sstable_parity_corruption_verify
+      gap: No scrub/verify parity pass implemented.
+      next_step: >-
+        Implement a verify pass and compare detected-corruption outcomes against
+        Cassandra VerifyTest/ScrubTest scenarios.
+
+  # ----------------------------------------------------------------------------
+  # filter_db_bloom
+  # ----------------------------------------------------------------------------
+  - id: cass.filter_db_bloom.serialization_no_false_negative
+    title: Filter.db Bloom filter serialization with no false negatives
+    status: partial
+    capability: filter_db_bloom
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: bloom-filter
+      relevance: high
+      files:
+        - BloomFilterTest.java
+        - LongBloomFilterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_filter_db_bloom
+        tests:
+          - cqlite-core/tests/sstable_parity_integration_test.rs
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 emits Filter.db
+      known_limitations: >-
+        CQLite reads Filter.db, but there is no gated test proving that lookups
+        never produce false negatives against a Cassandra-generated Filter.db.
+    ci:
+      tier: fast_pr
+    scope:
+      gap: No no-false-negative parity assertion against Cassandra Filter.db.
+      next_step: >-
+        Add a Filter.db serialization parity test asserting zero false negatives
+        across the present-key set.
+
+  # ----------------------------------------------------------------------------
+  # tombstone_ttl
+  # ----------------------------------------------------------------------------
+  - id: cass.tombstone_ttl.range_tombstone_boundaries
+    title: Range tombstone boundary and deletion-time parity
+    status: partial
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - RangeTombstoneListTest.java
+        - RangeTombstoneBoundaryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh  # cassandra:5.0.2 delete shapes → sstabledump JSONL
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Range/cell/row tombstone bounds and deletion timestamps are mapped to
+        the sstabledump JSONL deletion-fact model and compared.
+      known_limitations: >-
+        The test_deltas dataset asset is not yet published/enforced in CI
+        (issue #701), so this scenario is validated locally only.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: test_deltas dataset asset not published/enforced in CI (#701).
+      next_step: Publish the test_deltas dataset and enforce scan_delta parity in CI.
+
+  - id: cass.tombstone_ttl.ttl_and_local_deletion_time
+    title: TTL, local deletion time, and WRITETIME parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - TTLExpiryTest.java
+        - NeverPurgeTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/issue_694_writetime_ttl_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test issue_694_writetime_ttl_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        TTL, localDeletionTime and WRITETIME are compared against the
+        ttl/expiresAt/tstamp facts emitted by sstabledump JSONL.
+      known_limitations: >-
+        Canonical-semantic equivalence of liveness fields; not a Data.db byte
+        comparison.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
+  # delta_scan
+  # ----------------------------------------------------------------------------
+  - id: cass.delta_scan.tombstone_liveness_facts
+    title: Delta-scan tombstone/TTL/liveness fact extraction
+    status: partial
+    capability: delta_scan
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - TTLExpiryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/scan_delta_parity_test.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh  # all delete shapes → sstabledump JSONL
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta records (cell/row/partition/range tombstones, TTL, liveness)
+        are mapped to sstabledump JSONL deletion facts and compared.
+      known_limitations: >-
+        test_deltas dataset binaries are not yet published/enforced in CI
+        (issue #701); validated locally only.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/delta-roundtrip.yml
+    scope:
+      gap: test_deltas dataset asset not published/enforced (#701).
+      next_step: Publish and enforce the test_deltas dataset in delta-roundtrip CI.
+
+  # ----------------------------------------------------------------------------
+  # compaction_merge
+  # ----------------------------------------------------------------------------
+  - id: cass.compaction_merge.tombstone_ttl_shadowing
+    title: Compaction tombstone/TTL shadowing — canonical semantic parity
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionsPurgeTest.java
+        - GcCompactionTest.java
+        - CompactionIteratorTest.java
+        - RangeTombstoneBoundaryTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_819_differential_compaction.rs
+          - cqlite-core/tests/issue_933_range_tombstone_compaction.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        compaction-parity/scripts/bootstrap-cassandra.sh  # builds cassandra-5.0.2, runs reference compaction
+      comparison_command: >-
+        cargo test -p cqlite-core --features write-support --test issue_819_differential_compaction
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Tier-2 logical equivalence: merged partition/cell/timestamp/TTL/local
+        deletion time/is_deleted facts compared against Cassandra compaction
+        output; presentation/file layout ignored.
+      known_limitations: >-
+        Logical / canonical-semantic equivalence only; byte-for-byte compaction
+        output parity is debug-only and non-gated (north-star issue #842).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/compaction-parity.yml
+    scope: {}
+
+  - id: cass.compaction_merge.load_path_validity
+    title: Compaction output load-path validity (Tier-1)
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionTaskTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_819_differential_compaction.rs
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: smoke
+      artifacts: [component_files, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        cargo test -p cqlite-core --features write-support --test issue_819_differential_compaction
+      known_limitations: >-
+        Tier-1 validity only: compaction output has a well-formed TOC, valid
+        Digest.crc32 and correct partition ordering. This is load-path validity,
+        not byte parity.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/compaction-parity.yml
+    scope:
+      gap: Load-path validity does not assert byte or canonical-semantic parity.
+      next_step: >-
+        Covered for semantics by cass.compaction_merge.tombstone_ttl_shadowing;
+        byte parity tracked by cass.compaction_merge.byte_for_byte_output.
+
+  - id: cass.compaction_merge.byte_for_byte_output
+    title: Compaction byte-for-byte output parity (future)
+    status: planned
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - LongCompactionsTest.java
+        - CompactionsTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+    fixtures: {}
+    evidence:
+      type: partial
+      artifacts: [bytes, component_files]
+      known_limitations: >-
+        Byte-for-byte compaction output parity is a north-star goal (#842); only
+        the debug byte tier exists today and it is non-blocking.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 842
+      gap: No gated byte-for-byte comparison of compaction output.
+      next_step: >-
+        Promote the debug byte tier in compaction-parity to a gated comparison
+        once writer output is byte-stable.
+
+  # ----------------------------------------------------------------------------
+  # write_load_path
+  # ----------------------------------------------------------------------------
+  - id: cass.write_load_path.cassandra_sstable_writer_fixtures
+    title: CQLite-written SSTables load into Cassandra via sstableloader
+    status: mirrored
+    capability: write_load_path
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_writer_cassandra_fixture_parity
+        tests:
+          - cqlite-core/tests/sstableloader_integration.rs
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: smoke
+      artifacts: [component_files, logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/e2e-cassandra-readback.sh  # write → sstableloader → SELECT
+      known_limitations: >-
+        Proves CQLite-written SSTables load into Cassandra 5.0.2 and queries
+        return the written rows (round-trip success). This is load/round-trip
+        validity, not a byte comparison of writer output.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cassandra-validation.yml
+    scope:
+      gap: Round-trip query verification, not byte/JSONL parity of writer output.
+      next_step: >-
+        Add fixture byte comparison once a committed Cassandra-written reference
+        fixture exists for the same schema/data.
+
+  # ----------------------------------------------------------------------------
+  # bti_big_version_matrix
+  # ----------------------------------------------------------------------------
+  - id: cass.bti_big_version_matrix.big_nb_oa_read
+    title: BIG nb/oa read parity matrix
+    status: mirrored
+    capability: bti_big_version_matrix
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_data_db_jsonl
+        tests:
+          - cqlite-core/tests/reference_data_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test reference_data_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Data.db.jsonl
+      normalization: >-
+        Decoded rows for nb (Cassandra 4-compatible BIG) and oa (Cassandra 5
+        BIG) datasets are compared against sstabledump JSONL.
+      known_limitations: Canonical-semantic equivalence; not a Data.db byte comparison.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.bti_big_version_matrix.bti_da_write_read
+    title: BTI da write and read-back parity
+    status: mirrored
+    capability: bti_big_version_matrix
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-format
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_bti_partitions_rows
+        tests:
+          - cqlite-core/tests/issue_911_bti_sstabledump_parity.rs
+          - cqlite-core/tests/issue_766_bti_partitions_writer.rs
+          - cqlite-core/tests/issue_909_bti_reader_roundtrip.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [da]
+      fixture_generation_command: >-
+        bash test-data/scripts/gen-wide-bti.sh  # cassandra:5.0.2 BTI (da) write → sstabledump JSONL
+      comparison_command: >-
+        cargo test -p cqlite-core --features write-support --test issue_911_bti_sstabledump_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+      normalization: >-
+        CQLite-written da BTI SSTables are dumped with Cassandra 5 sstabledump
+        and compared for value equivalence; Partitions.db footer shape
+        [firstPos|keyCount|root] is matched against a real Cassandra fixture.
+      known_limitations: >-
+        Footer shape and dump equivalence are checked; full byte parity of BTI
+        trie nodes is not gated.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/e2e-readback.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
+  # cli_reporting
+  # ----------------------------------------------------------------------------
+  - id: cass.cli_reporting.parity_manifest_lint_and_report
+    title: Parity manifest lint and report tooling
+    status: mirrored
+    capability: cli_reporting
+    priority: P2
+    risk: tooling_only
+    cassandra:
+      category: other
+      relevance: low
+      files:
+        - "n/a — CQLite-native parity tooling (no Cassandra source mirror)"
+    cqlite:
+      coverage:
+        tests:
+          - tools/cassandra-parity/tests/lint_tests.rs
+        notes: >-
+          The cassandra-parity tool lints this manifest and generates
+          docs/reports/cassandra-test-parity.md.
+    fixtures: {}
+    evidence:
+      type: smoke
+      artifacts: [generated_report, logs]
+      known_limitations: >-
+        Validates the manifest lint/report tooling itself, not Cassandra
+        on-disk parity.
+    ci:
+      tier: fast_pr
+      workflow: .github/workflows/cassandra-parity.yml
+    scope: {}
+
+  # ----------------------------------------------------------------------------
+  # out_of_scope — node behaviors CQLite intentionally does not mirror
+  # ----------------------------------------------------------------------------
+  - id: cass.commitlog_replay.recovery_out_of_scope
+    title: Commitlog and replay compatibility (out of scope)
+    status: out_of_scope
+    capability: sstable_format
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: commitlog
+      relevance: high
+      files:
+        - CommitLogTest.java
+        - CommitLogReaderTest.java
+        - RecoveryManagerFlushedTest.java
+    cqlite:
+      coverage: {}
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+    ci:
+      tier: fast_pr
+    scope:
+      out_of_scope_category: commitlog_replay
+      rationale: >-
+        CQLite does not implement a commitlog or node recovery; it reads and
+        writes already-flushed SSTables. Out of scope does not mean unimportant.
+      cqlite_boundary: >-
+        CQLite operates on SSTable component files only. Commitlog segments and
+        replay/recovery are node runtime behavior CQLite never executes.
+      safe_claim: >-
+        CQLite reads SSTables that Cassandra has already flushed; it does not
+        replay or validate commitlogs.
+      related_in_scope_scenarios:
+        - cass.schema_evolution.serialization_header_column_order
+
+  - id: cass.repair_coordinator.anti_entropy_out_of_scope
+    title: Repair coordinator and anti-entropy protocol (out of scope)
+    status: out_of_scope
+    capability: sstable_format
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: repair
+      relevance: med
+      files:
+        - "repair / anti-entropy suite — docs/cassandra_test_index.md#repair"
+    cqlite:
+      coverage: {}
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+    ci:
+      tier: fast_pr
+    scope:
+      out_of_scope_category: repair_coordinator
+      rationale: >-
+        Repair is a multi-node anti-entropy protocol; CQLite is single-file and
+        has no peers to reconcile with.
+      cqlite_boundary: >-
+        CQLite never participates in Merkle-tree exchange, validation compaction,
+        or anti-compaction streaming.
+      safe_claim: CQLite does not perform or validate repair.
+      related_in_scope_scenarios:
+        - cass.compaction_merge.tombstone_ttl_shadowing
+
+  - id: cass.read_repair_coordinator.out_of_scope
+    title: Read-repair coordinator (out of scope)
+    status: out_of_scope
+    capability: data_db_decode
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: read-repair
+      relevance: med
+      files:
+        - "read-repair suite — docs/cassandra_test_index.md#read-repair"
+    cqlite:
+      coverage: {}
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+    ci:
+      tier: fast_pr
+    scope:
+      out_of_scope_category: read_repair_coordinator
+      rationale: >-
+        Read repair reconciles replicas at query time across a cluster; CQLite
+        reads a single set of SSTables with no replicas.
+      cqlite_boundary: >-
+        CQLite has no coordinator, no digest mismatch resolution, and no
+        cross-replica mutation path.
+      safe_claim: CQLite does not perform read repair.
+      related_in_scope_scenarios:
+        - cass.data_db_decode.row_cell_flags_and_vint
+
+  - id: cass.streaming_protocol.node_lifecycle_out_of_scope
+    title: SSTable streaming protocol and node lifecycle (out of scope)
+    status: out_of_scope
+    capability: write_load_path
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: streaming
+      relevance: med
+      files:
+        - "streaming suite — docs/cassandra_test_index.md#streaming"
+    cqlite:
+      coverage: {}
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+    ci:
+      tier: fast_pr
+    scope:
+      out_of_scope_category: streaming_protocol
+      rationale: >-
+        The streaming protocol moves SSTable ranges between nodes during
+        bootstrap/repair/decommission; CQLite has no node lifecycle.
+      cqlite_boundary: >-
+        CQLite writes complete SSTables to disk; it does not implement the
+        streaming wire protocol or node join/leave transitions.
+      safe_claim: >-
+        CQLite-written SSTables can be loaded with sstableloader, but CQLite does
+        not implement the streaming protocol itself.
+      related_in_scope_scenarios:
+        - cass.write_load_path.cassandra_sstable_writer_fixtures
+
+  - id: cass.nodetool_jmx_metrics.operational_out_of_scope
+    title: nodetool, JMX, metrics, and operational controls (out of scope)
+    status: out_of_scope
+    capability: cli_reporting
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: tools-cli
+      relevance: low
+      files:
+        - "tools/nodetool suite — docs/cassandra_test_index.md#tools-cli"
+    cqlite:
+      coverage: {}
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+    ci:
+      tier: fast_pr
+    scope:
+      out_of_scope_category: nodetool_jmx_metrics
+      rationale: >-
+        nodetool/JMX expose live node metrics and operational commands; CQLite
+        is a library/CLI over static files.
+      cqlite_boundary: >-
+        CQLite exposes no JMX, no live metrics registry, and no operational
+        control surface.
+      safe_claim: CQLite does not provide nodetool/JMX operational behavior.
+      related_in_scope_scenarios:
+        - cass.cli_reporting.parity_manifest_lint_and_report
+
+  - id: cass.distributed_consensus.paxos_accord_out_of_scope
+    title: Paxos/Accord and distributed consensus (out of scope)
+    status: out_of_scope
+    capability: data_db_decode
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: other
+      relevance: low
+      files:
+        - "Paxos/Accord suite — docs/cassandra_test_index.md#other"
+    cqlite:
+      coverage: {}
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+    ci:
+      tier: fast_pr
+    scope:
+      out_of_scope_category: distributed_consensus
+      rationale: >-
+        Paxos/Accord provide cluster-wide consensus for LWT/transactions; CQLite
+        has no consensus participants.
+      cqlite_boundary: >-
+        CQLite reads committed SSTable state and never executes a consensus
+        round or serializes Paxos/Accord state machines.
+      safe_claim: CQLite does not implement distributed consensus.
+      related_in_scope_scenarios:
+        - cass.data_db_decode.row_cell_flags_and_vint
+
+  - id: cass.sai_sasi_query.secondary_index_out_of_scope
+    title: SAI/SASI secondary index query behavior (out of scope)
+    status: out_of_scope
+    capability: index_summary
+    priority: P2
+    risk: node_behavior
+    cassandra:
+      category: index-sai-sasi
+      relevance: high
+      files:
+        - "SAI/SASI suite — docs/cassandra_test_index.md#index-sai-sasi"
+    cqlite:
+      coverage: {}
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+    ci:
+      tier: fast_pr
+    scope:
+      out_of_scope_category: sai_sasi_query
+      rationale: >-
+        CQLite does not implement SAI or SASI secondary indexes, so their
+        on-disk index components and query semantics are out of scope.
+      cqlite_boundary: >-
+        CQLite reads the base table SSTable components (Data/Index/Summary/
+        Statistics/Filter); it does not read or query SAI/SASI index files.
+      safe_claim: >-
+        CQLite reads base-table SSTables only and does not implement SAI/SASI
+        secondary indexes.
+      related_in_scope_scenarios:
+        - cass.index_summary.big_index_offsets
