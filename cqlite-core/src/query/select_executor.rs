@@ -94,6 +94,11 @@ struct ExecutionContext {
     pub columns: Vec<ColumnInfo>,
     /// Row count processed so far
     pub rows_processed: u64,
+    /// Rows examined by the SSTable-scan step ONLY (issue #1035). Distinct from
+    /// `rows_processed`, which is also bumped by the residual `Filter` step, so
+    /// this is the correct, non-double-counted source for the
+    /// `cqlite.query.rows_scanned` metric and span field.
+    pub scan_rows: u64,
     /// Projection flags controlling opt-in metadata collection (Issue #692).
     ///
     /// Set to `include_cell_metadata = true` when any `WRITETIME` or `TTL`
@@ -1225,7 +1230,78 @@ impl SelectExecutor {
         }
     }
 
-    /// Execute an optimized query plan
+    /// Derive a bounded plan-family label for a SELECT, from the plan it executed
+    /// and the honest access path the SSTable-scan step actually took (issue #1035).
+    ///
+    /// The string is one of the `PlanType` `Debug` forms (`"TableScan"`,
+    /// `"PointLookup"`, `"RangeScan"`, `"Aggregation"`) so that
+    /// `QueryEngine::plan_type_label` maps it onto the same bounded metric/span
+    /// taxonomy the legacy executor already uses — keeping cardinality bounded and
+    /// the dimension consistent across surfaces. The access path is the same
+    /// per-query signal surfaced on `QueryMetadata.access_path` (epic #951/#960);
+    /// this never inspects query text or key values.
+    fn select_plan_family(plan: &OptimizedQueryPlan, access_path: Option<&AccessPath>) -> String {
+        // Aggregation dominates: a query that aggregates is reported as such
+        // regardless of how its underlying scan was served.
+        if plan.aggregation_plan.is_some() {
+            return "Aggregation".to_string();
+        }
+        match access_path {
+            Some(
+                AccessPath::PartitionLookup
+                | AccessPath::MultiPartitionLookup
+                | AccessPath::MetadataPartitionLookup
+                | AccessPath::StreamingPartitionLookup,
+            ) => "PointLookup".to_string(),
+            Some(AccessPath::ClusteringSlice) => "RangeScan".to_string(),
+            // Full scan, any documented fallback, or no recorded path (e.g. a plan
+            // with no scan step) is honestly a table scan.
+            Some(AccessPath::FullScan | AccessPath::FallbackFullScan { .. }) | None => {
+                "TableScan".to_string()
+            }
+        }
+    }
+
+    /// Build the bounded `PlanInfo` carried on a SELECT result so the engine's
+    /// single observability chokepoint can dimension `QUERY_DURATION`/`QUERY_ROWS`
+    /// and the parent span by a real plan family instead of `"unknown"`
+    /// (issue #1035). Only the bounded plan-family string and the chosen access
+    /// path (as the single "index used" entry) are recorded — never query text.
+    fn select_plan_info(
+        plan: &OptimizedQueryPlan,
+        access_path: Option<&AccessPath>,
+    ) -> crate::query::result::PlanInfo {
+        crate::query::result::PlanInfo {
+            plan_type: Self::select_plan_family(plan, access_path),
+            estimated_cost: 0.0,
+            actual_cost: 0.0,
+            indexes_used: access_path
+                .map(|p| vec![p.label().to_string()])
+                .unwrap_or_default(),
+            steps: vec![],
+            parallelization: None,
+        }
+    }
+
+    /// Execute an optimized query plan.
+    ///
+    /// Instrumented as `query.select.plan` (issue #1035): this span covers the
+    /// modern SELECT pipeline — SSTable scan, filtering, projection, aggregation,
+    /// and WRITETIME/TTL metadata extraction — and is the parent under which the
+    /// read-path spans (issue #1034) nest. On completion it emits
+    /// [`catalog::QUERY_ROWS_SCANNED`] (rows the scan step examined) dimensioned by
+    /// the honest access path, so the rows-scanned vs rows-returned gap is
+    /// observable. The bounded access-path attribute is recorded on the span; the
+    /// query text and key values never are.
+    #[tracing::instrument(
+        name = "query.select.plan",
+        skip_all,
+        fields(
+            cqlite.query.access_path = tracing::field::Empty,
+            cqlite.query.rows_scanned = tracing::field::Empty,
+            cqlite.query.rows = tracing::field::Empty,
+        )
+    )]
     pub async fn execute(&self, plan: OptimizedQueryPlan) -> Result<QueryResult> {
         // Issue #960: clear the global access-path probe so a stale value from a
         // previous query cannot satisfy a test assertion against this one.
@@ -1254,6 +1330,7 @@ impl SelectExecutor {
             table_id,
             columns: self.get_result_columns(&plan.statement).await?,
             rows_processed: 0,
+            scan_rows: 0,
             projection_flags,
             access_path: None,
         };
@@ -1382,6 +1459,42 @@ impl SelectExecutor {
             }
         }
 
+        // Observability (issue #1035): the `query.select.plan` span declared
+        // `access_path`/`rows_scanned`/`rows` but never recorded them, and
+        // `QUERY_ROWS_SCANNED` was never emitted. Do both here, sourced from the
+        // honest per-query signal (`context.access_path`, set by the SSTable-scan
+        // step) and the rows the scan examined (`context.rows_processed`). Bounded
+        // attributes only — never the query text or key values.
+        {
+            use crate::observability::{self as obs, catalog, AttrValue};
+
+            let access_path_label: &'static str = context
+                .access_path
+                .as_ref()
+                .map(|p| p.label())
+                .unwrap_or("unknown");
+
+            obs::add_counter(
+                catalog::QUERY_ROWS_SCANNED,
+                context.scan_rows,
+                &[(
+                    catalog::attr::ACCESS_PATH,
+                    AttrValue::StaticStr(access_path_label),
+                )],
+            );
+
+            let span = tracing::Span::current();
+            span.record(catalog::attr::ACCESS_PATH, access_path_label);
+            span.record("cqlite.query.rows_scanned", context.scan_rows);
+            span.record("cqlite.query.rows", total_rows);
+        }
+
+        // Issue #1035: carry a bounded plan family on the result so the engine's
+        // single observability chokepoint reports a real plan type for SELECTs
+        // (the modern executor previously always returned `plan_info: None`,
+        // forcing plan_type to "unknown").
+        let plan_info = Self::select_plan_info(&plan, context.access_path.as_ref());
+
         Ok(QueryResult {
             rows: intermediate_results,
             rows_affected: total_rows, // Use actual number of rows returned
@@ -1389,7 +1502,7 @@ impl SelectExecutor {
             metadata: crate::query::result::QueryMetadata {
                 columns,
                 total_rows: Some(total_rows),
-                plan_info: None,
+                plan_info: Some(plan_info),
                 performance: Default::default(),
                 warnings: vec![],
                 // Issue #960: surface the access path the SSTable-scan step chose
@@ -1943,6 +2056,7 @@ impl SelectExecutor {
 
             for (key, value, cell_meta) in scan_results {
                 context.rows_processed += 1;
+                context.scan_rows += 1;
 
                 let Some(mut row) =
                     build_row_from_scan(key, value, projection, schema_opt.as_ref())
@@ -2077,6 +2191,7 @@ impl SelectExecutor {
 
             for (key, value) in scan_results {
                 context.rows_processed += 1;
+                context.scan_rows += 1;
 
                 // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
                 let Some(row) = build_row_from_scan(key, value, projection, schema_opt.as_ref())
