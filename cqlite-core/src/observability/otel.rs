@@ -404,6 +404,50 @@ pub(crate) fn mark_span_error(category: crate::observability::ErrorCategory) {
     span.set_attribute(catalog::attr::ERROR_CATEGORY, category.as_str());
 }
 
+/// Extract a W3C `traceparent` header and set the resulting remote context as
+/// the parent of `span`. No-op when `traceparent` is absent/empty/unparseable.
+///
+/// Uses the standard [`TraceContextPropagator`] to parse the header into an
+/// OpenTelemetry [`Context`](opentelemetry::Context), then
+/// `tracing-opentelemetry`'s `set_parent` to link the `tracing` span to that
+/// remote span. Only the `traceparent` header is consulted (no baggage /
+/// tracestate), keeping the surface minimal and the behaviour identical to
+/// other CQLite hosts.
+pub(crate) fn set_span_parent_from_traceparent(span: &tracing::Span, traceparent: Option<&str>) {
+    use opentelemetry::propagation::{Extractor, TextMapPropagator};
+    use opentelemetry::trace::TraceContextExt;
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+    let header = match traceparent {
+        Some(h) if !h.trim().is_empty() => h,
+        _ => return,
+    };
+
+    /// Single-header carrier exposing only `traceparent` to the propagator.
+    struct TraceParentCarrier<'a>(&'a str);
+    impl Extractor for TraceParentCarrier<'_> {
+        fn get(&self, key: &str) -> Option<&str> {
+            if key.eq_ignore_ascii_case("traceparent") {
+                Some(self.0)
+            } else {
+                None
+            }
+        }
+        fn keys(&self) -> Vec<&str> {
+            vec!["traceparent"]
+        }
+    }
+
+    let propagator = TraceContextPropagator::new();
+    let cx = propagator.extract(&TraceParentCarrier(header));
+    // Only re-parent when extraction produced a valid remote span context;
+    // otherwise leave the span attached to its in-process parent.
+    if cx.span().span_context().is_valid() {
+        span.set_parent(cx);
+    }
+}
+
 /// Convenience for the default flush timeout used by tests.
 #[allow(dead_code)]
 pub(crate) const DEFAULT_FLUSH: Duration = Duration::from_secs(1);
@@ -425,5 +469,22 @@ mod tests {
         // Just exercise the builder for coverage; sampler has no public getter.
         let _ = build_sampler(0.5);
         let _ = build_sampler(2.0); // clamps internally
+    }
+
+    #[test]
+    fn traceparent_none_empty_and_invalid_are_noops() {
+        // Must not panic for absent / blank / malformed headers.
+        let span = tracing::info_span!("test");
+        set_span_parent_from_traceparent(&span, None);
+        set_span_parent_from_traceparent(&span, Some("   "));
+        set_span_parent_from_traceparent(&span, Some("not-a-traceparent"));
+    }
+
+    #[test]
+    fn traceparent_valid_header_is_accepted() {
+        // A well-formed W3C traceparent should parse and re-parent without panic.
+        let span = tracing::info_span!("test");
+        let valid = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        set_span_parent_from_traceparent(&span, Some(valid));
     }
 }

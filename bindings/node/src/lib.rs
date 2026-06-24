@@ -22,6 +22,7 @@
 
 mod database;
 mod error;
+mod observability;
 mod prepared;
 mod runtime;
 mod streaming;
@@ -36,6 +37,7 @@ pub use database::MaintenanceReport;
 pub use database::QueryResult;
 pub use database::StreamingConfig;
 pub use database::WriteStats;
+pub use observability::OtelOptions;
 pub use prepared::PreparedStatement;
 pub use prepared::PreparedStatementStats;
 pub use streaming::StreamingResult;
