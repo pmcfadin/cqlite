@@ -93,6 +93,13 @@ impl RpcMetrics {
     /// method set (see [`method_index`]).
     pub fn start(method: &'static str) -> Self {
         let method_idx = method_index(method);
+        // Normalize the label to the bounded slot name so an unexpected method
+        // string can never leak as a metric attribute: a value not in the fixed
+        // set resolves to `method_idx` for the `"other"` slot, and we report that
+        // slot's canonical label here (and in `finish`). This keeps metric
+        // cardinality capped at exactly the RPC_METHODS set and makes the in-flight
+        // gauge label match the shared counter that is actually incremented.
+        let method = RPC_METHODS[method_idx];
         // Increment the shared per-method counter and observe the level. Because
         // the counter is process-wide (not thread-local), the matching decrement
         // in `finish` stays correct under Tokio worker-thread hopping.
