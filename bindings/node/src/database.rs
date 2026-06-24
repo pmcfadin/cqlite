@@ -1284,8 +1284,7 @@ impl napi::Task for ExecuteNativeTask {
         use tracing::Instrument;
 
         // Per-call span (issue #1040), parented under the handle's traceparent.
-        let span =
-            crate::observability::execute_span("executeNative", self.traceparent.as_deref());
+        let span = crate::observability::execute_span("executeNative", self.traceparent.as_deref());
 
         // Route DML to write engine when write support is present. This path is
         // fully synchronous, so a span guard is correct (no `.await`).
@@ -1294,9 +1293,9 @@ impl napi::Task for ExecuteNativeTask {
             if let Some(ref we) = self.write_engine {
                 let _entered = span.enter();
                 let start = std::time::Instant::now();
-                let mut engine = we.lock().map_err(|_| {
-                    simple_error("Write engine lock poisoned")
-                })?;
+                let mut engine = we
+                    .lock()
+                    .map_err(|_| simple_error("Write engine lock poisoned"))?;
                 engine.execute(&self.query).map_err(to_napi_error)?;
                 let elapsed_ms = start.elapsed().as_millis() as u32;
                 crate::observability::record_rows(&span, 0);

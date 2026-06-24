@@ -288,7 +288,11 @@ mod tests {
     #[test]
     fn helpers_are_callable_in_any_build() {
         // These must compile and not panic regardless of feature state.
-        add_counter(catalog::READ_ROWS, 3, &[(catalog::attr::SSTABLE_FORMAT, "bti".into())]);
+        add_counter(
+            catalog::READ_ROWS,
+            3,
+            &[(catalog::attr::SSTABLE_FORMAT, "bti".into())],
+        );
         record_histogram(catalog::QUERY_DURATION, 0.001, &[]);
         record_gauge(catalog::SSTABLES_OPEN, 2, &[]);
         let err = Error::corruption("x");

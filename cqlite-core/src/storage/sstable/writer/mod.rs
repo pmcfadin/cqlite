@@ -831,11 +831,7 @@ impl SSTableWriter {
         self.stats.increment_partition_count();
 
         // Partitions-written counter (issue #1036). One per successful partition.
-        crate::observability::add_counter(
-            crate::observability::catalog::WRITE_PARTITIONS,
-            1,
-            &[],
-        );
+        crate::observability::add_counter(crate::observability::catalog::WRITE_PARTITIONS, 1, &[]);
 
         Ok(())
     }

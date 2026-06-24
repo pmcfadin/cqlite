@@ -533,7 +533,9 @@ impl SSTableReader {
 
         // Load spec readers for enhanced metadata and lookups
         let index_reader = Self::load_index_reader(path, &platform)
-            .instrument(tracing::debug_span!("sstable.reader.open.load_index_reader"))
+            .instrument(tracing::debug_span!(
+                "sstable.reader.open.load_index_reader"
+            ))
             .await;
         let summary_reader = Self::load_summary_reader(path, &platform)
             .instrument(tracing::debug_span!("sstable.reader.open.load_summary"))

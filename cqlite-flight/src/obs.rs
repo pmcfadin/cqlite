@@ -395,9 +395,8 @@ mod tests {
                 .parse()
                 .expect("ascii value"),
         );
-        let cx = opentelemetry::global::get_text_map_propagator(|p| {
-            p.extract(&MetadataExtractor(&md))
-        });
+        let cx =
+            opentelemetry::global::get_text_map_propagator(|p| p.extract(&MetadataExtractor(&md)));
         let trace_id = cx.span().span_context().trace_id();
         assert_eq!(
             format!("{trace_id:032x}"),

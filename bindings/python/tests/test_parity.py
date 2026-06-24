@@ -23,6 +23,12 @@ Tables Tested (33 total):
                         multi_metric_timeseries, product_catalog, sparse_data_table
 """
 
+# Defer annotation evaluation so PEP 604 unions (e.g. `Path | None`) parse on
+# Python 3.9, the project's minimum supported version. Without this, the
+# module-level `-> Path | None` annotation is evaluated at import time and
+# raises `TypeError` on 3.9 (PEP 604 runtime support is 3.10+).
+from __future__ import annotations
+
 import functools
 import json
 import re

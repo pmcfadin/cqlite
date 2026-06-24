@@ -60,9 +60,13 @@ impl StorageEngine {
     ///
     /// NOTE: Issue #176 removed write infrastructure (compaction, manifest).
     /// This is now a read-only storage layer focused on SSTable access.
+    // `skip_all` (not an explicit skip list): the `schema_registry` parameter is
+    // `#[cfg(feature = "state_machine")]`-gated, so naming it in `skip(...)` would
+    // reference a nonexistent binding in the minimal build. `skip_all` records no
+    // args as fields regardless of cfg; the `fields(...)` below are set in the body.
     #[tracing::instrument(
         name = "storage.engine.open",
-        skip(path, config, platform),
+        skip_all,
         fields(sstables = tracing::field::Empty, bytes = tracing::field::Empty)
     )]
     pub async fn open(
@@ -74,10 +78,7 @@ impl StorageEngine {
         >,
     ) -> Result<Self> {
         // Create storage directory if it doesn't exist
-        crate::observability::record_result(
-            "reader",
-            platform.fs().create_dir_all(path).await,
-        )?;
+        crate::observability::record_result("reader", platform.fs().create_dir_all(path).await)?;
 
         // Initialize SSTable manager with schema registry
         let sstables = Arc::new(crate::observability::record_result(
@@ -113,7 +114,11 @@ impl StorageEngine {
             Ok(stats) => {
                 tracing::Span::current().record("sstables", stats.sstable_count as u64);
                 tracing::Span::current().record("bytes", stats.total_size);
-                obs::add_counter(catalog::STORAGE_OPEN_SSTABLES, stats.sstable_count as u64, &[]);
+                obs::add_counter(
+                    catalog::STORAGE_OPEN_SSTABLES,
+                    stats.sstable_count as u64,
+                    &[],
+                );
                 obs::add_counter(catalog::STORAGE_OPEN_BYTES, stats.total_size, &[]);
                 obs::add_counter(catalog::STORAGE_OPEN_TABLES, stats.total_tables, &[]);
             }
@@ -164,9 +169,11 @@ impl StorageEngine {
     /// # Ok(())
     /// # }
     /// ```
+    // `skip_all`: see the note on `open` — the cfg-gated `schema_registry` cannot
+    // be named in an explicit `skip(...)` without breaking the minimal build.
     #[tracing::instrument(
         name = "storage.engine.open",
-        skip(path, discovered_table_dirs, config, platform),
+        skip_all,
         fields(sstables = tracing::field::Empty, bytes = tracing::field::Empty)
     )]
     pub async fn open_with_sstables(
@@ -179,10 +186,7 @@ impl StorageEngine {
         >,
     ) -> Result<Self> {
         // Create storage directory if it doesn't exist
-        crate::observability::record_result(
-            "reader",
-            platform.fs().create_dir_all(path).await,
-        )?;
+        crate::observability::record_result("reader", platform.fs().create_dir_all(path).await)?;
 
         // Initialize SSTable manager with pre-discovered paths and schema registry
         let sstables = Arc::new(crate::observability::record_result(
