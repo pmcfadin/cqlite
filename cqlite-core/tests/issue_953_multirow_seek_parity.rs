@@ -93,6 +93,34 @@ async fn setup(schema_file: &str, keyspace_filter: &str) -> Result<Database, Str
     Ok(result.database)
 }
 
+/// True if `<datasets>/sstables/<keyspace>/<table>-*/` holds a `*-Data.db` file —
+/// i.e. the fixture's binary is actually present. Skips key off THIS (not a
+/// zero-row query result), so that when the fixture IS present a 0-row scan stays
+/// a hard failure (a real ingestion/seek regression) rather than a silent skip.
+fn fixture_data_present(keyspace: &str, table: &str) -> bool {
+    let Some(root) = datasets_root() else {
+        return false;
+    };
+    let ks_dir = root.join("sstables").join(keyspace);
+    let Ok(entries) = std::fs::read_dir(&ks_dir) else {
+        return false;
+    };
+    let prefix = format!("{table}-");
+    for e in entries.flatten() {
+        if !e.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        if let Ok(files) = std::fs::read_dir(e.path()) {
+            for f in files.flatten() {
+                if f.file_name().to_string_lossy().ends_with("-Data.db") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 fn row_fingerprint(row: &QueryRow) -> BTreeMap<String, String> {
     row.values
         .iter()
@@ -125,14 +153,24 @@ async fn assert_multirow_seek_parity<F>(
 where
     F: Fn(&QueryRow) -> Option<String>,
 {
+    // Skip only when the fixture's binary is genuinely absent. When it IS present,
+    // a 0-row scan below stays a hard failure (real ingestion/seek regression).
+    let (ks, tbl) = qualified_table
+        .split_once('.')
+        .unwrap_or(("", qualified_table));
+    if !fixture_data_present(ks, tbl) {
+        eprintln!("Skipping {qualified_table}: fixture Data.db not present in this dataset");
+        return None;
+    }
     let full = db
         .execute(&format!("SELECT {projection} FROM {qualified_table}"))
         .await
         .unwrap_or_else(|e| panic!("full scan of {qualified_table} must succeed: {e}"));
-    if full.rows.is_empty() {
-        eprintln!("Skipping {qualified_table}: full scan returned 0 rows (Data.db not fetched)");
-        return None;
-    }
+    assert!(
+        !full.rows.is_empty(),
+        "{qualified_table}: fixture Data.db is present but the full scan returned 0 rows — \
+         a real ingestion/query regression, not a missing fixture"
+    );
 
     // Group full-scan rows by the partition-key literal, preserving the order
     // they appear in (the per-partition fingerprint set is order-insensitive).

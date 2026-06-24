@@ -83,6 +83,32 @@ fn schemas_dir() -> Option<PathBuf> {
     dir.exists().then_some(dir)
 }
 
+/// True if `<datasets>/sstables/<keyspace>/<table>-*/` holds a `*-Data.db` file.
+/// The skip keys off fixture presence (not a 0-row result), so when the fixture
+/// IS present a 0-row read stays a hard failure rather than a silent skip.
+fn fixture_data_present(keyspace: &str, table: &str) -> bool {
+    let Some(root) = datasets_root() else {
+        return false;
+    };
+    let Ok(entries) = std::fs::read_dir(root.join("sstables").join(keyspace)) else {
+        return false;
+    };
+    let prefix = format!("{table}-");
+    for e in entries.flatten() {
+        if !e.file_name().to_string_lossy().starts_with(&prefix) {
+            continue;
+        }
+        if let Ok(files) = std::fs::read_dir(e.path()) {
+            for f in files.flatten() {
+                if f.file_name().to_string_lossy().ends_with("-Data.db") {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
 async fn setup() -> Result<Database, String> {
     let root = datasets_root().ok_or("CQLITE_DATASETS_ROOT not set or missing")?;
     let schema_path = schemas_dir()
@@ -138,14 +164,16 @@ async fn head_of_file_seek_bounds_decompression_window() {
         }
     };
 
-    // ── pk = 3 (LAST partition): legitimately reads to EOF; the reference cost. ──
-    let (rows3, chunks3, parts3) = seek_pk(&db, 3).await;
-    if rows3 == 0 {
-        // test_da/wide_table is a local fixture not present in the published CI
-        // dataset; skip rather than fail when its Data.db is absent.
-        eprintln!("Skipping (BTI wide_table bound test): 0 rows (Data.db not fetched)");
+    // test_da/wide_table is a local fixture absent from the published CI dataset;
+    // skip on fixture ABSENCE only. When it IS present, a wrong row count below
+    // stays a hard failure (real seek/ingestion regression).
+    if !fixture_data_present("test_da", "wide_table") {
+        eprintln!("Skipping (BTI wide_table bound test): fixture Data.db not present");
         return;
     }
+
+    // ── pk = 3 (LAST partition): legitimately reads to EOF; the reference cost. ──
+    let (rows3, chunks3, parts3) = seek_pk(&db, 3).await;
     assert_eq!(rows3, 300, "pk=3 must return all 300 rows");
     assert_eq!(parts3, 1, "pk=3 decodes exactly one partition");
 
