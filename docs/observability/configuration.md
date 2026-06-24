@@ -134,9 +134,36 @@ with cqlite.open(
 
 ### Node.js
 
-The Node.js bindings do not yet expose a dedicated OTel option object; configure
-them through the shared `CQLITE_OTEL_*` environment variables before launching
-the process. (Tracked under epic #1031.)
+`Database.open(dir, options)` accepts an optional `otel` object (and a
+`traceparent` string), each field layered over the shared `CQLITE_OTEL_*`
+environment variables (env is the baseline; the object overrides). Requires a
+build with the `observability` feature.
+
+```js
+const { Database } = require('@cqlite/node');
+const db = await Database.open('test-data/datasets/sstables', {
+  schema: 'test-data/schemas/basic-types.cql',
+  otel: {
+    enabled: true,
+    endpoint: 'http://localhost:4317',
+    protocol: 'grpc',          // 'grpc' | 'http'
+    serviceName: 'cqlite-node',
+    serviceVersion: '0.12.0',
+    samplingRatio: 1.0,
+    timeoutMs: 10000,
+  },
+  // Optional W3C traceparent to parent the Rust spans under your Node trace:
+  traceparent: '00-<trace-id>-<span-id>-01',
+});
+```
+
+Each `otel` field is optional and falls back to the matching `CQLITE_OTEL_*`
+env var, then the built-in default. `Database.close()` flushes telemetry. Per
+call (`execute` / `executeNative` / `executeStreaming`) a `node.execute*` span
+is emitted; streaming spans record rows yielded. Source:
+`bindings/node/src/observability.rs`, `bindings/node/src/database.rs`.
+
+You can also configure purely through the shared environment variables:
 
 ```bash
 CQLITE_OTEL_ENABLED=true \

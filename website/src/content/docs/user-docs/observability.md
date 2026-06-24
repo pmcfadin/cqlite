@@ -137,8 +137,20 @@ with cqlite.open(
 
 ### Node.js
 
-Configure via the shared `CQLITE_OTEL_*` environment variables before launching
-the process (a dedicated option object is tracked under epic #1031):
+`Database.open(dir, options)` accepts an optional `otel` object (and a
+`traceparent` string), each field layered over the shared `CQLITE_OTEL_*`
+environment variables. Requires a build with the `observability` feature.
+
+```js
+const db = await Database.open('test-data/datasets/sstables', {
+  schema: 'test-data/schemas/basic-types.cql',
+  otel: { enabled: true, endpoint: 'http://localhost:4317', protocol: 'grpc',
+          serviceName: 'cqlite-node', samplingRatio: 1.0, timeoutMs: 10000 },
+  traceparent: '00-<trace-id>-<span-id>-01',
+});
+```
+
+Or configure purely through the shared environment variables:
 
 ```bash
 CQLITE_OTEL_ENABLED=true CQLITE_OTEL_ENDPOINT=http://localhost:4317 \
