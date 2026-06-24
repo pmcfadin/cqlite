@@ -71,7 +71,7 @@ scenarios:
 
   - id: cass.sstable_format.toc_component_manifest
     title: TOC.txt component manifest completeness
-    status: partial
+    status: mirrored
     capability: sstable_format
     priority: P0
     risk: p1_correctness
@@ -84,31 +84,54 @@ scenarios:
       coverage:
         suite: sstable_parity_component_manifest
         tests:
-          - cqlite-core/tests/sstable_parity_integration_test.rs
+          - cqlite-core/tests/sstable_parity_toc_component_test.rs
+        notes: >-
+          Gated, fixture-backed strict lane over every committed Cassandra TOC.txt
+          (nb/oa BIG and da BTI). Asserts (1) every component Cassandra named is
+          recognized and round-trips byte-exactly to its filename suffix — no
+          unknown-component fallbacks, no silent drops; (2) the always-present
+          component set (Data/Statistics/TOC/Digest/Filter) is complete; and
+          (3) BIG-vs-BTI discovery parity — the format declared in the filename
+          (parsed authoritatively, no heuristics) agrees with the on-disk
+          component manifest (Index+Summary for BIG, Partitions+Rows for BTI) and
+          the two families never mix. Exposed and fixed a real gap: CQLite's
+          component model did not recognize the `CRC.db` component Cassandra
+          emits for uncompressed SSTables.
     fixtures:
       references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
     evidence:
       type: partial
       artifacts: [component_files]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
-      storage_format_version: [da]
+      storage_format_version: [nb, oa, da]
       fixture_generation_command: >-
-        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 BTI flush emits TOC.txt
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits TOC.txt per generation
       reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
         - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
       known_limitations: >-
-        Component set is compared as an unordered set on read; an exact
-        TOC.txt byte/line comparison against the Cassandra reference is not
-        yet a gated test.
+        Parity is on the recognized component *set* and format-discovery, not the
+        exact TOC.txt line order: Cassandra emits components in HashSet iteration
+        order, so line order is not a stable writer goal (cf. epic #968 "exact
+        parsed fields where byte identity is not a stable writer goal"). Digest.crc32
+        byte parity (recomputing the Data.db CRC) and Index/Summary/Statistics/
+        CompressionInfo/Filter byte parity require the binary components and remain
+        separate #982/#968 scenarios.
     ci:
       tier: fast_pr
     scope:
-      gap: No gated exact TOC.txt comparison against the Cassandra-produced manifest.
+      gap: >-
+        Companion-component *byte* parity (Digest.crc32 CRC recomputation,
+        Index.db/Summary.db byte layout) is not yet gated; it depends on fetched
+        binary Data.db components.
       next_step: >-
-        Add a component-manifest byte comparison to the
-        sstable_parity_component_manifest suite.
+        Land the Digest.crc32 and Index.db/Summary.db byte-parity scenarios in the
+        Required parity tier once the binary dataset fetch is wired into CI.
 
   # ----------------------------------------------------------------------------
   # data_db_decode

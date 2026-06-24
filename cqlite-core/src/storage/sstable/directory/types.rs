@@ -50,6 +50,12 @@ pub enum SSTableComponent {
     CompressionInfo,
     /// CRC32 checksum
     Digest,
+    /// Per-chunk CRC32 file for uncompressed SSTables (Cassandra `CRC.db`).
+    ///
+    /// Cassandra writes this instead of inline compressed-chunk CRCs when the
+    /// table is uncompressed; it coexists with `Digest.crc32`. It is optional
+    /// (absent for compressed tables) and shared by BIG and BTI formats.
+    Crc,
     /// Table of contents listing all components
     TOC,
     /// BTI Partitions index (BTI format only)
@@ -70,6 +76,7 @@ impl FromStr for SSTableComponent {
             "Summary.db" => Ok(SSTableComponent::Summary),
             "CompressionInfo.db" => Ok(SSTableComponent::CompressionInfo),
             "Digest.crc32" => Ok(SSTableComponent::Digest),
+            "CRC.db" => Ok(SSTableComponent::Crc),
             "TOC.txt" => Ok(SSTableComponent::TOC),
             "Partitions.db" => Ok(SSTableComponent::Partitions),
             "Rows.db" => Ok(SSTableComponent::Rows),
@@ -92,6 +99,7 @@ impl SSTableComponent {
             SSTableComponent::Summary => "Summary.db",
             SSTableComponent::CompressionInfo => "CompressionInfo.db",
             SSTableComponent::Digest => "Digest.crc32",
+            SSTableComponent::Crc => "CRC.db",
             SSTableComponent::TOC => "TOC.txt",
             SSTableComponent::Partitions => "Partitions.db",
             SSTableComponent::Rows => "Rows.db",

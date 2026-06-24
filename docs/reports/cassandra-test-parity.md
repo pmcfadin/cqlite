@@ -10,8 +10,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 13 |
-| `partial` | 6 |
+| `mirrored` | 14 |
+| `partial` | 5 |
 | `planned` | 2 |
 | `out_of_scope` | 7 |
 | **total** | **28** |
@@ -60,7 +60,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.index_summary.big_index_offsets` | index_summary | mirrored | canonical_semantic | `sstable_parity_index_db_big` | p1_correctness |
 | `cass.index_summary.summary_boundaries` | index_summary | partial | partial | `sstable_parity_summary_db_big` | p1_correctness |
 | `cass.sstable_format.descriptor_component_resolution` | sstable_format | mirrored | smoke | `sstable_parity_component_manifest` | p1_correctness |
-| `cass.sstable_format.toc_component_manifest` | sstable_format | partial | partial | `sstable_parity_component_manifest` | p1_correctness |
+| `cass.sstable_format.toc_component_manifest` | sstable_format | mirrored | partial | `sstable_parity_component_manifest` | p1_correctness |
 | `cass.statistics_metadata.serialization_header` | statistics_metadata | mirrored | canonical_semantic | `sstable_parity_statistics_db` | p1_correctness |
 | `cass.tombstone_ttl.range_tombstone_boundaries` | tombstone_ttl | partial | partial | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.ttl_and_local_deletion_time` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_data_db_jsonl` | p0_data_loss |
@@ -105,7 +105,6 @@ _None yet._ No scenario currently claims byte-for-byte parity; coverage is canon
 - `cass.delta_scan.tombstone_liveness_facts` (partial): test_deltas dataset asset not published/enforced (#701). → _Publish and enforce the test_deltas dataset in delta-roundtrip CI._
 - `cass.filter_db_bloom.serialization_no_false_negative` (partial): No no-false-negative parity assertion against Cassandra Filter.db. → _Add a Filter.db serialization parity test asserting zero false negatives across the present-key set._
 - `cass.index_summary.summary_boundaries` (partial): Cassandra Summary.db reference dumps not published for all tables. → _Publish Summary.db reference dumps and enable strict first/last-key boundary comparison in the sstable_parity_summary_db_big suite._
-- `cass.sstable_format.toc_component_manifest` (partial): No gated exact TOC.txt comparison against the Cassandra-produced manifest. → _Add a component-manifest byte comparison to the sstable_parity_component_manifest suite._
 - `cass.tombstone_ttl.range_tombstone_boundaries` (partial): test_deltas dataset asset not published/enforced in CI (#701). → _Publish the test_deltas dataset and enforce scan_delta parity in CI._
 
 ## Out-of-scope taxonomy
@@ -206,7 +205,7 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.sai_sasi_query.secondary_index_out_of_scope` | — | — |
 | `cass.schema_evolution.serialization_header_column_order` | nb | — |
 | `cass.sstable_format.descriptor_component_resolution` | nb, oa, da | — |
-| `cass.sstable_format.toc_component_manifest` | da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt |
+| `cass.sstable_format.toc_component_manifest` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt<br>test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt |
 | `cass.statistics_metadata.serialization_header` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt |
 | `cass.streaming_protocol.node_lifecycle_out_of_scope` | — | — |
 | `cass.tombstone_ttl.range_tombstone_boundaries` | nb | test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl |
