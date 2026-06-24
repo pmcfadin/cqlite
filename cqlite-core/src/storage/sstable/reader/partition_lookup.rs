@@ -27,6 +27,11 @@ impl SSTableReader {
         &self,
         partition_key: &[u8],
     ) -> Result<Option<(u64, u32)>> {
+        use crate::observability::{self as obs, catalog};
+
+        let _span = tracing::debug_span!("sstable.partition_lookup.index").entered();
+        let format = self.sstable_format_label();
+
         if let Some(index_reader) = &self.index_reader {
             // Direct raw-key lookup — O(1) HashMap lookup.
             // Index.db entries are keyed on the raw partition key bytes since #552;
@@ -35,6 +40,15 @@ impl SSTableReader {
                 debug!(
                     "Found partition via Index.db raw-key lookup: offset={}, size={}",
                     entry.data_offset, entry.data_size
+                );
+                obs::add_counter(
+                    catalog::READ_PARTITION_LOOKUP,
+                    1,
+                    &[
+                        (catalog::attr::RESULT, "hit".into()),
+                        (catalog::attr::ACCESS_PATH, "index".into()),
+                        (catalog::attr::SSTABLE_FORMAT, format.into()),
+                    ],
                 );
                 return Ok(Some((entry.data_offset, entry.data_size)));
             } else {
@@ -46,6 +60,15 @@ impl SSTableReader {
         } else {
             debug!("No Index.db reader available for partition lookup");
         }
+        obs::add_counter(
+            catalog::READ_PARTITION_LOOKUP,
+            1,
+            &[
+                (catalog::attr::RESULT, "miss".into()),
+                (catalog::attr::ACCESS_PATH, "index".into()),
+                (catalog::attr::SSTABLE_FORMAT, format.into()),
+            ],
+        );
         Ok(None)
     }
 
@@ -78,24 +101,53 @@ impl SSTableReader {
     ///
     /// [`resolve_rows_db_entry`]: crate::storage::sstable::bti::resolve_rows_db_entry
     pub fn lookup_partition_via_bti_trie(&self, partition_key: &[u8]) -> Result<Option<u64>> {
+        use crate::observability::{self as obs, catalog};
         use crate::storage::sstable::bti::{
             lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry, BtiPartitionLocation,
         };
+
+        let span = tracing::debug_span!(
+            "sstable.partition_lookup.bti_trie",
+            partition_shape = tracing::field::Empty,
+        );
+        let _entered = span.enter();
 
         let Some(partitions_db) = &self.bti_partitions_db else {
             // Not a BTI reader — no trie to consult.
             return Ok(None);
         };
 
-        let mut cursor = std::io::Cursor::new(partitions_db.as_slice());
-        match lookup_raw_key_in_bti_partitions_db(&mut cursor, partition_key).map_err(|e| {
+        let lookup = lookup_raw_key_in_bti_partitions_db(
+            &mut std::io::Cursor::new(partitions_db.as_slice()),
+            partition_key,
+        )
+        .map_err(|e| {
             Error::corruption(format!(
                 "BTI Partitions.db trie lookup failed for partition key (len={}): {}",
                 partition_key.len(),
                 e
             ))
-        })? {
+        });
+        let lookup = match lookup {
+            Ok(v) => v,
+            Err(e) => {
+                obs::record_error(&e, "reader");
+                return Err(e);
+            }
+        };
+
+        match lookup {
             Some(BtiPartitionLocation::DataOffset(off)) => {
+                span.record("partition_shape", "narrow");
+                obs::add_counter(
+                    catalog::READ_PARTITION_LOOKUP,
+                    1,
+                    &[
+                        (catalog::attr::RESULT, "hit".into()),
+                        (catalog::attr::ACCESS_PATH, "bti_trie".into()),
+                        (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+                    ],
+                );
                 debug!(
                     "BTI trie resolved NARROW partition (key len={}) to Data.db offset {}",
                     partition_key.len(),
@@ -109,7 +161,8 @@ impl SSTableReader {
                 // partition's Data.db start position (`data_position`), which lives
                 // in the SAME uncompressed-offset domain the narrow path uses, so
                 // the caller can decode the partition identically (#909/#910).
-                let rows_db = self.bti_rows_db.as_ref().ok_or_else(|| {
+                span.record("partition_shape", "wide");
+                let rows_db = match self.bti_rows_db.as_ref().ok_or_else(|| {
                     Error::corruption(format!(
                         "BTI Partitions.db trie returned RowsOffset({}) for partition key \
                          (len={}) but this reader has no Rows.db loaded; the SSTable is \
@@ -117,9 +170,15 @@ impl SSTableReader {
                         rows_offset,
                         partition_key.len()
                     ))
-                })?;
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        obs::record_error(&e, "reader");
+                        return Err(e);
+                    }
+                };
 
-                let header = resolve_rows_db_entry(rows_db.as_slice(), rows_offset as usize)
+                let header = match resolve_rows_db_entry(rows_db.as_slice(), rows_offset as usize)
                     .map_err(|e| {
                         Error::corruption(format!(
                             "BTI Rows.db row-index entry at RowsOffset({}) is unreadable for \
@@ -128,8 +187,23 @@ impl SSTableReader {
                             partition_key.len(),
                             e
                         ))
-                    })?;
+                    }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        obs::record_error(&e, "reader");
+                        return Err(e);
+                    }
+                };
 
+                obs::add_counter(
+                    catalog::READ_PARTITION_LOOKUP,
+                    1,
+                    &[
+                        (catalog::attr::RESULT, "hit".into()),
+                        (catalog::attr::ACCESS_PATH, "bti_trie".into()),
+                        (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+                    ],
+                );
                 debug!(
                     "BTI trie resolved WIDE partition (key len={}) via RowsOffset {} -> Data.db \
                      position {} ({} row-index blocks)",
@@ -140,7 +214,18 @@ impl SSTableReader {
                 );
                 Ok(Some(header.data_position))
             }
-            None => Ok(None),
+            None => {
+                obs::add_counter(
+                    catalog::READ_PARTITION_LOOKUP,
+                    1,
+                    &[
+                        (catalog::attr::RESULT, "miss".into()),
+                        (catalog::attr::ACCESS_PATH, "bti_trie".into()),
+                        (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+                    ],
+                );
+                Ok(None)
+            }
         }
     }
 
