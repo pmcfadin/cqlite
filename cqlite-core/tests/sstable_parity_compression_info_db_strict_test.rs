@@ -210,21 +210,29 @@ fn assert_field_semantics(info: &CompressionInfo, ci: &Path) {
             info.chunk_offsets[i - 1],
         );
     }
-    // Cassandra chunk-count invariant: one chunk per chunk_length of uncompressed
-    // data, the final chunk partial. Proves data_length / chunk_length / chunk_count
-    // were decoded mutually-consistently rather than as independent lucky reads.
+    // Cassandra chunk-count invariant (lower bound only): every chunk decompresses
+    // to at most `chunk_length` uncompressed bytes, so the offset table needs *at
+    // least* ceil(data_length / chunk_length) entries. It is NOT an equality, and
+    // there is no useful upper bound: the compressed writer cuts a chunk early on a
+    // forced flush/sync and can append degenerate empty trailing chunks, so a real
+    // file can carry MORE chunks than the ceiling and even more than data_length
+    // (e.g. 1 byte of data + an empty trailing chunk -> chunk_count 2, data_length 1;
+    // the committed `system/local` fixture has data_length 708 < chunk_length 16384
+    // yet two chunks). The exact total is cross-checked end-to-end by step (3) below,
+    // which decompresses every chunk and asserts the sum equals data_length — that is
+    // what catches over-read chunk metadata. This lower bound proves chunk_count is at
+    // least consistent with data_length / chunk_length rather than a lucky short read.
     if info.data_length > 0 {
-        let expected_chunks = info.data_length.div_ceil(info.chunk_length as u64) as usize;
-        assert_eq!(
-            info.chunk_offsets.len(),
-            expected_chunks,
-            "{}: chunk_count {} != ceil(data_length {} / chunk_length {}) = {} — \
-             inconsistent compression metadata",
+        let min_chunks = info.data_length.div_ceil(info.chunk_length as u64) as usize;
+        assert!(
+            info.chunk_offsets.len() >= min_chunks,
+            "{}: chunk_count {} < ceil(data_length {} / chunk_length {}) = {} — \
+             too few chunks to hold the data, inconsistent compression metadata",
             ci.display(),
             info.chunk_offsets.len(),
             info.data_length,
             info.chunk_length,
-            expected_chunks,
+            min_chunks,
         );
     }
 }
@@ -251,11 +259,15 @@ fn compression_info_db_strict_byte_parity() {
     let mut format_oa = 0usize;
     let mut format_da = 0usize;
 
-    // Which formats have a fetched CompressionInfo.db on disk, computed up front so
-    // we can require real coverage for every format the local dataset contains.
+    // Which formats AND compressors have a fetched CompressionInfo.db on disk, computed
+    // up front so we can require real coverage for every format/compressor the local
+    // dataset actually contains — not just an OR over the corpus minimums (which would
+    // let a partial fetch claim LZ4+Snappy parity while only one is present).
     let mut present_nb = false;
     let mut present_oa = false;
     let mut present_da = false;
+    let mut present_lz4 = false;
+    let mut present_snappy = false;
     for toc in &tocs {
         let ci = compression_info_for(toc);
         if !ci.exists() {
@@ -266,6 +278,17 @@ fn compression_info_db_strict_byte_parity() {
             Some(n) if n.starts_with("oa-") => present_oa = true,
             Some(n) if n.starts_with("da-") => present_da = true,
             _ => {}
+        }
+        // Parse the (small) header to learn which compressor this fixture uses, so the
+        // coverage assertions below can require each present real compressor.
+        if let Ok(bytes) = std::fs::read(&ci) {
+            if let Ok(info) = CompressionInfo::parse(&bytes) {
+                match info.algorithm.as_str() {
+                    "LZ4Compressor" => present_lz4 = true,
+                    "SnappyCompressor" => present_snappy = true,
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -320,27 +343,51 @@ fn compression_info_db_strict_byte_parity() {
         }
 
         // (3) Inline chunk-CRC + decompression parity against the sibling Data.db.
-        //     read_all_data validates every 4-byte big-endian inline CRC32 trailer
-        //     and decompresses every chunk; the output length must equal data_length.
+        //     Iterate EVERY chunk record in the offset table (not read_all_data, which
+        //     is bounded by data_length and would skip a degenerate empty trailing
+        //     chunk): each chunk is decompressed via decompress_chunk_by_index, which
+        //     validates its 4-byte big-endian inline CRC32 trailer. The concatenated
+        //     length of all chunks must equal data_length — proving the offset table,
+        //     compressed boundaries, inline CRCs, and chunk sizes are all mutually
+        //     consistent with the bytes Cassandra wrote, including any extra chunks
+        //     beyond ceil(data_length / chunk_length).
         let data_path = data_db_for(toc);
         if data_path.exists() {
             let mut dec = create_decompressor_from_file(&ci)
                 .unwrap_or_else(|e| panic!("{}: build decompressor failed: {e:?}", ci.display()));
             let mut data_file = std::fs::File::open(&data_path)
                 .unwrap_or_else(|e| panic!("open {} failed: {e}", data_path.display()));
-            let out = dec.read_all_data(&mut data_file).unwrap_or_else(|e| {
-                panic!(
-                    "{}: inline-CRC validation / decompression of {} failed: {e:?}",
-                    ci.display(),
-                    data_path.display(),
-                )
-            });
+
             assert_eq!(
-                out.len() as u64,
-                info.data_length,
-                "{}: decompressed length {} != CompressionInfo.db data_length {}",
+                dec.chunk_count(),
+                info.chunk_offsets.len(),
+                "{}: decompressor chunk_count {} != parsed offset-table length {}",
                 ci.display(),
-                out.len(),
+                dec.chunk_count(),
+                info.chunk_offsets.len(),
+            );
+
+            let mut total: u64 = 0;
+            for chunk_index in 0..dec.chunk_count() {
+                let chunk = dec
+                    .decompress_chunk_by_index(&mut data_file, chunk_index)
+                    .unwrap_or_else(|e| {
+                        panic!(
+                            "{}: inline-CRC validation / decompression of chunk {} in {} failed: {e:?}",
+                            ci.display(),
+                            chunk_index,
+                            data_path.display(),
+                        )
+                    });
+                total += chunk.len() as u64;
+            }
+            assert_eq!(
+                total,
+                info.data_length,
+                "{}: total decompressed length {} (over {} chunks) != CompressionInfo.db data_length {}",
+                ci.display(),
+                total,
+                info.chunk_offsets.len(),
                 info.data_length,
             );
             decompressed += 1;
@@ -356,7 +403,12 @@ fn compression_info_db_strict_byte_parity() {
             "ZstdCompressor" => saw_zstd = true,
             _ => {}
         }
-        if info.chunk_offsets.len() > 1 {
+        // A genuine multi-chunk boundary requires more than one *addressable* data
+        // chunk, i.e. data_length > chunk_length. A file with >1 offset but
+        // data_length <= chunk_length (the degenerate empty-trailing-chunk case, e.g.
+        // system/local) has only one addressable chunk and must NOT satisfy the
+        // multi-chunk coverage claim.
+        if info.data_length > info.chunk_length as u64 {
             saw_multi_chunk = true;
         }
         if info.data_length % info.chunk_length as u64 != 0 {
@@ -425,14 +477,28 @@ fn compression_info_db_strict_byte_parity() {
         "no compressed fixture with > 1 chunk — multi-chunk offset-table parity unproven"
     );
 
-    // At least one of the committed real compressors (LZ4 / Snappy) must have been
-    // decoded — these are the corpus minimums per the #986 acceptance criteria.
-    // Deflate/Zstd are decoded if present but not required (fixtures tracked under
-    // epic #970); we surface their presence in the coverage line above.
+    // Every committed real compressor (LZ4 / Snappy) that is PRESENT on disk must have
+    // been decoded — not merely one of them. The manifest claims both LZ4 and Snappy
+    // as mirrored byte-for-byte parity; this requires each independently so a corpus
+    // missing one cannot falsely claim coverage for both. (Deflate/Zstd are decoded if
+    // present but not required — fixtures tracked under epic #970.)
     assert!(
-        saw_lz4 || saw_snappy,
-        "no LZ4 or Snappy fixture decoded despite present binaries — real-compressor parity unproven"
+        present_lz4 || present_snappy,
+        "no LZ4 or Snappy CompressionInfo.db present despite present binaries — \
+         real-compressor parity corpus is missing its minimums"
     );
+    if present_lz4 {
+        assert!(
+            saw_lz4,
+            "LZ4 CompressionInfo.db present but no LZ4 fixture decoded — LZ4 parity unproven"
+        );
+    }
+    if present_snappy {
+        assert!(
+            saw_snappy,
+            "Snappy CompressionInfo.db present but no Snappy fixture decoded — Snappy parity unproven"
+        );
+    }
 
     // When at least one Data.db was fetched alongside, the inline-CRC + decompression
     // path must actually have run (never silently degrade to metadata-only).
