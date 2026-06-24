@@ -20,6 +20,7 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 | [Test data](/cqlite/agents-developing/test-data/) | Fetching datasets, dataset pins, CQLITE_DATASETS_ROOT, missing-data behaviour |
 | [Key source paths](/cqlite/agents-developing/source-map/) | Where parsers, writers, query engine, and bindings live |
 | [sstabledump validation playbook](/cqlite/agents-developing/validation-playbook/) | JSONL golden files, parity tests, smoke-test-all-tables |
+| [Wiring evidence](/cqlite/agents-developing/wiring-evidence/) | Prove the public surface exercises a feature; reject helper-only implementations (issues #949/#963) |
 | [Format debugging workflow](/cqlite/agents-developing/format-debugging/) | Hex dumps, definitive-guide chapters, appendix F known limitations |
 
 ## Non-negotiable rules
@@ -28,6 +29,9 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 2. Use authoritative metadata only — no type guessing, no heuristics (see [no-heuristics mandate](/cqlite/agents-developing/no-heuristics/)).
 3. Integration tests use real SSTable data. Fetch it before running: `bash test-data/scripts/fetch-datasets.sh`.
 4. `RUSTFLAGS="-D warnings"` must pass — zero clippy warnings allowed.
+5. A feature is done only when its **public surface** exercises it. Name the surface, the
+   call chain, and add an end-to-end test from that surface — green helper unit tests are
+   not sufficient (see [Wiring evidence](/cqlite/agents-developing/wiring-evidence/)).
 
 ## Quick-start for a new agent
 
