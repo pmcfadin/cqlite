@@ -71,11 +71,20 @@ pub struct StreamingResult {
     inner: Arc<Mutex<Option<cqlite_core::query::result::QueryResultIterator>>>,
     /// Cached column metadata for the result set.
     columns: Vec<ColumnInfo>,
+    /// Per-stream span (issue #1040). Shared with each `next()` task so rows
+    /// yielded across iterations accumulate, and finalised on
+    /// exhaustion/close. `Span` is cheap to clone and is a no-op when telemetry
+    /// is disabled.
+    span: tracing::Span,
 }
 
 impl StreamingResult {
-    /// Create a new StreamingResult from a core QueryResultIterator.
-    pub fn new(iter: cqlite_core::query::result::QueryResultIterator) -> napi::Result<Self> {
+    /// Create a new StreamingResult from a core QueryResultIterator and the
+    /// owning per-stream span.
+    pub fn new(
+        iter: cqlite_core::query::result::QueryResultIterator,
+        span: tracing::Span,
+    ) -> napi::Result<Self> {
         // Cache column metadata from iterator
         let columns: Vec<ColumnInfo> = iter
             .metadata
@@ -94,7 +103,15 @@ impl StreamingResult {
         Ok(Self {
             inner: Arc::new(Mutex::new(Some(iter))),
             columns,
+            span,
         })
+    }
+
+    /// Record the final rows-yielded count onto the stream span. Reads the
+    /// authoritative count from the iterator (or 0 once cleaned up).
+    fn finalize_span(&self) {
+        let rows = self.rows_received().unwrap_or(0);
+        self.span.record("rows", rows as u64);
     }
 }
 
@@ -109,6 +126,9 @@ pub enum NextResult {
 /// Async task for fetching the next row.
 pub struct NextTask {
     inner: Arc<Mutex<Option<cqlite_core::query::result::QueryResultIterator>>>,
+    /// Stream span, finalised with the row count when the stream ends or errors
+    /// (issue #1040).
+    span: tracing::Span,
 }
 
 impl napi::Task for NextTask {
@@ -116,6 +136,8 @@ impl napi::Task for NextTask {
     type JsValue = JsObject;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
+        use tracing::Instrument;
+
         // Acquire lock - use unwrap_or_else to handle poisoned mutex by clearing the iterator
         let mut guard = self.inner.lock().unwrap_or_else(|poisoned| {
             // Mutex was poisoned by a panic in another thread
@@ -131,19 +153,26 @@ impl napi::Task for NextTask {
             None => return Ok(NextResult::Done),
         };
 
-        // Get next row from core iterator using the global runtime
-        match crate::runtime::block_on(iter.next_async()) {
+        // Get next row from core iterator using the global runtime. The fetch is
+        // `.instrument`-ed by the stream span (no guard across the runtime).
+        let next = crate::runtime::block_on(iter.next_async().instrument(self.span.clone()));
+        match next {
             Some(Ok(row)) => {
                 // Take ownership of values - no clone needed
                 Ok(NextResult::Value(row.values))
             }
             Some(Err(e)) => {
-                // Error occurred - cleanup and propagate
+                // Error occurred - record at the boundary, finalise span, cleanup.
+                crate::observability::record_boundary_error(&e);
+                let yielded: u64 = iter.rows_received();
+                self.span.record("rows", yielded);
                 *guard = None;
                 Err(to_napi_error(e))
             }
             None => {
-                // Stream exhausted - cleanup
+                // Stream exhausted - finalise span with the total yielded, cleanup.
+                let yielded: u64 = iter.rows_received();
+                self.span.record("rows", yielded);
                 *guard = None;
                 Ok(NextResult::Done)
             }
@@ -183,9 +212,10 @@ impl StreamingResult {
     /// @returns Promise resolving to iterator result object
     #[napi]
     pub fn next(&self) -> AsyncTask<NextTask> {
-        // Clone the Arc reference to share with the task
+        // Clone the Arc reference + span to share with the task
         AsyncTask::new(NextTask {
             inner: self.inner.clone(),
+            span: self.span.clone(),
         })
     }
 
@@ -234,6 +264,11 @@ impl StreamingResult {
     /// This method is synchronous and does not need to be awaited.
     #[napi]
     pub fn close(&self) -> napi::Result<()> {
+        // Finalise the stream span with the rows yielded so far before the
+        // iterator is dropped (issue #1040). Reads the count first so an early
+        // `break` from a `for await` loop still records progress.
+        self.finalize_span();
+
         // Use unwrap_or_else to handle poisoned mutex gracefully
         let mut guard = self.inner.lock().unwrap_or_else(|poisoned| {
             // Recover by taking ownership

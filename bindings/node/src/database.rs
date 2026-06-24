@@ -178,6 +178,24 @@ pub struct DatabaseOptions {
     /// Sub-directories `data/` and `wal/` are created automatically.
     #[napi(js_name = "writeDir")]
     pub write_dir: Option<String>,
+
+    /// OpenTelemetry export options (epic #1031, issue #1040).
+    ///
+    /// When omitted, the `CQLITE_OTEL_*` environment variables are consulted;
+    /// telemetry stays disabled unless `enabled: true` is set (here or via env)
+    /// AND the binding was built with the `observability` feature. The
+    /// foundation initialises ONCE per process on the first `open()`, so passing
+    /// `otel` on a later open has no effect.
+    pub otel: Option<crate::observability::OtelOptions>,
+
+    /// Incoming W3C `traceparent` header to parent this database's per-call and
+    /// per-stream spans under a remote trace (distributed-tracing propagation).
+    ///
+    /// Applied as the default parent for every `execute`/`executeNative`/
+    /// `executeStreaming` issued on this handle. Invalid/empty values are
+    /// ignored. Only meaningful when telemetry is enabled and the
+    /// `observability` feature is built.
+    pub traceparent: Option<String>,
 }
 
 /// Configuration for streaming query execution.
@@ -347,6 +365,9 @@ impl ParquetExportOptions {
 pub struct Database {
     inner: Arc<cqlite_core::Database>,
     closed: AtomicBool,
+    /// Default incoming W3C `traceparent` for this handle's per-call spans
+    /// (issue #1040). `None` when not supplied or invalid.
+    traceparent: Option<String>,
     /// Write engine, present only when `writable: true` was supplied to `open()`.
     /// Wrapped in Arc so it can be shared with async tasks.
     #[cfg(feature = "write-support")]
@@ -424,6 +445,19 @@ impl Database {
         options: Option<DatabaseOptions>,
     ) -> napi::Result<Database> {
         let path = PathBuf::from(&data_dir);
+
+        // Initialise observability ONCE per process from the open options (or the
+        // CQLITE_OTEL_* env fallback). Later opens are no-ops; the first wins.
+        // This must run before any span is created below so the OTel layer is
+        // composed in. Safe + inert when telemetry is disabled or the feature is
+        // off (issue #1040).
+        crate::observability::init_once(options.as_ref().and_then(|o| o.otel.as_ref()));
+
+        // Per-handle default traceparent for this database's per-call spans.
+        let traceparent = options
+            .as_ref()
+            .and_then(|o| o.traceparent.clone())
+            .filter(|t| !t.trim().is_empty());
 
         // Extract all options and build config
         let (schema_path, core_config, writable, write_dir) = if let Some(opts) = options {
@@ -629,6 +663,7 @@ impl Database {
         Ok(Database {
             inner: Arc::new(db),
             closed: AtomicBool::new(false),
+            traceparent,
             #[cfg(feature = "write-support")]
             write_engine: write_engine_opt,
             #[cfg(feature = "write-support")]
@@ -659,71 +694,90 @@ impl Database {
     /// ```
     #[napi]
     pub async fn execute(&self, query: String) -> napi::Result<QueryResult> {
+        use tracing::Instrument;
+
         self.ensure_open()?;
 
-        // Route DML statements to write engine when write support is compiled in.
-        // Use spawn_blocking so the Mutex lock + synchronous engine.execute() call
-        // does not stall the napi async executor thread (same pattern as flush_run).
-        #[cfg(feature = "write-support")]
-        if Self::is_dml_statement(&query) {
-            self.ensure_writable()?;
-            let we_clone = Arc::clone(
-                self.write_engine
-                    .as_ref()
-                    .expect("ensure_writable verified write_engine is Some"),
-            );
-            let elapsed_ms = tokio::task::spawn_blocking(move || {
-                let start = std::time::Instant::now();
-                let mut engine = we_clone
-                    .lock()
-                    .map_err(|_| simple_error("Write engine lock poisoned"))?;
-                engine.execute(&query).map_err(to_napi_error)?;
-                Ok::<u32, napi::Error>(start.elapsed().as_millis() as u32)
+        // Per-call span (issue #1040), parented under the handle's traceparent
+        // when one was supplied. We never hold a span guard across `.await`; the
+        // async work is `.instrument(span)`-ed instead.
+        let span = crate::observability::execute_span("execute", self.traceparent.as_deref());
+        let span_for_record = span.clone();
+
+        async move {
+            // Route DML statements to write engine when write support is compiled
+            // in. Use spawn_blocking so the Mutex lock + synchronous
+            // engine.execute() call does not stall the napi async executor thread.
+            #[cfg(feature = "write-support")]
+            if Self::is_dml_statement(&query) {
+                self.ensure_writable()?;
+                let we_clone = Arc::clone(
+                    self.write_engine
+                        .as_ref()
+                        .expect("ensure_writable verified write_engine is Some"),
+                );
+                let elapsed_ms = tokio::task::spawn_blocking(move || {
+                    let start = std::time::Instant::now();
+                    let mut engine = we_clone
+                        .lock()
+                        .map_err(|_| simple_error("Write engine lock poisoned"))?;
+                    engine.execute(&query).map_err(to_napi_error)?;
+                    Ok::<u32, napi::Error>(start.elapsed().as_millis() as u32)
+                })
+                .await
+                .map_err(|e| simple_error(format!("execute DML task panicked: {e}")))??;
+                crate::observability::record_rows(&span_for_record, 0);
+                return Ok(QueryResult {
+                    rows: vec![],
+                    row_count: 0,
+                    rows_affected: 1,
+                    execution_time_ms: elapsed_ms,
+                    columns: vec![],
+                });
+            }
+
+            let core_result = self.inner.execute(&query).await.map_err(|e| {
+                // Boundary error: record once here (subsystem = "node"), not in
+                // nested helpers, to avoid double counting with core.
+                crate::observability::record_boundary_error(&e);
+                to_napi_error(e)
+            })?;
+
+            // Convert rows to JSON values
+            let rows: Vec<serde_json::Value> = core_result
+                .rows
+                .iter()
+                .map(|row| {
+                    #[allow(deprecated)]
+                    let obj: serde_json::Map<String, serde_json::Value> = row
+                        .values
+                        .iter()
+                        .map(|(k, v)| (k.clone(), value_to_json(v)))
+                        .collect();
+                    serde_json::Value::Object(obj)
+                })
+                .collect();
+
+            // Convert column metadata
+            let columns: Vec<ColumnInfo> = core_result
+                .metadata
+                .columns
+                .iter()
+                .map(ColumnInfo::from_core)
+                .collect();
+
+            let row_count = rows.len() as u32;
+            crate::observability::record_rows(&span_for_record, row_count as u64);
+            Ok(QueryResult {
+                rows_affected: row_count,
+                row_count,
+                rows,
+                execution_time_ms: core_result.execution_time_ms as u32,
+                columns,
             })
-            .await
-            .map_err(|e| simple_error(format!("execute DML task panicked: {e}")))??;
-            return Ok(QueryResult {
-                rows: vec![],
-                row_count: 0,
-                rows_affected: 1,
-                execution_time_ms: elapsed_ms,
-                columns: vec![],
-            });
         }
-
-        let core_result = self.inner.execute(&query).await.map_err(to_napi_error)?;
-
-        // Convert rows to JSON values
-        let rows: Vec<serde_json::Value> = core_result
-            .rows
-            .iter()
-            .map(|row| {
-                #[allow(deprecated)]
-                let obj: serde_json::Map<String, serde_json::Value> = row
-                    .values
-                    .iter()
-                    .map(|(k, v)| (k.clone(), value_to_json(v)))
-                    .collect();
-                serde_json::Value::Object(obj)
-            })
-            .collect();
-
-        // Convert column metadata
-        let columns: Vec<ColumnInfo> = core_result
-            .metadata
-            .columns
-            .iter()
-            .map(ColumnInfo::from_core)
-            .collect();
-
-        let row_count = rows.len() as u32;
-        Ok(QueryResult {
-            rows_affected: row_count,
-            row_count,
-            rows,
-            execution_time_ms: core_result.execution_time_ms as u32,
-            columns,
-        })
+        .instrument(span)
+        .await
     }
 
     /// Get database statistics.
@@ -775,6 +829,11 @@ impl Database {
 
         // Shutdown the storage engine to release resources
         self.inner.shutdown().await.map_err(to_napi_error)?;
+
+        // Flush buffered telemetry promptly on a graceful close (issue #1040)
+        // rather than waiting for the process-exit Drop of the global guard.
+        // No-op when telemetry is disabled / the feature is off.
+        crate::observability::flush();
 
         Ok(())
     }
@@ -830,7 +889,14 @@ impl Database {
         query: String,
         config: Option<StreamingConfig>,
     ) -> napi::Result<crate::streaming::StreamingResult> {
+        use tracing::Instrument;
+
         self.ensure_open()?;
+
+        // Per-stream span (issue #1040). It is handed to the StreamingResult so
+        // rows yielded across `next()` iterations accumulate onto it, and it is
+        // finalised when iteration ends or the result is closed.
+        let span = crate::observability::streaming_span(self.traceparent.as_deref());
 
         // Convert config or use defaults
         let core_config = match config {
@@ -838,15 +904,23 @@ impl Database {
             None => cqlite_core::query::result::StreamingConfig::default(),
         };
 
-        // Execute streaming query via core library
-        let iter = self
-            .inner
-            .execute_streaming(&query, core_config)
-            .await
-            .map_err(to_napi_error)?;
+        // Execute streaming query via core library. The setup is instrumented by
+        // the stream span (no guard held across `.await`).
+        let span_for_iter = span.clone();
+        let iter = async move {
+            self.inner
+                .execute_streaming(&query, core_config)
+                .await
+                .map_err(|e| {
+                    crate::observability::record_boundary_error(&e);
+                    to_napi_error(e)
+                })
+        }
+        .instrument(span)
+        .await?;
 
-        // Create StreamingResult with shared runtime
-        crate::streaming::StreamingResult::new(iter)
+        // Create StreamingResult with shared runtime, carrying the stream span.
+        crate::streaming::StreamingResult::new(iter, span_for_iter)
     }
 
     /// Export the results of a CQL query to a Parquet file.
@@ -977,6 +1051,7 @@ impl Database {
         Ok(napi::bindgen_prelude::AsyncTask::new(ExecuteNativeTask {
             inner: self.inner.clone(),
             query,
+            traceparent: self.traceparent.clone(),
             #[cfg(feature = "write-support")]
             write_engine: self.write_engine.clone(),
         }))
@@ -1185,6 +1260,8 @@ impl Database {
 pub struct ExecuteNativeTask {
     inner: Arc<cqlite_core::Database>,
     query: String,
+    /// Per-handle default traceparent for the per-call span (issue #1040).
+    traceparent: Option<String>,
     /// Write engine handle, present only when write support is compiled and writable=true.
     #[cfg(feature = "write-support")]
     write_engine: Option<Arc<Mutex<cqlite_core::storage::write_engine::WriteEngine>>>,
@@ -1204,16 +1281,25 @@ impl napi::Task for ExecuteNativeTask {
     type JsValue = napi::JsObject;
 
     fn compute(&mut self) -> napi::Result<Self::Output> {
-        // Route DML to write engine when write support is present.
+        use tracing::Instrument;
+
+        // Per-call span (issue #1040), parented under the handle's traceparent.
+        let span =
+            crate::observability::execute_span("executeNative", self.traceparent.as_deref());
+
+        // Route DML to write engine when write support is present. This path is
+        // fully synchronous, so a span guard is correct (no `.await`).
         #[cfg(feature = "write-support")]
         if Database::is_dml_statement(&self.query) {
             if let Some(ref we) = self.write_engine {
+                let _entered = span.enter();
                 let start = std::time::Instant::now();
-                let mut engine = we
-                    .lock()
-                    .map_err(|_| simple_error("Write engine lock poisoned"))?;
+                let mut engine = we.lock().map_err(|_| {
+                    simple_error("Write engine lock poisoned")
+                })?;
                 engine.execute(&self.query).map_err(to_napi_error)?;
                 let elapsed_ms = start.elapsed().as_millis() as u32;
+                crate::observability::record_rows(&span, 0);
                 return Ok(QueryResultData {
                     rows: vec![],
                     execution_time_ms: elapsed_ms,
@@ -1223,11 +1309,23 @@ impl napi::Task for ExecuteNativeTask {
             }
         }
 
-        // Use global runtime for async execution
-        let result =
-            crate::runtime::block_on(self.inner.execute(&self.query)).map_err(to_napi_error)?;
+        // Use global runtime for async execution. The future is `.instrument`-ed
+        // by the span rather than holding a guard across the runtime boundary.
+        let span_for_record = span.clone();
+        let query = &self.query;
+        let inner = &self.inner;
+        let result = crate::runtime::block_on(
+            async move {
+                inner.execute(query).await.map_err(|e| {
+                    crate::observability::record_boundary_error(&e);
+                    to_napi_error(e)
+                })
+            }
+            .instrument(span),
+        )?;
 
         let row_count = result.rows.len() as u32;
+        crate::observability::record_rows(&span_for_record, row_count as u64);
         Ok(QueryResultData {
             rows: result.rows.iter().map(|r| r.values.clone()).collect(),
             execution_time_ms: result.execution_time_ms as u32,
