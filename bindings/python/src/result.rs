@@ -129,6 +129,16 @@ impl QueryResult {
 }
 
 impl QueryResult {
+    /// Number of materialised rows (for SELECT spans, issue #1039).
+    pub(crate) fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    /// Number of rows affected (for DML spans, issue #1039).
+    pub(crate) fn rows_affected_value(&self) -> i64 {
+        self.rows_affected as i64
+    }
+
     /// Create a minimal QueryResult for a DML operation (INSERT/UPDATE/DELETE).
     ///
     /// The result has no rows but reflects the number of mutations applied.
@@ -429,13 +439,42 @@ impl ColumnInfo {
 pub struct StreamingIterator {
     /// The wrapped core iterator (Mutex for interior mutability without &mut self)
     inner: Mutex<cqlite_core::query::result::QueryResultIterator>,
+    /// Per-call observability span (`python.execute_streaming`, issue #1039).
+    ///
+    /// The span is kept alive for the whole iteration so the streamed rows are
+    /// attributed to the caller's trace. The total rows yielded is recorded into
+    /// the span's `cqlite.rows` field when the iterator is dropped (fully
+    /// consumed, garbage collected, or abandoned via `break`).
+    span: tracing::Span,
 }
 
 impl StreamingIterator {
-    /// Create a new streaming iterator from a core QueryResultIterator.
+    /// Create a new streaming iterator from a core QueryResultIterator with no
+    /// observability span (used where instrumentation is not wired).
     pub fn new(iter: cqlite_core::query::result::QueryResultIterator) -> Self {
+        Self::with_span(iter, tracing::Span::none())
+    }
+
+    /// Create a streaming iterator that records into `span` as rows are yielded.
+    pub fn with_span(
+        iter: cqlite_core::query::result::QueryResultIterator,
+        span: tracing::Span,
+    ) -> Self {
         Self {
             inner: Mutex::new(iter),
+            span,
+        }
+    }
+}
+
+impl Drop for StreamingIterator {
+    fn drop(&mut self) {
+        // Record total rows yielded once the stream ends (exhausted, GC'd, or
+        // broken out of). `rows_received` is the authoritative count tracked by
+        // the core iterator. Lock may be poisoned if a panic occurred mid-next;
+        // in that case we simply skip recording rather than risk a double panic.
+        if let Ok(iter) = self.inner.lock() {
+            self.span.record("cqlite.rows", iter.rows_received() as i64);
         }
     }
 }

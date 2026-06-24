@@ -21,5 +21,33 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 hex = "0.4"
 
+# Tracing — always available so per-call spans (`python.execute*`) are emitted
+# unconditionally. They are zero-cost unless a subscriber + OTel layer is wired
+# up by the `observability` feature at `Database.open` time.
+tracing = { workspace = true }
+
+# OpenTelemetry wiring — only linked behind the `observability` feature, which
+# pulls in `cqlite-core/observability` so `tracing_layer()` and the W3C
+# traceparent propagator are available. NOT in defaults: the default wheel links
+# no OTel crates and all instrumentation compiles to no-ops.
+tracing-subscriber = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+
+[features]
+# Opt-in OpenTelemetry export for the Python bindings (epic #1031, issue #1039).
+# NOT default: a plain `maturin develop` / wheel build links no OTel crates and
+# every span/metric call is a no-op. With this on, `Database.open(otel_config=…)`
+# installs a process-global tracing subscriber + OTLP exporter and spans are
+# exported.
+observability = [
+    "cqlite-core/observability",
+    "dep:tracing-subscriber",
+    "dep:tracing-opentelemetry",
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+]
+
 [lints]
 workspace = true

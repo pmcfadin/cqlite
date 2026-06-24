@@ -70,6 +70,11 @@ pub struct Database {
     closed: AtomicBool,
     /// Optional write engine — present only when opened with `writable=True`.
     write_engine: Option<Mutex<PyWriteEngine>>,
+    /// W3C `traceparent` captured at `open` time (issue #1039). When set, every
+    /// per-call span is re-parented to this trace unless a per-call traceparent
+    /// overrides it, so the bindings' Rust spans correlate with the caller's
+    /// Python OpenTelemetry trace.
+    default_traceparent: Option<String>,
 }
 
 impl Database {
@@ -88,6 +93,13 @@ impl Database {
     /// the borrow of self.
     pub(crate) fn inner(&self) -> Arc<cqlite_core::Database> {
         Arc::clone(&self.inner)
+    }
+
+    /// Resolve the effective W3C traceparent for a call: the per-call value when
+    /// supplied, otherwise the one captured at `open` time. Returns `None` when
+    /// neither is set (the span keeps its natural parent).
+    fn resolve_traceparent<'a>(&'a self, per_call: Option<&'a str>) -> Option<&'a str> {
+        per_call.or(self.default_traceparent.as_deref())
     }
 
     /// Return a clear error when a write method is called on a read-only database.
@@ -147,6 +159,13 @@ impl Database {
         // Shutdown the read-side storage engine
         py.allow_threads(|| block_on(self.inner.shutdown()))
             .map_err(to_py_err)?;
+
+        // Flush buffered telemetry (issue #1039) so a short-lived script that
+        // closes its database before interpreter shutdown still exports its
+        // spans/metrics. Process-global and idempotent; the guard itself also
+        // flushes on interpreter shutdown via Drop.
+        crate::observability::flush();
+
         Ok(())
     }
 
@@ -230,12 +249,28 @@ impl Database {
     /// result = db.execute("INSERT INTO users (id, name) VALUES (1, 'Alice')")
     /// print(f"Affected {result.rows_affected} row(s)")
     /// ```
-    pub fn execute(&self, py: Python<'_>, query: &str) -> PyResult<QueryResult> {
+    #[pyo3(signature = (query, *, traceparent=None))]
+    pub fn execute(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        traceparent: Option<&str>,
+    ) -> PyResult<QueryResult> {
         self.ensure_open()?;
+
+        // Per-call span (issue #1039). Core's query path (#1035) emits the
+        // query.duration / query.rows metrics and marks the active span on
+        // error, so we intentionally do NOT re-emit those here — we only own the
+        // `python.execute` span and re-parent it to the caller's trace.
+        let span = crate::observability::call_span("python.execute");
+        crate::observability::set_traceparent_parent(&span, self.resolve_traceparent(traceparent));
+        let _enter = span.enter();
 
         // Route DML statements to the write engine when present
         if Self::is_dml_statement(query) {
-            return self.execute_dml(py, query);
+            let result = self.execute_dml(py, query)?;
+            span.record("cqlite.rows", result.rows_affected_value());
+            return Ok(result);
         }
 
         let db = self.inner();
@@ -246,7 +281,9 @@ impl Database {
             .allow_threads(|| block_on(db.execute(&query_owned)))
             .map_err(to_py_err)?;
 
-        QueryResult::from_core(py, core_result)
+        let result = QueryResult::from_core(py, core_result)?;
+        span.record("cqlite.rows", result.row_count() as i64);
+        Ok(result)
     }
 
     /// Execute a CQL query with streaming results.
@@ -287,14 +324,23 @@ impl Database {
     ///     if row["id"] == target_id:
     ///         break
     /// ```
-    #[pyo3(signature = (query, *, config=None))]
+    #[pyo3(signature = (query, *, config=None, traceparent=None))]
     pub fn execute_streaming(
         &self,
         py: Python<'_>,
         query: &str,
         config: Option<&StreamingConfig>,
+        traceparent: Option<&str>,
     ) -> PyResult<StreamingIterator> {
         self.ensure_open()?;
+
+        // Per-call span (issue #1039). The span outlives this method: it is moved
+        // into the StreamingIterator, which records the total rows yielded across
+        // iteration when it is exhausted or dropped. Re-parent to the caller's
+        // trace so the whole stream correlates with the Python OTel span.
+        let span = crate::observability::call_span("python.execute_streaming");
+        crate::observability::set_traceparent_parent(&span, self.resolve_traceparent(traceparent));
+        let _enter = span.enter();
 
         let db = self.inner();
         let query_owned = query.to_string();
@@ -305,7 +351,7 @@ impl Database {
             .allow_threads(|| block_on(db.execute_streaming(&query_owned, core_config)))
             .map_err(to_py_err)?;
 
-        Ok(StreamingIterator::new(core_iter))
+        Ok(StreamingIterator::with_span(core_iter, span.clone()))
     }
 
     /// Export the results of a CQL query to a Parquet file.
@@ -733,7 +779,7 @@ impl Database {
 ///     pass
 /// ```
 #[pyfunction]
-#[pyo3(signature = (path, *, schema=None, config=None, writable=false, write_dir=None))]
+#[pyo3(signature = (path, *, schema=None, config=None, writable=false, write_dir=None, otel_config=None, traceparent=None))]
 pub fn open(
     py: Python<'_>,
     path: PathBuf,
@@ -741,7 +787,17 @@ pub fn open(
     config: Option<&Bound<'_, PyAny>>,
     writable: bool,
     write_dir: Option<PathBuf>,
+    otel_config: Option<&Bound<'_, PyAny>>,
+    traceparent: Option<String>,
 ) -> PyResult<Database> {
+    // Initialise observability once per process (issue #1039). The config is
+    // resolved from the optional `otel_config` dict layered over the
+    // `CQLITE_OTEL_*` environment. The first `open` wins; later opens reuse the
+    // installed exporters. A bad exporter config never blocks the open — it
+    // simply yields no telemetry.
+    let obs_cfg = crate::observability::config_from_py(py, otel_config)?;
+    crate::observability::ensure_initialized(obs_cfg);
+
     // Validate writable-mode requirements upfront before any I/O.
     if writable {
         if write_dir.is_none() {
@@ -844,6 +900,7 @@ pub fn open(
         inner: Arc::new(db),
         closed: AtomicBool::new(false),
         write_engine,
+        default_traceparent: traceparent.filter(|s| !s.trim().is_empty()),
     })
 }
 

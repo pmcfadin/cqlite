@@ -8,6 +8,7 @@ use pyo3::prelude::*;
 mod config;
 mod database;
 mod error;
+mod observability;
 mod prepared;
 mod result;
 mod runtime;
