@@ -93,21 +93,18 @@ fn schemas_dir() -> Option<PathBuf> {
     dir.exists().then_some(dir)
 }
 
-/// Open a database over the full sstables tree with the schemas these tests need.
-/// `basic-types.cql` (`test_basic.simple_table`, uuid pk) is the active fixture —
-/// it decodes cleanly on the `tombstones` build. `wide-table-bti.cql`
-/// (`test_da.wide_table`, int pk) and `time-series.cql` are loaded too (matching
-/// the #961 harness and the requested setup), but the int-pk BTI fixture is NOT
-/// exercised here because its multi-row BTI partitions do not decode on the
-/// `tombstones` build (see the IN test's note). Skips (returns `Err`) when the
-/// data/schema is absent, like the other dataset-backed tests.
+/// Open a database isolated to `test_basic.simple_table` (uuid pk, the only
+/// fixture these tombstones tests exercise — it decodes cleanly on the
+/// `tombstones` build). ISOLATION MATTERS: under the `tombstones` build the
+/// targeted lookup is a full-scan+retain that resolves readers by table NAME, so
+/// loading the whole tree would let a same-named table in another keyspace (e.g.
+/// `test_da.simple_table`) contaminate or fail these queries. We therefore load
+/// only `basic-types.cql` and filter ingestion to the `test_basic/simple_table`
+/// directory. Skips (returns `Err`) when the data/schema is absent.
 async fn setup() -> Result<Database, String> {
     let root = datasets_root().ok_or("CQLITE_DATASETS_ROOT not set or missing")?;
     let schemas = schemas_dir().ok_or("schemas dir not found")?;
-    let schema_paths: Vec<PathBuf> = ["basic-types.cql", "time-series.cql", "wide-table-bti.cql"]
-        .iter()
-        .map(|f| schemas.join(f))
-        .collect();
+    let schema_paths: Vec<PathBuf> = vec![schemas.join("basic-types.cql")];
     for p in &schema_paths {
         if !p.exists() {
             return Err(format!("schema not found at {p:?}"));
@@ -123,7 +120,7 @@ async fn setup() -> Result<Database, String> {
         data_dir,
         version_hint: None,
         core_config: cqlite_core::Config::default(),
-        table_directory_filter: None,
+        table_directory_filter: Some("/test_basic/simple_table-".to_string()),
     };
     let result = ingest(config)
         .await
