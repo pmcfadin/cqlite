@@ -94,6 +94,11 @@ struct ExecutionContext {
     pub columns: Vec<ColumnInfo>,
     /// Row count processed so far
     pub rows_processed: u64,
+    /// Rows examined by the SSTable-scan step ONLY (issue #1035). Distinct from
+    /// `rows_processed`, which is also bumped by the residual `Filter` step, so
+    /// this is the correct, non-double-counted source for the
+    /// `cqlite.query.rows_scanned` metric and span field.
+    pub scan_rows: u64,
     /// Projection flags controlling opt-in metadata collection (Issue #692).
     ///
     /// Set to `include_cell_metadata = true` when any `WRITETIME` or `TTL`
@@ -1325,6 +1330,7 @@ impl SelectExecutor {
             table_id,
             columns: self.get_result_columns(&plan.statement).await?,
             rows_processed: 0,
+            scan_rows: 0,
             projection_flags,
             access_path: None,
         };
@@ -1470,7 +1476,7 @@ impl SelectExecutor {
 
             obs::add_counter(
                 catalog::QUERY_ROWS_SCANNED,
-                context.rows_processed,
+                context.scan_rows,
                 &[(
                     catalog::attr::ACCESS_PATH,
                     AttrValue::StaticStr(access_path_label),
@@ -1479,7 +1485,7 @@ impl SelectExecutor {
 
             let span = tracing::Span::current();
             span.record(catalog::attr::ACCESS_PATH, access_path_label);
-            span.record("cqlite.query.rows_scanned", context.rows_processed);
+            span.record("cqlite.query.rows_scanned", context.scan_rows);
             span.record("cqlite.query.rows", total_rows);
         }
 
@@ -2050,6 +2056,7 @@ impl SelectExecutor {
 
             for (key, value, cell_meta) in scan_results {
                 context.rows_processed += 1;
+                context.scan_rows += 1;
 
                 let Some(mut row) =
                     build_row_from_scan(key, value, projection, schema_opt.as_ref())
@@ -2184,6 +2191,7 @@ impl SelectExecutor {
 
             for (key, value) in scan_results {
                 context.rows_processed += 1;
+                context.scan_rows += 1;
 
                 // build_row_from_scan returns None for tombstoned/null rows (Issue #191).
                 let Some(row) = build_row_from_scan(key, value, projection, schema_opt.as_ref())
