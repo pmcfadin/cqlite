@@ -1,0 +1,269 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": { "type": "grafana", "uid": "-- Grafana --" },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Starter CQLite runtime signals: throughput, latency, error rate. Metric names match cqlite-core/src/observability/catalog.rs. The OTel Collector Prometheus exporter sanitises dotted names to underscores, appends _total to counters, and unit suffixes (_seconds for s, _bytes for By).",
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "tags": ["cqlite", "observability"],
+  "templating": {
+    "list": [
+      {
+        "current": { "text": "Prometheus", "value": "cqlite-prometheus" },
+        "name": "DS_PROMETHEUS",
+        "label": "Prometheus",
+        "type": "datasource",
+        "query": "prometheus",
+        "hide": 0
+      }
+    ]
+  },
+  "time": { "from": "now-15m", "to": "now" },
+  "refresh": "5s",
+  "title": "CQLite — Overview (Throughput / Latency / Errors)",
+  "uid": "cqlite-overview",
+  "panels": [
+    {
+      "type": "row",
+      "title": "Throughput",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Read rows/sec (cqlite.read.rows)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "rps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(rate(cqlite_read_rows_total[1m]))",
+          "legendFormat": "read rows/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Query rows returned/sec (cqlite.query.rows)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "rps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(rate(cqlite_query_rows_total[1m]))",
+          "legendFormat": "query rows/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Mutations/sec & Flush rows/sec (cqlite.write.mutations, cqlite.flush.rows)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "rps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 1 },
+      "targets": [
+        {
+          "expr": "sum(rate(cqlite_write_mutations_total[1m]))",
+          "legendFormat": "mutations/s",
+          "refId": "A"
+        },
+        {
+          "expr": "sum(rate(cqlite_flush_rows_total[1m]))",
+          "legendFormat": "flush rows/s",
+          "refId": "B"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Compaction rows merged/sec (cqlite.compaction.rows_merged)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "rps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 9 },
+      "targets": [
+        {
+          "expr": "sum(rate(cqlite_compaction_rows_merged_total[1m]))",
+          "legendFormat": "compaction rows merged/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "RPC rows streamed/sec (cqlite.rpc.rows)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "rps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 9 },
+      "targets": [
+        {
+          "expr": "sum(rate(cqlite_rpc_rows_total[1m])) by (cqlite_rpc_method)",
+          "legendFormat": "{{cqlite_rpc_method}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Read bytes/sec (cqlite.read.bytes)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "Bps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 9 },
+      "targets": [
+        {
+          "expr": "sum(rate(cqlite_read_bytes_total[1m]))",
+          "legendFormat": "read bytes/s",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Latency (p50 / p95 / p99)",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 17 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Query duration (cqlite.query.duration)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(cqlite_query_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(cqlite_query_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(cqlite_query_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Flush duration (cqlite.flush.duration)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(cqlite_flush_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(cqlite_flush_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(cqlite_flush_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Compaction duration (cqlite.compaction.duration)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 26 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(cqlite_compaction_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(cqlite_compaction_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(cqlite_compaction_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "WAL fsync duration (cqlite.wal.sync.duration)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 26 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(cqlite_wal_sync_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(cqlite_wal_sync_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum(rate(cqlite_wal_sync_duration_seconds_bucket[5m])) by (le))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ]
+    },
+    {
+      "type": "row",
+      "title": "Error rate",
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 34 }
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors/sec by category (cqlite.errors.total)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "errps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 35 },
+      "targets": [
+        {
+          "expr": "sum(rate(cqlite_errors_total[1m])) by (cqlite_error_category)",
+          "legendFormat": "{{cqlite_error_category}}",
+          "refId": "A"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Errors/sec by subsystem (cqlite.errors.total)",
+      "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+      "fieldConfig": { "defaults": { "unit": "errps" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 35 },
+      "targets": [
+        {
+          "expr": "sum(rate(cqlite_errors_total[1m])) by (cqlite_subsystem)",
+          "legendFormat": "{{cqlite_subsystem}}",
+          "refId": "A"
+        }
+      ]
+    }
+  ]
+}

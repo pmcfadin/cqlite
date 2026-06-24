@@ -1,0 +1,18 @@
+# Grafana datasource provisioning for the CQLite local stack (issue #1042).
+# Both datasources are auto-loaded on Grafana startup.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    uid: cqlite-prometheus
+
+  - name: Jaeger
+    type: jaeger
+    access: proxy
+    url: http://jaeger:16686
+    uid: cqlite-jaeger

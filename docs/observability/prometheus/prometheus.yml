@@ -1,0 +1,13 @@
+# Prometheus scrape config for the CQLite local stack (issue #1042).
+#
+# The OpenTelemetry Collector re-exports CQLite's OTLP metrics on a Prometheus
+# pull endpoint (port 8889); Prometheus scrapes that.
+
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: cqlite-otel-collector
+    static_configs:
+      - targets: ["otel-collector:8889"]
