@@ -881,7 +881,11 @@ impl ConfigBuilder {
             match raw.trim().to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "on" => self.config.observability.enabled = Some(true),
                 "0" | "false" | "no" | "off" => self.config.observability.enabled = Some(false),
-                _ => {}
+                // An unrecognized value for the MASTER enable switch falls back to
+                // the core default (disabled) — fail safe to "off" — rather than
+                // silently leaving a lower-precedence config-file `enabled = true`
+                // active. Reset to None so `to_core()` uses the core default.
+                _ => self.config.observability.enabled = None,
             }
         }
         if let Some(ref endpoint) = cli.otel_endpoint {
@@ -1276,6 +1280,27 @@ mod tests {
         let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
         assert_eq!(config.observability.sampling_ratio, None);
         assert_eq!(config.observability.timeout_ms, None);
+    }
+
+    /// A malformed high-precedence `CQLITE_OTEL_ENABLED` must not leave a
+    /// lower-precedence config-file `enabled = true` active — the master switch
+    /// fails safe to the core default (disabled) on garbage input (issue #1033).
+    #[test]
+    #[serial]
+    fn test_observability_malformed_enabled_env_overrides_file_to_default() {
+        use std::env;
+        env::set_var("CQLITE_OTEL_ENABLED", "maybe");
+        let cli = Cli::parse_from(&["cqlite"]);
+
+        // Simulate a lower-precedence config-file value that enabled export.
+        let mut builder = ConfigBuilder::from_defaults();
+        builder.config.observability.enabled = Some(true);
+        let config = builder.with_flags(&cli).build();
+
+        // Garbage env resets the master switch to None so to_core() uses the
+        // core default (disabled) instead of the file's `true`.
+        assert_eq!(config.observability.enabled, None);
+        env::remove_var("CQLITE_OTEL_ENABLED");
     }
 
     #[test]
