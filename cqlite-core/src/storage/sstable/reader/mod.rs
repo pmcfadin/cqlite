@@ -61,7 +61,7 @@ use header::{
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -255,10 +255,26 @@ fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
 
 /// Process-wide count of currently-open [`SSTableReader`]s, the source value
 /// for the [`SSTABLES_OPEN`](crate::observability::catalog::SSTABLES_OPEN)
-/// gauge. Incremented when [`SSTableReader::open`] succeeds and decremented when
-/// a reader is dropped, so the gauge reflects live readers regardless of the
-/// `observability` feature state (the helper calls are no-ops when off).
-static SSTABLES_OPEN_COUNT: AtomicU64 = AtomicU64::new(0);
+/// gauge. Tracked PER FORMAT so the gauge — which carries the
+/// [`cqlite.sstable.format`](crate::observability::catalog::attr::SSTABLE_FORMAT)
+/// attribute — reports the correct live count for each `big`/`bti` label series
+/// instead of a single global total stamped onto every series. Incremented when
+/// [`SSTableReader::open`] succeeds and decremented when a reader is dropped, so
+/// each gauge series reflects live readers regardless of the `observability`
+/// feature state (the helper calls are no-ops when off).
+static SSTABLES_OPEN_COUNT_BIG: AtomicI64 = AtomicI64::new(0);
+static SSTABLES_OPEN_COUNT_BTI: AtomicI64 = AtomicI64::new(0);
+
+/// Select the per-format open-reader counter for a `sstable_format_label()`
+/// value (`"big"` / `"bti"`). Defaults to the BIG counter for any unexpected
+/// label so the value is never silently dropped; the label set is bounded to
+/// the two [`sstable_format_label`](SSTableReader::sstable_format_label) returns.
+fn sstables_open_count_for(format: &str) -> &'static AtomicI64 {
+    match format {
+        "bti" => &SSTABLES_OPEN_COUNT_BTI,
+        _ => &SSTABLES_OPEN_COUNT_BIG,
+    }
+}
 
 impl SSTableReader {
     /// Open an SSTable file for reading.
@@ -270,26 +286,34 @@ impl SSTableReader {
     /// [`SSTABLES_OPEN`]: crate::observability::catalog::SSTABLES_OPEN
     pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
         use crate::observability::{self as obs, catalog};
+        use tracing::Instrument as _;
 
         let span = tracing::debug_span!(
             "sstable.reader.open",
             file_size = tracing::field::Empty,
             sstable_format = tracing::field::Empty,
         );
-        let _entered = span.enter();
 
-        let result = Self::open_inner(path, config, platform).await;
+        // Instrument the future rather than holding an entered guard across the
+        // `.await`: entering a span guard and then awaiting can attach unrelated
+        // async work scheduled on this task to the span. `Instrument` enters the
+        // span only while this specific future is polled.
+        let result = Self::open_inner(path, config, platform)
+            .instrument(span.clone())
+            .await;
         match &result {
             Ok(reader) => {
                 let format = reader.sstable_format_label();
                 span.record("file_size", reader.stats.file_size);
                 span.record("sstable_format", format);
                 // SSTABLES_OPEN is a snapshot gauge of the live reader count;
-                // record the current count after this open succeeds.
-                let now = SSTABLES_OPEN_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                // record the current PER-FORMAT count after this open succeeds so
+                // the format-attributed gauge series stays correct under mixed
+                // BIG/BTI readers.
+                let now = sstables_open_count_for(format).fetch_add(1, Ordering::Relaxed) + 1;
                 obs::record_gauge(
                     catalog::SSTABLES_OPEN,
-                    now as i64,
+                    now,
                     &[(catalog::attr::SSTABLE_FORMAT, format.into())],
                 );
             }
@@ -971,17 +995,18 @@ impl SSTableReader {
 impl Drop for SSTableReader {
     fn drop(&mut self) {
         use crate::observability::{self as obs, catalog};
-        // Keep the live-reader count and the SSTABLES_OPEN gauge in sync as
-        // readers are released. `saturating_sub`-style guard via fetch_update
-        // would be heavier than needed: open() only ever increments on success,
-        // so the count never underflows in practice; clamp defensively anyway.
-        let prev = SSTABLES_OPEN_COUNT.load(Ordering::Relaxed);
-        let now = prev.saturating_sub(1);
-        SSTABLES_OPEN_COUNT.store(now, Ordering::Relaxed);
+        // Keep the per-format live-reader count and the SSTABLES_OPEN gauge in
+        // sync as readers are released. Use a single atomic read-modify-write
+        // (`fetch_sub`) on the SAME per-format counter `open()` incremented: a
+        // load-then-store would race concurrent drops and lose decrements,
+        // drifting the gauge permanently high. `open()` only ever increments on
+        // success, so this never underflows in practice.
+        let format = self.sstable_format_label();
+        let now = sstables_open_count_for(format).fetch_sub(1, Ordering::Relaxed) - 1;
         obs::record_gauge(
             catalog::SSTABLES_OPEN,
-            now as i64,
-            &[(catalog::attr::SSTABLE_FORMAT, self.sstable_format_label().into())],
+            now,
+            &[(catalog::attr::SSTABLE_FORMAT, format.into())],
         );
     }
 }

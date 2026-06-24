@@ -382,17 +382,44 @@ impl SSTableReader {
     /// `partition_key` must be the raw partition-key bytes (same encoding the bloom
     /// filter and Index.db/BTI trie are keyed on).
     pub fn might_contain_partition(&self, partition_key: &[u8]) -> bool {
+        use crate::observability::{self as obs, catalog};
+
         if self.bti_partitions_db.is_some() {
             // BTI: trie miss is authoritative absence; any error is conservative.
-            return matches!(
+            let present = matches!(
                 self.lookup_partition_via_bti_trie(partition_key),
                 Ok(Some(_)) | Err(_)
             );
+            obs::add_counter(
+                catalog::READ_BLOOM_CHECKS,
+                1,
+                &[
+                    (
+                        catalog::attr::RESULT,
+                        if present { "hit" } else { "miss" }.into(),
+                    ),
+                    (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+                ],
+            );
+            return present;
         }
-        match &self.bloom_filter {
+        let format = self.sstable_format_label();
+        let present = match &self.bloom_filter {
             Some(bloom) => bloom.might_contain(partition_key),
             None => true,
-        }
+        };
+        obs::add_counter(
+            catalog::READ_BLOOM_CHECKS,
+            1,
+            &[
+                (
+                    catalog::attr::RESULT,
+                    if present { "hit" } else { "miss" }.into(),
+                ),
+                (catalog::attr::SSTABLE_FORMAT, format.into()),
+            ],
+        );
+        present
     }
 
     /// Enhanced partition lookup using schema-driven key digest computation
@@ -585,9 +612,26 @@ impl SSTableReader {
         table_id: &TableId,
         key: &RowKey,
     ) -> Result<Option<Value>> {
+        use crate::observability::{self as obs, catalog};
+
         // Step 1: Use bloom filter for existence check
         if let Some(bloom_filter) = &self.bloom_filter {
-            if !bloom_filter.might_contain(key.as_bytes()) {
+            let present = bloom_filter.might_contain(key.as_bytes());
+            obs::add_counter(
+                catalog::READ_BLOOM_CHECKS,
+                1,
+                &[
+                    (
+                        catalog::attr::RESULT,
+                        if present { "hit" } else { "miss" }.into(),
+                    ),
+                    (
+                        catalog::attr::SSTABLE_FORMAT,
+                        self.sstable_format_label().into(),
+                    ),
+                ],
+            );
+            if !present {
                 debug!("Bloom filter indicates key does not exist");
                 return Ok(None);
             }
@@ -611,9 +655,26 @@ impl SSTableReader {
         key: &RowKey,
         parsing_context: &ParsingContext,
     ) -> Result<Option<Value>> {
+        use crate::observability::{self as obs, catalog};
+
         // Step 1: Use bloom filter for existence check
         if let Some(bloom_filter) = &self.bloom_filter {
-            if !bloom_filter.might_contain(key.as_bytes()) {
+            let present = bloom_filter.might_contain(key.as_bytes());
+            obs::add_counter(
+                catalog::READ_BLOOM_CHECKS,
+                1,
+                &[
+                    (
+                        catalog::attr::RESULT,
+                        if present { "hit" } else { "miss" }.into(),
+                    ),
+                    (
+                        catalog::attr::SSTABLE_FORMAT,
+                        self.sstable_format_label().into(),
+                    ),
+                ],
+            );
+            if !present {
                 debug!("Bloom filter indicates key does not exist");
                 return Ok(None);
             }

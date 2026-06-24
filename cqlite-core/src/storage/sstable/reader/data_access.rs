@@ -331,6 +331,8 @@ impl SSTableReader {
 
     /// Get a value by key from the SSTable
     pub async fn get(&self, table_id: &TableId, key: &RowKey) -> Result<Option<Value>> {
+        use crate::observability::{self as obs, catalog};
+
         // Issue #831 / #909: BTI ("da") readers resolve partitions via the
         // Partitions.db trie (O(log n)), never via Index.db (absent for BTI) or
         // the sequential scan. The trie is the AUTHORITATIVE presence oracle for a
@@ -347,7 +349,22 @@ impl SSTableReader {
 
         // First check bloom filter if available
         if let Some(bloom_filter) = &self.bloom_filter {
-            if !bloom_filter.might_contain(key.as_bytes()) {
+            let present = bloom_filter.might_contain(key.as_bytes());
+            obs::add_counter(
+                catalog::READ_BLOOM_CHECKS,
+                1,
+                &[
+                    (
+                        catalog::attr::RESULT,
+                        if present { "hit" } else { "miss" }.into(),
+                    ),
+                    (
+                        catalog::attr::SSTABLE_FORMAT,
+                        self.sstable_format_label().into(),
+                    ),
+                ],
+            );
+            if !present {
                 return Ok(None);
             }
         }
