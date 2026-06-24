@@ -160,6 +160,16 @@ pub enum FallbackReason {
     /// Tracked by #962 (route the legacy/prepared surfaces through the modern
     /// executor) and #961 (param binding).
     LegacyExecutorPath,
+
+    /// The `tombstones` build compiles out the partition-targeted prune. On that
+    /// build the targeted storage surfaces (`scan_partition`,
+    /// `scan_partition_with_cell_metadata`) are full-scan + retain fallbacks with
+    /// NO bloom/BTI SSTable pruning, so a fully-constrained `WHERE pk = ?` (or
+    /// `IN (...)`/WRITETIME-TTL) opens the whole table even though the rows are
+    /// byte-identical to the pruned build. The executor reports this honest reason
+    /// (rather than a fake targeted label) whenever the storage call returns
+    /// `engaged == false` (Epic #951, honest access paths).
+    TombstonesBuildNoPrune,
 }
 
 impl FallbackReason {
@@ -173,6 +183,7 @@ impl FallbackReason {
             FallbackReason::PartitionKeyEncodingFailed => "partition_key_encoding_failed",
             FallbackReason::MetadataScanPath => "metadata_scan_path",
             FallbackReason::LegacyExecutorPath => "legacy_executor_path",
+            FallbackReason::TombstonesBuildNoPrune => "tombstones_build_no_prune",
         }
     }
 }

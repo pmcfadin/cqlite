@@ -228,12 +228,17 @@ impl StorageEngine {
     /// partition. Delegates to [`SSTableManager::scan_partition`] (which has a
     /// bloom-prune implementation for the default build and a scan-and-filter
     /// fallback for the `tombstones` build, so callers need no cfg branching).
+    ///
+    /// Returns `(rows, engaged)`: `engaged` is `true` only when the call actually
+    /// pruned the SSTable set to partition candidates (the default build). The
+    /// `tombstones` build returns `false` because it full-scans and retains with no
+    /// prune, so the caller reports an honest fallback access path (Epic #951).
     pub async fn scan_partition(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
         self.sstables
             .scan_partition(table_id, partition_key, schema)
             .await
@@ -275,18 +280,24 @@ impl StorageEngine {
     /// [`scan_with_cell_metadata`](Self::scan_with_cell_metadata) result to the
     /// partition; cross-generation reconciliation runs over the pruned candidates.
     /// Delegates to [`SSTableManager::scan_partition_with_cell_metadata`].
+    ///
+    /// Returns `(rows, engaged)`: `engaged` is `true` only when the call pruned the
+    /// SSTable set to partition candidates (the default build). The `tombstones`
+    /// build returns `false` because it full-scans with metadata and retains with no
+    /// prune, so the caller reports an honest fallback access path (Epic #951).
     pub async fn scan_partition_with_cell_metadata(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<
+    ) -> Result<(
         Vec<(
             RowKey,
             Value,
             std::collections::HashMap<String, CellWriteMetadata>,
         )>,
-    > {
+        bool,
+    )> {
         self.sstables
             .scan_partition_with_cell_metadata(table_id, partition_key, schema)
             .await

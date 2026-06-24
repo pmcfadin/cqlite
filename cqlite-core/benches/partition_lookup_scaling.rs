@@ -148,7 +148,9 @@ mod scaling {
                 Some(&fx.schema),
             ));
             assert_eq!(
-                probe.expect("probe lookup").len(),
+                // `scan_partition` now returns `(rows, engaged)` (Epic #951 honest
+                // access paths); the bench only cares about the row count.
+                probe.expect("probe lookup").0.len(),
                 1,
                 "fixture with {n} generations must resolve the target partition to 1 row"
             );

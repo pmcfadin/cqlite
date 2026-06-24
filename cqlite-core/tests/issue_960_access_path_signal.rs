@@ -20,7 +20,19 @@
 //! (not failed) when the data isn't present, matching the repo's other
 //! dataset-backed integration tests.
 
-#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+// Epic #951 (honest access paths): these tests assert TARGETED labels
+// (`PartitionLookup` / `StreamingPartitionLookup` / `MetadataPartitionLookup`).
+// The `tombstones` build compiles out the partition-targeted prune, so those
+// surfaces full-scan + retain and the executor HONESTLY reports
+// `FallbackFullScan { TombstonesBuildNoPrune }` instead. Gate the file
+// `not(tombstones)` so the targeted assertions only run on builds where the
+// prune exists; the honest-fallback behaviour is covered by a `tombstones`
+// unit test in `select_executor.rs`.
+#![cfg(all(
+    feature = "state_machine",
+    feature = "cli-helpers",
+    not(feature = "tombstones")
+))]
 
 use std::path::{Path, PathBuf};
 

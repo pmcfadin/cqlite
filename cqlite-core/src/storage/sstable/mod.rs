@@ -977,17 +977,27 @@ impl SSTableManager {
     /// MULTI-candidate path is unchanged: it still reconciles via the k-way merge
     /// (or the per-candidate concat fallback), so cross-generation LWW / tombstone
     /// shadowing (#883) is preserved.
+    ///
+    /// Returns `(rows, engaged)`. On this build `engaged` is always `true`: the
+    /// underlying [`scan_partition_clustering`](Self::scan_partition_clustering)
+    /// prunes the SSTable set via `might_contain_partition` before decoding, so a
+    /// caller may honestly report a partition-targeted access path. The
+    /// `tombstones`-build counterpart returns `false` because it has no prune
+    /// (Epic #951, honest access paths).
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan_partition(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
-        Ok(self
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
+        // The clustering-aware path always prunes via the bloom/BTI candidate
+        // filter, so the partition-targeted access path is genuinely engaged
+        // regardless of whether the within-partition clustering seek narrowed.
+        let (rows, _clustering_engaged) = self
             .scan_partition_clustering(table_id, partition_key, None, schema)
-            .await?
-            .0)
+            .await?;
+        Ok((rows, true))
     }
 
     /// Metadata-carrying partition-targeted scan (Issue #962, Epic #951).
@@ -1026,18 +1036,27 @@ impl SSTableManager {
     /// follow-up.
     ///
     /// Gated on `not(tombstones)` to match the `scan_partition` variant it parallels.
+    ///
+    /// Returns `(rows, engaged)`. On this build `engaged` is always `true`: the
+    /// candidate set is pruned via `might_contain_partition` before any decode, so
+    /// the partition-targeted metadata access path is genuinely engaged. The
+    /// `tombstones`-build counterpart returns `false` (no prune; full metadata
+    /// scan + retain) so the caller reports an honest fallback (Epic #951).
     #[cfg(not(feature = "tombstones"))]
     pub async fn scan_partition_with_cell_metadata(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>> {
+    ) -> Result<(
+        Vec<(RowKey, Value, HashMap<String, CellWriteMetadata>)>,
+        bool,
+    )> {
         let table_readers = self.table_readers.read().await;
         let table_name = table_id.name();
 
         let Some(reader_list) = Self::resolve_reader_list(&table_readers, table_name) else {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
         };
 
         // Prune: keep only SSTables whose bloom filter / BTI trie admit the key.
@@ -1058,7 +1077,7 @@ impl SSTableManager {
         );
 
         if candidates.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), true));
         }
 
         let matches_key = |entry: &(RowKey, Value, HashMap<String, CellWriteMetadata>)| {
@@ -1083,7 +1102,7 @@ impl SSTableManager {
                         // partitions this lookup returns.
                         work_counters::add_sstables_scanned(candidates.len() as u64);
                         work_counters::add_partitions_parsed(merged.len() as u64);
-                        return Ok(merged);
+                        return Ok((merged, true));
                     }
                     Err(e) => {
                         log::warn!(
@@ -1119,7 +1138,7 @@ impl SSTableManager {
             all_results.sort_by(|a, b| a.0.cmp(&b.0));
         }
         work_counters::add_partitions_parsed(all_results.len() as u64);
-        Ok(all_results)
+        Ok((all_results, true))
     }
 
     /// `tombstones`-build counterpart of
@@ -1129,24 +1148,31 @@ impl SSTableManager {
     /// `WHERE pk = ?` WRITETIME/TTL read is served by scanning with metadata and
     /// filtering to the partition key, matching the `not(tombstones)` output while
     /// keeping the query executor free of `tombstones` cfg branching.
+    ///
+    /// Returns `(rows, engaged)` with `engaged == false`: this is a full metadata
+    /// scan + retain with NO SSTable prune, so the caller MUST report an honest
+    /// fallback access path (`FallbackReason::TombstonesBuildNoPrune`) rather than a
+    /// targeted label, even though the rows are byte-identical to the pruned build
+    /// (Epic #951, honest access paths).
     #[cfg(feature = "tombstones")]
     pub async fn scan_partition_with_cell_metadata(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<
+    ) -> Result<(
         Vec<(
             RowKey,
             Value,
             HashMap<String, crate::types::CellWriteMetadata>,
         )>,
-    > {
+        bool,
+    )> {
         let mut rows = self
             .scan_with_cell_metadata(table_id, None, None, None, schema)
             .await?;
         rows.retain(|entry| entry.0.as_bytes() == partition_key);
-        Ok(rows)
+        Ok((rows, false))
     }
 
     /// Clustering-slice-aware partition-targeted scan (Issue #954, Epic #951).
@@ -1307,16 +1333,21 @@ impl SSTableManager {
     /// [`scan`](Self::scan) — identical to what the `not(tombstones)`
     /// `scan_partition` returns — which keeps the query executor free of any
     /// `tombstones` cfg branching.
+    ///
+    /// Returns `(rows, engaged)` with `engaged == false`: this is a full scan +
+    /// retain with NO SSTable prune, so the caller MUST report an honest fallback
+    /// access path (`FallbackReason::TombstonesBuildNoPrune`) rather than a targeted
+    /// label, even though the rows match the pruned build byte-for-byte (Epic #951).
     #[cfg(feature = "tombstones")]
     pub async fn scan_partition(
         &self,
         table_id: &TableId,
         partition_key: &[u8],
         schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
+    ) -> Result<(Vec<(RowKey, Value)>, bool)> {
         let mut rows = self.scan(table_id, None, None, None, schema).await?;
         rows.retain(|entry| entry.0.as_bytes() == partition_key);
-        Ok(rows)
+        Ok((rows, false))
     }
 
     /// Resolve the reader list for a table id, trying the fully-qualified

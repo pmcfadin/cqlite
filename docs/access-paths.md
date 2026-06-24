@@ -38,6 +38,7 @@ assertion in a test, not a silently "successful" full scan.
 | `PartitionKeyEncodingFailed` | The constrained values could not be encoded to the on-disk key form (e.g. type mismatch). Full scan is the safe fallback. | — |
 | `MetadataScanPath` | The WRITETIME/TTL metadata projection falls back to a full scan when the partition key is NOT fully constrained by equality — e.g. `WRITETIME(col)` with an `IN`-list partition key (the IN-metadata fan-out is a documented follow-up) or no/partial restriction. A fully-constrained `WHERE pk = ?` metadata projection is now targeted (`MetadataPartitionLookup`, #962). | #962 (IN-metadata fan-out follow-up) |
 | `LegacyExecutorPath` | The legacy `QueryExecutor` (simple-id-lookup and prepared SELECTs) issues an unconditional `storage.scan`. | #962 (route through modern executor) + #961 (param binding) |
+| `TombstonesBuildNoPrune` | The `tombstones` build compiles out the partition-targeted prune: `scan_partition` / `scan_partition_with_cell_metadata` become full-scan + retain fallbacks with NO bloom/BTI pruning. A fully-constrained `WHERE pk = ?` (or `IN (...)` / WRITETIME-TTL) therefore opens the whole table even though the rows are byte-identical to the pruned build. The executor reports this honest reason whenever the storage call returns `engaged == false`, so a targeted label is never claimed for a full-table scan. | Epic #951 (re-enable prune on the `tombstones` build) |
 
 ## How the signal is exposed
 
@@ -67,6 +68,7 @@ Two observable surfaces, both from the modern `SelectExecutor`:
 | Streaming `WHERE pk = ?` (full PK, `=`) | `SelectExecutor::execute_streaming` | `StreamingPartitionLookup` (via probe) |
 | Streaming, no/partial restriction | `SelectExecutor::execute_streaming` | `FallbackFullScan { ... }` (via probe) |
 | Legacy `QueryExecutor` (simple-id-lookup, prepared) | `engine.rs` legacy route / `prepared.rs` | **does not report yet** — see below |
+| Any targeted surface (`WHERE pk = ?` / `IN` / WRITETIME-TTL) under the `tombstones` build | `SelectExecutor` (materializing + streaming) | `FallbackFullScan { TombstonesBuildNoPrune }` — the `tombstones` build compiles out the prune, so the storage call returns `engaged == false` and the executor reports the honest full-scan reason instead of `PartitionLookup` / `MultiPartitionLookup` / `MetadataPartitionLookup` / `StreamingPartitionLookup`. Rows are byte-identical to the pruned build. |
 
 ## Honest-reporting mandate (#960 vs #962)
 

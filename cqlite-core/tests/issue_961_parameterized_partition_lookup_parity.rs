@@ -29,7 +29,18 @@
 //! failed) when the data isn't present, matching the repo's other dataset-backed
 //! integration tests.
 
-#![cfg(all(feature = "state_machine", feature = "cli-helpers"))]
+// Epic #951 (honest access paths): these tests assert the bound `WHERE pk = ?`
+// reports the TARGETED `AccessPath::PartitionLookup` (and that param/prepared
+// routes match literal routes). The `tombstones` build compiles out the
+// partition-targeted prune, so the executor honestly reports
+// `FallbackFullScan { TombstonesBuildNoPrune }` there instead — making the
+// targeted-label assertions inapplicable. Gate the file `not(tombstones)` so
+// the rows-parity AND access-path assertions only run where the prune exists.
+#![cfg(all(
+    feature = "state_machine",
+    feature = "cli-helpers",
+    not(feature = "tombstones")
+))]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

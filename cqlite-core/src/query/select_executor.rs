@@ -459,6 +459,29 @@ enum PartitionLookupOutcome {
     Fallback(FallbackReason),
 }
 
+/// Resolve the HONEST access path for a partition-targeted storage call (Epic
+/// #951).
+///
+/// The executor decides a query *could* use a targeted lookup (`targeted` is the
+/// label it would report — `PartitionLookup`, `MultiPartitionLookup`,
+/// `MetadataPartitionLookup`, or `StreamingPartitionLookup`). But the storage
+/// call reports, via `engaged`, whether it *actually* pruned the SSTable set. On
+/// the `tombstones` build the targeted surfaces compile out the prune and become
+/// full-scan + retain fallbacks (`engaged == false`); claiming a targeted label
+/// there would dishonestly report a targeted path for a query that opened the
+/// whole table. When `engaged` is false this returns
+/// `FallbackFullScan { TombstonesBuildNoPrune }`. The returned ROWS are identical
+/// either way — this only governs the *reported* access path.
+fn honest_targeted_path(targeted: AccessPath, engaged: bool) -> AccessPath {
+    if engaged {
+        targeted
+    } else {
+        AccessPath::FallbackFullScan {
+            reason: FallbackReason::TombstonesBuildNoPrune,
+        }
+    }
+}
+
 /// Maximum number of `IN` partition keys served by independent targeted lookups
 /// before falling back to a full scan (Issue #955).
 ///
@@ -1627,11 +1650,17 @@ impl SelectExecutor {
                     let lookup = classify_partition_lookup(predicates, schema_opt.as_ref());
                     if let PartitionLookupOutcome::Targeted(ref pk_bytes) = lookup {
                         // Issue #960: the streaming analogue of the materializing
-                        // partition-targeted lookup.
-                        crate::query::access_path::record(AccessPath::StreamingPartitionLookup);
-                        let rows = storage
+                        // partition-targeted lookup. Epic #951 (honest paths): the
+                        // `tombstones` build's `scan_partition` is a full-scan +
+                        // retain with NO prune, reported via `engaged == false`; only
+                        // claim `StreamingPartitionLookup` when it really pruned.
+                        let (rows, engaged) = storage
                             .scan_partition(table, pk_bytes, schema_opt.as_ref())
                             .await?;
+                        crate::query::access_path::record(honest_targeted_path(
+                            AccessPath::StreamingPartitionLookup,
+                            engaged,
+                        ));
                         for (key, value) in rows {
                             let part_sig = per_partition_limit.map(|_| key.0.clone());
                             let Some(row) =
@@ -1675,14 +1704,23 @@ impl SelectExecutor {
                     // token to match full-scan order, then drive the same per-row
                     // pipeline (predicates, PER PARTITION LIMIT, OFFSET, LIMIT).
                     if let PartitionLookupOutcome::MultiTargeted(ref pk_keys) = lookup {
-                        crate::query::access_path::record(AccessPath::MultiPartitionLookup);
+                        // Epic #951 (honest paths): each lookup reports whether it
+                        // pruned. On the `tombstones` build every call full-scans
+                        // (`engaged == false`); claim `MultiPartitionLookup` only when
+                        // the lookups actually pruned, else report the honest fallback.
                         let mut combined = Vec::new();
+                        let mut all_engaged = true;
                         for pk_bytes in pk_keys {
-                            let rows = storage
+                            let (rows, engaged) = storage
                                 .scan_partition(table, pk_bytes, schema_opt.as_ref())
                                 .await?;
+                            all_engaged &= engaged;
                             combined.extend(rows);
                         }
+                        crate::query::access_path::record(honest_targeted_path(
+                            AccessPath::MultiPartitionLookup,
+                            all_engaged,
+                        ));
                         sort_rows_by_token(&mut combined);
                         for (key, value) in combined {
                             let part_sig = per_partition_limit.map(|_| key.0.clone());
@@ -1870,11 +1908,20 @@ impl SelectExecutor {
                         pk_bytes.len(),
                         table
                     );
-                    context.access_path = Some(AccessPath::MetadataPartitionLookup);
-                    crate::query::access_path::record(AccessPath::MetadataPartitionLookup);
-                    self.storage
+                    // Epic #951 (honest paths): the `tombstones` build's metadata
+                    // lookup is a full metadata scan + retain with NO prune,
+                    // reported via `engaged == false`; claim
+                    // `MetadataPartitionLookup` only when it really pruned, else
+                    // report the honest `TombstonesBuildNoPrune` fallback (the
+                    // rows are byte-identical either way).
+                    let (rows, engaged) = self
+                        .storage
                         .scan_partition_with_cell_metadata(table, &pk_bytes, schema_opt.as_ref())
-                        .await?
+                        .await?;
+                    let path = honest_targeted_path(AccessPath::MetadataPartitionLookup, engaged);
+                    context.access_path = Some(path.clone());
+                    crate::query::access_path::record(path);
+                    rows
                 }
                 // Issue #962: `WHERE pk IN (...)` on the metadata path is NOT yet
                 // fanned out to N targeted metadata lookups; it still full-scans.
@@ -1967,11 +2014,19 @@ impl SelectExecutor {
                     }
                     #[cfg(feature = "tombstones")]
                     {
-                        context.access_path = Some(AccessPath::PartitionLookup);
-                        crate::query::access_path::record(AccessPath::PartitionLookup);
-                        self.storage
+                        // Epic #951 (honest paths): the `tombstones` build's
+                        // `scan_partition` is a full scan + retain with NO prune,
+                        // reported via `engaged == false`. Report the honest
+                        // fallback rather than a fake `PartitionLookup`; the rows
+                        // are byte-identical to the pruned build.
+                        let (rows, engaged) = self
+                            .storage
                             .scan_partition(table, &pk_bytes, schema_opt.as_ref())
-                            .await?
+                            .await?;
+                        let path = honest_targeted_path(AccessPath::PartitionLookup, engaged);
+                        context.access_path = Some(path.clone());
+                        crate::query::access_path::record(path);
+                        rows
                     }
                 }
                 PartitionLookupOutcome::MultiTargeted(pk_keys) => {
@@ -1982,17 +2037,24 @@ impl SelectExecutor {
                     );
                     // Issue #955/#960: `WHERE pk IN (...)` over the complete key
                     // is the union of N independent partition-targeted lookups,
-                    // each of which prunes SSTables. Report MultiPartitionLookup.
-                    context.access_path = Some(AccessPath::MultiPartitionLookup);
-                    crate::query::access_path::record(AccessPath::MultiPartitionLookup);
+                    // each of which prunes SSTables. Epic #951 (honest paths): on
+                    // the `tombstones` build each lookup full-scans + retains with
+                    // NO prune (`engaged == false`); report `MultiPartitionLookup`
+                    // only when the lookups actually pruned, else the honest
+                    // `TombstonesBuildNoPrune` fallback. Rows are unchanged.
                     let mut combined = Vec::new();
+                    let mut all_engaged = true;
                     for pk_bytes in &pk_keys {
-                        let rows = self
+                        let (rows, engaged) = self
                             .storage
                             .scan_partition(table, pk_bytes, schema_opt.as_ref())
                             .await?;
+                        all_engaged &= engaged;
                         combined.extend(rows);
                     }
+                    let path = honest_targeted_path(AccessPath::MultiPartitionLookup, all_engaged);
+                    context.access_path = Some(path.clone());
+                    crate::query::access_path::record(path);
                     // Order the union to equal a full scan filtered to these keys:
                     // partitions are stored token-ordered, so sort the combined
                     // rows by (partition token, raw key bytes). A *stable* sort
@@ -2742,6 +2804,41 @@ mod tests {
             columns: vec![],
             comments: std::collections::HashMap::new(),
             dropped_columns: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Epic #951 (honest access paths): the executor's per-branch record decision
+    /// must report the TARGETED label only when the storage call actually engaged
+    /// a pruned path (`engaged == true`); when the prune is compiled out on the
+    /// `tombstones` build the call returns `engaged == false` and the reported
+    /// path MUST be the honest `FallbackFullScan { TombstonesBuildNoPrune }`. This
+    /// pins the record-decision in EVERY build (including `tombstones`, where the
+    /// integration tests that assert targeted labels are cfg'd out).
+    #[test]
+    fn honest_targeted_path_reports_fallback_when_not_engaged() {
+        // Engaged: the targeted label is reported as-is, for each targeted surface.
+        for targeted in [
+            AccessPath::PartitionLookup,
+            AccessPath::MultiPartitionLookup,
+            AccessPath::MetadataPartitionLookup,
+            AccessPath::StreamingPartitionLookup,
+        ] {
+            let engaged = honest_targeted_path(targeted.clone(), true);
+            assert_eq!(engaged, targeted, "engaged must keep the targeted label");
+            assert!(engaged.is_targeted());
+
+            // Not engaged (tombstones build / no prune): honest full-scan fallback,
+            // regardless of which targeted surface was attempted.
+            let fallback = honest_targeted_path(targeted, false);
+            assert_eq!(
+                fallback,
+                AccessPath::FallbackFullScan {
+                    reason: FallbackReason::TombstonesBuildNoPrune,
+                },
+                "a non-engaged targeted call must report the honest no-prune fallback"
+            );
+            assert!(fallback.is_full_scan());
+            assert!(!fallback.is_targeted());
         }
     }
 
