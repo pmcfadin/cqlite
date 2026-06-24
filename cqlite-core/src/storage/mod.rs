@@ -62,7 +62,7 @@ impl StorageEngine {
     /// This is now a read-only storage layer focused on SSTable access.
     #[tracing::instrument(
         name = "storage.engine.open",
-        skip(path, config, platform),
+        skip_all,
         fields(sstables = tracing::field::Empty, bytes = tracing::field::Empty)
     )]
     pub async fn open(
@@ -166,7 +166,7 @@ impl StorageEngine {
     /// ```
     #[tracing::instrument(
         name = "storage.engine.open",
-        skip(path, discovered_table_dirs, config, platform),
+        skip_all,
         fields(sstables = tracing::field::Empty, bytes = tracing::field::Empty)
     )]
     pub async fn open_with_sstables(
