@@ -131,11 +131,14 @@ impl TocWriter {
             SSTableComponent::Digest => 2,
             SSTableComponent::TOC => 3,
             SSTableComponent::CompressionInfo => 4,
-            SSTableComponent::Filter => 5,
-            SSTableComponent::Index => 6,
-            SSTableComponent::Summary => 7,
-            SSTableComponent::Partitions => 8,
-            SSTableComponent::Rows => 9,
+            // CRC.db (uncompressed per-chunk CRC) sorts next to CompressionInfo,
+            // its compressed-table counterpart; the two are mutually exclusive.
+            SSTableComponent::Crc => 5,
+            SSTableComponent::Filter => 6,
+            SSTableComponent::Index => 7,
+            SSTableComponent::Summary => 8,
+            SSTableComponent::Partitions => 9,
+            SSTableComponent::Rows => 10,
         });
 
         // Create file with buffered writing
