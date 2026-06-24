@@ -12,7 +12,7 @@
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use opentelemetry::metrics::{Counter, Histogram, Meter};
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry::{global, KeyValue};
 use opentelemetry_otlp::{MetricExporter, Protocol, SpanExporter, WithExportConfig};
@@ -214,8 +214,16 @@ pub fn tracing_layer<S>() -> impl tracing_subscriber::Layer<S>
 where
     S: tracing::Subscriber + for<'span> tracing_subscriber::registry::LookupSpan<'span>,
 {
-    let provider = TRACER_PROVIDER.get_or_init(|| SdkTracerProvider::builder().build());
-    let tracer = provider.tracer(SCOPE);
+    // Use the provider installed by `init` if present. If `init` has not run
+    // yet, build an EPHEMERAL no-export provider for this layer WITHOUT storing
+    // it — otherwise a later enabled `init` would be unable to install its
+    // exporting provider. The SdkTracer keeps the provider's shared state alive,
+    // so dropping the local handle is fine; this layer simply drops spans until
+    // (and unless) `init` runs. Callers should `init` before composing.
+    let tracer = match TRACER_PROVIDER.get() {
+        Some(provider) => provider.tracer(SCOPE),
+        None => SdkTracerProvider::builder().build().tracer(SCOPE),
+    };
     tracing_opentelemetry::layer().with_tracer(tracer)
 }
 
@@ -225,44 +233,125 @@ fn meter() -> &'static Meter {
     METER.get_or_init(|| global::meter(SCOPE))
 }
 
-/// Lazily-built, cached instruments for the catalog metrics. Building an
-/// instrument per record call would be wasteful, so we cache by name.
+/// Lazily-built, cached instruments for every catalog metric. Building an
+/// instrument on each record call is wasteful (re-registration overhead and
+/// possible duplicate-instrument churn), so all catalog instruments are
+/// constructed once and reused. Non-catalog names fall back to an ad-hoc
+/// instrument so call sites never silently drop data.
 struct Instruments {
+    read_rows: Counter<u64>,
+    read_bytes: Counter<u64>,
+    read_partitions: Counter<u64>,
+    query_rows: Counter<u64>,
     errors_total: Counter<u64>,
+    read_duration: Histogram<f64>,
+    query_duration: Histogram<f64>,
+    compaction_duration: Histogram<f64>,
+    sstables_open: Gauge<i64>,
 }
 
 fn instruments() -> &'static Instruments {
     static INSTRUMENTS: OnceLock<Instruments> = OnceLock::new();
-    INSTRUMENTS.get_or_init(|| Instruments {
-        errors_total: meter()
-            .u64_counter(catalog::ERRORS_TOTAL)
-            .with_unit(catalog::unit::ERRORS)
-            .with_description("Total errors observed, keyed by bounded {category, subsystem}.")
-            .build(),
+    INSTRUMENTS.get_or_init(|| {
+        let m = meter();
+        Instruments {
+            read_rows: m
+                .u64_counter(catalog::READ_ROWS)
+                .with_unit(catalog::unit::ROWS)
+                .with_description("Total rows materialised by the read path.")
+                .build(),
+            read_bytes: m
+                .u64_counter(catalog::READ_BYTES)
+                .with_unit(catalog::unit::BYTES)
+                .with_description("Total bytes read from Data.db (post-decompression).")
+                .build(),
+            read_partitions: m
+                .u64_counter(catalog::READ_PARTITIONS)
+                .with_unit(catalog::unit::PARTITIONS)
+                .with_description("Total partitions scanned.")
+                .build(),
+            query_rows: m
+                .u64_counter(catalog::QUERY_ROWS)
+                .with_unit(catalog::unit::ROWS)
+                .with_description("Total rows returned to callers by the query engine.")
+                .build(),
+            errors_total: m
+                .u64_counter(catalog::ERRORS_TOTAL)
+                .with_unit(catalog::unit::ERRORS)
+                .with_description("Total errors observed, keyed by bounded {category, subsystem}.")
+                .build(),
+            read_duration: m
+                .f64_histogram(catalog::READ_DURATION)
+                .with_unit(catalog::unit::SECONDS)
+                .with_description("Single read/scan operation duration in seconds.")
+                .build(),
+            query_duration: m
+                .f64_histogram(catalog::QUERY_DURATION)
+                .with_unit(catalog::unit::SECONDS)
+                .with_description("End-to-end query execution duration in seconds.")
+                .build(),
+            compaction_duration: m
+                .f64_histogram(catalog::COMPACTION_DURATION)
+                .with_unit(catalog::unit::SECONDS)
+                .with_description("Compaction run duration in seconds.")
+                .build(),
+            sstables_open: m
+                .i64_gauge(catalog::SSTABLES_OPEN)
+                .with_unit(catalog::unit::SSTABLES)
+                .with_description("Number of SSTables currently held open.")
+                .build(),
+        }
     })
 }
 
 /// Add to a u64 counter identified by a catalog name.
 ///
-/// Unknown names build an ad-hoc counter so call sites never silently drop data;
-/// catalog names should always be used.
+/// Catalog names use the cached instrument; unknown names build an ad-hoc
+/// counter so call sites never silently drop data (catalog names should always
+/// be used).
 pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue]) {
-    if name == catalog::ERRORS_TOTAL {
-        instruments().errors_total.add(value, attributes);
+    let i = instruments();
+    let counter = if name == catalog::READ_ROWS {
+        &i.read_rows
+    } else if name == catalog::READ_BYTES {
+        &i.read_bytes
+    } else if name == catalog::READ_PARTITIONS {
+        &i.read_partitions
+    } else if name == catalog::QUERY_ROWS {
+        &i.query_rows
+    } else if name == catalog::ERRORS_TOTAL {
+        &i.errors_total
+    } else {
+        meter().u64_counter(name).build().add(value, attributes);
         return;
-    }
-    meter().u64_counter(name).build().add(value, attributes);
+    };
+    counter.add(value, attributes);
 }
 
 /// Record into an f64 histogram identified by a catalog name.
 pub(crate) fn record_histogram(name: &'static str, value: f64, attributes: &[KeyValue]) {
-    let h: Histogram<f64> = meter().f64_histogram(name).build();
-    h.record(value, attributes);
+    let i = instruments();
+    let hist = if name == catalog::READ_DURATION {
+        &i.read_duration
+    } else if name == catalog::QUERY_DURATION {
+        &i.query_duration
+    } else if name == catalog::COMPACTION_DURATION {
+        &i.compaction_duration
+    } else {
+        meter().f64_histogram(name).build().record(value, attributes);
+        return;
+    };
+    hist.record(value, attributes);
 }
 
 /// Record an i64 gauge identified by a catalog name.
 pub(crate) fn record_gauge(name: &'static str, value: i64, attributes: &[KeyValue]) {
-    meter().i64_gauge(name).build().record(value, attributes);
+    let i = instruments();
+    if name == catalog::SSTABLES_OPEN {
+        i.sstables_open.record(value, attributes);
+    } else {
+        meter().i64_gauge(name).build().record(value, attributes);
+    }
 }
 
 /// Mark the currently-active `tracing` span as errored and tag it with the

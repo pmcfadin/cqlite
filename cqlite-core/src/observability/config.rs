@@ -135,7 +135,12 @@ impl ObservabilityConfig {
         }
         if let Some(v) = env_str("CQLITE_OTEL_SAMPLING_RATIO") {
             if let Ok(r) = v.trim().parse::<f64>() {
-                cfg.sampling_ratio = r.clamp(0.0, 1.0);
+                // Reject non-finite values (NaN, ±inf) — they survive `clamp`
+                // and would violate the documented [0.0, 1.0] contract. Keep the
+                // default in that case.
+                if r.is_finite() {
+                    cfg.sampling_ratio = r.clamp(0.0, 1.0);
+                }
             }
         }
         if let Some(v) = env_str("CQLITE_OTEL_TIMEOUT_MS") {
@@ -144,8 +149,18 @@ impl ObservabilityConfig {
             }
         }
 
-        cfg.sampling_ratio = cfg.sampling_ratio.clamp(0.0, 1.0);
+        cfg.sampling_ratio = sanitize_ratio(cfg.sampling_ratio);
         cfg
+    }
+}
+
+/// Clamp a sampling ratio into `[0.0, 1.0]`, falling back to full sampling for
+/// non-finite inputs (NaN / ±inf) which would otherwise bypass the clamp.
+fn sanitize_ratio(r: f64) -> f64 {
+    if r.is_finite() {
+        r.clamp(0.0, 1.0)
+    } else {
+        1.0
     }
 }
 
@@ -181,9 +196,10 @@ impl ObservabilityConfigBuilder {
         self.config.service_version = version.into();
         self
     }
-    /// Set the trace-ID-ratio sampling probability (clamped to `[0.0, 1.0]`).
+    /// Set the trace-ID-ratio sampling probability (clamped to `[0.0, 1.0]`;
+    /// non-finite values fall back to full sampling).
     pub fn sampling_ratio(mut self, ratio: f64) -> Self {
-        self.config.sampling_ratio = ratio.clamp(0.0, 1.0);
+        self.config.sampling_ratio = sanitize_ratio(ratio);
         self
     }
     /// Set the exporter timeout.
@@ -194,7 +210,7 @@ impl ObservabilityConfigBuilder {
     /// Finish building.
     pub fn build(self) -> ObservabilityConfig {
         let mut cfg = self.config;
-        cfg.sampling_ratio = cfg.sampling_ratio.clamp(0.0, 1.0);
+        cfg.sampling_ratio = sanitize_ratio(cfg.sampling_ratio);
         cfg
     }
 }
@@ -254,6 +270,15 @@ mod tests {
     fn negative_ratio_clamps_to_zero() {
         let cfg = ObservabilityConfig::builder().sampling_ratio(-1.0).build();
         assert_eq!(cfg.sampling_ratio, 0.0);
+    }
+
+    #[test]
+    fn non_finite_ratio_falls_back_to_full_sampling() {
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let cfg = ObservabilityConfig::builder().sampling_ratio(bad).build();
+            assert!(cfg.sampling_ratio.is_finite());
+            assert_eq!(cfg.sampling_ratio, 1.0);
+        }
     }
 
     #[test]
