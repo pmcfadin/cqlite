@@ -887,11 +887,26 @@ impl ConfigBuilder {
         if let Some(ref version) = cli.otel_service_version {
             self.config.observability.service_version = Some(version.clone());
         }
-        if let Some(ratio) = cli.otel_sampling_ratio {
-            self.config.observability.sampling_ratio = Some(ratio);
+        // The numeric OTel flags are carried as raw strings so a malformed
+        // `CQLITE_OTEL_*` env value cannot abort `Cli::parse()` for the whole
+        // CLI (including builds without the `observability` feature). Parse them
+        // here with the same lenient semantics as
+        // `cqlite_core::observability::ObservabilityConfig::from_env`: on bad
+        // input (NaN/inf/garbage) keep the existing/default value rather than
+        // erroring. Non-finite ratios are rejected (they survive `clamp`); the
+        // final clamp into [0.0, 1.0] is applied by the core builder in
+        // `to_core()`.
+        if let Some(ref raw) = cli.otel_sampling_ratio {
+            if let Ok(ratio) = raw.trim().parse::<f64>() {
+                if ratio.is_finite() {
+                    self.config.observability.sampling_ratio = Some(ratio);
+                }
+            }
         }
-        if let Some(ms) = cli.otel_timeout_ms {
-            self.config.observability.timeout_ms = Some(ms);
+        if let Some(ref raw) = cli.otel_timeout_ms {
+            if let Ok(ms) = raw.trim().parse::<u64>() {
+                self.config.observability.timeout_ms = Some(ms);
+            }
         }
 
         self
@@ -1177,6 +1192,72 @@ mod tests {
 
         env::remove_var("CQLITE_OTEL_ENABLED");
         env::remove_var("CQLITE_OTEL_ENDPOINT");
+    }
+
+    /// A malformed `CQLITE_OTEL_SAMPLING_RATIO` / `CQLITE_OTEL_TIMEOUT_MS` env
+    /// value must NOT abort `Cli::parse()` and must fall back to defaults,
+    /// matching `ObservabilityConfig::from_env` semantics (issue #1033). These
+    /// flags are carried as raw strings and parsed leniently in the config
+    /// layer, so a bad env value can never break the whole CLI at parse time.
+    #[test]
+    #[serial]
+    fn test_observability_malformed_numeric_env_falls_back_to_defaults() {
+        use std::env;
+
+        env::set_var("CQLITE_OTEL_SAMPLING_RATIO", "not-a-number");
+        env::set_var("CQLITE_OTEL_TIMEOUT_MS", "xyz");
+
+        // The bad env values are surfaced to clap as raw strings; parse must
+        // not error.
+        let cli = Cli::parse_from(&["cqlite"]);
+        assert_eq!(cli.otel_sampling_ratio.as_deref(), Some("not-a-number"));
+        assert_eq!(cli.otel_timeout_ms.as_deref(), Some("xyz"));
+
+        // The config layer parses leniently and keeps the defaults (None ->
+        // core defaults) on garbage input rather than propagating an error.
+        let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
+        assert_eq!(config.observability.sampling_ratio, None);
+        assert_eq!(config.observability.timeout_ms, None);
+
+        // Non-finite values (NaN / inf) are also rejected — they would survive
+        // a naive clamp.
+        env::set_var("CQLITE_OTEL_SAMPLING_RATIO", "inf");
+        let cli = Cli::parse_from(&["cqlite"]);
+        let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
+        assert_eq!(config.observability.sampling_ratio, None);
+
+        // A well-formed env value is still honored.
+        env::set_var("CQLITE_OTEL_SAMPLING_RATIO", "0.25");
+        env::set_var("CQLITE_OTEL_TIMEOUT_MS", "2500");
+        let cli = Cli::parse_from(&["cqlite"]);
+        let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
+        assert_eq!(config.observability.sampling_ratio, Some(0.25));
+        assert_eq!(config.observability.timeout_ms, Some(2500));
+
+        env::remove_var("CQLITE_OTEL_SAMPLING_RATIO");
+        env::remove_var("CQLITE_OTEL_TIMEOUT_MS");
+    }
+
+    /// An explicit malformed `--otel-sampling-ratio` flag on the command line
+    /// is tolerated the same way (falls back to default) rather than aborting
+    /// the CLI.
+    #[test]
+    #[serial]
+    fn test_observability_malformed_numeric_flag_is_tolerated() {
+        use std::env;
+        env::remove_var("CQLITE_OTEL_SAMPLING_RATIO");
+        env::remove_var("CQLITE_OTEL_TIMEOUT_MS");
+
+        let cli = Cli::parse_from(&[
+            "cqlite",
+            "--otel-sampling-ratio",
+            "garbage",
+            "--otel-timeout-ms",
+            "garbage",
+        ]);
+        let config = ConfigBuilder::from_defaults().with_flags(&cli).build();
+        assert_eq!(config.observability.sampling_ratio, None);
+        assert_eq!(config.observability.timeout_ms, None);
     }
 
     #[test]

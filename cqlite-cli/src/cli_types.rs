@@ -180,12 +180,25 @@ pub struct Cli {
     pub otel_service_version: Option<String>,
 
     /// Trace sampling ratio in [0.0, 1.0].
+    ///
+    /// Held as a raw string (not a clap-parsed `f64`) so that a malformed
+    /// `CQLITE_OTEL_SAMPLING_RATIO` env value never aborts `Cli::parse()` for
+    /// the entire CLI. The value is parsed leniently in the config layer
+    /// (`config.rs`), matching `ObservabilityConfig::from_env` semantics: bad
+    /// input (NaN/inf/garbage) silently falls back to the default rather than
+    /// erroring. A bad value passed explicitly on the command line is also
+    /// tolerated this way.
     #[arg(long, value_name = "RATIO", env = "CQLITE_OTEL_SAMPLING_RATIO")]
-    pub otel_sampling_ratio: Option<f64>,
+    pub otel_sampling_ratio: Option<String>,
 
     /// OTLP exporter timeout in milliseconds.
+    ///
+    /// Held as a raw string (not a clap-parsed `u64`) for the same reason as
+    /// `otel_sampling_ratio`: a malformed `CQLITE_OTEL_TIMEOUT_MS` env value
+    /// must not abort the whole CLI at parse time. Parsed leniently in the
+    /// config layer, falling back to the default on bad input.
     #[arg(long, value_name = "MS", env = "CQLITE_OTEL_TIMEOUT_MS")]
-    pub otel_timeout_ms: Option<u64>,
+    pub otel_timeout_ms: Option<String>,
 
     #[command(subcommand)]
     pub command: Option<Commands>,
