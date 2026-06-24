@@ -61,6 +61,15 @@ pub mod attr {
     pub const SSTABLE_FORMAT: &str = "cqlite.sstable.format";
     /// Compression algorithm, e.g. `"lz4"`, `"snappy"`, `"none"`. Bounded.
     pub const COMPRESSION: &str = "cqlite.compression";
+    /// Outcome of a lookup/check, exactly `"hit"` or `"miss"`. Bounded to two
+    /// values; used by partition-lookup and bloom-check counters so a single
+    /// metric carries both arms for ratio dashboards.
+    pub const RESULT: &str = "cqlite.result";
+    /// Read-path access route for a partition lookup, e.g. `"index"` (BIG
+    /// Index.db) or `"bti_trie"` (BTI Partitions.db). Bounded by the code.
+    /// Distinct from [`ACCESS_PATH`], which is the query-engine SELECT access
+    /// path (#1035); this is the storage-layer lookup route (#1034).
+    pub const LOOKUP_ROUTE: &str = "cqlite.read.lookup_route";
     /// Access path a `SELECT` chose for its SSTable-scan step (issue #1035).
     ///
     /// Values come from [`crate::query::access_path::AccessPath::label`] — a
@@ -97,6 +106,42 @@ pub const READ_PARTITIONS: &str = "cqlite.read.partitions";
 /// Distribution of single read/scan operation durations in seconds. Bounded
 /// attributes: [`attr::SSTABLE_FORMAT`].
 pub const READ_DURATION: &str = "cqlite.read.duration";
+
+/// `cqlite.storage.open.sstables` — counter `{sstable}`.
+///
+/// SSTables discovered and opened by a single [`StorageEngine`] open, summed
+/// across opens over the process lifetime. No high-cardinality attributes.
+pub const STORAGE_OPEN_SSTABLES: &str = "cqlite.storage.open.sstables";
+
+/// `cqlite.storage.open.bytes` — counter `By`.
+///
+/// Total on-disk Data.db bytes across the SSTables discovered by a
+/// [`StorageEngine`] open. No high-cardinality attributes.
+pub const STORAGE_OPEN_BYTES: &str = "cqlite.storage.open.bytes";
+
+/// `cqlite.storage.open.tables` — counter `1`.
+///
+/// Total logical tables represented by the SSTables discovered at
+/// [`StorageEngine`] open. No high-cardinality attributes.
+pub const STORAGE_OPEN_TABLES: &str = "cqlite.storage.open.tables";
+
+/// `cqlite.read.partition_lookup.total` — counter `1`.
+///
+/// Total partition point lookups attempted on the read path, one increment per
+/// lookup. Bounded attributes: [`attr::RESULT`] (`hit`/`miss`),
+/// [`attr::ACCESS_PATH`] (`index`/`bti_trie`), and [`attr::SSTABLE_FORMAT`].
+/// Carrying `result` as an attribute (instead of separate metric names) lets a
+/// dashboard compute hit ratio from one series.
+pub const READ_PARTITION_LOOKUP: &str = "cqlite.read.partition_lookup.total";
+
+/// `cqlite.read.bloom.checks` — counter `1`.
+///
+/// Total bloom-filter / BTI-trie present-or-absent checks on the read path, one
+/// increment per check. Bounded attributes: [`attr::RESULT`] (`hit` = maybe
+/// present, `miss` = definitely absent) and [`attr::SSTABLE_FORMAT`]. The
+/// miss-rate of this metric is the pruning effectiveness; pairing it with
+/// [`READ_PARTITION_LOOKUP`] reveals the bloom false-positive rate.
+pub const READ_BLOOM_CHECKS: &str = "cqlite.read.bloom.checks";
 
 /// `cqlite.query.duration` — histogram `s`.
 ///
@@ -144,6 +189,11 @@ pub const ALL_METRICS: &[&str] = &[
     READ_BYTES,
     READ_PARTITIONS,
     READ_DURATION,
+    READ_PARTITION_LOOKUP,
+    READ_BLOOM_CHECKS,
+    STORAGE_OPEN_SSTABLES,
+    STORAGE_OPEN_BYTES,
+    STORAGE_OPEN_TABLES,
     QUERY_DURATION,
     QUERY_ROWS,
     QUERY_ROWS_SCANNED,
@@ -176,6 +226,8 @@ mod tests {
             attr::SUBSYSTEM,
             attr::SSTABLE_FORMAT,
             attr::COMPRESSION,
+            attr::RESULT,
+            attr::LOOKUP_ROUTE,
             attr::ACCESS_PATH,
             attr::PLAN_TYPE,
         ] {

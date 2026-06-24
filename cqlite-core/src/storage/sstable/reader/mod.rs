@@ -61,7 +61,7 @@ use header::{
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -253,9 +253,84 @@ fn mmap_advice_for(prefetch: PrefetchMode) -> Option<memmap2::Advice> {
     }
 }
 
+/// Process-wide count of currently-open [`SSTableReader`]s, the source value
+/// for the [`SSTABLES_OPEN`](crate::observability::catalog::SSTABLES_OPEN)
+/// gauge. Tracked PER FORMAT so the gauge — which carries the
+/// [`cqlite.sstable.format`](crate::observability::catalog::attr::SSTABLE_FORMAT)
+/// attribute — reports the correct live count for each `big`/`bti` label series
+/// instead of a single global total stamped onto every series. Incremented when
+/// [`SSTableReader::open`] succeeds and decremented when a reader is dropped, so
+/// each gauge series reflects live readers regardless of the `observability`
+/// feature state (the helper calls are no-ops when off).
+static SSTABLES_OPEN_COUNT_BIG: AtomicI64 = AtomicI64::new(0);
+static SSTABLES_OPEN_COUNT_BTI: AtomicI64 = AtomicI64::new(0);
+
+/// Select the per-format open-reader counter for a `sstable_format_label()`
+/// value (`"big"` / `"bti"`). Defaults to the BIG counter for any unexpected
+/// label so the value is never silently dropped; the label set is bounded to
+/// the two [`sstable_format_label`](SSTableReader::sstable_format_label) returns.
+fn sstables_open_count_for(format: &str) -> &'static AtomicI64 {
+    match format {
+        "bti" => &SSTABLES_OPEN_COUNT_BTI,
+        _ => &SSTABLES_OPEN_COUNT_BIG,
+    }
+}
+
 impl SSTableReader {
-    /// Open an SSTable file for reading
+    /// Open an SSTable file for reading.
+    ///
+    /// Instrumented (epic #1031 / #1034): wraps the open in a
+    /// `sstable.reader.open` span, increments the [`SSTABLES_OPEN`] gauge on
+    /// success, and records an error on the `reader` subsystem when open fails.
+    ///
+    /// [`SSTABLES_OPEN`]: crate::observability::catalog::SSTABLES_OPEN
     pub async fn open(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
+        use crate::observability::{self as obs, catalog};
+        use tracing::Instrument as _;
+
+        let span = tracing::debug_span!(
+            "sstable.reader.open",
+            file_size = tracing::field::Empty,
+            sstable_format = tracing::field::Empty,
+        );
+
+        // Instrument the future rather than holding an entered guard across the
+        // `.await`: entering a span guard and then awaiting can attach unrelated
+        // async work scheduled on this task to the span. `Instrument` enters the
+        // span only while this specific future is polled.
+        let result = Self::open_inner(path, config, platform)
+            .instrument(span.clone())
+            .await;
+        match &result {
+            Ok(reader) => {
+                let format = reader.sstable_format_label();
+                span.record("file_size", reader.stats.file_size);
+                span.record("sstable_format", format);
+                // SSTABLES_OPEN is a snapshot gauge of the live reader count;
+                // record the current PER-FORMAT count after this open succeeds so
+                // the format-attributed gauge series stays correct under mixed
+                // BIG/BTI readers.
+                let now = sstables_open_count_for(format).fetch_add(1, Ordering::Relaxed) + 1;
+                obs::record_gauge(
+                    catalog::SSTABLES_OPEN,
+                    now,
+                    &[(catalog::attr::SSTABLE_FORMAT, format.into())],
+                );
+            }
+            Err(e) => {
+                // Record the error WHILE the open span is current so
+                // `mark_span_error` marks THIS `sstable.reader.open` span. The
+                // instrumented future has already completed here, so the span is
+                // no longer entered; `in_scope` re-enters it for the duration of
+                // the error-recording call.
+                span.in_scope(|| obs::record_error(e, "reader"));
+            }
+        }
+        result
+    }
+
+    /// Open implementation; see [`open`](Self::open) for the instrumented wrapper.
+    async fn open_inner(path: &Path, config: &Config, platform: Arc<Platform>) -> Result<Self> {
         // Resolve the disk-access backend (buffered / mmap / direct, or auto)
         // from config + environment overrides. See `Config::storage.disk_access_mode`.
         let mut reader_config = SSTableReaderConfig::default();
@@ -394,12 +469,15 @@ impl SSTableReader {
             (none.clone(), none)
         };
 
+        use tracing::Instrument;
+
         let config = crate::cql::config::ParserConfig::default();
         let parser = SSTableParser::new(config)?;
         // Parse the header using enhanced version detection - strict error propagation.
         // VersionGates are passed so VG3 can flip version-sensitive parsing decisions
         // inside header parsing without re-deriving gates from the filename.
         let header = parse_header_with_version_detection(&header_buffer, path, &version_gates)
+            .instrument(tracing::debug_span!("sstable.reader.open.header_parse"))
             .await
             .map_err(|e| {
                 Error::corruption(format!(
@@ -444,15 +522,25 @@ impl SSTableReader {
         }
 
         // Load index if available (supports both integrated and component-based)
-        let index = Self::load_index(&file, &header, &platform, path).await?;
+        let index = Self::load_index(&file, &header, &platform, path)
+            .instrument(tracing::debug_span!("sstable.reader.open.load_index"))
+            .await?;
 
         // Load bloom filter if available (supports both integrated and component-based)
-        let bloom_filter = Self::load_bloom_filter(&file, &header, &platform, path).await?;
+        let bloom_filter = Self::load_bloom_filter(&file, &header, &platform, path)
+            .instrument(tracing::debug_span!("sstable.reader.open.load_bloom"))
+            .await?;
 
         // Load spec readers for enhanced metadata and lookups
-        let index_reader = Self::load_index_reader(path, &platform).await;
-        let summary_reader = Self::load_summary_reader(path, &platform).await;
-        let statistics_reader = Self::load_statistics_reader(path, &platform).await;
+        let index_reader = Self::load_index_reader(path, &platform)
+            .instrument(tracing::debug_span!("sstable.reader.open.load_index_reader"))
+            .await;
+        let summary_reader = Self::load_summary_reader(path, &platform)
+            .instrument(tracing::debug_span!("sstable.reader.open.load_summary"))
+            .await;
+        let statistics_reader = Self::load_statistics_reader(path, &platform)
+            .instrument(tracing::debug_span!("sstable.reader.open.load_statistics"))
+            .await;
 
         // Extract SerializationHeader columns from Statistics.db (Issue #163)
         // This enables schema extraction for V5CompressedLegacy format
@@ -849,6 +937,18 @@ impl SSTableReader {
         self.header.cassandra_version
     }
 
+    /// Low-cardinality on-disk format family label for telemetry attributes
+    /// (`"bti"` or `"big"`). Derived from the authoritative [`VersionGates`], so
+    /// it stays bounded to exactly two values — safe to attach to metrics. NOT a
+    /// substitute for [`format_version`](Self::format_version), which returns the
+    /// exact on-disk version token.
+    pub(crate) fn sstable_format_label(&self) -> &'static str {
+        match *self.version_gates {
+            VersionGates::Bti(_) => "bti",
+            VersionGates::Big(_) => "big",
+        }
+    }
+
     /// Get the SSTable format version string
     pub fn format_version(&self) -> Result<String> {
         let filename = self
@@ -896,6 +996,25 @@ impl SSTableReader {
                     0
                 }),
         }
+    }
+}
+
+impl Drop for SSTableReader {
+    fn drop(&mut self) {
+        use crate::observability::{self as obs, catalog};
+        // Keep the per-format live-reader count and the SSTABLES_OPEN gauge in
+        // sync as readers are released. Use a single atomic read-modify-write
+        // (`fetch_sub`) on the SAME per-format counter `open()` incremented: a
+        // load-then-store would race concurrent drops and lose decrements,
+        // drifting the gauge permanently high. `open()` only ever increments on
+        // success, so this never underflows in practice.
+        let format = self.sstable_format_label();
+        let now = sstables_open_count_for(format).fetch_sub(1, Ordering::Relaxed) - 1;
+        obs::record_gauge(
+            catalog::SSTABLES_OPEN,
+            now,
+            &[(catalog::attr::SSTABLE_FORMAT, format.into())],
+        );
     }
 }
 

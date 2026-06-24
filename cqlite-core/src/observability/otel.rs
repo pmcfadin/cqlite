@@ -242,6 +242,11 @@ struct Instruments {
     read_rows: Counter<u64>,
     read_bytes: Counter<u64>,
     read_partitions: Counter<u64>,
+    read_partition_lookup: Counter<u64>,
+    read_bloom_checks: Counter<u64>,
+    storage_open_sstables: Counter<u64>,
+    storage_open_bytes: Counter<u64>,
+    storage_open_tables: Counter<u64>,
     query_rows: Counter<u64>,
     errors_total: Counter<u64>,
     read_duration: Histogram<f64>,
@@ -269,6 +274,31 @@ fn instruments() -> &'static Instruments {
                 .u64_counter(catalog::READ_PARTITIONS)
                 .with_unit(catalog::unit::PARTITIONS)
                 .with_description("Total partitions scanned.")
+                .build(),
+            read_partition_lookup: m
+                .u64_counter(catalog::READ_PARTITION_LOOKUP)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Total partition point lookups, keyed by {result, access_path}.")
+                .build(),
+            read_bloom_checks: m
+                .u64_counter(catalog::READ_BLOOM_CHECKS)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Total bloom/BTI-trie presence checks, keyed by {result}.")
+                .build(),
+            storage_open_sstables: m
+                .u64_counter(catalog::STORAGE_OPEN_SSTABLES)
+                .with_unit(catalog::unit::SSTABLES)
+                .with_description("SSTables discovered and opened, summed across opens.")
+                .build(),
+            storage_open_bytes: m
+                .u64_counter(catalog::STORAGE_OPEN_BYTES)
+                .with_unit(catalog::unit::BYTES)
+                .with_description("On-disk Data.db bytes across SSTables discovered at open.")
+                .build(),
+            storage_open_tables: m
+                .u64_counter(catalog::STORAGE_OPEN_TABLES)
+                .with_unit(catalog::unit::DIMENSIONLESS)
+                .with_description("Logical tables represented by SSTables discovered at open.")
                 .build(),
             query_rows: m
                 .u64_counter(catalog::QUERY_ROWS)
@@ -317,6 +347,16 @@ pub(crate) fn add_counter(name: &'static str, value: u64, attributes: &[KeyValue
         &i.read_bytes
     } else if name == catalog::READ_PARTITIONS {
         &i.read_partitions
+    } else if name == catalog::READ_PARTITION_LOOKUP {
+        &i.read_partition_lookup
+    } else if name == catalog::READ_BLOOM_CHECKS {
+        &i.read_bloom_checks
+    } else if name == catalog::STORAGE_OPEN_SSTABLES {
+        &i.storage_open_sstables
+    } else if name == catalog::STORAGE_OPEN_BYTES {
+        &i.storage_open_bytes
+    } else if name == catalog::STORAGE_OPEN_TABLES {
+        &i.storage_open_tables
     } else if name == catalog::QUERY_ROWS {
         &i.query_rows
     } else if name == catalog::ERRORS_TOTAL {

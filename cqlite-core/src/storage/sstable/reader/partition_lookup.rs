@@ -27,6 +27,11 @@ impl SSTableReader {
         &self,
         partition_key: &[u8],
     ) -> Result<Option<(u64, u32)>> {
+        use crate::observability::{self as obs, catalog};
+
+        let _span = tracing::debug_span!("sstable.partition_lookup.index").entered();
+        let format = self.sstable_format_label();
+
         if let Some(index_reader) = &self.index_reader {
             // Direct raw-key lookup — O(1) HashMap lookup.
             // Index.db entries are keyed on the raw partition key bytes since #552;
@@ -35,6 +40,15 @@ impl SSTableReader {
                 debug!(
                     "Found partition via Index.db raw-key lookup: offset={}, size={}",
                     entry.data_offset, entry.data_size
+                );
+                obs::add_counter(
+                    catalog::READ_PARTITION_LOOKUP,
+                    1,
+                    &[
+                        (catalog::attr::RESULT, "hit".into()),
+                        (catalog::attr::LOOKUP_ROUTE, "index".into()),
+                        (catalog::attr::SSTABLE_FORMAT, format.into()),
+                    ],
                 );
                 return Ok(Some((entry.data_offset, entry.data_size)));
             } else {
@@ -46,6 +60,15 @@ impl SSTableReader {
         } else {
             debug!("No Index.db reader available for partition lookup");
         }
+        obs::add_counter(
+            catalog::READ_PARTITION_LOOKUP,
+            1,
+            &[
+                (catalog::attr::RESULT, "miss".into()),
+                (catalog::attr::LOOKUP_ROUTE, "index".into()),
+                (catalog::attr::SSTABLE_FORMAT, format.into()),
+            ],
+        );
         Ok(None)
     }
 
@@ -78,24 +101,76 @@ impl SSTableReader {
     ///
     /// [`resolve_rows_db_entry`]: crate::storage::sstable::bti::resolve_rows_db_entry
     pub fn lookup_partition_via_bti_trie(&self, partition_key: &[u8]) -> Result<Option<u64>> {
+        use crate::observability::{self as obs, catalog};
         use crate::storage::sstable::bti::{
             lookup_raw_key_in_bti_partitions_db, resolve_rows_db_entry, BtiPartitionLocation,
         };
+
+        let span = tracing::debug_span!(
+            "sstable.partition_lookup.bti_trie",
+            partition_shape = tracing::field::Empty,
+        );
+        let _entered = span.enter();
 
         let Some(partitions_db) = &self.bti_partitions_db else {
             // Not a BTI reader — no trie to consult.
             return Ok(None);
         };
 
-        let mut cursor = std::io::Cursor::new(partitions_db.as_slice());
-        match lookup_raw_key_in_bti_partitions_db(&mut cursor, partition_key).map_err(|e| {
+        let lookup = lookup_raw_key_in_bti_partitions_db(
+            &mut std::io::Cursor::new(partitions_db.as_slice()),
+            partition_key,
+        )
+        .map_err(|e| {
             Error::corruption(format!(
                 "BTI Partitions.db trie lookup failed for partition key (len={}): {}",
                 partition_key.len(),
                 e
             ))
-        })? {
+        });
+        let lookup = match lookup {
+            Ok(v) => v,
+            Err(e) => {
+                obs::record_error(&e, "reader");
+                return Err(e);
+            }
+        };
+
+        // The BTI Partitions.db trie IS the presence oracle for a BTI SSTable
+        // (BTI has no bloom filter). Emit READ_BLOOM_CHECKS exactly ONCE here — the
+        // single common path every BTI presence/point lookup funnels through
+        // (get / get_with_spec_readers / get_with_schema_context / point lookup /
+        // might_contain_partition). `cqlite.result` is hit for a trie HIT
+        // (maybe-present/found: a DataOffset/RowsOffset, possibly a prefix-collision
+        // candidate the caller re-verifies) and miss for a trie MISS (definitive
+        // absence). A trie parse error returns above without an outcome and is
+        // counted as an error, not a bloom check, so this never double counts.
+        // Emitting before the per-arm handling (which can still error on a missing
+        // Rows.db for a wide partition) guarantees a single emission per call.
+        obs::add_counter(
+            catalog::READ_BLOOM_CHECKS,
+            1,
+            &[
+                (
+                    catalog::attr::RESULT,
+                    if lookup.is_some() { "hit" } else { "miss" }.into(),
+                ),
+                (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+            ],
+        );
+
+        match lookup {
             Some(BtiPartitionLocation::DataOffset(off)) => {
+                span.record("partition_shape", "narrow");
+                obs::add_counter(
+                    catalog::READ_PARTITION_LOOKUP,
+                    1,
+                    &[
+                        (catalog::attr::RESULT, "hit".into()),
+                        (catalog::attr::LOOKUP_ROUTE, "bti_trie".into()),
+                        (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+                    ],
+                );
                 debug!(
                     "BTI trie resolved NARROW partition (key len={}) to Data.db offset {}",
                     partition_key.len(),
@@ -109,7 +184,8 @@ impl SSTableReader {
                 // partition's Data.db start position (`data_position`), which lives
                 // in the SAME uncompressed-offset domain the narrow path uses, so
                 // the caller can decode the partition identically (#909/#910).
-                let rows_db = self.bti_rows_db.as_ref().ok_or_else(|| {
+                span.record("partition_shape", "wide");
+                let rows_db = match self.bti_rows_db.as_ref().ok_or_else(|| {
                     Error::corruption(format!(
                         "BTI Partitions.db trie returned RowsOffset({}) for partition key \
                          (len={}) but this reader has no Rows.db loaded; the SSTable is \
@@ -117,9 +193,15 @@ impl SSTableReader {
                         rows_offset,
                         partition_key.len()
                     ))
-                })?;
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        obs::record_error(&e, "reader");
+                        return Err(e);
+                    }
+                };
 
-                let header = resolve_rows_db_entry(rows_db.as_slice(), rows_offset as usize)
+                let header = match resolve_rows_db_entry(rows_db.as_slice(), rows_offset as usize)
                     .map_err(|e| {
                         Error::corruption(format!(
                             "BTI Rows.db row-index entry at RowsOffset({}) is unreadable for \
@@ -128,8 +210,23 @@ impl SSTableReader {
                             partition_key.len(),
                             e
                         ))
-                    })?;
+                    }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        obs::record_error(&e, "reader");
+                        return Err(e);
+                    }
+                };
 
+                obs::add_counter(
+                    catalog::READ_PARTITION_LOOKUP,
+                    1,
+                    &[
+                        (catalog::attr::RESULT, "hit".into()),
+                        (catalog::attr::LOOKUP_ROUTE, "bti_trie".into()),
+                        (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+                    ],
+                );
                 debug!(
                     "BTI trie resolved WIDE partition (key len={}) via RowsOffset {} -> Data.db \
                      position {} ({} row-index blocks)",
@@ -140,7 +237,18 @@ impl SSTableReader {
                 );
                 Ok(Some(header.data_position))
             }
-            None => Ok(None),
+            None => {
+                obs::add_counter(
+                    catalog::READ_PARTITION_LOOKUP,
+                    1,
+                    &[
+                        (catalog::attr::RESULT, "miss".into()),
+                        (catalog::attr::LOOKUP_ROUTE, "bti_trie".into()),
+                        (catalog::attr::SSTABLE_FORMAT, "bti".into()),
+                    ],
+                );
+                Ok(None)
+            }
         }
     }
 
@@ -297,15 +405,41 @@ impl SSTableReader {
     /// `partition_key` must be the raw partition-key bytes (same encoding the bloom
     /// filter and Index.db/BTI trie are keyed on).
     pub fn might_contain_partition(&self, partition_key: &[u8]) -> bool {
+        use crate::observability::{self as obs, catalog};
+
         if self.bti_partitions_db.is_some() {
             // BTI: trie miss is authoritative absence; any error is conservative.
+            // `lookup_partition_via_bti_trie` is the single common path that emits
+            // READ_BLOOM_CHECKS for the BTI presence check — do NOT emit again here
+            // or the metric would be double counted.
             return matches!(
                 self.lookup_partition_via_bti_trie(partition_key),
                 Ok(Some(_)) | Err(_)
             );
         }
+        // BIG: only record READ_BLOOM_CHECKS when a bloom filter actually exists.
+        // With no filter loaded we cannot prune, so we conservatively return `true`
+        // WITHOUT recording a check (a no-filter "hit" is not a real bloom check and
+        // would inflate the metric).
         match &self.bloom_filter {
-            Some(bloom) => bloom.might_contain(partition_key),
+            Some(bloom) => {
+                let present = bloom.might_contain(partition_key);
+                obs::add_counter(
+                    catalog::READ_BLOOM_CHECKS,
+                    1,
+                    &[
+                        (
+                            catalog::attr::RESULT,
+                            if present { "hit" } else { "miss" }.into(),
+                        ),
+                        (
+                            catalog::attr::SSTABLE_FORMAT,
+                            self.sstable_format_label().into(),
+                        ),
+                    ],
+                );
+                present
+            }
             None => true,
         }
     }
@@ -500,9 +634,39 @@ impl SSTableReader {
         table_id: &TableId,
         key: &RowKey,
     ) -> Result<Option<Value>> {
+        use crate::observability::{self as obs, catalog};
+
+        // Issue #1034: BTI ("da") readers resolve partitions via the Partitions.db
+        // trie, which is the AUTHORITATIVE presence oracle. Branch to the trie path
+        // FIRST and skip the bloom/Index.db pre-check entirely. This mirrors `get()`
+        // (which routes BTI to `bti_point_lookup` → `lookup_partition_via_bti_trie`)
+        // and is required for correctness: a BTI bloom false negative must never
+        // short-circuit the trie lookup. Routing through `get()` also guarantees the
+        // BTI presence check emits READ_BLOOM_CHECKS exactly once (from
+        // `lookup_partition_via_bti_trie`) instead of being counted here AND again on
+        // the fallback path. BIG readers keep the bloom → Index.db behavior below.
+        if self.bti_partitions_db.is_some() {
+            return self.get(table_id, key).await;
+        }
+
         // Step 1: Use bloom filter for existence check
         if let Some(bloom_filter) = &self.bloom_filter {
-            if !bloom_filter.might_contain(key.as_bytes()) {
+            let present = bloom_filter.might_contain(key.as_bytes());
+            obs::add_counter(
+                catalog::READ_BLOOM_CHECKS,
+                1,
+                &[
+                    (
+                        catalog::attr::RESULT,
+                        if present { "hit" } else { "miss" }.into(),
+                    ),
+                    (
+                        catalog::attr::SSTABLE_FORMAT,
+                        self.sstable_format_label().into(),
+                    ),
+                ],
+            );
+            if !present {
                 debug!("Bloom filter indicates key does not exist");
                 return Ok(None);
             }
@@ -526,9 +690,39 @@ impl SSTableReader {
         key: &RowKey,
         parsing_context: &ParsingContext,
     ) -> Result<Option<Value>> {
+        use crate::observability::{self as obs, catalog};
+
+        // Issue #1034: BTI ("da") readers resolve partitions via the Partitions.db
+        // trie keyed on RAW partition-key bytes, not Index.db key digests, so the
+        // schema-driven digest path below does not apply. Branch to the trie path
+        // FIRST and skip the bloom/Index.db pre-check entirely, mirroring `get()`
+        // (which routes BTI to `bti_point_lookup` → `lookup_partition_via_bti_trie`).
+        // This keeps BTI correct (a bloom false negative can never short-circuit the
+        // authoritative trie lookup) and ensures the BTI presence check emits
+        // READ_BLOOM_CHECKS exactly once instead of being double counted across this
+        // helper and its fallback. BIG readers keep the bloom → Index.db behavior.
+        if self.bti_partitions_db.is_some() {
+            return self.get(table_id, key).await;
+        }
+
         // Step 1: Use bloom filter for existence check
         if let Some(bloom_filter) = &self.bloom_filter {
-            if !bloom_filter.might_contain(key.as_bytes()) {
+            let present = bloom_filter.might_contain(key.as_bytes());
+            obs::add_counter(
+                catalog::READ_BLOOM_CHECKS,
+                1,
+                &[
+                    (
+                        catalog::attr::RESULT,
+                        if present { "hit" } else { "miss" }.into(),
+                    ),
+                    (
+                        catalog::attr::SSTABLE_FORMAT,
+                        self.sstable_format_label().into(),
+                    ),
+                ],
+            );
+            if !present {
                 debug!("Bloom filter indicates key does not exist");
                 return Ok(None);
             }
