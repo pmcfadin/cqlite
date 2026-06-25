@@ -310,50 +310,70 @@ fn assert_header_parity(manifest_id: &str, table: &str, dir: &Path, gen: &str) -
         )
     });
 
-    // Build name -> binary HeaderCol for type/kind lookups.
-    let bin_by_name: std::collections::BTreeMap<&str, &HeaderCol> =
-        bin.iter().map(|c| (c.name.as_str(), c)).collect();
+    // POSITIONAL header parity. Both the Cassandra reference dump
+    // (StaticColumns: line, then RegularColumns: line) and CQLite's binary
+    // decode (static columns first, then regular columns — see
+    // enhanced_statistics_parser::parse_serialization_header) order columns the
+    // same way: statics first in on-disk order, then regulars in on-disk order.
+    // We therefore compare the two as ORDERED VECTORS, checking position, name,
+    // converted CQL type, and static kind at each index. A name-keyed map/set
+    // (the previous approach) would silently accept a WRONG-ORDER header; the
+    // index-by-index walk below fails loud on a reorder, a missing column, or an
+    // over-emitted column at the exact position.
+    let expected_seq: Vec<(String, String, bool)> = reference
+        .iter()
+        .map(|rc| (rc.name.clone(), marshal_to_cql(&rc.marshal_type), rc.is_static))
+        .collect();
+    let actual_seq: Vec<(String, String, bool)> = bin
+        .iter()
+        .map(|bc| (bc.name.clone(), bc.cql_type.clone(), bc.is_static))
+        .collect();
 
-    // Every reference column must be present in the binary decode with the SAME
-    // on-disk CQL type and static kind.
-    for rc in &reference {
-        let expected_cql = marshal_to_cql(&rc.marshal_type);
-        let Some(bc) = bin_by_name.get(rc.name.as_str()) else {
-            panic!(
-                "[{manifest_id}] table={table} component={gen}-big-Statistics.db column={} \
-                 MISSING from CQLite binary header decode; expected on-disk type={expected_cql} \
-                 (marshal {}), static={}",
-                rc.name, rc.marshal_type, rc.is_static
-            );
-        };
+    let common = expected_seq.len().min(actual_seq.len());
+    for i in 0..common {
+        let (en, et, es) = &expected_seq[i];
+        let (an, at, as_) = &actual_seq[i];
         assert_eq!(
-            bc.cql_type, expected_cql,
-            "[{manifest_id}] table={table} component={gen}-big-Statistics.db column={}: \
-             on-disk type mismatch — cassandra(marshal {}) => {expected_cql}, cqlite => {}",
-            rc.name, rc.marshal_type, bc.cql_type
+            an, en,
+            "[{manifest_id}] table={table} component={gen}-big-Statistics.db position #{i}: \
+             column-NAME/ORDER mismatch — cassandra={en:?}, cqlite={an:?} \
+             (full expected order={:?}, actual order={:?})",
+            expected_seq, actual_seq
         );
         assert_eq!(
-            bc.is_static, rc.is_static,
-            "[{manifest_id}] table={table} component={gen}-big-Statistics.db column={}: \
-             static-kind mismatch — cassandra static={}, cqlite static={}",
-            rc.name, rc.is_static, bc.is_static
+            at, et,
+            "[{manifest_id}] table={table} component={gen}-big-Statistics.db position #{i} \
+             column={en}: on-disk type mismatch — cassandra => {et}, cqlite => {at}"
+        );
+        assert_eq!(
+            as_, es,
+            "[{manifest_id}] table={table} component={gen}-big-Statistics.db position #{i} \
+             column={en}: static-kind mismatch — cassandra static={es}, cqlite static={as_}"
         );
     }
 
-    // And no EXTRA regular/static columns hallucinated by the binary decode.
-    let ref_names: std::collections::BTreeSet<&str> =
-        reference.iter().map(|c| c.name.as_str()).collect();
-    for bc in &bin {
-        assert!(
-            ref_names.contains(bc.name.as_str()),
-            "[{manifest_id}] table={table} component={gen}-big-Statistics.db: CQLite binary decode \
-             emitted UNEXPECTED column={} (type={}, static={}) not in the Cassandra reference \
-             header {:?}",
-            bc.name,
-            bc.cql_type,
-            bc.is_static,
-            ref_names
-        );
+    // Length divergence: a column missing from / over-emitted by the binary
+    // decode at the tail, reported at the exact position.
+    if expected_seq.len() != actual_seq.len() {
+        if let Some((en, et, es)) = expected_seq.get(common) {
+            panic!(
+                "[{manifest_id}] table={table} component={gen}-big-Statistics.db: column at \
+                 position #{common} ({en}, type={et}, static={es}) MISSING from CQLite binary \
+                 header decode (cassandra has {} columns, cqlite decoded {})",
+                expected_seq.len(),
+                actual_seq.len()
+            );
+        }
+        if let Some((an, at, as_)) = actual_seq.get(common) {
+            panic!(
+                "[{manifest_id}] table={table} component={gen}-big-Statistics.db: CQLite binary \
+                 decode emitted UNEXPECTED column at position #{common} ({an}, type={at}, \
+                 static={as_}) not present in the Cassandra reference header (cassandra has {} \
+                 columns, cqlite decoded {})",
+                expected_seq.len(),
+                actual_seq.len()
+            );
+        }
     }
 
     bin

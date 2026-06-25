@@ -90,10 +90,40 @@ fn normalization_unifies_equivalent_representations() {
         other => panic!("expected Timestamp, got {other:?}"),
     }
 
-    // Numeric-as-string vs numeric-as-number unify.
+    // M1: sstabledump emits a SPACE between date and time; ISO-8601 uses `T`.
+    // Both must normalize to the same instant (and to the same epoch-µs as the
+    // padded fractional form). Real goldens use the space form.
+    let space = CanonicalValue::from_json(&serde_json::json!("2025-10-06 01:12:07.265Z"));
+    let tee = CanonicalValue::from_json(&serde_json::json!("2025-10-06T01:12:07.265000Z"));
+    assert_eq!(
+        space, tee,
+        "space-separated sstabledump timestamp must normalize equal to the ISO-8601 `T` form"
+    );
+    match (&space, &tee) {
+        (
+            CanonicalValue::Timestamp { micros: m1, .. },
+            CanonicalValue::Timestamp { micros: m2, .. },
+        ) => assert_eq!(m1, m2, "both renderings must yield identical epoch-µs"),
+        other => panic!("expected two Timestamps, got {other:?}"),
+    }
+
+    // M2: a JSON *string* is NEVER coerced to Int. sstabledump renders typed
+    // integers as bare JSON numbers and CQL text/ascii/varchar as quoted
+    // strings, so a numeric-looking string stays Text and must NOT compare
+    // equal to the same value rendered as a JSON number — type is load-bearing.
     let n = CanonicalValue::from_json(&serde_json::json!(123456789));
     let s = CanonicalValue::from_json(&serde_json::json!("123456789"));
-    assert_eq!(n, s, "numeric string must canonicalize to Int");
+    assert_eq!(n, CanonicalValue::Int(123_456_789), "JSON number stays Int");
+    assert_eq!(s, CanonicalValue::Text("123456789".to_string()), "JSON string stays Text");
+    assert_ne!(
+        n, s,
+        "numeric JSON string must NOT canonicalize to Int (text \"5\" != int 5)"
+    );
+    assert_ne!(
+        CanonicalValue::Text("5".to_string()),
+        CanonicalValue::Int(5),
+        "Text(\"5\") must not equal Int(5)"
+    );
 
     // Whitespace inside JSON arrays is irrelevant (parse-level).
     let compact = parse_document_str(

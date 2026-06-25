@@ -499,12 +499,27 @@ async fn run_fixture(
     Some(expected.len())
 }
 
-/// Positional structural comparison: every expected (ck, column, canonical value)
-/// must appear in the actual decode and compare equal. Field/index/key order is
+/// Bidirectional structural comparison. First the ROW-KEY sets must match
+/// exactly (a row over-emitted or dropped by CQLite FAILS), then per shared row
+/// the COLUMN-KEY sets must match exactly (a stale/over-emitted or dropped
+/// column FAILS), and only then are values compared. Field/index/key order is
 /// already baked into the canonical model's positional `PartialEq`, so a
 /// reorder/null-vs-empty conflation FAILS here with the exact nested path.
+///
+/// Iterating only the expected side (the previous behavior) silently ignored
+/// extra rows/columns emitted by CQLite, letting an over-emission regression
+/// false-pass; the set checks below close that hole.
 fn compare_rows(table: &str, expected: &ExpectedRows, actual: &ActualRows) {
     let mut errors: Vec<String> = Vec::new();
+
+    // Row-key set parity: report rows missing from / unexpected in the decode.
+    for ck in actual.keys() {
+        if !expected.contains_key(ck) {
+            errors.push(format!(
+                "[{table}] row ck={ck} UNEXPECTED in CQLite decode (over-emission)"
+            ));
+        }
+    }
 
     for (ck, exp_cols) in expected {
         let act_cols = match actual.get(ck) {
@@ -514,6 +529,19 @@ fn compare_rows(table: &str, expected: &ExpectedRows, actual: &ActualRows) {
                 continue;
             }
         };
+
+        // Column-key set parity within this row: report columns CQLite emitted
+        // that the golden does not contain (stale/dropped-column over-emission).
+        for col in act_cols.keys() {
+            if !exp_cols.contains_key(col) {
+                errors.push(format!(
+                    "[{table}] ck={ck} column '{col}' UNEXPECTED in CQLite decode \
+                     (over-emission)\n    actual (CQLite): {}",
+                    render_full(&act_cols[col]),
+                ));
+            }
+        }
+
         for (col, exp_val) in exp_cols {
             match act_cols.get(col) {
                 Some(act_val) if act_val == exp_val => {}

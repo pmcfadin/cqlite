@@ -62,8 +62,13 @@ on:
       - 'cqlite-core/tests/issue_1007_complex_type_parity.rs'
       - 'cqlite-core/tests/issue_1008_counter_final_value_parity.rs'
       - 'cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs'
+      # Shared support module imported by the parity tests above — a change
+      # here (comparator semantics) must re-run them.
+      - 'cqlite-core/tests/support/canonical_jsonl.rs'
       - 'test-data/cassandra-parity-manifest.yml'
       - 'test-data/scripts/generate-cql-type-parity.sh'
+      # Generator INPUT schema — editing it changes what fixtures get produced.
+      - 'test-data/schemas/cql-type-parity.cql'
       - 'test-data/codec-vectors/**'
       - '.github/workflows/cql-type-parity.yml'
 

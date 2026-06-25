@@ -92,6 +92,40 @@
 #   - Docker (or podman) available in PATH
 #   - ~4 GB RAM available for the Cassandra container
 #
+# =====================================================================
+# NON-DETERMINISTIC FIELDS (regeneration is NOT byte-identical — by design)
+# =====================================================================
+# A small set of emitted fields are Cassandra wall-clock / random and CANNOT be
+# pinned even with the fixed-timestamp scheme above. This is INHERENT Cassandra
+# behavior (it matches the accepted pattern from epic #972's tombstone parity
+# generator) — it is NOT a bug in this script, and the generation logic must NOT
+# be changed to try to force determinism on them. The non-deterministic fields:
+#
+#   * Multicell collection element CELL-PATH UUIDs — for a non-frozen (multicell)
+#     list/UDT, Cassandra keys each element cell by a freshly generated
+#     TimeUUID/random UUID at write time (e.g. the per-element `path` values in
+#     the `ml` column of se_frozen_multicell_collection_mismatch and the
+#     multicell columns of cx_multicell_udt_collection_paths). These differ on
+#     every regeneration.
+#   * Tombstone `local_delete_time` (deletion_info) — Cassandra stamps the
+#     server WALL-CLOCK second at delete time. DROP-column / DELETE generations
+#     therefore carry a regeneration-date `local_delete_time` (e.g. 2026-06-25)
+#     in the golden, which changes every time the fixtures are regenerated.
+#   * Counter shard clocks / host-ids (Group D) — coordinator-derived; only the
+#     EXPECTED final per-pk counter value is deterministic and asserted (teed to
+#     `*.counter-select.txt`), never the internal shard layout.
+#
+# CONSEQUENCE for parity testing:
+#   * The COMMITTED `*-Data.db.jsonl` / `*-Statistics.db.txt` goldens are the
+#     AUTHORITATIVE SNAPSHOT. The parity tests (issue_1003..1009) compare CQLite's
+#     decode against the COMMITTED golden — they NEVER regenerate-and-byte-diff.
+#   * Re-running this script produces a STRUCTURALLY equivalent corpus (same
+#     tables, columns, types, kinds, row/cell shapes) but is intentionally NOT
+#     byte-identical to the committed goldens because of the fields above.
+#   * The nightly_docker workflow (.github/workflows/cql-type-parity.yml)
+#     regenerates the fixtures STRUCTURALLY to catch Cassandra-format drift; it
+#     does not assert byte-identity against the committed snapshot.
+#
 # Backs: epic #971 (issues #1003, #1006, #1007, #1008)
 
 set -euo pipefail

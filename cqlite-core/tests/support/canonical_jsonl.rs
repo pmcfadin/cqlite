@@ -177,12 +177,16 @@ impl CanonicalValue {
                 }
             }
             JsonValue::String(s) => {
-                // A bare numeric string from sstabledump (e.g. varint/bigint
-                // sometimes rendered as a string) is canonicalized to Int so it
-                // compares equal to the same value rendered as a JSON number.
-                if let Some(i) = parse_strict_i128(s) {
-                    CanonicalValue::Int(i)
-                } else if let Some(micros) = parse_timestamp_micros(s) {
+                // A JSON *string* stays Text. We deliberately do NOT coerce a
+                // numeric-looking string (e.g. CQL text/ascii/varchar "5") to
+                // Int: sstabledump renders typed integers as bare JSON numbers
+                // and text as quoted strings, so the JSON shape already carries
+                // the type. Coercing here would mask a real text-vs-numeric
+                // parity bug (`text "5"` must NOT equal `int 5`) and violate the
+                // typed-comparator contract. Timestamps are the one exception:
+                // sstabledump renders them as quoted strings, so we recognize
+                // and normalize those to an epoch-µs instant.
+                if let Some(micros) = parse_timestamp_micros(s) {
                     CanonicalValue::Timestamp {
                         micros,
                         raw: s.clone(),
@@ -200,6 +204,31 @@ impl CanonicalValue {
                     .collect(),
             ),
         }
+    }
+
+    /// Decode a partition-key / clustering-key COMPONENT.
+    ///
+    /// This differs from [`CanonicalValue::from_json`] in exactly one,
+    /// schema-aware-but-narrow way: sstabledump renders partition-key components
+    /// as quoted JSON *strings* even for numeric key columns (e.g. an `int`
+    /// partition key `1` is dumped as `"1"`), whereas CQLite's own JSONL emits
+    /// the typed number `1`. For KEY COMPONENTS ONLY we therefore coerce a clean
+    /// numeric string to `Int` so the two equivalent key renderings unify.
+    ///
+    /// This is intentionally NOT applied to cell VALUES (see `from_json`): a CQL
+    /// text/ascii/varchar cell `"5"` must stay `Text` and must NOT equal a
+    /// numeric `5`. The coercion here is confined to the key path because that is
+    /// the only place sstabledump's string-stringification of typed scalars
+    /// occurs, so it cannot mask a text-vs-numeric cell-value parity bug.
+    pub fn from_json_key(v: &JsonValue) -> Self {
+        if let JsonValue::String(s) = v {
+            if parse_timestamp_micros(s).is_none() {
+                if let Some(i) = parse_strict_i128(s) {
+                    return CanonicalValue::Int(i);
+                }
+            }
+        }
+        CanonicalValue::from_json(v)
     }
 
     /// Compact single-line rendering for diff messages.
@@ -238,17 +267,16 @@ impl CanonicalValue {
     }
 }
 
-/// Parse a string strictly as a base-10 i128 (used to unify
-/// numeric-as-string vs numeric-as-number). Returns `None` for anything that
-/// is not a clean integer (so timestamps / text are untouched).
+/// Parse a string strictly as a base-10 i128. Returns `None` for anything that
+/// is not a clean integer (leading-zero / sign-prefixed / non-digit forms are
+/// rejected). Used ONLY by [`CanonicalValue::from_json_key`] to unify
+/// sstabledump's string-rendered numeric KEY components with CQLite's typed
+/// numbers — never for cell values.
 fn parse_strict_i128(s: &str) -> Option<i128> {
     let t = s.trim();
     if t.is_empty() {
         return None;
     }
-    // Reject leading-zero ambiguity ("007") and "+5" so we don't accidentally
-    // canonicalize identifiers that merely look numeric; sstabledump never
-    // emits those for integers.
     let body = t.strip_prefix('-').unwrap_or(t);
     if body.len() > 1 && body.starts_with('0') {
         return None;
@@ -263,13 +291,20 @@ fn parse_strict_i128(s: &str) -> Option<i128> {
 // Timestamp normalization (ISO-8601 → epoch microseconds)
 // ===========================================================================
 
-/// Recognize and normalize an sstabledump timestamp string
-/// (`YYYY-MM-DDTHH:MM:SS[.ffffff]Z`) to epoch-microseconds. Returns `None` for
-/// any string that is not a `Z`-suffixed ISO-8601 timestamp, so plain text is
+/// Recognize and normalize an sstabledump timestamp string to
+/// epoch-microseconds. Accepts BOTH the ISO-8601 `T` separator
+/// (`YYYY-MM-DDTHH:MM:SS[.ffffff]Z`) and the SPACE separator that real
+/// `sstabledump` emits in the committed goldens (`YYYY-MM-DD HH:MM:SS[.fff]Z`),
+/// so the two equivalent renderings normalize to the same instant. Returns
+/// `None` for any string that is not a `Z`-suffixed timestamp, so plain text is
 /// left as `Text`.
 pub fn parse_timestamp_micros(s: &str) -> Option<i64> {
     let body = s.strip_suffix('Z')?;
-    let (date_part, time_part) = body.split_once('T')?;
+    // sstabledump uses a space between date and time; ISO-8601 uses `T`. Accept
+    // either so `"2025-10-06 01:12:07.265Z"` == `"2025-10-06T01:12:07.265000Z"`.
+    let (date_part, time_part) = body
+        .split_once('T')
+        .or_else(|| body.split_once(' '))?;
 
     let mut dp = date_part.splitn(3, '-');
     let year: i64 = dp.next()?.parse().ok()?;
@@ -578,7 +613,7 @@ fn parse_partition(
             line,
             msg: "`partition` missing array `key`".to_string(),
         })?;
-    let key = key_arr.iter().map(CanonicalValue::from_json).collect();
+    let key = key_arr.iter().map(CanonicalValue::from_json_key).collect();
 
     let deletion = partition.get("deletion_info").and_then(parse_deletion_info);
 
@@ -616,7 +651,7 @@ fn parse_row(row: &JsonValue, rtype: &str) -> CanonicalRow {
     let clustering = row
         .get("clustering")
         .and_then(|c| c.as_array())
-        .map(|a| a.iter().map(CanonicalValue::from_json).collect())
+        .map(|a| a.iter().map(CanonicalValue::from_json_key).collect())
         .unwrap_or_default();
 
     let liveness = row.get("liveness_info").map(|li| LivenessInfo {
@@ -734,7 +769,7 @@ fn parse_bound_half(inner: &JsonValue) -> BoundHalf {
         .map(|a| {
             a.iter()
                 .filter(|v| v.as_str() != Some("*"))
-                .map(CanonicalValue::from_json)
+                .map(CanonicalValue::from_json_key)
                 .collect()
         })
         .unwrap_or_default();
