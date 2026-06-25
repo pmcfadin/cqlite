@@ -624,14 +624,14 @@ if [[ "$DRY_RUN" -eq 0 ]]; then
   log "  OK: uncompressed_table has no CompressionInfo.db, has CRC.db"
 
   # short_final_chunk: short final chunk must be present.
-  local sf_sidecar
+  # NOTE: `local` is only valid inside a function; this assertion block runs at
+  # script top level, so plain assignments are used (roborev #970).
   sf_sidecar=$(find "$SSTABLES_DIR/$KEYSPACE/short_final_chunk-"* -name "*-CompressionInfo.db.txt" | head -1)
   grep -q '^short_final_chunk: True' "$sf_sidecar" \
     || fail "short_final_chunk: expected a short final chunk but sidecar reports otherwise"
   log "  OK: short_final_chunk has a short final chunk"
 
   # incompressible_uncompressed_chunk: at least one raw-stored chunk.
-  local ic_sidecar ic_raw
   ic_sidecar=$(find "$SSTABLES_DIR/$KEYSPACE/incompressible_uncompressed_chunk-"* -name "*-CompressionInfo.db.txt" | head -1)
   ic_raw=$(grep -m1 '^raw_stored_chunk_count:' "$ic_sidecar" | awk '{print $2}')
   [[ "${ic_raw:-0}" -ge 1 ]] \
