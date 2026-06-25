@@ -731,7 +731,7 @@ impl V5CompressedLegacyParser {
             // Issue #699: emit PartitionDelete if the partition header carried
             // a tombstone (markedForDeleteAt != LIVE sentinel).
             // ----------------------------------------------------------------
-            if let Some(deleted_at) = partition_deletion {
+            if let Some((deleted_at, _partition_ldt)) = partition_deletion {
                 match emit((
                     partition_key.clone(),
                     HashMap::new(),
@@ -2255,16 +2255,36 @@ impl V5CompressedLegacyParser {
             });
         }
 
-        let (partition_key, mut offset) = match self.parse_partition_header(data, 0) {
-            Ok(v) => v,
-            Err(_) => return Ok(ParseStep::Emitted(1)),
-        };
+        let (partition_key, mut offset, partition_deletion) =
+            match self.parse_partition_header_full(data, 0) {
+                Ok(v) => v,
+                Err(_) => return Ok(ParseStep::Emitted(1)),
+            };
 
         // Static cells are kept as the collapsed map so they can be folded into
         // subsequent clustering rows, exactly like the legacy path. They are
         // surfaced as simple cells on each emitted row.
         let mut static_cells: HashMap<String, Value> = HashMap::new();
         let mut pending: Vec<CompactionRow> = Vec::new();
+
+        // Issue #1072: a partition-level tombstone in this SSTable must shadow OLDER
+        // live rows in OTHER SSTables during a cross-generation compaction merge.
+        // Surface it as a synthetic partition-deletion `CompactionRow` (mirroring the
+        // `RangeMarker` carrier) so the merge can apply the partition floor and
+        // re-emit the surviving tombstone. Pushed exactly once per partition — even
+        // when the partition has zero rows (tombstone-only case) — because this
+        // header parse runs once per partition emit.
+        if let Some((mfda, ldt)) = partition_deletion {
+            use crate::storage::sstable::reader::compaction_row::CompactionRowData;
+            pending.push(CompactionRow {
+                key: partition_key.clone(),
+                row_timestamp: mfda,
+                row_data: CompactionRowData::PartitionDelete {
+                    deletion_time: mfda,
+                    local_deletion_time: ldt,
+                },
+            });
+        }
 
         // In-flight range tombstone start bound (issue #933). A range tombstone is
         // a pair of adjacent bound markers (start then end), or a sequence of
@@ -3046,27 +3066,29 @@ impl V5CompressedLegacyParser {
     /// Exposed for integration testing to validate partition header parsing
     #[doc(hidden)]
     pub fn parse_partition_header(&self, data: &[u8], offset: usize) -> Result<(RowKey, usize)> {
-        let (row_key, next_offset, _deletion_time) =
-            self.parse_partition_header_full(data, offset)?;
+        let (row_key, next_offset, _deletion) = self.parse_partition_header_full(data, offset)?;
         Ok((row_key, next_offset))
     }
 
     /// Like [`parse_partition_header`] but also returns the partition-level deletion
-    /// timestamp (`markedForDeleteAt` in µs since epoch), if the partition is deleted.
+    /// `(markedForDeleteAt µs, localDeletionTime s)`, if the partition is deleted.
     ///
-    /// Returns `(RowKey, next_offset, Option<markedForDeleteAt_micros>)`.
+    /// Returns `(RowKey, next_offset, Option<(markedForDeleteAt_micros, localDeletionTime_secs)>)`.
     ///
     /// `None` means the partition is live (no partition tombstone).
-    /// `Some(ts)` means the partition carries a tombstone; `ts` is the authoritative
-    /// reconciliation timestamp in microseconds since the Unix epoch.
+    /// `Some((mfda, ldt))` means the partition carries a tombstone; `mfda` is the
+    /// authoritative reconciliation timestamp in microseconds since the Unix epoch and
+    /// `ldt` is the GC-grace clock in seconds (carried as the wrapping `as u32 as i32`
+    /// for far-future local-deletion-times, matching the row/range tombstone contract).
     ///
     /// Authority: DeletionTime.java (getSerializer / legacySerializer / Serializer),
     /// BigFormat.java:409 (`hasUIntDeletionTime`).
+    #[allow(clippy::type_complexity)]
     pub fn parse_partition_header_full(
         &self,
         data: &[u8],
         mut offset: usize,
-    ) -> Result<(RowKey, usize, Option<i64>)> {
+    ) -> Result<(RowKey, usize, Option<(i64, i32)>)> {
         let start_offset = offset;
 
         if offset >= data.len() {
@@ -3131,7 +3153,7 @@ impl V5CompressedLegacyParser {
         //            8 bytes markedForDeleteAt (long) = 12 bytes total
         //
         // Authority: DeletionTime.java:191-219 (getSerializer / Serializer.serialize)
-        let partition_deletion: Option<i64>;
+        let partition_deletion: Option<(i64, i32)>;
         if self.has_uint_deletion_time() {
             // oa / da format
             if offset >= data.len() {
@@ -3165,8 +3187,16 @@ impl V5CompressedLegacyParser {
                         .try_into()
                         .map_err(|_| Error::corruption("V5CompressedLegacy: oa mfda slice"))?,
                 );
+                // localDeletionTime is the next 4 bytes (big-endian u32). Keep the
+                // wrapping `as u32 as i32` representation so far-future LDTs in
+                // [2^31, 2^32) round-trip exactly like row/range tombstones.
+                let ldt = u32::from_be_bytes(
+                    data[offset + 8..offset + 12]
+                        .try_into()
+                        .map_err(|_| Error::corruption("V5CompressedLegacy: oa ldt slice"))?,
+                ) as i32;
                 offset += 12; // markedForDeleteAt(8) + localDeletionTime(4)
-                partition_deletion = Some(mfda);
+                partition_deletion = Some((mfda, ldt));
             }
         } else {
             // nb format: 4 bytes localDeletionTime (big-endian i32)
@@ -3197,7 +3227,7 @@ impl V5CompressedLegacyParser {
             if local_deletion_time == NB_LIVE_LOCAL_DELETION_TIME {
                 partition_deletion = None;
             } else {
-                partition_deletion = Some(mfda);
+                partition_deletion = Some((mfda, local_deletion_time));
             }
         }
 

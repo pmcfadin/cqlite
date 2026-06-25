@@ -161,6 +161,24 @@ pub enum CompactionRowData {
         /// `localDeletionTime` in seconds (GC-grace clock).
         local_deletion_time: i32,
     },
+    /// Partition-level tombstone (whole-partition delete) carrying its
+    /// authoritative timestamps (issue #1072).
+    ///
+    /// Surfaced by the compaction read path as a synthetic carrier row (no
+    /// clustering) so the cross-generation merge can apply the partition deletion
+    /// as the OUTERMOST floor — shadowing every older cell/row/range/complex
+    /// marker across ALL merge sources — and re-emit the surviving partition
+    /// tombstone to the output SSTable. Without this carrier a newer partition
+    /// tombstone in one SSTable failed to shadow older live rows in another,
+    /// resurrecting deleted partitions. `deletion_time` is `markedForDeleteAt`
+    /// (microseconds); `local_deletion_time` is the GC-grace clock (seconds,
+    /// carried as the wrapping `as u32 as i32` for far-future LDTs).
+    PartitionDelete {
+        /// `markedForDeleteAt` in microseconds.
+        deletion_time: i64,
+        /// `localDeletionTime` in seconds (GC-grace clock).
+        local_deletion_time: i32,
+    },
     /// Row tombstone (whole-row delete) carrying its authoritative timestamps.
     Tombstone {
         /// `markedForDeleteAt` in microseconds.
