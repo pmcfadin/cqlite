@@ -678,12 +678,14 @@ async fn nested_frozen_collections_parity() {
 
 /// `cass.cql_types.complex.multicell_udt_collection_paths`
 ///
-/// EXPECTED-FAIL (bug found by this lane): the multicell `ml list<text>` column
-/// decodes correctly (ordered list via cell-paths), but the multicell
-/// `mp person_type` (non-frozen UDT) decodes to a raw blob (`0x08020000`) rather
-/// than a structured UDT reassembled from its per-field cells. Written to the
-/// CORRECT Cassandra behavior; unignore when issue #1079 lands.
-#[ignore = "issue #1081: non-frozen (multicell) top-level UDT decodes as opaque blob, not structured UDT"]
+/// Both multicell columns decode structurally: the `ml list<text>` column as an
+/// ordered list via cell-paths, and the `mp person_type` (non-frozen, top-level
+/// UDT) reassembled from its per-field cells into a structured UDT. Fixed by
+/// issue #1081: the complex-ness decision and the multicell-UDT decode now use
+/// the AUTHORITATIVE on-disk SerializationHeader marshal type
+/// (`ColumnInfo.column_type`, which carries `UserType(...)`) instead of the
+/// supplied schema's bare CQL short form (`person_type`), which previously
+/// misrouted the column to the scalar path and yielded a raw blob (`0x08020000`).
 #[tokio::test]
 async fn multicell_udt_collection_paths_parity() {
     let schema = load_table_schema("cx_multicell_udt_collection_paths");

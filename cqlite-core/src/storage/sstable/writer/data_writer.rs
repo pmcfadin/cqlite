@@ -10206,7 +10206,7 @@ mod tests {
         // True round-trip through the reader.
         let parser = person_reader();
         let (value, _off, _meta) = parser
-            .parse_complex_column_inner(&buf, 0, &col, true, row_ts, None)
+            .parse_complex_column_inner(&buf, 0, &col, &col.data_type, true, row_ts, None)
             .expect("reader must parse the UDT complex column");
 
         match value {
@@ -11829,7 +11829,7 @@ mod tests {
 
         let parser = person_reader();
         let (value, _off, _meta) = parser
-            .parse_complex_column_inner(&buf, 0, &col, true, row_ts, None)
+            .parse_complex_column_inner(&buf, 0, &col, &col.data_type, true, row_ts, None)
             .expect("reader must parse the UDT complex column");
 
         match value {
