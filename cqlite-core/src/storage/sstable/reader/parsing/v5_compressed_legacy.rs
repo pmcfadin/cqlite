@@ -7822,9 +7822,16 @@ impl V5CompressedLegacyParser {
     /// form (`"int"`) understood by [`parse_value_from_raw_bytes`]'s match
     /// (issue #1081). Returns `None` for any non-primitive marshal form
     /// (UserType / collection / tuple / reversed / frozen / custom), so the
-    /// caller leaves those to the dedicated arms. The suffix set mirrors the
-    /// authoritative marshal→`CqlType` mapping in
-    /// [`parse_cassandra_type_with_depth`] (no heuristics — issue #28).
+    /// caller leaves those to the dedicated arms. The suffix set is a *superset*
+    /// of the authoritative marshal→`CqlType` mapping in
+    /// [`parse_cassandra_type_with_depth`] (no heuristics — issue #28): in
+    /// addition to the scalars that mapping enumerates, this also normalizes a
+    /// few marshal forms that `parse_cassandra_type_with_depth` routes to
+    /// `Custom` (`VarcharType`, `CounterColumnType`, `LexicalUUIDType`,
+    /// `ShortType`, `ByteType`). Those extra mappings are required so we can
+    /// decode the corresponding scalar UDT field values — e.g. `ShortType`/
+    /// `ByteType` are needed to read `smallint`/`tinyint` UDT fields, which
+    /// otherwise fall through to the blob default.
     fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
         // Composite marshal forms carry a `(` after the type name; primitives do
         // not. Reject anything parameterised so we never misread a collection /
@@ -10133,6 +10140,65 @@ impl V5CompressedLegacyParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #1081: `primitive_marshal_to_cql_short` must normalize every
+    /// PRIMITIVE Cassandra marshal type (fully-qualified) to its canonical CQL
+    /// short form, and must reject any parameterised/composite marshal form
+    /// (anything containing `(` — UDT / collection / reversed) so the
+    /// no-heuristics `(`-rejection guard never misreads a composite as a scalar.
+    #[test]
+    fn primitive_marshal_to_cql_short_maps_scalars_and_rejects_composites() {
+        const P: &str = "org.apache.cassandra.db.marshal.";
+
+        // (marshal type name, expected canonical CQL short form)
+        let cases: &[(&str, &str)] = &[
+            ("UTF8Type", "text"),
+            ("AsciiType", "ascii"),
+            ("Int32Type", "int"),
+            ("LongType", "bigint"),
+            ("FloatType", "float"),
+            ("DoubleType", "double"),
+            ("BooleanType", "boolean"),
+            ("UUIDType", "uuid"),
+            ("TimeUUIDType", "timeuuid"),
+            ("TimestampType", "timestamp"),
+            ("SimpleDateType", "date"),
+            ("TimeType", "time"),
+            ("DecimalType", "decimal"),
+            ("IntegerType", "varint"),
+            ("ShortType", "smallint"),
+            ("ByteType", "tinyint"),
+            ("InetAddressType", "inet"),
+            ("BytesType", "blob"),
+        ];
+
+        for (marshal, expected) in cases {
+            let full = format!("{}{}", P, marshal);
+            assert_eq!(
+                V5CompressedLegacyParser::primitive_marshal_to_cql_short(&full),
+                Some(*expected),
+                "primitive marshal {} should map to {}",
+                full,
+                expected
+            );
+        }
+
+        // Parameterised / composite marshal forms must be rejected (return None)
+        // by the `(`-guard, leaving them to the dedicated composite arms.
+        let composites = [
+            "org.apache.cassandra.db.marshal.UserType(...)",
+            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type)",
+            "org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.Int32Type)",
+        ];
+        for composite in composites {
+            assert_eq!(
+                V5CompressedLegacyParser::primitive_marshal_to_cql_short(composite),
+                None,
+                "composite marshal {} must be rejected by the `(`-guard",
+                composite
+            );
+        }
+    }
 
     /// Local VInt encoder for test helpers — avoids depending on
     /// `storage::serialization` which is gated behind `write-support`.
