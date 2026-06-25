@@ -4201,17 +4201,24 @@ impl V5CompressedLegacyParser {
             // on-disk header marshal string (the only type metadata we have), then
             // discard the value. `emit` gates every cell/metadata insertion below.
             let emit = ctp.schema.is_some();
-            // Synthetic column used ONLY to consume a dropped column's bytes; built
-            // from the on-disk header marshal type. Kept in a local so `column` can
-            // borrow it for the whole iteration.
-            let dropped_column_holder = crate::schema::Column {
-                name: format!("__dropped_col_{col_idx}"),
-                data_type: header_type.unwrap_or("blob").to_string(),
-                nullable: true,
-                default: None,
-                is_static,
+            // Synthetic column used ONLY to consume a DROPPED column's bytes; built
+            // from the on-disk header marshal type. Initialized lazily (deferred
+            // binding) so the common schema-present path pays no allocation — the
+            // dropped-column path is rare. The holder outlives the borrow below.
+            let dropped_column_holder;
+            let column: &crate::schema::Column = match ctp.schema {
+                Some(c) => c,
+                None => {
+                    dropped_column_holder = crate::schema::Column {
+                        name: format!("__dropped_col_{col_idx}"),
+                        data_type: header_type.unwrap_or("blob").to_string(),
+                        nullable: true,
+                        default: None,
+                        is_static,
+                    };
+                    &dropped_column_holder
+                }
             };
-            let column: &crate::schema::Column = ctp.schema.unwrap_or(&dropped_column_holder);
 
             if offset >= data.len() {
                 log::debug!(
@@ -11747,6 +11754,73 @@ mod tests {
             trailing_marker,
             "the trailing column's bytes must be byte-for-byte intact \
              (proves the Err->break trailing-column loss is gone)"
+        );
+    }
+
+    /// Issue #1080: `header_type_is_user_type` gates whether the frozen-UDT
+    /// header-type fallback fires at all. Lock in the case-insensitive match and
+    /// the negative cases so a non-UDT marshal type never triggers the fallback.
+    #[test]
+    fn test_regression_1080_header_type_is_user_type_predicate() {
+        // Positive: canonical marshal form and the FrozenType wrapper.
+        assert!(V5CompressedLegacyParser::header_type_is_user_type(
+            "org.apache.cassandra.db.marshal.UserType(ks,abcd)"
+        ));
+        assert!(V5CompressedLegacyParser::header_type_is_user_type(
+            "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,abcd))"
+        ));
+        // Positive: case-insensitive (eq_ignore_ascii_case window).
+        assert!(V5CompressedLegacyParser::header_type_is_user_type(
+            "USERTYPE("
+        ));
+        assert!(V5CompressedLegacyParser::header_type_is_user_type(
+            "UsErTyPe("
+        ));
+        // Negative: other complex/primitive marshal types must NOT match.
+        assert!(!V5CompressedLegacyParser::header_type_is_user_type(
+            "org.apache.cassandra.db.marshal.Int32Type"
+        ));
+        assert!(!V5CompressedLegacyParser::header_type_is_user_type(
+            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)"
+        ));
+        // Negative: shorter than the needle (no panic, returns false).
+        assert!(!V5CompressedLegacyParser::header_type_is_user_type("user"));
+        assert!(!V5CompressedLegacyParser::header_type_is_user_type(""));
+    }
+
+    /// Issue #1080: `decode_frozen_udt_from_header_type` must return a clean
+    /// `Error` (never panic / silently truncate) on a malformed blob — a length
+    /// prefix that runs past the end of the available data.
+    #[test]
+    fn test_regression_1080_frozen_udt_truncated_blob_errors() {
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+        let column = crate::schema::Column {
+            name: "p".to_string(),
+            data_type: "frozen<person_type>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        let header_type = format!(
+            "org.apache.cassandra.db.marshal.FrozenType(\
+             org.apache.cassandra.db.marshal.UserType(test_types,{},{}:org.apache.cassandra.db.marshal.UTF8Type))",
+            hex("person_type"),
+            hex("name"),
+        );
+
+        // VUInt length prefix claims 50 bytes but only 2 follow → must Err, not panic.
+        let buf: Vec<u8> = vec![50u8, 0x00, 0x01];
+        let res = parser.decode_frozen_udt_from_header_type(&buf, 0, &header_type, &column);
+        assert!(
+            res.is_err(),
+            "truncated frozen-UDT blob must yield Err, not panic/silent-truncate"
         );
     }
 
