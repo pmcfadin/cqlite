@@ -1868,9 +1868,32 @@ impl SSTableReader {
         // Pre-allocate buffer for ~2.5MB (estimated max size for test data)
         let mut stitched_buffer = Vec::with_capacity(2_500_000);
 
+        // Incompressible-chunk fallback (Bug #639, epic #970): Cassandra stores a
+        // chunk RAW (not compressed) when its compressed length would meet or
+        // exceed `max_compressed_length`. `ChunkDecompressor::decompress_chunk`
+        // already honours this, but the stitch path did not — it blindly tried to
+        // LZ4/Snappy/etc-decode a raw chunk, which fails on the `incompressible`
+        // fixture. Mirror the writer rule here: when the (CRC-stripped) chunk
+        // length >= max_compressed_length, the bytes are already plaintext.
+        // Authority: CompressedSequentialWriter.java:160-177.
+        let max_compressed_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.max_compressed_length as usize)
+            .unwrap_or(usize::MAX);
+
         let mut chunk_count = 0;
         while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
-            let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
+            let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
+                // Stored uncompressed by Cassandra — pass the raw bytes through.
+                log::debug!(
+                    "stitch_all_chunks: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
+                    chunk_count,
+                    compressed_chunk.len(),
+                    max_compressed_length
+                );
+                compressed_chunk
+            } else if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
                 match compression.decompress(&compressed_chunk) {
                     Ok(decompressed) => decompressed,

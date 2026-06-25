@@ -188,6 +188,7 @@ pub mod delta_export;
 pub mod docker;
 pub mod info;
 pub mod read_sstable;
+pub mod verify;
 
 #[cfg(feature = "state_machine")]
 pub async fn execute_query(
