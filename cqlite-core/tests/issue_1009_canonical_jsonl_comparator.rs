@@ -88,11 +88,37 @@ fn typed_values_compare_by_type_not_string() {
 #[test]
 fn key_component_coercion_is_schema_sound() {
     // KeyKind classification: integral families coerce, everything else does not.
-    for t in ["int", "bigint", "smallint", "tinyint", "varint", "counter", "INT", "frozen<int>"] {
-        assert_eq!(KeyKind::from_cql_type(t), KeyKind::Integral, "{t} must be integral");
+    for t in [
+        "int",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "varint",
+        "counter",
+        "INT",
+        "frozen<int>",
+    ] {
+        assert_eq!(
+            KeyKind::from_cql_type(t),
+            KeyKind::Integral,
+            "{t} must be integral"
+        );
     }
-    for t in ["text", "ascii", "varchar", "blob", "uuid", "timestamp", "double", "tuple<int,int>"] {
-        assert_eq!(KeyKind::from_cql_type(t), KeyKind::Other, "{t} must be Other (no coercion)");
+    for t in [
+        "text",
+        "ascii",
+        "varchar",
+        "blob",
+        "uuid",
+        "timestamp",
+        "double",
+        "tuple<int,int>",
+    ] {
+        assert_eq!(
+            KeyKind::from_cql_type(t),
+            KeyKind::Other,
+            "{t} must be Other (no coercion)"
+        );
     }
 
     // sstabledump renders EVERY key component as a quoted string. The actual
@@ -103,8 +129,9 @@ fn key_component_coercion_is_schema_sound() {
 
     // --- TEXT partition key: golden "5" must stay Text and NOT match a numeric 5. ---
     let text_spec = KeySpec::from_cql_types(&["text"], &[]);
-    let golden_text = parse_document_str_with_keys(golden_line, Path::new("<g-text>"), true, &text_spec)
-        .expect("golden text-key parse");
+    let golden_text =
+        parse_document_str_with_keys(golden_line, Path::new("<g-text>"), true, &text_spec)
+            .expect("golden text-key parse");
     assert_eq!(
         golden_text.partitions[0].key,
         vec![CanonicalValue::Text("5".to_string())],
@@ -127,8 +154,9 @@ fn key_component_coercion_is_schema_sound() {
 
     // --- INTEGRAL partition key: golden "5" coerces to Int and matches a typed 5. ---
     let int_spec = KeySpec::from_cql_types(&["int"], &[]);
-    let golden_int = parse_document_str_with_keys(golden_line, Path::new("<g-int>"), true, &int_spec)
-        .expect("golden int-key parse");
+    let golden_int =
+        parse_document_str_with_keys(golden_line, Path::new("<g-int>"), true, &int_spec)
+            .expect("golden int-key parse");
     assert_eq!(
         golden_int.partitions[0].key,
         vec![CanonicalValue::Int(5)],
@@ -186,7 +214,11 @@ fn normalization_unifies_equivalent_representations() {
     let n = CanonicalValue::from_json(&serde_json::json!(123456789));
     let s = CanonicalValue::from_json(&serde_json::json!("123456789"));
     assert_eq!(n, CanonicalValue::Int(123_456_789), "JSON number stays Int");
-    assert_eq!(s, CanonicalValue::Text("123456789".to_string()), "JSON string stays Text");
+    assert_eq!(
+        s,
+        CanonicalValue::Text("123456789".to_string()),
+        "JSON string stays Text"
+    );
     assert_ne!(
         n, s,
         "numeric JSON string must NOT canonicalize to Int (text \"5\" != int 5)"
@@ -212,7 +244,11 @@ fn normalization_unifies_equivalent_representations() {
     .expect("spaced parse");
     let ctx = CompareCtx::new(MID_NORM, "<inmem>");
     let diffs = compare_documents(&ctx, &compact, &spaced);
-    assert!(diffs.is_empty(), "whitespace must not produce diffs: {}", render_diffs(&diffs));
+    assert!(
+        diffs.is_empty(),
+        "whitespace must not produce diffs: {}",
+        render_diffs(&diffs)
+    );
 
     // JSON object key ordering is irrelevant (typed parse).
     let order_a = parse_document_str(
@@ -228,7 +264,11 @@ fn normalization_unifies_equivalent_representations() {
     )
     .expect("b");
     let diffs = compare_documents(&ctx, &order_a, &order_b);
-    assert!(diffs.is_empty(), "key ordering must not diff: {}", render_diffs(&diffs));
+    assert!(
+        diffs.is_empty(),
+        "key ordering must not diff: {}",
+        render_diffs(&diffs)
+    );
 
     // NaN unification in the float wrapper.
     assert_eq!(NormalizedFloat(f64::NAN), NormalizedFloat(f64::NAN));
@@ -245,7 +285,10 @@ fn precise_diff_on_each_cell_field() {
     let ctx = CompareCtx::new(MID_CELL, "<inmem>");
 
     // Self-compare → match.
-    assert!(compare_documents(&ctx, &doc, &doc).is_empty(), "identical docs must match");
+    assert!(
+        compare_documents(&ctx, &doc, &doc).is_empty(),
+        "identical docs must match"
+    );
 
     // Value change.
     let mutated_val = parse_document_str(
@@ -257,8 +300,16 @@ fn precise_diff_on_each_cell_field() {
     let d = compare_documents(&ctx, &doc, &mutated_val);
     assert_eq!(d.len(), 1, "exactly one value diff");
     assert!(d[0].what.contains("value"), "diff names value: {}", d[0]);
-    assert!(d[0].column_path.contains("col"), "diff locates column: {}", d[0]);
-    assert!(d[0].row_key.contains("ck1"), "diff locates row key: {}", d[0]);
+    assert!(
+        d[0].column_path.contains("col"),
+        "diff locates column: {}",
+        d[0]
+    );
+    assert!(
+        d[0].row_key.contains("ck1"),
+        "diff locates row key: {}",
+        d[0]
+    );
 
     // Per-cell writetime change.
     let mutated_ts = parse_document_str(
@@ -299,7 +350,9 @@ fn precise_diff_on_each_cell_field() {
     let rdoc = parse_document_str(reordered, Path::new("<r>"), true).expect("r");
     let d = compare_documents(&ctx, &pdoc, &rdoc);
     assert!(
-        !d.is_empty() && d.iter().any(|x| x.what.contains("path") || x.what.contains("value")),
+        !d.is_empty()
+            && d.iter()
+                .any(|x| x.what.contains("path") || x.what.contains("value")),
         "reordered collection paths must diff (order-sensitive): {}",
         render_diffs(&d)
     );
@@ -311,7 +364,8 @@ fn precise_diff_on_each_cell_field() {
     let tdoc = parse_document_str(tomb, Path::new("<t>"), true).expect("t");
     let d = compare_documents(&ctx, &ldoc, &tdoc);
     assert!(
-        d.iter().any(|x| x.what.contains("deletion") || x.what.contains("value")),
+        d.iter()
+            .any(|x| x.what.contains("deletion") || x.what.contains("value")),
         "live vs tombstone cell must diff: {}",
         render_diffs(&d)
     );
@@ -384,7 +438,9 @@ fn run_self_parity(keyspace: &str, table: &str) -> bool {
     let (dir, golden) = match golden_for(keyspace, table) {
         Some(x) => x,
         None => {
-            println!("[SKIP] no golden for {keyspace}.{table} (datasets root absent or fixture missing)");
+            println!(
+                "[SKIP] no golden for {keyspace}.{table} (datasets root absent or fixture missing)"
+            );
             return false;
         }
     };
@@ -460,7 +516,10 @@ fn real_golden_match_and_fail_proof_basic() {
     // simple_table: simple types, clustering key + liveness writetime.
     let ran = run_self_parity("test_basic", "simple_table");
     if datasets_root().is_some() {
-        assert!(ran, "datasets root present but test_basic.simple_table golden not exercised");
+        assert!(
+            ran,
+            "datasets root present but test_basic.simple_table golden not exercised"
+        );
     }
 }
 
@@ -496,7 +555,10 @@ fn real_golden_match_and_fail_proof_collections() {
                     }
                 }
             }
-            assert!(found, "datasets root present but no test_collections golden exercised");
+            assert!(
+                found,
+                "datasets root present but no test_collections golden exercised"
+            );
         }
     }
 }
@@ -526,8 +588,18 @@ fn manifest_report_is_deterministic_and_attributed() {
     assert_eq!(diffs_bad.len(), 1, "bad pair must produce one diff");
 
     let reports = vec![
-        build_report(MID_REPORT, Path::new("/fixtures/zzz-Data.db.jsonl"), &golden, &diffs_ok),
-        build_report(MID_REPORT, Path::new("/fixtures/aaa-Data.db.jsonl"), &golden, &diffs_bad),
+        build_report(
+            MID_REPORT,
+            Path::new("/fixtures/zzz-Data.db.jsonl"),
+            &golden,
+            &diffs_ok,
+        ),
+        build_report(
+            MID_REPORT,
+            Path::new("/fixtures/aaa-Data.db.jsonl"),
+            &golden,
+            &diffs_bad,
+        ),
     ];
     let r1 = render_manifest_report(&reports);
     let r2 = render_manifest_report(&reports);
@@ -539,7 +611,10 @@ fn manifest_report_is_deterministic_and_attributed() {
     assert!(aaa_pos < zzz_pos, "report sorted by fixture path:\n{r1}");
     assert!(r1.contains("[FAIL]"), "report shows FAIL state:\n{r1}");
     assert!(r1.contains("[MATCH]"), "report shows MATCH state:\n{r1}");
-    assert!(r1.contains(MID_REPORT), "report attributes manifest id:\n{r1}");
+    assert!(
+        r1.contains(MID_REPORT),
+        "report attributes manifest id:\n{r1}"
+    );
     println!("\n{r1}");
 }
 

@@ -102,7 +102,10 @@ pub enum CanonicalValue {
     /// A timestamp value, normalized to epoch-microseconds for equivalence
     /// across fractional-second formatting (`.06Z` vs `.060000Z`). The original
     /// string is retained for diagnostics only and is NOT compared.
-    Timestamp { micros: i64, raw: String },
+    Timestamp {
+        micros: i64,
+        raw: String,
+    },
     /// An ordered list (CQL list / frozen list / vector).
     List(Vec<CanonicalValue>),
     /// An ordered set — Cassandra persists set elements sorted, so order is
@@ -333,8 +336,14 @@ impl KeySpec {
     /// Build a spec from ordered (partition, clustering) declared CQL type names.
     pub fn from_cql_types(partition: &[&str], clustering: &[&str]) -> Self {
         KeySpec {
-            partition: partition.iter().map(|t| KeyKind::from_cql_type(t)).collect(),
-            clustering: clustering.iter().map(|t| KeyKind::from_cql_type(t)).collect(),
+            partition: partition
+                .iter()
+                .map(|t| KeyKind::from_cql_type(t))
+                .collect(),
+            clustering: clustering
+                .iter()
+                .map(|t| KeyKind::from_cql_type(t))
+                .collect(),
         }
     }
 
@@ -382,9 +391,7 @@ pub fn parse_timestamp_micros(s: &str) -> Option<i64> {
     let body = s.strip_suffix('Z')?;
     // sstabledump uses a space between date and time; ISO-8601 uses `T`. Accept
     // either so `"2025-10-06 01:12:07.265Z"` == `"2025-10-06T01:12:07.265000Z"`.
-    let (date_part, time_part) = body
-        .split_once('T')
-        .or_else(|| body.split_once(' '))?;
+    let (date_part, time_part) = body.split_once('T').or_else(|| body.split_once(' '))?;
 
     let mut dp = date_part.splitn(3, '-');
     let year: i64 = dp.next()?.parse().ok()?;
@@ -555,11 +562,19 @@ pub enum CanonicalError {
     /// The reference file exists but is empty (zero non-blank lines).
     Empty(PathBuf),
     /// A line failed to parse as JSON.
-    Malformed { path: PathBuf, line: usize, msg: String },
+    Malformed {
+        path: PathBuf,
+        line: usize,
+        msg: String,
+    },
     /// The reference is a placeholder/sentinel, not real golden data.
     Placeholder { path: PathBuf, marker: String },
     /// Structural problem (a `partition` object missing `key`, etc.).
-    Structure { path: PathBuf, line: usize, msg: String },
+    Structure {
+        path: PathBuf,
+        line: usize,
+        msg: String,
+    },
 }
 
 impl fmt::Display for CanonicalError {
@@ -569,7 +584,11 @@ impl fmt::Display for CanonicalError {
                 write!(f, "canonical JSONL reference MISSING: {}", p.display())
             }
             CanonicalError::Empty(p) => {
-                write!(f, "canonical JSONL reference EMPTY (no rows): {}", p.display())
+                write!(
+                    f,
+                    "canonical JSONL reference EMPTY (no rows): {}",
+                    p.display()
+                )
             }
             CanonicalError::Malformed { path, line, msg } => write!(
                 f,
@@ -623,7 +642,10 @@ const PLACEHOLDER_MARKERS: &[&str] = &[
 /// numeric-string coercion). Lanes whose KEY columns are integral MUST use
 /// [`load_golden_document_with_keys`] so an `int` key dumped as `"1"` unifies
 /// with CQLite's typed `1` while a text key `"5"` still stays `Text`.
-pub fn load_golden_document(path: &Path, expect_rows: bool) -> Result<CanonicalDocument, CanonicalError> {
+pub fn load_golden_document(
+    path: &Path,
+    expect_rows: bool,
+) -> Result<CanonicalDocument, CanonicalError> {
     load_golden_document_with_keys(path, expect_rows, &KeySpec::none())
 }
 
@@ -638,8 +660,11 @@ pub fn load_golden_document_with_keys(
     if !path.exists() {
         return Err(CanonicalError::Missing(path.to_path_buf()));
     }
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| CanonicalError::Malformed { path: path.to_path_buf(), line: 0, msg: e.to_string() })?;
+    let content = std::fs::read_to_string(path).map_err(|e| CanonicalError::Malformed {
+        path: path.to_path_buf(),
+        line: 0,
+        msg: e.to_string(),
+    })?;
 
     for marker in PLACEHOLDER_MARKERS {
         if content.contains(marker) {
@@ -710,11 +735,13 @@ fn parse_partition(
     line: usize,
     keys: &KeySpec,
 ) -> Result<CanonicalPartition, CanonicalError> {
-    let partition = v.get("partition").ok_or_else(|| CanonicalError::Structure {
-        path: path.to_path_buf(),
-        line,
-        msg: "top-level object missing `partition`".to_string(),
-    })?;
+    let partition = v
+        .get("partition")
+        .ok_or_else(|| CanonicalError::Structure {
+            path: path.to_path_buf(),
+            line,
+            msg: "top-level object missing `partition`".to_string(),
+        })?;
 
     let key_arr = partition
         .get("key")
@@ -1042,9 +1069,19 @@ pub fn compare_documents(
 
     let common = expected.partitions.len().min(actual.partitions.len());
     for i in 0..common {
-        compare_partition(ctx, &expected.partitions[i], &actual.partitions[i], &mut diffs);
+        compare_partition(
+            ctx,
+            &expected.partitions[i],
+            &actual.partitions[i],
+            &mut diffs,
+        );
     }
-    for (i, exp) in expected.partitions.iter().enumerate().skip(actual.partitions.len()) {
+    for (i, exp) in expected
+        .partitions
+        .iter()
+        .enumerate()
+        .skip(actual.partitions.len())
+    {
         diffs.push(ctx.diff(
             &format!("pk={}", render_key(&exp.key)),
             &format!("<partition #{i}>"),
@@ -1053,7 +1090,12 @@ pub fn compare_documents(
             "<absent>",
         ));
     }
-    for (i, act) in actual.partitions.iter().enumerate().skip(expected.partitions.len()) {
+    for (i, act) in actual
+        .partitions
+        .iter()
+        .enumerate()
+        .skip(expected.partitions.len())
+    {
         diffs.push(ctx.diff(
             &format!("pk={}", render_key(&act.key)),
             &format!("<partition #{i}>"),
@@ -1131,7 +1173,12 @@ fn compare_partition(
             ));
         }
     }
-    for (i, rb) in exp.range_bounds.iter().enumerate().skip(act.range_bounds.len()) {
+    for (i, rb) in exp
+        .range_bounds
+        .iter()
+        .enumerate()
+        .skip(act.range_bounds.len())
+    {
         diffs.push(ctx.diff(
             &rk,
             &format!("<range_bound #{i}>"),
@@ -1140,7 +1187,12 @@ fn compare_partition(
             "<absent>",
         ));
     }
-    for (i, rb) in act.range_bounds.iter().enumerate().skip(exp.range_bounds.len()) {
+    for (i, rb) in act
+        .range_bounds
+        .iter()
+        .enumerate()
+        .skip(exp.range_bounds.len())
+    {
         diffs.push(ctx.diff(
             &rk,
             &format!("<range_bound #{i}>"),
@@ -1161,7 +1213,13 @@ fn compare_row(
     let rk = render_row_key(pk, &exp.clustering);
 
     if exp.row_type != act.row_type {
-        diffs.push(ctx.diff(&rk, "<row type>", "row type mismatch", &exp.row_type, &act.row_type));
+        diffs.push(ctx.diff(
+            &rk,
+            "<row type>",
+            "row type mismatch",
+            &exp.row_type,
+            &act.row_type,
+        ));
     }
     if exp.clustering != act.clustering {
         diffs.push(ctx.diff(

@@ -17,14 +17,17 @@
 //! ## What "the same final value" means for counters
 //!
 //! sstabledump renders a counter cell as the RAW CounterContext bytes
-//! interpreted as a big-endian i64 (in these fixtures, the constant
-//! `422212677445164`). That is INTERNAL SHARD STATE, not the value a user sees.
-//! The user-visible value is the logical count Cassandra's `SELECT` returns,
+//! interpreted as a big-endian i64 (a large value such as `422212677445164`).
+//! That is INTERNAL SHARD STATE, not the value a user sees, and because the
+//! CounterContext embeds a per-node UUID it CHANGES every time the fixtures are
+//! regenerated — so it must never be hardcoded as a fixed constant. The
+//! user-visible value is the logical count Cassandra's `SELECT` returns,
 //! captured in each fixture's committed `*.counter-select.txt` sidecar
 //! (`pk | c` table). This lane therefore asserts CQLite's merged value against
 //! the SIDECAR (the authoritative final values) and *separately* asserts that
-//! CQLite never surfaces the raw shard constant (`422212677445164`) — i.e. the
-//! CounterContext was actually decoded and summed, not passed through.
+//! CQLite never surfaces any raw shard rendering the golden actually carries —
+//! derived dynamically from the golden, never matched against a fixed integer —
+//! i.e. the CounterContext was actually decoded and summed, not passed through.
 //!
 //! ## Cross-generation counter merge model (derived, not guessed)
 //!
@@ -65,16 +68,6 @@ use cqlite_core::types::Value;
 #[path = "support/canonical_jsonl.rs"]
 mod canonical_jsonl;
 use canonical_jsonl::{load_golden_document, CanonicalValue};
-
-// ===========================================================================
-// Constants
-// ===========================================================================
-
-/// The raw CounterContext byte pattern these fixtures persist, interpreted as a
-/// big-endian i64. sstabledump renders this as the cell `value`; it is INTERNAL
-/// shard state and MUST NOT be the user-facing decoded value. Asserting CQLite
-/// never returns this is the "do not expose shard state" guard.
-const RAW_SHARD_CONTEXT_I64: i64 = 422212677445164;
 
 // ===========================================================================
 // Dataset path helpers
@@ -284,8 +277,8 @@ fn parse_counter_select_sidecar(path: &Path) -> (Vec<(i64, i64)>, usize) {
         };
         rows.push((pk, c));
     }
-    let declared = declared_rows
-        .unwrap_or_else(|| panic!("sidecar {path:?} missing the `(N rows)` footer"));
+    let declared =
+        declared_rows.unwrap_or_else(|| panic!("sidecar {path:?} missing the `(N rows)` footer"));
     assert_eq!(
         rows.len(),
         declared,
@@ -430,34 +423,50 @@ fn partition_key_i64(pk: &[Value]) -> i64 {
 }
 
 // ===========================================================================
-// JSONL golden cross-checks (raw shard constant — the no-shard-state guard)
+// JSONL golden cross-checks (raw shard renderings — the no-shard-state guard)
 // ===========================================================================
 
-/// Confirm the committed sstabledump JSONL golden for `gen_prefix` carries the
-/// RAW shard constant as the `c` cell value (proving the golden's value is
-/// internal shard state, distinct from the user-visible total CQLite computes).
-/// Returns the number of counter cells whose golden value equals the raw shard
-/// constant.
-fn golden_raw_shard_cell_count(fixture_dir: &Path, gen_prefix: &str) -> usize {
+/// Every `c`-cell `Int` value rendered in the committed sstabledump JSONL golden
+/// for `gen_prefix`. sstabledump NEVER decodes a CounterContext, so every counter
+/// cell value it emits is raw shard state (a big-endian i64 of the context bytes),
+/// NOT the logical total. The exact integer is regen-dependent (the context embeds
+/// a per-node UUID), so callers must treat these values as opaque/dynamic — never
+/// compare against a fixed constant.
+fn golden_counter_raw_values(fixture_dir: &Path, gen_prefix: &str) -> Vec<i128> {
     // Generation prefix is e.g. "nb-1-big-"; the golden is "<prefix>Data.db.jsonl".
     let golden = fixture_dir.join(format!("{gen_prefix}Data.db.jsonl"));
     let doc = load_golden_document(&golden, false)
         .unwrap_or_else(|e| panic!("load golden {golden:?}: {e}"));
-    let mut raw_hits = 0usize;
+    let mut values = Vec::new();
     for part in &doc.partitions {
         for row in &part.rows {
             for cell in &row.cells {
                 if cell.name == "c" {
                     if let CanonicalValue::Int(v) = &cell.value {
-                        if *v == RAW_SHARD_CONTEXT_I64 as i128 {
-                            raw_hits += 1;
-                        }
+                        values.push(*v);
                     }
                 }
             }
         }
     }
-    raw_hits
+    values
+}
+
+/// Count of counter (`c`) cells the golden renders as a raw shard `Int` value.
+/// Used to assert the golden actually carries raw shard renderings; the exact
+/// integers are intentionally ignored (regen-dependent).
+fn golden_raw_shard_cell_count(fixture_dir: &Path, gen_prefix: &str) -> usize {
+    golden_counter_raw_values(fixture_dir, gen_prefix).len()
+}
+
+/// Union of every `c`-cell raw shard `Int` value across all generations of a
+/// fixture (the dynamic "shard state" set the merged user value must never be in).
+fn golden_raw_value_set(fixture_dir: &Path) -> BTreeSet<i128> {
+    let mut set = BTreeSet::new();
+    for g in generation_prefixes(fixture_dir) {
+        set.extend(golden_counter_raw_values(fixture_dir, &g));
+    }
+    set
 }
 
 // ===========================================================================
@@ -495,6 +504,11 @@ async fn run_fixture(manifest_id: &str, prefix: &str) {
     // CQLite: read every generation and merge as a query would.
     let actual = read_and_merge_counters(&dir).await;
 
+    // Dynamic no-shard-state guard set: the raw shard renderings the golden
+    // actually carries for this fixture's generations (regen-stable — we read
+    // whatever the golden contains rather than matching a fixed integer).
+    let raw_shard_values = golden_raw_value_set(&dir);
+
     // 1) Every expected partition must be present with the EXACT final value.
     for (pk, exp_c) in &expected {
         let got = actual.get(pk).copied();
@@ -504,18 +518,21 @@ async fn run_fixture(manifest_id: &str, prefix: &str) {
             "[{manifest_id}] {prefix}: pk={pk} final counter mismatch — \
              Cassandra SELECT (sidecar {sidecar:?}) says {exp_c}, CQLite merged says {got:?}"
         );
-        // No-shard-state guard: the merged user value must NOT be the raw
-        // CounterContext constant.
-        assert_ne!(
-            *exp_c, RAW_SHARD_CONTEXT_I64,
-            "[{manifest_id}] sidecar value equals the raw shard constant — test setup error"
+        // No-shard-state guard: the merged user value must NOT be any raw
+        // CounterContext rendering the golden carries.
+        assert!(
+            !raw_shard_values.contains(&(*exp_c as i128)),
+            "[{manifest_id}] sidecar value {exp_c} appears among the golden's raw shard \
+             renderings {raw_shard_values:?} — test setup error / shard state not distinct"
         );
-        assert_ne!(
-            got,
-            Some(RAW_SHARD_CONTEXT_I64),
-            "[{manifest_id}] {prefix}: pk={pk} exposed RAW shard context {RAW_SHARD_CONTEXT_I64} \
-             as the user-facing value (CounterContext was not decoded/summed)"
-        );
+        if let Some(g) = got {
+            assert!(
+                !raw_shard_values.contains(&(g as i128)),
+                "[{manifest_id}] {prefix}: pk={pk} exposed a RAW shard context value {g} \
+                 (one of {raw_shard_values:?}) as the user-facing value (CounterContext was \
+                 not decoded/summed)"
+            );
+        }
     }
 
     // 2) No partition may appear that the sidecar does not list (a deleted /
@@ -620,12 +637,14 @@ async fn counters_compacted_final_value() {
 
 /// Manifest: cass.cql_types.counters.canonical_jsonl_value
 ///
-/// The committed sstabledump JSONL goldens render counter cells as the RAW
-/// CounterContext constant (`422212677445164`). This lane proves two things:
-///   1. the golden value IS that raw shard constant (so the JSONL value is
-///      internal shard state, not the user total), and
-///   2. CQLite's decoded/merged value for the SAME partitions is DIFFERENT from
-///      that raw constant and equals the sidecar — i.e. CQLite decodes the
+/// The committed sstabledump JSONL goldens render counter cells as RAW
+/// CounterContext shard state (a large i64 such as `422212677445164`, but the
+/// exact integer is regen-dependent because the context embeds a per-node UUID).
+/// This lane proves two things, dynamically (never against a fixed constant):
+///   1. the golden carries raw shard renderings for its counter cells (so the
+///      JSONL value is internal shard state, not the user total), and
+///   2. CQLite's decoded/merged value for the SAME partitions is NOT in that set
+///      of raw shard renderings and equals the sidecar — i.e. CQLite decodes the
 ///      CounterContext rather than passing the raw bytes through.
 #[tokio::test]
 async fn counters_canonical_jsonl_value() {
@@ -642,7 +661,7 @@ async fn counters_canonical_jsonl_value() {
         return;
     }
 
-    // (1) The golden carries the raw shard constant for its counter cells.
+    // (1) The golden carries raw shard renderings for its counter cells.
     let gens = generation_prefixes(&dir);
     let mut total_raw_hits = 0usize;
     for g in &gens {
@@ -650,14 +669,33 @@ async fn counters_canonical_jsonl_value() {
     }
     assert!(
         total_raw_hits > 0,
-        "[{manifest}] {prefix}: expected the JSONL golden to render counter cells as the raw \
-         shard constant {RAW_SHARD_CONTEXT_I64}, found none — golden assumption broken"
+        "[{manifest}] {prefix}: expected the JSONL golden to render counter cells as raw \
+         shard state, found none — golden assumption broken"
     );
 
-    // (2) CQLite's decoded/merged values differ from the raw constant and match
-    //     the authoritative sidecar.
+    // The dynamic set of raw shard renderings actually present in the golden
+    // (read from the committed golden, regen-stable; not a hardcoded integer).
+    let raw_shard_values = golden_raw_value_set(&dir);
+    assert!(
+        !raw_shard_values.is_empty(),
+        "[{manifest}] {prefix}: golden raw shard value set is empty despite raw hits"
+    );
+
+    // (2) CQLite's decoded/merged values are NOT in the golden's raw shard set
+    //     and match the authoritative sidecar.
     let sidecar = find_sidecar(&dir);
     let (expected_rows, _) = parse_counter_select_sidecar(&sidecar);
+    let sidecar_values: BTreeSet<i128> = expected_rows.iter().map(|(_, c)| *c as i128).collect();
+
+    // Soundness: the golden's raw shard renderings and the sidecar's logical
+    // totals must be DISJOINT — raw renderings are huge (~4e14), logical totals
+    // are tiny — which proves the golden carries shard state, not decoded values.
+    assert!(
+        raw_shard_values.is_disjoint(&sidecar_values),
+        "[{manifest}] {prefix}: golden raw shard set {raw_shard_values:?} overlaps the sidecar \
+         logical totals {sidecar_values:?} — golden does not carry distinct shard state"
+    );
+
     let actual = read_and_merge_counters(&dir).await;
     for (pk, exp_c) in expected_rows {
         let got = actual.get(&pk).copied();
@@ -666,10 +704,12 @@ async fn counters_canonical_jsonl_value() {
             Some(exp_c),
             "[{manifest}] {prefix}: pk={pk} merged value {got:?} != sidecar {exp_c}"
         );
-        assert_ne!(
-            got,
-            Some(RAW_SHARD_CONTEXT_I64),
-            "[{manifest}] {prefix}: pk={pk} returned raw shard constant instead of decoded total"
-        );
+        if let Some(g) = got {
+            assert!(
+                !raw_shard_values.contains(&(g as i128)),
+                "[{manifest}] {prefix}: pk={pk} returned a raw shard rendering {g} \
+                 (one of {raw_shard_values:?}) instead of the decoded total"
+            );
+        }
     }
 }

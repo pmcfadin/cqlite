@@ -341,7 +341,13 @@ fn assert_header_parity(manifest_id: &str, table: &str, dir: &Path, gen: &str) -
     // over-emitted column at the exact position.
     let expected_seq: Vec<(String, String, bool)> = reference
         .iter()
-        .map(|rc| (rc.name.clone(), marshal_to_cql(&rc.marshal_type), rc.is_static))
+        .map(|rc| {
+            (
+                rc.name.clone(),
+                marshal_to_cql(&rc.marshal_type),
+                rc.is_static,
+            )
+        })
         .collect();
     let actual_seq: Vec<(String, String, bool)> = bin
         .iter()
@@ -731,20 +737,22 @@ fn assert_decode_parity(
     let key_spec = key_spec_from_schema(&schema);
 
     // FAIL-LOUD on a missing / empty / placeholder golden.
-    let golden = load_golden_document_with_keys(&golden_path, true, &key_spec).unwrap_or_else(|e| {
-        panic!("[{manifest_id}] table={table} gen={gen}: golden load failed: {e}")
-    });
+    let golden =
+        load_golden_document_with_keys(&golden_path, true, &key_spec).unwrap_or_else(|e| {
+            panic!("[{manifest_id}] table={table} gen={gen}: golden load failed: {e}")
+        });
 
     let isolated = isolate_generation(dir, gen);
     let records = block_on(collect_records(isolated.path(), schema));
     let jsonl = records_to_jsonl(&records, excluded_cols);
     let synthetic_path = golden_path.with_extension("cqlite.synthetic");
-    let actual = parse_document_str_with_keys(&jsonl, &synthetic_path, true, &key_spec).unwrap_or_else(|e| {
-        panic!(
+    let actual = parse_document_str_with_keys(&jsonl, &synthetic_path, true, &key_spec)
+        .unwrap_or_else(|e| {
+            panic!(
             "[{manifest_id}] table={table} gen={gen}: CQLite-rendered JSONL failed to parse: {e}\n\
              ---- rendered ----\n{jsonl}"
         )
-    });
+        });
 
     let ctx = CompareCtx::new(manifest_id.to_string(), golden_path.clone());
     let diffs = compare_documents(&ctx, &golden, &actual);
