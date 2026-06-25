@@ -5558,11 +5558,21 @@ impl V5CompressedLegacyParser {
     }
 
     /// Issue #1080: does the on-disk SerializationHeader marshal type contain a
-    /// `UserType(` token (case-insensitive)? When true, a `frozen<udt>` cell whose
-    /// supplied schema short form carries no field defs (and with no `UdtRegistry`
-    /// wired) can still be decoded STRUCTURALLY from this authoritative header type.
+    /// FULLY-QUALIFIED `org.apache.cassandra.db.marshal.UserType(` token
+    /// (case-insensitive)? When true, a `frozen<udt>` cell whose supplied schema
+    /// short form carries no field defs (and with no `UdtRegistry` wired) can be
+    /// decoded STRUCTURALLY from this authoritative header type.
+    ///
+    /// We deliberately match ONLY the fully-qualified marshal form — that is the
+    /// single shape real Cassandra SerializationHeaders ever carry (preserved
+    /// verbatim by `convert_marshal_type_to_cql`), and the whole decode chain
+    /// (`parse_udt_type_definition` + `parse_cassandra_type_with_depth` for nested
+    /// fields) keys on the same qualified marker at every nesting level. Matching a
+    /// bare `UserType(` here would let the predicate accept a string the nested
+    /// decoder cannot fully resolve, re-triggering the Err→break trailing-column
+    /// loss this fix exists to prevent (roborev jobs 1359/1361).
     fn header_type_is_user_type(header_type: &str) -> bool {
-        const NEEDLE: &[u8] = b"usertype(";
+        const NEEDLE: &[u8] = b"org.apache.cassandra.db.marshal.usertype(";
         header_type
             .as_bytes()
             .windows(NEEDLE.len())
@@ -5570,11 +5580,13 @@ impl V5CompressedLegacyParser {
     }
 
     /// Issue #1080: decode a single-cell frozen UDT value using the AUTHORITATIVE
-    /// on-disk SerializationHeader marshal type (`FrozenType(UserType(...))` or a
-    /// bare `UserType(...)`), used when no `UdtRegistry` is wired and the supplied
-    /// schema short form (`frozen<person_type>`) carries no field defs.
+    /// on-disk SerializationHeader marshal type (the fully-qualified
+    /// `FrozenType(UserType(...))` marshal string), used when no `UdtRegistry` is
+    /// wired and the supplied schema short form (`frozen<person_type>`) carries no
+    /// field defs.
     ///
-    /// `parse_udt_type_definition` does a case-insensitive find for `UserType(`, so
+    /// `parse_udt_type_definition` does a case-insensitive find for the qualified
+    /// `UserType(` marker, so
     /// the `FrozenType(...)` wrapper is transparently handled and nested
     /// `FrozenType(UserType(...))` fields resolve to `CqlType::Frozen(CqlType::Udt)`
     /// (decoded recursively by `parse_udt_field_value`). Returns the decoded UDT
@@ -5685,26 +5697,21 @@ impl V5CompressedLegacyParser {
             )));
         }
 
-        // Find the UserType(...) portion (case-insensitive). Accept BOTH the
-        // fully-qualified marshal marker AND a bare `UserType(`, so this decoder
-        // stays consistent with `header_type_is_user_type` (issue #1080 / roborev
-        // job 1359): any string the predicate accepts MUST be decodable here, or
-        // the row-decode loop would break and drop trailing columns. The qualified
-        // form is preferred (checked first); the bare form is the fallback. Markers
-        // are ASCII, so byte offsets in the lowercased copy match `type_str`.
+        // Find the UserType(...) portion (case-insensitive). Match ONLY the
+        // fully-qualified marshal marker — the single shape real SerializationHeaders
+        // carry, and the same marker the nested-field decoder
+        // (`parse_cassandra_type_with_depth`) keys on. Keeping top-level and nested
+        // parsing on the same qualified marker avoids the partial-bare-support
+        // inconsistency that would blob nested UDT fields (roborev jobs 1359/1361).
+        let start_marker = "org.apache.cassandra.db.marshal.UserType(";
         let type_lower = type_str.to_lowercase();
-        const QUALIFIED_MARKER: &str = "org.apache.cassandra.db.marshal.usertype(";
-        const BARE_MARKER: &str = "usertype(";
-        let (start_idx, marker_len) = if let Some(idx) = type_lower.find(QUALIFIED_MARKER) {
-            (idx, QUALIFIED_MARKER.len())
-        } else if let Some(idx) = type_lower.find(BARE_MARKER) {
-            (idx, BARE_MARKER.len())
-        } else {
-            return Err(Error::schema(format!("Not a UserType: {}", type_str)));
-        };
+        let start_marker_lower = start_marker.to_lowercase();
+        let start_idx = type_lower
+            .find(&start_marker_lower)
+            .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
 
         // Find the matching close paren (handling nested types)
-        let inner_start = start_idx + marker_len;
+        let inner_start = start_idx + start_marker.len();
         let mut paren_depth = 1;
         let mut end_idx = inner_start;
         let chars: Vec<char> = type_str[inner_start..].chars().collect();
@@ -11779,12 +11786,19 @@ mod tests {
         assert!(V5CompressedLegacyParser::header_type_is_user_type(
             "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,abcd))"
         ));
-        // Positive: case-insensitive (eq_ignore_ascii_case window).
+        // Positive: case-insensitive on the qualified marker.
         assert!(V5CompressedLegacyParser::header_type_is_user_type(
-            "USERTYPE("
+            "ORG.APACHE.CASSANDRA.DB.MARSHAL.USERTYPE(ks,abcd)"
         ));
-        assert!(V5CompressedLegacyParser::header_type_is_user_type(
-            "UsErTyPe("
+        // Negative: a BARE `UserType(` (no marshal namespace) must NOT match — the
+        // nested-field decoder only resolves the qualified form, so accepting bare
+        // here would risk blobbing nested UDT fields (roborev jobs 1359/1361). Real
+        // SerializationHeaders are always fully qualified.
+        assert!(!V5CompressedLegacyParser::header_type_is_user_type(
+            "UserType(ks,abcd)"
+        ));
+        assert!(!V5CompressedLegacyParser::header_type_is_user_type(
+            "FrozenType(UserType(ks,abcd))"
         ));
         // Negative: other complex/primitive marshal types must NOT match.
         assert!(!V5CompressedLegacyParser::header_type_is_user_type(
@@ -11834,13 +11848,14 @@ mod tests {
         );
     }
 
-    /// Issue #1080 / roborev job 1359 (Medium): `header_type_is_user_type` accepts
-    /// a BARE `UserType(` (no `org.apache.cassandra.db.marshal.` prefix), so the
-    /// decoder MUST also accept it — otherwise the predicate would route a bare
-    /// header into a decode that errors, re-triggering the Err→break trailing-loss.
-    /// This proves predicate and decoder agree on the bare form.
+    /// Issue #1080 / roborev jobs 1359+1361: predicate and decoder must agree on
+    /// the SAME marshal form. We key everything on the fully-qualified
+    /// `org.apache.cassandra.db.marshal.UserType(` marker (the only shape real
+    /// SerializationHeaders carry, and the one the nested-field decoder resolves).
+    /// This proves a NESTED qualified frozen UDT field decodes structurally — the
+    /// exact case partial bare support would have blobbed.
     #[test]
-    fn test_regression_1080_bare_user_type_decodes_consistently() {
+    fn test_regression_1080_nested_qualified_frozen_udt_field_decodes() {
         let parser = V5CompressedLegacyParser::new(
             "test_types".to_string(),
             "cx_frozen_udt".to_string(),
@@ -11849,47 +11864,73 @@ mod tests {
             None,
         );
         let column = crate::schema::Column {
-            name: "p".to_string(),
-            data_type: "frozen<person_type>".to_string(),
+            name: "e".to_string(),
+            data_type: "frozen<employee_type>".to_string(),
             nullable: true,
             default: None,
             is_static: false,
         };
         let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
-        // BARE marshal form: `FrozenType(UserType(...))` with NO namespace prefix.
-        let bare_header = format!(
-            "FrozenType(UserType(test_types,{},{}:UTF8Type,{}:Int32Type))",
-            hex("person_type"),
+        let q = "org.apache.cassandra.db.marshal";
+        // Fully-qualified NESTED frozen UDT: employee { name text, home frozen<addr> }
+        // where addr = { city text }. Exercises the nested-field decode path.
+        let addr = format!(
+            "{q}.FrozenType({q}.UserType(test_types,{},{}:{q}.UTF8Type))",
+            hex("addr_type"),
+            hex("city"),
+        );
+        let header_type = format!(
+            "{q}.FrozenType({q}.UserType(test_types,{},{}:{q}.UTF8Type,{}:{addr}))",
+            hex("employee_type"),
             hex("name"),
-            hex("age"),
+            hex("home"),
         );
-        // Predicate must accept it...
         assert!(
-            V5CompressedLegacyParser::header_type_is_user_type(&bare_header),
-            "predicate must accept the bare UserType form"
+            V5CompressedLegacyParser::header_type_is_user_type(&header_type),
+            "qualified nested frozen UDT header must be recognized"
         );
-        // ...and so must the decoder (consistency — no Err→break).
+
+        // Blob: name="Bo" (2 bytes); home = frozen<addr> blob with city="NYC".
+        let mut addr_blob: Vec<u8> = Vec::new();
+        let city = b"NYC";
+        addr_blob.extend_from_slice(&(city.len() as i32).to_be_bytes());
+        addr_blob.extend_from_slice(city);
+
         let mut udt_blob: Vec<u8> = Vec::new();
-        let name = b"Ada";
+        let name = b"Bo";
         udt_blob.extend_from_slice(&(name.len() as i32).to_be_bytes());
         udt_blob.extend_from_slice(name);
-        udt_blob.extend_from_slice(&4i32.to_be_bytes());
-        udt_blob.extend_from_slice(&7i32.to_be_bytes());
+        udt_blob.extend_from_slice(&(addr_blob.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(&addr_blob);
+
         assert!(udt_blob.len() < 0x80);
         let mut buf: Vec<u8> = vec![udt_blob.len() as u8];
         buf.extend_from_slice(&udt_blob);
 
         let (value, _off) = parser
-            .decode_frozen_udt_from_header_type(&buf, 0, &bare_header, &column)
-            .expect(
-                "bare UserType header must decode structurally (predicate/decoder consistency)",
-            );
+            .decode_frozen_udt_from_header_type(&buf, 0, &header_type, &column)
+            .expect("nested qualified frozen UDT must decode structurally (not blob)");
         match value {
             Value::Udt(u) => {
-                assert_eq!(u.type_name, "person_type");
+                assert_eq!(u.type_name, "employee_type");
                 assert_eq!(u.fields.len(), 2);
+                // The NESTED `home` field must itself be a structured UDT, NOT a blob.
+                let home = u
+                    .fields
+                    .iter()
+                    .find(|f| f.name == "home")
+                    .and_then(|f| f.value.as_ref())
+                    .expect("home field present");
+                let inner = match home {
+                    Value::Frozen(b) => b.as_ref(),
+                    other => other,
+                };
+                assert!(
+                    matches!(inner, Value::Udt(_)),
+                    "nested frozen UDT field must decode structurally, got {inner:?}"
+                );
             }
-            other => panic!("expected Value::Udt from bare UserType header, got {other:?}"),
+            other => panic!("expected Value::Udt, got {other:?}"),
         }
     }
 
