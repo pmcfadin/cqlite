@@ -5685,16 +5685,26 @@ impl V5CompressedLegacyParser {
             )));
         }
 
-        // Find the UserType(...) portion (case-insensitive search)
-        let start_marker = "org.apache.cassandra.db.marshal.UserType(";
+        // Find the UserType(...) portion (case-insensitive). Accept BOTH the
+        // fully-qualified marshal marker AND a bare `UserType(`, so this decoder
+        // stays consistent with `header_type_is_user_type` (issue #1080 / roborev
+        // job 1359): any string the predicate accepts MUST be decodable here, or
+        // the row-decode loop would break and drop trailing columns. The qualified
+        // form is preferred (checked first); the bare form is the fallback. Markers
+        // are ASCII, so byte offsets in the lowercased copy match `type_str`.
         let type_lower = type_str.to_lowercase();
-        let start_marker_lower = start_marker.to_lowercase();
-        let start_idx = type_lower
-            .find(&start_marker_lower)
-            .ok_or_else(|| Error::schema(format!("Not a UserType: {}", type_str)))?;
+        const QUALIFIED_MARKER: &str = "org.apache.cassandra.db.marshal.usertype(";
+        const BARE_MARKER: &str = "usertype(";
+        let (start_idx, marker_len) = if let Some(idx) = type_lower.find(QUALIFIED_MARKER) {
+            (idx, QUALIFIED_MARKER.len())
+        } else if let Some(idx) = type_lower.find(BARE_MARKER) {
+            (idx, BARE_MARKER.len())
+        } else {
+            return Err(Error::schema(format!("Not a UserType: {}", type_str)));
+        };
 
         // Find the matching close paren (handling nested types)
-        let inner_start = start_idx + start_marker.len();
+        let inner_start = start_idx + marker_len;
         let mut paren_depth = 1;
         let mut end_idx = inner_start;
         let chars: Vec<char> = type_str[inner_start..].chars().collect();
@@ -11824,6 +11834,65 @@ mod tests {
         );
     }
 
+    /// Issue #1080 / roborev job 1359 (Medium): `header_type_is_user_type` accepts
+    /// a BARE `UserType(` (no `org.apache.cassandra.db.marshal.` prefix), so the
+    /// decoder MUST also accept it — otherwise the predicate would route a bare
+    /// header into a decode that errors, re-triggering the Err→break trailing-loss.
+    /// This proves predicate and decoder agree on the bare form.
+    #[test]
+    fn test_regression_1080_bare_user_type_decodes_consistently() {
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+        let column = crate::schema::Column {
+            name: "p".to_string(),
+            data_type: "frozen<person_type>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        // BARE marshal form: `FrozenType(UserType(...))` with NO namespace prefix.
+        let bare_header = format!(
+            "FrozenType(UserType(test_types,{},{}:UTF8Type,{}:Int32Type))",
+            hex("person_type"),
+            hex("name"),
+            hex("age"),
+        );
+        // Predicate must accept it...
+        assert!(
+            V5CompressedLegacyParser::header_type_is_user_type(&bare_header),
+            "predicate must accept the bare UserType form"
+        );
+        // ...and so must the decoder (consistency — no Err→break).
+        let mut udt_blob: Vec<u8> = Vec::new();
+        let name = b"Ada";
+        udt_blob.extend_from_slice(&(name.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(name);
+        udt_blob.extend_from_slice(&4i32.to_be_bytes());
+        udt_blob.extend_from_slice(&7i32.to_be_bytes());
+        assert!(udt_blob.len() < 0x80);
+        let mut buf: Vec<u8> = vec![udt_blob.len() as u8];
+        buf.extend_from_slice(&udt_blob);
+
+        let (value, _off) = parser
+            .decode_frozen_udt_from_header_type(&buf, 0, &bare_header, &column)
+            .expect(
+                "bare UserType header must decode structurally (predicate/decoder consistency)",
+            );
+        match value {
+            Value::Udt(u) => {
+                assert_eq!(u.type_name, "person_type");
+                assert_eq!(u.fields.len(), 2);
+            }
+            other => panic!("expected Value::Udt from bare UserType header, got {other:?}"),
+        }
+    }
+
     /// Issue #1080 / roborev job 1357 (High): a DROPPED *fixed-width* scalar column
     /// (e.g. `int`) must be consumed with the correct fixed-width framing, NOT as a
     /// VInt-length-prefixed blob — otherwise it would misalign every trailing column.
@@ -11842,7 +11911,12 @@ mod tests {
         use std::sync::Arc;
 
         // `_reader` is unused by parse_cell_value_schema_order, but we still need a
-        // real instance; open any available SSTable. Skip when datasets absent.
+        // real instance; open any available SSTable. The ONLY legitimate skip is
+        // when CQLITE_DATASETS_ROOT is unset (local dev without data). When it IS
+        // set (gate/CI), the core `test_basic/simple_table` fixture MUST be present
+        // and openable — a missing/broken fixture is a hard failure, never a silent
+        // green (roborev job 1359; matches the project's present-but-broken
+        // doctrine).
         let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
             Ok(r) => r,
             Err(_) => return,
@@ -11870,20 +11944,21 @@ mod tests {
                 }
             }
         }
-        let data_file = match data_file {
-            Some(f) => f,
-            None => return,
-        };
+        let data_file = data_file.unwrap_or_else(|| {
+            panic!(
+                "CQLITE_DATASETS_ROOT is set ({datasets_root}) but the core fixture \
+                 test_basic/simple_table-*/*-Data.db is missing — refusing to silently skip"
+            )
+        });
         let config = crate::Config::default();
         let platform = Arc::new(
             crate::platform::Platform::new(&config)
                 .await
                 .expect("platform"),
         );
-        let reader = match SSTableReader::open(&data_file, &config, platform).await {
-            Ok(r) => r,
-            Err(_) => return,
-        };
+        let reader = SSTableReader::open(&data_file, &config, platform)
+            .await
+            .expect("core fixture test_basic/simple_table must open (datasets root is set)");
 
         let parser = V5CompressedLegacyParser::new(
             "test_basic".to_string(),
