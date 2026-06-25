@@ -10,8 +10,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 102 |
-| `partial` | 18 |
+| `mirrored` | 106 |
+| `partial` | 14 |
 | `planned` | 11 |
 | `out_of_scope` | 8 |
 | **total** | **139** |
@@ -21,9 +21,9 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 | Evidence | Scenarios |
 |---|---|
 | `byte_for_byte` | 49 |
-| `canonical_semantic` | 46 |
+| `canonical_semantic` | 50 |
 | `smoke` | 7 |
-| `partial` | 27 |
+| `partial` | 23 |
 | `out_of_scope` | 10 |
 
 ## ⚠️ P0 scenarios with weak evidence
@@ -222,10 +222,18 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: A regular column that was never written (absent) has no cell at all, a column written then deleted is a cell tombstone (null), and a column written with a zero-length value is a live empty cell; the three are mapped to distinct sstabledump JSONL facts (no cell / deletion_info / empty value) and compared.
 - `cass.cql_types.boundaries.empty_collections` — Empty collection vs null collection distinction
   - Normalization: Empty multicell collections (no surviving cells) versus absent collections are mapped to the sstabledump JSONL cell-presence facts and compared so that an empty collection and a never-written collection are distinguished.
+- `cass.cql_types.complex.frozen_udt_value` — Frozen UDT value decode parity
+  - Normalization: Frozen UDT values (including the nested frozen<address_type>) are decoded structurally and compared field-by-field against the sstabledump JSONL value. Structured frozen<udt> decode landed in bug fix #1080 (PR #1088).
+- `cass.cql_types.complex.legacy_dropped_tuple_udt_fields` — Legacy dropped tuple/UDT field decode parity
+  - Normalization: Dropped tuple/UDT columns are skipped via on-disk header metadata and the surviving columns decode and compare against the sstabledump JSONL value; the Err-drops-trailing-column regression was fixed in #1080 (PR #1088).
+- `cass.cql_types.complex.multicell_udt_collection_paths` — Multicell UDT / collection cell-path decode parity
+  - Normalization: Multicell (non-frozen) UDT and collection cell-paths are decoded structurally and compared against the sstabledump JSONL value. Structured multicell-UDT decode landed in bug fix #1081 (PR #1087).
 - `cass.cql_types.complex.nested_frozen_collections` — Nested frozen collection decode parity
   - Normalization: Nested frozen collections (list<frozen<map>>, etc.) are recursively decoded and mapped to the nested sstabledump JSONL value and compared structurally.
 - `cass.cql_types.complex.tuple_field_order` — Frozen tuple field-order decode parity
   - Normalization: Frozen tuple field values are mapped in declared field order to the sstabledump JSONL tuple value and compared element-by-element.
+- `cass.cql_types.complex.udt_field_order_null_empty` — UDT field-order with null/empty fields decode parity
+  - Normalization: Frozen UDT field values are mapped in declared field order to the sstabledump JSONL value and compared field-by-field, including the null-field and empty-string-field distinctions. Structured frozen<udt> decode landed in bug fix #1080 (PR #1088).
 - `cass.cql_types.counters.canonical_jsonl_value` — Counter canonical JSONL final-value comparison
   - Normalization: The merged counter final value is rendered to the canonical JSONL value model and compared against the sstabledump JSONL counter cell, independent of the SELECT sidecar.
 - `cass.cql_types.counters.compacted_final_value` — Compacted counter final value
@@ -313,10 +321,6 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compression_info.zstd.real_fixture_chunks` (planned): No real ZstdCompressor CompressionInfo.db / Data.db fixture in the committed corpus, so chunk + CRC parity cannot be byte-compared. → _Generate a ZstdCompressor SSTable via regenerate-datasets.sh and let the existing test exercise it (the codec dispatch already handles it)._
 - `cass.corruption_verify.component_corruption_detection` (planned): No scrub/verify parity pass implemented. → _Implement a verify pass and compare detected-corruption outcomes against Cassandra VerifyTest/ScrubTest scenarios._
 - `cass.cql_types.boundaries.null_empty_text_blob` (partial): blocked by #1077 → _land bug #1077 (empty-value cell decodes by declared type: empty blob -> Blob([])), then un-#[ignore] the assertion and flip status to mirrored_
-- `cass.cql_types.complex.frozen_udt_value` (partial): blocked by #1080 → _land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and flip status to mirrored_
-- `cass.cql_types.complex.legacy_dropped_tuple_udt_fields` (partial): blocked by #1080 → _land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and flip status to mirrored_
-- `cass.cql_types.complex.multicell_udt_collection_paths` (partial): blocked by #1081 → _land bug #1081 (structured UDT decode), then un-#[ignore] the assertion and flip status to mirrored_
-- `cass.cql_types.complex.udt_field_order_null_empty` (partial): blocked by #1080 → _land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and flip status to mirrored_
 - `cass.delta_scan.tombstone_liveness_facts` (partial): test_deltas dataset asset not published/enforced (#701). → _Publish and enforce the test_deltas dataset in delta-roundtrip CI._
 - `cass.filter_db.bti_membership` (partial): No raw-partition-key source for BTI fixtures, so the no-false-negative probe cannot run against da Filter.db. → _Recover raw BTI partition keys (e.g. by decoding partitions during a Data.db scan) and extend the no-false-negative gate to cover da fixtures._
 - `cass.filter_db.statistical_false_positive_rate` (planned): No gated comparison of measured FPR against Cassandra's configured bloom_filter_fp_chance. → _Add larger-cardinality fixtures and assert the measured FPR tracks the configured fp_chance within a documented statistical tolerance._
