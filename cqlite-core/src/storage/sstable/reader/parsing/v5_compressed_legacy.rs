@@ -4076,7 +4076,31 @@ impl V5CompressedLegacyParser {
         //   - Regular rows: bitmap covers only regular columns
         // Including the wrong group shifts all bitmap indices, causing columns to be
         // silently absent or misread.  Filter columns_in_order to the matching kind.
-        let columns_in_order: Vec<_> = if !reader.header.columns.is_empty() {
+        // Each entry pairs the supplied schema `Column` (drives column identity /
+        // order) with the AUTHORITATIVE on-disk SerializationHeader marshal type
+        // (`ColumnInfo.column_type`). The on-disk marshal type is the no-heuristics
+        // source of truth (issue #28) used to decide complex-ness and to decode
+        // complex values — e.g. `UserType(...)` for a non-frozen multicell UDT
+        // (issue #1081), or `FrozenType(UserType(...))` for a frozen UDT whose
+        // supplied short form carries no field defs (issue #1080).
+        //
+        // `schema` is `None` for a column present on disk but ABSENT from the
+        // supplied schema — a DROPPED / evolved-away column.  Such a column is NOT
+        // emitted, but its bytes MUST still be consumed from the cell stream so the
+        // trailing columns stay byte-aligned (issue #1080 Part 2: the gen-1 header
+        // carries dropped tuple/UDT columns ahead of `survivor`).  We therefore keep
+        // dropped columns in iteration order (driven by the header) rather than
+        // filtering them out, which would silently misalign every following column.
+        //
+        // `header_type` is `None` only on the header-empty fallback path (synthetic
+        // SSTables) where the supplied schema type is all we have; on that path
+        // every iterated column is schema-present by construction.
+        struct ColumnToParse<'a> {
+            schema: Option<&'a crate::schema::Column>,
+            header_type: Option<&'a str>,
+        }
+
+        let columns_in_order: Vec<ColumnToParse> = if !reader.header.columns.is_empty() {
             // Build lookup map from schema for column details
             let schema_map: HashMap<String, &crate::schema::Column> = schema
                 .columns
@@ -4095,7 +4119,10 @@ impl V5CompressedLegacyParser {
                         && !col_info.is_clustering
                         && col_info.is_static == is_static
                 })
-                .filter_map(|col_info| schema_map.get(&col_info.name).copied())
+                .map(|col_info| ColumnToParse {
+                    schema: schema_map.get(&col_info.name).copied(),
+                    header_type: Some(col_info.column_type.as_str()),
+                })
                 .collect()
         } else {
             // Fallback to schema order when header is empty (shouldn't happen for real SSTables)
@@ -4108,17 +4135,24 @@ impl V5CompressedLegacyParser {
                         && !clustering_key_names.contains(col.name.as_str())
                         && col.is_static == is_static // Issue #702: match row kind
                 })
+                .map(|col| ColumnToParse {
+                    schema: Some(col),
+                    header_type: None,
+                })
                 .collect()
         };
 
         // Filter columns by missing_columns_bitmap when present.
         // The bitmap indicates which columns are MISSING (bit=1 → absent).
         // We only parse cells for columns that are actually present in the data.
-        let columns_to_parse: Vec<&crate::schema::Column> = match row_header.missing_columns_bitmap
-        {
+        // The bitmap is indexed by the ON-DISK column order (header order), which is
+        // exactly `columns_in_order` (dropped columns retained), so the index
+        // alignment is preserved.
+        let columns_to_parse: Vec<ColumnToParse> = match row_header.missing_columns_bitmap {
             Some(bitmap) => {
+                let total_columns = columns_in_order.len();
                 let filtered: Vec<_> = columns_in_order
-                    .iter()
+                    .into_iter()
                     .enumerate()
                     .filter(|(idx, _)| {
                         // Bitmap only covers the first 64 columns (u64).
@@ -4126,12 +4160,12 @@ impl V5CompressedLegacyParser {
                         // bitmap and are treated as present.
                         *idx >= 64 || (bitmap & (1u64 << idx)) == 0
                     })
-                    .map(|(_, col)| *col)
+                    .map(|(_, col)| col)
                     .collect();
                 log::debug!(
                     "V5CompressedLegacy: Column bitmap 0x{:X} filters {} → {} columns",
                     bitmap,
-                    columns_in_order.len(),
+                    total_columns,
                     filtered.len()
                 );
                 filtered
@@ -4142,7 +4176,10 @@ impl V5CompressedLegacyParser {
         log::debug!("V5CompressedLegacy: Parsing {} cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes)", columns_to_parse.len(), offset, row_header.header_size);
         log::debug!(
             "V5CompressedLegacy: Column order: {:?}",
-            columns_to_parse.iter().map(|c| &c.name).collect::<Vec<_>>()
+            columns_to_parse
+                .iter()
+                .map(|c| c.schema.map(|s| s.name.as_str()).unwrap_or("<dropped>"))
+                .collect::<Vec<_>>()
         );
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
@@ -4155,7 +4192,45 @@ impl V5CompressedLegacyParser {
             log::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
         }
 
-        for (col_idx, &column) in columns_to_parse.iter().enumerate() {
+        for (col_idx, ctp) in columns_to_parse.iter().enumerate() {
+            let header_type: Option<&str> = ctp.header_type;
+
+            // A column present on disk but ABSENT from the supplied schema is a
+            // DROPPED column (issue #1080 Part 2): its bytes MUST be consumed to
+            // keep the trailing columns aligned, but it is NOT emitted. We decode
+            // it with a synthetic Column whose `data_type` is the AUTHORITATIVE
+            // on-disk header marshal string (the only type metadata we have), then
+            // discard the value. `emit` gates every cell/metadata insertion below.
+            let emit = ctp.schema.is_some();
+            // Synthetic column used ONLY to consume a DROPPED column's bytes; built
+            // from the on-disk header marshal type. Initialized lazily (deferred
+            // binding) so the common schema-present path pays no allocation — the
+            // dropped-column path is rare. The holder outlives the borrow below.
+            let dropped_column_holder;
+            let column: &crate::schema::Column = match ctp.schema {
+                Some(c) => c,
+                None => {
+                    dropped_column_holder = crate::schema::Column {
+                        name: format!("__dropped_col_{col_idx}"),
+                        data_type: header_type.unwrap_or("blob").to_string(),
+                        nullable: true,
+                        default: None,
+                        is_static,
+                    };
+                    &dropped_column_holder
+                }
+            };
+
+            // Issue #1081: the AUTHORITATIVE complex-ness / complex-decode type.
+            // Prefer the on-disk SerializationHeader marshal type (carries
+            // `UserType(...)` for a non-frozen UDT, which the supplied schema's
+            // bare short form cannot express); fall back to the supplied schema
+            // type only on the header-empty path (no-heuristics: both are
+            // authoritative metadata, never guessed from bytes — issue #28). For a
+            // dropped column the synthetic `column.data_type` IS the header marshal
+            // type, so this resolves identically either way.
+            let complex_type: &str = header_type.unwrap_or(&column.data_type);
+
             if offset >= data.len() {
                 log::debug!(
                     "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} cells",
@@ -4170,9 +4245,9 @@ impl V5CompressedLegacyParser {
             // Issue #221: Branch based on column type - complex columns need special parsing
             // Issue #693: simple columns return 4-tuple including cell timestamp / expiration;
             //             complex columns return 2-tuple and inherit the row-level timestamp.
-            if Self::is_complex_column(&column.data_type) {
+            if Self::is_complex_column(complex_type) {
                 log::debug!(
-                    "V5CompressedLegacy: Column '{}' is complex (non-frozen collection), using parse_complex_column",
+                    "V5CompressedLegacy: Column '{}' is complex (non-frozen collection / multicell UDT), using parse_complex_column",
                     column.name
                 );
                 // Epic #899: on the compaction read path collect per-element
@@ -4187,23 +4262,33 @@ impl V5CompressedLegacyParser {
                         data,
                         offset,
                         column,
+                        complex_type,
                         has_complex_deletion,
                         row_ts,
                         Some(&mut element_buf),
                     )
                     .map(|(value, new_offset, col_meta)| {
-                        if let Some(ref mut out) = compaction_complex_out {
-                            // Capture the whole-collection collapsed value for the
-                            // byte-neutral Phase A output path (roborev #863).
-                            out.insert(
-                                column.name.clone(),
-                                (col_meta.complex_deletion, element_buf, value.clone()),
-                            );
+                        if emit {
+                            if let Some(ref mut out) = compaction_complex_out {
+                                // Capture the whole-collection collapsed value for the
+                                // byte-neutral Phase A output path (roborev #863).
+                                out.insert(
+                                    column.name.clone(),
+                                    (col_meta.complex_deletion, element_buf, value.clone()),
+                                );
+                            }
                         }
                         (value, new_offset, col_meta)
                     })
                 } else {
-                    self.parse_complex_column(data, offset, column, has_complex_deletion, reader)
+                    self.parse_complex_column(
+                        data,
+                        offset,
+                        column,
+                        complex_type,
+                        has_complex_deletion,
+                        reader,
+                    )
                 };
                 match parse_result {
                     Ok((value, new_offset, col_meta)) => {
@@ -4219,21 +4304,23 @@ impl V5CompressedLegacyParser {
                         // for collection columns.  Do NOT mutate this with max_element_writetime
                         // here — that would silently change WRITETIME(col) on the ordinary path
                         // (roborev Finding 1).
-                        if let Some(ref mut meta_map) = cell_meta {
-                            let row_ts = row_header.timestamp.unwrap_or(0);
-                            meta_map.insert(
-                                column.name.clone(),
-                                CellWriteMetadata {
-                                    write_timestamp_micros: row_ts,
-                                    expiration: None,
-                                },
-                            );
+                        if emit {
+                            if let Some(ref mut meta_map) = cell_meta {
+                                let row_ts = row_header.timestamp.unwrap_or(0);
+                                meta_map.insert(
+                                    column.name.clone(),
+                                    CellWriteMetadata {
+                                        write_timestamp_micros: row_ts,
+                                        expiration: None,
+                                    },
+                                );
+                            }
+                            // DS4 (Issue #700): Store ComplexColumnMeta for delta-scan callers.
+                            if let Some(ref mut ccm_map) = complex_col_meta {
+                                ccm_map.insert(column.name.clone(), col_meta);
+                            }
+                            cells.insert(column.name.clone(), value);
                         }
-                        // DS4 (Issue #700): Store ComplexColumnMeta for delta-scan callers.
-                        if let Some(ref mut ccm_map) = complex_col_meta {
-                            ccm_map.insert(column.name.clone(), col_meta);
-                        }
-                        cells.insert(column.name.clone(), value);
                         offset = new_offset;
                     }
                     Err(e) => {
@@ -4245,7 +4332,8 @@ impl V5CompressedLegacyParser {
                     }
                 }
             } else {
-                match self.parse_cell_value_schema_order(data, offset, column, reader) {
+                match self.parse_cell_value_schema_order(data, offset, column, header_type, reader)
+                {
                     Ok((value, cell_own_ts, cell_exp, new_offset)) => {
                         log::debug!(
                             "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
@@ -4258,33 +4346,37 @@ impl V5CompressedLegacyParser {
                         // Only compute and store per-cell metadata when the caller requested it.
                         // On the normal read hot-path (want_cell_metadata == false), cell_meta is
                         // None and this entire block is skipped — zero allocations per cell.
-                        if let Some(ref mut meta_map) = cell_meta {
-                            // Resolve effective write timestamp:
-                            // use cell's own timestamp when present, else row-level liveness timestamp.
-                            let effective_ts =
-                                cell_own_ts.unwrap_or_else(|| row_header.timestamp.unwrap_or(0));
-                            // Resolve expiration: cell-level wins; fall back to row-level TTL when
-                            // the cell used USE_ROW_TTL (cell_exp is None in that case).
-                            // USE_ROW_TTL path: row_header.ttl is the row-level TTL in seconds.
-                            // row_header.local_deletion_time is the corresponding expires_at (seconds).
-                            let row_level_exp =
-                                match (row_header.ttl, row_header.local_deletion_time) {
-                                    (Some(ttl_s), Some(ldt_s)) => Some(CellExpiration {
-                                        ttl_seconds: ttl_s,
-                                        expires_at_seconds: ldt_s as i64,
-                                    }),
-                                    _ => None,
-                                };
-                            let effective_exp = cell_exp.or(row_level_exp);
-                            meta_map.insert(
-                                column.name.clone(),
-                                CellWriteMetadata {
-                                    write_timestamp_micros: effective_ts,
-                                    expiration: effective_exp,
-                                },
-                            );
+                        // `emit` is false for a DROPPED column (issue #1080 Part 2): we still
+                        // advanced `offset` to consume its bytes, but emit no cell/metadata.
+                        if emit {
+                            if let Some(ref mut meta_map) = cell_meta {
+                                // Resolve effective write timestamp:
+                                // use cell's own timestamp when present, else row-level liveness timestamp.
+                                let effective_ts = cell_own_ts
+                                    .unwrap_or_else(|| row_header.timestamp.unwrap_or(0));
+                                // Resolve expiration: cell-level wins; fall back to row-level TTL when
+                                // the cell used USE_ROW_TTL (cell_exp is None in that case).
+                                // USE_ROW_TTL path: row_header.ttl is the row-level TTL in seconds.
+                                // row_header.local_deletion_time is the corresponding expires_at (seconds).
+                                let row_level_exp =
+                                    match (row_header.ttl, row_header.local_deletion_time) {
+                                        (Some(ttl_s), Some(ldt_s)) => Some(CellExpiration {
+                                            ttl_seconds: ttl_s,
+                                            expires_at_seconds: ldt_s as i64,
+                                        }),
+                                        _ => None,
+                                    };
+                                let effective_exp = cell_exp.or(row_level_exp);
+                                meta_map.insert(
+                                    column.name.clone(),
+                                    CellWriteMetadata {
+                                        write_timestamp_micros: effective_ts,
+                                        expiration: effective_exp,
+                                    },
+                                );
+                            }
+                            cells.insert(column.name.clone(), value);
                         }
-                        cells.insert(column.name.clone(), value);
                         offset = new_offset;
                     }
                     Err(e) => {
@@ -4381,6 +4473,13 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         mut offset: usize,
         column: &crate::schema::Column,
+        // AUTHORITATIVE on-disk SerializationHeader marshal type for this column
+        // (issue #1080). Used as a fallback to resolve a `frozen<udt>` whose
+        // supplied schema short form carries no field defs and no UdtRegistry is
+        // wired: the header type is the full `FrozenType(UserType(ks,name,fields))`
+        // marshal string, decoded structurally rather than guessed. `None` on the
+        // header-empty synthetic path and on internal recursive calls.
+        header_type: Option<&str>,
         _reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, Option<i64>, Option<CellExpiration>, usize)> {
         // Cell flag constants (from Cassandra 5.0 Cell.Serializer)
@@ -5248,8 +5347,7 @@ impl V5CompressedLegacyParser {
 
                     // Parse UDT value from the blob
                     let udt_data = &data[offset..offset + blob_len];
-                    let (udt_value, _) =
-                        self.parse_udt_value(udt_data, 0, &udt_def, column, _reader)?;
+                    let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
                     offset += blob_len;
 
                     (udt_value, offset)
@@ -5297,11 +5395,22 @@ impl V5CompressedLegacyParser {
                     }
 
                     let udt_data = &data[offset..offset + blob_len];
-                    let (udt_value, _) =
-                        self.parse_udt_value(udt_data, 0, &udt_def, column, _reader)?;
+                    let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
                     offset += blob_len;
 
                     (udt_value, offset)
+                } else if let Some(ht) =
+                    header_type.filter(|ht| Self::marshal_is_top_level_frozen_udt(ht))
+                {
+                    // Issue #1080: NO UdtRegistry is wired and the supplied schema
+                    // short form `frozen<person_type>` carries no field defs, but
+                    // the AUTHORITATIVE on-disk SerializationHeader marshal type for
+                    // this column is the full
+                    // `FrozenType(UserType(ks,hexname,field:Type,...))`. Decode the
+                    // UDT STRUCTURALLY from that header type (no guessing, issue #28)
+                    // rather than dropping the column (which also broke the Err→break
+                    // loop, silently losing all trailing columns).
+                    self.decode_frozen_udt_from_header_type(data, offset, ht, column)?
                 } else {
                     // Detect bare identifiers that look like unregistered UDT names.
                     // A bare identifier has no '<' (not a container or tuple) and does not
@@ -5353,8 +5462,14 @@ impl V5CompressedLegacyParser {
                     // The recursive call now returns 4 elements; we only need value + offset.
                     let mut inner_column = column.clone();
                     inner_column.data_type = inner_type.clone();
-                    let (inner_val, _inner_ts, _inner_exp, inner_off) =
-                        self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?;
+                    let (inner_val, _inner_ts, _inner_exp, inner_off) = self
+                        .parse_cell_value_schema_order(
+                            data,
+                            offset,
+                            &inner_column,
+                            None,
+                            _reader,
+                        )?;
                     (inner_val, inner_off)
                 };
 
@@ -5414,6 +5529,30 @@ impl V5CompressedLegacyParser {
                 }
             }
 
+            // Issue #1080 / roborev job 1363: marshal-form frozen UDT. When the
+            // schema is DERIVED FROM the on-disk header (rather than supplied as a
+            // CQL short form), `column.data_type` is the authoritative marshal
+            // string `org.apache.cassandra.db.marshal.FrozenType(...UserType...)`,
+            // which does NOT start with CQL `frozen<` and so misses the arm above.
+            // Decode it structurally from that marshal type (same authoritative
+            // path as the supplied-schema header fallback) instead of blobbing it.
+            // `marshal_is_top_level_frozen_udt` accepts ONLY a top-level
+            // `FrozenType(UserType(...))` (NOT a frozen collection that contains a
+            // UDT, e.g. `FrozenType(ListType(UserType(...)))` — roborev 1365), and a
+            // non-frozen top-level UDT is routed to the complex branch by
+            // `is_complex_column`, so reaching here means a single-cell frozen UDT
+            // → wrap in `Value::Frozen` (consistent with the CQL `frozen<` arm).
+            _ if Self::marshal_is_top_level_frozen_udt(&column.data_type) => {
+                let (udt_value, new_offset) = self.decode_frozen_udt_from_header_type(
+                    data,
+                    offset,
+                    &column.data_type,
+                    column,
+                )?;
+                offset = new_offset;
+                Value::Frozen(Box::new(udt_value))
+            }
+
             // TODO(Issue #162): UDT parsing requires schema registry access
             // For now, UDTs fall through to blob. Future implementation will:
             // - Extract UDT name from type_str
@@ -5462,21 +5601,128 @@ impl V5CompressedLegacyParser {
         Ok((value, cell_timestamp, cell_expiration, offset))
     }
 
-    /// Extract inner type from frozen<T> type string
-    fn extract_frozen_inner_type(&self, type_str: &str) -> Result<String> {
-        if !type_str.starts_with("frozen<") || !type_str.ends_with('>') {
-            return Err(Error::schema(format!(
-                "Invalid frozen type format: {}",
-                type_str
+    /// Issue #1080: is this on-disk SerializationHeader marshal type a TOP-LEVEL
+    /// frozen (or bare) UDT — `FrozenType(UserType(...))` or `UserType(...)` — that
+    /// may be decoded as a single UDT blob via `decode_frozen_udt_from_header_type`?
+    ///
+    /// Returns FALSE for a frozen COLLECTION that merely CONTAINS a UDT, e.g.
+    /// `FrozenType(ListType(UserType(...)))` or `FrozenType(MapType(...UserType...))`
+    /// — those must go through the collection decoders, NOT the scalar UDT path; a
+    /// substring `UserType(` test would misroute them and corrupt the value or break
+    /// the row loop, dropping trailing columns (roborev job 1365).
+    ///
+    /// We match ONLY the fully-qualified marshal form (the single shape real
+    /// SerializationHeaders carry, preserved verbatim by `convert_marshal_type_to_cql`)
+    /// and require `UserType(` to be the IMMEDIATE inner type, after an optional
+    /// single `FrozenType(` wrapper. The whole decode chain
+    /// (`parse_udt_type_definition` + `parse_cassandra_type_with_depth`) keys on the
+    /// same qualified marker at every nesting level (roborev jobs 1359/1361).
+    fn marshal_is_top_level_frozen_udt(marshal_type: &str) -> bool {
+        const FROZEN: &str = "org.apache.cassandra.db.marshal.frozentype(";
+        const USERTYPE: &str = "org.apache.cassandra.db.marshal.usertype(";
+        let lower = marshal_type.trim().to_lowercase();
+        // Strip at most one leading FrozenType( wrapper; then UserType( must be the
+        // immediate inner type (rejecting FrozenType(ListType(UserType(...))) etc.).
+        let inner = lower.strip_prefix(FROZEN).unwrap_or(&lower);
+        inner.starts_with(USERTYPE)
+    }
+
+    /// Issue #1080: decode a single-cell frozen UDT value using the AUTHORITATIVE
+    /// on-disk SerializationHeader marshal type (the fully-qualified
+    /// `FrozenType(UserType(...))` marshal string), used when no `UdtRegistry` is
+    /// wired and the supplied schema short form (`frozen<person_type>`) carries no
+    /// field defs.
+    ///
+    /// `parse_udt_type_definition` does a case-insensitive find for the qualified
+    /// `UserType(` marker, so
+    /// the `FrozenType(...)` wrapper is transparently handled and nested
+    /// `FrozenType(UserType(...))` fields resolve to `CqlType::Frozen(CqlType::Udt)`
+    /// (decoded recursively by `parse_udt_field_value`). Returns the decoded UDT
+    /// value (UNWRAPPED — the caller wraps it in `Value::Frozen`) and the new offset
+    /// AFTER the VInt-prefixed blob, so trailing columns stay byte-aligned.
+    fn decode_frozen_udt_from_header_type(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        header_type: &str,
+        column: &crate::schema::Column,
+    ) -> Result<(Value, usize)> {
+        let udt_def = Self::parse_udt_type_definition(header_type)?;
+
+        // Read the VInt-prefixed blob length (same framing as the registry /
+        // marshal-format UDT blocks in the frozen< arm).
+        let (remaining, blob_len_raw) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen UDT (column '{}', on-disk header type): failed to parse blob length: {:?}",
+                column.name, e
+            ))
+        })?;
+        if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+            return Err(Error::corruption(format!(
+                "Frozen UDT (column '{}', on-disk header type): blob_len {} exceeds maximum {}",
+                column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+            )));
+        }
+        let blob_len = blob_len_raw as usize;
+        let len_bytes_consumed = data[offset..].len() - remaining.len();
+        offset += len_bytes_consumed;
+
+        if offset + blob_len > data.len() {
+            return Err(Error::corruption(format!(
+                "Frozen UDT (column '{}', on-disk header type): need {} bytes but only {} available",
+                column.name,
+                blob_len,
+                data.len() - offset
             )));
         }
 
-        let inner = &type_str[7..type_str.len() - 1];
-        if inner.is_empty() {
-            return Err(Error::schema(format!("Empty frozen type: {}", type_str)));
+        let udt_data = &data[offset..offset + blob_len];
+        let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+        offset += blob_len;
+
+        Ok((udt_value, offset))
+    }
+
+    /// Extract inner type from a frozen type string (CQL or Cassandra internal format).
+    ///
+    /// Accepts both the CQL short form `frozen<T>` and the authoritative on-disk
+    /// marshal form `org.apache.cassandra.db.marshal.FrozenType(T)`. Multicell-UDT
+    /// field types resolve from the `UserType(...)` marshal string, where frozen
+    /// fields are spelled `FrozenType(...)` (e.g. `frozen<list<int>>` →
+    /// `FrozenType(ListType(Int32Type))`), so we mirror how
+    /// `extract_collection_element_type` supports both forms. In both cases the
+    /// inner substring is sliced from the ORIGINAL-CASE input so nested marshal
+    /// types keep their case and re-normalize correctly on recursion.
+    fn extract_frozen_inner_type(&self, type_str: &str) -> Result<String> {
+        let type_lower = type_str.to_lowercase();
+
+        // Cassandra internal format: org.apache.cassandra.db.marshal.FrozenType(T)
+        let internal_prefix_lower = "org.apache.cassandra.db.marshal.frozentype(";
+        if type_lower.starts_with(internal_prefix_lower) && type_lower.ends_with(')') {
+            let inner = &type_str[internal_prefix_lower.len()..type_str.len() - 1];
+            if inner.is_empty() {
+                return Err(Error::schema(format!("Empty frozen type: {}", type_str)));
+            }
+            return Ok(inner.to_string());
         }
 
-        Ok(inner.to_string())
+        // CQL format: frozen<T> — match the prefix/suffix case-insensitively
+        // (parse_value_from_raw_bytes routes here off a lowercased guard but
+        // passes the ORIGINAL-CASE string, so a mixed-case `Frozen<...>` reaches
+        // this branch and must still be accepted) while slicing from the
+        // original string to preserve nested-type case.
+        if type_lower.starts_with("frozen<") && type_lower.ends_with('>') {
+            let inner = &type_str[7..type_str.len() - 1];
+            if inner.is_empty() {
+                return Err(Error::schema(format!("Empty frozen type: {}", type_str)));
+            }
+            return Ok(inner.to_string());
+        }
+
+        Err(Error::schema(format!(
+            "Invalid frozen type format: {}",
+            type_str
+        )))
     }
 
     /// Check if a type string represents a UDT (User-Defined Type).
@@ -5524,7 +5770,12 @@ impl V5CompressedLegacyParser {
             )));
         }
 
-        // Find the UserType(...) portion (case-insensitive search)
+        // Find the UserType(...) portion (case-insensitive). Match ONLY the
+        // fully-qualified marshal marker — the single shape real SerializationHeaders
+        // carry, and the same marker the nested-field decoder
+        // (`parse_cassandra_type_with_depth`) keys on. Keeping top-level and nested
+        // parsing on the same qualified marker avoids the partial-bare-support
+        // inconsistency that would blob nested UDT fields (roborev jobs 1359/1361).
         let start_marker = "org.apache.cassandra.db.marshal.UserType(";
         let type_lower = type_str.to_lowercase();
         let start_marker_lower = start_marker.to_lowercase();
@@ -5774,13 +6025,16 @@ impl V5CompressedLegacyParser {
     /// - For each field in schema order:
     ///   - [4 bytes BE i32]: field length (-1 = null, 0 = empty, >0 = data length)
     ///   - [N bytes]: field data (if length > 0)
+    // NOTE: this UDT decoder is purely structural — it reads the i32-length-prefixed
+    // field layout using only the [`UdtTypeDef`] field types. It does NOT need an
+    // [`SSTableReader`] (the previous `reader` param was threaded through but never
+    // dereferenced), so it is reader-free and unit-testable in isolation (issue #1080).
     fn parse_udt_value(
         &self,
         data: &[u8],
         offset: usize,
         udt_def: &UdtTypeDef,
         _column: &crate::schema::Column,
-        reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         // Validate field count to prevent memory exhaustion
         if udt_def.fields.len() > MAX_UDT_FIELD_COUNT {
@@ -5870,8 +6124,7 @@ impl V5CompressedLegacyParser {
                 );
 
                 // Parse field value based on its type
-                let value =
-                    self.parse_udt_field_value(field_data, &field_def.field_type, reader)?;
+                let value = self.parse_udt_field_value(field_data, &field_def.field_type)?;
                 Some(value)
             };
 
@@ -5891,12 +6144,7 @@ impl V5CompressedLegacyParser {
     }
 
     /// Parse a UDT field value based on its CqlType.
-    fn parse_udt_field_value(
-        &self,
-        data: &[u8],
-        field_type: &CqlType,
-        reader: &super::super::types::SSTableReader,
-    ) -> Result<Value> {
+    fn parse_udt_field_value(&self, data: &[u8], field_type: &CqlType) -> Result<Value> {
         match field_type {
             CqlType::Text | CqlType::Ascii => {
                 let s = String::from_utf8(data.to_vec())
@@ -5994,7 +6242,7 @@ impl V5CompressedLegacyParser {
             CqlType::Inet => Ok(Value::Inet(data.to_vec())),
             CqlType::Frozen(inner) => {
                 // Parse the inner type and wrap in Frozen
-                let inner_value = self.parse_udt_field_value(data, inner, reader)?;
+                let inner_value = self.parse_udt_field_value(data, inner)?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
             CqlType::Udt(name, field_defs) => {
@@ -6011,8 +6259,7 @@ impl V5CompressedLegacyParser {
                     default: None,
                     is_static: false,
                 };
-                let (value, _) =
-                    self.parse_udt_value(data, 0, &nested_def, &dummy_column, reader)?;
+                let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
                 Ok(value)
             }
             _ => {
@@ -6681,13 +6928,35 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         offset: usize,
         column: &crate::schema::Column,
+        // Issue #1081: authoritative on-disk marshal type used to decode the
+        // complex value (e.g. `UserType(...)` for a non-frozen UDT). See
+        // [`parse_complex_column_inner`].
+        complex_type: &str,
         has_complex_deletion: bool,
         _reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize, ComplexColumnMeta)> {
-        self.parse_complex_column_inner(data, offset, column, has_complex_deletion, 0, None)
+        self.parse_complex_column_inner(
+            data,
+            offset,
+            column,
+            complex_type,
+            has_complex_deletion,
+            0,
+            None,
+        )
     }
 
     /// Inner complex-column parser.
+    ///
+    /// `complex_type` is the AUTHORITATIVE marshal type that drives the
+    /// complex-value decode — for the live read/compaction paths this is the
+    /// on-disk SerializationHeader `ColumnInfo.column_type` (issue #1081), which
+    /// is the only source that carries `UserType(...)` for a non-frozen
+    /// top-level UDT (the supplied schema's `column.data_type` is the bare CQL
+    /// short form, e.g. `person_type`, and cannot express it). `column` still
+    /// supplies the column identity (name) and is used for collection element /
+    /// map-key decode where the supplied schema form is sufficient. No
+    /// heuristics: both inputs are authoritative metadata (issue #28).
     ///
     /// When `elements_out` is `Some`, each parsed element (live, empty, or
     /// tombstoned) is also pushed as a
@@ -6702,6 +6971,7 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         mut offset: usize,
         column: &crate::schema::Column,
+        complex_type: &str,
         has_complex_deletion: bool,
         row_timestamp: i64,
         mut elements_out: Option<
@@ -6865,8 +7135,12 @@ impl V5CompressedLegacyParser {
             }
         }
 
-        // Determine collection type and extract element type(s)
-        let dt = column.data_type.to_lowercase();
+        // Determine collection / UDT type from the AUTHORITATIVE marshal type
+        // (issue #1081). For collection branches the supplied schema short form
+        // (`column.data_type`) is still used to extract element/key types below —
+        // those paths are unchanged and proven. Only the top-level non-frozen UDT
+        // branch needs the marshal form, which `complex_type` carries.
+        let dt = complex_type.to_lowercase();
         let value = if dt.starts_with("list<")
             || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
         {
@@ -7085,7 +7359,12 @@ impl V5CompressedLegacyParser {
             // cell_path is the 2-byte (signed ShortType) declared field index and
             // whose value bytes are the field datum. Decode each cell's value with
             // the DECLARED field type resolved from the marshal string.
-            let field_defs = Self::udt_field_marshal_types(&column.data_type)?;
+            //
+            // Issue #1081: resolve the field layout from the AUTHORITATIVE on-disk
+            // marshal type (`complex_type`), not the supplied schema's bare short
+            // form (`column.data_type`, e.g. `person_type`) which cannot express
+            // the field list. This is the no-heuristics source of truth (issue #28).
+            let field_defs = Self::udt_field_marshal_types(complex_type)?;
             // Field values keyed by declared index; absent / null fields stay None.
             let mut field_values: Vec<Option<Value>> = vec![None; field_defs.len()];
 
@@ -7160,8 +7439,9 @@ impl V5CompressedLegacyParser {
             }
 
             // Build the collapsed UDT in DECLARED field order for the user-facing
-            // read path. The keyspace/type-name come from the marshal string.
-            let (udt_keyspace, udt_name) = Self::udt_keyspace_and_name(&column.data_type)?;
+            // read path. The keyspace/type-name come from the authoritative
+            // on-disk marshal string (issue #1081).
+            let (udt_keyspace, udt_name) = Self::udt_keyspace_and_name(complex_type)?;
             let fields = field_defs
                 .iter()
                 .zip(field_values)
@@ -7746,6 +8026,82 @@ impl V5CompressedLegacyParser {
         Ok((key_type, value_type))
     }
 
+    /// Map a PRIMITIVE Cassandra marshal type (e.g.
+    /// `org.apache.cassandra.db.marshal.Int32Type`) to the canonical CQL short
+    /// form (`"int"`) understood by [`parse_value_from_raw_bytes`]'s match
+    /// (issue #1081). Returns `None` for any non-primitive marshal form
+    /// (UserType / collection / tuple / reversed / frozen / custom), so the
+    /// caller leaves those to the dedicated arms. The suffix set is a *superset*
+    /// of the authoritative marshal→`CqlType` mapping in
+    /// [`parse_cassandra_type_with_depth`] (no heuristics — issue #28): in
+    /// addition to the scalars that mapping enumerates, this also normalizes a
+    /// few marshal forms that `parse_cassandra_type_with_depth` routes to
+    /// `Custom` (`VarcharType`, `CounterColumnType`, `LexicalUUIDType`,
+    /// `ShortType`, `ByteType`). Those extra mappings are required so we can
+    /// decode the corresponding scalar UDT field values — e.g. `ShortType`/
+    /// `ByteType` are needed to read `smallint`/`tinyint` UDT fields, which
+    /// otherwise fall through to the blob default.
+    fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
+        // Composite marshal forms carry a `(` after the type name; primitives do
+        // not. Reject anything parameterised so we never misread a collection /
+        // UDT as a scalar.
+        if marshal_type.contains('(') {
+            return None;
+        }
+        let s = marshal_type;
+        let short = if s.ends_with("UTF8Type") || s.ends_with("VarcharType") {
+            "text"
+        } else if s.ends_with("AsciiType") {
+            "ascii"
+        } else if s.ends_with("Int32Type") {
+            "int"
+        } else if s.ends_with("LongType") || s.ends_with("CounterColumnType") {
+            "bigint"
+        } else if s.ends_with("FloatType") {
+            "float"
+        } else if s.ends_with("DoubleType") {
+            "double"
+        } else if s.ends_with("BooleanType") {
+            "boolean"
+        } else if s.ends_with("TimeUUIDType") {
+            "timeuuid"
+        } else if s.ends_with("UUIDType") || s.ends_with("LexicalUUIDType") {
+            "uuid"
+        } else if s.ends_with("SimpleDateType") {
+            // CQL `date` (`SimpleDateType`) is a 4-byte unsigned days-since-epoch
+            // value. This is distinct from the legacy `DateType` handled below.
+            "date"
+        } else if s.ends_with("DateType") {
+            // Legacy Cassandra `DateType` is an 8-byte millis-since-epoch value —
+            // the same wire format as `TimestampType`. Mapping it to `date` would
+            // wrongly decode only the first 4 bytes, so route it to `timestamp`.
+            // NOTE: this `ends_with` arm must follow the `SimpleDateType` arm above
+            // because `SimpleDateType` also ends with `DateType`.
+            "timestamp"
+        } else if s.ends_with("TimestampType") {
+            "timestamp"
+        } else if s.ends_with("TimeType") {
+            "time"
+        } else if s.ends_with("DecimalType") {
+            "decimal"
+        } else if s.ends_with("IntegerType") {
+            "varint"
+        } else if s.ends_with("DurationType") {
+            "duration"
+        } else if s.ends_with("ShortType") {
+            "smallint"
+        } else if s.ends_with("ByteType") {
+            "tinyint"
+        } else if s.ends_with("InetAddressType") {
+            "inet"
+        } else if s.ends_with("BytesType") {
+            "blob"
+        } else {
+            return None;
+        };
+        Some(short)
+    }
+
     /// Parse a value from a complete, bounded byte slice.
     ///
     /// This is used when the outer Cassandra collection format already provides
@@ -7768,6 +8124,35 @@ impl V5CompressedLegacyParser {
                 column_name, depth, MAX_TYPE_NESTING_DEPTH
             )));
         }
+        // Issue #1081: scalar marshal forms (e.g.
+        // `org.apache.cassandra.db.marshal.Int32Type` / `BooleanType`) reach this
+        // function for multicell-UDT field values, which resolve their field
+        // types from the authoritative on-disk `UserType(...)` marshal string.
+        // The match below only enumerates short forms plus a handful of text
+        // marshal aliases, so a bare scalar marshal type would otherwise fall
+        // through to the blob default. Normalize a primitive marshal type to its
+        // canonical CQL short form (via the existing authoritative marshal→CqlType
+        // mapping, no heuristics) and re-dispatch. Composite/UDT marshal forms
+        // (UserType/ListType/MapType/SetType/etc.) are left untouched here — they
+        // are handled by the dedicated arms below — so this only rewrites scalars.
+        if type_str.contains("org.apache.cassandra.db.marshal.") {
+            if let Some(short) = Self::primitive_marshal_to_cql_short(type_str) {
+                return self.parse_value_from_raw_bytes(data, short, column_name, depth);
+            }
+        }
+
+        // Preserve the ORIGINAL-CASE type string. Below, the `match` scrutinee is
+        // `type_str.to_lowercase()` and each `type_str if ...` arm binding SHADOWS
+        // the function parameter with the lowercased string. The collection/tuple/
+        // frozen extraction helpers slice their element/inner types out of the
+        // string they are handed, so if we passed the lowercased binding the nested
+        // element marshal type would come back lowercased (e.g. `...int32type`) and
+        // would NOT re-normalize via the CASE-SENSITIVE `primitive_marshal_to_cql_short`
+        // suffix match, wrongly falling through to blob. The marshal-form arms below
+        // therefore extract from `raw_type_str` (original case) so nested element
+        // marshal types keep their case. The CQL-short-form arms are unaffected
+        // because their inner types are already canonical lowercase.
+        let raw_type_str = type_str;
         let normalized_type = type_str.to_lowercase();
         match normalized_type.as_str() {
             "text"
@@ -7909,6 +8294,42 @@ impl V5CompressedLegacyParser {
                     data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                 ])))
             }
+            "duration" => {
+                // Issue #1081: in this function the entire `data` slice IS the value
+                // (the element/cell length prefix already bounded it) — there is NO
+                // outer `[VInt len]` prefix. Decode three consecutive SIGNED VInts
+                // directly over `data`: months, days, nanos (Cassandra
+                // DurationSerializer). Contrast `parse_raw_type_value`'s duration arm,
+                // which reads an outer `[VInt len]` first because its framing differs.
+                let (remaining, months) = parse_vint(data).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration months: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let pos = data.len() - remaining.len();
+
+                let (remaining, days) = parse_vint(&data[pos..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration days: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let pos = data.len() - remaining.len();
+
+                let (_remaining, nanos) = parse_vint(&data[pos..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration nanos: {:?}",
+                        column_name, e
+                    ))
+                })?;
+
+                Ok(Value::Duration {
+                    months: months as i32,
+                    days: days as i32,
+                    nanos,
+                })
+            }
             "varint" => Ok(Value::Varint(data.to_vec())),
             "decimal" => {
                 if data.len() < 4 {
@@ -7923,9 +8344,23 @@ impl V5CompressedLegacyParser {
                 Ok(Value::Decimal { scale, unscaled })
             }
             "inet" => Ok(Value::Inet(data.to_vec())),
-            // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>)
-            type_str if type_str.starts_with("list<") => {
-                let element_type = self.extract_collection_element_type(type_str, "list")?;
+            // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>).
+            //
+            // Issue #1081: the guards accept BOTH the CQL short form (`list<...>`)
+            // and the authoritative Cassandra marshal form
+            // (`org.apache.cassandra.db.marshal.ListType(...)`). Multicell-UDT field
+            // values resolve their field types from the on-disk `UserType(...)`
+            // marshal string, so a collection-typed UDT field arrives here in marshal
+            // form and would otherwise fall through to the blob default. The
+            // extraction helpers (`extract_collection_element_type` / `extract_map_types`)
+            // already accept marshal forms; we extract from `raw_type_str`
+            // (original case) so the returned nested element marshal type keeps its
+            // case and re-normalizes correctly on recursion (see note above).
+            type_str
+                if type_str.starts_with("list<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.listtype(") =>
+            {
+                let element_type = self.extract_collection_element_type(raw_type_str, "list")?;
                 let (val, _) = self.parse_frozen_list_value_raw(
                     data,
                     0,
@@ -7935,8 +8370,11 @@ impl V5CompressedLegacyParser {
                 )?;
                 Ok(val)
             }
-            type_str if type_str.starts_with("set<") => {
-                let element_type = self.extract_collection_element_type(type_str, "set")?;
+            type_str
+                if type_str.starts_with("set<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.settype(") =>
+            {
+                let element_type = self.extract_collection_element_type(raw_type_str, "set")?;
                 let (val, _) = self.parse_frozen_set_value_raw(
                     data,
                     0,
@@ -7946,8 +8384,11 @@ impl V5CompressedLegacyParser {
                 )?;
                 Ok(val)
             }
-            type_str if type_str.starts_with("map<") => {
-                let (key_type, value_type) = self.extract_map_types(type_str)?;
+            type_str
+                if type_str.starts_with("map<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.maptype(") =>
+            {
+                let (key_type, value_type) = self.extract_map_types(raw_type_str)?;
                 let (val, _) = self.parse_frozen_map_value_raw(
                     data,
                     0,
@@ -7962,8 +8403,13 @@ impl V5CompressedLegacyParser {
             // The caller (read_frozen_element) has already extracted the raw element bytes
             // into `data`, so there is no outer VUInt length here — just the sequence of
             // [i32 BE len][bytes] fields as written by serialize_value for Value::Tuple.
-            type_str if type_str.starts_with("tuple<") => {
-                let element_types = self.extract_tuple_element_types(type_str)?;
+            // Issue #1081: also accept the marshal form `TupleType(...)`, extracting
+            // element types from the original-case `raw_type_str`.
+            type_str
+                if type_str.starts_with("tuple<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.tupletype(") =>
+            {
+                let element_types = self.extract_tuple_element_types(raw_type_str)?;
                 if element_types.is_empty() {
                     return Err(Error::schema(format!(
                         "Nested tuple element '{}': empty tuple type",
@@ -7982,8 +8428,23 @@ impl V5CompressedLegacyParser {
                 )?;
                 Ok(Value::Tuple(elements))
             }
-            type_str if type_str.starts_with("frozen<") => {
-                let inner_type = self.extract_frozen_inner_type(type_str)?;
+            // Issue #1081: accept BOTH the CQL short form (`frozen<...>`) and the
+            // authoritative Cassandra marshal form
+            // (`org.apache.cassandra.db.marshal.FrozenType(...)`). Collection/UDT
+            // fields inside a multicell UDT must be frozen, and their field types
+            // resolve from the on-disk `UserType(...)` marshal string where a frozen
+            // field is spelled `FrozenType(...)` — e.g. `frozen<list<int>>` arrives
+            // as `FrozenType(ListType(Int32Type))` and `frozen<some_udt>` as
+            // `FrozenType(UserType(...))`. Without this arm those bypass the frozen
+            // handling and fall through to the blob default. `extract_frozen_inner_type`
+            // accepts both forms; we extract from `raw_type_str` (original case) so the
+            // inner marshal type keeps its case and re-routes to the marshal
+            // collection/UDT/scalar arms above on recursion.
+            type_str
+                if type_str.starts_with("frozen<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.frozentype(") =>
+            {
+                let inner_type = self.extract_frozen_inner_type(raw_type_str)?;
                 let inner =
                     self.parse_value_from_raw_bytes(data, &inner_type, column_name, depth + 1)?;
                 Ok(Value::Frozen(Box::new(inner)))
@@ -9859,36 +10320,52 @@ impl V5CompressedLegacyParser {
         Ok(elements)
     }
 
-    /// Extract tuple element types from tuple<T1, T2, ...> string
+    /// Extract tuple element types from a `tuple<T1, T2, ...>` (CQL short) or
+    /// `org.apache.cassandra.db.marshal.TupleType(T1, T2, ...)` (Cassandra marshal)
+    /// type string. Marshal support (issue #1081) is required so a tuple-typed
+    /// multicell-UDT field, whose type arrives in marshal form, decodes its
+    /// elements instead of falling through to the blob default.
     fn extract_tuple_element_types(&self, type_str: &str) -> Result<Vec<String>> {
-        if !type_str.starts_with("tuple<") || !type_str.ends_with('>') {
+        let type_lower = type_str.to_lowercase();
+
+        // Determine the inner element-list content based on format. Slice from the
+        // ORIGINAL-CASE `type_str` so nested element marshal types keep their case.
+        let inner = if type_lower.starts_with("org.apache.cassandra.db.marshal.tupletype(")
+            && type_str.ends_with(')')
+        {
+            let prefix = "org.apache.cassandra.db.marshal.TupleType(";
+            &type_str[prefix.len()..type_str.len() - 1]
+        } else if type_lower.starts_with("tuple<") && type_str.ends_with('>') {
+            &type_str[6..type_str.len() - 1]
+        } else {
             return Err(Error::schema(format!(
                 "Invalid tuple type format: {}",
                 type_str
             )));
-        }
+        };
 
-        let inner = &type_str[6..type_str.len() - 1];
         if inner.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Split by comma, handling nested angle brackets
+        // Split by top-level comma, handling both CQL angle brackets (`<`/`>`)
+        // and marshal parentheses (`(`/`)`) so nested composite element types
+        // (e.g. `ListType(UTF8Type)`) are not split internally.
         let mut types = Vec::new();
         let mut current = String::new();
-        let mut depth = 0;
+        let mut depth = 0i32;
 
         for ch in inner.chars() {
             match ch {
-                '<' => {
+                '<' | '(' => {
                     depth += 1;
                     current.push(ch);
                 }
-                '>' => {
+                '>' | ')' => {
                     if depth == 0 {
                         return Err(Error::schema(format!(
-                            "Unmatched '>' in tuple type: {}",
-                            type_str
+                            "Unmatched '{}' in tuple type: {}",
+                            ch, type_str
                         )));
                     }
                     depth -= 1;
@@ -9985,6 +10462,70 @@ impl V5CompressedLegacyParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #1081: `primitive_marshal_to_cql_short` must normalize every
+    /// PRIMITIVE Cassandra marshal type (fully-qualified) to its canonical CQL
+    /// short form, and must reject any parameterised/composite marshal form
+    /// (anything containing `(` — UDT / collection / reversed) so the
+    /// no-heuristics `(`-rejection guard never misreads a composite as a scalar.
+    #[test]
+    fn primitive_marshal_to_cql_short_maps_scalars_and_rejects_composites() {
+        const P: &str = "org.apache.cassandra.db.marshal.";
+
+        // (marshal type name, expected canonical CQL short form)
+        let cases: &[(&str, &str)] = &[
+            ("UTF8Type", "text"),
+            ("AsciiType", "ascii"),
+            ("Int32Type", "int"),
+            ("LongType", "bigint"),
+            ("FloatType", "float"),
+            ("DoubleType", "double"),
+            ("BooleanType", "boolean"),
+            ("UUIDType", "uuid"),
+            ("TimeUUIDType", "timeuuid"),
+            ("TimestampType", "timestamp"),
+            ("SimpleDateType", "date"),
+            // Legacy `DateType` is an 8-byte millis-since-epoch value (same wire
+            // format as `TimestampType`), NOT the 4-byte CQL `date`
+            // (`SimpleDateType`). It must normalize to `timestamp`.
+            ("DateType", "timestamp"),
+            ("TimeType", "time"),
+            ("DecimalType", "decimal"),
+            ("IntegerType", "varint"),
+            ("DurationType", "duration"),
+            ("ShortType", "smallint"),
+            ("ByteType", "tinyint"),
+            ("InetAddressType", "inet"),
+            ("BytesType", "blob"),
+        ];
+
+        for (marshal, expected) in cases {
+            let full = format!("{}{}", P, marshal);
+            assert_eq!(
+                V5CompressedLegacyParser::primitive_marshal_to_cql_short(&full),
+                Some(*expected),
+                "primitive marshal {} should map to {}",
+                full,
+                expected
+            );
+        }
+
+        // Parameterised / composite marshal forms must be rejected (return None)
+        // by the `(`-guard, leaving them to the dedicated composite arms.
+        let composites = [
+            "org.apache.cassandra.db.marshal.UserType(...)",
+            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type)",
+            "org.apache.cassandra.db.marshal.ReversedType(org.apache.cassandra.db.marshal.Int32Type)",
+        ];
+        for composite in composites {
+            assert_eq!(
+                V5CompressedLegacyParser::primitive_marshal_to_cql_short(composite),
+                None,
+                "composite marshal {} must be rejected by the `(`-guard",
+                composite
+            );
+        }
+    }
 
     /// Local VInt encoder for test helpers — avoids depending on
     /// `storage::serialization` which is gated behind `write-support`.
@@ -10351,6 +10892,66 @@ mod tests {
         );
     }
 
+    /// Issue #1081: a multicell-UDT field declared `duration` resolves its
+    /// field type from the authoritative on-disk `UserType(...)` marshal string
+    /// as `org.apache.cassandra.db.marshal.DurationType`. That bare scalar
+    /// marshal form must normalize to `"duration"` and decode the three
+    /// consecutive SIGNED VInts (months, days, nanos) that constitute the value
+    /// — NOT fall through to `Value::Blob`. In `parse_value_from_raw_bytes` the
+    /// entire slice IS the value (no outer `[VInt len]` prefix).
+    #[test]
+    fn test_parse_value_from_raw_bytes_duration_marshal() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Build three SIGNED VInts (months=1, days=2, nanos=3) using the same
+        // ZigZag-over-unsigned-VInt scheme `parse_vint` decodes. ZigZag:
+        // 1 -> 2, 2 -> 4, 3 -> 6.
+        let zigzag = |v: i64| ((v << 1) ^ (v >> 63)) as u64;
+        let mut data = Vec::new();
+        encode_unsigned(zigzag(1), &mut data); // months
+        encode_unsigned(zigzag(2), &mut data); // days
+        encode_unsigned(zigzag(3), &mut data); // nanos
+
+        // Round-trip via the signed VInt parser to confirm the encoding before
+        // exercising the decode arm under test.
+        let (rem, m) = parse_vint(&data).unwrap();
+        let consumed = data.len() - rem.len();
+        let (rem2, d) = parse_vint(&data[consumed..]).unwrap();
+        let consumed2 = data.len() - rem2.len();
+        let (_rem3, n) = parse_vint(&data[consumed2..]).unwrap();
+        assert_eq!(
+            (m, d, n),
+            (1, 2, 3),
+            "hand-encoded duration vints round-trip"
+        );
+
+        // The bare scalar marshal form must normalize and decode to Duration,
+        // NOT fall through to Blob.
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.DurationType",
+                "col",
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::Duration {
+                months: 1,
+                days: 2,
+                nanos: 3
+            }
+        );
+
+        // The canonical CQL short form must decode identically.
+        let val_short = parser
+            .parse_value_from_raw_bytes(&data, "duration", "col", 0)
+            .unwrap();
+        assert_eq!(val_short, val);
+    }
+
     #[test]
     fn test_parse_value_from_raw_bytes_nested_list() {
         let parser =
@@ -10416,6 +11017,171 @@ mod tests {
                 Value::Integer(200)
             ])))
         );
+    }
+
+    /// Helper: build a frozen list<text> raw binary in the same
+    /// `[i32 BE count]` + per-element `[i32 BE len][utf8 bytes]` framing that
+    /// `parse_frozen_list_value_raw` expects for an already-bounded element.
+    fn build_frozen_list_text(values: &[&str]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(values.len() as i32).to_be_bytes());
+        for v in values {
+            let b = v.as_bytes();
+            buf.extend_from_slice(&(b.len() as i32).to_be_bytes());
+            buf.extend_from_slice(b);
+        }
+        buf
+    }
+
+    /// Issue #1081 (FINDING 1): a multicell-UDT field whose declared type arrives
+    /// in Cassandra MARSHAL form for a COLLECTION — here
+    /// `ListType(UTF8Type)` — must decode to a real `Value::List`, NOT fall
+    /// through to the blob default. This also exercises the case-sensitivity
+    /// path: the lowercased match binding must NOT corrupt the original-case
+    /// nested element marshal type (`UTF8Type`), which would otherwise fail to
+    /// re-normalize and blob.
+    #[test]
+    fn test_parse_value_from_raw_bytes_marshal_list_utf8() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_text(&["alpha", "beta"]);
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type)",
+                "udt_field",
+                0,
+            )
+            .expect("marshal ListType(UTF8Type) must decode, not blob");
+        assert_eq!(
+            val,
+            Value::List(vec![
+                Value::Text("alpha".to_string()),
+                Value::Text("beta".to_string()),
+            ]),
+            "marshal-form list field must produce a List of Text (not a Blob)"
+        );
+    }
+
+    /// Issue #1081 (FINDING 1): a multicell-UDT field declared as a marshal-form
+    /// `MapType(UTF8Type, Int32Type)` must decode to a `Value::Map`. The
+    /// Int32Type VALUE proves the nested element marshal type keeps its original
+    /// case through the lowercased match arm (a lowercased `...int32type` would
+    /// fail the case-sensitive primitive normalizer and blob).
+    #[test]
+    fn test_parse_value_from_raw_bytes_marshal_map_utf8_int32() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Same [count][i32 key_len][key][i32 val_len][i32 value] framing the
+        // frozen map raw parser expects; the int value is a 4-byte i32.
+        let data = build_frozen_map_text_int(&[("alice", 1), ("bob", 2)]);
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.Int32Type)",
+                "udt_field",
+                0,
+            )
+            .expect("marshal MapType(UTF8Type, Int32Type) must decode, not blob");
+        assert_eq!(
+            val,
+            Value::Map(vec![
+                (Value::Text("alice".to_string()), Value::Integer(1)),
+                (Value::Text("bob".to_string()), Value::Integer(2)),
+            ]),
+            "marshal-form map field must produce a Map of (Text, Integer) (not a Blob)"
+        );
+    }
+
+    /// Issue #1081 (FINDING 1): a marshal-form `SetType(Int32Type)` field must
+    /// decode to a `Value::Set` rather than a blob.
+    #[test]
+    fn test_parse_value_from_raw_bytes_marshal_set_int32() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_int(&[7, 9]);
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type)",
+                "udt_field",
+                0,
+            )
+            .expect("marshal SetType(Int32Type) must decode, not blob");
+        assert_eq!(
+            val,
+            Value::Set(vec![Value::Integer(7), Value::Integer(9)]),
+            "marshal-form set field must produce a Set of Integer (not a Blob)"
+        );
+    }
+
+    /// Issue #1081 (FINDING — last type-tree gap): a multicell-UDT field declared
+    /// `frozen<list<text>>` resolves from the on-disk `UserType(...)` marshal string
+    /// as `FrozenType(ListType(UTF8Type))`. Before the fix the frozen arm in
+    /// `parse_value_from_raw_bytes` only matched the CQL `frozen<...>` form, so this
+    /// marshal form bypassed it and fell through to `Value::Blob`. It must now decode
+    /// to `Value::Frozen(List([Text, ...]))`. (Collection/UDT fields inside a UDT must
+    /// be frozen, so this marshal form is the common real case.)
+    #[test]
+    fn test_parse_value_from_raw_bytes_marshal_frozen_list_utf8() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_text(&["gamma", "delta"]);
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type))",
+                "udt_field",
+                0,
+            )
+            .expect("marshal FrozenType(ListType(UTF8Type)) must decode, not blob");
+        assert_eq!(
+            val,
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Text("gamma".to_string()),
+                Value::Text("delta".to_string()),
+            ]))),
+            "marshal-form frozen-list field must produce Frozen(List(Text)) (not a Blob)"
+        );
+    }
+
+    /// Issue #1081: `extract_frozen_inner_type` must accept BOTH the CQL short form
+    /// (`frozen<list<int>>`) and the authoritative marshal form
+    /// (`FrozenType(ListType(Int32Type))`), returning the inner type with its
+    /// ORIGINAL case preserved so nested marshal types re-normalize on recursion.
+    #[test]
+    fn test_extract_frozen_inner_type_cql_and_marshal() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // CQL short form
+        let cql_inner = parser
+            .extract_frozen_inner_type("frozen<list<int>>")
+            .expect("CQL frozen<...> must parse");
+        assert_eq!(cql_inner, "list<int>");
+
+        // Marshal form — original case (Int32Type) must be preserved.
+        let marshal_inner = parser
+            .extract_frozen_inner_type(
+                "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))",
+            )
+            .expect("marshal FrozenType(...) must parse");
+        assert_eq!(
+            marshal_inner,
+            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)",
+            "marshal frozen inner type must be original-case (Int32Type preserved)"
+        );
+
+        // Mixed-case CQL spelling must also parse (the prefix/suffix check is
+        // case-insensitive) while the sliced inner keeps its original case.
+        let mixed_inner = parser
+            .extract_frozen_inner_type("Frozen<List<Int>>")
+            .expect("mixed-case Frozen<...> must parse");
+        assert_eq!(mixed_inner, "List<Int>");
     }
 
     #[test]
@@ -11425,7 +12191,7 @@ mod tests {
         blob.extend_from_slice(&udt_bytes);
 
         let (value, consumed, _meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
             .expect("parse_complex_column_inner must succeed for list<frozen<address_type>>");
         assert_eq!(consumed, blob.len(), "all bytes must be consumed");
 
@@ -11478,6 +12244,525 @@ mod tests {
         );
     }
 
+    /// Regression test for Issue #1080: a `frozen<udt>` column whose supplied
+    /// schema short form (`frozen<person_type>`) carries NO field defs, with NO
+    /// `UdtRegistry` wired, must decode STRUCTURALLY from the AUTHORITATIVE on-disk
+    /// SerializationHeader marshal type (`FrozenType(UserType(...))`) — not drop to
+    /// a blob or go MISSING.
+    ///
+    /// **Before the fix** the `frozen<` arm errored in exactly this configuration
+    /// (no registry, no field defs), and the row-decode loop turned that `Err` into
+    /// a `break`, silently dropping the failing column AND every trailing column.
+    ///
+    /// This test drives the exact fix path (`decode_frozen_udt_from_header_type`),
+    /// asserts it yields `Value::Udt{...}` with the right fields, AND proves NO
+    /// trailing-column loss: the returned offset lands exactly at the start of an
+    /// appended trailing-column cell whose bytes are byte-for-byte intact (the
+    /// frozen-UDT decode consumed exactly its own VInt-prefixed blob, no more).
+    #[test]
+    fn test_regression_1080_frozen_udt_decodes_from_header_type_no_registry() {
+        // NO UdtRegistry wired; keyspace matches the header type's keyspace.
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+
+        // Supplied schema short form: `frozen<person_type>` — NO field defs.
+        let column = crate::schema::Column {
+            name: "p".to_string(),
+            data_type: "frozen<person_type>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // AUTHORITATIVE on-disk SerializationHeader marshal type for this column:
+        //   FrozenType(UserType(test_types, hex("person_type"),
+        //                       hex("name"):UTF8Type, hex("age"):Int32Type))
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        let header_type = format!(
+            "org.apache.cassandra.db.marshal.FrozenType(\
+             org.apache.cassandra.db.marshal.UserType(test_types,{},{}:org.apache.cassandra.db.marshal.UTF8Type,{}:org.apache.cassandra.db.marshal.Int32Type))",
+            hex("person_type"),
+            hex("name"),
+            hex("age"),
+        );
+        assert!(
+            V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(&header_type),
+            "header type must be recognized as a UserType"
+        );
+
+        // Build the serialized UDT blob: each field is [i32 BE length][bytes].
+        //   name = "Ada" (3 bytes), age = 42 (i32, 4 bytes).
+        let mut udt_blob: Vec<u8> = Vec::new();
+        let name = b"Ada";
+        udt_blob.extend_from_slice(&(name.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(name);
+        udt_blob.extend_from_slice(&4i32.to_be_bytes());
+        udt_blob.extend_from_slice(&42i32.to_be_bytes());
+
+        // Cell layout at the decode entry point (after flags/timestamp, which the
+        // caller already consumed): [blob_len:VUInt][udt_blob]. Then append a
+        // sentinel for the FOLLOWING column to prove no trailing-column loss.
+        assert!(udt_blob.len() < 0x80, "test assumes single-byte VUInt");
+        let mut buf: Vec<u8> = vec![udt_blob.len() as u8];
+        let blob_start = buf.len();
+        buf.extend_from_slice(&udt_blob);
+        // Trailing column's bytes — must remain addressable & untouched.
+        let trailing_marker: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let trailing_offset = buf.len();
+        buf.extend_from_slice(trailing_marker);
+
+        let (udt_value, new_offset) = parser
+            .decode_frozen_udt_from_header_type(&buf, 0, &header_type, &column)
+            .expect("frozen<udt> must decode structurally from the on-disk header type");
+
+        // 1) Structural UDT, NOT a blob.
+        let udt = match &udt_value {
+            Value::Udt(u) => u,
+            other => panic!(
+                "expected Value::Udt from header-type fallback, got {other:?} \
+                 (regression #1080: frozen<udt> must not blob/miss)"
+            ),
+        };
+        assert_eq!(udt.type_name, "person_type");
+        let field_names: Vec<&str> = udt.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["name", "age"],
+            "UDT field ORDER preserved"
+        );
+        assert_eq!(
+            udt.fields[0].value,
+            Some(Value::Text("Ada".to_string())),
+            "name field decodes to Text"
+        );
+        assert_eq!(
+            udt.fields[1].value,
+            Some(Value::Integer(42)),
+            "age field decodes to int"
+        );
+
+        // 2) NO trailing-column loss: the decode consumed exactly the VInt-prefixed
+        //    blob (blob_len bytes after the length prefix), leaving the following
+        //    column's bytes intact and addressable at `new_offset`.
+        assert_eq!(
+            new_offset,
+            blob_start + udt_blob.len(),
+            "frozen UDT decode must consume exactly its own blob"
+        );
+        assert_eq!(
+            new_offset, trailing_offset,
+            "offset must land at the START of the trailing column"
+        );
+        assert_eq!(
+            &buf[new_offset..],
+            trailing_marker,
+            "the trailing column's bytes must be byte-for-byte intact \
+             (proves the Err->break trailing-column loss is gone)"
+        );
+    }
+
+    /// Issue #1080 / roborev jobs 1359/1361/1365: `marshal_is_top_level_frozen_udt`
+    /// gates whether the scalar frozen-UDT decode fires. It must accept ONLY a
+    /// top-level `FrozenType(UserType(...))` / `UserType(...)`, and REJECT frozen
+    /// collections that merely contain a UDT (which must use the collection
+    /// decoders), bare (unqualified) forms, and primitives.
+    #[test]
+    fn test_regression_1080_marshal_is_top_level_frozen_udt_predicate() {
+        let q = "org.apache.cassandra.db.marshal";
+        // Positive: top-level qualified UDT and FrozenType(UserType(...)).
+        assert!(V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.UserType(ks,abcd)")
+        ));
+        assert!(V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.FrozenType({q}.UserType(ks,abcd))")
+        ));
+        // Positive: case-insensitive.
+        assert!(V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            "ORG.APACHE.CASSANDRA.DB.MARSHAL.USERTYPE(ks,abcd)"
+        ));
+        // Negative (roborev 1365): frozen COLLECTIONS containing a UDT must NOT
+        // match — they must go through the collection decoders, not the scalar path.
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.FrozenType({q}.ListType({q}.UserType(ks,abcd)))")
+        ));
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.FrozenType({q}.MapType({q}.UTF8Type,{q}.UserType(ks,abcd)))")
+        ));
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.SetType({q}.UserType(ks,abcd))")
+        ));
+        // Negative: bare (unqualified) forms — real headers are always qualified.
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            "UserType(ks,abcd)"
+        ));
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            "FrozenType(UserType(ks,abcd))"
+        ));
+        // Negative: primitives / non-UDT.
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.Int32Type")
+        ));
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            "user"
+        ));
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            ""
+        ));
+    }
+
+    /// Issue #1080: `decode_frozen_udt_from_header_type` must return a clean
+    /// `Error` (never panic / silently truncate) on a malformed blob — a length
+    /// prefix that runs past the end of the available data.
+    #[test]
+    fn test_regression_1080_frozen_udt_truncated_blob_errors() {
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+        let column = crate::schema::Column {
+            name: "p".to_string(),
+            data_type: "frozen<person_type>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        let header_type = format!(
+            "org.apache.cassandra.db.marshal.FrozenType(\
+             org.apache.cassandra.db.marshal.UserType(test_types,{},{}:org.apache.cassandra.db.marshal.UTF8Type))",
+            hex("person_type"),
+            hex("name"),
+        );
+
+        // VUInt length prefix claims 50 bytes but only 2 follow → must Err, not panic.
+        let buf: Vec<u8> = vec![50u8, 0x00, 0x01];
+        let res = parser.decode_frozen_udt_from_header_type(&buf, 0, &header_type, &column);
+        assert!(
+            res.is_err(),
+            "truncated frozen-UDT blob must yield Err, not panic/silent-truncate"
+        );
+    }
+
+    /// Issue #1080 / roborev jobs 1359+1361: predicate and decoder must agree on
+    /// the SAME marshal form. We key everything on the fully-qualified
+    /// `org.apache.cassandra.db.marshal.UserType(` marker (the only shape real
+    /// SerializationHeaders carry, and the one the nested-field decoder resolves).
+    /// This proves a NESTED qualified frozen UDT field decodes structurally — the
+    /// exact case partial bare support would have blobbed.
+    #[test]
+    fn test_regression_1080_nested_qualified_frozen_udt_field_decodes() {
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+        let column = crate::schema::Column {
+            name: "e".to_string(),
+            data_type: "frozen<employee_type>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        let q = "org.apache.cassandra.db.marshal";
+        // Fully-qualified NESTED frozen UDT: employee { name text, home frozen<addr> }
+        // where addr = { city text }. Exercises the nested-field decode path.
+        let addr = format!(
+            "{q}.FrozenType({q}.UserType(test_types,{},{}:{q}.UTF8Type))",
+            hex("addr_type"),
+            hex("city"),
+        );
+        let header_type = format!(
+            "{q}.FrozenType({q}.UserType(test_types,{},{}:{q}.UTF8Type,{}:{addr}))",
+            hex("employee_type"),
+            hex("name"),
+            hex("home"),
+        );
+        assert!(
+            V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(&header_type),
+            "qualified nested frozen UDT header must be recognized"
+        );
+
+        // Blob: name="Bo" (2 bytes); home = frozen<addr> blob with city="NYC".
+        let mut addr_blob: Vec<u8> = Vec::new();
+        let city = b"NYC";
+        addr_blob.extend_from_slice(&(city.len() as i32).to_be_bytes());
+        addr_blob.extend_from_slice(city);
+
+        let mut udt_blob: Vec<u8> = Vec::new();
+        let name = b"Bo";
+        udt_blob.extend_from_slice(&(name.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(name);
+        udt_blob.extend_from_slice(&(addr_blob.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(&addr_blob);
+
+        assert!(udt_blob.len() < 0x80);
+        let mut buf: Vec<u8> = vec![udt_blob.len() as u8];
+        buf.extend_from_slice(&udt_blob);
+
+        let (value, _off) = parser
+            .decode_frozen_udt_from_header_type(&buf, 0, &header_type, &column)
+            .expect("nested qualified frozen UDT must decode structurally (not blob)");
+        match value {
+            Value::Udt(u) => {
+                assert_eq!(u.type_name, "employee_type");
+                assert_eq!(u.fields.len(), 2);
+                // The NESTED `home` field must itself be a structured UDT, NOT a blob.
+                let home = u
+                    .fields
+                    .iter()
+                    .find(|f| f.name == "home")
+                    .and_then(|f| f.value.as_ref())
+                    .expect("home field present");
+                let inner = match home {
+                    Value::Frozen(b) => b.as_ref(),
+                    other => other,
+                };
+                assert!(
+                    matches!(inner, Value::Udt(_)),
+                    "nested frozen UDT field must decode structurally, got {inner:?}"
+                );
+            }
+            other => panic!("expected Value::Udt, got {other:?}"),
+        }
+    }
+
+    /// Issue #1080 / roborev job 1357 (High): a DROPPED *fixed-width* scalar column
+    /// (e.g. `int`) must be consumed with the correct fixed-width framing, NOT as a
+    /// VInt-length-prefixed blob — otherwise it would misalign every trailing column.
+    ///
+    /// The dropped-column synthetic `Column` carries the on-disk header type, which
+    /// the SerializationHeader parser ALWAYS normalizes to the CQL form via
+    /// `convert_marshal_type_to_cql` (`Int32Type` → `"int"`). So a dropped int hits
+    /// the same fixed-width arm as a present int and reads exactly 4 value bytes (no
+    /// length prefix). This test drives the shared `parse_cell_value_schema_order`
+    /// with a hand-crafted int cell and asserts exact 5-byte consumption (1 flags +
+    /// 4 value) with the trailing column's bytes left intact.
+    #[tokio::test]
+    async fn test_regression_1080_dropped_fixed_width_scalar_consumes_exact_width() {
+        use crate::storage::sstable::SSTableReader;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        // `_reader` is unused by parse_cell_value_schema_order, but we still need a
+        // real instance; open any available SSTable. The ONLY legitimate skip is
+        // when CQLITE_DATASETS_ROOT is unset (local dev without data). When it IS
+        // set (gate/CI), the core `test_basic/simple_table` fixture MUST be present
+        // and openable — a missing/broken fixture is a hard failure, never a silent
+        // green (roborev job 1359; matches the project's present-but-broken
+        // doctrine).
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let keyspace_dir = PathBuf::from(&datasets_root)
+            .join("sstables")
+            .join("test_basic");
+        let mut data_file = None;
+        if let Ok(entries) = std::fs::read_dir(&keyspace_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("simple_table-") {
+                    if let Ok(inner) = std::fs::read_dir(&path) {
+                        if let Some(df) = inner.flatten().find(|e| {
+                            e.file_name()
+                                .to_str()
+                                .map(|s| s.ends_with("-Data.db"))
+                                .unwrap_or(false)
+                        }) {
+                            data_file = Some(df.path());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let data_file = data_file.unwrap_or_else(|| {
+            panic!(
+                "CQLITE_DATASETS_ROOT is set ({datasets_root}) but the core fixture \
+                 test_basic/simple_table-*/*-Data.db is missing — refusing to silently skip"
+            )
+        });
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&config)
+                .await
+                .expect("platform"),
+        );
+        let reader = SSTableReader::open(&data_file, &config, platform)
+            .await
+            .expect("core fixture test_basic/simple_table must open (datasets root is set)");
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "simple_table".to_string(),
+            0,
+            0,
+            None,
+        );
+        // A DROPPED int column carries the CQL-normalized header type "int".
+        let column = crate::schema::Column {
+            name: "__dropped_col_0".to_string(),
+            data_type: "int".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Cell: [flags=0x08 USE_ROW_TIMESTAMP → live, has-value, no own ts/ttl]
+        //       [i32 BE = 0x01020304]. Then a trailing sentinel for the FOLLOWING
+        //       column to prove no misalignment.
+        let mut buf: Vec<u8> = vec![0x08];
+        buf.extend_from_slice(&0x0102_0304_i32.to_be_bytes());
+        let value_end = buf.len(); // 1 flags + 4 value = 5
+        let trailing_marker: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        buf.extend_from_slice(trailing_marker);
+
+        let (value, _ts, _exp, new_offset) = parser
+            .parse_cell_value_schema_order(&buf, 0, &column, Some("int"), &reader)
+            .expect("dropped int cell must decode with fixed-width framing");
+        assert_eq!(value, Value::Integer(0x0102_0304));
+        assert_eq!(
+            new_offset, value_end,
+            "int consumes exactly flags(1)+4 fixed bytes — NO spurious VInt length \
+             (refutes roborev job 1357: dropped fixed-width scalar misalignment)"
+        );
+        assert_eq!(
+            &buf[new_offset..],
+            trailing_marker,
+            "trailing column bytes must be intact (no misalignment after a dropped scalar)"
+        );
+    }
+
+    /// Issue #1080 / roborev job 1363 (Medium): when the schema is DERIVED FROM the
+    /// on-disk header (not supplied as a CQL short form), a frozen UDT column's
+    /// `data_type` is the marshal string `org.apache.cassandra.db.marshal.FrozenType(
+    /// ...UserType...)`, which does NOT start with CQL `frozen<`. It must still
+    /// decode STRUCTURALLY (via the marshal-form dispatch arm), not blob. Drives the
+    /// full `parse_cell_value_schema_order` to prove the dispatch routes correctly
+    /// and a trailing column stays byte-aligned.
+    #[tokio::test]
+    async fn test_regression_1080_marshal_form_frozen_udt_decodes_structurally() {
+        use crate::storage::sstable::SSTableReader;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let keyspace_dir = PathBuf::from(&datasets_root)
+            .join("sstables")
+            .join("test_basic");
+        let mut data_file = None;
+        if let Ok(entries) = std::fs::read_dir(&keyspace_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("simple_table-") {
+                    if let Ok(inner) = std::fs::read_dir(&path) {
+                        if let Some(df) = inner.flatten().find(|e| {
+                            e.file_name()
+                                .to_str()
+                                .map(|s| s.ends_with("-Data.db"))
+                                .unwrap_or(false)
+                        }) {
+                            data_file = Some(df.path());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let data_file = data_file.unwrap_or_else(|| {
+            panic!(
+                "CQLITE_DATASETS_ROOT is set ({datasets_root}) but the core fixture \
+                 test_basic/simple_table-*/*-Data.db is missing — refusing to silently skip"
+            )
+        });
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&config)
+                .await
+                .expect("platform"),
+        );
+        let reader = SSTableReader::open(&data_file, &config, platform)
+            .await
+            .expect("core fixture test_basic/simple_table must open (datasets root is set)");
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        let q = "org.apache.cassandra.db.marshal";
+        // Header-derived schema: data_type IS the fully-qualified marshal string.
+        let marshal_type = format!(
+            "{q}.FrozenType({q}.UserType(test_types,{},{}:{q}.UTF8Type,{}:{q}.Int32Type))",
+            hex("person_type"),
+            hex("name"),
+            hex("age"),
+        );
+        let column = crate::schema::Column {
+            name: "p".to_string(),
+            data_type: marshal_type,
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Cell: [flags=0x08][VInt blob_len][udt_blob]; then a trailing sentinel.
+        let mut udt_blob: Vec<u8> = Vec::new();
+        let name = b"Ada";
+        udt_blob.extend_from_slice(&(name.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(name);
+        udt_blob.extend_from_slice(&4i32.to_be_bytes());
+        udt_blob.extend_from_slice(&36i32.to_be_bytes());
+        assert!(udt_blob.len() < 0x80);
+        let mut buf: Vec<u8> = vec![0x08, udt_blob.len() as u8];
+        buf.extend_from_slice(&udt_blob);
+        let trailing_marker: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let trailing_offset = buf.len();
+        buf.extend_from_slice(trailing_marker);
+
+        let (value, _ts, _exp, new_offset) = parser
+            .parse_cell_value_schema_order(&buf, 0, &column, None, &reader)
+            .expect("marshal-form frozen UDT must decode");
+        // Structured frozen UDT, NOT a blob.
+        let inner = match &value {
+            Value::Frozen(b) => b.as_ref(),
+            other => other,
+        };
+        match inner {
+            Value::Udt(u) => {
+                assert_eq!(u.type_name, "person_type");
+                assert_eq!(u.fields.len(), 2);
+            }
+            other => panic!(
+                "header-derived marshal-form frozen UDT must decode structurally, got {other:?}"
+            ),
+        }
+        assert_eq!(
+            new_offset, trailing_offset,
+            "marshal-form frozen UDT must consume exactly its cell — trailing column stays aligned"
+        );
+        assert_eq!(&buf[new_offset..], trailing_marker);
+    }
+
     /// Regression test for Issue #481 bug 3: for `set<T>` complex columns, each
     /// set element is stored in the cell PATH (with `HAS_EMPTY_VALUE` = 0x04
     /// set in cell flags), not the cell value.
@@ -11513,7 +12798,7 @@ mod tests {
         blob.extend(build_set_cell_bytes(world));
 
         let (value, consumed, _meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
             .expect("parse_complex_column_inner should succeed");
 
         assert_eq!(consumed, blob.len());
@@ -11566,7 +12851,7 @@ mod tests {
         blob.extend(build_set_tombstone_cell_bytes(dead));
 
         let (value, consumed, meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
             .expect("parse_complex_column_inner should succeed");
 
         assert_eq!(consumed, blob.len(), "parser must consume the entire blob");
@@ -12221,8 +13506,13 @@ mod tests {
 
         let (value, consumed, meta) = parser
             .parse_complex_column_inner(
-                &blob, 0, &column, true, /* has_complex_deletion */
-                0, None,
+                &blob,
+                0,
+                &column,
+                &column.data_type,
+                true, /* has_complex_deletion */
+                0,
+                None,
             )
             .expect("parse_complex_column_inner must succeed for collection tombstone");
 
@@ -12334,6 +13624,7 @@ mod tests {
                 &blob,
                 0,
                 &column,
+                &column.data_type,
                 true, // has_complex_deletion
                 min_timestamp,
                 Some(&mut elements),
