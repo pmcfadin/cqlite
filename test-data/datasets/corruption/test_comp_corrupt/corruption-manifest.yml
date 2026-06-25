@@ -14,7 +14,7 @@ fixtures:
     component: nb-1-big-Data.db
     clean_source_table: "lz4_table"
     clean_source_path: "test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db"
-    corrupted_path: "sstables/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db"
+    corrupted_path: "corruption/test_comp_corrupt/data_db_bit_flip/nb-1-big-Data.db"
     mutation_type: bitflip
     byte_offset: 64
     original_bytes_hex: "61"
@@ -32,7 +32,7 @@ fixtures:
     component: nb-1-big-Data.db
     clean_source_table: "lz4_table"
     clean_source_path: "test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db"
-    corrupted_path: "sstables/test_comp_corrupt/data_db_truncation/nb-1-big-Data.db"
+    corrupted_path: "corruption/test_comp_corrupt/data_db_truncation/nb-1-big-Data.db"
     mutation_type: truncate
     byte_offset: 4096
     original_bytes_hex: "len=6979"
@@ -50,7 +50,7 @@ fixtures:
     component: nb-1-big-CompressionInfo.db
     clean_source_table: "lz4_table"
     clean_source_path: "test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db"
-    corrupted_path: "sstables/test_comp_corrupt/compression_info_bad_offset/nb-1-big-CompressionInfo.db"
+    corrupted_path: "corruption/test_comp_corrupt/compression_info_bad_offset/nb-1-big-CompressionInfo.db"
     mutation_type: setbyte
     byte_offset: 47
     original_bytes_hex: "00"
@@ -68,7 +68,7 @@ fixtures:
     component: nb-1-big-Index.db
     clean_source_table: "lz4_table"
     clean_source_path: "test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Index.db"
-    corrupted_path: "sstables/test_comp_corrupt/index_db_bit_flip_big/nb-1-big-Index.db"
+    corrupted_path: "corruption/test_comp_corrupt/index_db_bit_flip_big/nb-1-big-Index.db"
     mutation_type: bitflip
     byte_offset: 7
     original_bytes_hex: "4e"
@@ -86,7 +86,7 @@ fixtures:
     component: da-2-bti-Partitions.db
     clean_source_table: "wide_table"
     clean_source_path: "../cqlite/test-data/datasets/sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786/da-2-bti-Partitions.db"
-    corrupted_path: "sstables/test_comp_corrupt/bti_partitions_footer_flip/da-2-bti-Partitions.db"
+    corrupted_path: "corruption/test_comp_corrupt/bti_partitions_footer_flip/da-2-bti-Partitions.db"
     mutation_type: bitflip
     byte_offset: 57
     original_bytes_hex: "14"
@@ -104,7 +104,7 @@ fixtures:
     component: da-2-bti-Rows.db
     clean_source_table: "wide_table"
     clean_source_path: "../cqlite/test-data/datasets/sstables/test_da/wide_table-9099a7c06c1811f19864870fb8444786/da-2-bti-Rows.db"
-    corrupted_path: "sstables/test_comp_corrupt/bti_rows_truncation/da-2-bti-Rows.db"
+    corrupted_path: "corruption/test_comp_corrupt/bti_rows_truncation/da-2-bti-Rows.db"
     mutation_type: truncate
     byte_offset: 256
     original_bytes_hex: "len=760"
@@ -122,7 +122,7 @@ fixtures:
     component: nb-1-big-Statistics.db
     clean_source_table: "lz4_table"
     clean_source_path: "test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Statistics.db"
-    corrupted_path: "sstables/test_comp_corrupt/statistics_db_header_damage/nb-1-big-Statistics.db"
+    corrupted_path: "corruption/test_comp_corrupt/statistics_db_header_damage/nb-1-big-Statistics.db"
     mutation_type: setbyte
     byte_offset: 0
     original_bytes_hex: "00"
@@ -140,7 +140,7 @@ fixtures:
     component: nb-1-big-Summary.db
     clean_source_table: "lz4_table"
     clean_source_path: "test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Summary.db"
-    corrupted_path: "sstables/test_comp_corrupt/summary_db_truncation/nb-1-big-Summary.db"
+    corrupted_path: "corruption/test_comp_corrupt/summary_db_truncation/nb-1-big-Summary.db"
     mutation_type: truncate
     byte_offset: 16
     original_bytes_hex: "len=56"
@@ -158,7 +158,7 @@ fixtures:
     component: nb-1-big-TOC.txt
     clean_source_table: "lz4_table"
     clean_source_path: "test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-TOC.txt"
-    corrupted_path: "sstables/test_comp_corrupt/toc_missing_component/nb-1-big-TOC.txt"
+    corrupted_path: "corruption/test_comp_corrupt/toc_missing_component/nb-1-big-TOC.txt"
     mutation_type: tocdrop
     byte_offset: line
     original_bytes_hex: "line:Statistics.db"
@@ -176,7 +176,7 @@ fixtures:
     component: nb-1-big-Digest.crc32
     clean_source_table: "lz4_table"
     clean_source_path: "test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Digest.crc32"
-    corrupted_path: "sstables/test_comp_corrupt/digest_crc32_mismatch/nb-1-big-Digest.crc32"
+    corrupted_path: "corruption/test_comp_corrupt/digest_crc32_mismatch/nb-1-big-Digest.crc32"
     mutation_type: digest
     byte_offset: text
     original_bytes_hex: "1177334624"

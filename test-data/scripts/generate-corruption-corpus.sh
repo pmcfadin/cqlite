@@ -131,7 +131,10 @@ fi
 
 SSTABLES_DIR="$OUT_DIR/sstables"
 CLEAN_DIR="$SSTABLES_DIR/$CLEAN_KS"
-CORRUPT_DIR="$SSTABLES_DIR/$CORRUPT_KS"
+# Corrupt corpus lives OUTSIDE sstables/ so the query engine and fixture-
+# discovery walkers never treat intentionally-corrupted data as a valid table.
+# The verifier/tests read these by explicit path. (epic #970, issue #999)
+CORRUPT_DIR="$OUT_DIR/corruption/$CORRUPT_KS"
 MANIFEST="$CORRUPT_DIR/corruption-manifest.yml"
 REPORT="$CORRUPT_DIR/verification-report.txt"
 
@@ -433,7 +436,7 @@ emit_manifest_entry() {
         offset="$6" orig_hex="$7" mut_hex="$8" orig_sha="$9" corr_sha="${10}" \
         orig_len="${11}" corr_len="${12}" exp="${13}" errc="${14}" rationale="${15}" status="${16}" \
         clean_table="${17:-}"
-  local corr_rel="sstables/$CORRUPT_KS/$name/$component"
+  local corr_rel="corruption/$CORRUPT_KS/$name/$component"
   {
     echo "  - name: $name"
     echo "    manifest_key: $key"
