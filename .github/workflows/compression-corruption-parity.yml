@@ -60,6 +60,16 @@ on:
       - 'test-data/scripts/generate-compression-parity.sh'
       - 'test-data/scripts/generate-corruption-corpus.sh'
       - '.github/workflows/compression-corruption-parity.yml'
+      # Production code the parity tests validate — a regression here must trip
+      # the STRICT (regenerate + require-fixtures) workflow, not only the
+      # continue-on-error PR gate (roborev).
+      - 'cqlite-core/src/storage/sstable/compression.rs'
+      - 'cqlite-core/src/storage/sstable/compression_info.rs'
+      - 'cqlite-core/src/storage/sstable/chunk_decompressor.rs'
+      - 'cqlite-core/src/storage/sstable/chunked_data_reader.rs'
+      - 'cqlite-core/src/storage/sstable/verify.rs'
+      - 'cqlite-core/src/storage/sstable/reader/**'
+      - 'cqlite-cli/src/commands/verify.rs'
 
 env:
   CASSANDRA_IMAGE: cassandra:5.0.2

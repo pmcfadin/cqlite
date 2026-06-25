@@ -1026,15 +1026,22 @@ async fn full_row_scan_partitions(
     config: &Config,
     platform: Arc<Platform>,
 ) -> Result<(usize, usize)> {
-    use std::collections::HashSet;
-
     let reader = SSTableReader::open(data_path, config, platform).await?;
+
+    // `rows` is the total decoded row/entry count (exercises the full
+    // decompression + decode stitch path so Data.db corruption surfaces here).
     let entries = reader.get_all_entries().await?;
-    let distinct: HashSet<&[u8]> = entries
-        .iter()
-        .map(|(_tid, key, _v)| key.as_bytes())
-        .collect();
-    Ok((entries.len(), distinct.len()))
+    let rows = entries.len();
+
+    // `distinct_partitions` is the true count of distinct PARTITION keys decoded
+    // from Data.db — one per partition, NOT per row. Deduping `get_all_entries`
+    // RowKeys would over-count a multi-row partition (those keys carry
+    // clustering/column/static suffixes), which previously FALSE-FAILED the BTI
+    // Partitions.db cross-check on healthy SSTables (issue #970). The reader
+    // counts at the partition boundary for both BIG (`nb`) and BTI (`da`).
+    let distinct_partitions = reader.distinct_partition_count().await?;
+
+    Ok((rows, distinct_partitions))
 }
 
 /// Map an error surfaced by the inline-CRC / decompression path onto a stable

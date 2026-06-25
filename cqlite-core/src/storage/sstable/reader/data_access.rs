@@ -2251,6 +2251,58 @@ impl SSTableReader {
             .collect())
     }
 
+    /// Count the distinct PARTITION keys decoded from `Data.db` (issue #970).
+    ///
+    /// This is a partition-granular count — one per partition, never per row —
+    /// used by the SSTable verifier's BTI cross-check (`verify.rs`). It must NOT
+    /// be confused with [`get_all_entries`], whose `RowKey`s carry
+    /// clustering/column/static suffixes and therefore over-count a multi-row
+    /// partition as many distinct keys.
+    ///
+    /// Both supported Data.db layouts surface the partition key (without any
+    /// clustering suffix) via the compaction read path:
+    ///
+    /// - BIG (`nb`, `V5CompressedLegacy` + `is_nb_format`):
+    ///   [`iterate_all_partitions_for_compaction`] emits one
+    ///   [`CompactionRow`](super::compaction_row::CompactionRow) per row, each
+    ///   carrying the partition key (`CompactionRow::key`). Distinct keys ==
+    ///   partition count.
+    /// - BTI (`da`): the compaction iterator's non-stitching fallback would route
+    ///   through [`iterate_all_partitions`], whose keys are row-granular. Instead
+    ///   we stitch the data section and run the compaction parser directly, which
+    ///   emits the same partition-key-only `CompactionRow::key`.
+    ///
+    /// No schema is required from the caller: the parser resolves it via the
+    /// reader's header/registry (`get_table_schema`).
+    pub async fn distinct_partition_count(&self) -> Result<usize> {
+        use std::collections::HashSet;
+
+        // Stitch the whole data section and parse with the compaction parser,
+        // which emits one `CompactionRow` per partition with the partition key in
+        // `key` (partition-granular — NOT one row per clustering row). This is
+        // used by the verifier's BTI Partitions.db cross-check, so it must count
+        // PARTITIONS, not rows.
+        //
+        // We deliberately route through `stitch_all_chunks` (not the generic
+        // `iterate_all_partitions_for_compaction`) for BOTH BIG and BTI: that
+        // path honours Cassandra's incompressible/raw-chunk fallback, whereas the
+        // compaction stitch path does not yet, and would fail to decode the
+        // `incompressible_uncompressed_chunk` fixture (issue #970).
+        let cursor = self.new_scan_cursor().await?;
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        let whole = self.stitch_all_chunks(&cursor).await?;
+
+        let effective_schema = self.get_table_schema(None);
+        let parser = self.build_v5_parser();
+        let rows = parser.parse_block_for_compaction(&whole, effective_schema.as_ref(), self)?;
+        let distinct: HashSet<&[u8]> = rows.iter().map(|r| r.key.as_bytes()).collect();
+        Ok(distinct.len())
+    }
+
     /// Streaming compaction read (issue #827): yield `(RowKey, Value, ts)`
     /// entries via `emit` one partition at a time, so peak memory is bounded by
     /// `max_partition_size + one_chunk` rather than by the total input size.
