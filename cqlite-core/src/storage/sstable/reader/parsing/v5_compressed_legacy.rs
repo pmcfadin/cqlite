@@ -5500,21 +5500,42 @@ impl V5CompressedLegacyParser {
         Ok((value, cell_timestamp, cell_expiration, offset))
     }
 
-    /// Extract inner type from frozen<T> type string
+    /// Extract inner type from a frozen type string (CQL or Cassandra internal format).
+    ///
+    /// Accepts both the CQL short form `frozen<T>` and the authoritative on-disk
+    /// marshal form `org.apache.cassandra.db.marshal.FrozenType(T)`. Multicell-UDT
+    /// field types resolve from the `UserType(...)` marshal string, where frozen
+    /// fields are spelled `FrozenType(...)` (e.g. `frozen<list<int>>` →
+    /// `FrozenType(ListType(Int32Type))`), so we mirror how
+    /// `extract_collection_element_type` supports both forms. In both cases the
+    /// inner substring is sliced from the ORIGINAL-CASE input so nested marshal
+    /// types keep their case and re-normalize correctly on recursion.
     fn extract_frozen_inner_type(&self, type_str: &str) -> Result<String> {
-        if !type_str.starts_with("frozen<") || !type_str.ends_with('>') {
-            return Err(Error::schema(format!(
-                "Invalid frozen type format: {}",
-                type_str
-            )));
+        let type_lower = type_str.to_lowercase();
+
+        // Cassandra internal format: org.apache.cassandra.db.marshal.FrozenType(T)
+        let internal_prefix_lower = "org.apache.cassandra.db.marshal.frozentype(";
+        if type_lower.starts_with(internal_prefix_lower) && type_lower.ends_with(')') {
+            let inner = &type_str[internal_prefix_lower.len()..type_str.len() - 1];
+            if inner.is_empty() {
+                return Err(Error::schema(format!("Empty frozen type: {}", type_str)));
+            }
+            return Ok(inner.to_string());
         }
 
-        let inner = &type_str[7..type_str.len() - 1];
-        if inner.is_empty() {
-            return Err(Error::schema(format!("Empty frozen type: {}", type_str)));
+        // CQL format: frozen<T>
+        if type_str.starts_with("frozen<") && type_str.ends_with('>') {
+            let inner = &type_str[7..type_str.len() - 1];
+            if inner.is_empty() {
+                return Err(Error::schema(format!("Empty frozen type: {}", type_str)));
+            }
+            return Ok(inner.to_string());
         }
 
-        Ok(inner.to_string())
+        Err(Error::schema(format!(
+            "Invalid frozen type format: {}",
+            type_str
+        )))
     }
 
     /// Check if a type string represents a UDT (User-Defined Type).
@@ -8219,12 +8240,22 @@ impl V5CompressedLegacyParser {
                 )?;
                 Ok(Value::Tuple(elements))
             }
-            // Issue #1081: `frozen<...>` has no distinct marshal form (the marshal
-            // string carries the inner composite directly, e.g. `ListType(...)`
-            // for a frozen collection, which the arms above already handle). Only
-            // the CQL short form needs handling here; extract from `raw_type_str`
-            // to preserve the inner type's case on recursion.
-            type_str if type_str.starts_with("frozen<") => {
+            // Issue #1081: accept BOTH the CQL short form (`frozen<...>`) and the
+            // authoritative Cassandra marshal form
+            // (`org.apache.cassandra.db.marshal.FrozenType(...)`). Collection/UDT
+            // fields inside a multicell UDT must be frozen, and their field types
+            // resolve from the on-disk `UserType(...)` marshal string where a frozen
+            // field is spelled `FrozenType(...)` — e.g. `frozen<list<int>>` arrives
+            // as `FrozenType(ListType(Int32Type))` and `frozen<some_udt>` as
+            // `FrozenType(UserType(...))`. Without this arm those bypass the frozen
+            // handling and fall through to the blob default. `extract_frozen_inner_type`
+            // accepts both forms; we extract from `raw_type_str` (original case) so the
+            // inner marshal type keeps its case and re-routes to the marshal
+            // collection/UDT/scalar arms above on recursion.
+            type_str
+                if type_str.starts_with("frozen<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.frozentype(") =>
+            {
                 let inner_type = self.extract_frozen_inner_type(raw_type_str)?;
                 let inner =
                     self.parse_value_from_raw_bytes(data, &inner_type, column_name, depth + 1)?;
@@ -10896,6 +10927,65 @@ mod tests {
             val,
             Value::Set(vec![Value::Integer(7), Value::Integer(9)]),
             "marshal-form set field must produce a Set of Integer (not a Blob)"
+        );
+    }
+
+    /// Issue #1081 (FINDING — last type-tree gap): a multicell-UDT field declared
+    /// `frozen<list<text>>` resolves from the on-disk `UserType(...)` marshal string
+    /// as `FrozenType(ListType(UTF8Type))`. Before the fix the frozen arm in
+    /// `parse_value_from_raw_bytes` only matched the CQL `frozen<...>` form, so this
+    /// marshal form bypassed it and fell through to `Value::Blob`. It must now decode
+    /// to `Value::Frozen(List([Text, ...]))`. (Collection/UDT fields inside a UDT must
+    /// be frozen, so this marshal form is the common real case.)
+    #[test]
+    fn test_parse_value_from_raw_bytes_marshal_frozen_list_utf8() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_text(&["gamma", "delta"]);
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type))",
+                "udt_field",
+                0,
+            )
+            .expect("marshal FrozenType(ListType(UTF8Type)) must decode, not blob");
+        assert_eq!(
+            val,
+            Value::Frozen(Box::new(Value::List(vec![
+                Value::Text("gamma".to_string()),
+                Value::Text("delta".to_string()),
+            ]))),
+            "marshal-form frozen-list field must produce Frozen(List(Text)) (not a Blob)"
+        );
+    }
+
+    /// Issue #1081: `extract_frozen_inner_type` must accept BOTH the CQL short form
+    /// (`frozen<list<int>>`) and the authoritative marshal form
+    /// (`FrozenType(ListType(Int32Type))`), returning the inner type with its
+    /// ORIGINAL case preserved so nested marshal types re-normalize on recursion.
+    #[test]
+    fn test_extract_frozen_inner_type_cql_and_marshal() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // CQL short form
+        let cql_inner = parser
+            .extract_frozen_inner_type("frozen<list<int>>")
+            .expect("CQL frozen<...> must parse");
+        assert_eq!(cql_inner, "list<int>");
+
+        // Marshal form — original case (Int32Type) must be preserved.
+        let marshal_inner = parser
+            .extract_frozen_inner_type(
+                "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type))",
+            )
+            .expect("marshal FrozenType(...) must parse");
+        assert_eq!(
+            marshal_inner,
+            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)",
+            "marshal frozen inner type must be original-case (Int32Type preserved)"
         );
     }
 
