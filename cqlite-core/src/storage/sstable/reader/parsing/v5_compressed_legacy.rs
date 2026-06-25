@@ -4076,7 +4076,19 @@ impl V5CompressedLegacyParser {
         //   - Regular rows: bitmap covers only regular columns
         // Including the wrong group shifts all bitmap indices, causing columns to be
         // silently absent or misread.  Filter columns_in_order to the matching kind.
-        let columns_in_order: Vec<_> = if !reader.header.columns.is_empty() {
+        // Issue #1081: each entry pairs the SUPPLIED schema `Column` (which drives
+        // column identity / order) with the AUTHORITATIVE on-disk
+        // SerializationHeader marshal type (`ColumnInfo.column_type`, e.g.
+        // `org.apache.cassandra.db.marshal.UserType(...)`). The on-disk marshal
+        // type is the no-heuristics source of truth (issue #28) used to decide
+        // complex-ness and to decode complex values — the supplied schema's bare
+        // CQL short form (e.g. `person_type`) cannot disambiguate a non-frozen UDT.
+        // It is `None` only on the header-empty fallback path below.
+        let columns_in_order: Vec<(&crate::schema::Column, Option<&str>)> = if !reader
+            .header
+            .columns
+            .is_empty()
+        {
             // Build lookup map from schema for column details
             let schema_map: HashMap<String, &crate::schema::Column> = schema
                 .columns
@@ -4095,7 +4107,12 @@ impl V5CompressedLegacyParser {
                         && !col_info.is_clustering
                         && col_info.is_static == is_static
                 })
-                .filter_map(|col_info| schema_map.get(&col_info.name).copied())
+                .filter_map(|col_info| {
+                    schema_map
+                        .get(&col_info.name)
+                        .copied()
+                        .map(|col| (col, Some(col_info.column_type.as_str())))
+                })
                 .collect()
         } else {
             // Fallback to schema order when header is empty (shouldn't happen for real SSTables)
@@ -4108,41 +4125,47 @@ impl V5CompressedLegacyParser {
                         && !clustering_key_names.contains(col.name.as_str())
                         && col.is_static == is_static // Issue #702: match row kind
                 })
+                .map(|col| (col, None))
                 .collect()
         };
 
         // Filter columns by missing_columns_bitmap when present.
         // The bitmap indicates which columns are MISSING (bit=1 → absent).
         // We only parse cells for columns that are actually present in the data.
-        let columns_to_parse: Vec<&crate::schema::Column> = match row_header.missing_columns_bitmap
-        {
-            Some(bitmap) => {
-                let filtered: Vec<_> = columns_in_order
-                    .iter()
-                    .enumerate()
-                    .filter(|(idx, _)| {
-                        // Bitmap only covers the first 64 columns (u64).
-                        // Columns beyond index 63 are not represented in the
-                        // bitmap and are treated as present.
-                        *idx >= 64 || (bitmap & (1u64 << idx)) == 0
-                    })
-                    .map(|(_, col)| *col)
-                    .collect();
-                log::debug!(
-                    "V5CompressedLegacy: Column bitmap 0x{:X} filters {} → {} columns",
-                    bitmap,
-                    columns_in_order.len(),
-                    filtered.len()
-                );
-                filtered
-            }
-            None => columns_in_order,
-        };
+        // Issue #1081: carries the same (schema Column, authoritative on-disk
+        // marshal type) pairing produced above.
+        let columns_to_parse: Vec<(&crate::schema::Column, Option<&str>)> =
+            match row_header.missing_columns_bitmap {
+                Some(bitmap) => {
+                    let filtered: Vec<_> = columns_in_order
+                        .iter()
+                        .enumerate()
+                        .filter(|(idx, _)| {
+                            // Bitmap only covers the first 64 columns (u64).
+                            // Columns beyond index 63 are not represented in the
+                            // bitmap and are treated as present.
+                            *idx >= 64 || (bitmap & (1u64 << idx)) == 0
+                        })
+                        .map(|(_, col)| *col)
+                        .collect();
+                    log::debug!(
+                        "V5CompressedLegacy: Column bitmap 0x{:X} filters {} → {} columns",
+                        bitmap,
+                        columns_in_order.len(),
+                        filtered.len()
+                    );
+                    filtered
+                }
+                None => columns_in_order,
+            };
 
         log::debug!("V5CompressedLegacy: Parsing {} cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes)", columns_to_parse.len(), offset, row_header.header_size);
         log::debug!(
             "V5CompressedLegacy: Column order: {:?}",
-            columns_to_parse.iter().map(|c| &c.name).collect::<Vec<_>>()
+            columns_to_parse
+                .iter()
+                .map(|(c, _)| &c.name)
+                .collect::<Vec<_>>()
         );
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
@@ -4155,7 +4178,14 @@ impl V5CompressedLegacyParser {
             log::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
         }
 
-        for (col_idx, &column) in columns_to_parse.iter().enumerate() {
+        for (col_idx, &(column, on_disk_type)) in columns_to_parse.iter().enumerate() {
+            // Issue #1081: the AUTHORITATIVE complex-ness / complex-decode type.
+            // Prefer the on-disk SerializationHeader marshal type (carries
+            // `UserType(...)` for a non-frozen UDT, which the supplied schema's
+            // bare short form cannot express); fall back to the supplied schema
+            // type only on the header-empty path (no-heuristics: both are
+            // authoritative metadata, never guessed from bytes — issue #28).
+            let complex_type: &str = on_disk_type.unwrap_or(&column.data_type);
             if offset >= data.len() {
                 log::debug!(
                     "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} cells",
@@ -4170,9 +4200,9 @@ impl V5CompressedLegacyParser {
             // Issue #221: Branch based on column type - complex columns need special parsing
             // Issue #693: simple columns return 4-tuple including cell timestamp / expiration;
             //             complex columns return 2-tuple and inherit the row-level timestamp.
-            if Self::is_complex_column(&column.data_type) {
+            if Self::is_complex_column(complex_type) {
                 log::debug!(
-                    "V5CompressedLegacy: Column '{}' is complex (non-frozen collection), using parse_complex_column",
+                    "V5CompressedLegacy: Column '{}' is complex (non-frozen collection / multicell UDT), using parse_complex_column",
                     column.name
                 );
                 // Epic #899: on the compaction read path collect per-element
@@ -4187,6 +4217,7 @@ impl V5CompressedLegacyParser {
                         data,
                         offset,
                         column,
+                        complex_type,
                         has_complex_deletion,
                         row_ts,
                         Some(&mut element_buf),
@@ -4203,7 +4234,14 @@ impl V5CompressedLegacyParser {
                         (value, new_offset, col_meta)
                     })
                 } else {
-                    self.parse_complex_column(data, offset, column, has_complex_deletion, reader)
+                    self.parse_complex_column(
+                        data,
+                        offset,
+                        column,
+                        complex_type,
+                        has_complex_deletion,
+                        reader,
+                    )
                 };
                 match parse_result {
                     Ok((value, new_offset, col_meta)) => {
@@ -6681,13 +6719,35 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         offset: usize,
         column: &crate::schema::Column,
+        // Issue #1081: authoritative on-disk marshal type used to decode the
+        // complex value (e.g. `UserType(...)` for a non-frozen UDT). See
+        // [`parse_complex_column_inner`].
+        complex_type: &str,
         has_complex_deletion: bool,
         _reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize, ComplexColumnMeta)> {
-        self.parse_complex_column_inner(data, offset, column, has_complex_deletion, 0, None)
+        self.parse_complex_column_inner(
+            data,
+            offset,
+            column,
+            complex_type,
+            has_complex_deletion,
+            0,
+            None,
+        )
     }
 
     /// Inner complex-column parser.
+    ///
+    /// `complex_type` is the AUTHORITATIVE marshal type that drives the
+    /// complex-value decode — for the live read/compaction paths this is the
+    /// on-disk SerializationHeader `ColumnInfo.column_type` (issue #1081), which
+    /// is the only source that carries `UserType(...)` for a non-frozen
+    /// top-level UDT (the supplied schema's `column.data_type` is the bare CQL
+    /// short form, e.g. `person_type`, and cannot express it). `column` still
+    /// supplies the column identity (name) and is used for collection element /
+    /// map-key decode where the supplied schema form is sufficient. No
+    /// heuristics: both inputs are authoritative metadata (issue #28).
     ///
     /// When `elements_out` is `Some`, each parsed element (live, empty, or
     /// tombstoned) is also pushed as a
@@ -6702,6 +6762,7 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         mut offset: usize,
         column: &crate::schema::Column,
+        complex_type: &str,
         has_complex_deletion: bool,
         row_timestamp: i64,
         mut elements_out: Option<
@@ -6865,8 +6926,12 @@ impl V5CompressedLegacyParser {
             }
         }
 
-        // Determine collection type and extract element type(s)
-        let dt = column.data_type.to_lowercase();
+        // Determine collection / UDT type from the AUTHORITATIVE marshal type
+        // (issue #1081). For collection branches the supplied schema short form
+        // (`column.data_type`) is still used to extract element/key types below —
+        // those paths are unchanged and proven. Only the top-level non-frozen UDT
+        // branch needs the marshal form, which `complex_type` carries.
+        let dt = complex_type.to_lowercase();
         let value = if dt.starts_with("list<")
             || dt.starts_with("org.apache.cassandra.db.marshal.listtype(")
         {
@@ -7085,7 +7150,12 @@ impl V5CompressedLegacyParser {
             // cell_path is the 2-byte (signed ShortType) declared field index and
             // whose value bytes are the field datum. Decode each cell's value with
             // the DECLARED field type resolved from the marshal string.
-            let field_defs = Self::udt_field_marshal_types(&column.data_type)?;
+            //
+            // Issue #1081: resolve the field layout from the AUTHORITATIVE on-disk
+            // marshal type (`complex_type`), not the supplied schema's bare short
+            // form (`column.data_type`, e.g. `person_type`) which cannot express
+            // the field list. This is the no-heuristics source of truth (issue #28).
+            let field_defs = Self::udt_field_marshal_types(complex_type)?;
             // Field values keyed by declared index; absent / null fields stay None.
             let mut field_values: Vec<Option<Value>> = vec![None; field_defs.len()];
 
@@ -7160,8 +7230,9 @@ impl V5CompressedLegacyParser {
             }
 
             // Build the collapsed UDT in DECLARED field order for the user-facing
-            // read path. The keyspace/type-name come from the marshal string.
-            let (udt_keyspace, udt_name) = Self::udt_keyspace_and_name(&column.data_type)?;
+            // read path. The keyspace/type-name come from the authoritative
+            // on-disk marshal string (issue #1081).
+            let (udt_keyspace, udt_name) = Self::udt_keyspace_and_name(complex_type)?;
             let fields = field_defs
                 .iter()
                 .zip(field_values)
@@ -7746,6 +7817,66 @@ impl V5CompressedLegacyParser {
         Ok((key_type, value_type))
     }
 
+    /// Map a PRIMITIVE Cassandra marshal type (e.g.
+    /// `org.apache.cassandra.db.marshal.Int32Type`) to the canonical CQL short
+    /// form (`"int"`) understood by [`parse_value_from_raw_bytes`]'s match
+    /// (issue #1081). Returns `None` for any non-primitive marshal form
+    /// (UserType / collection / tuple / reversed / frozen / custom), so the
+    /// caller leaves those to the dedicated arms. The suffix set mirrors the
+    /// authoritative marshal→`CqlType` mapping in
+    /// [`parse_cassandra_type_with_depth`] (no heuristics — issue #28).
+    fn primitive_marshal_to_cql_short(marshal_type: &str) -> Option<&'static str> {
+        // Composite marshal forms carry a `(` after the type name; primitives do
+        // not. Reject anything parameterised so we never misread a collection /
+        // UDT as a scalar.
+        if marshal_type.contains('(') {
+            return None;
+        }
+        let s = marshal_type;
+        let short = if s.ends_with("UTF8Type") || s.ends_with("VarcharType") {
+            "text"
+        } else if s.ends_with("AsciiType") {
+            "ascii"
+        } else if s.ends_with("Int32Type") {
+            "int"
+        } else if s.ends_with("LongType") || s.ends_with("CounterColumnType") {
+            "bigint"
+        } else if s.ends_with("FloatType") {
+            "float"
+        } else if s.ends_with("DoubleType") {
+            "double"
+        } else if s.ends_with("BooleanType") {
+            "boolean"
+        } else if s.ends_with("TimeUUIDType") {
+            "timeuuid"
+        } else if s.ends_with("UUIDType") || s.ends_with("LexicalUUIDType") {
+            "uuid"
+        } else if s.ends_with("TimestampType") {
+            "timestamp"
+        } else if s.ends_with("SimpleDateType") || s.ends_with("DateType") {
+            // Note: legacy `DateType` (millis-since-epoch) is intentionally mapped
+            // to `date`; modern UDT fields use `SimpleDateType`. Both are 4-byte.
+            "date"
+        } else if s.ends_with("TimeType") {
+            "time"
+        } else if s.ends_with("DecimalType") {
+            "decimal"
+        } else if s.ends_with("IntegerType") {
+            "varint"
+        } else if s.ends_with("ShortType") {
+            "smallint"
+        } else if s.ends_with("ByteType") {
+            "tinyint"
+        } else if s.ends_with("InetAddressType") {
+            "inet"
+        } else if s.ends_with("BytesType") {
+            "blob"
+        } else {
+            return None;
+        };
+        Some(short)
+    }
+
     /// Parse a value from a complete, bounded byte slice.
     ///
     /// This is used when the outer Cassandra collection format already provides
@@ -7768,6 +7899,23 @@ impl V5CompressedLegacyParser {
                 column_name, depth, MAX_TYPE_NESTING_DEPTH
             )));
         }
+        // Issue #1081: scalar marshal forms (e.g.
+        // `org.apache.cassandra.db.marshal.Int32Type` / `BooleanType`) reach this
+        // function for multicell-UDT field values, which resolve their field
+        // types from the authoritative on-disk `UserType(...)` marshal string.
+        // The match below only enumerates short forms plus a handful of text
+        // marshal aliases, so a bare scalar marshal type would otherwise fall
+        // through to the blob default. Normalize a primitive marshal type to its
+        // canonical CQL short form (via the existing authoritative marshal→CqlType
+        // mapping, no heuristics) and re-dispatch. Composite/UDT marshal forms
+        // (UserType/ListType/MapType/SetType/etc.) are left untouched here — they
+        // are handled by the dedicated arms below — so this only rewrites scalars.
+        if type_str.contains("org.apache.cassandra.db.marshal.") {
+            if let Some(short) = Self::primitive_marshal_to_cql_short(type_str) {
+                return self.parse_value_from_raw_bytes(data, short, column_name, depth);
+            }
+        }
+
         let normalized_type = type_str.to_lowercase();
         match normalized_type.as_str() {
             "text"
@@ -11425,7 +11573,7 @@ mod tests {
         blob.extend_from_slice(&udt_bytes);
 
         let (value, consumed, _meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
             .expect("parse_complex_column_inner must succeed for list<frozen<address_type>>");
         assert_eq!(consumed, blob.len(), "all bytes must be consumed");
 
@@ -11513,7 +11661,7 @@ mod tests {
         blob.extend(build_set_cell_bytes(world));
 
         let (value, consumed, _meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
             .expect("parse_complex_column_inner should succeed");
 
         assert_eq!(consumed, blob.len());
@@ -11566,7 +11714,7 @@ mod tests {
         blob.extend(build_set_tombstone_cell_bytes(dead));
 
         let (value, consumed, meta) = parser
-            .parse_complex_column_inner(&blob, 0, &column, false, 0, None)
+            .parse_complex_column_inner(&blob, 0, &column, &column.data_type, false, 0, None)
             .expect("parse_complex_column_inner should succeed");
 
         assert_eq!(consumed, blob.len(), "parser must consume the entire blob");
@@ -12221,8 +12369,13 @@ mod tests {
 
         let (value, consumed, meta) = parser
             .parse_complex_column_inner(
-                &blob, 0, &column, true, /* has_complex_deletion */
-                0, None,
+                &blob,
+                0,
+                &column,
+                &column.data_type,
+                true, /* has_complex_deletion */
+                0,
+                None,
             )
             .expect("parse_complex_column_inner must succeed for collection tombstone");
 
@@ -12334,6 +12487,7 @@ mod tests {
                 &blob,
                 0,
                 &column,
+                &column.data_type,
                 true, // has_complex_deletion
                 min_timestamp,
                 Some(&mut elements),
