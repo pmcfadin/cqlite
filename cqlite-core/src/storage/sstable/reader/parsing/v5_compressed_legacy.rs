@@ -12588,12 +12588,32 @@ mod tests {
                 }
             }
         }
-        let data_file = data_file.unwrap_or_else(|| {
-            panic!(
-                "CQLITE_DATASETS_ROOT is set ({datasets_root}) but the core fixture \
-                 test_basic/simple_table-*/*-Data.db is missing — refusing to silently skip"
-            )
-        });
+        let data_file = match data_file {
+            Some(df) => df,
+            None => {
+                // CQLITE_DATASETS_ROOT is set by lanes (Core Validation, Minimal
+                // Build) that do NOT ship the test_basic bundle. A missing core
+                // fixture is only a hard failure when the gate explicitly opts in
+                // via CQLITE_REQUIRE_FIXTURES=1; otherwise skip cleanly. This
+                // matches the sibling parity tests' present-but-broken doctrine
+                // and fixes the per-PR failures reported in issue #1094.
+                let require_fixtures = std::env::var("CQLITE_REQUIRE_FIXTURES")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if require_fixtures {
+                    panic!(
+                        "CQLITE_REQUIRE_FIXTURES=1 but the core fixture \
+                         test_basic/simple_table-*/*-Data.db is missing under \
+                         CQLITE_DATASETS_ROOT ({datasets_root}) — refusing to silently skip"
+                    );
+                }
+                eprintln!(
+                    "[SKIP] core fixture test_basic/simple_table-*/*-Data.db absent under \
+                     CQLITE_DATASETS_ROOT ({datasets_root}); set CQLITE_REQUIRE_FIXTURES=1 to enforce"
+                );
+                return;
+            }
+        };
         let config = crate::Config::default();
         let platform = Arc::new(
             crate::platform::Platform::new(&config)
@@ -12685,12 +12705,32 @@ mod tests {
                 }
             }
         }
-        let data_file = data_file.unwrap_or_else(|| {
-            panic!(
-                "CQLITE_DATASETS_ROOT is set ({datasets_root}) but the core fixture \
-                 test_basic/simple_table-*/*-Data.db is missing — refusing to silently skip"
-            )
-        });
+        let data_file = match data_file {
+            Some(df) => df,
+            None => {
+                // CQLITE_DATASETS_ROOT is set by lanes (Core Validation, Minimal
+                // Build) that do NOT ship the test_basic bundle. A missing core
+                // fixture is only a hard failure when the gate explicitly opts in
+                // via CQLITE_REQUIRE_FIXTURES=1; otherwise skip cleanly. This
+                // matches the sibling parity tests' present-but-broken doctrine
+                // and fixes the per-PR failures reported in issue #1094.
+                let require_fixtures = std::env::var("CQLITE_REQUIRE_FIXTURES")
+                    .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                    .unwrap_or(false);
+                if require_fixtures {
+                    panic!(
+                        "CQLITE_REQUIRE_FIXTURES=1 but the core fixture \
+                         test_basic/simple_table-*/*-Data.db is missing under \
+                         CQLITE_DATASETS_ROOT ({datasets_root}) — refusing to silently skip"
+                    );
+                }
+                eprintln!(
+                    "[SKIP] core fixture test_basic/simple_table-*/*-Data.db absent under \
+                     CQLITE_DATASETS_ROOT ({datasets_root}); set CQLITE_REQUIRE_FIXTURES=1 to enforce"
+                );
+                return;
+            }
+        };
         let config = crate::Config::default();
         let platform = Arc::new(
             crate::platform::Platform::new(&config)
