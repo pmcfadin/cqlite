@@ -7877,6 +7877,8 @@ impl V5CompressedLegacyParser {
             "decimal"
         } else if s.ends_with("IntegerType") {
             "varint"
+        } else if s.ends_with("DurationType") {
+            "duration"
         } else if s.ends_with("ShortType") {
             "smallint"
         } else if s.ends_with("ByteType") {
@@ -8082,6 +8084,42 @@ impl V5CompressedLegacyParser {
                 Ok(Value::Time(i64::from_be_bytes([
                     data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
                 ])))
+            }
+            "duration" => {
+                // Issue #1081: in this function the entire `data` slice IS the value
+                // (the element/cell length prefix already bounded it) — there is NO
+                // outer `[VInt len]` prefix. Decode three consecutive SIGNED VInts
+                // directly over `data`: months, days, nanos (Cassandra
+                // DurationSerializer). Contrast `parse_raw_type_value`'s duration arm,
+                // which reads an outer `[VInt len]` first because its framing differs.
+                let (remaining, months) = parse_vint(data).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration months: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let pos = data.len() - remaining.len();
+
+                let (remaining, days) = parse_vint(&data[pos..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration days: {:?}",
+                        column_name, e
+                    ))
+                })?;
+                let pos = data.len() - remaining.len();
+
+                let (_remaining, nanos) = parse_vint(&data[pos..]).map_err(|e| {
+                    Error::corruption(format!(
+                        "Frozen element '{}': failed to parse duration nanos: {:?}",
+                        column_name, e
+                    ))
+                })?;
+
+                Ok(Value::Duration {
+                    months: months as i32,
+                    days: days as i32,
+                    nanos,
+                })
             }
             "varint" => Ok(Value::Varint(data.to_vec())),
             "decimal" => {
@@ -10235,6 +10273,7 @@ mod tests {
             ("TimeType", "time"),
             ("DecimalType", "decimal"),
             ("IntegerType", "varint"),
+            ("DurationType", "duration"),
             ("ShortType", "smallint"),
             ("ByteType", "tinyint"),
             ("InetAddressType", "inet"),
@@ -10632,6 +10671,66 @@ mod tests {
                 unscaled: vec![0x01, 0xC8]
             }
         );
+    }
+
+    /// Issue #1081: a multicell-UDT field declared `duration` resolves its
+    /// field type from the authoritative on-disk `UserType(...)` marshal string
+    /// as `org.apache.cassandra.db.marshal.DurationType`. That bare scalar
+    /// marshal form must normalize to `"duration"` and decode the three
+    /// consecutive SIGNED VInts (months, days, nanos) that constitute the value
+    /// — NOT fall through to `Value::Blob`. In `parse_value_from_raw_bytes` the
+    /// entire slice IS the value (no outer `[VInt len]` prefix).
+    #[test]
+    fn test_parse_value_from_raw_bytes_duration_marshal() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Build three SIGNED VInts (months=1, days=2, nanos=3) using the same
+        // ZigZag-over-unsigned-VInt scheme `parse_vint` decodes. ZigZag:
+        // 1 -> 2, 2 -> 4, 3 -> 6.
+        let zigzag = |v: i64| ((v << 1) ^ (v >> 63)) as u64;
+        let mut data = Vec::new();
+        encode_unsigned(zigzag(1), &mut data); // months
+        encode_unsigned(zigzag(2), &mut data); // days
+        encode_unsigned(zigzag(3), &mut data); // nanos
+
+        // Round-trip via the signed VInt parser to confirm the encoding before
+        // exercising the decode arm under test.
+        let (rem, m) = parse_vint(&data).unwrap();
+        let consumed = data.len() - rem.len();
+        let (rem2, d) = parse_vint(&data[consumed..]).unwrap();
+        let consumed2 = data.len() - rem2.len();
+        let (_rem3, n) = parse_vint(&data[consumed2..]).unwrap();
+        assert_eq!(
+            (m, d, n),
+            (1, 2, 3),
+            "hand-encoded duration vints round-trip"
+        );
+
+        // The bare scalar marshal form must normalize and decode to Duration,
+        // NOT fall through to Blob.
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.DurationType",
+                "col",
+                0,
+            )
+            .unwrap();
+        assert_eq!(
+            val,
+            Value::Duration {
+                months: 1,
+                days: 2,
+                nanos: 3
+            }
+        );
+
+        // The canonical CQL short form must decode identically.
+        let val_short = parser
+            .parse_value_from_raw_bytes(&data, "duration", "col", 0)
+            .unwrap();
+        assert_eq!(val_short, val);
     }
 
     #[test]
