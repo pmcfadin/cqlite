@@ -451,8 +451,8 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.tombstone_ttl.static_row.dropped_static_header_preserved` | nb | test-data/datasets/sstables/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt<br>_fail:_ target/cassandra-parity/dropped-static-header-mismatch.log |
 | `cass.tombstone_ttl.static_row.with_row_cell_range_tombstones` | nb | test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.ttl_and_local_deletion_time` | nb | test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
-| `cass.tombstone_ttl.ttl_cells.local_deletion_time` | nb | test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
-| `cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live` | nb | test-data/datasets/sstables/test_deltas/ttl_cells-299c9220701f11f1b5d1d98b0640ec05/nb-1-big-Data.db.jsonl |
+| `cass.tombstone_ttl.ttl_cells.local_deletion_time` | nb | test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
+| `cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live` | nb | test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl |
 | `cass.tombstone_ttl.ttl_expiry.gc_before_boundary` | nb | test-data/datasets/sstables/test_tomb/gc_before_boundary-4c92ceb0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl |
 | `cass.write_load_path.cassandra_sstable_writer_fixtures` | nb | — |
 
