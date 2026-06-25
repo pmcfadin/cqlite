@@ -101,6 +101,23 @@ pip install cqlite-py        # Python
 npm install @cqlite/node     # Node.js
 ```
 
+### Arrow Flight server (container)
+
+Query a Cassandra node's SSTables over Arrow Flight (gRPC) with the
+`cqlite-flight` server, published as a multi-arch image on every release tag.
+Mount the data dir read-only and point `--data-dir` at it:
+
+```bash
+docker run --rm -p 8815:8815 \
+  -v /var/lib/cassandra:/var/lib/cassandra:ro \
+  ghcr.io/pmcfadin/cqlite-flight:latest \
+  --data-dir /var/lib/cassandra/data --listen 0.0.0.0:8815
+```
+
+See [`cqlite-flight/README.md`](cqlite-flight/README.md) for image tags, the
+ticket/predicate API, and the [`trino-connector`](trino-connector) that builds
+on it.
+
 ## Quick Start
 
 ```bash
