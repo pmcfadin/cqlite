@@ -42,7 +42,7 @@
 use crate::platform::Platform;
 use crate::storage::sstable::compression_info::CompressionInfo;
 use crate::storage::sstable::reader::SSTableReader;
-use crate::storage::sstable::version_gate::SsTableFormat;
+use crate::storage::sstable::version_gate::{SsTableDescriptor, SsTableFormat};
 use crate::{Config, Error, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -402,11 +402,13 @@ fn resolve_components(dir: &Path) -> Result<ComponentSet> {
         .ok_or_else(|| Error::invalid_path("Data.db filename did not end with -Data.db"))?
         .to_string();
 
-    // Detect format from the base name's third dash-segment ("big" / "bti").
-    let format = base_name
-        .split('-')
-        .nth(2)
-        .and_then(SsTableFormat::parse)
+    // Detect format via the descriptor parser, which scans for the "big"/"bti"
+    // segment correctly even when the SSTable id is a hyphenated UUID
+    // (e.g. "da-00000000-0000-0000-0000-000000000001-bti-Data.db"). A fixed
+    // dash-index split would misread those as BIG and verify the wrong
+    // components (roborev).
+    let format = SsTableDescriptor::parse_filename(data_name)
+        .map(|d| d.format)
         .unwrap_or(SsTableFormat::Big);
 
     // Index present components for this base name only.
@@ -551,8 +553,11 @@ fn check_digest(
             e
         ))
     })?;
-    let recorded: u32 = match digest_text.trim().parse::<u64>() {
-        Ok(v) => (v & 0xffff_ffff) as u32,
+    // Parse strictly as u32: a CRC32 digest cannot exceed u32::MAX. Parsing as
+    // u64 + truncating would accept an oversized value whose low 32 bits happen
+    // to match the computed CRC (roborev).
+    let recorded: u32 = match digest_text.trim().parse::<u32>() {
+        Ok(v) => v,
         Err(e) => {
             findings.push(VerifyFinding::new(
                 VerifyErrorClass::DigestMismatch,
