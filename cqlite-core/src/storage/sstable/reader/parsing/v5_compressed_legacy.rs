@@ -4076,7 +4076,30 @@ impl V5CompressedLegacyParser {
         //   - Regular rows: bitmap covers only regular columns
         // Including the wrong group shifts all bitmap indices, causing columns to be
         // silently absent or misread.  Filter columns_in_order to the matching kind.
-        let columns_in_order: Vec<_> = if !reader.header.columns.is_empty() {
+        // Each entry pairs the AUTHORITATIVE on-disk SerializationHeader column
+        // (its marshal type) with the supplied schema `Column` for that column, if
+        // any.  The header type is the single source of truth for complex-value
+        // decode (e.g. a `frozen<udt>` whose schema short form `frozen<person_type>`
+        // carries no field defs is decoded from the header's
+        // `FrozenType(UserType(...))` marshal string — issue #1080).
+        //
+        // `schema` is `None` for a column present on disk but ABSENT from the
+        // supplied schema — a DROPPED / evolved-away column.  Such a column is NOT
+        // emitted, but its bytes MUST still be consumed from the cell stream so the
+        // trailing columns stay byte-aligned (issue #1080 Part 2: the gen-1 header
+        // carries dropped tuple/UDT columns ahead of `survivor`).  We therefore keep
+        // dropped columns in iteration order (driven by the header) rather than
+        // filtering them out, which would silently misalign every following column.
+        //
+        // `header_type` is `None` only on the header-empty fallback path (synthetic
+        // SSTables) where the supplied schema type is all we have; on that path
+        // every iterated column is schema-present by construction.
+        struct ColumnToParse<'a> {
+            schema: Option<&'a crate::schema::Column>,
+            header_type: Option<String>,
+        }
+
+        let columns_in_order: Vec<ColumnToParse> = if !reader.header.columns.is_empty() {
             // Build lookup map from schema for column details
             let schema_map: HashMap<String, &crate::schema::Column> = schema
                 .columns
@@ -4095,7 +4118,10 @@ impl V5CompressedLegacyParser {
                         && !col_info.is_clustering
                         && col_info.is_static == is_static
                 })
-                .filter_map(|col_info| schema_map.get(&col_info.name).copied())
+                .map(|col_info| ColumnToParse {
+                    schema: schema_map.get(&col_info.name).copied(),
+                    header_type: Some(col_info.column_type.clone()),
+                })
                 .collect()
         } else {
             // Fallback to schema order when header is empty (shouldn't happen for real SSTables)
@@ -4108,17 +4134,24 @@ impl V5CompressedLegacyParser {
                         && !clustering_key_names.contains(col.name.as_str())
                         && col.is_static == is_static // Issue #702: match row kind
                 })
+                .map(|col| ColumnToParse {
+                    schema: Some(col),
+                    header_type: None,
+                })
                 .collect()
         };
 
         // Filter columns by missing_columns_bitmap when present.
         // The bitmap indicates which columns are MISSING (bit=1 → absent).
         // We only parse cells for columns that are actually present in the data.
-        let columns_to_parse: Vec<&crate::schema::Column> = match row_header.missing_columns_bitmap
-        {
+        // The bitmap is indexed by the ON-DISK column order (header order), which is
+        // exactly `columns_in_order` (dropped columns retained), so the index
+        // alignment is preserved.
+        let columns_to_parse: Vec<ColumnToParse> = match row_header.missing_columns_bitmap {
             Some(bitmap) => {
+                let total_columns = columns_in_order.len();
                 let filtered: Vec<_> = columns_in_order
-                    .iter()
+                    .into_iter()
                     .enumerate()
                     .filter(|(idx, _)| {
                         // Bitmap only covers the first 64 columns (u64).
@@ -4126,12 +4159,12 @@ impl V5CompressedLegacyParser {
                         // bitmap and are treated as present.
                         *idx >= 64 || (bitmap & (1u64 << idx)) == 0
                     })
-                    .map(|(_, col)| *col)
+                    .map(|(_, col)| col)
                     .collect();
                 log::debug!(
                     "V5CompressedLegacy: Column bitmap 0x{:X} filters {} → {} columns",
                     bitmap,
-                    columns_in_order.len(),
+                    total_columns,
                     filtered.len()
                 );
                 filtered
@@ -4142,7 +4175,10 @@ impl V5CompressedLegacyParser {
         log::debug!("V5CompressedLegacy: Parsing {} cells in SERIALIZATION HEADER ORDER starting at offset {} (row header was {} bytes)", columns_to_parse.len(), offset, row_header.header_size);
         log::debug!(
             "V5CompressedLegacy: Column order: {:?}",
-            columns_to_parse.iter().map(|c| &c.name).collect::<Vec<_>>()
+            columns_to_parse
+                .iter()
+                .map(|c| c.schema.map(|s| s.name.as_str()).unwrap_or("<dropped>"))
+                .collect::<Vec<_>>()
         );
         log::debug!(
             "V5CompressedLegacy: Cell data hex (first 64 bytes): {}",
@@ -4155,7 +4191,28 @@ impl V5CompressedLegacyParser {
             log::debug!("V5CompressedLegacy: Row has HAS_COMPLEX_DELETION flag (0x40) set");
         }
 
-        for (col_idx, &column) in columns_to_parse.iter().enumerate() {
+        for (col_idx, ctp) in columns_to_parse.iter().enumerate() {
+            let header_type: Option<&str> = ctp.header_type.as_deref();
+
+            // A column present on disk but ABSENT from the supplied schema is a
+            // DROPPED column (issue #1080 Part 2): its bytes MUST be consumed to
+            // keep the trailing columns aligned, but it is NOT emitted. We decode
+            // it with a synthetic Column whose `data_type` is the AUTHORITATIVE
+            // on-disk header marshal string (the only type metadata we have), then
+            // discard the value. `emit` gates every cell/metadata insertion below.
+            let emit = ctp.schema.is_some();
+            // Synthetic column used ONLY to consume a dropped column's bytes; built
+            // from the on-disk header marshal type. Kept in a local so `column` can
+            // borrow it for the whole iteration.
+            let dropped_column_holder = crate::schema::Column {
+                name: format!("__dropped_col_{col_idx}"),
+                data_type: header_type.unwrap_or("blob").to_string(),
+                nullable: true,
+                default: None,
+                is_static,
+            };
+            let column: &crate::schema::Column = ctp.schema.unwrap_or(&dropped_column_holder);
+
             if offset >= data.len() {
                 log::debug!(
                     "V5CompressedLegacy: Reached end of data at column {} ('{}'), parsed {}/{} cells",
@@ -4192,13 +4249,15 @@ impl V5CompressedLegacyParser {
                         Some(&mut element_buf),
                     )
                     .map(|(value, new_offset, col_meta)| {
-                        if let Some(ref mut out) = compaction_complex_out {
-                            // Capture the whole-collection collapsed value for the
-                            // byte-neutral Phase A output path (roborev #863).
-                            out.insert(
-                                column.name.clone(),
-                                (col_meta.complex_deletion, element_buf, value.clone()),
-                            );
+                        if emit {
+                            if let Some(ref mut out) = compaction_complex_out {
+                                // Capture the whole-collection collapsed value for the
+                                // byte-neutral Phase A output path (roborev #863).
+                                out.insert(
+                                    column.name.clone(),
+                                    (col_meta.complex_deletion, element_buf, value.clone()),
+                                );
+                            }
                         }
                         (value, new_offset, col_meta)
                     })
@@ -4219,21 +4278,23 @@ impl V5CompressedLegacyParser {
                         // for collection columns.  Do NOT mutate this with max_element_writetime
                         // here — that would silently change WRITETIME(col) on the ordinary path
                         // (roborev Finding 1).
-                        if let Some(ref mut meta_map) = cell_meta {
-                            let row_ts = row_header.timestamp.unwrap_or(0);
-                            meta_map.insert(
-                                column.name.clone(),
-                                CellWriteMetadata {
-                                    write_timestamp_micros: row_ts,
-                                    expiration: None,
-                                },
-                            );
+                        if emit {
+                            if let Some(ref mut meta_map) = cell_meta {
+                                let row_ts = row_header.timestamp.unwrap_or(0);
+                                meta_map.insert(
+                                    column.name.clone(),
+                                    CellWriteMetadata {
+                                        write_timestamp_micros: row_ts,
+                                        expiration: None,
+                                    },
+                                );
+                            }
+                            // DS4 (Issue #700): Store ComplexColumnMeta for delta-scan callers.
+                            if let Some(ref mut ccm_map) = complex_col_meta {
+                                ccm_map.insert(column.name.clone(), col_meta);
+                            }
+                            cells.insert(column.name.clone(), value);
                         }
-                        // DS4 (Issue #700): Store ComplexColumnMeta for delta-scan callers.
-                        if let Some(ref mut ccm_map) = complex_col_meta {
-                            ccm_map.insert(column.name.clone(), col_meta);
-                        }
-                        cells.insert(column.name.clone(), value);
                         offset = new_offset;
                     }
                     Err(e) => {
@@ -4245,7 +4306,8 @@ impl V5CompressedLegacyParser {
                     }
                 }
             } else {
-                match self.parse_cell_value_schema_order(data, offset, column, reader) {
+                match self.parse_cell_value_schema_order(data, offset, column, header_type, reader)
+                {
                     Ok((value, cell_own_ts, cell_exp, new_offset)) => {
                         log::debug!(
                             "V5CompressedLegacy:   ✓ Column {} '{}' ({}) = {:?}, consumed {} bytes",
@@ -4258,33 +4320,37 @@ impl V5CompressedLegacyParser {
                         // Only compute and store per-cell metadata when the caller requested it.
                         // On the normal read hot-path (want_cell_metadata == false), cell_meta is
                         // None and this entire block is skipped — zero allocations per cell.
-                        if let Some(ref mut meta_map) = cell_meta {
-                            // Resolve effective write timestamp:
-                            // use cell's own timestamp when present, else row-level liveness timestamp.
-                            let effective_ts =
-                                cell_own_ts.unwrap_or_else(|| row_header.timestamp.unwrap_or(0));
-                            // Resolve expiration: cell-level wins; fall back to row-level TTL when
-                            // the cell used USE_ROW_TTL (cell_exp is None in that case).
-                            // USE_ROW_TTL path: row_header.ttl is the row-level TTL in seconds.
-                            // row_header.local_deletion_time is the corresponding expires_at (seconds).
-                            let row_level_exp =
-                                match (row_header.ttl, row_header.local_deletion_time) {
-                                    (Some(ttl_s), Some(ldt_s)) => Some(CellExpiration {
-                                        ttl_seconds: ttl_s,
-                                        expires_at_seconds: ldt_s as i64,
-                                    }),
-                                    _ => None,
-                                };
-                            let effective_exp = cell_exp.or(row_level_exp);
-                            meta_map.insert(
-                                column.name.clone(),
-                                CellWriteMetadata {
-                                    write_timestamp_micros: effective_ts,
-                                    expiration: effective_exp,
-                                },
-                            );
+                        // `emit` is false for a DROPPED column (issue #1080 Part 2): we still
+                        // advanced `offset` to consume its bytes, but emit no cell/metadata.
+                        if emit {
+                            if let Some(ref mut meta_map) = cell_meta {
+                                // Resolve effective write timestamp:
+                                // use cell's own timestamp when present, else row-level liveness timestamp.
+                                let effective_ts = cell_own_ts
+                                    .unwrap_or_else(|| row_header.timestamp.unwrap_or(0));
+                                // Resolve expiration: cell-level wins; fall back to row-level TTL when
+                                // the cell used USE_ROW_TTL (cell_exp is None in that case).
+                                // USE_ROW_TTL path: row_header.ttl is the row-level TTL in seconds.
+                                // row_header.local_deletion_time is the corresponding expires_at (seconds).
+                                let row_level_exp =
+                                    match (row_header.ttl, row_header.local_deletion_time) {
+                                        (Some(ttl_s), Some(ldt_s)) => Some(CellExpiration {
+                                            ttl_seconds: ttl_s,
+                                            expires_at_seconds: ldt_s as i64,
+                                        }),
+                                        _ => None,
+                                    };
+                                let effective_exp = cell_exp.or(row_level_exp);
+                                meta_map.insert(
+                                    column.name.clone(),
+                                    CellWriteMetadata {
+                                        write_timestamp_micros: effective_ts,
+                                        expiration: effective_exp,
+                                    },
+                                );
+                            }
+                            cells.insert(column.name.clone(), value);
                         }
-                        cells.insert(column.name.clone(), value);
                         offset = new_offset;
                     }
                     Err(e) => {
@@ -4381,6 +4447,13 @@ impl V5CompressedLegacyParser {
         data: &[u8],
         mut offset: usize,
         column: &crate::schema::Column,
+        // AUTHORITATIVE on-disk SerializationHeader marshal type for this column
+        // (issue #1080). Used as a fallback to resolve a `frozen<udt>` whose
+        // supplied schema short form carries no field defs and no UdtRegistry is
+        // wired: the header type is the full `FrozenType(UserType(ks,name,fields))`
+        // marshal string, decoded structurally rather than guessed. `None` on the
+        // header-empty synthetic path and on internal recursive calls.
+        header_type: Option<&str>,
         _reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, Option<i64>, Option<CellExpiration>, usize)> {
         // Cell flag constants (from Cassandra 5.0 Cell.Serializer)
@@ -5248,8 +5321,7 @@ impl V5CompressedLegacyParser {
 
                     // Parse UDT value from the blob
                     let udt_data = &data[offset..offset + blob_len];
-                    let (udt_value, _) =
-                        self.parse_udt_value(udt_data, 0, &udt_def, column, _reader)?;
+                    let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
                     offset += blob_len;
 
                     (udt_value, offset)
@@ -5297,11 +5369,21 @@ impl V5CompressedLegacyParser {
                     }
 
                     let udt_data = &data[offset..offset + blob_len];
-                    let (udt_value, _) =
-                        self.parse_udt_value(udt_data, 0, &udt_def, column, _reader)?;
+                    let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
                     offset += blob_len;
 
                     (udt_value, offset)
+                } else if let Some(ht) = header_type.filter(|ht| Self::header_type_is_user_type(ht))
+                {
+                    // Issue #1080: NO UdtRegistry is wired and the supplied schema
+                    // short form `frozen<person_type>` carries no field defs, but
+                    // the AUTHORITATIVE on-disk SerializationHeader marshal type for
+                    // this column is the full
+                    // `FrozenType(UserType(ks,hexname,field:Type,...))`. Decode the
+                    // UDT STRUCTURALLY from that header type (no guessing, issue #28)
+                    // rather than dropping the column (which also broke the Err→break
+                    // loop, silently losing all trailing columns).
+                    self.decode_frozen_udt_from_header_type(data, offset, ht, column)?
                 } else {
                     // Detect bare identifiers that look like unregistered UDT names.
                     // A bare identifier has no '<' (not a container or tuple) and does not
@@ -5353,8 +5435,14 @@ impl V5CompressedLegacyParser {
                     // The recursive call now returns 4 elements; we only need value + offset.
                     let mut inner_column = column.clone();
                     inner_column.data_type = inner_type.clone();
-                    let (inner_val, _inner_ts, _inner_exp, inner_off) =
-                        self.parse_cell_value_schema_order(data, offset, &inner_column, _reader)?;
+                    let (inner_val, _inner_ts, _inner_exp, inner_off) = self
+                        .parse_cell_value_schema_order(
+                            data,
+                            offset,
+                            &inner_column,
+                            None,
+                            _reader,
+                        )?;
                     (inner_val, inner_off)
                 };
 
@@ -5460,6 +5548,72 @@ impl V5CompressedLegacyParser {
         };
 
         Ok((value, cell_timestamp, cell_expiration, offset))
+    }
+
+    /// Issue #1080: does the on-disk SerializationHeader marshal type contain a
+    /// `UserType(` token (case-insensitive)? When true, a `frozen<udt>` cell whose
+    /// supplied schema short form carries no field defs (and with no `UdtRegistry`
+    /// wired) can still be decoded STRUCTURALLY from this authoritative header type.
+    fn header_type_is_user_type(header_type: &str) -> bool {
+        const NEEDLE: &[u8] = b"usertype(";
+        header_type
+            .as_bytes()
+            .windows(NEEDLE.len())
+            .any(|w| w.iter().zip(NEEDLE).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+    }
+
+    /// Issue #1080: decode a single-cell frozen UDT value using the AUTHORITATIVE
+    /// on-disk SerializationHeader marshal type (`FrozenType(UserType(...))` or a
+    /// bare `UserType(...)`), used when no `UdtRegistry` is wired and the supplied
+    /// schema short form (`frozen<person_type>`) carries no field defs.
+    ///
+    /// `parse_udt_type_definition` does a case-insensitive find for `UserType(`, so
+    /// the `FrozenType(...)` wrapper is transparently handled and nested
+    /// `FrozenType(UserType(...))` fields resolve to `CqlType::Frozen(CqlType::Udt)`
+    /// (decoded recursively by `parse_udt_field_value`). Returns the decoded UDT
+    /// value (UNWRAPPED — the caller wraps it in `Value::Frozen`) and the new offset
+    /// AFTER the VInt-prefixed blob, so trailing columns stay byte-aligned.
+    fn decode_frozen_udt_from_header_type(
+        &self,
+        data: &[u8],
+        mut offset: usize,
+        header_type: &str,
+        column: &crate::schema::Column,
+    ) -> Result<(Value, usize)> {
+        let udt_def = Self::parse_udt_type_definition(header_type)?;
+
+        // Read the VInt-prefixed blob length (same framing as the registry /
+        // marshal-format UDT blocks in the frozen< arm).
+        let (remaining, blob_len_raw) = parse_vuint(&data[offset..]).map_err(|e| {
+            Error::corruption(format!(
+                "Frozen UDT (column '{}', on-disk header type): failed to parse blob length: {:?}",
+                column.name, e
+            ))
+        })?;
+        if blob_len_raw > MAX_CELL_VALUE_LENGTH {
+            return Err(Error::corruption(format!(
+                "Frozen UDT (column '{}', on-disk header type): blob_len {} exceeds maximum {}",
+                column.name, blob_len_raw, MAX_CELL_VALUE_LENGTH
+            )));
+        }
+        let blob_len = blob_len_raw as usize;
+        let len_bytes_consumed = data[offset..].len() - remaining.len();
+        offset += len_bytes_consumed;
+
+        if offset + blob_len > data.len() {
+            return Err(Error::corruption(format!(
+                "Frozen UDT (column '{}', on-disk header type): need {} bytes but only {} available",
+                column.name,
+                blob_len,
+                data.len() - offset
+            )));
+        }
+
+        let udt_data = &data[offset..offset + blob_len];
+        let (udt_value, _) = self.parse_udt_value(udt_data, 0, &udt_def, column)?;
+        offset += blob_len;
+
+        Ok((udt_value, offset))
     }
 
     /// Extract inner type from frozen<T> type string
@@ -5774,13 +5928,16 @@ impl V5CompressedLegacyParser {
     /// - For each field in schema order:
     ///   - [4 bytes BE i32]: field length (-1 = null, 0 = empty, >0 = data length)
     ///   - [N bytes]: field data (if length > 0)
+    // NOTE: this UDT decoder is purely structural — it reads the i32-length-prefixed
+    // field layout using only the [`UdtTypeDef`] field types. It does NOT need an
+    // [`SSTableReader`] (the previous `reader` param was threaded through but never
+    // dereferenced), so it is reader-free and unit-testable in isolation (issue #1080).
     fn parse_udt_value(
         &self,
         data: &[u8],
         offset: usize,
         udt_def: &UdtTypeDef,
         _column: &crate::schema::Column,
-        reader: &super::super::types::SSTableReader,
     ) -> Result<(Value, usize)> {
         // Validate field count to prevent memory exhaustion
         if udt_def.fields.len() > MAX_UDT_FIELD_COUNT {
@@ -5870,8 +6027,7 @@ impl V5CompressedLegacyParser {
                 );
 
                 // Parse field value based on its type
-                let value =
-                    self.parse_udt_field_value(field_data, &field_def.field_type, reader)?;
+                let value = self.parse_udt_field_value(field_data, &field_def.field_type)?;
                 Some(value)
             };
 
@@ -5891,12 +6047,7 @@ impl V5CompressedLegacyParser {
     }
 
     /// Parse a UDT field value based on its CqlType.
-    fn parse_udt_field_value(
-        &self,
-        data: &[u8],
-        field_type: &CqlType,
-        reader: &super::super::types::SSTableReader,
-    ) -> Result<Value> {
+    fn parse_udt_field_value(&self, data: &[u8], field_type: &CqlType) -> Result<Value> {
         match field_type {
             CqlType::Text | CqlType::Ascii => {
                 let s = String::from_utf8(data.to_vec())
@@ -5994,7 +6145,7 @@ impl V5CompressedLegacyParser {
             CqlType::Inet => Ok(Value::Inet(data.to_vec())),
             CqlType::Frozen(inner) => {
                 // Parse the inner type and wrap in Frozen
-                let inner_value = self.parse_udt_field_value(data, inner, reader)?;
+                let inner_value = self.parse_udt_field_value(data, inner)?;
                 Ok(Value::Frozen(Box::new(inner_value)))
             }
             CqlType::Udt(name, field_defs) => {
@@ -6011,8 +6162,7 @@ impl V5CompressedLegacyParser {
                     default: None,
                     is_static: false,
                 };
-                let (value, _) =
-                    self.parse_udt_value(data, 0, &nested_def, &dummy_column, reader)?;
+                let (value, _) = self.parse_udt_value(data, 0, &nested_def, &dummy_column)?;
                 Ok(value)
             }
             _ => {
@@ -11475,6 +11625,128 @@ mod tests {
             city_field.value,
             Some(Value::Text("Springfield".to_string())),
             "city field must decode to Text(\"Springfield\")"
+        );
+    }
+
+    /// Regression test for Issue #1080: a `frozen<udt>` column whose supplied
+    /// schema short form (`frozen<person_type>`) carries NO field defs, with NO
+    /// `UdtRegistry` wired, must decode STRUCTURALLY from the AUTHORITATIVE on-disk
+    /// SerializationHeader marshal type (`FrozenType(UserType(...))`) — not drop to
+    /// a blob or go MISSING.
+    ///
+    /// **Before the fix** the `frozen<` arm errored in exactly this configuration
+    /// (no registry, no field defs), and the row-decode loop turned that `Err` into
+    /// a `break`, silently dropping the failing column AND every trailing column.
+    ///
+    /// This test drives the exact fix path (`decode_frozen_udt_from_header_type`),
+    /// asserts it yields `Value::Udt{...}` with the right fields, AND proves NO
+    /// trailing-column loss: the returned offset lands exactly at the start of an
+    /// appended trailing-column cell whose bytes are byte-for-byte intact (the
+    /// frozen-UDT decode consumed exactly its own VInt-prefixed blob, no more).
+    #[test]
+    fn test_regression_1080_frozen_udt_decodes_from_header_type_no_registry() {
+        // NO UdtRegistry wired; keyspace matches the header type's keyspace.
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+
+        // Supplied schema short form: `frozen<person_type>` — NO field defs.
+        let column = crate::schema::Column {
+            name: "p".to_string(),
+            data_type: "frozen<person_type>".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // AUTHORITATIVE on-disk SerializationHeader marshal type for this column:
+        //   FrozenType(UserType(test_types, hex("person_type"),
+        //                       hex("name"):UTF8Type, hex("age"):Int32Type))
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        let header_type = format!(
+            "org.apache.cassandra.db.marshal.FrozenType(\
+             org.apache.cassandra.db.marshal.UserType(test_types,{},{}:org.apache.cassandra.db.marshal.UTF8Type,{}:org.apache.cassandra.db.marshal.Int32Type))",
+            hex("person_type"),
+            hex("name"),
+            hex("age"),
+        );
+        assert!(
+            V5CompressedLegacyParser::header_type_is_user_type(&header_type),
+            "header type must be recognized as a UserType"
+        );
+
+        // Build the serialized UDT blob: each field is [i32 BE length][bytes].
+        //   name = "Ada" (3 bytes), age = 42 (i32, 4 bytes).
+        let mut udt_blob: Vec<u8> = Vec::new();
+        let name = b"Ada";
+        udt_blob.extend_from_slice(&(name.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(name);
+        udt_blob.extend_from_slice(&4i32.to_be_bytes());
+        udt_blob.extend_from_slice(&42i32.to_be_bytes());
+
+        // Cell layout at the decode entry point (after flags/timestamp, which the
+        // caller already consumed): [blob_len:VUInt][udt_blob]. Then append a
+        // sentinel for the FOLLOWING column to prove no trailing-column loss.
+        assert!(udt_blob.len() < 0x80, "test assumes single-byte VUInt");
+        let mut buf: Vec<u8> = vec![udt_blob.len() as u8];
+        let blob_start = buf.len();
+        buf.extend_from_slice(&udt_blob);
+        // Trailing column's bytes — must remain addressable & untouched.
+        let trailing_marker: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let trailing_offset = buf.len();
+        buf.extend_from_slice(trailing_marker);
+
+        let (udt_value, new_offset) = parser
+            .decode_frozen_udt_from_header_type(&buf, 0, &header_type, &column)
+            .expect("frozen<udt> must decode structurally from the on-disk header type");
+
+        // 1) Structural UDT, NOT a blob.
+        let udt = match &udt_value {
+            Value::Udt(u) => u,
+            other => panic!(
+                "expected Value::Udt from header-type fallback, got {other:?} \
+                 (regression #1080: frozen<udt> must not blob/miss)"
+            ),
+        };
+        assert_eq!(udt.type_name, "person_type");
+        let field_names: Vec<&str> = udt.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(
+            field_names,
+            vec!["name", "age"],
+            "UDT field ORDER preserved"
+        );
+        assert_eq!(
+            udt.fields[0].value,
+            Some(Value::Text("Ada".to_string())),
+            "name field decodes to Text"
+        );
+        assert_eq!(
+            udt.fields[1].value,
+            Some(Value::Integer(42)),
+            "age field decodes to int"
+        );
+
+        // 2) NO trailing-column loss: the decode consumed exactly the VInt-prefixed
+        //    blob (blob_len bytes after the length prefix), leaving the following
+        //    column's bytes intact and addressable at `new_offset`.
+        assert_eq!(
+            new_offset,
+            blob_start + udt_blob.len(),
+            "frozen UDT decode must consume exactly its own blob"
+        );
+        assert_eq!(
+            new_offset, trailing_offset,
+            "offset must land at the START of the trailing column"
+        );
+        assert_eq!(
+            &buf[new_offset..],
+            trailing_marker,
+            "the trailing column's bytes must be byte-for-byte intact \
+             (proves the Err->break trailing-column loss is gone)"
         );
     }
 

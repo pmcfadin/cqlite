@@ -631,7 +631,6 @@ async fn tuple_field_order_parity() {
 /// not decode to a structured UDT on the schema-driven read path — the column is
 /// dropped/blobbed. Written to the CORRECT Cassandra behavior; unignore when
 /// issue #1078 lands.
-#[ignore = "issue #1080: frozen<udt> column decodes as opaque blob / missing, not structured UDT"]
 #[tokio::test]
 async fn udt_field_order_null_empty_parity() {
     let schema = load_table_schema("cx_udt_field_order_null_empty");
@@ -646,7 +645,6 @@ async fn udt_field_order_null_empty_parity() {
 /// (which contains a `frozen<address_type>`) decodes to a raw blob hex string
 /// instead of the structured nested UDT. Written to the CORRECT Cassandra
 /// behavior; unignore when issue #1078 lands.
-#[ignore = "issue #1080: frozen<udt> column decodes as opaque blob, not structured nested UDT"]
 #[tokio::test]
 async fn frozen_udt_value_parity() {
     let schema = load_table_schema("cx_frozen_udt_value");
@@ -714,7 +712,6 @@ async fn multicell_udt_collection_paths_parity() {
 /// frozen-UDT decode error also drops the trailing `survivor` column (Err→break
 /// blast radius). Written to the CORRECT Cassandra behavior; unignore when issue
 /// #1078 lands (then the dropped-column-skip part-2 assertion can be exercised).
-#[ignore = "issue #1080: gen-1 frozen<udt> (drop_udt) fails to decode and drops the trailing survivor column"]
 #[tokio::test]
 async fn legacy_dropped_tuple_udt_fields_parity() {
     let table = "cx_legacy_dropped_tuple_udt";
