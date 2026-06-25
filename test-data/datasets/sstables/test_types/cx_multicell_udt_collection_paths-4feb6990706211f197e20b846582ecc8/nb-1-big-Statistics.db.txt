@@ -1,0 +1,66 @@
+SSTable: /data/test_types/cx_multicell_udt_collection_paths-4feb6990706211f197e20b846582ecc8/nb-1-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 12/31/2020 23:59:59 (1609459199999999)
+Maximum timestamp: 01/01/2021 00:00:00 (1609459200000000)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: 06/25/2026 06:51:38 (1782370298)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 0.8181818181818182
+TTL min: 0
+TTL max: 0
+First token: -4069959284402364209 (1)
+Last token: -4069959284402364209 (1)
+Covered clusterings: [1, 1]
+Estimated droppable tombstones: 0.2857142857142857
+SSTable Level: 0
+Repaired at: 0
+Originating host id: 0ca8a62c-5f2b-48b2-bf00-1438908b20f7
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1782369828325, position=172003)=CommitLogPosition(segmentId=1782369828325, position=259460)}
+totalColumnsSet: 2
+totalRows: 1
+Estimated tombstone drop times: 
+   Drop Time                        | Count  (%)  Histogram 
+   1782370320 (06/25/2026 06:52:00) |     2 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1996099046 (04/02/2033 23:57:26)
+   75th      1996099046 (04/02/2033 23:57:26)
+   95th      1996099046 (04/02/2033 23:57:26)
+   98th      1996099046 (04/02/2033 23:57:26)
+   99th      1996099046 (04/02/2033 23:57:26)
+   Min       1663415873 (09/17/2022 11:57:53)
+   Max       1996099046 (04/02/2033 23:57:26)
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   149 (149 B)  |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      149 (149 B)
+   75th      149 (149 B)
+   95th      149 (149 B)
+   98th      149 (149 B)
+   99th      149 (149 B)
+   Min       125 (125 B)
+   Max       149 (149 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   7       |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      7
+   75th      7
+   95th      7
+   98th      7
+   99th      7
+   Min       7
+   Max       7
+Local token space coverage: NaN
+Estimated cardinality: 1
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 06/25/2026 06:51:38 (1782370298)
+EncodingStats minTimestamp: 12/31/2020 23:59:59 (1609459199999999)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]
+StaticColumns: 
+RegularColumns: mp:org.apache.cassandra.db.marshal.UserType(test_types,706572736f6e5f74797065,66697273745f6e616d65:org.apache.cassandra.db.marshal.UTF8Type,6c6173745f6e616d65:org.apache.cassandra.db.marshal.UTF8Type,616765:org.apache.cassandra.db.marshal.Int32Type,616374697665:org.apache.cassandra.db.marshal.BooleanType), ml:org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type)
+IsTransient: false

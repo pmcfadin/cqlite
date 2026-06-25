@@ -4651,3 +4651,1626 @@ scenarios:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
     scope: {}
+
+  # ----------------------------------------------------------------------------
+  # #971 — CQL Type & Schema-Evolution Parity (issues #1003-#1009)
+  # Appended block. Fixture-backed lanes enforced nightly via
+  # .github/workflows/cql-type-parity.yml; codec-vector and comparator lanes
+  # run on the fast PR gate.
+  # ----------------------------------------------------------------------------
+
+  # ---- #1003 ----
+  - id: cass.schema_evolution.serialization_header.no_schema_change
+    title: Serialization-header parity with no schema change
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1003_schema_evolution_header_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - logs
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.schema_evolution.serialization_header.altered_column_type
+    title: Serialization-header parity after ALTER column type
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/se_altered_column_type-4f6856e0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_altered_column_type-4f6856e0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1003_schema_evolution_header_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/se_altered_column_type-4f6856e0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_altered_column_type-4f6856e0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - logs
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.schema_evolution.serialization_header.dropped_column_same_type
+    title: Serialization-header parity after DROP column (same type)
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/se_dropped_column_same_type-4f72b720706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_dropped_column_same_type-4f72b720706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1003_schema_evolution_header_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/se_dropped_column_same_type-4f72b720706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_dropped_column_same_type-4f72b720706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - logs
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.schema_evolution.serialization_header.altered_then_dropped_column
+    title: Serialization-header parity after ALTER then DROP column
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1003_schema_evolution_header_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - logs
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.schema_evolution.serialization_header.static_regular_kind_mismatch
+    title: Serialization-header parity across static/regular column-kind mismatch
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1003_schema_evolution_header_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - logs
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.schema_evolution.serialization_header.frozen_multicell_collection_mismatch
+    title: Serialization-header parity across frozen/multicell collection mismatch
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/se_frozen_multicell_collection_mismatch-4f913ba0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_frozen_multicell_collection_mismatch-4f913ba0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1003_schema_evolution_header_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/se_frozen_multicell_collection_mismatch-4f913ba0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_types/se_frozen_multicell_collection_mismatch-4f913ba0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - logs
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+
+  # ---- #1004 ----
+  - id: cass.cql_types.primitives.fixed_width_vectors
+    title: Fixed-width primitive serializer codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SimpleDateSerializerTest.java
+        - TimeSerializerTest.java
+        - TimestampSerializerTest.java
+        - DecimalSerializerTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1004_primitive_codec_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/primitives.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/primitives-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1004_primitive_codec_vectors
+      reference_paths:
+        - test-data/codec-vectors/primitives.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.primitives.text_blob_ascii_vectors
+    title: Text / blob / ascii serializer codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SimpleDateSerializerTest.java
+        - TimeSerializerTest.java
+        - TimestampSerializerTest.java
+        - DecimalSerializerTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1004_primitive_codec_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/primitives.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/primitives-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1004_primitive_codec_vectors
+      reference_paths:
+        - test-data/codec-vectors/primitives.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.primitives.temporal_vectors
+    title: Date / time / timestamp serializer codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SimpleDateSerializerTest.java
+        - TimeSerializerTest.java
+        - TimestampSerializerTest.java
+        - DecimalSerializerTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1004_primitive_codec_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/primitives.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/primitives-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1004_primitive_codec_vectors
+      reference_paths:
+        - test-data/codec-vectors/primitives.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.primitives.uuid_inet_vectors
+    title: UUID / timeuuid / inet serializer codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SimpleDateSerializerTest.java
+        - TimeSerializerTest.java
+        - TimestampSerializerTest.java
+        - DecimalSerializerTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1004_primitive_codec_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/primitives.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/primitives-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1004_primitive_codec_vectors
+      reference_paths:
+        - test-data/codec-vectors/primitives.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.primitives.varint_decimal_duration_vectors
+    title: Varint / decimal / duration serializer codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SimpleDateSerializerTest.java
+        - TimeSerializerTest.java
+        - TimestampSerializerTest.java
+        - DecimalSerializerTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1004_primitive_codec_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/primitives.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/primitives-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1004_primitive_codec_vectors
+      reference_paths:
+        - test-data/codec-vectors/primitives.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.primitives.invalid_length_rejection
+    title: Invalid-length primitive decode rejection
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SimpleDateSerializerTest.java
+        - TimeSerializerTest.java
+        - TimestampSerializerTest.java
+        - DecimalSerializerTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1004_primitive_codec_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/primitives.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/primitives-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1004_primitive_codec_vectors
+      reference_paths:
+        - test-data/codec-vectors/primitives.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+
+  # ---- #1005 ----
+  - id: cass.cql_types.collections.set_lookup_offsets
+    title: Frozen-set element lookup offset codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SetSerializerTest.java
+        - MapSerializerTest.java
+        - CollectionSerializersTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1005_collection_serializer_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/collections.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/collections-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1005_collection_serializer_vectors
+      reference_paths:
+        - test-data/codec-vectors/collections.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.collections.set_range_offsets
+    title: Frozen-set element range offset codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SetSerializerTest.java
+        - MapSerializerTest.java
+        - CollectionSerializersTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1005_collection_serializer_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/collections.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/collections-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1005_collection_serializer_vectors
+      reference_paths:
+        - test-data/codec-vectors/collections.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.collections.map_key_lookup_offsets
+    title: Frozen-map key lookup offset codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SetSerializerTest.java
+        - MapSerializerTest.java
+        - CollectionSerializersTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1005_collection_serializer_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/collections.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/collections-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1005_collection_serializer_vectors
+      reference_paths:
+        - test-data/codec-vectors/collections.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.collections.map_key_range_offsets
+    title: Frozen-map key range offset codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SetSerializerTest.java
+        - MapSerializerTest.java
+        - CollectionSerializersTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1005_collection_serializer_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/collections.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/collections-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1005_collection_serializer_vectors
+      reference_paths:
+        - test-data/codec-vectors/collections.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.collections.vint_element_count_boundaries
+    title: VInt element-count boundary codec vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SetSerializerTest.java
+        - MapSerializerTest.java
+        - CollectionSerializersTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1005_collection_serializer_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/collections.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/collections-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1005_collection_serializer_vectors
+      reference_paths:
+        - test-data/codec-vectors/collections.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+  - id: cass.cql_types.collections.single_cell_multicell_equivalence
+    title: Single-cell vs multicell collection equivalence vectors
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SetSerializerTest.java
+        - MapSerializerTest.java
+        - CollectionSerializersTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1005_collection_serializer_vectors.rs
+    fixtures:
+      references:
+        - test-data/codec-vectors/collections.json
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        hand-derived from Cassandra 5.0.2 serializer contracts; see test-data/codec-
+        vectors/collections-README.md
+      comparison_command: >-
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1005_collection_serializer_vectors
+      reference_paths:
+        - test-data/codec-vectors/collections.json
+      failure_artifacts:
+        - logs
+    ci:
+      tier: fast_pr
+    scope: {}
+
+  # ---- #1006 ----
+  - id: cass.cql_types.boundaries.null_empty_text_blob
+    title: Null / empty text vs blob boundary decode
+    status: partial
+    capability: cql_types
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - UnfilteredSerializerTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/nb_null_empty_text_blob-4f9b26b0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_types/nb_null_empty_text_blob-4f9b26b0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      known_limitations: >-
+        empty-value cell decodes as Text("") regardless of declared type; empty blob
+        should be Blob([]) / 0x — bug #1077; the parity assertion is written to
+        correct Cassandra behavior and #[ignore]-pinned pending the fix.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope:
+      gap: >-
+        blocked by #1077
+      next_step: >-
+        land bug #1077 (empty-value cell decodes by declared type: empty blob ->
+        Blob([])), then un-#[ignore] the assertion and flip status to mirrored
+      target_issue: 1077
+  - id: cass.cql_types.boundaries.absent_vs_null_regular_columns
+    title: Absent vs null regular column distinction
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - UnfilteredSerializerTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/nb_absent_vs_null_regular-4fa69860706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1006_null_empty_boundary_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/nb_absent_vs_null_regular-4fa69860706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      normalization: >-
+        A regular column that was never written (absent) has no cell at all, a
+        column written then deleted is a cell tombstone (null), and a column written
+        with a zero-length value is a live empty cell; the three are mapped to
+        distinct sstabledump JSONL facts (no cell / deletion_info / empty value) and
+        compared.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.boundaries.empty_collections
+    title: Empty collection vs null collection distinction
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - UnfilteredSerializerTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/nb_empty_collections-4faf9910706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1006_null_empty_boundary_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/nb_empty_collections-4faf9910706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Empty multicell collections (no surviving cells) versus absent collections
+        are mapped to the sstabledump JSONL cell-presence facts and compared so that
+        an empty collection and a never-written collection are distinguished.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.boundaries.length_prefix_edges
+    title: Cell value length-prefix edge encoding parity
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - UnfilteredSerializerTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/nb_length_prefix_edges-4fba4770706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [offsets, bytes, jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1006_null_empty_boundary_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/nb_length_prefix_edges-4fba4770706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - logs
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.data_db_decode.row_preamble_size_mismatch
+    title: Malformed row-preamble size fails loud
+    status: mirrored
+    capability: data_db_decode
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationMirrorTest.java
+        - UnfilteredSerializerTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/src/storage/sstable/reader/parsing/v5_compressed_legacy.rs
+    fixtures: {}
+    evidence:
+      type: smoke
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        n/a — crafted in-test malformed buffer
+      known_limitations: >-
+        negative robustness test: asserts a malformed/truncated row preamble fails
+        loud with a specific parse error and emits no partial row; crafted in-test,
+        no Cassandra fixture (no corrupt-row golden exists)
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+
+  # ---- #1007 ----
+  - id: cass.cql_types.complex.tuple_field_order
+    title: Frozen tuple field-order decode parity
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1007_complex_type_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/cx_tuple_field_order-4fc4f5d0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1007_complex_type_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/cx_tuple_field_order-4fc4f5d0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Frozen tuple field values are mapped in declared field order to the
+        sstabledump JSONL tuple value and compared element-by-element.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.complex.udt_field_order_null_empty
+    title: UDT field-order with null/empty fields decode parity
+    status: partial
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1007_complex_type_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/cx_udt_field_order_null_empty-4fcd8150706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_types/cx_udt_field_order_null_empty-4fcd8150706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      known_limitations: >-
+        frozen<udt> decodes as opaque blob, not structured UDT — bug #1080;
+        #[ignore]-pinned
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope:
+      gap: >-
+        blocked by #1080
+      next_step: >-
+        land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and
+        flip status to mirrored
+      target_issue: 1080
+  - id: cass.cql_types.complex.frozen_udt_value
+    title: Frozen UDT value decode parity
+    status: partial
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1007_complex_type_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/cx_frozen_udt_value-4fd68200706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_types/cx_frozen_udt_value-4fd68200706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      known_limitations: >-
+        frozen<udt> decodes as opaque blob, not structured UDT — bug #1080;
+        #[ignore]-pinned
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope:
+      gap: >-
+        blocked by #1080
+      next_step: >-
+        land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and
+        flip status to mirrored
+      target_issue: 1080
+  - id: cass.cql_types.complex.nested_frozen_collections
+    title: Nested frozen collection decode parity
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1007_complex_type_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/cx_nested_frozen_collections-4fe21ac0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1007_complex_type_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/cx_nested_frozen_collections-4fe21ac0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Nested frozen collections (list<frozen<map>>, etc.) are recursively decoded
+        and mapped to the nested sstabledump JSONL value and compared structurally.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.complex.multicell_udt_collection_paths
+    title: Multicell UDT / collection cell-path decode parity
+    status: partial
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1007_complex_type_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/cx_multicell_udt_collection_paths-4feb6990706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_types/cx_multicell_udt_collection_paths-4feb6990706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      known_limitations: >-
+        multicell (non-frozen) UDT decodes as opaque blob — bug #1081;
+        #[ignore]-pinned
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope:
+      gap: >-
+        blocked by #1081
+      next_step: >-
+        land bug #1081 (structured UDT decode), then un-#[ignore] the assertion and
+        flip status to mirrored
+      target_issue: 1081
+  - id: cass.cql_types.complex.legacy_dropped_tuple_udt_fields
+    title: Legacy dropped tuple/UDT field decode parity
+    status: partial
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - CQLSSTableWriterTest.java
+        - LegacySSTableTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1007_complex_type_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/cx_legacy_dropped_tuple_udt-4ff5a2c0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      reference_paths:
+        - test-data/datasets/sstables/test_types/cx_legacy_dropped_tuple_udt-4ff5a2c0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+      known_limitations: >-
+        frozen<udt> drop also drops the trailing survivor column — bug #1080;
+        #[ignore]-pinned
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope:
+      gap: >-
+        blocked by #1080
+      next_step: >-
+        land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and
+        flip status to mirrored
+      target_issue: 1080
+
+  # ---- #1008 ----
+  - id: cass.cql_types.counters.single_sstable_context_decode
+    title: Single-SSTable counter context final-value decode
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+        - StandaloneVerifierOnSSTablesTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1008_counter_final_value_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/ct_single_sstable-4fff8dd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_single_sstable-4fff8dd0706211f197e20b846582ecc8/ct_single_sstable.counter-select.txt
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1008_counter_final_value_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/ct_single_sstable-4fff8dd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_single_sstable-4fff8dd0706211f197e20b846582ecc8/ct_single_sstable.counter-select.txt
+      normalization: >-
+        The counter context (shard headers + local count) is decoded to a final
+        scalar value and compared against the Cassandra SELECT counter sidecar and
+        the sstabledump JSONL counter cell.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.counters.multi_sstable_increment_decrement_merge
+    title: Multi-SSTable counter increment/decrement merge final value
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+        - StandaloneVerifierOnSSTablesTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1008_counter_final_value_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/ct_multi_sstable_merge.counter-select.txt
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1008_counter_final_value_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/ct_multi_sstable_merge.counter-select.txt
+      normalization: >-
+        Counter shards across multiple SSTable generations are merged (increments
+        and decrements) to one final value and compared against the Cassandra SELECT
+        counter sidecar and the merged sstabledump JSONL.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.counters.deleted_counter_shadowing
+    title: Deleted-counter shadowing final value
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+        - StandaloneVerifierOnSSTablesTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1008_counter_final_value_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/ct_deleted_counter_shadowing-50114110706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_deleted_counter_shadowing-50114110706211f197e20b846582ecc8/ct_deleted_counter_shadowing.counter-select.txt
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1008_counter_final_value_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/ct_deleted_counter_shadowing-50114110706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_deleted_counter_shadowing-50114110706211f197e20b846582ecc8/ct_deleted_counter_shadowing.counter-select.txt
+      normalization: >-
+        A deleted counter shadows older shards; the post-delete final value (counter
+        absent / shadowed) is compared against the Cassandra SELECT counter sidecar
+        and the sstabledump JSONL deletion fact.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.counters.compacted_final_value
+    title: Compacted counter final value
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+        - StandaloneVerifierOnSSTablesTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1008_counter_final_value_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/ct_compacted_final_value-501f4ad0706211f197e20b846582ecc8/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_compacted_final_value-501f4ad0706211f197e20b846582ecc8/ct_compacted_final_value.counter-select.txt
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1008_counter_final_value_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/ct_compacted_final_value-501f4ad0706211f197e20b846582ecc8/nb-3-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_compacted_final_value-501f4ad0706211f197e20b846582ecc8/ct_compacted_final_value.counter-select.txt
+      normalization: >-
+        After compaction merges all counter shards into one generation, the
+        compacted final value is compared against the Cassandra SELECT counter
+        sidecar and the post-compaction sstabledump JSONL.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.counters.canonical_jsonl_value
+    title: Counter canonical JSONL final-value comparison
+    status: mirrored
+    capability: cql_types
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - LegacySSTableTest.java
+        - StandaloneVerifierOnSSTablesTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1008_counter_final_value_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/ct_multi_sstable_merge.counter-select.txt
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1008_counter_final_value_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/ct_multi_sstable_merge.counter-select.txt
+      normalization: >-
+        The merged counter final value is rendered to the canonical JSONL value
+        model and compared against the sstabledump JSONL counter cell, independent
+        of the SELECT sidecar.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+
+  # ---- #1009 ----
+  - id: cass.cql_types.jsonl.canonical_value_comparator
+    title: Canonical JSONL value comparator self-test
+    status: mirrored
+    capability: cql_types
+    priority: P0
+    risk: tooling_only
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        The comparator parses a published sstabledump JSONL golden into a typed,
+        ordered canonical value model and asserts an identical re-parse compares
+        equal; type/order mismatches fail loud rather than coercing.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.jsonl.schema_aware_normalization
+    title: Schema-aware JSONL normalization self-test
+    status: mirrored
+    capability: cql_types
+    priority: P0
+    risk: tooling_only
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Values are normalized against the declared schema type (not guessed) so that
+        ascii vs text, frozen vs multicell, and numeric widths are compared with the
+        correct typed model; ambiguous coercion is rejected.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare
+    title: JSONL cell-path / timestamp / TTL / tombstone comparison self-test
+    status: mirrored
+    capability: cql_types
+    priority: P0
+    risk: tooling_only
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Per-cell path, writetime/timestamp, TTL/local-deletion-time, and tombstone
+        facts are extracted from the JSONL and compared field-by-field; presentation
+        ordering and whitespace are ignored but typed facts must match.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.jsonl.no_placeholder_references
+    title: No-placeholder-reference enforcement self-test
+    status: mirrored
+    capability: cql_types
+    priority: P0
+    risk: tooling_only
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        The comparator refuses to treat placeholder or absent reference paths as a
+        pass; a missing or empty reference JSONL fails loud, guaranteeing parity
+        scenarios cannot false-pass on unpublished goldens.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
+  - id: cass.cql_types.jsonl.manifest_report_generation
+    title: Manifest report generation self-test
+    status: mirrored
+    capability: cql_types
+    priority: P0
+    risk: tooling_only
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - SerializationMirrorTest.java
+        - CQLSSTableWriterTest.java
+    cqlite:
+      coverage:
+        tests:
+          - cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      normalization: >-
+        The canonical JSONL model feeds the manifest report generator; the
+        comparator asserts the rendered report rows match the typed value model so
+        report drift is caught against the published golden.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/cql-type-parity.yml
+    scope: {}
