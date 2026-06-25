@@ -90,10 +90,11 @@ cargo run -p cqlite-flight -- \
   --listen 0.0.0.0:8815 \
   --batch-size 8192
 
-# container (built from this repo; see Dockerfile)
+# container — published to GHCR on every release tag (multi-arch amd64/arm64).
+# Mount the Cassandra data dir read-only and point --data-dir at it.
 docker run --rm -p 8815:8815 \
   -v /var/lib/cassandra:/var/lib/cassandra:ro \
-  ghcr.io/<owner>/cqlite-flight:latest \
+  ghcr.io/pmcfadin/cqlite-flight:latest \
   --data-dir /var/lib/cassandra/data --listen 0.0.0.0:8815
 ```
 
