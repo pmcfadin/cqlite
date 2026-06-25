@@ -5523,8 +5523,12 @@ impl V5CompressedLegacyParser {
             return Ok(inner.to_string());
         }
 
-        // CQL format: frozen<T>
-        if type_str.starts_with("frozen<") && type_str.ends_with('>') {
+        // CQL format: frozen<T> — match the prefix/suffix case-insensitively
+        // (parse_value_from_raw_bytes routes here off a lowercased guard but
+        // passes the ORIGINAL-CASE string, so a mixed-case `Frozen<...>` reaches
+        // this branch and must still be accepted) while slicing from the
+        // original string to preserve nested-type case.
+        if type_lower.starts_with("frozen<") && type_lower.ends_with('>') {
             let inner = &type_str[7..type_str.len() - 1];
             if inner.is_empty() {
                 return Err(Error::schema(format!("Empty frozen type: {}", type_str)));
@@ -10987,6 +10991,13 @@ mod tests {
             "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)",
             "marshal frozen inner type must be original-case (Int32Type preserved)"
         );
+
+        // Mixed-case CQL spelling must also parse (the prefix/suffix check is
+        // case-insensitive) while the sliced inner keeps its original case.
+        let mixed_inner = parser
+            .extract_frozen_inner_type("Frozen<List<Int>>")
+            .expect("mixed-case Frozen<...> must parse");
+        assert_eq!(mixed_inner, "List<Int>");
     }
 
     #[test]
