@@ -10046,6 +10046,78 @@ mod tests {
         assert_eq!(row_key.0, expected_uuid_bytes);
     }
 
+    /// Issue #1006 (manifest: cass.data_db_decode.row_preamble_size_mismatch).
+    ///
+    /// A truncated / malformed row PREAMBLE must FAIL with an explicit parse
+    /// error and must NOT fabricate a partial row. `parse_row_metadata` decodes
+    /// the row preamble (row_size VInt, prev_size VInt, then optional
+    /// timestamp/ttl/deletion); a multi-byte VInt whose continuation bytes run
+    /// off the end of the buffer must surface as a specific `corruption` error.
+    ///
+    /// There is no Cassandra fixture for a malformed row, so the buffers are
+    /// crafted in-test. `parse_row_metadata` is the reader-free row-preamble
+    /// decoder, so this exercises the real production parser directly.
+    #[test]
+    fn row_preamble_truncated_size_fails_loud() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Case 1: row_size VInt claims 2 extra bytes (lead byte 0x80 => one
+        // continuation byte expected) but the buffer ends immediately after the
+        // lead byte. parse_vuint must NOT fabricate a value; the preamble parse
+        // must return a specific "Failed to parse row size" corruption error.
+        let truncated_row_size = [0x80u8]; // 2-byte VInt header, no continuation.
+        let err = parser
+            .parse_row_metadata(&truncated_row_size, 0, /* row_flags */ 0x00, None)
+            .expect_err("truncated row_size VInt must error, not fabricate a row");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to parse row size"),
+            "expected a specific row-size parse error, got: {msg}"
+        );
+
+        // Case 2: a valid single-byte row_size (0x05) followed by a truncated
+        // prev_size VInt (0xC0 => 3-byte header, no continuation bytes). The
+        // preamble parser must fail on prev_size specifically — proving it does
+        // not silently accept a short preamble and emit a partial row.
+        let truncated_prev_size = [0x05u8, 0xC0u8];
+        let err = parser
+            .parse_row_metadata(&truncated_prev_size, 0, 0x00, None)
+            .expect_err("truncated prev_size VInt must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to parse prev size"),
+            "expected a specific prev-size parse error, got: {msg}"
+        );
+
+        // Case 3: HAS_TIMESTAMP set but the timestamp-delta VInt is truncated
+        // (valid row_size + prev_size, then a 0x80 header with no continuation).
+        // The preamble parser must fail on the timestamp delta — no partial row.
+        let truncated_ts = [0x05u8, 0x00u8, 0x80u8];
+        let err = parser
+            .parse_row_metadata(&truncated_ts, 0, ROW_HAS_TIMESTAMP, None)
+            .expect_err("truncated timestamp-delta VInt must error");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Failed to parse timestamp delta"),
+            "expected a specific timestamp-delta parse error, got: {msg}"
+        );
+
+        // Sanity: a well-formed minimal preamble parses successfully and reports
+        // the declared row_size verbatim — proving the failures above are caused
+        // by the truncation, not by the parser rejecting all input. ROW_HAS_ALL_COLUMNS
+        // (0x20) is set so no missing-columns bitmap VInt is expected, leaving the
+        // preamble as exactly row_size + prev_size.
+        let well_formed = [0x07u8, 0x00u8];
+        let (_hdr, row_size) = parser
+            .parse_row_metadata(&well_formed, 0, ROW_HAS_ALL_COLUMNS, None)
+            .expect("well-formed minimal preamble must parse");
+        assert_eq!(
+            row_size, 7,
+            "row_size must be decoded verbatim from preamble"
+        );
+    }
+
     #[test]
     fn test_extract_frozen_inner_type() {
         let parser =

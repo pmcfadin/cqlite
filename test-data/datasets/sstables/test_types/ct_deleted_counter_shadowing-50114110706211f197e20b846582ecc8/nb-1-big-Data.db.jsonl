@@ -1,0 +1,2 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":0},"rows":[{"type":"row","position":18,"cells":[{"name":"c","value":422212677445164,"tstamp":"2026-06-25T06:51:38.305298Z"}]}]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":61},"rows":[{"type":"row","position":79,"cells":[{"name":"c","value":422212677445164,"tstamp":"2026-06-25T06:51:38.307845Z"}]}]}

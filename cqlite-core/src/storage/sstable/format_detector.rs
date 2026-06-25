@@ -189,6 +189,12 @@ pub enum SSTableComponent {
     CompressionInfo,
     Statistics,
     Digest,
+    /// Per-chunk CRC32 file for uncompressed SSTables (Cassandra `CRC.db`).
+    ///
+    /// Optional: emitted for uncompressed tables only (mutually exclusive with
+    /// `CompressionInfo.db`) and shared by BIG and BTI formats. Recognized here
+    /// for consistency with `directory::types::SSTableComponent::Crc`.
+    Crc,
     TOC,
 }
 
@@ -209,6 +215,8 @@ impl SSTableComponent {
             Some(SSTableComponent::Statistics)
         } else if filename.ends_with("-Digest.crc32") {
             Some(SSTableComponent::Digest)
+        } else if filename.ends_with("-CRC.db") {
+            Some(SSTableComponent::Crc)
         } else if filename.ends_with("-TOC.txt") {
             Some(SSTableComponent::TOC)
         } else {
@@ -226,6 +234,7 @@ impl SSTableComponent {
             SSTableComponent::CompressionInfo => "CompressionInfo.db",
             SSTableComponent::Statistics => "Statistics.db",
             SSTableComponent::Digest => "Digest.crc32",
+            SSTableComponent::Crc => "CRC.db",
             SSTableComponent::TOC => "TOC.txt",
         }
     }
@@ -498,6 +507,29 @@ mod tests {
             SSTableComponent::from_filename("nb-1-big-TOC.txt"),
             Some(SSTableComponent::TOC)
         );
+    }
+
+    /// `CRC.db` must round-trip in BOTH `SSTableComponent` models (#1048).
+    ///
+    /// Cassandra emits `CRC.db` for uncompressed SSTables. The
+    /// `directory::types` enum already recognized it (#966); this confirms the
+    /// filename-scan `format_detector` enum now agrees.
+    #[test]
+    fn test_crc_component_round_trips_in_both_models() {
+        // format_detector model: from_filename -> variant -> suffix
+        assert_eq!(
+            SSTableComponent::from_filename("nb-1-big-CRC.db"),
+            Some(SSTableComponent::Crc)
+        );
+        assert_eq!(SSTableComponent::Crc.suffix(), "CRC.db");
+
+        // directory::types model: from_str -> variant -> file_extension
+        use crate::storage::sstable::directory::types::SSTableComponent as DirComponent;
+        let dir_component = "CRC.db"
+            .parse::<DirComponent>()
+            .expect("directory model must parse CRC.db");
+        assert_eq!(dir_component, DirComponent::Crc);
+        assert_eq!(dir_component.file_extension(), "CRC.db");
     }
 
     #[test]
