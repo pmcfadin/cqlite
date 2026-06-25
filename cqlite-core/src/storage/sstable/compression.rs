@@ -368,7 +368,8 @@ impl Compression {
             CompressionAlgorithm::Zstd => {
                 #[cfg(feature = "zstd")]
                 {
-                    use zstd::stream::decode_all;
+                    use std::io::Read;
+                    use zstd::stream::read::Decoder as ZstdDecoder;
 
                     // Cassandra's ZstdCompressor writes a BARE zstd frame (magic
                     // 0x28 0xB5 0x2F 0xFD ...) with NO 4-byte uncompressed-size
@@ -383,7 +384,17 @@ impl Compression {
                         return Err(Error::storage("Invalid Zstd data: empty chunk".to_string()));
                     }
 
-                    let decompressed = decode_all(data)
+                    // Decompression-bomb guard: stream through a capped reader so a
+                    // small malicious frame cannot allocate past the limit BEFORE we
+                    // check the length (mirrors the Deflate path). A zstd frame can
+                    // declare a huge content size, so `decode_all` would pre-allocate
+                    // it up front — `Read::take` bounds the work instead.
+                    let mut decoder = ZstdDecoder::new(data)
+                        .map_err(|e| Error::storage(format!("Zstd decoder init failed: {}", e)))?
+                        .take(MAX_DECOMPRESSED_SIZE as u64 + 1);
+                    let mut decompressed = Vec::new();
+                    decoder
+                        .read_to_end(&mut decompressed)
                         .map_err(|e| Error::storage(format!("Zstd decompression failed: {}", e)))?;
 
                     if decompressed.len() > MAX_DECOMPRESSED_SIZE {

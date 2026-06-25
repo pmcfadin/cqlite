@@ -205,6 +205,12 @@ async fn discover_compression_info(
         Ok(None) => {
             // Continue to fallback strategies
         }
+        // Fail-fast (issue #1001): an unsupported/unknown compressor discovered via
+        // directory scan is the SAME hard error as the standard-pattern path above —
+        // it must propagate, not warn-and-continue into the uncompressed fallback.
+        Err(e @ crate::Error::UnsupportedFormat(_)) => {
+            return Err(e);
+        }
         Err(e) => {
             warn!("Directory scan failed: {}", e);
             // Continue to fallback strategies
