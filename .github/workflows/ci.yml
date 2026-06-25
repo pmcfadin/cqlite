@@ -54,7 +54,11 @@ jobs:
         # #1080 no-silent-skip guard hard-fail. Gate on the core fixture instead.
         run: |
           set -euo pipefail
-          if find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null | grep -q .; then
+          # Capture into a var rather than piping find into grep -q / head: under
+          # `set -o pipefail`, a downstream consumer that closes the pipe early
+          # makes find exit non-zero (SIGPIPE), which would abort the step.
+          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
+          if [ -n "$CORE_FIXTURE" ]; then
             echo "✅ Core Data.db fixture present; skipping download"
           else
             echo "📦 Core Data.db fixture missing — fetching ${DATASET_ASSET}..."
@@ -70,12 +74,14 @@ jobs:
         run: |
           set -euo pipefail
           test -f test-data/datasets/metadata.yml
-          find test-data/datasets/sstables -name "*-Data.db" | head -n 1
-          # Fail loudly here rather than letting the #1080 guard panic mid-test (#1097)
-          if ! find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null | grep -q .; then
+          # Fail loudly here rather than letting the #1080 guard panic mid-test (#1097).
+          # Capture into a var (see Fetch step) to stay pipefail-safe.
+          CORE_FIXTURE=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null || true)
+          if [ -z "$CORE_FIXTURE" ]; then
             echo "❌ Core fixture test_basic/simple_table-*/*-Data.db missing after fetch" >&2
             exit 1
           fi
+          echo "✅ Core fixture present: ${CORE_FIXTURE}"
 
       - name: Validate environment
         run: |
