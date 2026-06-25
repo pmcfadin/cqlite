@@ -736,7 +736,7 @@ impl SSTableManager {
         Ok(None)
     }
 
-    /// Scan a range of keys from all SSTables with proper tombstone merging
+    /// Scan a range of keys from all SSTables for a table.
     ///
     /// # Arguments
     /// * `table_id` - The table to scan
@@ -746,81 +746,25 @@ impl SSTableManager {
     /// * `schema` - Optional table schema for schema-aware parsing. When provided,
     ///   enables accurate type detection and avoids heuristic-based parsing.
     ///   Strongly recommended for Cassandra 5.0+ formats.
-    #[cfg(feature = "tombstones")]
-    pub async fn scan(
-        &self,
-        table_id: &TableId,
-        start_key: Option<&RowKey>,
-        end_key: Option<&RowKey>,
-        limit: Option<usize>,
-        schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
-        let readers = self.readers.read().await;
-        let mut key_values = std::collections::HashMap::new();
-
-        // Collect results from all SSTables, grouping by key
-        for reader in readers.values() {
-            let results = reader
-                .scan(table_id, start_key, end_key, None, schema)
-                .await?;
-
-            for (row_key, value) in results {
-                let generation = reader.generation;
-                let write_time = reader.extract_write_time_from_entry(&row_key, &value);
-
-                let gen_value = GenerationValue {
-                    value,
-                    metadata: EntryMetadata {
-                        write_time,
-                        generation,
-                        ttl: None,
-                    },
-                };
-
-                key_values
-                    .entry(row_key)
-                    .or_insert_with(Vec::new)
-                    .push(gen_value);
-            }
-        }
-
-        // Merge values for each key using tombstone merger
-        let merger = TombstoneMerger::new();
-        let mut final_results = Vec::new();
-
-        for (row_key, values) in key_values {
-            if let Some(merged_value) = merger.merge_generations(values)? {
-                final_results.push((row_key, merged_value));
-            }
-        }
-
-        // Sort results by key
-        final_results.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Apply limit
-        if let Some(limit) = limit {
-            final_results.truncate(limit);
-        }
-
-        Ok(final_results)
-    }
-
-    /// Scan a range of keys from all SSTables (simple version without tombstone merging)
     ///
-    /// # Arguments
-    /// * `table_id` - The table to scan
-    /// * `start_key` - Optional start key for range scan
-    /// * `end_key` - Optional end key for range scan
-    /// * `limit` - Optional limit on number of results
-    /// * `schema` - Optional table schema for schema-aware parsing. When provided,
-    ///   enables accurate type detection and avoids heuristic-based parsing.
-    ///   Strongly recommended for Cassandra 5.0+ formats.
+    /// Cross-generation reconciliation (last-write-wins + tombstone shadowing) is
+    /// applied via the authoritative k-way merger when more than one SSTable
+    /// generation backs the table and `write-support` + a schema are available;
+    /// otherwise rows from each reader are concatenated.
+    ///
+    /// Issue #1085: this is the SINGLE `scan` implementation for every feature
+    /// build. The former `#[cfg(feature = "tombstones")]` variant grouped per-row
+    /// results into a `HashMap` keyed on `RowKey` (which carries only the
+    /// partition-key bytes, no clustering) and ran `TombstoneMerger`, so it
+    /// collapsed all clustering rows of a partition into one — a full `SELECT *`
+    /// over a clustered table returned ~one row per partition. Concatenating
+    /// per-reader rows here (and reconciling only ACROSS generations) is correct
+    /// for clustered tables in every build.
     ///
     /// Lookup order (Issue #680):
     ///   1. Exact match on the full `table_id` string (e.g. `"test_basic.simple_table"`)
     ///   2. Unqualified table name (e.g. `"simple_table"`) — for backward compatibility
     ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
-    #[cfg(not(feature = "tombstones"))]
     pub async fn scan(
         &self,
         table_id: &TableId,
@@ -1357,7 +1301,6 @@ impl SSTableManager {
     /// Shared by [`get`](Self::get), [`scan`](Self::scan), and
     /// [`scan_partition`](Self::scan_partition) so the resolution rule lives in
     /// one place and the targeted-lookup path can never drift from `scan`.
-    #[cfg(not(feature = "tombstones"))]
     fn resolve_reader_list<'a>(
         table_readers: &'a HashMap<String, Vec<Arc<reader::SSTableReader>>>,
         table_name: &str,
@@ -1399,7 +1342,7 @@ impl SSTableManager {
     /// full reconciled table (Issue #957). The range filter runs before `limit`, matching
     /// the per-reader scan order (range then limit). With `None`/`None` bounds the output
     /// is byte-for-byte the full reconciled set, unchanged from before.
-    #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
+    #[cfg(feature = "write-support")]
     async fn merge_generations_for_read(
         &self,
         reader_list: &[Arc<reader::SSTableReader>],
