@@ -7858,12 +7858,19 @@ impl V5CompressedLegacyParser {
             "timeuuid"
         } else if s.ends_with("UUIDType") || s.ends_with("LexicalUUIDType") {
             "uuid"
+        } else if s.ends_with("SimpleDateType") {
+            // CQL `date` (`SimpleDateType`) is a 4-byte unsigned days-since-epoch
+            // value. This is distinct from the legacy `DateType` handled below.
+            "date"
+        } else if s.ends_with("DateType") {
+            // Legacy Cassandra `DateType` is an 8-byte millis-since-epoch value —
+            // the same wire format as `TimestampType`. Mapping it to `date` would
+            // wrongly decode only the first 4 bytes, so route it to `timestamp`.
+            // NOTE: this `ends_with` arm must follow the `SimpleDateType` arm above
+            // because `SimpleDateType` also ends with `DateType`.
+            "timestamp"
         } else if s.ends_with("TimestampType") {
             "timestamp"
-        } else if s.ends_with("SimpleDateType") || s.ends_with("DateType") {
-            // Note: legacy `DateType` (millis-since-epoch) is intentionally mapped
-            // to `date`; modern UDT fields use `SimpleDateType`. Both are 4-byte.
-            "date"
         } else if s.ends_with("TimeType") {
             "time"
         } else if s.ends_with("DecimalType") {
@@ -7923,6 +7930,18 @@ impl V5CompressedLegacyParser {
             }
         }
 
+        // Preserve the ORIGINAL-CASE type string. Below, the `match` scrutinee is
+        // `type_str.to_lowercase()` and each `type_str if ...` arm binding SHADOWS
+        // the function parameter with the lowercased string. The collection/tuple/
+        // frozen extraction helpers slice their element/inner types out of the
+        // string they are handed, so if we passed the lowercased binding the nested
+        // element marshal type would come back lowercased (e.g. `...int32type`) and
+        // would NOT re-normalize via the CASE-SENSITIVE `primitive_marshal_to_cql_short`
+        // suffix match, wrongly falling through to blob. The marshal-form arms below
+        // therefore extract from `raw_type_str` (original case) so nested element
+        // marshal types keep their case. The CQL-short-form arms are unaffected
+        // because their inner types are already canonical lowercase.
+        let raw_type_str = type_str;
         let normalized_type = type_str.to_lowercase();
         match normalized_type.as_str() {
             "text"
@@ -8078,9 +8097,23 @@ impl V5CompressedLegacyParser {
                 Ok(Value::Decimal { scale, unscaled })
             }
             "inet" => Ok(Value::Inet(data.to_vec())),
-            // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>)
-            type_str if type_str.starts_with("list<") => {
-                let element_type = self.extract_collection_element_type(type_str, "list")?;
+            // Nested list/set/map inside a bounded element (e.g. map<text, list<int>>).
+            //
+            // Issue #1081: the guards accept BOTH the CQL short form (`list<...>`)
+            // and the authoritative Cassandra marshal form
+            // (`org.apache.cassandra.db.marshal.ListType(...)`). Multicell-UDT field
+            // values resolve their field types from the on-disk `UserType(...)`
+            // marshal string, so a collection-typed UDT field arrives here in marshal
+            // form and would otherwise fall through to the blob default. The
+            // extraction helpers (`extract_collection_element_type` / `extract_map_types`)
+            // already accept marshal forms; we extract from `raw_type_str`
+            // (original case) so the returned nested element marshal type keeps its
+            // case and re-normalizes correctly on recursion (see note above).
+            type_str
+                if type_str.starts_with("list<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.listtype(") =>
+            {
+                let element_type = self.extract_collection_element_type(raw_type_str, "list")?;
                 let (val, _) = self.parse_frozen_list_value_raw(
                     data,
                     0,
@@ -8090,8 +8123,11 @@ impl V5CompressedLegacyParser {
                 )?;
                 Ok(val)
             }
-            type_str if type_str.starts_with("set<") => {
-                let element_type = self.extract_collection_element_type(type_str, "set")?;
+            type_str
+                if type_str.starts_with("set<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.settype(") =>
+            {
+                let element_type = self.extract_collection_element_type(raw_type_str, "set")?;
                 let (val, _) = self.parse_frozen_set_value_raw(
                     data,
                     0,
@@ -8101,8 +8137,11 @@ impl V5CompressedLegacyParser {
                 )?;
                 Ok(val)
             }
-            type_str if type_str.starts_with("map<") => {
-                let (key_type, value_type) = self.extract_map_types(type_str)?;
+            type_str
+                if type_str.starts_with("map<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.maptype(") =>
+            {
+                let (key_type, value_type) = self.extract_map_types(raw_type_str)?;
                 let (val, _) = self.parse_frozen_map_value_raw(
                     data,
                     0,
@@ -8117,8 +8156,13 @@ impl V5CompressedLegacyParser {
             // The caller (read_frozen_element) has already extracted the raw element bytes
             // into `data`, so there is no outer VUInt length here — just the sequence of
             // [i32 BE len][bytes] fields as written by serialize_value for Value::Tuple.
-            type_str if type_str.starts_with("tuple<") => {
-                let element_types = self.extract_tuple_element_types(type_str)?;
+            // Issue #1081: also accept the marshal form `TupleType(...)`, extracting
+            // element types from the original-case `raw_type_str`.
+            type_str
+                if type_str.starts_with("tuple<")
+                    || type_str.starts_with("org.apache.cassandra.db.marshal.tupletype(") =>
+            {
+                let element_types = self.extract_tuple_element_types(raw_type_str)?;
                 if element_types.is_empty() {
                     return Err(Error::schema(format!(
                         "Nested tuple element '{}': empty tuple type",
@@ -8137,8 +8181,13 @@ impl V5CompressedLegacyParser {
                 )?;
                 Ok(Value::Tuple(elements))
             }
+            // Issue #1081: `frozen<...>` has no distinct marshal form (the marshal
+            // string carries the inner composite directly, e.g. `ListType(...)`
+            // for a frozen collection, which the arms above already handle). Only
+            // the CQL short form needs handling here; extract from `raw_type_str`
+            // to preserve the inner type's case on recursion.
             type_str if type_str.starts_with("frozen<") => {
-                let inner_type = self.extract_frozen_inner_type(type_str)?;
+                let inner_type = self.extract_frozen_inner_type(raw_type_str)?;
                 let inner =
                     self.parse_value_from_raw_bytes(data, &inner_type, column_name, depth + 1)?;
                 Ok(Value::Frozen(Box::new(inner)))
@@ -10014,36 +10063,52 @@ impl V5CompressedLegacyParser {
         Ok(elements)
     }
 
-    /// Extract tuple element types from tuple<T1, T2, ...> string
+    /// Extract tuple element types from a `tuple<T1, T2, ...>` (CQL short) or
+    /// `org.apache.cassandra.db.marshal.TupleType(T1, T2, ...)` (Cassandra marshal)
+    /// type string. Marshal support (issue #1081) is required so a tuple-typed
+    /// multicell-UDT field, whose type arrives in marshal form, decodes its
+    /// elements instead of falling through to the blob default.
     fn extract_tuple_element_types(&self, type_str: &str) -> Result<Vec<String>> {
-        if !type_str.starts_with("tuple<") || !type_str.ends_with('>') {
+        let type_lower = type_str.to_lowercase();
+
+        // Determine the inner element-list content based on format. Slice from the
+        // ORIGINAL-CASE `type_str` so nested element marshal types keep their case.
+        let inner = if type_lower.starts_with("org.apache.cassandra.db.marshal.tupletype(")
+            && type_str.ends_with(')')
+        {
+            let prefix = "org.apache.cassandra.db.marshal.TupleType(";
+            &type_str[prefix.len()..type_str.len() - 1]
+        } else if type_lower.starts_with("tuple<") && type_str.ends_with('>') {
+            &type_str[6..type_str.len() - 1]
+        } else {
             return Err(Error::schema(format!(
                 "Invalid tuple type format: {}",
                 type_str
             )));
-        }
+        };
 
-        let inner = &type_str[6..type_str.len() - 1];
         if inner.is_empty() {
             return Ok(Vec::new());
         }
 
-        // Split by comma, handling nested angle brackets
+        // Split by top-level comma, handling both CQL angle brackets (`<`/`>`)
+        // and marshal parentheses (`(`/`)`) so nested composite element types
+        // (e.g. `ListType(UTF8Type)`) are not split internally.
         let mut types = Vec::new();
         let mut current = String::new();
-        let mut depth = 0;
+        let mut depth = 0i32;
 
         for ch in inner.chars() {
             match ch {
-                '<' => {
+                '<' | '(' => {
                     depth += 1;
                     current.push(ch);
                 }
-                '>' => {
+                '>' | ')' => {
                     if depth == 0 {
                         return Err(Error::schema(format!(
-                            "Unmatched '>' in tuple type: {}",
-                            type_str
+                            "Unmatched '{}' in tuple type: {}",
+                            ch, type_str
                         )));
                     }
                     depth -= 1;
@@ -10163,6 +10228,10 @@ mod tests {
             ("TimeUUIDType", "timeuuid"),
             ("TimestampType", "timestamp"),
             ("SimpleDateType", "date"),
+            // Legacy `DateType` is an 8-byte millis-since-epoch value (same wire
+            // format as `TimestampType`), NOT the 4-byte CQL `date`
+            // (`SimpleDateType`). It must normalize to `timestamp`.
+            ("DateType", "timestamp"),
             ("TimeType", "time"),
             ("DecimalType", "decimal"),
             ("IntegerType", "varint"),
@@ -10629,6 +10698,105 @@ mod tests {
                 Value::Integer(100),
                 Value::Integer(200)
             ])))
+        );
+    }
+
+    /// Helper: build a frozen list<text> raw binary in the same
+    /// `[i32 BE count]` + per-element `[i32 BE len][utf8 bytes]` framing that
+    /// `parse_frozen_list_value_raw` expects for an already-bounded element.
+    fn build_frozen_list_text(values: &[&str]) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&(values.len() as i32).to_be_bytes());
+        for v in values {
+            let b = v.as_bytes();
+            buf.extend_from_slice(&(b.len() as i32).to_be_bytes());
+            buf.extend_from_slice(b);
+        }
+        buf
+    }
+
+    /// Issue #1081 (FINDING 1): a multicell-UDT field whose declared type arrives
+    /// in Cassandra MARSHAL form for a COLLECTION — here
+    /// `ListType(UTF8Type)` — must decode to a real `Value::List`, NOT fall
+    /// through to the blob default. This also exercises the case-sensitivity
+    /// path: the lowercased match binding must NOT corrupt the original-case
+    /// nested element marshal type (`UTF8Type`), which would otherwise fail to
+    /// re-normalize and blob.
+    #[test]
+    fn test_parse_value_from_raw_bytes_marshal_list_utf8() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_text(&["alpha", "beta"]);
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.UTF8Type)",
+                "udt_field",
+                0,
+            )
+            .expect("marshal ListType(UTF8Type) must decode, not blob");
+        assert_eq!(
+            val,
+            Value::List(vec![
+                Value::Text("alpha".to_string()),
+                Value::Text("beta".to_string()),
+            ]),
+            "marshal-form list field must produce a List of Text (not a Blob)"
+        );
+    }
+
+    /// Issue #1081 (FINDING 1): a multicell-UDT field declared as a marshal-form
+    /// `MapType(UTF8Type, Int32Type)` must decode to a `Value::Map`. The
+    /// Int32Type VALUE proves the nested element marshal type keeps its original
+    /// case through the lowercased match arm (a lowercased `...int32type` would
+    /// fail the case-sensitive primitive normalizer and blob).
+    #[test]
+    fn test_parse_value_from_raw_bytes_marshal_map_utf8_int32() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        // Same [count][i32 key_len][key][i32 val_len][i32 value] framing the
+        // frozen map raw parser expects; the int value is a 4-byte i32.
+        let data = build_frozen_map_text_int(&[("alice", 1), ("bob", 2)]);
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.MapType(org.apache.cassandra.db.marshal.UTF8Type,org.apache.cassandra.db.marshal.Int32Type)",
+                "udt_field",
+                0,
+            )
+            .expect("marshal MapType(UTF8Type, Int32Type) must decode, not blob");
+        assert_eq!(
+            val,
+            Value::Map(vec![
+                (Value::Text("alice".to_string()), Value::Integer(1)),
+                (Value::Text("bob".to_string()), Value::Integer(2)),
+            ]),
+            "marshal-form map field must produce a Map of (Text, Integer) (not a Blob)"
+        );
+    }
+
+    /// Issue #1081 (FINDING 1): a marshal-form `SetType(Int32Type)` field must
+    /// decode to a `Value::Set` rather than a blob.
+    #[test]
+    fn test_parse_value_from_raw_bytes_marshal_set_int32() {
+        let parser =
+            V5CompressedLegacyParser::new("test".to_string(), "table".to_string(), 0, 0, None);
+
+        let data = build_frozen_list_int(&[7, 9]);
+        let val = parser
+            .parse_value_from_raw_bytes(
+                &data,
+                "org.apache.cassandra.db.marshal.SetType(org.apache.cassandra.db.marshal.Int32Type)",
+                "udt_field",
+                0,
+            )
+            .expect("marshal SetType(Int32Type) must decode, not blob");
+        assert_eq!(
+            val,
+            Value::Set(vec![Value::Integer(7), Value::Integer(9)]),
+            "marshal-form set field must produce a Set of Integer (not a Blob)"
         );
     }
 
