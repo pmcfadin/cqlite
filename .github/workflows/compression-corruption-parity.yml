@@ -59,6 +59,7 @@ on:
       - 'test-data/cassandra-parity-manifest.yml'
       - 'test-data/scripts/generate-compression-parity.sh'
       - 'test-data/scripts/generate-corruption-corpus.sh'
+      - 'test-data/schemas/compression-parity.cql'
       - '.github/workflows/compression-corruption-parity.yml'
       # Production code the parity tests validate — a regression here must trip
       # the STRICT (regenerate + require-fixtures) workflow, not only the

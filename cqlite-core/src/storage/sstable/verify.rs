@@ -322,22 +322,35 @@ pub async fn verify_sstable(
 
         // ---- Check 7: full row scan (no silent empty on corruption) --------
         //
-        // The structural index checks (1, 4) above already hard-fail on a
-        // corrupt Index.db / BTI trie BEFORE we ever scan, so a corrupt index
-        // can never be reported as a successful zero-row scan. We still run the
-        // scan to exercise the decompression stitch path and surface Data.db
-        // corruption that only manifests during decode.
-        match full_row_scan_partitions(&components.data_path, config, platform).await {
-            Ok((rows, scan_partitions)) => {
-                rows_scanned = Some(rows);
-                // BTI cross-check: the partition count recovered by walking
-                // Partitions.db MUST match the distinct partitions decoded from
-                // Data.db. A mismatch means the trie was traversed from a
-                // corrupt root (footer flip) even though it parsed without
-                // erroring — a silent under-count we must surface.
-                if let Some(trie_keys) = bti_partition_keys {
-                    if trie_keys != scan_partitions {
-                        findings.push(VerifyFinding::new(
+        // Skip the scan when compression metadata is already known-corrupt: the
+        // corruption is reported, and scanning would re-read the bad
+        // CompressionInfo.db and drive the chunk reader off an out-of-bounds
+        // offset. The reader now bounds-checks and errors rather than panicking
+        // (block_io.rs), but there is no value in scanning metadata we have
+        // already flagged (roborev #970).
+        let compression_metadata_corrupt = findings.iter().any(|f| {
+            matches!(
+                f.class,
+                VerifyErrorClass::CompressionInfoCorrupt | VerifyErrorClass::ChunkOffsetOutOfBounds
+            )
+        });
+        if !compression_metadata_corrupt {
+            // The structural index checks (1, 4) above already hard-fail on a
+            // corrupt Index.db / BTI trie BEFORE we ever scan, so a corrupt index
+            // can never be reported as a successful zero-row scan. We still run the
+            // scan to exercise the decompression stitch path and surface Data.db
+            // corruption that only manifests during decode.
+            match full_row_scan_partitions(&components.data_path, config, platform).await {
+                Ok((rows, scan_partitions)) => {
+                    rows_scanned = Some(rows);
+                    // BTI cross-check: the partition count recovered by walking
+                    // Partitions.db MUST match the distinct partitions decoded from
+                    // Data.db. A mismatch means the trie was traversed from a
+                    // corrupt root (footer flip) even though it parsed without
+                    // erroring — a silent under-count we must surface.
+                    if let Some(trie_keys) = bti_partition_keys {
+                        if trie_keys != scan_partitions {
+                            findings.push(VerifyFinding::new(
                             VerifyErrorClass::BtiRootPointerCorrupt,
                             "Partitions.db",
                             format!(
@@ -345,11 +358,12 @@ pub async fn verify_sstable(
                                 trie_keys, scan_partitions
                             ),
                         ));
+                        }
                     }
                 }
+                Err(e) => findings.push(classify_scan_error(&components, &e)),
             }
-            Err(e) => findings.push(classify_scan_error(&components, &e)),
-        }
+        } // end: if !compression_metadata_corrupt
     }
 
     Ok(VerifyReport {
