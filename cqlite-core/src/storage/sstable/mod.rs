@@ -750,7 +750,14 @@ impl SSTableManager {
     /// Cross-generation reconciliation (last-write-wins + tombstone shadowing) is
     /// applied via the authoritative k-way merger when more than one SSTable
     /// generation backs the table and `write-support` + a schema are available;
-    /// otherwise rows from each reader are concatenated.
+    /// otherwise rows from each reader are concatenated. That concat fallback is
+    /// the documented multi-generation limitation (Issue #883) and is now
+    /// IDENTICAL across every feature build: the `tombstones` build takes exactly
+    /// this path too (it no longer runs its own partition-keyed merge). So no
+    /// build regresses relative to the default — a `tombstones`-without-
+    /// `write-support` multi-generation read behaves the same as the default
+    /// `not(tombstones)`-without-`write-support` build, and the prior `tombstones`
+    /// "merge" it replaces was the row-collapsing bug, not real reconciliation.
     ///
     /// Issue #1085: this is the SINGLE `scan` implementation for every feature
     /// build. The former `#[cfg(feature = "tombstones")]` variant grouped per-row
@@ -898,10 +905,12 @@ impl SSTableManager {
     /// evaluation, so any over-inclusion (e.g. a BTI prefix-collision candidate) is
     /// filtered out downstream.
     ///
-    /// Gated on `not(tombstones)` to match the `scan` variant it parallels: the
-    /// `tombstones` build uses a structurally different reader map, so the method
-    /// is defined only for the default build (the executor falls back to a full
-    /// scan under `tombstones`).
+    /// Gated on `not(tombstones)` because the bloom/BTI prune fast path it relies
+    /// on ([`scan_partition_clustering`](reader::SSTableReader::scan_partition_clustering))
+    /// is itself `not(tombstones)`-only. Under `tombstones` the executor falls back
+    /// to a full [`scan`](Self::scan) + predicate filter (since #1085, `scan` is the
+    /// same correct implementation in both builds, so the fallback is correct — just
+    /// without the single-partition prune).
     ///
     /// `partition_key` is the raw on-disk partition-key bytes produced by
     /// [`encode_partition_key_columns`](crate::storage::partition_key_codec::encode_partition_key_columns),
