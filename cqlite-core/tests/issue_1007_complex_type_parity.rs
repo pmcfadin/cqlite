@@ -442,6 +442,25 @@ fn binary_data_db_present(dir: &Path, prefix: &str) -> bool {
     dir.join(format!("{prefix}-Data.db")).exists()
 }
 
+/// `CQLITE_REQUIRE_FIXTURES=1` makes a missing fixture a HARD failure (the
+/// nightly_docker lane regenerates the corpus and sets this so a skipped
+/// comparison can never be mistaken for a passing `mirrored` parity run).
+/// Without it the test skips cleanly (fresh checkout, binaries absent).
+fn require_fixtures_strict() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1")
+        .unwrap_or(false)
+}
+
+/// Skip when fixtures are absent — unless strict mode is on, in which case fail
+/// loud so the scenario cannot false-pass as compared.
+fn skip_or_fail(table: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!("CQLITE_REQUIRE_FIXTURES=1 but {table} fixture unavailable: {reason}");
+    }
+    println!("[SKIP] {table}: {reason}");
+}
+
 /// The committed JSONL goldens live in the repo's `test-data` tree (the binary
 /// `Data.db` files are gitignored and supplied separately via
 /// `CQLITE_DATASETS_ROOT`). Resolve the golden for `table`'s `prefix` generation
@@ -481,12 +500,12 @@ async fn run_fixture(
     let dir = match fixture_dir(table) {
         Some(d) => d,
         None => {
-            println!("[SKIP] {table}: no fixture dir under CQLITE_DATASETS_ROOT");
+            skip_or_fail(table, "no fixture dir under CQLITE_DATASETS_ROOT");
             return None;
         }
     };
     if !binary_data_db_present(&dir, "nb-1-big") {
-        println!("[SKIP] {table}: binary nb-1-big-Data.db absent");
+        skip_or_fail(table, "binary nb-1-big-Data.db absent");
         return None;
     }
     let golden = golden_for_gen(table, "nb-1-big")
@@ -718,12 +737,12 @@ async fn legacy_dropped_tuple_udt_fields_parity() {
     let dir = match fixture_dir(table) {
         Some(d) => d,
         None => {
-            println!("[SKIP] {table}: no fixture dir");
+            skip_or_fail(table, "no fixture dir under CQLITE_DATASETS_ROOT");
             return;
         }
     };
     if !binary_data_db_present(&dir, "nb-1-big") {
-        println!("[SKIP] {table}: binary nb-1-big-Data.db absent");
+        skip_or_fail(table, "binary nb-1-big-Data.db absent");
         return;
     }
 
