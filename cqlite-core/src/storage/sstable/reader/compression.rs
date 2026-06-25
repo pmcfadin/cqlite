@@ -19,7 +19,11 @@ pub(crate) async fn detect_and_initialize_compression(
 ) -> Result<Option<CompressionReader>> {
     // Strategy 1: Check header compression info
     if header.compression.algorithm != "NONE" {
-        let algorithm = CompressionAlgorithm::from(header.compression.algorithm.as_str());
+        // Fail-fast (issue #1001): the header declares compression, so an unknown name
+        // here is a hard error, not a silent uncompressed fallback. `parse` rejects any
+        // unrecognized compressor (with the exact offending string) instead of mapping it
+        // to `CompressionAlgorithm::None`.
+        let algorithm = CompressionAlgorithm::parse(&header.compression.algorithm)?;
         debug!("Header indicates compression: {:?}", algorithm);
 
         // Validate compression algorithm is supported
@@ -31,7 +35,8 @@ pub(crate) async fn detect_and_initialize_compression(
                 return Ok(Some(CompressionReader::new(algorithm)));
             }
             CompressionAlgorithm::None => {
-                // Continue to other detection methods
+                // Header named an explicit no-compression marker; continue to other
+                // detection methods (a CompressionInfo.db may still be present).
             }
         }
     }
@@ -174,6 +179,13 @@ async fn discover_compression_info(
                         return Ok(Some(CompressionReader::new(algorithm)));
                     }
                 }
+                // Fail-fast (issue #1001): an unsupported/unknown compressor name is a
+                // hard error and MUST propagate — never warn-and-continue, which would
+                // silently fall through to the uncompressed path and read compressed
+                // bytes as raw. Only tolerate unrelated/malformed-file load errors.
+                Err(e @ crate::Error::UnsupportedFormat(_)) => {
+                    return Err(e);
+                }
                 Err(e) => {
                     warn!(
                         "Failed to load CompressionInfo from {:?}: {}",
@@ -192,6 +204,12 @@ async fn discover_compression_info(
         }
         Ok(None) => {
             // Continue to fallback strategies
+        }
+        // Fail-fast (issue #1001): an unsupported/unknown compressor discovered via
+        // directory scan is the SAME hard error as the standard-pattern path above —
+        // it must propagate, not warn-and-continue into the uncompressed fallback.
+        Err(e @ crate::Error::UnsupportedFormat(_)) => {
+            return Err(e);
         }
         Err(e) => {
             warn!("Directory scan failed: {}", e);
@@ -284,6 +302,11 @@ async fn scan_directory_for_compression_files(
                     return Ok(Some(CompressionReader::new(algorithm)));
                 }
             }
+            // Fail-fast (issue #1001): unsupported compressor names must propagate, never
+            // warn-and-continue into a silent uncompressed fallback.
+            Err(e @ crate::Error::UnsupportedFormat(_)) => {
+                return Err(e);
+            }
             Err(e) => {
                 log::warn!(
                     "Failed to load CompressionInfo from {:?}: {}",
@@ -373,17 +396,32 @@ async fn load_compression_info(path: &Path) -> Result<CompressionInfo> {
 pub fn extract_sstable_base_name(path: &Path) -> Option<String> {
     let filename = path.file_name()?.to_str()?;
 
-    // Remove .db extension first
+    // Require a .db component (preserves the legacy contract: no-extension and
+    // wrong-extension names yield None).
     let filename_no_ext = filename.strip_suffix(".db")?;
 
-    // Parse SSTable filename pattern: {prefix}-{generation}-{format}-{component}
-    let parts: Vec<&str> = filename_no_ext.split('-').collect();
+    // Prefer the descriptor parser, which finds the big/bti format segment even
+    // when the SSTable id is a hyphenated UUID (e.g.
+    // "da-00000000-0000-0000-0000-000000000001-bti-Data.db") that a fixed
+    // parts[0..3] split would mangle into the wrong base name, so the
+    // "*-CompressionInfo.db" sidecar lookup failed and compressed data was read
+    // as uncompressed (roborev #970).
+    if let Ok(d) = crate::storage::sstable::version_gate::SsTableDescriptor::parse(path) {
+        return Some(format!(
+            "{}-{}-{}",
+            d.version,
+            d.sstable_id,
+            d.format.as_str()
+        ));
+    }
 
+    // Fallback for non-standard names the descriptor rejects: keep the legacy
+    // {prefix}-{generation}-{format} heuristic so existing callers/tests are
+    // unchanged (e.g. "nb-1-big.db" with only 3 parts still yields None).
+    let parts: Vec<&str> = filename_no_ext.split('-').collect();
     if parts.len() >= 4 {
-        // Join prefix, generation, and format: "nb-1-big"
         Some(parts[0..3].join("-"))
     } else {
-        // Fallback for non-standard naming
         log::warn!("Non-standard SSTable filename pattern: {}", filename);
         None
     }

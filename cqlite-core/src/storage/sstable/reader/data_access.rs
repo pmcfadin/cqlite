@@ -1868,9 +1868,32 @@ impl SSTableReader {
         // Pre-allocate buffer for ~2.5MB (estimated max size for test data)
         let mut stitched_buffer = Vec::with_capacity(2_500_000);
 
+        // Incompressible-chunk fallback (Bug #639, epic #970): Cassandra stores a
+        // chunk RAW (not compressed) when its compressed length would meet or
+        // exceed `max_compressed_length`. `ChunkDecompressor::decompress_chunk`
+        // already honours this, but the stitch path did not — it blindly tried to
+        // LZ4/Snappy/etc-decode a raw chunk, which fails on the `incompressible`
+        // fixture. Mirror the writer rule here: when the (CRC-stripped) chunk
+        // length >= max_compressed_length, the bytes are already plaintext.
+        // Authority: CompressedSequentialWriter.java:160-177.
+        let max_compressed_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.max_compressed_length as usize)
+            .unwrap_or(usize::MAX);
+
         let mut chunk_count = 0;
         while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
-            let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
+            let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
+                // Stored uncompressed by Cassandra — pass the raw bytes through.
+                log::debug!(
+                    "stitch_all_chunks: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
+                    chunk_count,
+                    compressed_chunk.len(),
+                    max_compressed_length
+                );
+                compressed_chunk
+            } else if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
                 match compression.decompress(&compressed_chunk) {
                     Ok(decompressed) => decompressed,
@@ -2226,6 +2249,58 @@ impl SSTableReader {
                 super::compaction_row::CompactionRow::from_legacy_value(key, value, 0)
             })
             .collect())
+    }
+
+    /// Count the distinct PARTITION keys decoded from `Data.db` (issue #970).
+    ///
+    /// This is a partition-granular count — one per partition, never per row —
+    /// used by the SSTable verifier's BTI cross-check (`verify.rs`). It must NOT
+    /// be confused with [`get_all_entries`], whose `RowKey`s carry
+    /// clustering/column/static suffixes and therefore over-count a multi-row
+    /// partition as many distinct keys.
+    ///
+    /// Both supported Data.db layouts surface the partition key (without any
+    /// clustering suffix) via the compaction read path:
+    ///
+    /// - BIG (`nb`, `V5CompressedLegacy` + `is_nb_format`):
+    ///   [`iterate_all_partitions_for_compaction`] emits one
+    ///   [`CompactionRow`](super::compaction_row::CompactionRow) per row, each
+    ///   carrying the partition key (`CompactionRow::key`). Distinct keys ==
+    ///   partition count.
+    /// - BTI (`da`): the compaction iterator's non-stitching fallback would route
+    ///   through [`iterate_all_partitions`], whose keys are row-granular. Instead
+    ///   we stitch the data section and run the compaction parser directly, which
+    ///   emits the same partition-key-only `CompactionRow::key`.
+    ///
+    /// No schema is required from the caller: the parser resolves it via the
+    /// reader's header/registry (`get_table_schema`).
+    pub async fn distinct_partition_count(&self) -> Result<usize> {
+        use std::collections::HashSet;
+
+        // Stitch the whole data section and parse with the compaction parser,
+        // which emits one `CompactionRow` per partition with the partition key in
+        // `key` (partition-granular — NOT one row per clustering row). This is
+        // used by the verifier's BTI Partitions.db cross-check, so it must count
+        // PARTITIONS, not rows.
+        //
+        // We deliberately route through `stitch_all_chunks` (not the generic
+        // `iterate_all_partitions_for_compaction`) for BOTH BIG and BTI: that
+        // path honours Cassandra's incompressible/raw-chunk fallback, whereas the
+        // compaction stitch path does not yet, and would fail to decode the
+        // `incompressible_uncompressed_chunk` fixture (issue #970).
+        let cursor = self.new_scan_cursor().await?;
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        let whole = self.stitch_all_chunks(&cursor).await?;
+
+        let effective_schema = self.get_table_schema(None);
+        let parser = self.build_v5_parser();
+        let rows = parser.parse_block_for_compaction(&whole, effective_schema.as_ref(), self)?;
+        let distinct: HashSet<&[u8]> = rows.iter().map(|r| r.key.as_bytes()).collect();
+        Ok(distinct.len())
     }
 
     /// Streaming compaction read (issue #827): yield `(RowKey, Value, ts)`

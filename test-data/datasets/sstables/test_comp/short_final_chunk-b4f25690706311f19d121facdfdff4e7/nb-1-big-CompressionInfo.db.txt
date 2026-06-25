@@ -1,0 +1,76 @@
+algorithm: LZ4Compressor
+option_count: 0
+chunk_length: 4096
+max_compressed_length: 2147483647
+total_uncompressed_length: 252543
+chunk_count: 62
+data_db_size_bytes: 12444
+
+# Per-chunk map (on_disk_len = next_offset - offset; comp_len = on_disk_len - 4 CRC word)
+# raw_uncompressed = chunk_length for all but the last chunk; last = total_uncompressed_length - last_offset_uncompressed
+idx	offset	on_disk_len	comp_len	raw_uncompressed_len	raw_stored
+0	0	220	216	4096	False
+1	220	204	200	4096	False
+2	424	196	192	4096	False
+3	620	207	203	4096	False
+4	827	196	192	4096	False
+5	1023	204	200	4096	False
+6	1227	205	201	4096	False
+7	1432	196	192	4096	False
+8	1628	206	202	4096	False
+9	1834	196	192	4096	False
+10	2030	205	201	4096	False
+11	2235	205	201	4096	False
+12	2440	195	191	4096	False
+13	2635	206	202	4096	False
+14	2841	197	193	4096	False
+15	3038	202	198	4096	False
+16	3240	205	201	4096	False
+17	3445	196	192	4096	False
+18	3641	207	203	4096	False
+19	3848	197	193	4096	False
+20	4045	201	197	4096	False
+21	4246	206	202	4096	False
+22	4452	197	193	4096	False
+23	4649	207	203	4096	False
+24	4856	197	193	4096	False
+25	5053	195	191	4096	False
+26	5248	207	203	4096	False
+27	5455	196	192	4096	False
+28	5651	206	202	4096	False
+29	5857	200	196	4096	False
+30	6057	196	192	4096	False
+31	6253	207	203	4096	False
+32	6460	196	192	4096	False
+33	6656	206	202	4096	False
+34	6862	201	197	4096	False
+35	7063	196	192	4096	False
+36	7259	206	202	4096	False
+37	7465	196	192	4096	False
+38	7661	206	202	4096	False
+39	7867	202	198	4096	False
+40	8069	199	195	4096	False
+41	8268	207	203	4096	False
+42	8475	196	192	4096	False
+43	8671	206	202	4096	False
+44	8877	201	197	4096	False
+45	9078	196	192	4096	False
+46	9274	206	202	4096	False
+47	9480	197	193	4096	False
+48	9677	206	202	4096	False
+49	9883	203	199	4096	False
+50	10086	194	190	4096	False
+51	10280	206	202	4096	False
+52	10486	196	192	4096	False
+53	10682	208	204	4096	False
+54	10890	202	198	4096	False
+55	11092	195	191	4096	False
+56	11287	206	202	4096	False
+57	11493	196	192	4096	False
+58	11689	206	202	4096	False
+59	11895	202	198	4096	False
+60	12097	193	189	4096	False
+61	12290	154	150	2687	False
+
+short_final_chunk: True  (last chunk covers 2687 uncompressed bytes vs chunk_length 4096)
+raw_stored_chunk_count: 0  indices: []

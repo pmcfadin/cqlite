@@ -99,7 +99,7 @@ jobs:
 
       - name: Build parity test targets
         run: |
-          cargo test --no-run --package cqlite-core --features write-support \
+          cargo test --no-run --package cqlite-core --features write-support,cli-helpers \
             --test sstabledump_parity_data \
             --test sstabledump_parity_index \
             --test sstabledump_parity_statistics \
@@ -109,7 +109,12 @@ jobs:
             --test sstable_parity_statistics_db_strict_test \
             --test sstable_parity_compression_info_test \
             --test sstable_parity_filter_db_test \
-            --test sstable_parity_repaired_metadata_test
+            --test sstable_parity_repaired_metadata_test \
+            --test issue_997_compressioninfo_parity \
+            --test issue_998_inline_crc_trailers \
+            --test issue_1000_verifier \
+            --test issue_1001_reject_unknown_compression \
+            --test issue_1082_deflate_zlib
 
       - name: Run Data.db parity tests
         id: data_parity
@@ -192,6 +197,22 @@ jobs:
             --test sstable_parity_repaired_metadata_test \
             -- --nocapture
 
+      - name: Run compression / corruption parity tests (epic #970)
+        # These tests skip-clean when the test_comp fixtures are absent from the
+        # published bundle, so they are informational on the PR gate. The
+        # authoritative strict run (regenerate + assert fixtures) lives in
+        # .github/workflows/compression-corruption-parity.yml (nightly + dispatch).
+        id: compression_corruption_parity
+        continue-on-error: true
+        run: |
+          cargo test --package cqlite-core --features write-support,cli-helpers \
+            --test issue_997_compressioninfo_parity \
+            --test issue_998_inline_crc_trailers \
+            --test issue_1000_verifier \
+            --test issue_1001_reject_unknown_compression \
+            --test issue_1082_deflate_zlib \
+            -- --nocapture
+
       - name: Generate parity summary
         if: always()
         run: |
@@ -208,6 +229,7 @@ jobs:
           - CompressionInfo.db (strict): ${{ steps.compression_info_parity.outcome }}
           - Filter.db (strict): ${{ steps.filter_db_parity.outcome }}
           - Repaired-metadata (strict): ${{ steps.repaired_metadata_parity.outcome }}
+          - Compression/corruption parity (epic #970, informational): ${{ steps.compression_corruption_parity.outcome }}
 
           Dataset:
           - Tag: ${{ env.DATASET_TAG }}

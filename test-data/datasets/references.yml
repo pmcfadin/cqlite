@@ -886,3 +886,171 @@ tables:
         present: false
         path: "/Users/patrick/local_projects/cqlite/test-data/datasets/sstables/system_schema/types-5a8b1ca866023f77a0459273d308917a/nb-1-big-Summary.db.txt"
     generated_at: 2025-10-06T01:15:15Z
+  - keyspace: test_comp
+    table: deflate_table
+    sstable_dir: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-Statistics.db.txt"
+      compressioninfo_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt"
+      toc_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-TOC.txt"
+      digest_crc32:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-Digest.crc32"
+      summary_txt:
+        present: false
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-Summary.db.txt"
+    generated_at: 2026-06-25T07:05:19Z
+  - keyspace: test_comp
+    table: incompressible_uncompressed_chunk
+    sstable_dir: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-Statistics.db.txt"
+      compressioninfo_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt"
+      toc_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-TOC.txt"
+      digest_crc32:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-Digest.crc32"
+      summary_txt:
+        present: false
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-Summary.db.txt"
+    generated_at: 2026-06-25T07:05:19Z
+  - keyspace: test_comp
+    table: lz4_table
+    sstable_dir: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Statistics.db.txt"
+      compressioninfo_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt"
+      toc_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-TOC.txt"
+      digest_crc32:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Digest.crc32"
+      summary_txt:
+        present: false
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Summary.db.txt"
+    generated_at: 2026-06-25T07:05:19Z
+  - keyspace: test_comp
+    table: short_final_chunk
+    sstable_dir: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-Statistics.db.txt"
+      compressioninfo_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt"
+      toc_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-TOC.txt"
+      digest_crc32:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-Digest.crc32"
+      summary_txt:
+        present: false
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-Summary.db.txt"
+    generated_at: 2026-06-25T07:05:19Z
+  - keyspace: test_comp
+    table: snappy_table
+    sstable_dir: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-Statistics.db.txt"
+      compressioninfo_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt"
+      toc_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-TOC.txt"
+      digest_crc32:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-Digest.crc32"
+      summary_txt:
+        present: false
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-Summary.db.txt"
+    generated_at: 2026-06-25T07:05:19Z
+  - keyspace: test_comp
+    table: uncompressed_table
+    sstable_dir: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Statistics.db.txt"
+      compressioninfo_txt:
+        present: false
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt"
+      toc_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-TOC.txt"
+      digest_crc32:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Digest.crc32"
+      summary_txt:
+        present: false
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Summary.db.txt"
+    generated_at: 2026-06-25T07:05:19Z
+  - keyspace: test_comp
+    table: zstd_table
+    sstable_dir: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7"
+    prefix: nb-1-big
+    references:
+      data_jsonl:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl"
+      statistics_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-Statistics.db.txt"
+      compressioninfo_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt"
+      toc_txt:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-TOC.txt"
+      digest_crc32:
+        present: true
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-Digest.crc32"
+      summary_txt:
+        present: false
+        path: "/Users/pmcfadin/projects/cqlite-epic970/test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-Summary.db.txt"
+    generated_at: 2026-06-25T07:05:19Z

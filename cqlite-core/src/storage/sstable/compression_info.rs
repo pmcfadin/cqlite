@@ -29,6 +29,33 @@
 use crate::{Error, Result};
 use std::io::{Cursor, Read};
 
+/// Cassandra compressor simple names that CQLite can decompress.
+///
+/// These are the only `org.apache.cassandra.io.compress.ICompressor` implementations
+/// CQLite supports. The decompression paths in `chunk_decompressor.rs` and
+/// `chunked_data_reader.rs` are keyed on exactly these names. Any other name in a
+/// `CompressionInfo.db` is rejected fail-fast at metadata-parse time rather than
+/// silently treated as uncompressed (issue #1001). No content-based guessing is ever
+/// performed (no-heuristics mandate, issue #28).
+pub const SUPPORTED_COMPRESSOR_NAMES: &[&str] = &[
+    "LZ4Compressor",
+    "SnappyCompressor",
+    "DeflateCompressor",
+    "ZstdCompressor",
+    // NoopCompressor is the explicit "no compression" marker; chunks are stored raw.
+    "NoopCompressor",
+];
+
+/// Returns true if `name` is a Cassandra compressor simple name CQLite can honor.
+///
+/// Accepts both the simple name (e.g. `"LZ4Compressor"`) and the fully-qualified
+/// class name (e.g. `"org.apache.cassandra.io.compress.LZ4Compressor"`) that Cassandra
+/// may write into `CompressionInfo.db`.
+pub fn is_supported_compressor_name(name: &str) -> bool {
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    SUPPORTED_COMPRESSOR_NAMES.contains(&simple)
+}
+
 /// CompressionInfo.db file content parsed from binary format
 #[derive(Debug, Clone)]
 pub struct CompressionInfo {
@@ -117,6 +144,33 @@ impl CompressionInfo {
             ));
         }
 
+        // Fail-fast on unknown/unsupported compressors (issue #1001). A CompressionInfo.db
+        // that names a compressor CQLite cannot decompress must error here, at metadata-parse
+        // time, BEFORE any Data.db chunk is read — never silently fall back to uncompressed.
+        // No content-based guessing is performed (no-heuristics mandate, issue #28).
+        if !is_supported_compressor_name(&algorithm) {
+            return Err(Error::UnsupportedFormat(format!(
+                "Unsupported compression algorithm '{}' in CompressionInfo.db. \
+                 CQLite only supports: {}. Cannot decompress this SSTable.",
+                algorithm,
+                SUPPORTED_COMPRESSOR_NAMES.join(", ")
+            )));
+        }
+
+        // Normalize to the simple class name. Cassandra may write a
+        // fully-qualified class name (e.g. "org.apache.cassandra.io.compress.LZ4Compressor");
+        // is_supported_compressor_name accepts it, but downstream consumers
+        // (ChunkDecompressor matches simple names like "LZ4Compressor") would
+        // otherwise fail at decompress time with "Unknown compression algorithm".
+        // Store the canonical simple name so parse-time acceptance and
+        // decode-time handling stay consistent (roborev). No-op for the
+        // already-simple names Cassandra writes into the test fixtures.
+        let algorithm = algorithm
+            .rsplit('.')
+            .next()
+            .unwrap_or(&algorithm)
+            .to_string();
+
         // 2. writeInt(option_count)
         let option_count = read_u32(&mut cursor, "option_count")?;
         if option_count > 256 {
@@ -192,6 +246,19 @@ impl CompressionInfo {
         Ok(info)
     }
 
+    /// Resolve the compression algorithm to the runtime `CompressionAlgorithm` enum,
+    /// failing fast on any name CQLite cannot decompress (issue #1001).
+    ///
+    /// `parse()` already rejects unknown names, so for any `CompressionInfo` produced by
+    /// `parse()` this is infallible in practice; the `Result` guards `CompressionInfo`
+    /// values constructed directly (e.g. in tests) and keeps the no-fallback contract
+    /// at the point of use.
+    pub fn algorithm_enum(
+        &self,
+    ) -> Result<crate::storage::sstable::compression::CompressionAlgorithm> {
+        crate::storage::sstable::compression::CompressionAlgorithm::parse(&self.algorithm)
+    }
+
     /// Get the chunk index for a given offset in the uncompressed data
     pub fn chunk_for_offset(&self, offset: u64) -> usize {
         (offset / self.chunk_length as u64) as usize
@@ -219,11 +286,15 @@ impl CompressionInfo {
     ) -> Option<u64> {
         let start_offset = self.compressed_chunk_offset(chunk_index)?;
 
+        // Checked subtraction: a corrupt offset (start past the next offset or
+        // past EOF for the final chunk) must NOT underflow-panic in debug / wrap
+        // in release. Return None so the caller surfaces a recoverable
+        // InvalidFormat error instead of crashing (roborev #970).
         if chunk_index + 1 < self.chunk_offsets.len() {
             let next_offset = self.chunk_offsets[chunk_index + 1];
-            Some(next_offset - start_offset)
+            next_offset.checked_sub(start_offset)
         } else {
-            Some(total_compressed_size - start_offset)
+            total_compressed_size.checked_sub(start_offset)
         }
     }
 

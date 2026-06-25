@@ -1,0 +1,26 @@
+algorithm: SnappyCompressor
+option_count: 0
+chunk_length: 16384
+max_compressed_length: 2147483647
+total_uncompressed_length: 195018
+chunk_count: 12
+data_db_size_bytes: 13060
+
+# Per-chunk map (on_disk_len = next_offset - offset; comp_len = on_disk_len - 4 CRC word)
+# raw_uncompressed = chunk_length for all but the last chunk; last = total_uncompressed_length - last_offset_uncompressed
+idx	offset	on_disk_len	comp_len	raw_uncompressed_len	raw_stored
+0	0	1116	1112	16384	False
+1	1116	1099	1095	16384	False
+2	2215	1100	1096	16384	False
+3	3315	1096	1092	16384	False
+4	4411	1095	1091	16384	False
+5	5506	1096	1092	16384	False
+6	6602	1089	1085	16384	False
+7	7691	1095	1091	16384	False
+8	8786	1089	1085	16384	False
+9	9875	1095	1091	16384	False
+10	10970	1094	1090	16384	False
+11	12064	996	992	14794	False
+
+short_final_chunk: True  (last chunk covers 14794 uncompressed bytes vs chunk_length 16384)
+raw_stored_chunk_count: 0  indices: []
