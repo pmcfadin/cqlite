@@ -11824,6 +11824,108 @@ mod tests {
         );
     }
 
+    /// Issue #1080 / roborev job 1357 (High): a DROPPED *fixed-width* scalar column
+    /// (e.g. `int`) must be consumed with the correct fixed-width framing, NOT as a
+    /// VInt-length-prefixed blob — otherwise it would misalign every trailing column.
+    ///
+    /// The dropped-column synthetic `Column` carries the on-disk header type, which
+    /// the SerializationHeader parser ALWAYS normalizes to the CQL form via
+    /// `convert_marshal_type_to_cql` (`Int32Type` → `"int"`). So a dropped int hits
+    /// the same fixed-width arm as a present int and reads exactly 4 value bytes (no
+    /// length prefix). This test drives the shared `parse_cell_value_schema_order`
+    /// with a hand-crafted int cell and asserts exact 5-byte consumption (1 flags +
+    /// 4 value) with the trailing column's bytes left intact.
+    #[tokio::test]
+    async fn test_regression_1080_dropped_fixed_width_scalar_consumes_exact_width() {
+        use crate::storage::sstable::SSTableReader;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        // `_reader` is unused by parse_cell_value_schema_order, but we still need a
+        // real instance; open any available SSTable. Skip when datasets absent.
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let keyspace_dir = PathBuf::from(&datasets_root)
+            .join("sstables")
+            .join("test_basic");
+        let mut data_file = None;
+        if let Ok(entries) = std::fs::read_dir(&keyspace_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("simple_table-") {
+                    if let Ok(inner) = std::fs::read_dir(&path) {
+                        if let Some(df) = inner.flatten().find(|e| {
+                            e.file_name()
+                                .to_str()
+                                .map(|s| s.ends_with("-Data.db"))
+                                .unwrap_or(false)
+                        }) {
+                            data_file = Some(df.path());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let data_file = match data_file {
+            Some(f) => f,
+            None => return,
+        };
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&config)
+                .await
+                .expect("platform"),
+        );
+        let reader = match SSTableReader::open(&data_file, &config, platform).await {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_basic".to_string(),
+            "simple_table".to_string(),
+            0,
+            0,
+            None,
+        );
+        // A DROPPED int column carries the CQL-normalized header type "int".
+        let column = crate::schema::Column {
+            name: "__dropped_col_0".to_string(),
+            data_type: "int".to_string(),
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Cell: [flags=0x08 USE_ROW_TIMESTAMP → live, has-value, no own ts/ttl]
+        //       [i32 BE = 0x01020304]. Then a trailing sentinel for the FOLLOWING
+        //       column to prove no misalignment.
+        let mut buf: Vec<u8> = vec![0x08];
+        buf.extend_from_slice(&0x0102_0304_i32.to_be_bytes());
+        let value_end = buf.len(); // 1 flags + 4 value = 5
+        let trailing_marker: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        buf.extend_from_slice(trailing_marker);
+
+        let (value, _ts, _exp, new_offset) = parser
+            .parse_cell_value_schema_order(&buf, 0, &column, Some("int"), &reader)
+            .expect("dropped int cell must decode with fixed-width framing");
+        assert_eq!(value, Value::Integer(0x0102_0304));
+        assert_eq!(
+            new_offset, value_end,
+            "int consumes exactly flags(1)+4 fixed bytes — NO spurious VInt length \
+             (refutes roborev job 1357: dropped fixed-width scalar misalignment)"
+        );
+        assert_eq!(
+            &buf[new_offset..],
+            trailing_marker,
+            "trailing column bytes must be intact (no misalignment after a dropped scalar)"
+        );
+    }
+
     /// Regression test for Issue #481 bug 3: for `set<T>` complex columns, each
     /// set element is stored in the cell PATH (with `HAS_EMPTY_VALUE` = 0x04
     /// set in cell flags), not the cell value.
