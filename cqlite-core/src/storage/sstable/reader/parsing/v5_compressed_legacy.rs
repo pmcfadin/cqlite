@@ -4097,7 +4097,7 @@ impl V5CompressedLegacyParser {
         // every iterated column is schema-present by construction.
         struct ColumnToParse<'a> {
             schema: Option<&'a crate::schema::Column>,
-            header_type: Option<String>,
+            header_type: Option<&'a str>,
         }
 
         let columns_in_order: Vec<ColumnToParse> = if !reader.header.columns.is_empty() {
@@ -4121,7 +4121,7 @@ impl V5CompressedLegacyParser {
                 })
                 .map(|col_info| ColumnToParse {
                     schema: schema_map.get(&col_info.name).copied(),
-                    header_type: Some(col_info.column_type.clone()),
+                    header_type: Some(col_info.column_type.as_str()),
                 })
                 .collect()
         } else {
@@ -4193,7 +4193,7 @@ impl V5CompressedLegacyParser {
         }
 
         for (col_idx, ctp) in columns_to_parse.iter().enumerate() {
-            let header_type: Option<&str> = ctp.header_type.as_deref();
+            let header_type: Option<&str> = ctp.header_type;
 
             // A column present on disk but ABSENT from the supplied schema is a
             // DROPPED column (issue #1080 Part 2): its bytes MUST be consumed to
