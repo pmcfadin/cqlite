@@ -102,6 +102,14 @@ async fn run_main() -> Result<()> {
         }
     }
 
+    // `verify` operates directly on an SSTable directory and needs no Database /
+    // schema / write-engine, so short-circuit before any database init (epic
+    // #970, issue #1000). On a failing verification the handler prints the
+    // report and exits non-zero.
+    if let Some(Commands::Verify { path, mode, out }) = &cli.command {
+        return commands::verify::execute_verify_command(path, *mode, *out).await;
+    }
+
     // Initialize database connection
     let db_path = cli
         .database
@@ -1009,6 +1017,10 @@ async fn run_main() -> Result<()> {
                      Rebuild with: cargo build --package cqlite-cli --features delta-export"
                 ))
             }
+        }
+        Some(Commands::Verify { .. }) => {
+            // Handled by the short-circuit before database init; see above.
+            unreachable!("Commands::Verify is dispatched before database initialization")
         }
         None => {
             // Default to help message for now

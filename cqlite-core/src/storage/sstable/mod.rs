@@ -28,6 +28,9 @@ pub mod statistics_reader;
 #[cfg(feature = "tombstones")]
 pub mod tombstone_merger;
 pub mod validation;
+// Verifier contract for compressed + corrupted SSTables (epic #970, issue #1000).
+pub mod verify;
+pub use verify::{verify_sstable, VerifyErrorClass, VerifyFinding, VerifyMode, VerifyReport};
 
 // M5: SSTable writer components (Issue #359)
 #[cfg(feature = "write-support")]

@@ -63,8 +63,12 @@ impl<R: Read + Seek> ChunkedDataReader<R> {
     /// # Returns
     /// Configured reader ready to stream decompressed data
     pub fn new(reader: R, file_size: u64, compression_info: Arc<CompressionInfo>) -> Result<Self> {
-        // Convert algorithm name to enum
-        let algorithm = CompressionAlgorithm::from(compression_info.algorithm.clone());
+        // Resolve the algorithm name fail-fast (issue #1001): an unknown/unsupported
+        // compressor name must hard-error here rather than silently mapping to
+        // `CompressionAlgorithm::None` (which would treat compressed bytes as raw).
+        // `CompressionInfo::parse` already rejects unknown names, so this is the
+        // belt-and-braces guard for `CompressionInfo` values built by other means.
+        let algorithm = compression_info.algorithm_enum()?;
         let compression = Compression::new(algorithm)?;
 
         Ok(Self {

@@ -8,6 +8,24 @@ use std::path::PathBuf;
 
 use crate::cli::{ExportFormat, ImportFormat, InfoOutputFormat, OutputFormat};
 
+/// Verification depth for the `verify` subcommand (epic #970, issue #1000).
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VerifyModeArg {
+    /// Metadata-only structural checks (fast).
+    Quick,
+    /// Quick checks plus inline chunk-CRC, Statistics/Summary parse, and a full row scan.
+    Full,
+}
+
+/// Output format for the `verify` subcommand report.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum VerifyOutputArg {
+    /// Human-readable text.
+    Text,
+    /// Machine-readable JSON (for CI artifacts).
+    Json,
+}
+
 /// Output mode for query results (distinct from display format)
 /// Mirrors OutputFormat variants for consistency with --format flag.
 #[derive(Debug, Clone, Copy, ValueEnum)]
@@ -349,6 +367,20 @@ pub enum Commands {
         long_about = "One-shot, policy-free compaction over exactly the SSTables in <input-dir>, writing the merged result to --output. Unlike maintenance/export-sstable this does not use a managed write-dir and takes an explicit --gc-before for deterministic, Cassandra-matching purge decisions (used by the compaction-parity harness, issue #842). Example: cqlite compact ./inputs -o ./out --schema ks.tbl.cql --gc-before 1700000000"
     )]
     Compact(CompactArgs),
+    /// Verify SSTable integrity (compressed + corrupted) — epic #970, issue #1000
+    #[command(
+        long_about = "Enforce the CQLite verifier contract on one SSTable generation directory. QUICK mode checks component presence, TOC.txt completeness, Digest.crc32, CompressionInfo.db (+ chunk-offset bounds) and BTI trie structure. FULL mode adds inline Data.db chunk-CRC validation, Statistics.db/Summary.db parse, and a complete row scan that fails loudly on corrupt index/BTI components (no silent empty results). Exit code is non-zero when verification fails. Example: cqlite verify ./test-data/datasets/sstables/test_comp/lz4_table-xxx --mode full --out json"
+    )]
+    Verify {
+        /// SSTable generation directory (the dir containing *-Data.db)
+        path: PathBuf,
+        /// Verification mode
+        #[arg(long, value_enum, default_value = "full")]
+        mode: VerifyModeArg,
+        /// Output format for the verification report
+        #[arg(long, value_enum, default_value = "text")]
+        out: VerifyOutputArg,
+    },
     /// Export an SSTable generation as a delta-envelope Parquet file (Issue #705)
     #[command(name = "delta-export")]
     #[command(

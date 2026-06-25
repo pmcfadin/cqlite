@@ -23,6 +23,47 @@ pub enum CompressionAlgorithm {
 /// Maximum allowed decompressed size to prevent memory exhaustion attacks (128MB)
 const MAX_DECOMPRESSED_SIZE: usize = 128 * 1024 * 1024;
 
+impl CompressionAlgorithm {
+    /// Map a recognized compressor name to its enum variant.
+    ///
+    /// Accepts CQLite short names (`LZ4`, `SNAPPY`, ...), Cassandra simple names
+    /// (`LZ4Compressor`, `SnappyCompressor`, ...) and the explicit no-compression
+    /// markers (`NONE`, `NoopCompressor`, `NoCompressor`). Returns `None` for any
+    /// other (unrecognized) name — callers MUST treat `None` here as "unknown",
+    /// not as "uncompressed".
+    fn from_name_opt(s: &str) -> Option<Self> {
+        // Strip any fully-qualified class prefix Cassandra may emit.
+        let simple = s.rsplit('.').next().unwrap_or(s);
+        match simple.to_uppercase().as_str() {
+            "NONE" | "NOOPCOMPRESSOR" | "NOCOMPRESSOR" | "NULLCOMPRESSOR" => {
+                Some(CompressionAlgorithm::None)
+            }
+            "LZ4" | "LZ4COMPRESSOR" => Some(CompressionAlgorithm::Lz4),
+            "SNAPPY" | "SNAPPYCOMPRESSOR" => Some(CompressionAlgorithm::Snappy),
+            "DEFLATE" | "DEFLATECOMPRESSOR" => Some(CompressionAlgorithm::Deflate),
+            "ZSTD" | "ZSTDCOMPRESSOR" => Some(CompressionAlgorithm::Zstd),
+            _ => None,
+        }
+    }
+
+    /// Fallible parse of a compressor name (issue #1001).
+    ///
+    /// This is the path the SSTable open / `CompressionInfo.db` flow MUST use: an
+    /// unrecognized name produces an explicit `UnsupportedFormat` error (including the
+    /// exact offending string) rather than silently falling back to uncompressed.
+    /// No content-based guessing is performed (no-heuristics mandate, issue #28).
+    pub fn parse(s: &str) -> Result<Self> {
+        Self::from_name_opt(s).ok_or_else(|| {
+            Error::UnsupportedFormat(format!(
+                "Unsupported compression algorithm '{}'. CQLite supports: \
+                 LZ4Compressor, SnappyCompressor, DeflateCompressor, ZstdCompressor \
+                 (or NONE for uncompressed).",
+                s
+            ))
+        })
+    }
+}
+
 impl From<String> for CompressionAlgorithm {
     fn from(s: String) -> Self {
         Self::from(s.as_str())
@@ -30,15 +71,16 @@ impl From<String> for CompressionAlgorithm {
 }
 
 impl From<&str> for CompressionAlgorithm {
+    /// Infallible best-effort mapping. Unrecognized names map to `None`.
+    ///
+    /// WARNING: this MUST NOT be used on the SSTable read path — an unknown name here
+    /// is indistinguishable from genuinely-disabled compression. Use the fallible
+    /// [`CompressionAlgorithm::parse`] for any path that opens real `CompressionInfo.db`
+    /// metadata (issue #1001). This `From` is retained only for the legacy header
+    /// (`SSTableHeader.compression.algorithm`) path, which guards with an explicit
+    /// `!= "NONE"` check before conversion and re-validates the resulting variant.
     fn from(s: &str) -> Self {
-        match s.to_uppercase().as_str() {
-            "NONE" => CompressionAlgorithm::None,
-            "LZ4" | "LZ4COMPRESSOR" => CompressionAlgorithm::Lz4,
-            "SNAPPY" | "SNAPPYCOMPRESSOR" => CompressionAlgorithm::Snappy,
-            "DEFLATE" | "DEFLATECOMPRESSOR" => CompressionAlgorithm::Deflate,
-            "ZSTD" | "ZSTDCOMPRESSOR" => CompressionAlgorithm::Zstd,
-            _ => CompressionAlgorithm::None, // Default to None for unknown algorithms
-        }
+        Self::from_name_opt(s).unwrap_or(CompressionAlgorithm::None)
     }
 }
 
@@ -142,24 +184,21 @@ impl Compression {
             CompressionAlgorithm::Deflate => {
                 #[cfg(feature = "deflate")]
                 {
-                    use flate2::write::DeflateEncoder;
+                    use flate2::write::ZlibEncoder;
                     use flate2::Compression as DeflateCompression;
                     use std::io::Write;
 
-                    // Use Cassandra-compatible Deflate parameters (level 6)
-                    let mut encoder = DeflateEncoder::new(Vec::new(), DeflateCompression::new(6));
+                    // Cassandra's DeflateCompressor uses java.util.zip.Deflater, which
+                    // emits a ZLIB-wrapped stream (2-byte header + DEFLATE body +
+                    // Adler-32 trailer) with NO 4-byte size prefix. Match it exactly so
+                    // the output reads back through the zlib-aware decode path. (#1082)
+                    let mut encoder = ZlibEncoder::new(Vec::new(), DeflateCompression::new(6));
                     encoder.write_all(data).map_err(|e| {
                         Error::storage(format!("Deflate compression failed: {}", e))
                     })?;
-                    let compressed = encoder
+                    encoder
                         .finish()
-                        .map_err(|e| Error::storage(format!("Deflate finish failed: {}", e)))?;
-
-                    // Prepend uncompressed size (4 bytes, big-endian) for Cassandra compatibility
-                    let mut result = Vec::with_capacity(4 + compressed.len());
-                    result.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    result.extend_from_slice(&compressed);
-                    Ok(result)
+                        .map_err(|e| Error::storage(format!("Deflate finish failed: {}", e)))
                 }
                 #[cfg(not(feature = "deflate"))]
                 {
@@ -173,15 +212,11 @@ impl Compression {
                 {
                     use zstd::stream::encode_all;
 
-                    // Use Cassandra-compatible Zstd parameters (level 3)
-                    let compressed = encode_all(data, 3)
-                        .map_err(|e| Error::storage(format!("Zstd compression failed: {}", e)))?;
-
-                    // Prepend uncompressed size (4 bytes, big-endian) for Cassandra compatibility
-                    let mut result = Vec::with_capacity(4 + compressed.len());
-                    result.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                    result.extend_from_slice(&compressed);
-                    Ok(result)
+                    // Cassandra's ZstdCompressor writes a BARE zstd frame with NO
+                    // 4-byte size prefix. Match it so the output reads back through
+                    // the bare-frame decode path (#1082).
+                    encode_all(data, 3)
+                        .map_err(|e| Error::storage(format!("Zstd compression failed: {}", e)))
                 }
                 #[cfg(not(feature = "zstd"))]
                 {
@@ -290,37 +325,34 @@ impl Compression {
             CompressionAlgorithm::Deflate => {
                 #[cfg(feature = "deflate")]
                 {
-                    use flate2::read::DeflateDecoder;
+                    use flate2::read::ZlibDecoder;
                     use std::io::Read;
 
-                    // Cassandra Deflate format includes 4-byte uncompressed size prefix
-                    if data.len() < 4 {
+                    // Cassandra's DeflateCompressor uses java.util.zip.Deflater/Inflater,
+                    // which emit ZLIB-wrapped streams: a 2-byte header (0x78 0x9c) +
+                    // DEFLATE body + 4-byte Adler-32 trailer. There is NO 4-byte
+                    // uncompressed-size prefix (that is an LZ4/Zstd convention) and the
+                    // body is NOT raw DEFLATE. Decode with ZlibDecoder. (#1082)
+                    if data.is_empty() {
                         return Err(Error::storage(
-                            "Invalid Deflate data: too short".to_string(),
+                            "Invalid Deflate data: empty chunk".to_string(),
                         ));
                     }
 
-                    // Extract uncompressed size (4 bytes, big-endian)
-                    let uncompressed_size =
-                        u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-
-                    // Validate size to prevent decompression bombs
-                    validate_decompression_size(uncompressed_size)?;
-
-                    // Decompress the actual data (skip first 4 bytes)
-                    let compressed_data = &data[4..];
-                    let mut decoder = DeflateDecoder::new(compressed_data);
+                    // Decompression-bomb guard: the decoder reads into a growing Vec,
+                    // so we cap the output length rather than trusting any in-stream
+                    // size field (none exists for zlib). The caller (chunk reader)
+                    // separately bounds chunks by CompressionInfo.db lengths.
+                    let mut decoder = ZlibDecoder::new(data).take(MAX_DECOMPRESSED_SIZE as u64 + 1);
                     let mut decompressed = Vec::new();
                     decoder.read_to_end(&mut decompressed).map_err(|e| {
                         Error::storage(format!("Deflate decompression failed: {}", e))
                     })?;
 
-                    // Verify decompressed size matches expected
-                    if decompressed.len() != uncompressed_size {
+                    if decompressed.len() > MAX_DECOMPRESSED_SIZE {
                         return Err(Error::storage(format!(
-                            "Deflate size mismatch: expected {}, got {}",
-                            uncompressed_size,
-                            decompressed.len()
+                            "Decompression bomb protection: Deflate output exceeds limit {} (128MB)",
+                            MAX_DECOMPRESSED_SIZE
                         )));
                     }
 
@@ -336,31 +368,39 @@ impl Compression {
             CompressionAlgorithm::Zstd => {
                 #[cfg(feature = "zstd")]
                 {
-                    use zstd::stream::decode_all;
+                    use std::io::Read;
+                    use zstd::stream::read::Decoder as ZstdDecoder;
 
-                    // Cassandra Zstd format includes 4-byte uncompressed size prefix
-                    if data.len() < 4 {
-                        return Err(Error::storage("Invalid Zstd data: too short".to_string()));
+                    // Cassandra's ZstdCompressor writes a BARE zstd frame (magic
+                    // 0x28 0xB5 0x2F 0xFD ...) with NO 4-byte uncompressed-size
+                    // prefix — the same as the chunk-targeted decode path
+                    // (chunk_decompressor.rs::decompress_zstd_chunk). The previous
+                    // 4-byte-prefix assumption mis-read the frame magic as a ~650MB
+                    // size and tripped the bomb guard on every stitched scan (#1082,
+                    // same root cause as the Deflate fix). Decode the frame directly
+                    // and bound the OUTPUT length instead of trusting an in-stream
+                    // size field.
+                    if data.is_empty() {
+                        return Err(Error::storage("Invalid Zstd data: empty chunk".to_string()));
                     }
 
-                    // Extract uncompressed size (4 bytes, big-endian)
-                    let uncompressed_size =
-                        u32::from_be_bytes([data[0], data[1], data[2], data[3]]) as usize;
-
-                    // Validate size to prevent decompression bombs
-                    validate_decompression_size(uncompressed_size)?;
-
-                    // Decompress the actual data (skip first 4 bytes)
-                    let compressed_data = &data[4..];
-                    let decompressed = decode_all(compressed_data)
+                    // Decompression-bomb guard: stream through a capped reader so a
+                    // small malicious frame cannot allocate past the limit BEFORE we
+                    // check the length (mirrors the Deflate path). A zstd frame can
+                    // declare a huge content size, so `decode_all` would pre-allocate
+                    // it up front — `Read::take` bounds the work instead.
+                    let mut decoder = ZstdDecoder::new(data)
+                        .map_err(|e| Error::storage(format!("Zstd decoder init failed: {}", e)))?
+                        .take(MAX_DECOMPRESSED_SIZE as u64 + 1);
+                    let mut decompressed = Vec::new();
+                    decoder
+                        .read_to_end(&mut decompressed)
                         .map_err(|e| Error::storage(format!("Zstd decompression failed: {}", e)))?;
 
-                    // Verify decompressed size matches expected
-                    if decompressed.len() != uncompressed_size {
+                    if decompressed.len() > MAX_DECOMPRESSED_SIZE {
                         return Err(Error::storage(format!(
-                            "Zstd size mismatch: expected {}, got {}",
-                            uncompressed_size,
-                            decompressed.len()
+                            "Decompression bomb protection: Zstd output exceeds limit {} (128MB)",
+                            MAX_DECOMPRESSED_SIZE
                         )));
                     }
 
@@ -604,11 +644,14 @@ impl StreamingDecompressor {
     ) -> Result<()> {
         #[cfg(feature = "deflate")]
         {
-            use flate2::read::DeflateDecoder;
+            use flate2::read::ZlibDecoder;
             use std::io::BufReader;
 
+            // Cassandra's DeflateCompressor emits ZLIB-wrapped streams (header
+            // 0x78 0x9c + DEFLATE body + Adler-32 trailer), NOT raw DEFLATE and
+            // with NO 4-byte size prefix. Decode with ZlibDecoder. (#1082)
             let buf_reader = BufReader::new(reader);
-            let mut decoder = DeflateDecoder::new(buf_reader);
+            let mut decoder = ZlibDecoder::new(buf_reader);
             let mut chunk_buffer = vec![0u8; self.config.chunk_size];
 
             loop {
@@ -956,11 +999,9 @@ mod tests {
 
         let compressed = compression.compress(&data).unwrap();
 
-        // Verify format: 4-byte size prefix + compressed data
-        assert!(compressed.len() >= 4);
-        let size_prefix =
-            u32::from_be_bytes([compressed[0], compressed[1], compressed[2], compressed[3]]);
-        assert_eq!(size_prefix, data.len() as u32);
+        // Cassandra format: ZLIB-wrapped (0x78 header), NO 4-byte size prefix (#1082).
+        assert!(compressed.len() >= 2);
+        assert_eq!(compressed[0], 0x78, "zlib stream must start with CMF 0x78");
 
         let decompressed = compression.decompress(&compressed).unwrap();
         assert_eq!(decompressed, data);
@@ -1159,36 +1200,50 @@ mod tests {
             // The actual protection is at lines 281-286 in the decompress() method.
         }
 
-        // Deflate: Create data claiming 200MB uncompressed size
+        // Deflate (#1082): Cassandra emits ZLIB-wrapped streams with NO 4-byte size
+        // prefix, so the bomb guard caps the DECODED output length rather than
+        // trusting an in-stream size field. The legacy "fake 200MB size prefix" no
+        // longer applies; instead verify that non-zlib bytes (here, what the old
+        // format would have produced) are rejected as malformed rather than read as
+        // a 2GB size and OOM'd.
         #[cfg(feature = "deflate")]
         {
             let compression = Compression::new(CompressionAlgorithm::Deflate).unwrap();
-            let malicious_size: u32 = 200 * 1024 * 1024; // 200MB claim (exceeds 128MB limit)
+            let malicious_size: u32 = 200 * 1024 * 1024;
             let mut malicious_data = malicious_size.to_be_bytes().to_vec();
-            malicious_data.extend_from_slice(&[0u8; 10]); // Some fake compressed data
+            malicious_data.extend_from_slice(&[0u8; 10]);
 
             let result = compression.decompress(&malicious_data);
-            assert!(result.is_err(), "Should reject malicious Deflate size");
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("Decompression bomb"));
+            assert!(
+                result.is_err(),
+                "Should reject malformed (non-zlib) Deflate data"
+            );
+
+            // A genuine zlib-wrapped round-trip still decodes correctly.
+            let data = b"deflate bomb-guard roundtrip".repeat(4);
+            let compressed = compression.compress(&data).unwrap();
+            let decompressed = compression.decompress(&compressed).unwrap();
+            assert_eq!(decompressed, data);
         }
 
-        // Zstd: Create data claiming 200MB uncompressed size
+        // Zstd (#1082): Cassandra writes a BARE zstd frame with NO 4-byte size
+        // prefix, so the old "fake 200MB prefix" scenario no longer applies. The
+        // bomb guard now caps the DECODED output length; here verify that malformed
+        // (non-frame) bytes are rejected rather than mis-read as a multi-GB size,
+        // and that a genuine bare-frame round-trip still decodes.
         #[cfg(feature = "zstd")]
         {
             let compression = Compression::new(CompressionAlgorithm::Zstd).unwrap();
-            let malicious_size: u32 = 200 * 1024 * 1024; // 200MB claim (exceeds 128MB limit)
-            let mut malicious_data = malicious_size.to_be_bytes().to_vec();
-            malicious_data.extend_from_slice(&[0u8; 10]); // Some fake compressed data
+            let mut malicious_data = (200u32 * 1024 * 1024).to_be_bytes().to_vec();
+            malicious_data.extend_from_slice(&[0u8; 10]);
 
             let result = compression.decompress(&malicious_data);
-            assert!(result.is_err(), "Should reject malicious Zstd size");
-            assert!(result
-                .unwrap_err()
-                .to_string()
-                .contains("Decompression bomb"));
+            assert!(result.is_err(), "Should reject malformed Zstd frame");
+
+            let data = b"zstd bomb-guard roundtrip".repeat(4);
+            let compressed = compression.compress(&data).unwrap();
+            let decompressed = compression.decompress(&compressed).unwrap();
+            assert_eq!(decompressed, data);
         }
 
         // LZ4: Create data claiming 200MB uncompressed size
@@ -1361,6 +1416,20 @@ impl CompressionInfo {
         // Read algorithm name (e.g. "LZ4Compressor")
         let raw_algorithm = String::from_utf8(data[offset..offset + algo_len].to_vec())
             .map_err(|e| Error::storage(format!("Invalid UTF-8 in algorithm name: {}", e)))?;
+
+        // Fail-fast on unknown/unsupported compressors (issue #1001). This legacy binary
+        // parser must not let an unrecognized name slip through to `get_algorithm()`, which
+        // would silently map it to `CompressionAlgorithm::None` and treat compressed bytes
+        // as raw. No content-based guessing is performed (no-heuristics mandate, issue #28).
+        if !crate::storage::sstable::compression_info::is_supported_compressor_name(&raw_algorithm)
+        {
+            return Err(Error::UnsupportedFormat(format!(
+                "Unsupported compression algorithm '{}' in CompressionInfo.db. \
+                 CQLite only supports: {}. Cannot decompress this SSTable.",
+                raw_algorithm,
+                crate::storage::sstable::compression_info::SUPPORTED_COMPRESSOR_NAMES.join(", ")
+            )));
+        }
 
         // Normalize algorithm name: "LZ4Compressor" -> "LZ4", "SnappyCompressor" -> "SNAPPY", etc.
         let algorithm = normalize_algorithm_name(&raw_algorithm);
