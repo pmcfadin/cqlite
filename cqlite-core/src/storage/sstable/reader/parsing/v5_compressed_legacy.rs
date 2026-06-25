@@ -12537,6 +12537,79 @@ mod tests {
         }
     }
 
+    /// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+    /// In strict mode a missing core fixture (or an unset datasets root) is a hard
+    /// failure; otherwise it is a clean skip. Mirrors the sibling parity tests.
+    fn require_fixtures_strict() -> bool {
+        std::env::var("CQLITE_REQUIRE_FIXTURES")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
+    /// Resolve the core `test_basic/simple_table-*/*-Data.db` fixture used by the
+    /// #1080 regression tests.
+    ///
+    /// Returns `Some(path)` when the fixture is present. Returns `None` (clean
+    /// skip) when the test data is unavailable in non-strict mode — either
+    /// `CQLITE_DATASETS_ROOT` is unset (local dev without data) or the bundle is
+    /// absent (lanes such as Core Validation / Minimal Build set the datasets
+    /// root without shipping `test_basic`).
+    ///
+    /// When `CQLITE_REQUIRE_FIXTURES=1` (full-dataset CI) the same conditions are
+    /// a hard failure — never a silent green (issue #1094; matches the project's
+    /// present-but-broken doctrine, roborev job 1359). Crucially, strict mode is
+    /// also enforced when the datasets root itself is missing, so a misconfigured
+    /// gate cannot false-pass.
+    fn core_simple_table_data_file() -> Option<std::path::PathBuf> {
+        let strict = require_fixtures_strict();
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(r) => r,
+            Err(_) => {
+                if strict {
+                    panic!(
+                        "CQLITE_REQUIRE_FIXTURES=1 but CQLITE_DATASETS_ROOT is unset — \
+                         cannot locate the core fixture test_basic/simple_table; refusing \
+                         to silently skip"
+                    );
+                }
+                return None;
+            }
+        };
+        let keyspace_dir = std::path::PathBuf::from(&datasets_root)
+            .join("sstables")
+            .join("test_basic");
+        if let Ok(entries) = std::fs::read_dir(&keyspace_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("simple_table-") {
+                    if let Ok(inner) = std::fs::read_dir(&path) {
+                        if let Some(df) = inner.flatten().find(|e| {
+                            e.file_name()
+                                .to_str()
+                                .map(|s| s.ends_with("-Data.db"))
+                                .unwrap_or(false)
+                        }) {
+                            return Some(df.path());
+                        }
+                    }
+                }
+            }
+        }
+        if strict {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but the core fixture \
+                 test_basic/simple_table-*/*-Data.db is missing under \
+                 CQLITE_DATASETS_ROOT ({datasets_root}) — refusing to silently skip"
+            );
+        }
+        eprintln!(
+            "[SKIP] core fixture test_basic/simple_table-*/*-Data.db absent under \
+             CQLITE_DATASETS_ROOT ({datasets_root}); set CQLITE_REQUIRE_FIXTURES=1 to enforce"
+        );
+        None
+    }
+
     /// Issue #1080 / roborev job 1357 (High): a DROPPED *fixed-width* scalar column
     /// (e.g. `int`) must be consumed with the correct fixed-width framing, NOT as a
     /// VInt-length-prefixed blob — otherwise it would misalign every trailing column.
@@ -12551,49 +12624,16 @@ mod tests {
     #[tokio::test]
     async fn test_regression_1080_dropped_fixed_width_scalar_consumes_exact_width() {
         use crate::storage::sstable::SSTableReader;
-        use std::path::PathBuf;
         use std::sync::Arc;
 
         // `_reader` is unused by parse_cell_value_schema_order, but we still need a
-        // real instance; open any available SSTable. The ONLY legitimate skip is
-        // when CQLITE_DATASETS_ROOT is unset (local dev without data). When it IS
-        // set (gate/CI), the core `test_basic/simple_table` fixture MUST be present
-        // and openable — a missing/broken fixture is a hard failure, never a silent
-        // green (roborev job 1359; matches the project's present-but-broken
-        // doctrine).
-        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
-            Ok(r) => r,
-            Err(_) => return,
+        // real instance; open the core test_basic/simple_table fixture. The helper
+        // handles the skip-vs-strict policy (issue #1094): a clean skip when the
+        // data is unavailable, or a hard failure under CQLITE_REQUIRE_FIXTURES=1.
+        let data_file = match core_simple_table_data_file() {
+            Some(df) => df,
+            None => return,
         };
-        let keyspace_dir = PathBuf::from(&datasets_root)
-            .join("sstables")
-            .join("test_basic");
-        let mut data_file = None;
-        if let Ok(entries) = std::fs::read_dir(&keyspace_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with("simple_table-") {
-                    if let Ok(inner) = std::fs::read_dir(&path) {
-                        if let Some(df) = inner.flatten().find(|e| {
-                            e.file_name()
-                                .to_str()
-                                .map(|s| s.ends_with("-Data.db"))
-                                .unwrap_or(false)
-                        }) {
-                            data_file = Some(df.path());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        let data_file = data_file.unwrap_or_else(|| {
-            panic!(
-                "CQLITE_DATASETS_ROOT is set ({datasets_root}) but the core fixture \
-                 test_basic/simple_table-*/*-Data.db is missing — refusing to silently skip"
-            )
-        });
         let config = crate::Config::default();
         let platform = Arc::new(
             crate::platform::Platform::new(&config)
@@ -12655,42 +12695,15 @@ mod tests {
     #[tokio::test]
     async fn test_regression_1080_marshal_form_frozen_udt_decodes_structurally() {
         use crate::storage::sstable::SSTableReader;
-        use std::path::PathBuf;
         use std::sync::Arc;
 
-        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
-            Ok(r) => r,
-            Err(_) => return,
+        // Skip-vs-strict fixture policy is centralized in core_simple_table_data_file
+        // (issue #1094): clean skip when data is unavailable, hard failure under
+        // CQLITE_REQUIRE_FIXTURES=1.
+        let data_file = match core_simple_table_data_file() {
+            Some(df) => df,
+            None => return,
         };
-        let keyspace_dir = PathBuf::from(&datasets_root)
-            .join("sstables")
-            .join("test_basic");
-        let mut data_file = None;
-        if let Ok(entries) = std::fs::read_dir(&keyspace_dir) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if name.starts_with("simple_table-") {
-                    if let Ok(inner) = std::fs::read_dir(&path) {
-                        if let Some(df) = inner.flatten().find(|e| {
-                            e.file_name()
-                                .to_str()
-                                .map(|s| s.ends_with("-Data.db"))
-                                .unwrap_or(false)
-                        }) {
-                            data_file = Some(df.path());
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        let data_file = data_file.unwrap_or_else(|| {
-            panic!(
-                "CQLITE_DATASETS_ROOT is set ({datasets_root}) but the core fixture \
-                 test_basic/simple_table-*/*-Data.db is missing — refusing to silently skip"
-            )
-        });
         let config = crate::Config::default();
         let platform = Arc::new(
             crate::platform::Platform::new(&config)

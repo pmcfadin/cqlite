@@ -245,6 +245,10 @@ impl ChunkDecompressor {
     /// chunk length (the final chunk is shorter, never larger). Used to bound the
     /// streaming Deflate/Zstd decoders against decompression bombs. Falls back to
     /// the 128MB global cap if chunk_length is unset/zero.
+    ///
+    /// Only the streaming Deflate/Zstd paths consume this bound, so the method is
+    /// gated to match its callers and stay dead-code-free under minimal builds.
+    #[cfg(any(feature = "deflate", feature = "zstd"))]
     fn chunk_size_guard(&self) -> u64 {
         match self.compression_info.chunk_length {
             0 => 128 * 1024 * 1024,
