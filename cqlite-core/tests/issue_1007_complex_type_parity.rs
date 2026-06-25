@@ -627,11 +627,9 @@ async fn tuple_field_order_parity() {
 
 /// `cass.cql_types.complex.udt_field_order_null_empty`
 ///
-/// EXPECTED-FAIL (bug found by this lane): a `frozen<person_type>` column does
-/// not decode to a structured UDT on the schema-driven read path — the column is
-/// dropped/blobbed. Written to the CORRECT Cassandra behavior; unignore when
-/// issue #1078 lands.
-#[ignore = "issue #1080: frozen<udt> column decodes as opaque blob / missing, not structured UDT"]
+/// Regression coverage for issue #1080 (now FIXED): a `frozen<person_type>`
+/// column decodes to a STRUCTURED UDT on the schema-driven read path (previously
+/// it was dropped/blobbed). Exercises UDT field order and null-vs-empty fields.
 #[tokio::test]
 async fn udt_field_order_null_empty_parity() {
     let schema = load_table_schema("cx_udt_field_order_null_empty");
@@ -642,11 +640,9 @@ async fn udt_field_order_null_empty_parity() {
 
 /// `cass.cql_types.complex.frozen_udt_value`
 ///
-/// EXPECTED-FAIL (bug found by this lane): a nested `frozen<employee_type>`
-/// (which contains a `frozen<address_type>`) decodes to a raw blob hex string
-/// instead of the structured nested UDT. Written to the CORRECT Cassandra
-/// behavior; unignore when issue #1078 lands.
-#[ignore = "issue #1080: frozen<udt> column decodes as opaque blob, not structured nested UDT"]
+/// Regression coverage for issue #1080 (now FIXED): a nested
+/// `frozen<employee_type>` (which contains a `frozen<address_type>`) decodes to
+/// the structured nested UDT (previously a raw blob hex string).
 #[tokio::test]
 async fn frozen_udt_value_parity() {
     let schema = load_table_schema("cx_frozen_udt_value");
@@ -711,12 +707,11 @@ async fn multicell_udt_collection_paths_parity() {
 ///      SerializationHeader column-set/type metadata, yet still decode `survivor`
 ///      correctly (its bytes follow the dropped columns' bytes on disk).
 ///
-/// EXPECTED-FAIL (bug found by this lane): part 1 fails because the gen-1
-/// `drop_udt frozen<person_type>` column does not decode (issue #1078), and that
-/// frozen-UDT decode error also drops the trailing `survivor` column (Err→break
-/// blast radius). Written to the CORRECT Cassandra behavior; unignore when issue
-/// #1078 lands (then the dropped-column-skip part-2 assertion can be exercised).
-#[ignore = "issue #1080: gen-1 frozen<udt> (drop_udt) fails to decode and drops the trailing survivor column"]
+/// Regression coverage for issue #1080 (now FIXED): previously the gen-1
+/// `drop_udt frozen<person_type>` column failed to decode, and that frozen-UDT
+/// decode error also dropped the trailing `survivor` column (Err→break blast
+/// radius). Now part 1 decodes tuple + frozen-UDT + survivor, and part 2 exercises
+/// the dropped-column-skip (bytes consumed via on-disk header metadata, not emitted).
 #[tokio::test]
 async fn legacy_dropped_tuple_udt_fields_parity() {
     let table = "cx_legacy_dropped_tuple_udt";
