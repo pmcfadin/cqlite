@@ -5509,6 +5509,28 @@ impl V5CompressedLegacyParser {
                 }
             }
 
+            // Issue #1080 / roborev job 1363: marshal-form frozen UDT. When the
+            // schema is DERIVED FROM the on-disk header (rather than supplied as a
+            // CQL short form), `column.data_type` is the authoritative marshal
+            // string `org.apache.cassandra.db.marshal.FrozenType(...UserType...)`,
+            // which does NOT start with CQL `frozen<` and so misses the arm above.
+            // Decode it structurally from that marshal type (same authoritative
+            // path as the supplied-schema header fallback) instead of blobbing it.
+            // `header_type_is_user_type` keys on the fully-qualified marker, and a
+            // non-frozen top-level UDT is routed to the complex branch by
+            // `is_complex_column`, so reaching here means a single-cell frozen UDT
+            // → wrap in `Value::Frozen` (consistent with the CQL `frozen<` arm).
+            _ if Self::header_type_is_user_type(&column.data_type) => {
+                let (udt_value, new_offset) = self.decode_frozen_udt_from_header_type(
+                    data,
+                    offset,
+                    &column.data_type,
+                    column,
+                )?;
+                offset = new_offset;
+                Value::Frozen(Box::new(udt_value))
+            }
+
             // TODO(Issue #162): UDT parsing requires schema registry access
             // For now, UDTs fall through to blob. Future implementation will:
             // - Extract UDT name from type_str
@@ -12040,6 +12062,124 @@ mod tests {
             trailing_marker,
             "trailing column bytes must be intact (no misalignment after a dropped scalar)"
         );
+    }
+
+    /// Issue #1080 / roborev job 1363 (Medium): when the schema is DERIVED FROM the
+    /// on-disk header (not supplied as a CQL short form), a frozen UDT column's
+    /// `data_type` is the marshal string `org.apache.cassandra.db.marshal.FrozenType(
+    /// ...UserType...)`, which does NOT start with CQL `frozen<`. It must still
+    /// decode STRUCTURALLY (via the marshal-form dispatch arm), not blob. Drives the
+    /// full `parse_cell_value_schema_order` to prove the dispatch routes correctly
+    /// and a trailing column stays byte-aligned.
+    #[tokio::test]
+    async fn test_regression_1080_marshal_form_frozen_udt_decodes_structurally() {
+        use crate::storage::sstable::SSTableReader;
+        use std::path::PathBuf;
+        use std::sync::Arc;
+
+        let datasets_root = match std::env::var("CQLITE_DATASETS_ROOT") {
+            Ok(r) => r,
+            Err(_) => return,
+        };
+        let keyspace_dir = PathBuf::from(&datasets_root)
+            .join("sstables")
+            .join("test_basic");
+        let mut data_file = None;
+        if let Ok(entries) = std::fs::read_dir(&keyspace_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if name.starts_with("simple_table-") {
+                    if let Ok(inner) = std::fs::read_dir(&path) {
+                        if let Some(df) = inner.flatten().find(|e| {
+                            e.file_name()
+                                .to_str()
+                                .map(|s| s.ends_with("-Data.db"))
+                                .unwrap_or(false)
+                        }) {
+                            data_file = Some(df.path());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        let data_file = data_file.unwrap_or_else(|| {
+            panic!(
+                "CQLITE_DATASETS_ROOT is set ({datasets_root}) but the core fixture \
+                 test_basic/simple_table-*/*-Data.db is missing — refusing to silently skip"
+            )
+        });
+        let config = crate::Config::default();
+        let platform = Arc::new(
+            crate::platform::Platform::new(&config)
+                .await
+                .expect("platform"),
+        );
+        let reader = SSTableReader::open(&data_file, &config, platform)
+            .await
+            .expect("core fixture test_basic/simple_table must open (datasets root is set)");
+
+        let parser = V5CompressedLegacyParser::new(
+            "test_types".to_string(),
+            "cx_frozen_udt".to_string(),
+            0,
+            0,
+            None,
+        );
+        let hex = |s: &str| -> String { hex::encode(s.as_bytes()) };
+        let q = "org.apache.cassandra.db.marshal";
+        // Header-derived schema: data_type IS the fully-qualified marshal string.
+        let marshal_type = format!(
+            "{q}.FrozenType({q}.UserType(test_types,{},{}:{q}.UTF8Type,{}:{q}.Int32Type))",
+            hex("person_type"),
+            hex("name"),
+            hex("age"),
+        );
+        let column = crate::schema::Column {
+            name: "p".to_string(),
+            data_type: marshal_type,
+            nullable: true,
+            default: None,
+            is_static: false,
+        };
+
+        // Cell: [flags=0x08][VInt blob_len][udt_blob]; then a trailing sentinel.
+        let mut udt_blob: Vec<u8> = Vec::new();
+        let name = b"Ada";
+        udt_blob.extend_from_slice(&(name.len() as i32).to_be_bytes());
+        udt_blob.extend_from_slice(name);
+        udt_blob.extend_from_slice(&4i32.to_be_bytes());
+        udt_blob.extend_from_slice(&36i32.to_be_bytes());
+        assert!(udt_blob.len() < 0x80);
+        let mut buf: Vec<u8> = vec![0x08, udt_blob.len() as u8];
+        buf.extend_from_slice(&udt_blob);
+        let trailing_marker: &[u8] = &[0xDE, 0xAD, 0xBE, 0xEF];
+        let trailing_offset = buf.len();
+        buf.extend_from_slice(trailing_marker);
+
+        let (value, _ts, _exp, new_offset) = parser
+            .parse_cell_value_schema_order(&buf, 0, &column, None, &reader)
+            .expect("marshal-form frozen UDT must decode");
+        // Structured frozen UDT, NOT a blob.
+        let inner = match &value {
+            Value::Frozen(b) => b.as_ref(),
+            other => other,
+        };
+        match inner {
+            Value::Udt(u) => {
+                assert_eq!(u.type_name, "person_type");
+                assert_eq!(u.fields.len(), 2);
+            }
+            other => panic!(
+                "header-derived marshal-form frozen UDT must decode structurally, got {other:?}"
+            ),
+        }
+        assert_eq!(
+            new_offset, trailing_offset,
+            "marshal-form frozen UDT must consume exactly its cell — trailing column stays aligned"
+        );
+        assert_eq!(&buf[new_offset..], trailing_marker);
     }
 
     /// Regression test for Issue #481 bug 3: for `set<T>` complex columns, each
