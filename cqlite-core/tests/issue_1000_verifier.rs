@@ -199,6 +199,34 @@ async fn every_corrupt_fixture_fails_on_expected_component() {
                 .collect::<Vec<_>>()
         );
 
+        // The error CLASS must match the manifest, not just the component, so a
+        // regression that changes the verifier's classification is caught
+        // (roborev). `expected_error_class` is "Code" or "Code/Subtype" (the
+        // optional suffix is descriptive); accept a finding whose stable
+        // class.code() equals ANY slash-separated segment.
+        let want_classes: Vec<&str> = fx
+            .expected_error_class
+            .split('/')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let class_matched = report
+            .findings
+            .iter()
+            .any(|f| want_classes.contains(&f.class.code()));
+        assert!(
+            class_matched,
+            "corrupt fixture {} expected error class '{}' (any of {:?}), got: {:?}",
+            fx.name,
+            fx.expected_error_class,
+            want_classes,
+            report
+                .findings
+                .iter()
+                .map(|f| f.class.code())
+                .collect::<Vec<_>>()
+        );
+
         // Findings must carry locating context (non-empty detail).
         assert!(
             report.findings.iter().all(|f| !f.detail.trim().is_empty()),

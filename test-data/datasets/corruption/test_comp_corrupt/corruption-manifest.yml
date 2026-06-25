@@ -42,8 +42,8 @@ fixtures:
     original_size_bytes: 6979
     corrupted_size_bytes: 4096
     expected_failing_component: Data.db
-    expected_error_class: UnexpectedEof/TruncatedChunk
-    rationale: "Tail truncated mid-stream so the final chunk(s) referenced by CompressionInfo.db cannot be read."
+    expected_error_class: ChunkOffsetOutOfBounds/DigestMismatch
+    rationale: "Tail truncated so CompressionInfo.db chunk offsets now point past the shortened Data.db (ChunkOffsetOutOfBounds) and the Data.db digest no longer matches (DigestMismatch); the row scan then fails."
   - name: compression_info_bad_offset
     manifest_key: cass.corruption.compression_info.bad_offset
     status: active
@@ -60,8 +60,8 @@ fixtures:
     original_size_bytes: 135
     corrupted_size_bytes: 135
     expected_failing_component: CompressionInfo.db
-    expected_error_class: ChunkOffsetOutOfBounds
-    rationale: "chunk[1] offset MSB set -> chunk offset points ~9.2e18 bytes past Data.db end."
+    expected_error_class: CompressionInfoCorrupt
+    rationale: "chunk[1] offset MSB set -> CompressionInfo.db parse rejects the non-ascending/out-of-range chunk offset before any Data.db read."
   - name: index_db_bit_flip_big
     manifest_key: cass.corruption.index_db.bit_flip_big
     status: active
@@ -114,8 +114,8 @@ fixtures:
     original_size_bytes: 760
     corrupted_size_bytes: 256
     expected_failing_component: Rows.db
-    expected_error_class: UnexpectedEof/TruncatedTrie
-    rationale: "Rows.db trie truncated mid-node so row-trie traversal hits EOF."
+    expected_error_class: BtiTrieCorrupt
+    rationale: "Rows.db trie truncated mid-node so per-partition row-trie traversal fails (BtiTrieCorrupt)."
   - name: statistics_db_header_damage
     manifest_key: cass.corruption.statistics_db.header_damage
     status: active
@@ -150,8 +150,8 @@ fixtures:
     original_size_bytes: 56
     corrupted_size_bytes: 16
     expected_failing_component: Summary.db
-    expected_error_class: UnexpectedEof/TruncatedSummary
-    rationale: "Summary.db truncated inside the index-samples block so the summary cannot be deserialized."
+    expected_error_class: SummaryCorrupt
+    rationale: "Summary.db truncated inside the index-samples block so the summary cannot be deserialized (SummaryCorrupt)."
   - name: toc_missing_component
     manifest_key: cass.corruption.toc_missing_component
     status: active

@@ -715,6 +715,22 @@ fn check_bti_structure(
         }
     };
 
+    // A BTI Partitions.db always ends with an 8-byte trailing root pointer; a
+    // file shorter than that is truncated/corrupt, NOT a valid empty trie.
+    // Without this, QUICK mode would report success for a truncated required
+    // index component (roborev).
+    if partitions_bytes.len() < 8 {
+        findings.push(VerifyFinding::new(
+            VerifyErrorClass::UnexpectedEof,
+            "Partitions.db",
+            format!(
+                "Partitions.db is {} bytes — shorter than the mandatory 8-byte trie root footer (truncated)",
+                partitions_bytes.len()
+            ),
+        ));
+        return Ok(None);
+    }
+
     let mut cursor = Cursor::new(&partitions_bytes);
     let partitions = match iterate_partitions_in_bti_file(&mut cursor) {
         Ok(p) => p,
@@ -731,7 +747,7 @@ fn check_bti_structure(
         }
     };
 
-    if partitions.is_empty() && partitions_bytes.len() >= 8 {
+    if partitions.is_empty() {
         findings.push(VerifyFinding::new(
             VerifyErrorClass::BtiRootPointerCorrupt,
             "Partitions.db",
