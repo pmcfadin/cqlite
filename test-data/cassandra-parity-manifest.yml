@@ -1512,6 +1512,232 @@ scenarios:
         compare bucket boundaries against the reference dump.
 
   # ----------------------------------------------------------------------------
+  # statistics_db repaired-metadata (issue #988 / epic #968)
+  #
+  # PRESERVATION / REPORTING ONLY. Decoding repairedAt / pendingRepair /
+  # isTransient from Statistics.db proves CQLite reports the persisted repair
+  # STATE accurately. It does NOT establish repair-aware compaction or
+  # repair-aware tombstone purging correctness; those (and repair coordination /
+  # incremental-repair session tracking) are out of scope here and live in the
+  # compaction layer. See cass.tombstone_ttl.* for tombstone correctness.
+  # ----------------------------------------------------------------------------
+  - id: cass.repaired_metadata.statistics_db.repaired_at_field
+    title: Statistics.db repairedAt field decode + report parity (unrepaired state)
+    status: mirrored
+    capability: statistics_metadata
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - StatsMetadata.java
+        - SSTableMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
+        notes: >-
+          repaired_metadata_strict_parity decodes the STATS-component repairedAt
+          directly from the Statistics.db bytes (self-describing forward walk over
+          the two EstimatedHistograms + the version-gated TombstoneHistogram) for
+          every nb/oa/da fixture and asserts it equals the `Repaired at: <n>`
+          reference line. The whole Cassandra 5.0 corpus is unrepaired
+          (repairedAt=0), so this proves the unrepaired repairedAt field
+          round-trips byte-for-byte across formats. PRESERVATION/REPORTING ONLY —
+          establishes nothing about repair-aware tombstone purging.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstablemetadata emit Statistics.db.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_repaired_metadata_test
+        repaired_metadata_strict_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/statistics-db-repaired-at-mismatch.log
+      known_limitations: >-
+        repairedAt is decoded from real bytes; pendingRepair / isTransient are
+        NOT walked and are reported honestly as RepairField::Unparsed (not a
+        fabricated null / false), so a real pending-repair UUID or transient flag
+        is never silently misreported as absent (see
+        cass.repaired_metadata.statistics_db.pending_repair_uuid and
+        .transient_repair_flag). The fetched *-Statistics.db binary is required;
+        when absent that fixture is skipped (never a silent pass) and the
+        committed *-Statistics.db.txt reference presence is enforced fail-closed.
+        This lane is metadata preservation/reporting only — NOT repair-aware
+        tombstone purging.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      cqlite_boundary: >-
+        Persisted-metadata parse/report of the STATS-component repairedAt field;
+        no repair coordination and no repair-aware compaction/tombstone GC.
+
+  - id: cass.repaired_metadata.statistics_db.pending_repair_uuid
+    title: Statistics.db pendingRepair reported as Unparsed — no repaired fixture available
+    status: planned
+    capability: statistics_metadata
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: serialization
+      relevance: med
+      files:
+        - StatsMetadata.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+    evidence:
+      type: partial
+      storage_format_version: [nb, oa, da]
+      known_limitations: >-
+        The Cassandra 5.0 corpus contains NO pending-repair SSTable fixture
+        (every reference shows `Pending repair: --`, i.e. null). The reference is
+        asserted null, but the read path does NOT decode this field: it reports
+        pendingRepair as RepairField::Unparsed (an explicit not-yet-decoded
+        state) rather than fabricating a `None`, so a real non-null pendingRepair
+        UUID could not be silently misreported as absent. A non-null pendingRepair
+        UUID cannot be decoded byte-for-byte until a pending-repair fixture
+        exists. The pendingRepair field sits after the version-gated
+        improvedMinMax block and the variable commitLogIntervals set, so a
+        non-null UUID requires a type-aware / interval-aware forward walk to
+        reach. Reporting/preservation only — not repair-aware tombstone purging.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 988
+      gap: >-
+        No Cassandra 5.0 pending-repair fixture available; the reference null
+        (`Pending repair: --`) state is confirmed, and the read path reports the
+        field as Unparsed (it is not walked from bytes) rather than a fabricated
+        absent value.
+      next_step: >-
+        When a pending-repair fixture is generated, decode the pendingRepair UUID
+        (type-aware skip past improvedMinMax + commitLogIntervals) — promoting
+        the field from RepairField::Unparsed to Decoded — and assert it
+        byte-for-byte against the `Pending repair: <uuid>` reference line.
+
+  - id: cass.repaired_metadata.statistics_db.transient_repair_flag
+    title: Statistics.db isTransient reported as Unparsed — no transient fixture available
+    status: planned
+    capability: statistics_metadata
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: serialization
+      relevance: med
+      files:
+        - StatsMetadata.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt
+    evidence:
+      type: partial
+      storage_format_version: [nb, oa, da]
+      known_limitations: >-
+        The Cassandra 5.0 corpus contains NO transiently-replicated SSTable
+        fixture (every reference shows `IsTransient: false`). The reference is
+        asserted false, but the read path does NOT decode this field: it reports
+        isTransient as RepairField::Unparsed (an explicit not-yet-decoded state)
+        rather than fabricating `false`, so a real isTransient=true could not be
+        silently misreported as false. isTransient=true cannot be decoded
+        byte-for-byte until a transient fixture exists (transient replication
+        requires a multi-node cluster with transient replicas to produce).
+        Reporting/preservation only — not repair-aware tombstone purging.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 988
+      gap: >-
+        No transiently-replicated fixture available; the reference `IsTransient:
+        false` state is confirmed, and the read path reports the field as
+        Unparsed (it is not walked from bytes) rather than a fabricated `false`.
+      next_step: >-
+        When a transient-replication fixture is generated, decode the isTransient
+        flag (after the version-gated improvedMinMax block and commitLogIntervals)
+        — promoting it from RepairField::Unparsed to Decoded — and assert it
+        byte-for-byte against the `IsTransient: true` reference line.
+
+  - id: cass.repaired_metadata.statistics_db.write_roundtrip
+    title: Statistics.db repair fields survive a write -> read round-trip (unrepaired)
+    status: mirrored
+    capability: statistics_metadata
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: serialization
+      relevance: med
+      files:
+        - StatsMetadata.java
+        - MetadataSerializer.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/sstable_parity_repaired_metadata_test.rs
+        notes: >-
+          repaired_metadata_writer_roundtrip_preserves_unrepaired_state writes a
+          real Statistics.db via StatisticsWriter (persisting repairedAt=0 /
+          pendingRepair=null / isTransient=false), decodes the repair metadata
+          back through the read path, and asserts it is preserved field-exact.
+          Proves persisted repair STATE survives write -> read; NOT repair-aware
+          compaction behaviour.
+    fixtures: {}
+    evidence:
+      type: partial
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        n/a — writer round-trip; the CQLite StatisticsWriter produces the
+        Statistics.db in-test (no fetched Cassandra fixture). Targets the
+        cassandra 5.0.2 nb StatsMetadata layout.
+      known_limitations: >-
+        Round-trips the writer's unrepaired persisted state (repairedAt=0,
+        pendingRepair=null, isTransient=false); the writer does not emit a
+        repaired / pending / transient state, so those distinct states are
+        covered by the synthetic round-trip
+        (repaired_metadata_synthetic_repaired_state_roundtrip) and the planned
+        no-fixture scenarios above. Preservation/reporting only.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        Writer emits only the unrepaired repair state; repaired/pending/transient
+        write round-trips are synthetic until repaired fixtures exist.
+      next_step: >-
+        Extend the writer round-trip to repaired/pending/transient states once a
+        repaired-fixture generation path exists.
+
+  # ----------------------------------------------------------------------------
   # compression_checksum
   # ----------------------------------------------------------------------------
   - id: cass.compression_checksum.chunk_offsets_and_crc
@@ -1606,6 +1832,456 @@ scenarios:
         Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify
         suite.
 
+  - id: cass.compression_info.CompressionMetadataTest.metadata_serialization
+    title: CompressionInfo.db metadata byte-for-byte serialization parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          Re-derives the CompressionInfo.db layout (compressor simple-name, option
+          key/value pairs, chunk_length, max_compressed_length, uncompressed
+          data_length, chunk count, ordered chunk-offset vector) independently from
+          the raw bytes and asserts equality field-for-field against
+          CompressionInfo::parse. The file must end exactly after the offset table
+          (no trailing metadata CRC). Compares ordered offsets, not just counts.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes CompressionInfo.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_compression_info_test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-metadata-mismatch.log
+      known_limitations: >-
+        Validates the CompressionInfo.db metadata Cassandra persisted; the codecs
+        actually exercised are LZ4Compressor and SnappyCompressor (the only ones in
+        the committed corpus).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets
+    title: CompressionInfo.db ordered chunk-offset table parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          The decoded chunk-offset table is compared as an ordered vector against
+          the independent re-derivation, asserted to start at offset 0, and checked
+          to be strictly ascending — catching any reordering or off-by-one bug in
+          the offset decode.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes CompressionInfo.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_compression_info_test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-chunk-offsets-mismatch.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries
+    title: Compressed chunk record boundaries vs Data.db parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressedSequentialWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          For every chunk, the record size (delta to the next offset, or to EOF for
+          the final partial chunk) is checked against the Data.db length and proven
+          to hold at least the 4-byte inline CRC trailer. Multi-chunk fixtures
+          exercise final partial-chunk handling (last record runs to EOF), mirroring
+          CompressedSequentialWriter.java.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes Data.db chunks
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_compression_info_test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-chunk-boundaries-mismatch.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation
+    title: Inline per-chunk CRC32 trailer validation parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: checksum
+      relevance: high
+      files:
+        - CompressedSequentialWriterTest.java
+        - CompressedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          The trailing 4-byte big-endian CRC32 of each compressed chunk record is
+          recomputed over the compressed payload and asserted equal to the stored
+          CRC, exactly as CompressedSequentialWriter.java writes it. The corruption
+          lane (compression_info_strict_corruption_fails_closed) flips a payload
+          byte and a CRC byte and proves both fail closed.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes inline chunk CRCs
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_compression_info_test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-chunk-crc-mismatch.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.StandardCompressedChunkReaderTest.round_trip_chunk_bytes
+    title: Compressed chunk payload + CRC round-trip byte parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          Each compressed chunk record [payload][4-byte CRC] is walked from the
+          offset table against the real Data.db bytes; the payload+CRC framing is
+          validated byte-for-byte across 350+ chunks of the committed corpus.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes Data.db chunks
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_compression_info_test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-round-trip-mismatch.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection
+    title: Truncated compressed chunk fail-closed parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: corruption-recovery
+      relevance: high
+      files:
+        - CompressedInputStreamTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          The corruption lane (compression_info_strict_corruption_fails_closed)
+          truncates the final chunk record below its 4-byte CRC trailer, drops a
+          declared chunk offset, and corrupts the CompressionInfo.db header, proving
+          parse and the strict chunk gate fail closed rather than silently accepting
+          truncated input.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes Data.db chunks
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_compression_info_test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-truncated-chunk.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.lz4.real_fixture_chunks
+    title: LZ4Compressor real-fixture chunk + CRC parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+        - CompressedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          The corpus carries 76 LZ4Compressor CompressionInfo.db fixtures. The lane
+          fails closed if no LZ4 metadata is compared or no LZ4 Data.db chunks are
+          CRC-validated when the binaries are present.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 with LZ4Compressor
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_compression_info_test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-lz4-mismatch.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.snappy.real_fixture_chunks
+    title: SnappyCompressor real-fixture chunk + CRC parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+        - CompressedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          The corpus carries 15 SnappyCompressor CompressionInfo.db fixtures. The
+          lane fails closed if no Snappy metadata is compared or no Snappy Data.db
+          chunks are CRC-validated when the binaries are present.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 with SnappyCompressor
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_compression_info_test
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-snappy-mismatch.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.deflate.real_fixture_chunks
+    title: DeflateCompressor real-fixture chunk + CRC parity (no fixture available)
+    status: planned
+    capability: compression_checksum
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: compression
+      relevance: med
+      files:
+        - CompressionMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          CQLite decodes DeflateCompressor, but the committed corpus carries NO
+          Cassandra-written Deflate fixture. The lane classifies Deflate explicitly
+          as no-fixture-available and logs it rather than faking synthetic reference
+          data — no byte_for_byte claim is made.
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+      known_limitations: >-
+        No Cassandra-generated DeflateCompressor SSTable exists in the corpus
+        (only LZ4Compressor and SnappyCompressor). Parity is unproven until such a
+        fixture is added.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 986
+      target_suite: sstable_parity_compression_info_chunks
+      gap: >-
+        No real DeflateCompressor CompressionInfo.db / Data.db fixture in the
+        committed corpus, so chunk + CRC parity cannot be byte-compared.
+      next_step: >-
+        Generate a DeflateCompressor SSTable via regenerate-datasets.sh and let the
+        existing test exercise it (the codec dispatch already handles it).
+
+  - id: cass.compression_info.zstd.real_fixture_chunks
+    title: ZstdCompressor real-fixture chunk + CRC parity (no fixture available)
+    status: planned
+    capability: compression_checksum
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: compression
+      relevance: med
+      files:
+        - CompressionMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_test.rs
+        notes: >-
+          CQLite decodes ZstdCompressor, but the committed corpus carries NO
+          Cassandra-written Zstd fixture. The lane classifies Zstd explicitly as
+          no-fixture-available and logs it rather than faking synthetic reference
+          data — no byte_for_byte claim is made. Zstd dictionary compression remains
+          out of scope per issue #986.
+    fixtures: {}
+    evidence:
+      type: out_of_scope
+      known_limitations: >-
+        No Cassandra-generated ZstdCompressor SSTable exists in the corpus (only
+        LZ4Compressor and SnappyCompressor). Parity is unproven until such a fixture
+        is added; Zstd dictionary compression stays out of scope.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 986
+      target_suite: sstable_parity_compression_info_chunks
+      gap: >-
+        No real ZstdCompressor CompressionInfo.db / Data.db fixture in the
+        committed corpus, so chunk + CRC parity cannot be byte-compared.
+      next_step: >-
+        Generate a ZstdCompressor SSTable via regenerate-datasets.sh and let the
+        existing test exercise it (the codec dispatch already handles it).
+
   # ----------------------------------------------------------------------------
   # corruption_verify
   # ----------------------------------------------------------------------------
@@ -1681,6 +2357,270 @@ scenarios:
       next_step: >-
         Add a Filter.db serialization parity test asserting zero false negatives
         across the present-key set.
+
+  # ----------------------------------------------------------------------------
+  # filter_db — strict Filter.db Bloom parity (issue #987 / epic #968)
+  # ----------------------------------------------------------------------------
+  - id: cass.filter_db.no_false_negative_membership
+    title: Filter.db no-false-negative membership over Cassandra present keys
+    status: mirrored
+    capability: filter_db_bloom
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: bloom-filter
+      relevance: high
+      files:
+        - BloomFilterTest.java
+        - LongBloomFilterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_filter_db_bloom
+        tests:
+          - cqlite-core/tests/sstable_parity_filter_db_test.rs
+        notes: >-
+          Strict, fail-closed lane (filter_db_strict_parameters_and_no_false_negative).
+          For every committed BIG Filter.db it independently re-reads the on-disk
+          header ([hash_count: i32 BE][num_longs: i32 BE][bitset: num_longs*8 bytes],
+          BloomFilterSerializer over OffHeapBitSet), asserts CQLite's decoded
+          hash_count / bit_count match the bytes, then enumerates EVERY raw partition
+          key Cassandra wrote (from the sibling Index.db key_digest, which holds the
+          raw key bytes per Issue #552 — the exact bytes Cassandra hashed) and asserts
+          the filter reports "maybe present" for all of them. A single false negative
+          fails the lane. Absent-key probes (deterministic, __cqlite_absent__-prefixed)
+          count and REPORT false positives without gating, since false positives are
+          legal for a Bloom filter.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Filter.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_filter_db_test
+        filter_db_strict_parameters_and_no_false_negative
+      normalization: >-
+        Present keys are the raw partition-key bytes from Index.db (not the decoded
+        CQL values), matching the bytes Cassandra's Murmur3 hashed into Filter.db.
+        The reference_paths point at the committed per-fixture Data.db.jsonl siblings
+        (the binary Filter.db and Index.db are gitignored, fetched on demand).
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/filter-db-false-negative.log
+      known_limitations: >-
+        The no-false-negative gate runs over BIG fixtures, whose Index.db exposes the
+        raw partition keys. BTI (da) fixtures have no Index.db and their Partitions.db
+        trie stores byte-comparable, hash-routed keys that do not expose the raw key
+        bytes, so BTI membership is tracked separately (cass.filter_db.bti_membership).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.filter_db.serialization_round_trip
+    title: Filter.db byte-exact serialization round-trip and parameter decode
+    status: mirrored
+    capability: filter_db_bloom
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: bloom-filter
+      relevance: high
+      files:
+        - BloomFilterSerializerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_filter_db_bloom
+        tests:
+          - cqlite-core/tests/sstable_parity_filter_db_test.rs
+        notes: >-
+          For every committed Filter.db (BIG and BTI), the strict lane decodes the
+          Bloom filter and re-serializes it, asserting the re-emitted bytes are
+          byte-for-byte identical to the on-disk component (header + bitset), and that
+          the decoded hash_count / num_longs equal the on-disk header values. This is
+          the write-side parity that lets CQLite re-emit a Cassandra-faithful Filter.db.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Filter.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_filter_db_test
+        filter_db_strict_parameters_and_no_false_negative
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/filter-db-roundtrip.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.filter_db.corruption_fails_closed
+    title: Filter.db malformed-byte rejection (fail-closed)
+    status: mirrored
+    capability: filter_db_bloom
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: bloom-filter
+      relevance: med
+      files:
+        - BloomFilterSerializerTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_filter_db_bloom
+        tests:
+          - cqlite-core/tests/sstable_parity_filter_db_test.rs
+        notes: >-
+          filter_db_strict_corruption_fails_closed asserts the decoder rejects (never
+          fabricates, never unwrap-panics) empty buffers, header-only truncation, a
+          partial bitset, trailing bytes beyond the declared bitset, and — when a real
+          fixture is present — a fixture whose num_longs header is corrupted so the
+          declared bitset length no longer matches the buffer.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Filter.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features write-support --test sstable_parity_filter_db_test
+        filter_db_strict_corruption_fails_closed
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/filter-db-corruption.log
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.filter_db.bti_membership
+    title: BTI (da) Filter.db no-false-negative membership
+    status: partial
+    capability: filter_db_bloom
+    priority: P1
+    risk: p1_correctness
+    cassandra:
+      category: bloom-filter
+      relevance: med
+      files:
+        - BloomFilterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_filter_db_bloom
+        tests:
+          - cqlite-core/tests/sstable_parity_filter_db_test.rs
+        notes: >-
+          BTI (da) Filter.db is covered for parameter-decode + byte-exact round-trip
+          by the strict lane, and filter_db_format_coverage_classification records the
+          BTI fixture count explicitly. The no-false-negative membership gate does NOT
+          yet run for BTI because its Partitions.db trie stores byte-comparable,
+          hash-routed keys and exposes no raw partition-key bytes to probe with.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: partial
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 BTI flush emits da Filter.db
+      known_limitations: >-
+        BTI fixtures lack Index.db; the BTI Partitions.db trie does not expose raw
+        partition keys, so BTI Filter.db membership is verified for parameter decode
+        and serialization round-trip only, not the no-false-negative probe.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      gap: >-
+        No raw-partition-key source for BTI fixtures, so the no-false-negative probe
+        cannot run against da Filter.db.
+      next_step: >-
+        Recover raw BTI partition keys (e.g. by decoding partitions during a Data.db
+        scan) and extend the no-false-negative gate to cover da fixtures.
+
+  - id: cass.filter_db.statistical_false_positive_rate
+    title: Filter.db empirical false-positive-rate report
+    status: planned
+    capability: filter_db_bloom
+    priority: P2
+    risk: p2_coverage
+    cassandra:
+      category: bloom-filter
+      relevance: low
+      files:
+        - LongBloomFilterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_filter_db_bloom
+        tests:
+          - cqlite-core/tests/sstable_parity_filter_db_test.rs
+        notes: >-
+          filter_db_statistical_false_positive_rate_slow probes a large deterministic
+          absent-key sample (50k keys, fixed seed + per-fixture salt) and reports the
+          measured FPR per fixture, asserting only a generous saturation ceiling
+          (< 0.50). It is gated behind CQLITE_FILTER_FPR_SLOW=1 so the required lane
+          stays fast — false positives are legal and never a correctness failure.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: smoke
+      artifacts: [logs]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 flush emits Filter.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets CQLITE_FILTER_FPR_SLOW=1
+        cargo test -p cqlite-core --features write-support
+        --test sstable_parity_filter_db_test
+        filter_db_statistical_false_positive_rate_slow -- --nocapture
+      known_limitations: >-
+        The measured FPR is reported, not gated against Cassandra's target fp_chance,
+        because the committed fixtures are tiny (single-long bitsets) where the
+        analytic FPR is dominated by quantization, not the configured fp_chance.
+    ci:
+      tier: manual_debug
+    scope:
+      target_issue: 987
+      gap: >-
+        No gated comparison of measured FPR against Cassandra's configured
+        bloom_filter_fp_chance.
+      next_step: >-
+        Add larger-cardinality fixtures and assert the measured FPR tracks the
+        configured fp_chance within a documented statistical tolerance.
 
   # ----------------------------------------------------------------------------
   # tombstone_ttl

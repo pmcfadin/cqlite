@@ -2,6 +2,13 @@
 
 use crate::{Error, Result};
 
+/// Maximum bloom-filter hash count CQLite will deserialize. Cassandra derives the
+/// number of hash functions (k) from the target false-positive rate via
+/// `BloomCalculations` (max ~20). This bound is far above any real filter yet
+/// rejects absurd positive header values that would otherwise drive `contains()`
+/// to loop billions of times on malformed/corrupt `Filter.db` bytes.
+const MAX_HASH_COUNT: i32 = 1024;
+
 /// Branchless absolute value matching Cassandra's `FBUtilities.abs()`.
 ///
 /// ```java
@@ -202,11 +209,53 @@ impl BloomFilter {
             return Err(Error::serialization("Invalid bloom filter data: too short"));
         }
 
-        // Read hash count (4 bytes, big-endian i32)
-        let hash_count = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        // Cassandra writes both header counts as signed 32-bit big-endian ints:
+        //   BloomFilterSerializer: `dos.writeInt(bf.hashCount)`
+        //   OffHeapBitSet:         `out.writeInt((int)(bytes.size() / 8))` (num longs)
+        // (see docs/sstables-definitive-guide/chapters/07-bloom-filter.md:107-111).
+        // We must read them as i32 so a high-bit-set value (e.g. 0xFFFF_FFFF == -1,
+        // or 0x8000_0000 == i32::MIN) is recognised as negative/garbage rather than
+        // a huge positive count. A pathologically large hash_count would otherwise
+        // make contains() loop billions of times (DoS); a negative num_longs cast to
+        // usize would also produce nonsense size math.
+        let hash_count_i32 = i32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+        let num_longs_i32 = i32::from_be_bytes([data[4], data[5], data[6], data[7]]);
 
-        // Read number of longs (4 bytes, big-endian i32)
-        let num_longs = u32::from_be_bytes([data[4], data[5], data[6], data[7]]) as usize;
+        // Strict-mode: reject malformed/unusable headers. A filter with a
+        // non-positive hash count or non-positive bit-word count is degenerate —
+        // it would fail OPEN (always report "not present", producing false
+        // negatives), drive a pathological lookup loop, or break size math.
+        // Real Cassandra Filter.db headers always carry hash_count >= 1 and
+        // num_longs >= 1, so rejecting `<= 0` (which subsumes the old `== 0`
+        // guard while also covering negative / high-bit-set garbage) only rejects
+        // corrupt/unsupported metadata.
+        if hash_count_i32 <= 0 {
+            return Err(Error::corruption(format!(
+                "Invalid bloom filter header: hash_count is {hash_count_i32} (must be > 0; \
+                 unsupported/malformed/corrupt filter metadata)"
+            )));
+        }
+        // Upper bound: a positive-but-absurd hash_count (e.g. i32::MAX) passes the
+        // `<= 0` guard yet makes every contains() loop billions of times (DoS).
+        // Cassandra derives k from the target FP rate via BloomCalculations, whose
+        // maximum is ~20; MAX_HASH_COUNT is far above any real filter while still
+        // bounding the lookup loop. Reject anything larger as malformed.
+        if hash_count_i32 > MAX_HASH_COUNT {
+            return Err(Error::corruption(format!(
+                "Invalid bloom filter header: hash_count {hash_count_i32} exceeds the maximum \
+                 supported ({MAX_HASH_COUNT}); malformed/corrupt filter metadata"
+            )));
+        }
+        if num_longs_i32 <= 0 {
+            return Err(Error::corruption(format!(
+                "Invalid bloom filter header: num_longs is {num_longs_i32} (must be > 0; \
+                 malformed/corrupt filter, zero or negative bits)"
+            )));
+        }
+
+        // Safe to widen now that both values are validated as strictly positive i32.
+        let hash_count = hash_count_i32 as u32;
+        let num_longs = num_longs_i32 as usize;
 
         let expected_size = 8 + (num_longs * 8);
 
