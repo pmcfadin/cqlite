@@ -29,6 +29,33 @@
 use crate::{Error, Result};
 use std::io::{Cursor, Read};
 
+/// Cassandra compressor simple names that CQLite can decompress.
+///
+/// These are the only `org.apache.cassandra.io.compress.ICompressor` implementations
+/// CQLite supports. The decompression paths in `chunk_decompressor.rs` and
+/// `chunked_data_reader.rs` are keyed on exactly these names. Any other name in a
+/// `CompressionInfo.db` is rejected fail-fast at metadata-parse time rather than
+/// silently treated as uncompressed (issue #1001). No content-based guessing is ever
+/// performed (no-heuristics mandate, issue #28).
+pub const SUPPORTED_COMPRESSOR_NAMES: &[&str] = &[
+    "LZ4Compressor",
+    "SnappyCompressor",
+    "DeflateCompressor",
+    "ZstdCompressor",
+    // NoopCompressor is the explicit "no compression" marker; chunks are stored raw.
+    "NoopCompressor",
+];
+
+/// Returns true if `name` is a Cassandra compressor simple name CQLite can honor.
+///
+/// Accepts both the simple name (e.g. `"LZ4Compressor"`) and the fully-qualified
+/// class name (e.g. `"org.apache.cassandra.io.compress.LZ4Compressor"`) that Cassandra
+/// may write into `CompressionInfo.db`.
+pub fn is_supported_compressor_name(name: &str) -> bool {
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    SUPPORTED_COMPRESSOR_NAMES.contains(&simple)
+}
+
 /// CompressionInfo.db file content parsed from binary format
 #[derive(Debug, Clone)]
 pub struct CompressionInfo {
@@ -117,6 +144,19 @@ impl CompressionInfo {
             ));
         }
 
+        // Fail-fast on unknown/unsupported compressors (issue #1001). A CompressionInfo.db
+        // that names a compressor CQLite cannot decompress must error here, at metadata-parse
+        // time, BEFORE any Data.db chunk is read — never silently fall back to uncompressed.
+        // No content-based guessing is performed (no-heuristics mandate, issue #28).
+        if !is_supported_compressor_name(&algorithm) {
+            return Err(Error::UnsupportedFormat(format!(
+                "Unsupported compression algorithm '{}' in CompressionInfo.db. \
+                 CQLite only supports: {}. Cannot decompress this SSTable.",
+                algorithm,
+                SUPPORTED_COMPRESSOR_NAMES.join(", ")
+            )));
+        }
+
         // 2. writeInt(option_count)
         let option_count = read_u32(&mut cursor, "option_count")?;
         if option_count > 256 {
@@ -190,6 +230,19 @@ impl CompressionInfo {
 
         info.validate()?;
         Ok(info)
+    }
+
+    /// Resolve the compression algorithm to the runtime `CompressionAlgorithm` enum,
+    /// failing fast on any name CQLite cannot decompress (issue #1001).
+    ///
+    /// `parse()` already rejects unknown names, so for any `CompressionInfo` produced by
+    /// `parse()` this is infallible in practice; the `Result` guards `CompressionInfo`
+    /// values constructed directly (e.g. in tests) and keeps the no-fallback contract
+    /// at the point of use.
+    pub fn algorithm_enum(
+        &self,
+    ) -> Result<crate::storage::sstable::compression::CompressionAlgorithm> {
+        crate::storage::sstable::compression::CompressionAlgorithm::parse(&self.algorithm)
     }
 
     /// Get the chunk index for a given offset in the uncompressed data

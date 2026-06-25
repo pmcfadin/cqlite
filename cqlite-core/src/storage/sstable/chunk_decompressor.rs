@@ -363,10 +363,13 @@ impl ChunkDecompressor {
     ) -> Result<Vec<u8>> {
         #[cfg(feature = "deflate")]
         {
-            use flate2::read::DeflateDecoder;
+            // Cassandra's DeflateCompressor uses java.util.zip.Deflater/Inflater,
+            // which emit zlib-wrapped streams (2-byte header 0x78 0x9c + Adler-32
+            // trailer), NOT raw DEFLATE. Decode with ZlibDecoder to match. (#1082)
+            use flate2::read::ZlibDecoder;
             use std::io::Read;
 
-            let mut decoder = DeflateDecoder::new(compressed_data);
+            let mut decoder = ZlibDecoder::new(compressed_data);
             let mut decompressed = Vec::new();
 
             match decoder.read_to_end(&mut decompressed) {

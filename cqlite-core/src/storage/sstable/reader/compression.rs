@@ -19,7 +19,11 @@ pub(crate) async fn detect_and_initialize_compression(
 ) -> Result<Option<CompressionReader>> {
     // Strategy 1: Check header compression info
     if header.compression.algorithm != "NONE" {
-        let algorithm = CompressionAlgorithm::from(header.compression.algorithm.as_str());
+        // Fail-fast (issue #1001): the header declares compression, so an unknown name
+        // here is a hard error, not a silent uncompressed fallback. `parse` rejects any
+        // unrecognized compressor (with the exact offending string) instead of mapping it
+        // to `CompressionAlgorithm::None`.
+        let algorithm = CompressionAlgorithm::parse(&header.compression.algorithm)?;
         debug!("Header indicates compression: {:?}", algorithm);
 
         // Validate compression algorithm is supported
@@ -31,7 +35,8 @@ pub(crate) async fn detect_and_initialize_compression(
                 return Ok(Some(CompressionReader::new(algorithm)));
             }
             CompressionAlgorithm::None => {
-                // Continue to other detection methods
+                // Header named an explicit no-compression marker; continue to other
+                // detection methods (a CompressionInfo.db may still be present).
             }
         }
     }
@@ -174,6 +179,13 @@ async fn discover_compression_info(
                         return Ok(Some(CompressionReader::new(algorithm)));
                     }
                 }
+                // Fail-fast (issue #1001): an unsupported/unknown compressor name is a
+                // hard error and MUST propagate — never warn-and-continue, which would
+                // silently fall through to the uncompressed path and read compressed
+                // bytes as raw. Only tolerate unrelated/malformed-file load errors.
+                Err(e @ crate::Error::UnsupportedFormat(_)) => {
+                    return Err(e);
+                }
                 Err(e) => {
                     warn!(
                         "Failed to load CompressionInfo from {:?}: {}",
@@ -283,6 +295,11 @@ async fn scan_directory_for_compression_files(
                 if algorithm != CompressionAlgorithm::None {
                     return Ok(Some(CompressionReader::new(algorithm)));
                 }
+            }
+            // Fail-fast (issue #1001): unsupported compressor names must propagate, never
+            // warn-and-continue into a silent uncompressed fallback.
+            Err(e @ crate::Error::UnsupportedFormat(_)) => {
+                return Err(e);
             }
             Err(e) => {
                 log::warn!(

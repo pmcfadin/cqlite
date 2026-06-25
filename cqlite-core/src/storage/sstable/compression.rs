@@ -23,6 +23,47 @@ pub enum CompressionAlgorithm {
 /// Maximum allowed decompressed size to prevent memory exhaustion attacks (128MB)
 const MAX_DECOMPRESSED_SIZE: usize = 128 * 1024 * 1024;
 
+impl CompressionAlgorithm {
+    /// Map a recognized compressor name to its enum variant.
+    ///
+    /// Accepts CQLite short names (`LZ4`, `SNAPPY`, ...), Cassandra simple names
+    /// (`LZ4Compressor`, `SnappyCompressor`, ...) and the explicit no-compression
+    /// markers (`NONE`, `NoopCompressor`, `NoCompressor`). Returns `None` for any
+    /// other (unrecognized) name — callers MUST treat `None` here as "unknown",
+    /// not as "uncompressed".
+    fn from_name_opt(s: &str) -> Option<Self> {
+        // Strip any fully-qualified class prefix Cassandra may emit.
+        let simple = s.rsplit('.').next().unwrap_or(s);
+        match simple.to_uppercase().as_str() {
+            "NONE" | "NOOPCOMPRESSOR" | "NOCOMPRESSOR" | "NULLCOMPRESSOR" => {
+                Some(CompressionAlgorithm::None)
+            }
+            "LZ4" | "LZ4COMPRESSOR" => Some(CompressionAlgorithm::Lz4),
+            "SNAPPY" | "SNAPPYCOMPRESSOR" => Some(CompressionAlgorithm::Snappy),
+            "DEFLATE" | "DEFLATECOMPRESSOR" => Some(CompressionAlgorithm::Deflate),
+            "ZSTD" | "ZSTDCOMPRESSOR" => Some(CompressionAlgorithm::Zstd),
+            _ => None,
+        }
+    }
+
+    /// Fallible parse of a compressor name (issue #1001).
+    ///
+    /// This is the path the SSTable open / `CompressionInfo.db` flow MUST use: an
+    /// unrecognized name produces an explicit `UnsupportedFormat` error (including the
+    /// exact offending string) rather than silently falling back to uncompressed.
+    /// No content-based guessing is performed (no-heuristics mandate, issue #28).
+    pub fn parse(s: &str) -> Result<Self> {
+        Self::from_name_opt(s).ok_or_else(|| {
+            Error::UnsupportedFormat(format!(
+                "Unsupported compression algorithm '{}'. CQLite supports: \
+                 LZ4Compressor, SnappyCompressor, DeflateCompressor, ZstdCompressor \
+                 (or NONE for uncompressed).",
+                s
+            ))
+        })
+    }
+}
+
 impl From<String> for CompressionAlgorithm {
     fn from(s: String) -> Self {
         Self::from(s.as_str())
@@ -30,15 +71,16 @@ impl From<String> for CompressionAlgorithm {
 }
 
 impl From<&str> for CompressionAlgorithm {
+    /// Infallible best-effort mapping. Unrecognized names map to `None`.
+    ///
+    /// WARNING: this MUST NOT be used on the SSTable read path — an unknown name here
+    /// is indistinguishable from genuinely-disabled compression. Use the fallible
+    /// [`CompressionAlgorithm::parse`] for any path that opens real `CompressionInfo.db`
+    /// metadata (issue #1001). This `From` is retained only for the legacy header
+    /// (`SSTableHeader.compression.algorithm`) path, which guards with an explicit
+    /// `!= "NONE"` check before conversion and re-validates the resulting variant.
     fn from(s: &str) -> Self {
-        match s.to_uppercase().as_str() {
-            "NONE" => CompressionAlgorithm::None,
-            "LZ4" | "LZ4COMPRESSOR" => CompressionAlgorithm::Lz4,
-            "SNAPPY" | "SNAPPYCOMPRESSOR" => CompressionAlgorithm::Snappy,
-            "DEFLATE" | "DEFLATECOMPRESSOR" => CompressionAlgorithm::Deflate,
-            "ZSTD" | "ZSTDCOMPRESSOR" => CompressionAlgorithm::Zstd,
-            _ => CompressionAlgorithm::None, // Default to None for unknown algorithms
-        }
+        Self::from_name_opt(s).unwrap_or(CompressionAlgorithm::None)
     }
 }
 
@@ -1361,6 +1403,20 @@ impl CompressionInfo {
         // Read algorithm name (e.g. "LZ4Compressor")
         let raw_algorithm = String::from_utf8(data[offset..offset + algo_len].to_vec())
             .map_err(|e| Error::storage(format!("Invalid UTF-8 in algorithm name: {}", e)))?;
+
+        // Fail-fast on unknown/unsupported compressors (issue #1001). This legacy binary
+        // parser must not let an unrecognized name slip through to `get_algorithm()`, which
+        // would silently map it to `CompressionAlgorithm::None` and treat compressed bytes
+        // as raw. No content-based guessing is performed (no-heuristics mandate, issue #28).
+        if !crate::storage::sstable::compression_info::is_supported_compressor_name(&raw_algorithm)
+        {
+            return Err(Error::UnsupportedFormat(format!(
+                "Unsupported compression algorithm '{}' in CompressionInfo.db. \
+                 CQLite only supports: {}. Cannot decompress this SSTable.",
+                raw_algorithm,
+                crate::storage::sstable::compression_info::SUPPORTED_COMPRESSOR_NAMES.join(", ")
+            )));
+        }
 
         // Normalize algorithm name: "LZ4Compressor" -> "LZ4", "SnappyCompressor" -> "SNAPPY", etc.
         let algorithm = normalize_algorithm_name(&raw_algorithm);

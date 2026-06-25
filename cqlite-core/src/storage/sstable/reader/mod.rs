@@ -846,20 +846,26 @@ impl SSTableReader {
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer).await?;
 
-                match CompressionInfo::parse(&buffer) {
-                    Ok(info) => {
-                        log::debug!(
-                            "Loaded CompressionInfo: algorithm={}, chunk_length={}, chunks={}",
-                            info.algorithm,
-                            info.chunk_length,
-                            info.chunk_offsets.len()
-                        );
-                        return Ok(Some(info));
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to parse CompressionInfo.db: {}", e);
-                    }
-                }
+                // Fail-fast (issue #1001): a CompressionInfo.db that is present but
+                // names an unknown/unsupported compressor (or is otherwise malformed)
+                // MUST hard-error at reader-open time, BEFORE any Data.db chunk is read —
+                // never silently fall back to the uncompressed path. The error carries
+                // the offending component path for diagnosis. A genuinely uncompressed
+                // SSTable has no CompressionInfo.db at all and returns Ok(None) below.
+                let info = CompressionInfo::parse(&buffer).map_err(|e| {
+                    Error::UnsupportedFormat(format!(
+                        "Failed to parse CompressionInfo.db at {}: {}",
+                        compression_info_path.display(),
+                        e
+                    ))
+                })?;
+                log::debug!(
+                    "Loaded CompressionInfo: algorithm={}, chunk_length={}, chunks={}",
+                    info.algorithm,
+                    info.chunk_length,
+                    info.chunk_offsets.len()
+                );
+                return Ok(Some(info));
             }
         }
 
