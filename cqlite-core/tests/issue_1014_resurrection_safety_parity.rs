@@ -840,9 +840,6 @@ fn repaired_unrepaired_purge_gate_partial() {
 /// specific to the compaction-merge read contract. Un-`ignore` this test once the
 /// compaction read path surfaces partition deletions and the merge shadows them.
 #[test]
-#[ignore = "issue #1014 finding: compaction-merge read path drops partition-level deletions \
-            (parse_one_partition_for_compaction → parse_partition_header), resurrecting pk=2; \
-            tracked for a follow-up fix"]
 fn partition_tombstone_resurrection_gap_pinned() {
     let Some((_dir, nb1, nb2)) = require_fixture("resurrection_gc0") else {
         return;

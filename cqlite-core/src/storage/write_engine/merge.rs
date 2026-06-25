@@ -122,6 +122,19 @@ pub struct MergeEntry {
     /// deletion and let older cells of other columns (in SSTables not part of the
     /// compaction) resurrect. `None` for a row with no coexisting deletion.
     pub row_deletion: Option<(i64, i32)>,
+    /// Partition-level deletion `(markedForDeleteAt µs, localDeletionTime s)`
+    /// carried by a synthetic partition-tombstone carrier entry (issue #1072).
+    ///
+    /// `Some(..)` ONLY on the carrier entry the reader emits for a partition
+    /// header that has a tombstone (empty `RowData::Live`, `clustering_key:
+    /// None`). The merge extracts the MAX `markedForDeleteAt` across sources,
+    /// applies it as the OUTERMOST per-cell `<=` shadow floor for the whole
+    /// partition, and re-emits the surviving tombstone via
+    /// `merge_entry_to_mutation` (→ `Mutation::partition_tombstone`). Without
+    /// this a newer partition tombstone in one SSTable failed to shadow older
+    /// live rows in another, resurrecting the deleted partition. `None` for every
+    /// non-carrier entry.
+    pub partition_deletion: Option<(i64, i32)>,
 }
 
 impl MergeEntry {
@@ -148,6 +161,7 @@ impl MergeEntry {
             complex_deletions: Vec::new(),
             range_deletion: None,
             row_deletion: None,
+            partition_deletion: None,
         }
     }
 
@@ -177,6 +191,18 @@ impl MergeEntry {
         self
     }
 
+    /// Attach a partition-level deletion (issue #1072).
+    ///
+    /// `deletion_time` is `markedForDeleteAt` (microseconds); `ldt` is the
+    /// `localDeletionTime` (GC-clock seconds). Marks this entry as the synthetic
+    /// partition-tombstone carrier so the merge applies the partition floor and
+    /// re-emits the surviving tombstone.
+    #[must_use]
+    pub fn with_partition_deletion(mut self, partition_deletion: (i64, i32)) -> Self {
+        self.partition_deletion = Some(partition_deletion);
+        self
+    }
+
     /// True when this entry has NO writer-emittable content at all — an empty
     /// `RowData::Live { cells: vec![] }` with no row tombstone and no carried
     /// deletion metadata. Routing such an entry to the writer would create a
@@ -203,6 +229,18 @@ impl MergeEntry {
             && self.complex_deletions.is_empty()
             && self.range_deletion.is_none()
             && self.row_deletion.is_none()
+            && self.partition_deletion.is_none()
+    }
+
+    /// True when this entry is a synthetic partition-tombstone carrier (issue
+    /// #1072): an empty live row whose only payload is `partition_deletion`.
+    /// Produced by [`Self::build_merge_entry`] from a reader `PartitionDelete`.
+    /// Such an entry produces NO output row (it yields a
+    /// `Mutation::partition_tombstone`, not a clustering row), so the merge must
+    /// not count it toward output row counts — but it MUST reach the writer.
+    #[must_use]
+    pub fn is_partition_delete_carrier(&self) -> bool {
+        self.partition_deletion.is_some()
     }
 }
 
@@ -910,6 +948,37 @@ impl SSTableRowIteratorAdapter {
         } = compaction_row;
         let decorated_key = DecoratedKey::from_key_bytes(key.0)?;
 
+        // Issue #1072: a partition-level tombstone surfaces as a self-contained
+        // carrier `MergeEntry` (empty live row + `partition_deletion`, no
+        // clustering). `merge_partition_rows` extracts these, applies the MAX
+        // partition floor across sources to shadow older cells/rows/ranges, and
+        // re-emits the surviving partition tombstone. Handled BEFORE the
+        // `RangeMarker` block so the partition floor is the outermost shadow.
+        if let CompactionRowData::PartitionDelete {
+            deletion_time,
+            local_deletion_time,
+        } = row_data
+        {
+            // Carry the deletion in `RowData::Tombstone` so the carrier never
+            // surfaces as a phantom live row to consumers iterating the merge step
+            // stream; `partition_deletion` marks it as the partition-level carrier
+            // and `merge_entry_to_mutation` lifts it onto the partition header
+            // (emitting NO clustering-row `DeleteRow`).
+            return Ok(MergeEntry::new(
+                run_index,
+                decorated_key,
+                None,
+                // Use markedForDeleteAt as the entry timestamp so stats baselines
+                // see a real value (not 0) for the carrier.
+                deletion_time,
+                RowData::Tombstone {
+                    deletion_time,
+                    local_deletion_time,
+                },
+            )
+            .with_partition_deletion((deletion_time, local_deletion_time)));
+        }
+
         // Issue #933: a range-tombstone marker surfaces as a self-contained
         // carrier `MergeEntry` (empty live row + `range_deletion`), routed into the
         // partition's `None` clustering bucket so it is never collapsed with data
@@ -1062,6 +1131,9 @@ impl SSTableRowIteratorAdapter {
             // Issue #933: a range marker is handled by `build_merge_entry` before
             // this point and routed into the `None` clustering bucket.
             CompactionRowData::RangeMarker { .. } => None,
+            // Issue #1072: a partition tombstone is handled by `build_merge_entry`
+            // before this point and routed into the `None` clustering bucket.
+            CompactionRowData::PartitionDelete { .. } => None,
         }
     }
 
@@ -1193,6 +1265,12 @@ impl SSTableRowIteratorAdapter {
             // (carrier entry with `range_deletion`); they never reach this
             // conversion. Map defensively to an empty live row.
             CompactionRowData::RangeMarker { .. } => {
+                (RowData::Live { cells: Vec::new() }, Vec::new(), None)
+            }
+            // Issue #1072: partition tombstones are intercepted in
+            // `build_merge_entry` (carrier entry with `partition_deletion`); they
+            // never reach this conversion. Map defensively to an empty live row.
+            CompactionRowData::PartitionDelete { .. } => {
                 (RowData::Live { cells: Vec::new() }, Vec::new(), None)
             }
         }
@@ -2086,6 +2164,8 @@ struct PurgeCounts {
     range_tombstones: u64,
     /// Complex-deletion (collection/UDT) markers purged.
     complex_deletions: u64,
+    /// Partition-level tombstones purged (issue #1072).
+    partition_tombstones: u64,
 }
 
 #[cfg(feature = "write-support")]
@@ -2096,6 +2176,7 @@ impl PurgeCounts {
             .saturating_add(self.row_tombstones)
             .saturating_add(self.range_tombstones)
             .saturating_add(self.complex_deletions)
+            .saturating_add(self.partition_tombstones)
     }
 }
 
@@ -2271,16 +2352,24 @@ impl KWayMerger {
                 continue;
             }
 
-            // Count only real rows toward `output_rows`; a pure range-tombstone
+            // Count only real rows toward `output_rows`. A pure range-tombstone
             // carrier (empty operations, no row tombstone, only `range_tombstones`)
-            // emits a marker, not a row (#933).
+            // emits a marker, not a row (#933). A pure partition-tombstone carrier
+            // (empty operations, no row tombstone, no range tombstones, only
+            // `partition_tombstone`) emits a partition-header deletion, not a row
+            // (#1072).
             let row_mutations = mutations
                 .iter()
                 .filter(|m| {
-                    !(m.operations.is_empty()
+                    let is_range_only = m.operations.is_empty()
                         && m.partition_tombstone.is_none()
                         && m.row_tombstone.is_none()
-                        && !m.range_tombstones.is_empty())
+                        && !m.range_tombstones.is_empty();
+                    let is_partition_only = m.operations.is_empty()
+                        && m.partition_tombstone.is_some()
+                        && m.row_tombstone.is_none()
+                        && m.range_tombstones.is_empty();
+                    !(is_range_only || is_partition_only)
                 })
                 .count();
 
@@ -2461,7 +2550,27 @@ impl KWayMerger {
         let mut range_tombstones: Vec<(DecoratedKey, RangeTombstone)> = Vec::new();
         let mut clustered_rows: BTreeMap<Option<ClusteringKey>, Vec<MergeEntry>> = BTreeMap::new();
 
+        // Issue #1072: extract the synthetic partition-tombstone carriers and keep
+        // the MAX `markedForDeleteAt` across ALL merge sources (with the winning
+        // mfda's localDeletionTime). This is the partition's OUTERMOST shadow floor.
+        // Carriers are NOT pushed into `clustered_rows` (they are partition-level,
+        // not per-`(pk, ck)` rows). The partition key is the same for every entry in
+        // this call (`merge_partition_rows` is invoked per partition), so a single
+        // floor value covers the whole partition.
+        let mut max_partition_deletion: Option<(i64, i32)> = None;
+        let mut partition_delete_key: Option<DecoratedKey> = None;
+
         for row in rows {
+            if row.is_partition_delete_carrier() {
+                if let Some((mfda, ldt)) = row.partition_deletion {
+                    partition_delete_key.get_or_insert_with(|| row.key.clone());
+                    match max_partition_deletion {
+                        Some((cur_mfda, _)) if cur_mfda >= mfda => {}
+                        _ => max_partition_deletion = Some((mfda, ldt)),
+                    }
+                    continue;
+                }
+            }
             if Self::is_range_marker_carrier(&row) {
                 if let Some(rt) = row.range_deletion.clone() {
                     range_tombstones.push((row.key.clone(), rt));
@@ -2500,9 +2609,27 @@ impl KWayMerger {
                 if let Some(shadowed) =
                     Self::apply_range_shadowing(entry, &range_tombstones, &self.schema)
                 {
-                    merged.push(shadowed);
+                    // Issue #1072: apply the partition deletion as the OUTERMOST
+                    // floor — after range shadowing — dropping every cell/row
+                    // whose timestamp is `<= pmfda` (per-cell `<=`, so strictly-
+                    // newer cells survive). A whole-row covered by the partition
+                    // floor contributes nothing (the re-emitted partition
+                    // tombstone covers it).
+                    if let Some(survivor) =
+                        Self::apply_partition_shadowing(shadowed, max_partition_deletion)
+                    {
+                        merged.push(survivor);
+                    }
                 }
             }
+        }
+
+        // Issue #1072: a range tombstone older-or-equal to the partition floor is
+        // subsumed by the partition deletion and must not be re-emitted (it would
+        // be redundant). A strictly-newer range marker survives. Apply BEFORE the
+        // range re-emit loop below.
+        if let Some((pmfda, _)) = max_partition_deletion {
+            range_tombstones.retain(|(_, rt)| rt.deletion_time > pmfda);
         }
 
         // Re-emit the surviving range tombstones as carrier entries so the writer
@@ -2546,6 +2673,48 @@ impl KWayMerger {
                 )
                 .with_range_deletion(rt),
             );
+        }
+
+        // Issue #1072: re-emit the surviving partition tombstone so even a
+        // tombstone-only partition (no rows in any source) still emits a partition
+        // deletion — and the deletion keeps shadowing older rows in non-compacted
+        // SSTables. gc_grace purges the marker only when BOTH conditions hold,
+        // IDENTICAL to the range-marker re-emit gate / #1061 idiom:
+        //   1. the partition's `localDeletionTime` is strictly below `gcBefore`
+        //      (gc-grace expired), AND
+        //   2. its own `markedForDeleteAt` is strictly below
+        //      `max_purgeable_timestamp` (the min write timestamp of every
+        //      non-included overlapping SSTable — #935), proving it shadows
+        //      nothing outside the compaction set.
+        // For a full / overlap-safe compaction `max_purgeable_timestamp` is
+        // `i64::MAX` so any realistic deletion passes condition 2. For a PARTIAL
+        // compaction without an overlap bound `max_purgeable_timestamp` is
+        // `i64::MIN`, so condition 2 never fires and the tombstone is always
+        // retained (never resurrect).
+        if let (Some((pmfda, pldt)), Some(key)) = (max_partition_deletion, partition_delete_key) {
+            let purge = match effective_gc_before {
+                Some(gc_before) => {
+                    i64::from(pldt as u32) < gc_before && pmfda < max_purgeable_timestamp
+                }
+                None => false,
+            };
+            if purge {
+                purges.partition_tombstones += 1;
+            } else {
+                merged.push(
+                    MergeEntry::new(
+                        usize::MAX,
+                        key,
+                        None,
+                        pmfda,
+                        RowData::Tombstone {
+                            deletion_time: pmfda,
+                            local_deletion_time: pldt,
+                        },
+                    )
+                    .with_partition_deletion((pmfda, pldt)),
+                );
+            }
         }
 
         // Sort merged rows by clustering key for output order
@@ -2844,6 +3013,151 @@ impl KWayMerger {
     /// only the bound's components (via [`ClusteringKey::compare`], which treats an
     /// absent trailing component as a first-sorting NULL) yields the correct
     /// containment for the `DELETE WHERE pk=? AND ck1=?` prefix case.
+    /// Shadow the cells / row / metadata of a reconciled cluster entry that are
+    /// covered by the partition-level deletion (issue #1072 — the OUTERMOST floor).
+    ///
+    /// Drops every DATA cell whose own `timestamp` is `<= pmfda` (the `<=` lets the
+    /// partition deletion win an equal-ts tie, like #498/#933). Clustering-key
+    /// pseudo-cells are retained whenever any data cell survives so the row keeps
+    /// its key columns for read-back. A row whose every data cell is shadowed AND
+    /// whose row-marker liveness is `<= pmfda` produces nothing (the re-emitted
+    /// partition tombstone covers it). A row tombstone / coexisting row deletion /
+    /// complex deletion older-or-equal to the floor is subsumed; a strictly-newer
+    /// one survives. `None` floor (`max_partition_deletion == None`) is the common
+    /// case and returns the entry untouched.
+    fn apply_partition_shadowing(
+        entry: MergeEntry,
+        max_partition_deletion: Option<(i64, i32)>,
+    ) -> Option<MergeEntry> {
+        let Some((pmfda, _)) = max_partition_deletion else {
+            return Some(entry);
+        };
+
+        // A complex (collection) deletion older-or-equal to the partition floor is
+        // subsumed; one strictly newer must survive.
+        let surviving_complex: Vec<ComplexDeletion> = entry
+            .complex_deletions
+            .into_iter()
+            .filter(|cd| cd.marked_for_delete_at > pmfda)
+            .collect();
+
+        // A coexisting row deletion (#932) older-or-equal to the floor is subsumed;
+        // a newer one is preserved.
+        let surviving_row_del = entry.row_deletion.filter(|(dt, _)| *dt > pmfda);
+
+        match entry.row_data {
+            RowData::Tombstone {
+                deletion_time,
+                local_deletion_time,
+            } => {
+                // A row tombstone older-or-equal to the partition floor is subsumed
+                // by the partition deletion; a strictly-newer one survives.
+                if deletion_time > pmfda {
+                    let mut rebuilt = MergeEntry::new(
+                        entry.run_index,
+                        entry.key,
+                        entry.clustering_key,
+                        deletion_time,
+                        RowData::Tombstone {
+                            deletion_time,
+                            local_deletion_time,
+                        },
+                    );
+                    if !surviving_complex.is_empty() {
+                        rebuilt = rebuilt.with_complex_deletions(surviving_complex);
+                    }
+                    Some(rebuilt)
+                } else if !surviving_complex.is_empty() {
+                    Some(
+                        MergeEntry::new(
+                            entry.run_index,
+                            entry.key,
+                            entry.clustering_key,
+                            entry.timestamp,
+                            RowData::Live { cells: Vec::new() },
+                        )
+                        .with_complex_deletions(surviving_complex),
+                    )
+                } else {
+                    None
+                }
+            }
+            RowData::Live { cells } => {
+                // Identify clustering pseudo-cells (kept when any data cell
+                // survives). A static / unclustered row has no clustering key.
+                let ck_names: std::collections::HashSet<String> = entry
+                    .clustering_key
+                    .as_ref()
+                    .map(|ck| ck.columns.iter().map(|(n, _)| n.clone()).collect())
+                    .unwrap_or_default();
+                let is_data = |c: &CellData| !ck_names.contains(&c.column);
+
+                let kept: Vec<CellData> = cells
+                    .into_iter()
+                    .filter(|c| !is_data(c) || c.timestamp > pmfda)
+                    .collect();
+                let has_data = kept.iter().any(is_data);
+
+                // The row-marker liveness survives the partition floor only if its
+                // own timestamp is strictly newer.
+                let marker_live = entry.timestamp > pmfda;
+
+                if !has_data && !marker_live {
+                    if let Some((dt, ldt)) = surviving_row_del {
+                        return Some(MergeEntry::new(
+                            entry.run_index,
+                            entry.key,
+                            entry.clustering_key,
+                            dt,
+                            RowData::Tombstone {
+                                deletion_time: dt,
+                                local_deletion_time: ldt,
+                            },
+                        ));
+                    }
+                    if !surviving_complex.is_empty() {
+                        return Some(
+                            MergeEntry::new(
+                                entry.run_index,
+                                entry.key,
+                                entry.clustering_key,
+                                entry.timestamp,
+                                RowData::Live { cells: Vec::new() },
+                            )
+                            .with_complex_deletions(surviving_complex),
+                        );
+                    }
+                    return None;
+                }
+
+                let row_ts = if has_data {
+                    kept.iter()
+                        .filter(|c| is_data(c))
+                        .map(|c| c.timestamp)
+                        .max()
+                        .unwrap_or(entry.timestamp)
+                } else {
+                    entry.timestamp
+                };
+
+                let mut rebuilt = MergeEntry::new(
+                    entry.run_index,
+                    entry.key,
+                    entry.clustering_key,
+                    row_ts,
+                    RowData::Live { cells: kept },
+                );
+                if !surviving_complex.is_empty() {
+                    rebuilt = rebuilt.with_complex_deletions(surviving_complex);
+                }
+                if let Some((dt, ldt)) = surviving_row_del {
+                    rebuilt = rebuilt.with_row_deletion(dt, ldt);
+                }
+                Some(rebuilt)
+            }
+        }
+    }
+
     fn range_tombstone_covers_ck(
         ck: &ClusteringKey,
         rt: &RangeTombstone,
@@ -3794,6 +4108,32 @@ impl KWayMerger {
 
         let partition_key = PartitionKey::from_bytes(&entry.key.key, schema)?;
         let table_id = TableId::new(&schema.keyspace, &schema.table);
+
+        // Issue #1072: a partition-tombstone carrier produces a mutation carrying
+        // ONLY a `partition_tombstone` (no operations, no clustering key, no row /
+        // range tombstone). The writer (`write_partition`) lifts the
+        // partition_tombstone onto the partition HEADER. Emitting any
+        // `CellOperation` here (e.g. `DeleteRow` from a `RowData::Tombstone`) would
+        // wrongly write a clustering-row tombstone instead. Handled first so the
+        // carrier's `row_data` (carried as a deletion so the merge step does not
+        // surface a phantom live row) never reaches the operation builder below.
+        if let Some((deletion_time, local_deletion_time)) = entry.partition_deletion {
+            let mutation = Mutation::new(
+                table_id,
+                partition_key,
+                None,
+                Vec::new(),
+                deletion_time,
+                None,
+            );
+            let mut mutation = mutation;
+            mutation.partition_tombstone =
+                Some(crate::storage::write_engine::mutation::PartitionTombstone {
+                    deletion_time,
+                    local_deletion_time,
+                });
+            return Ok(mutation);
+        }
 
         // Issue #933: a surviving range tombstone rides on the mutation's
         // `range_tombstones`, which the writer interleaves as on-disk bound markers

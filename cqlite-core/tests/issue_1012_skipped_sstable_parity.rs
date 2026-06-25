@@ -631,9 +631,6 @@ async fn scanner_tombstone_only_partition_surfaces_in_range() {
 /// query for pk=1 returns NO live rows. The gen-2 source is the one a clustering
 /// /min-max range filter would make look skippable, yet it must stay visible.
 #[test]
-#[ignore = "P0 GAP (#1012): KWayMerger drops partition tombstones — gen-2 DELETE WHERE pk=1 \
-            does NOT shadow gen-1's older live rows (resurrection). De-ignore when the \
-            compaction/merge read path threads partition deletions."]
 fn merge_partition_delete_shadows_older_rows_gap() {
     let Some(dir) = fixture_dir() else {
         skip_or_panic(
@@ -677,9 +674,6 @@ fn merge_partition_delete_shadows_older_rows_gap() {
 /// partition tombstone is also retained. Mirrors the issue_819 two-generation
 /// no-resurrection discipline.
 #[test]
-#[ignore = "P0 GAP (#1012): compaction across the skipped gen-2 source RESURRECTS pk=1 rows \
-            and DROPS the tombstone-only pk=2 partition. De-ignore when partition \
-            tombstones are applied during compaction."]
 fn compaction_partition_delete_shadowing_gap() {
     let Some(dir) = fixture_dir() else {
         skip_or_panic(

@@ -2173,7 +2173,7 @@ mod tests {
             "DEAD partition must yield Some(deleted_at); got None"
         );
         assert_eq!(
-            partition_deletion.unwrap(),
+            partition_deletion.unwrap().0,
             dead_ts,
             "deleted_at must equal the markedForDeleteAt bytes in the header"
         );

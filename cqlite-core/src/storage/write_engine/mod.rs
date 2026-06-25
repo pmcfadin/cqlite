@@ -1392,8 +1392,24 @@ impl WriteEngine {
                     }
 
                     // Count rows actually written (skipped metadata-only entries
-                    // produce no row, so they must not inflate the stats).
-                    let row_count = mutations.len() as u64;
+                    // produce no row, so they must not inflate the stats). A pure
+                    // range-tombstone carrier (#933) or a pure partition-tombstone
+                    // carrier (#1072) emits a marker / partition-header deletion,
+                    // not a row — exclude them, matching KWayMerger::merge.
+                    let row_count = mutations
+                        .iter()
+                        .filter(|m| {
+                            let is_range_only = m.operations.is_empty()
+                                && m.partition_tombstone.is_none()
+                                && m.row_tombstone.is_none()
+                                && !m.range_tombstones.is_empty();
+                            let is_partition_only = m.operations.is_empty()
+                                && m.partition_tombstone.is_some()
+                                && m.row_tombstone.is_none()
+                                && m.range_tombstones.is_empty();
+                            !(is_range_only || is_partition_only)
+                        })
+                        .count() as u64;
 
                     // Write partition to output SSTable
                     // Re-borrow active_merge to write

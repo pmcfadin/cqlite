@@ -10,8 +10,8 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 49 |
-| `partial` | 18 |
+| `mirrored` | 55 |
+| `partial` | 12 |
 | `planned` | 6 |
 | `out_of_scope` | 8 |
 | **total** | **81** |
@@ -21,9 +21,9 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 | Evidence | Scenarios |
 |---|---|
 | `byte_for_byte` | 18 |
-| `canonical_semantic` | 26 |
+| `canonical_semantic` | 32 |
 | `smoke` | 5 |
-| `partial` | 24 |
+| `partial` | 18 |
 | `out_of_scope` | 8 |
 
 ## ⚠️ P0 scenarios with weak evidence
@@ -32,8 +32,6 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 - `cass.compaction_merge.byte_for_byte_output` — Compaction byte-for-byte output parity (future) (partial)
 - `cass.compaction_merge.load_path_validity` — Compaction output load-path validity (Tier-1) (smoke)
-- `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` — Compaction partition-delete shadowing across skipped sources (partial)
-- `cass.compaction_merge.resurrection_safety.overlapping_sources` — Compaction resurrection-safety across overlapping sources (partial)
 - `cass.compression_checksum.checksum_trailer_detection` — Inline checksum / Digest.crc32 corruption detection (partial)
 - `cass.corruption_verify.component_corruption_detection` — Component corruption detection, scrub, and verify (partial)
 - `cass.delta_scan.tombstone_liveness_facts` — Delta-scan tombstone/TTL/liveness fact extraction (partial)
@@ -45,12 +43,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.sstable_format.descriptor_component_resolution` — Descriptor and on-disk version/component resolution (smoke)
 - `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` — Statistics.db max local deletion time for tombstone/TTL fixture (partial)
 - `cass.statistics_metadata.tombstone_histogram.deletion_times` — Statistics.db estimated tombstone-drop-times histogram parity (partial)
-- `cass.tombstone_ttl.gc_grace.partition_row_cell` — gc_grace read-merge parity for partition/row/cell tombstones (partial)
-- `cass.tombstone_ttl.never_purge.cell_row_partition` — never_purge keeps cell/row/partition tombstones on read and compaction (partial)
 - `cass.tombstone_ttl.range_tombstone_boundaries` — Range tombstone boundary and deletion-time parity (partial)
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` — Repaired vs unrepaired purge gate parity (partial)
-- `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` — Partition delete from a skipped SSTable is reincluded on read (partial)
-- `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` — Skipped-SSTable partition delete shadows older live rows (partial)
 - `cass.write_load_path.cassandra_sstable_writer_fixtures` — CQLite-written SSTables load into Cassandra via sstableloader (smoke)
 
 ## P0 scenarios
@@ -62,8 +56,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.compaction_merge.byte_for_byte_output` | compaction_merge | planned | partial | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.load_path_validity` | compaction_merge | mirrored | smoke | `compaction_parity_tombstone_ttl` | p1_correctness |
 | `cass.compaction_merge.partial_source_retains_tombstones` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
-| `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` | compaction_merge | partial | partial | `compaction_parity_tombstone_ttl` | p0_data_loss |
-| `cass.compaction_merge.resurrection_safety.overlapping_sources` | compaction_merge | partial | partial | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
+| `cass.compaction_merge.resurrection_safety.overlapping_sources` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.static_row.survives_tombstone_gc` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compaction_merge.tombstone_ttl_shadowing` | compaction_merge | mirrored | canonical_semantic | `compaction_parity_tombstone_ttl` | p0_data_loss |
 | `cass.compression_checksum.checksum_trailer_detection` | compression_checksum | partial | partial | `sstable_parity_corruption_verify` | p0_data_loss |
@@ -105,16 +99,16 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.tombstone_ttl.deletion_markers.range_delete_bounds` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.deletion_markers.range_tombstone_boundary` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.deletion_markers.row_delete` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
-| `cass.tombstone_ttl.gc_grace.partition_row_cell` | tombstone_ttl | partial | partial | `sstable_parity_delta_scan` | p0_data_loss |
-| `cass.tombstone_ttl.never_purge.cell_row_partition` | tombstone_ttl | partial | partial | `sstable_parity_delta_scan` | p0_data_loss |
+| `cass.tombstone_ttl.gc_grace.partition_row_cell` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
+| `cass.tombstone_ttl.never_purge.cell_row_partition` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.range_tombstone.closed_last_block` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.range_tombstone.index_block_first_marker` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.range_tombstone.index_block_last_marker` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.range_tombstone.open_ended_middle_block` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.range_tombstone_boundaries` | tombstone_ttl | partial | partial | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.repaired_unrepaired_purge_gate` | tombstone_ttl | partial | partial | `sstable_parity_statistics_db` | p0_data_loss |
-| `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` | tombstone_ttl | partial | partial | `sstable_parity_delta_scan` | p0_data_loss |
-| `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` | tombstone_ttl | partial | partial | `sstable_parity_delta_scan` | p0_data_loss |
+| `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
+| `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.static_row.dropped_static_header_preserved` | tombstone_ttl | mirrored | byte_for_byte | `schema_parity_serialization_header` | p0_data_loss |
 | `cass.tombstone_ttl.static_row.with_row_cell_range_tombstones` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
 | `cass.tombstone_ttl.ttl_and_local_deletion_time` | tombstone_ttl | mirrored | canonical_semantic | `sstable_parity_data_db_jsonl` | p0_data_loss |
@@ -158,6 +152,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: CQLite-written da BTI SSTables are dumped with Cassandra 5 sstabledump and compared for value equivalence; Partitions.db footer shape [firstPos|keyCount|root] is matched against a real Cassandra fixture.
 - `cass.compaction_merge.partial_source_retains_tombstones` — Partial-source compaction retains row/cell tombstones
   - Normalization: When only a subset of the overlapping sources is compacted, row/cell tombstones that may still shadow data in the un-compacted sources are retained; deletion facts are mapped to the sstabledump JSONL and compared.
+- `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` — Compaction partition-delete shadowing across skipped sources
+  - Normalization: Compacting gen-1 (live pk=1 rows) with gen-2 (partition delete for pk=1, tombstone-only pk=2) now drops the pk=1 rows and retains the tombstone within gc-grace; compared against Cassandra compaction semantics. Verified now that #1072 is fixed.
+- `cass.compaction_merge.resurrection_safety.overlapping_sources` — Compaction resurrection-safety across overlapping sources
+  - Normalization: Compacting overlapping sources where a tombstone in one source shadows live data in another does not resurrect the shadowed data; partition, row, and cell shadowing is compared against Cassandra compaction output. The partition sub-case is verified now that #1072 is fixed.
 - `cass.compaction_merge.static_row.survives_tombstone_gc` — Static row survives tombstone gc through compaction parity
   - Normalization: After compaction purges expired clustered-row tombstones, the live static row must survive; the post-compaction static_block liveness is compared against Cassandra compaction semantics.
 - `cass.compaction_merge.tombstone_ttl_shadowing` — Compaction tombstone/TTL shadowing — canonical semantic parity
@@ -186,6 +184,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: scan_delta adjacent range-tombstone boundary markers (the shared boundary between two adjacent ranges) are mapped to the sstabledump JSONL range_tombstone boundary facts and compared.
 - `cass.tombstone_ttl.deletion_markers.row_delete` — Row-level deletion marker parity
   - Normalization: scan_delta row-deletion records (deletion_info markedForDeleteAt) are mapped to the sstabledump JSONL row deletion_info fact and compared.
+- `cass.tombstone_ttl.gc_grace.partition_row_cell` — gc_grace read-merge parity for partition/row/cell tombstones
+  - Normalization: Read-merge of gc_grace=0 vs gc_grace=864000 fixtures is asserted identical for partition, row, and cell tombstones; deletion facts are mapped to the sstabledump JSONL and compared. The partition sub-case is verified now that #1072 is fixed.
+- `cass.tombstone_ttl.never_purge.cell_row_partition` — never_purge keeps cell/row/partition tombstones on read and compaction
+  - Normalization: With never_purge semantics, cell, row, and partition tombstones are retained on read and across compaction; their deletion facts are mapped to the sstabledump JSONL and compared. The partition sub-case is verified now that #1072 is fixed.
 - `cass.tombstone_ttl.range_tombstone.closed_last_block` — Range-tombstone closing in the last index block parity
   - Normalization: A range tombstone whose end bound lies in the last column-index block has its close marker mapped to the sstabledump JSONL range_tombstone close bound and compared.
 - `cass.tombstone_ttl.range_tombstone.index_block_first_marker` — Range-tombstone first-of-index-block marker parity
@@ -194,6 +196,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: The close marker emitted at the last marker of a column-index block is mapped to the sstabledump JSONL range_tombstone close bound and compared.
 - `cass.tombstone_ttl.range_tombstone.open_ended_middle_block` — Range-tombstone spanning interior index blocks parity
   - Normalization: The materialized fixture range [1500,2500] is a CLOSED range spanning interior column-index blocks (not open-ended); its open/close bounds and the synthetic per-block boundary markers are mapped to the sstabledump JSONL range_tombstone facts and compared. Covered here as an interior-block-spanning closed range.
+- `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` — Partition delete from a skipped SSTable is reincluded on read
+  - Normalization: The cross-generation MERGE read path now reincludes the gen-2 partition tombstone; the merged read is compared against the sstabledump JSONL of each generation. Verified end-to-end now that #1072 is fixed.
+- `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` — Skipped-SSTable partition delete shadows older live rows
+  - Normalization: A gen-2 partition delete with a higher timestamp now shadows the gen-1 live rows for pk=1, leaving zero live rows; compared against the merged read semantics implied by the per-generation sstabledump JSONL. Verified now that #1072 is fixed.
 - `cass.tombstone_ttl.static_row.with_row_cell_range_tombstones` — Static row alongside row/cell/range tombstones parity
   - Normalization: The static row liveness and the co-located row/cell/range tombstones are mapped to the sstabledump JSONL static_block and deletion facts and compared.
 - `cass.tombstone_ttl.ttl_and_local_deletion_time` — TTL, local deletion time, and WRITETIME parity
@@ -216,8 +222,6 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 ## Gaps and next steps
 
 - `cass.compaction_merge.byte_for_byte_output` (planned): No gated byte-for-byte comparison of compaction output. → _Promote the debug byte tier in compaction-parity to a gated comparison once writer output is byte-stable._
-- `cass.compaction_merge.partition_delete_shadowing_across_skipped_sources` (partial): Compaction resurrects pk=1 and drops the tombstone-only pk=2 because the compaction-merge read path discards partition-level deletions. → _Apply partition deletions in the compaction-merge read path so shadowing and tombstone retention match Cassandra; tracked by follow-up issue #1072._
-- `cass.compaction_merge.resurrection_safety.overlapping_sources` (partial): The partition-tombstone resurrection-safety sub-case is broken (pinned ignored) because partition deletions are dropped during compaction merge. → _Apply partition tombstones in the compaction-merge read path so overlapping sources do not resurrect partition-deleted data; tracked by follow-up issue #1072._
 - `cass.compression_checksum.checksum_trailer_detection` (partial): No gated byte comparison of Digest.crc32 against the Cassandra reference. → _Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify suite._
 - `cass.corruption_verify.component_corruption_detection` (planned): No scrub/verify parity pass implemented. → _Implement a verify pass and compare detected-corruption outcomes against Cassandra VerifyTest/ScrubTest scenarios._
 - `cass.delta_scan.tombstone_liveness_facts` (partial): test_deltas dataset asset not published/enforced (#701). → _Publish and enforce the test_deltas dataset in delta-roundtrip CI._
@@ -233,12 +237,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` (partial): CQLite's minimal Statistics parser does not decode the STATS-component SSTable max local deletion time and returns a placeholder equal to the min baseline. → _Decode the STATS max local-deletion-time field and assert it byte-equal to the sstablemetadata reference; tracked by follow-up issue #1073._
 - `cass.statistics_metadata.tombstone_histogram.deletion_times` (partial): The estimated-tombstone-drop-times histogram in Statistics.db is not decoded or exposed by CQLite. → _Decode the estimated-tombstone-drop-times histogram and assert bucket parity against the sstablemetadata reference; tracked by follow-up issue #1073._
 - `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` (planned): No downsampled (sampling_level < 128) Summary.db fixture exists. → _Publish a redistributed Summary.db fixture and extend the strict suite to assert downsampled offset tables and size_at_full_sampling > entry count._
-- `cass.tombstone_ttl.gc_grace.partition_row_cell` (partial): The partition-tombstone read-merge sub-case is broken and gc_grace is not surfaced from the Statistics.db on read. → _Apply partition tombstones in the read-merge path and surface gc_grace from disk; tracked by follow-up issue #1072._
-- `cass.tombstone_ttl.never_purge.cell_row_partition` (partial): The partition-tombstone never-purge sub-case is broken (pinned ignored) because partition deletions are not applied in the compaction-merge read path. → _Apply partition tombstones in the compaction-merge read path so never_purge retains partition deletions; tracked by follow-up issue #1072._
 - `cass.tombstone_ttl.range_tombstone_boundaries` (partial): test_deltas dataset asset not published/enforced in CI (#701). → _Publish the test_deltas dataset and enforce scan_delta parity in CI._
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` (partial): repairedAt / pendingRepair parsing is not implemented (gated on #968/#988), so the repaired-vs-unrepaired purge gate is only partially exercised. → _Parse repairedAt / pendingRepair from Statistics.db and gate purge on repair status (#968/#988)._
-- `cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded` (partial): The cross-generation MERGE read path (KWayMerger / parse_one_partition_for_compaction) discards partition-level deletions, so a partition delete from a skipped SSTable is not honored on a merged read. → _Thread partition deletions through the compaction-merge read path; tracked by follow-up issue #1072._
-- `cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows` (partial): Merging a higher-timestamp gen-2 partition delete over gen-1 leaves the 10 pk=1 rows live instead of 0 (P0 resurrection). → _Thread partition deletions through the compaction-merge read path so the skipped-SSTable partition delete shadows older rows; tracked by follow-up issue #1072._
 
 ## Out-of-scope taxonomy
 

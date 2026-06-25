@@ -2894,7 +2894,7 @@ scenarios:
 
   - id: cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded
     title: Partition delete from a skipped SSTable is reincluded on read
-    status: partial
+    status: mirrored
     capability: tombstone_ttl
     priority: P0
     risk: p0_data_loss
@@ -2914,7 +2914,7 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -2924,28 +2924,17 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
       normalization: >-
-        The per-generation reader reincludes the gen-2 partition tombstone; this is
-        compared against the sstabledump JSONL of each generation independently.
-      known_limitations: >-
-        The single-generation reader reincludes the partition tombstone, but the
-        cross-generation MERGE read path (KWayMerger / parse_one_partition_for_compaction)
-        discards partition-level deletions, so a merged read does not yet honor the
-        skipped-SSTable partition delete.
+        The cross-generation MERGE read path now reincludes the gen-2 partition
+        tombstone; the merged read is compared against the sstabledump JSONL of each
+        generation. Verified end-to-end now that #1072 is fixed.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
-    scope:
-      gap: >-
-        The cross-generation MERGE read path (KWayMerger /
-        parse_one_partition_for_compaction) discards partition-level deletions, so a
-        partition delete from a skipped SSTable is not honored on a merged read.
-      next_step: >-
-        Thread partition deletions through the compaction-merge read path; tracked
-        by follow-up issue #1072.
+    scope: {}
 
   - id: cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows
     title: Skipped-SSTable partition delete shadows older live rows
-    status: partial
+    status: mirrored
     capability: tombstone_ttl
     priority: P0
     risk: p0_data_loss
@@ -2965,7 +2954,7 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -2975,28 +2964,18 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
       normalization: >-
-        A gen-2 partition delete with a higher timestamp must shadow the gen-1 live
+        A gen-2 partition delete with a higher timestamp now shadows the gen-1 live
         rows for pk=1, leaving zero live rows; compared against the merged read
-        semantics implied by the per-generation sstabledump JSONL.
-      known_limitations: >-
-        P0 resurrection: merging the gen-2 partition delete over gen-1 currently
-        leaves the 10 pk=1 rows live instead of 0, because the compaction-merge read
-        path drops partition-level deletions.
+        semantics implied by the per-generation sstabledump JSONL. Verified now that
+        #1072 is fixed.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
-    scope:
-      gap: >-
-        Merging a higher-timestamp gen-2 partition delete over gen-1 leaves the 10
-        pk=1 rows live instead of 0 (P0 resurrection).
-      next_step: >-
-        Thread partition deletions through the compaction-merge read path so the
-        skipped-SSTable partition delete shadows older rows; tracked by follow-up
-        issue #1072.
+    scope: {}
 
   - id: cass.compaction_merge.partition_delete_shadowing_across_skipped_sources
     title: Compaction partition-delete shadowing across skipped sources
-    status: partial
+    status: mirrored
     capability: compaction_merge
     priority: P0
     risk: p0_data_loss
@@ -3016,7 +2995,7 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -3027,22 +3006,13 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
       normalization: >-
         Compacting gen-1 (live pk=1 rows) with gen-2 (partition delete for pk=1,
-        tombstone-only pk=2) should drop pk=1 rows and retain the tombstone within
-        gc-grace; compared against Cassandra compaction semantics.
-      known_limitations: >-
-        Compaction currently resurrects pk=1 (the gen-2 partition delete is dropped
-        by the merge read path) and also drops the tombstone-only pk=2, so partition
-        shadowing across skipped sources is not yet correct.
+        tombstone-only pk=2) now drops the pk=1 rows and retains the tombstone within
+        gc-grace; compared against Cassandra compaction semantics. Verified now that
+        #1072 is fixed.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
-    scope:
-      gap: >-
-        Compaction resurrects pk=1 and drops the tombstone-only pk=2 because the
-        compaction-merge read path discards partition-level deletions.
-      next_step: >-
-        Apply partition deletions in the compaction-merge read path so shadowing and
-        tombstone retention match Cassandra; tracked by follow-up issue #1072.
+    scope: {}
 
   # --- #1013 range-tombstone index-block markers ----------------------------
   - id: cass.tombstone_ttl.range_tombstone.index_block_first_marker
@@ -3281,7 +3251,7 @@ scenarios:
   # --- #1014 resurrection safety -------------------------------------------
   - id: cass.tombstone_ttl.never_purge.cell_row_partition
     title: never_purge keeps cell/row/partition tombstones on read and compaction
-    status: partial
+    status: mirrored
     capability: tombstone_ttl
     priority: P0
     risk: p0_data_loss
@@ -3301,7 +3271,7 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -3311,28 +3281,18 @@ scenarios:
       reference_paths:
         - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
       normalization: >-
-        With never_purge semantics, cell and row tombstones are retained on read and
-        across compaction; their deletion facts are mapped to the sstabledump JSONL
-        and compared.
-      known_limitations: >-
-        Row and cell never-purge is proven on both read and compaction; the
-        partition-tombstone sub-case is broken and pinned with an ignored test
-        because the compaction-merge read path drops partition deletions.
+        With never_purge semantics, cell, row, and partition tombstones are retained
+        on read and across compaction; their deletion facts are mapped to the
+        sstabledump JSONL and compared. The partition sub-case is verified now that
+        #1072 is fixed.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
-    scope:
-      gap: >-
-        The partition-tombstone never-purge sub-case is broken (pinned ignored)
-        because partition deletions are not applied in the compaction-merge read
-        path.
-      next_step: >-
-        Apply partition tombstones in the compaction-merge read path so never_purge
-        retains partition deletions; tracked by follow-up issue #1072.
+    scope: {}
 
   - id: cass.tombstone_ttl.gc_grace.partition_row_cell
     title: gc_grace read-merge parity for partition/row/cell tombstones
-    status: partial
+    status: mirrored
     capability: tombstone_ttl
     priority: P0
     risk: p0_data_loss
@@ -3354,7 +3314,7 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -3366,22 +3326,13 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
       normalization: >-
         Read-merge of gc_grace=0 vs gc_grace=864000 fixtures is asserted identical
-        for row and cell tombstones; deletion facts are mapped to the sstabledump
-        JSONL and compared.
-      known_limitations: >-
-        gc_grace=0 vs 864000 read-merge is proven identical for row/cell tombstones;
-        the partition sub-case is broken and gc_grace is not yet surfaced from disk
-        (Statistics.db) by CQLite.
+        for partition, row, and cell tombstones; deletion facts are mapped to the
+        sstabledump JSONL and compared. The partition sub-case is verified now that
+        #1072 is fixed.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
-    scope:
-      gap: >-
-        The partition-tombstone read-merge sub-case is broken and gc_grace is not
-        surfaced from the Statistics.db on read.
-      next_step: >-
-        Apply partition tombstones in the read-merge path and surface gc_grace from
-        disk; tracked by follow-up issue #1072.
+    scope: {}
 
   - id: cass.tombstone_ttl.repaired_unrepaired_purge_gate
     title: Repaired vs unrepaired purge gate parity
@@ -3436,7 +3387,7 @@ scenarios:
 
   - id: cass.compaction_merge.resurrection_safety.overlapping_sources
     title: Compaction resurrection-safety across overlapping sources
-    status: partial
+    status: mirrored
     capability: compaction_merge
     priority: P0
     risk: p0_data_loss
@@ -3456,7 +3407,7 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
         - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
@@ -3467,23 +3418,13 @@ scenarios:
         - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
       normalization: >-
         Compacting overlapping sources where a tombstone in one source shadows live
-        data in another must not resurrect the shadowed data; row/cell shadowing is
-        compared against Cassandra compaction output.
-      known_limitations: >-
-        Row and cell shadowing on compaction is proven; the partition-tombstone
-        sub-case is broken and pinned with an ignored test because partition
-        deletions are dropped by the compaction-merge read path.
+        data in another does not resurrect the shadowed data; partition, row, and cell
+        shadowing is compared against Cassandra compaction output. The partition
+        sub-case is verified now that #1072 is fixed.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
-    scope:
-      gap: >-
-        The partition-tombstone resurrection-safety sub-case is broken (pinned
-        ignored) because partition deletions are dropped during compaction merge.
-      next_step: >-
-        Apply partition tombstones in the compaction-merge read path so overlapping
-        sources do not resurrect partition-deleted data; tracked by follow-up issue
-        #1072.
+    scope: {}
 
   - id: cass.compaction_merge.partial_source_retains_tombstones
     title: Partial-source compaction retains row/cell tombstones
