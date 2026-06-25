@@ -286,11 +286,15 @@ impl CompressionInfo {
     ) -> Option<u64> {
         let start_offset = self.compressed_chunk_offset(chunk_index)?;
 
+        // Checked subtraction: a corrupt offset (start past the next offset or
+        // past EOF for the final chunk) must NOT underflow-panic in debug / wrap
+        // in release. Return None so the caller surfaces a recoverable
+        // InvalidFormat error instead of crashing (roborev #970).
         if chunk_index + 1 < self.chunk_offsets.len() {
             let next_offset = self.chunk_offsets[chunk_index + 1];
-            Some(next_offset - start_offset)
+            next_offset.checked_sub(start_offset)
         } else {
-            Some(total_compressed_size - start_offset)
+            total_compressed_size.checked_sub(start_offset)
         }
     }
 
