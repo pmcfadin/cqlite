@@ -1,0 +1,82 @@
+================================================================
+ CORRUPTION CORPUS VERIFICATION REPORT (epic #970, issue #999)
+================================================================
+corrupt corpus: test-data/datasets/sstables/test_comp_corrupt
+clean source  : test-data/datasets/sstables/test_comp
+
+FIXTURE                        COMPONENT            MUTATION     OFFSET    STATUS
+----------------------------------------------------------------------------------------
+data_db_bit_flip               nb-1-big-Data.db     bitflip      64        OK
+  data_db_bit_flip:
+      component        : nb-1-big-Data.db
+      clean   SHA256   : 260ad484202f379ad8d5a1860928db1120a8354697013a3dece6e12705ec61d3  (6979 bytes)
+      corrupt SHA256   : 4e1cdb2f32629770f9bb0611ec2240a62b37aab82226d75ad92c839b118e7cd7  (6979 bytes)
+      mutation         : bitflip @ 64  (orig=61 mut=60)
+      single-mutation  : OK
+data_db_truncation             nb-1-big-Data.db     truncate     4096      OK
+  data_db_truncation:
+      component        : nb-1-big-Data.db
+      clean   SHA256   : 260ad484202f379ad8d5a1860928db1120a8354697013a3dece6e12705ec61d3  (6979 bytes)
+      corrupt SHA256   : c65b976244faf0b38f5dc08211aa495723acbc42d88fa1d6e1a2a0a27a8ca893  (4096 bytes)
+      mutation         : truncate @ 4096  (orig=len=6979 mut=len=4096)
+      single-mutation  : OK
+compression_info_bad_offset    nb-1-big-CompressionInfo.db setbyte      47        OK
+  compression_info_bad_offset:
+      component        : nb-1-big-CompressionInfo.db
+      clean   SHA256   : 4af98f424e68f72b2c78d0f0d78c01117a6dca4f732a3571a3ecaa09a2c77b26  (135 bytes)
+      corrupt SHA256   : 5600275ab1ae62b60d1c0183183f71d456c82b7329caa26911c5d6c6eb0c01d1  (135 bytes)
+      mutation         : setbyte @ 47  (orig=00 mut=80)
+      single-mutation  : OK
+index_db_bit_flip_big          nb-1-big-Index.db    bitflip      7         OK
+  index_db_bit_flip_big:
+      component        : nb-1-big-Index.db
+      clean   SHA256   : 94c71e1e345aea2bdcaa47f8a1270bfe81e81cb4d7884cb35dd20ee4282c2b95  (86 bytes)
+      corrupt SHA256   : d92731ebec124f46fbf51b83bba9da680aa7850bf39874c1a60710d0fa246c32  (86 bytes)
+      mutation         : bitflip @ 7  (orig=4e mut=0e)
+      single-mutation  : OK
+bti_partitions_footer_flip     da-2-bti-Partitions.db bitflip      57        OK
+  bti_partitions_footer_flip:
+      component        : da-2-bti-Partitions.db
+      clean   SHA256   : 2037e896ff532e0a3204a47af8ff4eb9c330a56676e396ef95810a804da2a2cc  (58 bytes)
+      corrupt SHA256   : e93871d0b753546cf6abaf0b0208f2689d1cb8970d8efcca98dab0bb7ee135ef  (58 bytes)
+      mutation         : bitflip @ 57  (orig=14 mut=15)
+      single-mutation  : OK
+bti_rows_truncation            da-2-bti-Rows.db     truncate     256       OK
+  bti_rows_truncation:
+      component        : da-2-bti-Rows.db
+      clean   SHA256   : b3d5678b3041f803c4586705f979f71ae99bf78aa480aa41727e28fe4193a1b7  (760 bytes)
+      corrupt SHA256   : 8cdddaa6df572b3a233b84d91453c6f3c4ef3e0414a4ea117a69b081ebd92007  (256 bytes)
+      mutation         : truncate @ 256  (orig=len=760 mut=len=256)
+      single-mutation  : OK
+statistics_db_header_damage    nb-1-big-Statistics.db setbyte      0         OK
+  statistics_db_header_damage:
+      component        : nb-1-big-Statistics.db
+      clean   SHA256   : 40ae17779979141bbaea95ad1c91ccbc9cac4ad3c3c3611d128dd897aad6e0aa  (4847 bytes)
+      corrupt SHA256   : 28fb84c79f54c37d1d507aa7df9e36649bef2da634f954f67abde14f3046f1a4  (4847 bytes)
+      mutation         : setbyte @ 0  (orig=00 mut=ff)
+      single-mutation  : OK
+summary_db_truncation          nb-1-big-Summary.db  truncate     16        OK
+  summary_db_truncation:
+      component        : nb-1-big-Summary.db
+      clean   SHA256   : 609509aa0ccbeda5ad26d72017d8a4e1545fdef77ead3f2938e06d9732dd9011  (56 bytes)
+      corrupt SHA256   : f9339a82b91eeb5ea41a1a8672c015e0f42539f5206e3ec07ec609a1fbb987eb  (16 bytes)
+      mutation         : truncate @ 16  (orig=len=56 mut=len=16)
+      single-mutation  : OK
+toc_missing_component          nb-1-big-TOC.txt     tocdrop      line      OK
+  toc_missing_component:
+      component        : nb-1-big-TOC.txt
+      clean   SHA256   : cf526377ebd42f4caa5373174928b4135b907d829e714d0396accba86cdb1af5  (92 bytes)
+      corrupt SHA256   : 7989bb984960f1b552ca339295c192ffd976aae36db3135db71418e0ef3e71bc  (78 bytes)
+      mutation         : tocdrop @ line  (orig=line:Statistics.db mut=removed)
+      single-mutation  : OK
+digest_crc32_mismatch          nb-1-big-Digest.crc32 digest       text      OK
+  digest_crc32_mismatch:
+      component        : nb-1-big-Digest.crc32
+      clean   SHA256   : 240115c6ff1b379ce26e0315c4f43547b711edc0e73380f67d823c0a7c9b3f16  (10 bytes)
+      corrupt SHA256   : 3babd7a8e7d27188858449d00dbdbb413d75419a97b9fa4c43f0fb7af9b1e1c6  (10 bytes)
+      mutation         : digest @ text  (orig=1177334624 mut=1177334620)
+      single-mutation  : OK
+----------------------------------------------------------------------------------------
+active fixtures : 10  (data_db_bit_flip data_db_truncation compression_info_bad_offset index_db_bit_flip_big bti_partitions_footer_flip bti_rows_truncation statistics_db_header_damage summary_db_truncation toc_missing_component digest_crc32_mismatch)
+planned fixtures: 0  (none)
+================================================================
