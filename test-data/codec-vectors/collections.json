@@ -1,0 +1,145 @@
+{
+  "_provenance": {
+    "source": "Apache Cassandra 5.0.2 serializer source (docker image cassandra:5.0.2; sources fetched from github.com/apache/cassandra tag cassandra-5.0.2).",
+    "files": [
+      "org/apache/cassandra/serializers/CollectionSerializer.java",
+      "org/apache/cassandra/serializers/AbstractMapSerializer.java",
+      "org/apache/cassandra/serializers/SetSerializer.java",
+      "org/apache/cassandra/serializers/MapSerializer.java",
+      "org/apache/cassandra/serializers/ListSerializer.java"
+    ],
+    "framing_contract": {
+      "collection_size": "CollectionSerializer.writeCollectionSize == ByteBuffer.putInt(elements); sizeOfCollectionSize == TypeSizes.INT_SIZE == 4. Fixed 4-byte big-endian SIGNED int. NOT a VInt for the frozen/CQL-protocol (ByteBufferAccessor) serialized form.",
+      "element_size": "CollectionSerializer.writeValue == output.putInt(size); -1 == null. Fixed 4-byte big-endian SIGNED int prefix per element value (and per map value).",
+      "set_order": "SetSerializer.serializeValues sorts the serialized element buffers with comparators.buffer (Cassandra byte-comparable SORT order). For text (UTF8Type) the buffer order equals lexicographic UTF-8 byte order.",
+      "map_order": "MapSerializer/AbstractMapSerializer keep entries key-sorted (by key buffer comparator). getIndexFromSerialized skips the value buffer when comparison<0 (hasValues==true).",
+      "set_lookup": "SetSerializer.getSerializedValue linear-scans; returns the matching value buffer; short-circuits to null once comparison>0 (sorted-order). Element value at byte offset = sizeOfCollectionSize + sum over preceding elements of (4 + len_j); readValue slices [offset+4, offset+4+len].",
+      "index_lookup": "AbstractMapSerializer.getIndexFromSerialized returns the ELEMENT INDEX i (0-based, not a byte offset) of a matching key, or -1 if absent; short-circuits to -1 once comparison>0.",
+      "range": "AbstractMapSerializer.getIndexesRangeFromSerialized returns a half-open Range.closedOpen(start, end) i.e. [start,end). from/to UNSET => start=0 / end=n. If from is greater than every element => Range.closedOpen(0,0) (empty). end defaults to n if to is past the last element."
+    },
+    "vint_element_count_contract": {
+      "note": "The MULTI-CELL on-disk SSTable collection path reads the element/cell count with the Cassandra unsigned VInt (org.apache.cassandra.utils.VIntCoding / DataInputPlus.readUnsignedVInt). CQLite implements this as parser::vint::parse_vuint / encode_vuint. Size classes: leading-ones in byte 0 select extra-byte count; unsigned VInt of value v occupies ceil((bits_needed)/7)-style class boundaries at 2^7,2^14,2^21,... The frozen-collection serializer above uses a fixed 4-byte int instead and is unaffected by these boundaries.",
+      "source": "org/apache/cassandra/utils/VIntCoding.java; org/apache/cassandra/io/util/DataInputPlus.readUnsignedVInt(); confirmed in CQLite read path v5_compressed_legacy.rs:6821 (parse_vuint)."
+    },
+
+    "cqlite_reader_framing": {
+      "note": "CQLite's no-heuristics schema reader (parser::types::parse_list_with_schema / parse_map_with_schema) decodes the MULTI-CELL on-disk SSTable form, NOT the frozen 4-byte ByteBuffer form. In that form the element COUNT and each element LENGTH PREFIX are Cassandra SIGNED VInts (parser::vint::encode_vint / parse_vint, zigzag), and -1 length == null. For a `text` element the length-prefixed bytes are themselves a `parse_text` buffer == [signed-VInt str_len][utf8]; for `int` the element is 4 raw big-endian bytes (parse_int). The 4-byte-BE-int `serialized_bytes` vectors below are the FROZEN/CQL-protocol (CollectionSerializer ByteBufferAccessor) form used to validate Cassandra's offset/lookup/range ARITHMETIC; the reader-decode tests rebuild the same logical members in the VInt form. Both framings must yield identical ordered members (single_cell_multicell_equivalence).",
+      "source": "parser/types.rs parse_list_with_schema/parse_map_with_schema/parse_text/parse_int; in-tree convention parser/collection_correctness_tests.rs."
+    }
+  },
+
+  "set_lookup_offsets": {
+    "manifest": "cass.cql_types.collections.set_lookup_offsets",
+    "cql_type": "set<text>",
+    "frozen": true,
+    "description": "Frozen set<text> {alpha,bravo,delta} already in Cassandra sort order. Verifies element value byte-ranges, lookup-by-element returns the right index, and an ABSENT element ('charlie') returns no match WITHOUT shifting the byte offsets of the surrounding present elements.",
+    "serialized_bytes": [0,0,0,3, 0,0,0,5,97,108,112,104,97, 0,0,0,5,98,114,97,118,111, 0,0,0,5,100,101,108,116,97],
+    "element_count": 3,
+    "size_prefix_width_bytes": 4,
+    "elements": [
+      {"index": 0, "text": "alpha", "len_prefix_offset": 4, "value_range": [8, 13]},
+      {"index": 1, "text": "bravo", "len_prefix_offset": 13, "value_range": [17, 22]},
+      {"index": 2, "text": "delta", "len_prefix_offset": 22, "value_range": [26, 31]}
+    ],
+    "lookups": [
+      {"key": "alpha", "expect_index": 0, "expect_value_range": [8, 13]},
+      {"key": "bravo", "expect_index": 1, "expect_value_range": [17, 22]},
+      {"key": "delta", "expect_index": 2, "expect_value_range": [26, 31]},
+      {"key": "charlie", "expect_index": -1, "comment": "absent; sorts between bravo and delta; short-circuits after delta>charlie path. Present-element offsets must be unchanged."},
+      {"key": "zulu", "expect_index": -1, "comment": "absent; greater than all; short-circuits to -1."},
+      {"key": "aardvark", "expect_index": -1, "comment": "absent; less than all; first comparison>0 => -1 immediately."}
+    ]
+  },
+
+  "set_range_offsets": {
+    "manifest": "cass.cql_types.collections.set_range_offsets",
+    "cql_type": "set<text>",
+    "frozen": true,
+    "description": "getIndexesRangeFromSerialized half-open [start,end) semantics over the same {alpha,bravo,delta} set.",
+    "serialized_bytes": [0,0,0,3, 0,0,0,5,97,108,112,104,97, 0,0,0,5,98,114,97,118,111, 0,0,0,5,100,101,108,116,97],
+    "element_count": 3,
+    "ranges": [
+      {"from": "alpha", "to": "delta", "expect_start": 0, "expect_end": 3, "comment": "closed both ends -> [0,3)"},
+      {"from": "bravo", "to": "delta", "expect_start": 1, "expect_end": 3},
+      {"from": "alpha", "to": "bravo", "expect_start": 0, "expect_end": 2},
+      {"from": null, "to": "bravo", "expect_start": 0, "expect_end": 2, "comment": "from UNSET => start 0"},
+      {"from": "bravo", "to": null, "expect_start": 1, "expect_end": 3, "comment": "to UNSET => end n"},
+      {"from": "charlie", "to": "zulu", "expect_start": 2, "expect_end": 3, "comment": "from sorts between bravo/delta -> first element >= charlie is delta(2)"},
+      {"from": "zulu", "to": "zzzz", "expect_start": 0, "expect_end": 0, "comment": "from greater than all => empty closedOpen(0,0)"}
+    ]
+  },
+
+  "map_key_lookup_offsets": {
+    "manifest": "cass.cql_types.collections.map_key_lookup_offsets",
+    "cql_type": "map<text,int>",
+    "frozen": true,
+    "description": "Frozen map<text,int> {alpha:1, bravo:2, delta:3} key-sorted. int values are 4-byte BE. Verifies getIndexFromSerialized returns the ENTRY INDEX (not byte offset), value byte-ranges, and absent-key short-circuit. int values chosen non-negative so byte order is irrelevant (keys drive ordering).",
+    "serialized_bytes": [0,0,0,3, 0,0,0,5,97,108,112,104,97, 0,0,0,4,0,0,0,1, 0,0,0,5,98,114,97,118,111, 0,0,0,4,0,0,0,2, 0,0,0,5,100,101,108,116,97, 0,0,0,4,0,0,0,3],
+    "element_count": 3,
+    "entries": [
+      {"index": 0, "key": "alpha", "key_value_range": [8, 13], "value_int": 1, "value_value_range": [17, 21]},
+      {"index": 1, "key": "bravo", "key_value_range": [25, 30], "value_int": 2, "value_value_range": [34, 38]},
+      {"index": 2, "key": "delta", "key_value_range": [42, 47], "value_int": 3, "value_value_range": [51, 55]}
+    ],
+    "lookups": [
+      {"key": "alpha", "expect_index": 0},
+      {"key": "bravo", "expect_index": 1},
+      {"key": "delta", "expect_index": 2},
+      {"key": "charlie", "expect_index": -1, "comment": "absent between bravo/delta"},
+      {"key": "zulu", "expect_index": -1}
+    ]
+  },
+
+  "map_key_range_offsets": {
+    "manifest": "cass.cql_types.collections.map_key_range_offsets",
+    "cql_type": "map<text,int>",
+    "frozen": true,
+    "description": "getIndexesRangeFromSerialized over map keys {alpha,bravo,delta}; entry indexes [start,end).",
+    "serialized_bytes": [0,0,0,3, 0,0,0,5,97,108,112,104,97, 0,0,0,4,0,0,0,1, 0,0,0,5,98,114,97,118,111, 0,0,0,4,0,0,0,2, 0,0,0,5,100,101,108,116,97, 0,0,0,4,0,0,0,3],
+    "element_count": 3,
+    "ranges": [
+      {"from": "alpha", "to": "delta", "expect_start": 0, "expect_end": 3},
+      {"from": "bravo", "to": "bravo", "expect_start": 1, "expect_end": 2, "comment": "single key -> [1,2)"},
+      {"from": null, "to": "alpha", "expect_start": 0, "expect_end": 1},
+      {"from": "delta", "to": null, "expect_start": 2, "expect_end": 3},
+      {"from": "zulu", "to": "zzzz", "expect_start": 0, "expect_end": 0, "comment": "empty range"}
+    ]
+  },
+
+  "vint_element_count_boundaries": {
+    "manifest": "cass.cql_types.collections.vint_element_count_boundaries",
+    "description": "Unsigned VInt element-count size-class boundaries for the MULTI-CELL on-disk collection path (Cassandra readUnsignedVInt / CQLite parse_vuint, encode_vuint). Each entry gives the count value, the exact authoritative encoded bytes, and the byte width Cassandra emits.",
+    "cases": [
+      {"count": 0,        "encoded_bytes": [0],                          "width_bytes": 1, "class": "1-byte 0xxxxxxx"},
+      {"count": 1,        "encoded_bytes": [1],                          "width_bytes": 1, "class": "1-byte 0xxxxxxx"},
+      {"count": 127,      "encoded_bytes": [127],                        "width_bytes": 1, "class": "1-byte max (2^7-1)"},
+      {"count": 128,      "encoded_bytes": [128, 128],                   "width_bytes": 2, "class": "2-byte min: 10xxxxxx xxxxxxxx"},
+      {"count": 16383,    "encoded_bytes": [191, 255],                   "width_bytes": 2, "class": "2-byte max (2^14-1)"},
+      {"count": 16384,    "encoded_bytes": [192, 64, 0],                 "width_bytes": 3, "class": "3-byte min: 110xxxxx ..."},
+      {"count": 2097151,  "encoded_bytes": [223, 255, 255],              "width_bytes": 3, "class": "3-byte max (2^21-1)"},
+      {"count": 2097152,  "encoded_bytes": [224, 32, 0, 0],             "width_bytes": 4, "class": "4-byte min: 1110xxxx ..."}
+    ]
+  },
+
+  "single_cell_multicell_equivalence": {
+    "manifest": "cass.cql_types.collections.single_cell_multicell_equivalence",
+    "cql_type": "set<text>",
+    "description": "A frozen (single-cell) set and a multi-cell set with the SAME members in the SAME Cassandra sort order must decode to the same ordered element sequence. The frozen single-cell wire form is the CollectionSerializer 4-byte-framed blob (one cell value). The multi-cell form stores each element in its own complex cell (element count via unsigned VInt, element bytes in the cell PATH). This vector asserts the ORDERED member list is identical; it does not assert the two wire layouts are byte-identical (they are intentionally different framings).",
+    "members_in_sort_order": ["alpha", "bravo", "delta"],
+    "frozen_single_cell_bytes": [0,0,0,3, 0,0,0,5,97,108,112,104,97, 0,0,0,5,98,114,97,118,111, 0,0,0,5,100,101,108,116,97],
+    "multicell_element_count_vint": [3],
+    "multicell_element_path_bytes": [
+      [97,108,112,104,97],
+      [98,114,97,118,111],
+      [100,101,108,116,97]
+    ]
+  },
+
+  "list_insertion_order": {
+    "manifest": "cass.cql_types.collections.single_cell_multicell_equivalence",
+    "cql_type": "list<text>",
+    "frozen": false,
+    "description": "Lists (ListType) preserve INSERTION order and are NOT sorted (contrast with set_lookup_offsets, which is sorted). An intentionally non-sorted member sequence [delta, alpha, bravo] must decode back verbatim, positionally. Exercises the same multi-cell reader path as sets but proves the list ordering contract. Decoded via CQLite's MULTI-CELL VInt framing (see cqlite_reader_framing).",
+    "members_in_insertion_order": ["delta", "alpha", "bravo"]
+  }
+}
