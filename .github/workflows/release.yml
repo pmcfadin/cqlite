@@ -11,10 +11,6 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  # GHCR repo for the cqlite-flight Arrow Flight (gRPC) server image. Must be
-  # lowercase; `pmcfadin` already is. The Trino connector is released
-  # separately (it ships as a Trino plugin, not in this image).
-  REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/cqlite-flight
 
 jobs:
   build-cli:
@@ -125,124 +121,6 @@ jobs:
           ./cqlite-${{ matrix.target }}.${{ contains(matrix.target, 'windows') && 'zip' || 'tar.gz' }}.sha256
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  # Build the cqlite-flight container per architecture on a NATIVE runner
-  # (amd64 on ubuntu-latest, arm64 on ubuntu-24.04-arm) and push each by digest.
-  # Native runners avoid QEMU-emulated Rust compiles, which are slow and prone
-  # to OOM. The multi-arch manifest is assembled in the `merge-flight-image`
-  # job below. The image exposes the Arrow Flight gRPC listener on :8815 and
-  # reads SSTables from a directory mounted at runtime (`--data-dir`).
-  build-flight-image:
-    name: Build cqlite-flight image (${{ matrix.platform }})
-    runs-on: ${{ matrix.runner }}
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: read
-      packages: write
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            runner: ubuntu-24.04-arm
-    steps:
-    - name: Prepare platform tag
-      run: |
-        platform="${{ matrix.platform }}"
-        echo "PLATFORM_PAIR=${platform//\//-}" >> "$GITHUB_ENV"
-
-    - uses: actions/checkout@v5
-
-    - name: Docker metadata (labels)
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY_IMAGE }}
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Log in to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Build and push by digest
-      id: build
-      uses: docker/build-push-action@v6
-      with:
-        context: .
-        file: cqlite-flight/Dockerfile
-        platforms: ${{ matrix.platform }}
-        labels: ${{ steps.meta.outputs.labels }}
-        outputs: type=image,name=${{ env.REGISTRY_IMAGE }},push-by-digest=true,name-canonical=true,push=true
-
-    - name: Export digest
-      run: |
-        mkdir -p "${{ runner.temp }}/digests"
-        digest="${{ steps.build.outputs.digest }}"
-        touch "${{ runner.temp }}/digests/${digest#sha256:}"
-
-    - name: Upload digest
-      uses: actions/upload-artifact@v4
-      with:
-        name: digests-${{ env.PLATFORM_PAIR }}
-        path: ${{ runner.temp }}/digests/*
-        if-no-files-found: error
-        retention-days: 1
-
-  # Assemble the per-arch digests into a single multi-arch manifest list and
-  # apply the human tags (vX.Y.Z, X.Y, and `latest` for non-prerelease tags).
-  merge-flight-image:
-    name: Publish multi-arch cqlite-flight image
-    runs-on: ubuntu-latest
-    needs: build-flight-image
-    if: startsWith(github.ref, 'refs/tags/v')
-    permissions:
-      contents: read
-      packages: write
-    steps:
-    - name: Download digests
-      uses: actions/download-artifact@v4
-      with:
-        path: ${{ runner.temp }}/digests
-        pattern: digests-*
-        merge-multiple: true
-
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-
-    - name: Docker metadata (tags)
-      id: meta
-      uses: docker/metadata-action@v5
-      with:
-        images: ${{ env.REGISTRY_IMAGE }}
-        tags: |
-          type=semver,pattern={{version}}
-          type=semver,pattern={{major}}.{{minor}}
-          type=raw,value=latest,enable=${{ !contains(github.ref_name, '-') }}
-
-    - name: Log in to GHCR
-      uses: docker/login-action@v3
-      with:
-        registry: ghcr.io
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
-
-    - name: Create manifest list and push
-      working-directory: ${{ runner.temp }}/digests
-      run: |
-        docker buildx imagetools create \
-          $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
-          $(printf '${{ env.REGISTRY_IMAGE }}@sha256:%s ' *)
-
-    - name: Inspect image
-      run: |
-        docker buildx imagetools inspect ${{ env.REGISTRY_IMAGE }}:${{ steps.meta.outputs.version }}
 
   # Append the changelog + hosted API-docs links to the auto-generated release
   # notes. Runs once per tag (no matrix) so the body is set a single time (#563).
