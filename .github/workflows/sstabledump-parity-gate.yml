@@ -229,6 +229,7 @@ jobs:
           - CompressionInfo.db (strict): ${{ steps.compression_info_parity.outcome }}
           - Filter.db (strict): ${{ steps.filter_db_parity.outcome }}
           - Repaired-metadata (strict): ${{ steps.repaired_metadata_parity.outcome }}
+          - Compression/corruption parity (epic #970, informational): ${{ steps.compression_corruption_parity.outcome }}
 
           Dataset:
           - Tag: ${{ env.DATASET_TAG }}
