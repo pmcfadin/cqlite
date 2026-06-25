@@ -326,10 +326,9 @@ fn verify_via_reader(fx: &Fixture) {
 /// `ChunkDecompressor::read_all_data` decompress path. Trailer + boundary
 /// validation (the subject of issue #998) always runs via `verify_all_trailers`,
 /// which independently asserts the `payload_len = span - 4` trailer-subtraction
-/// invariant at the byte level. The full reader decompress is skipped for
-/// deflate fixtures because the production DeflateCompressor decode path is
-/// independently broken (zlib-wrapped stream fed to a raw-DEFLATE decoder) —
-/// reported separately, NOT fixed in this CRC-validation issue.
+/// invariant at the byte level. As of #1082 the production DeflateCompressor decode
+/// path correctly handles Cassandra's zlib-wrapped streams (ZlibDecoder), so the
+/// full reader decompress is now driven for every codec including deflate.
 fn run_positive(table: &str, drive_reader: bool) {
     let Some(fx) = resolve_fixture(table) else {
         eprintln!(
@@ -382,9 +381,11 @@ fn issue_998_snappy_inline_crc_trailers_verify() {
 
 #[test]
 fn issue_998_deflate_inline_crc_trailers_verify() {
-    // drive_reader=false: the DeflateCompressor decode path is independently
-    // broken (see report); CRC trailers + trailer-subtraction are still verified.
-    run_positive("deflate_table", false);
+    // drive_reader=true: the DeflateCompressor decode path (zlib-wrapped stream) is
+    // now decoded correctly via ZlibDecoder (#1082), so the production reader can
+    // decompress every chunk in addition to the CRC trailer + trailer-subtraction
+    // checks.
+    run_positive("deflate_table", true);
 }
 
 #[test]

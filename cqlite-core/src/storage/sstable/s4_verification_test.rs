@@ -709,27 +709,28 @@ mod s4_verification {
         );
     }
 
-    /// Document that Deflate has NO length prefix in Cassandra 5.0 nb format.
+    /// Document that Deflate has NO length prefix in Cassandra 5.0 nb format and is
+    /// ZLIB-wrapped (not raw DEFLATE).
     ///
-    /// Source authority: DeflateCompressor.java — raw Deflate bytes, no header.
-    /// CQLite's chunk_decompressor.rs uses raw Deflate (CORRECT).
+    /// Source authority: DeflateCompressor.java uses java.util.zip.Deflater/Inflater,
+    /// which emit a ZLIB-wrapped stream: 2-byte header (0x78 0x9c) + DEFLATE body +
+    /// 4-byte Adler-32 trailer. There is NO 4-byte uncompressed-size prefix. CQLite's
+    /// decode paths use ZlibDecoder (CORRECT, #1082).
     ///
-    /// VERDICT: CORRECT BUT UNTESTED under standard features.
+    /// VERDICT: CORRECT.
     #[test]
     fn test_deflate_no_prefix() {
-        // Cassandra's DeflateCompressor writes raw Deflate bytes with no length header.
-        // CQLite's chunk_decompressor.rs:decompress_deflate_chunk() correctly passes
-        // raw bytes to DeflateDecoder without skipping any prefix.
-        //
-        // Deflate data begins with a CMF+FLG byte pair (zlib header) or raw deflate stream.
-        // There is NO 4-byte length prefix added by Cassandra.
+        // Cassandra's DeflateCompressor writes a zlib-wrapped stream with no 4-byte
+        // length header. CQLite's chunk_decompressor.rs:decompress_deflate_chunk(),
+        // compression.rs::decompress(), and the streaming path all decode with
+        // ZlibDecoder without skipping any prefix (#1082).
 
         let deflate_has_4byte_prefix = false;
         assert!(
             !deflate_has_4byte_prefix,
             "No 4-byte length prefix for Deflate in Cassandra nb format. \
-             DeflateCompressor.java writes raw Deflate. \
-             chunk_decompressor.rs uses DeflateDecoder(raw bytes) — CORRECT."
+             DeflateCompressor.java emits a zlib-wrapped stream (0x78 0x9c + DEFLATE + \
+             Adler-32). All CQLite deflate paths use ZlibDecoder — CORRECT."
         );
     }
 
