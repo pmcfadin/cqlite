@@ -310,7 +310,10 @@ async fn corrupt_big_index_is_not_a_silent_zero_row_success() {
     };
     let dir = root.join("corruption/test_comp_corrupt/index_db_bit_flip_big");
     if !dir.is_dir() || !has_data_db(&dir) {
-        eprintln!("index_db_bit_flip_big not materialized — skipping (clean skip)");
+        skip_or_require(
+            "corrupt fixture index_db_bit_flip_big",
+            "not materialized (Data.db absent)",
+        );
         return;
     }
 
@@ -344,7 +347,12 @@ async fn corrupt_bti_tries_are_not_a_silent_zero_row_success() {
     ] {
         let dir = corrupt_root.join(fixture);
         if !dir.is_dir() || !has_data_db(&dir) {
-            eprintln!("{fixture} not materialized — skipping (clean skip)");
+            // Strict mode fails if this expected BTI fixture is absent;
+            // otherwise skip just this one and continue.
+            skip_or_require(
+                &format!("corrupt BTI fixture {fixture}"),
+                "not materialized (Data.db absent)",
+            );
             continue;
         }
 
@@ -401,7 +409,10 @@ async fn quick_mode_does_not_scan_rows_full_mode_does() {
                     .unwrap_or(false)
         })
     else {
-        eprintln!("lz4_table fixture not materialized — skipping (clean skip)");
+        skip_or_require(
+            "healthy fixture lz4_table",
+            "not materialized (Data.db absent)",
+        );
         return;
     };
 
