@@ -206,25 +206,30 @@ impl CanonicalValue {
         }
     }
 
-    /// Decode a partition-key / clustering-key COMPONENT.
+    /// Decode a partition-key / clustering-key COMPONENT given the DECLARED CQL
+    /// type of that key column ([`KeyKind`]).
     ///
-    /// This differs from [`CanonicalValue::from_json`] in exactly one,
-    /// schema-aware-but-narrow way: sstabledump renders partition-key components
-    /// as quoted JSON *strings* even for numeric key columns (e.g. an `int`
-    /// partition key `1` is dumped as `"1"`), whereas CQLite's own JSONL emits
-    /// the typed number `1`. For KEY COMPONENTS ONLY we therefore coerce a clean
-    /// numeric string to `Int` so the two equivalent key renderings unify.
+    /// sstabledump renders EVERY key component as a quoted JSON *string* — even
+    /// for numeric key columns (an `int` partition key `1` is dumped as `"1"`) —
+    /// whereas CQLite's own JSONL emits the typed number `1`. To unify those two
+    /// equivalent renderings we coerce a clean numeric string to `Int`, but ONLY
+    /// when the key column's declared type is integral
+    /// ([`KeyKind::Integral`]). For a text/ascii/varchar/blob/etc. key column
+    /// ([`KeyKind::Other`]) a numeric-looking string such as `"5"` stays `Text`,
+    /// so a TEXT key `"5"` can never compare equal to a numeric key `5`.
     ///
-    /// This is intentionally NOT applied to cell VALUES (see `from_json`): a CQL
-    /// text/ascii/varchar cell `"5"` must stay `Text` and must NOT equal a
-    /// numeric `5`. The coercion here is confined to the key path because that is
-    /// the only place sstabledump's string-stringification of typed scalars
-    /// occurs, so it cannot mask a text-vs-numeric cell-value parity bug.
-    pub fn from_json_key(v: &JsonValue) -> Self {
-        if let JsonValue::String(s) = v {
-            if parse_timestamp_micros(s).is_none() {
-                if let Some(i) = parse_strict_i128(s) {
-                    return CanonicalValue::Int(i);
+    /// This soundness is the whole point of taking [`KeyKind`]: without the
+    /// declared type, blindly coercing every numeric-looking key string to `Int`
+    /// would let a text-vs-numeric KEY mis-decode false-pass (issue #971). The
+    /// coercion is never applied to cell VALUES (see [`from_json`]): the JSON
+    /// shape there already carries the type.
+    pub fn from_json_key(v: &JsonValue, kind: KeyKind) -> Self {
+        if kind == KeyKind::Integral {
+            if let JsonValue::String(s) = v {
+                if parse_timestamp_micros(s).is_none() {
+                    if let Some(i) = parse_strict_i128(s) {
+                        return CanonicalValue::Int(i);
+                    }
                 }
             }
         }
@@ -264,6 +269,81 @@ impl CanonicalValue {
                     .join(", ")
             ),
         }
+    }
+}
+
+/// The comparison-relevant class of a partition/clustering KEY column's declared
+/// CQL type. Only the integral classes permit the sstabledump
+/// string-rendered-number → `Int` coercion in
+/// [`CanonicalValue::from_json_key`]; everything else (text/ascii/varchar/blob/
+/// uuid/timestamp/...) is [`KeyKind::Other`] and a numeric-looking key string is
+/// kept as `Text`, so a TEXT key `"5"` can never false-match a numeric key `5`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    /// int / bigint / smallint / tinyint / varint / counter — sstabledump emits
+    /// these as quoted numeric strings; coerce a clean numeric string to `Int`.
+    Integral,
+    /// Any non-integral key type — keep a numeric-looking string as `Text`.
+    Other,
+}
+
+impl KeyKind {
+    /// Classify a declared CQL type name (case-insensitive, `frozen<...>`
+    /// unwrapped) as integral or not. Unknown/compound types are `Other` — the
+    /// SAFE default, since coercion is the only thing that can mask a bug and we
+    /// only ever opt INTO it for known-integral scalar key types.
+    pub fn from_cql_type(cql_type: &str) -> Self {
+        let t = cql_type.trim().to_ascii_lowercase();
+        let t = t
+            .strip_prefix("frozen<")
+            .and_then(|s| s.strip_suffix('>'))
+            .unwrap_or(&t)
+            .trim();
+        match t {
+            "int" | "bigint" | "smallint" | "tinyint" | "varint" | "counter" => KeyKind::Integral,
+            _ => KeyKind::Other,
+        }
+    }
+}
+
+/// Ordered declared key-column kinds for a table: partition-key components
+/// followed by clustering-key components, in schema order. Threaded into the
+/// loader/parser so each KEY component is canonicalized against its DECLARED CQL
+/// type rather than guessed from the JSON shape (issue #971, no-heuristics).
+///
+/// When a position has no declared kind (the slice is shorter than the observed
+/// key — e.g. an unknown/under-specified fixture), the component falls back to
+/// [`KeyKind::Other`] (the sound, no-coercion default).
+#[derive(Debug, Clone, Default)]
+pub struct KeySpec {
+    /// Partition-key column kinds, in schema order.
+    pub partition: Vec<KeyKind>,
+    /// Clustering-key column kinds, in schema order.
+    pub clustering: Vec<KeyKind>,
+}
+
+impl KeySpec {
+    /// A spec with NO declared integral columns: every key component is treated
+    /// as [`KeyKind::Other`], so no numeric-string coercion happens. This is the
+    /// sound default used by the no-schema loaders.
+    pub fn none() -> Self {
+        KeySpec::default()
+    }
+
+    /// Build a spec from ordered (partition, clustering) declared CQL type names.
+    pub fn from_cql_types(partition: &[&str], clustering: &[&str]) -> Self {
+        KeySpec {
+            partition: partition.iter().map(|t| KeyKind::from_cql_type(t)).collect(),
+            clustering: clustering.iter().map(|t| KeyKind::from_cql_type(t)).collect(),
+        }
+    }
+
+    fn partition_kind(&self, i: usize) -> KeyKind {
+        self.partition.get(i).copied().unwrap_or(KeyKind::Other)
+    }
+
+    fn clustering_kind(&self, i: usize) -> KeyKind {
+        self.clustering.get(i).copied().unwrap_or(KeyKind::Other)
     }
 }
 
@@ -538,7 +618,23 @@ const PLACEHOLDER_MARKERS: &[&str] = &[
 ///
 /// `expect_rows = true` additionally rejects a document that parses to zero
 /// partitions, for lanes where the fixture is known to contain data.
+///
+/// This no-schema variant treats EVERY key component as [`KeyKind::Other`] (no
+/// numeric-string coercion). Lanes whose KEY columns are integral MUST use
+/// [`load_golden_document_with_keys`] so an `int` key dumped as `"1"` unifies
+/// with CQLite's typed `1` while a text key `"5"` still stays `Text`.
 pub fn load_golden_document(path: &Path, expect_rows: bool) -> Result<CanonicalDocument, CanonicalError> {
+    load_golden_document_with_keys(path, expect_rows, &KeySpec::none())
+}
+
+/// Schema-aware [`load_golden_document`]: canonicalizes each KEY component
+/// against its declared CQL type via `keys`, so the string→`Int` coercion is
+/// applied ONLY to integral key columns (issue #971 soundness).
+pub fn load_golden_document_with_keys(
+    path: &Path,
+    expect_rows: bool,
+    keys: &KeySpec,
+) -> Result<CanonicalDocument, CanonicalError> {
     if !path.exists() {
         return Err(CanonicalError::Missing(path.to_path_buf()));
     }
@@ -554,16 +650,30 @@ pub fn load_golden_document(path: &Path, expect_rows: bool) -> Result<CanonicalD
         }
     }
 
-    parse_document_str(&content, path, expect_rows)
+    parse_document_str_with_keys(&content, path, expect_rows, keys)
 }
 
 /// Parse an in-memory JSONL document (one JSON object per non-blank line). Used
 /// by [`load_golden_document`] and directly by tests that synthesize a CQLite
 /// JSONL document in memory.
+///
+/// No-schema variant: every key component is [`KeyKind::Other`] (no coercion).
+/// Use [`parse_document_str_with_keys`] for integral-key lanes.
 pub fn parse_document_str(
     content: &str,
     path: &Path,
     expect_rows: bool,
+) -> Result<CanonicalDocument, CanonicalError> {
+    parse_document_str_with_keys(content, path, expect_rows, &KeySpec::none())
+}
+
+/// Schema-aware [`parse_document_str`]: each KEY component is canonicalized
+/// against its declared CQL type from `keys` (issue #971 soundness).
+pub fn parse_document_str_with_keys(
+    content: &str,
+    path: &Path,
+    expect_rows: bool,
+    keys: &KeySpec,
 ) -> Result<CanonicalDocument, CanonicalError> {
     let mut partitions = Vec::new();
     let mut nonblank = 0usize;
@@ -580,7 +690,7 @@ pub fn parse_document_str(
             line: lineno,
             msg: e.to_string(),
         })?;
-        let partition = parse_partition(&v, path, lineno)?;
+        let partition = parse_partition(&v, path, lineno, keys)?;
         partitions.push(partition);
     }
 
@@ -598,6 +708,7 @@ fn parse_partition(
     v: &JsonValue,
     path: &Path,
     line: usize,
+    keys: &KeySpec,
 ) -> Result<CanonicalPartition, CanonicalError> {
     let partition = v.get("partition").ok_or_else(|| CanonicalError::Structure {
         path: path.to_path_buf(),
@@ -613,7 +724,11 @@ fn parse_partition(
             line,
             msg: "`partition` missing array `key`".to_string(),
         })?;
-    let key = key_arr.iter().map(CanonicalValue::from_json_key).collect();
+    let key = key_arr
+        .iter()
+        .enumerate()
+        .map(|(i, c)| CanonicalValue::from_json_key(c, keys.partition_kind(i)))
+        .collect();
 
     let deletion = partition.get("deletion_info").and_then(parse_deletion_info);
 
@@ -624,9 +739,9 @@ fn parse_partition(
         for row in arr {
             let rtype = row.get("type").and_then(|t| t.as_str()).unwrap_or("");
             match rtype {
-                "row" | "static_block" => rows.push(parse_row(row, rtype)),
+                "row" | "static_block" => rows.push(parse_row(row, rtype, keys)),
                 "range_tombstone_bound" | "range_tombstone_boundary" => {
-                    range_bounds.push(parse_range_bound(row, rtype));
+                    range_bounds.push(parse_range_bound(row, rtype, keys));
                 }
                 other => {
                     return Err(CanonicalError::Structure {
@@ -647,11 +762,16 @@ fn parse_partition(
     })
 }
 
-fn parse_row(row: &JsonValue, rtype: &str) -> CanonicalRow {
+fn parse_row(row: &JsonValue, rtype: &str, keys: &KeySpec) -> CanonicalRow {
     let clustering = row
         .get("clustering")
         .and_then(|c| c.as_array())
-        .map(|a| a.iter().map(CanonicalValue::from_json_key).collect())
+        .map(|a| {
+            a.iter()
+                .enumerate()
+                .map(|(i, c)| CanonicalValue::from_json_key(c, keys.clustering_kind(i)))
+                .collect()
+        })
         .unwrap_or_default();
 
     let liveness = row.get("liveness_info").map(|li| LivenessInfo {
@@ -736,15 +856,15 @@ fn parse_cell(cell: &JsonValue) -> CanonicalCell {
     }
 }
 
-fn parse_range_bound(row: &JsonValue, rtype: &str) -> CanonicalRangeBound {
-    let start = row.get("start").map(parse_bound_half);
-    let end = row.get("end").map(parse_bound_half);
+fn parse_range_bound(row: &JsonValue, rtype: &str, keys: &KeySpec) -> CanonicalRangeBound {
+    let start = row.get("start").map(|h| parse_bound_half(h, keys));
+    let end = row.get("end").map(|h| parse_bound_half(h, keys));
     // A simple `range_tombstone_bound` may carry the bound at the top level
     // rather than nested under start/end; cover that too.
     let (start, end) = if start.is_none() && end.is_none() {
         // Inspect the bound's own `type` to decide which side it is.
         let bt = row.get("type").and_then(|t| t.as_str()).unwrap_or("");
-        let half = parse_bound_half(row);
+        let half = parse_bound_half(row, keys);
         // Default to start side; sstabledump distinguishes via clustering.
         if bt.contains("end") {
             (None, Some(half))
@@ -762,14 +882,15 @@ fn parse_range_bound(row: &JsonValue, rtype: &str) -> CanonicalRangeBound {
     }
 }
 
-fn parse_bound_half(inner: &JsonValue) -> BoundHalf {
+fn parse_bound_half(inner: &JsonValue, keys: &KeySpec) -> BoundHalf {
     let clustering = inner
         .get("clustering")
         .and_then(|c| c.as_array())
         .map(|a| {
             a.iter()
                 .filter(|v| v.as_str() != Some("*"))
-                .map(CanonicalValue::from_json_key)
+                .enumerate()
+                .map(|(i, c)| CanonicalValue::from_json_key(c, keys.clustering_kind(i)))
                 .collect()
         })
         .unwrap_or_default();

@@ -69,12 +69,31 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use canonical_jsonl::{
-    compare_documents, datasets_root, find_golden_jsonl, load_golden_document, render_diffs,
-    CanonicalCell, CanonicalDocument, CanonicalPartition, CanonicalRow, CanonicalValue, CompareCtx,
-    LivenessInfo,
+    compare_documents, datasets_root, find_golden_jsonl, load_golden_document_with_keys,
+    render_diffs, CanonicalCell, CanonicalDocument, CanonicalPartition, CanonicalRow,
+    CanonicalValue, CompareCtx, KeyKind, KeySpec, LivenessInfo,
 };
 
 use cqlite_core::schema::{ClusteringColumn, ClusteringOrder, Column, KeyColumn, TableSchema};
+
+/// Build the comparator [`KeySpec`] from a [`TableSchema`] so each KEY component
+/// is canonicalized against its DECLARED CQL type (issue #971): integral key
+/// columns unify sstabledump's `"1"` with CQLite's typed `1`, while a text key
+/// `"5"` stays `Text` and never false-matches a numeric `5`.
+fn key_spec_from_schema(schema: &TableSchema) -> KeySpec {
+    KeySpec {
+        partition: schema
+            .partition_keys
+            .iter()
+            .map(|k| KeyKind::from_cql_type(&k.data_type))
+            .collect(),
+        clustering: schema
+            .clustering_keys
+            .iter()
+            .map(|c| KeyKind::from_cql_type(&c.data_type))
+            .collect(),
+    }
+}
 use cqlite_core::storage::sstable::reader::delta_scan::{scan_delta, CellDelta, DeltaRecord};
 use cqlite_core::types::Value;
 
@@ -400,7 +419,8 @@ async fn run_parity(manifest_id: &str, table: &str, schema: TableSchema) {
         return;
     };
 
-    let mut expected = load_golden_document(&golden_path, true)
+    let key_spec = key_spec_from_schema(&schema);
+    let mut expected = load_golden_document_with_keys(&golden_path, true, &key_spec)
         .unwrap_or_else(|e| panic!("[{table}] golden load failed: {e}"));
     normalize_for_value_axis(&mut expected);
 

@@ -89,8 +89,27 @@ use cqlite_core::types::Value;
 mod canonical_jsonl;
 
 use canonical_jsonl::{
-    compare_documents, load_golden_document, parse_document_str, render_diffs, CompareCtx,
+    compare_documents, load_golden_document_with_keys, parse_document_str_with_keys, render_diffs,
+    CompareCtx, KeyKind, KeySpec,
 };
+
+/// Build the comparator [`KeySpec`] from a [`TableSchema`]: ordered partition +
+/// clustering key CQL types, so each KEY component is canonicalized against its
+/// DECLARED type rather than guessed from the JSON shape (issue #971).
+fn key_spec_from_schema(schema: &TableSchema) -> KeySpec {
+    KeySpec {
+        partition: schema
+            .partition_keys
+            .iter()
+            .map(|k| KeyKind::from_cql_type(&k.data_type))
+            .collect(),
+        clustering: schema
+            .clustering_keys
+            .iter()
+            .map(|c| KeyKind::from_cql_type(&c.data_type))
+            .collect(),
+    }
+}
 
 // ===========================================================================
 // require-fixtures contract (epic #971): opt-in strict mode
@@ -702,8 +721,17 @@ fn assert_decode_parity(
     excluded_cols: &[&str],
 ) {
     let golden_path = gen_component(dir, gen, "Data.db.jsonl");
+
+    // Build the schema-aware KEY spec (ordered partition + clustering CQL types)
+    // BEFORE the schema is moved into the scan, so both the golden and the
+    // CQLite-rendered actual canonicalize each key component against its declared
+    // type. This makes sstabledump's string-rendered numeric keys (`"1"`) unify
+    // with CQLite's typed `1` ONLY for integral key columns (issue #971): a text
+    // key `"5"` would stay `Text` and never false-match a numeric `5`.
+    let key_spec = key_spec_from_schema(&schema);
+
     // FAIL-LOUD on a missing / empty / placeholder golden.
-    let golden = load_golden_document(&golden_path, true).unwrap_or_else(|e| {
+    let golden = load_golden_document_with_keys(&golden_path, true, &key_spec).unwrap_or_else(|e| {
         panic!("[{manifest_id}] table={table} gen={gen}: golden load failed: {e}")
     });
 
@@ -711,7 +739,7 @@ fn assert_decode_parity(
     let records = block_on(collect_records(isolated.path(), schema));
     let jsonl = records_to_jsonl(&records, excluded_cols);
     let synthetic_path = golden_path.with_extension("cqlite.synthetic");
-    let actual = parse_document_str(&jsonl, &synthetic_path, true).unwrap_or_else(|e| {
+    let actual = parse_document_str_with_keys(&jsonl, &synthetic_path, true, &key_spec).unwrap_or_else(|e| {
         panic!(
             "[{manifest_id}] table={table} gen={gen}: CQLite-rendered JSONL failed to parse: {e}\n\
              ---- rendered ----\n{jsonl}"

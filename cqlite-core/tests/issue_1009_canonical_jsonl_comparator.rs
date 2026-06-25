@@ -25,8 +25,9 @@ use std::path::{Path, PathBuf};
 
 use canonical_jsonl::{
     build_report, compare_documents, datasets_root, find_golden_jsonl, fixture_dir,
-    load_golden_document, parse_document_str, render_diffs, render_manifest_report, CanonicalError,
-    CanonicalValue, CompareCtx, NormalizedFloat,
+    load_golden_document, parse_document_str, parse_document_str_with_keys, render_diffs,
+    render_manifest_report, CanonicalError, CanonicalValue, CompareCtx, KeyKind, KeySpec,
+    NormalizedFloat,
 };
 
 // ---------------------------------------------------------------------------
@@ -74,6 +75,77 @@ fn typed_values_compare_by_type_not_string() {
         CanonicalValue::Null,
         CanonicalValue::List(vec![]),
         "explicit null must differ from empty collection"
+    );
+}
+
+/// `cass.cql_types.jsonl.schema_aware_normalization` — KEY-component
+/// canonicalization is SOUND: the sstabledump string→`Int` coercion is applied
+/// ONLY to integral key columns. A TEXT key `"5"` must NOT compare equal to a
+/// numeric key `5`, while a genuine integral key still matches the golden's
+/// string rendering. This guards the residual #971 finding: blindly coercing
+/// every numeric-looking key string would let a text-vs-numeric KEY mis-decode
+/// false-pass.
+#[test]
+fn key_component_coercion_is_schema_sound() {
+    // KeyKind classification: integral families coerce, everything else does not.
+    for t in ["int", "bigint", "smallint", "tinyint", "varint", "counter", "INT", "frozen<int>"] {
+        assert_eq!(KeyKind::from_cql_type(t), KeyKind::Integral, "{t} must be integral");
+    }
+    for t in ["text", "ascii", "varchar", "blob", "uuid", "timestamp", "double", "tuple<int,int>"] {
+        assert_eq!(KeyKind::from_cql_type(t), KeyKind::Other, "{t} must be Other (no coercion)");
+    }
+
+    // sstabledump renders EVERY key component as a quoted string. The actual
+    // (CQLite) side emits the typed token: an int key as a bare number `5`, a
+    // text key as a quoted `"5"`.
+    let golden_line =
+        r#"{"partition":{"key":["5"]},"rows":[{"type":"row","cells":[{"name":"v","value":1}]}]}"#;
+
+    // --- TEXT partition key: golden "5" must stay Text and NOT match a numeric 5. ---
+    let text_spec = KeySpec::from_cql_types(&["text"], &[]);
+    let golden_text = parse_document_str_with_keys(golden_line, Path::new("<g-text>"), true, &text_spec)
+        .expect("golden text-key parse");
+    assert_eq!(
+        golden_text.partitions[0].key,
+        vec![CanonicalValue::Text("5".to_string())],
+        "a text key column must keep \"5\" as Text (no coercion)"
+    );
+    // A CQLite side that WRONGLY decoded the text key as numeric 5 (bare JSON
+    // number) must FAIL the comparison — proving the false-pass is closed.
+    let actual_numeric =
+        r#"{"partition":{"key":[5]},"rows":[{"type":"row","cells":[{"name":"v","value":1}]}]}"#;
+    let actual_num_doc =
+        parse_document_str_with_keys(actual_numeric, Path::new("<a-num>"), true, &text_spec)
+            .expect("actual numeric parse");
+    let ctx = CompareCtx::new(MID_NORM, "<key-soundness>");
+    let diffs = compare_documents(&ctx, &golden_text, &actual_num_doc);
+    assert!(
+        diffs.iter().any(|d| d.what.contains("partition key")),
+        "text key \"5\" must NOT equal a mis-decoded numeric key 5: {}",
+        render_diffs(&diffs)
+    );
+
+    // --- INTEGRAL partition key: golden "5" coerces to Int and matches a typed 5. ---
+    let int_spec = KeySpec::from_cql_types(&["int"], &[]);
+    let golden_int = parse_document_str_with_keys(golden_line, Path::new("<g-int>"), true, &int_spec)
+        .expect("golden int-key parse");
+    assert_eq!(
+        golden_int.partitions[0].key,
+        vec![CanonicalValue::Int(5)],
+        "an int key column coerces the string \"5\" to Int(5)"
+    );
+    let int_diffs = compare_documents(&ctx, &golden_int, &actual_num_doc);
+    assert!(
+        int_diffs.is_empty(),
+        "a genuine int key must match the golden's string rendering: {}",
+        render_diffs(&int_diffs)
+    );
+
+    // The two interpretations of the SAME golden line are NOT equal to each other:
+    // type is load-bearing even on the key path.
+    assert_ne!(
+        golden_text.partitions[0].key, golden_int.partitions[0].key,
+        "text \"5\" key and int 5 key must be distinct canonical values"
     );
 }
 
