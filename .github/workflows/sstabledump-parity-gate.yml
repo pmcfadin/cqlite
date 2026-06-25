@@ -99,7 +99,7 @@ jobs:
 
       - name: Build parity test targets
         run: |
-          cargo test --no-run --package cqlite-core --features write-support \
+          cargo test --no-run --package cqlite-core --features write-support,cli-helpers \
             --test sstabledump_parity_data \
             --test sstabledump_parity_index \
             --test sstabledump_parity_statistics \
@@ -178,7 +178,7 @@ jobs:
         id: compression_corruption_parity
         continue-on-error: true
         run: |
-          cargo test --package cqlite-core --features write-support \
+          cargo test --package cqlite-core --features write-support,cli-helpers \
             --test issue_997_compressioninfo_parity \
             --test issue_998_inline_crc_trailers \
             --test issue_1000_verifier \

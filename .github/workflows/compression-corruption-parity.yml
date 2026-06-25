@@ -124,7 +124,7 @@ jobs:
         run: |
           env CQLITE_REQUIRE_FIXTURES=1 \
             CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
-            cargo test -p cqlite-core \
+            cargo test -p cqlite-core --features write-support,cli-helpers \
               --test issue_997_compressioninfo_parity \
               --test issue_998_inline_crc_trailers \
               --test issue_1000_verifier \
