@@ -644,10 +644,12 @@ fn check_compression_info(
             return Ok(Some(info));
         }
     };
+    let mut offset_out_of_bounds = false;
     for (i, &offset) in info.chunk_offsets.iter().enumerate() {
         // Every chunk record is at least its 4-byte inline CRC, so the offset
         // itself must leave room for that. Offsets at/after EOF are corrupt.
         if offset.saturating_add(4) > data_len {
+            offset_out_of_bounds = true;
             findings.push(VerifyFinding::new(
                 VerifyErrorClass::ChunkOffsetOutOfBounds,
                 "CompressionInfo.db",
@@ -657,6 +659,16 @@ fn check_compression_info(
                 ),
             ));
         }
+    }
+
+    // An out-of-bounds offset is corrupt metadata: do NOT hand it downstream.
+    // The inline-CRC check derives each chunk's compressed size from adjacent
+    // offsets, which would underflow (panic in debug / huge alloc in release) on
+    // a bad offset — violating the corruption-as-findings contract. The finding
+    // is already recorded, so returning None just skips the chunk-CRC check
+    // (roborev).
+    if offset_out_of_bounds {
+        return Ok(None);
     }
 
     Ok(Some(info))

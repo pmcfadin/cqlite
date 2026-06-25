@@ -157,6 +157,20 @@ impl CompressionInfo {
             )));
         }
 
+        // Normalize to the simple class name. Cassandra may write a
+        // fully-qualified class name (e.g. "org.apache.cassandra.io.compress.LZ4Compressor");
+        // is_supported_compressor_name accepts it, but downstream consumers
+        // (ChunkDecompressor matches simple names like "LZ4Compressor") would
+        // otherwise fail at decompress time with "Unknown compression algorithm".
+        // Store the canonical simple name so parse-time acceptance and
+        // decode-time handling stay consistent (roborev). No-op for the
+        // already-simple names Cassandra writes into the test fixtures.
+        let algorithm = algorithm
+            .rsplit('.')
+            .next()
+            .unwrap_or(&algorithm)
+            .to_string();
+
         // 2. writeInt(option_count)
         let option_count = read_u32(&mut cursor, "option_count")?;
         if option_count > 256 {
