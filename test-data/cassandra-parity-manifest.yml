@@ -2329,3 +2329,1444 @@ scenarios:
         secondary indexes.
       related_in_scope_scenarios:
         - cass.index_summary.big_index_offsets
+
+  # ----------------------------------------------------------------------------
+  # epic #972 — tombstone/TTL/dropped-column/static-row parity scenarios
+  # ----------------------------------------------------------------------------
+
+  # --- #1010 deletion markers (test_deltas) ---------------------------------
+  - id: cass.tombstone_ttl.deletion_markers.partition_delete
+    title: Partition-level deletion marker parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - PartitionTest.java
+        - DeletionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1010_deletion_markers_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-88f66f006c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1010_deletion_markers_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/partition_tombstones-88f66f006c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta partition-deletion records (markedForDeleteAt / localDeletionTime)
+        are mapped to the sstabledump JSONL partition_deletion fact and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the partition deletion fact; not a Data.db
+        byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.deletion_markers.row_delete
+    title: Row-level deletion marker parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RowTest.java
+        - DeletionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1010_deletion_markers_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-88dd41b06c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1010_deletion_markers_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/row_tombstones-88dd41b06c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta row-deletion records (deletion_info markedForDeleteAt) are mapped
+        to the sstabledump JSONL row deletion_info fact and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the row deletion fact; not a Data.db byte
+        comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.deletion_markers.cell_delete
+    title: Cell-level deletion marker parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - CellTest.java
+        - DeletionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1010_deletion_markers_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-88c7bde06c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1010_deletion_markers_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/cell_tombstones-88c7bde06c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta cell-tombstone records (deletion_time localDeletionTime) are
+        mapped to the sstabledump JSONL cell deletion_info fact and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the cell deletion fact; not a Data.db byte
+        comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.deletion_markers.range_delete_bounds
+    title: Range-tombstone bound deletion marker parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - RangeTombstoneListTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1010_deletion_markers_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-88e928906c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1010_deletion_markers_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/range_tombstones-88e928906c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta range-tombstone start/end bound markers (inclusive/exclusive +
+        clustering values) are mapped to the sstabledump JSONL range_tombstone_bound
+        facts and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the range-tombstone bound facts; not a
+        Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.deletion_markers.range_tombstone_boundary
+    title: Adjacent range-tombstone boundary marker parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneBoundaryTest.java
+        - RangeTombstoneListTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1010_deletion_markers_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1010_deletion_markers_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/adjacent_ranges-972f22806c7811f1a24ff924a65838e2/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta adjacent range-tombstone boundary markers (the shared boundary
+        between two adjacent ranges) are mapped to the sstabledump JSONL
+        range_tombstone boundary facts and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the adjacent-range boundary facts; not a
+        Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  # --- #1011 TTL / local deletion time --------------------------------------
+  - id: cass.tombstone_ttl.ttl_cells.local_deletion_time
+    title: Expiring-cell localDeletionTime parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - TTLExpiryTest.java
+        - CellTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1011_ttl_local_deletion_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+      normalization: >-
+        scan_delta expiring-cell ttl + localDeletionTime are mapped to the
+        sstabledump JSONL ttl/expires_at cell facts and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the expiring-cell liveness fields; not a
+        Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.ttl_cells.mixed_expiring_and_live
+    title: Mixed expiring and live cells in one row parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - TTLExpiryTest.java
+        - CellTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-deltas.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1011_ttl_local_deletion_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_deltas/ttl_cells-890626706c9311f1ae1bf55502e5fa53/nb-1-big-Data.db.jsonl
+      normalization: >-
+        For rows mixing expiring and non-expiring cells, the per-cell ttl/expires_at
+        presence is mapped to the sstabledump JSONL cell facts so that only the
+        expiring cells carry liveness expiry.
+      known_limitations: >-
+        Canonical-semantic equivalence of per-cell liveness; not a Data.db byte
+        comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.ttl_expiry.gc_before_boundary
+    title: TTL expiry before gc-grace boundary parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - TTLExpiryTest.java
+        - CompactionsPurgeTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/gc_before_boundary-4c92ceb0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1011_ttl_local_deletion_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/gc_before_boundary-4c92ceb0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Expired-but-not-yet-gc-purged cells retain their tombstone/expiry facts on
+        read; the localDeletionTime relative to the gc-grace boundary is mapped to
+        the sstabledump JSONL facts and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of expiry facts at the gc boundary; not a
+        Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.statistics_metadata.max_local_deletion_time.tombstones_ttl
+    title: Statistics.db max local deletion time for tombstone/TTL fixture
+    status: partial
+    capability: statistics_metadata
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SSTableMetadataTrackingTest.java
+        - StatsMetadata.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+    evidence:
+      type: partial
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh && sstablemetadata emit Statistics.db.txt
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+      normalization: >-
+        The EncodingStats min local-deletion-time baseline decoded from the
+        Statistics.db is compared against the reference dump; the max local
+        deletion time is asserted to be the unparsed placeholder.
+      known_limitations: >-
+        The minimal Statistics parser does not yet decode the STATS-component
+        SSTable max local deletion time, returning a placeholder equal to the min
+        baseline; only the min local-deletion-time baseline is asserted equal.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        CQLite's minimal Statistics parser does not decode the STATS-component
+        SSTable max local deletion time and returns a placeholder equal to the min
+        baseline.
+      next_step: >-
+        Decode the STATS max local-deletion-time field and assert it byte-equal to
+        the sstablemetadata reference; tracked by follow-up issue #1073.
+
+  - id: cass.statistics_metadata.tombstone_histogram.deletion_times
+    title: Statistics.db estimated tombstone-drop-times histogram parity
+    status: partial
+    capability: statistics_metadata
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SSTableMetadataTrackingTest.java
+        - StatsMetadata.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/tombstone_histogram-4ca1e9e0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+    evidence:
+      type: partial
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstablemetadata emit Statistics.db.txt
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/tombstone_histogram-4ca1e9e0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+      normalization: >-
+        Statistics.db core min baselines are decoded and compared; the
+        estimated-tombstone-drop-times histogram buckets present in the reference
+        dump are not yet exposed by CQLite.
+      known_limitations: >-
+        The estimated-tombstone-drop-times histogram is not decoded or exposed by
+        the minimal Statistics parser, so histogram-bucket parity is not asserted.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        The estimated-tombstone-drop-times histogram in Statistics.db is not decoded
+        or exposed by CQLite.
+      next_step: >-
+        Decode the estimated-tombstone-drop-times histogram and assert bucket parity
+        against the sstablemetadata reference; tracked by follow-up issue #1073.
+
+  # --- #1012 skipped-sstable / partition delete across generations ----------
+  - id: cass.sstable_io.reader.tombstone_only_partition
+    title: Tombstone-only partition reader parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableReaderTest.java
+        - PartitionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1012_skipped_sstable_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1012_skipped_sstable_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+      normalization: >-
+        A generation containing only a partition-level deletion (no live rows) is
+        read; its partition_deletion fact is mapped to the sstabledump JSONL fact
+        and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the tombstone-only partition; not a
+        Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.sstable_io.scanner.tombstone_only_partition_ranges
+    title: Tombstone-only partition range-scan parity
+    status: mirrored
+    capability: data_db_decode
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - SSTableScannerTest.java
+        - PartitionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1012_skipped_sstable_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1012_skipped_sstable_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+      normalization: >-
+        A partition-range scan over the tombstone-only generation surfaces the
+        partition deletion fact and no live rows; mapped to the sstabledump JSONL
+        and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the range-scan output; not a Data.db byte
+        comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.skipped_sstable.partition_delete_reincluded
+    title: Partition delete from a skipped SSTable is reincluded on read
+    status: partial
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - SSTableReaderTest.java
+        - CompactionsPurgeTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1012_skipped_sstable_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+      normalization: >-
+        The per-generation reader reincludes the gen-2 partition tombstone; this is
+        compared against the sstabledump JSONL of each generation independently.
+      known_limitations: >-
+        The single-generation reader reincludes the partition tombstone, but the
+        cross-generation MERGE read path (KWayMerger / parse_one_partition_for_compaction)
+        discards partition-level deletions, so a merged read does not yet honor the
+        skipped-SSTable partition delete.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        The cross-generation MERGE read path (KWayMerger /
+        parse_one_partition_for_compaction) discards partition-level deletions, so a
+        partition delete from a skipped SSTable is not honored on a merged read.
+      next_step: >-
+        Thread partition deletions through the compaction-merge read path; tracked
+        by follow-up issue #1072.
+
+  - id: cass.tombstone_ttl.skipped_sstable.partition_delete_shadows_older_rows
+    title: Skipped-SSTable partition delete shadows older live rows
+    status: partial
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - CompactionsPurgeTest.java
+        - SSTableReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1012_skipped_sstable_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        A gen-2 partition delete with a higher timestamp must shadow the gen-1 live
+        rows for pk=1, leaving zero live rows; compared against the merged read
+        semantics implied by the per-generation sstabledump JSONL.
+      known_limitations: >-
+        P0 resurrection: merging the gen-2 partition delete over gen-1 currently
+        leaves the 10 pk=1 rows live instead of 0, because the compaction-merge read
+        path drops partition-level deletions.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        Merging a higher-timestamp gen-2 partition delete over gen-1 leaves the 10
+        pk=1 rows live instead of 0 (P0 resurrection).
+      next_step: >-
+        Thread partition deletions through the compaction-merge read path so the
+        skipped-SSTable partition delete shadows older rows; tracked by follow-up
+        issue #1072.
+
+  - id: cass.compaction_merge.partition_delete_shadowing_across_skipped_sources
+    title: Compaction partition-delete shadowing across skipped sources
+    status: partial
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionsPurgeTest.java
+        - CompactionIteratorTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1012_skipped_sstable_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/skipped_partition_delete-4caaea90702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Compacting gen-1 (live pk=1 rows) with gen-2 (partition delete for pk=1,
+        tombstone-only pk=2) should drop pk=1 rows and retain the tombstone within
+        gc-grace; compared against Cassandra compaction semantics.
+      known_limitations: >-
+        Compaction currently resurrects pk=1 (the gen-2 partition delete is dropped
+        by the merge read path) and also drops the tombstone-only pk=2, so partition
+        shadowing across skipped sources is not yet correct.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        Compaction resurrects pk=1 and drops the tombstone-only pk=2 because the
+        compaction-merge read path discards partition-level deletions.
+      next_step: >-
+        Apply partition deletions in the compaction-merge read path so shadowing and
+        tombstone retention match Cassandra; tracked by follow-up issue #1072.
+
+  # --- #1013 range-tombstone index-block markers ----------------------------
+  - id: cass.tombstone_ttl.range_tombstone.index_block_first_marker
+    title: Range-tombstone first-of-index-block marker parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1013_rt_index_block_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1013_rt_index_block_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        For a wide partition spanning multiple column-index blocks, the open marker
+        emitted at the first marker of a block is mapped to the sstabledump JSONL
+        range_tombstone open bound and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the index-block boundary markers; not a
+        Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.range_tombstone.index_block_last_marker
+    title: Range-tombstone last-of-index-block marker parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1013_rt_index_block_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1013_rt_index_block_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        The close marker emitted at the last marker of a column-index block is
+        mapped to the sstabledump JSONL range_tombstone close bound and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the index-block boundary markers; not a
+        Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.range_tombstone.open_ended_middle_block
+    title: Range-tombstone spanning interior index blocks parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1013_rt_index_block_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1013_rt_index_block_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        The materialized fixture range [1500,2500] is a CLOSED range spanning
+        interior column-index blocks (not open-ended); its open/close bounds and the
+        synthetic per-block boundary markers are mapped to the sstabledump JSONL
+        range_tombstone facts and compared. Covered here as an interior-block-spanning
+        closed range.
+      known_limitations: >-
+        Canonical-semantic equivalence of the interior-block-spanning range; the
+        fixture range is closed rather than truly open-ended.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.range_tombstone.closed_last_block
+    title: Range-tombstone closing in the last index block parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - RangeTombstoneTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1013_rt_index_block_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1013_rt_index_block_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        A range tombstone whose end bound lies in the last column-index block has
+        its close marker mapped to the sstabledump JSONL range_tombstone close bound
+        and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the last-block close marker; not a Data.db
+        byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.index_summary.column_index.range_tombstone_boundary_big_bti
+    title: Column-index range-tombstone boundary across BIG and BTI formats
+    status: partial
+    capability: index_summary
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: sstable-io
+      relevance: high
+      files:
+        - ColumnIndexTest.java
+        - RangeTombstoneBoundaryTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_index_db_big
+        tests:
+          - cqlite-core/tests/issue_1013_rt_index_block_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+    evidence:
+      type: partial
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstablemetadata emit Statistics.db.txt
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/wide_range_tombstone-4ce3add0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+      normalization: >-
+        The BIG/nb column-index range-tombstone-at-block-edge behavior is covered;
+        the column-index entries carrying the open marker are compared against the
+        wide-partition fixture metadata.
+      known_limitations: >-
+        Only the BIG (nb) format is covered. There is no da/BTI tombstone fixture
+        generator yet, so the BTI range-tombstone-at-block-edge path is not asserted.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        BTI (da) range-tombstone-at-block-edge fixtures are not yet generated (no da
+        tombstone generator).
+      next_step: >-
+        Add a da/BTI wide-partition range-tombstone fixture generator and assert
+        BTI column-index boundary parity; file a follow-up issue.
+
+  # --- #1014 resurrection safety -------------------------------------------
+  - id: cass.tombstone_ttl.never_purge.cell_row_partition
+    title: never_purge keeps cell/row/partition tombstones on read and compaction
+    status: partial
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - NeverPurgeTest.java
+        - CompactionsPurgeTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1014_resurrection_safety_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        With never_purge semantics, cell and row tombstones are retained on read and
+        across compaction; their deletion facts are mapped to the sstabledump JSONL
+        and compared.
+      known_limitations: >-
+        Row and cell never-purge is proven on both read and compaction; the
+        partition-tombstone sub-case is broken and pinned with an ignored test
+        because the compaction-merge read path drops partition deletions.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        The partition-tombstone never-purge sub-case is broken (pinned ignored)
+        because partition deletions are not applied in the compaction-merge read
+        path.
+      next_step: >-
+        Apply partition tombstones in the compaction-merge read path so never_purge
+        retains partition deletions; tracked by follow-up issue #1072.
+
+  - id: cass.tombstone_ttl.gc_grace.partition_row_cell
+    title: gc_grace read-merge parity for partition/row/cell tombstones
+    status: partial
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - CompactionsPurgeTest.java
+        - GcCompactionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1014_resurrection_safety_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/resurrection_gc_positive-4cbfab10702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Read-merge of gc_grace=0 vs gc_grace=864000 fixtures is asserted identical
+        for row and cell tombstones; deletion facts are mapped to the sstabledump
+        JSONL and compared.
+      known_limitations: >-
+        gc_grace=0 vs 864000 read-merge is proven identical for row/cell tombstones;
+        the partition sub-case is broken and gc_grace is not yet surfaced from disk
+        (Statistics.db) by CQLite.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        The partition-tombstone read-merge sub-case is broken and gc_grace is not
+        surfaced from the Statistics.db on read.
+      next_step: >-
+        Apply partition tombstones in the read-merge path and surface gc_grace from
+        disk; tracked by follow-up issue #1072.
+
+  - id: cass.tombstone_ttl.repaired_unrepaired_purge_gate
+    title: Repaired vs unrepaired purge gate parity
+    status: partial
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - CompactionsPurgeTest.java
+        - RepairedDataInfoTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_statistics_db
+        tests:
+          - cqlite-core/tests/issue_1014_resurrection_safety_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Statistics.db.txt
+    evidence:
+      type: partial
+      artifacts: [bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstablemetadata emit Statistics.db.txt
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Statistics.db.txt
+      normalization: >-
+        The fixtures are asserted to be unrepaired (repairedAt == 0) from the
+        Statistics.db, so the purge gate must treat them as unrepaired; no purge is
+        claimed for repaired data.
+      known_limitations: >-
+        repairedAt / pendingRepair parsing is not implemented (gated on #968/#988);
+        the test only asserts the fixtures are unrepaired and does not claim
+        repaired-data purge behavior.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        repairedAt / pendingRepair parsing is not implemented (gated on #968/#988),
+        so the repaired-vs-unrepaired purge gate is only partially exercised.
+      next_step: >-
+        Parse repairedAt / pendingRepair from Statistics.db and gate purge on repair
+        status (#968/#988).
+
+  - id: cass.compaction_merge.resurrection_safety.overlapping_sources
+    title: Compaction resurrection-safety across overlapping sources
+    status: partial
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionsPurgeTest.java
+        - CompactionIteratorTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1014_resurrection_safety_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Compacting overlapping sources where a tombstone in one source shadows live
+        data in another must not resurrect the shadowed data; row/cell shadowing is
+        compared against Cassandra compaction output.
+      known_limitations: >-
+        Row and cell shadowing on compaction is proven; the partition-tombstone
+        sub-case is broken and pinned with an ignored test because partition
+        deletions are dropped by the compaction-merge read path.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        The partition-tombstone resurrection-safety sub-case is broken (pinned
+        ignored) because partition deletions are dropped during compaction merge.
+      next_step: >-
+        Apply partition tombstones in the compaction-merge read path so overlapping
+        sources do not resurrect partition-deleted data; tracked by follow-up issue
+        #1072.
+
+  - id: cass.compaction_merge.partial_source_retains_tombstones
+    title: Partial-source compaction retains row/cell tombstones
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - CompactionsPurgeTest.java
+        - CompactionIteratorTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1014_resurrection_safety_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-2-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1014_resurrection_safety_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/resurrection_gc0-4cb523c0702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        When only a subset of the overlapping sources is compacted, row/cell
+        tombstones that may still shadow data in the un-compacted sources are
+        retained; deletion facts are mapped to the sstabledump JSONL and compared.
+      known_limitations: >-
+        The partial-source overlap-safety gate retains row/cell tombstones (test
+        passes); partition-tombstone retention is untested due to the
+        compaction-merge read-path partition-deletion gap.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  # --- #1015 dropped-column / static-row ------------------------------------
+  - id: cass.schema_evolution.dropped_column.per_cell_purge
+    title: Dropped regular column per-cell purge parity
+    status: mirrored
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - DroppedColumnTest.java
+        - SerializationHeaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1015_dropped_static_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-2-big-Statistics.db.txt
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl, bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1015_dropped_static_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+      normalization: >-
+        Cells for a dropped regular column are purged per-cell on read; the surviving
+        cells and the dropped-column metadata in the SerializationHeader are mapped to
+        the sstabledump JSONL and Statistics.db dump and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the surviving cells and dropped-column
+        header; not a full Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.schema_evolution.dropped_column.empty_index_block_reverse_scan
+    title: Dropped-column empty-index-block reverse-scan parity
+    status: partial
+    capability: schema_evolution
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - DroppedColumnTest.java
+        - ColumnIndexTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1015_dropped_static_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: partial
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        Reverse-scanning a partition whose dropped-column cells produce an empty
+        column-index block must skip the empty block correctly; covered partially
+        against the narrow dropped_regular_col fixture.
+      known_limitations: >-
+        A wide dropped-column fixture that produces a fully empty index block under
+        reverse scan is not yet generated, so the empty-index-block reverse-scan path
+        is not exhaustively asserted.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope:
+      gap: >-
+        A wide dropped-column empty-index-block reverse-scan fixture is not yet
+        generated.
+      next_step: >-
+        Generate a wide dropped-column fixture that yields an empty index block under
+        reverse scan and assert parity; file a follow-up issue.
+
+  - id: cass.tombstone_ttl.static_row.with_row_cell_range_tombstones
+    title: Static row alongside row/cell/range tombstones parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: tombstone-ttl
+      relevance: high
+      files:
+        - StaticColumnsTest.java
+        - RangeTombstoneTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_delta_scan
+        tests:
+          - cqlite-core/tests/issue_1015_dropped_static_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1015_dropped_static_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        The static row liveness and the co-located row/cell/range tombstones are
+        mapped to the sstabledump JSONL static_block and deletion facts and compared.
+      known_limitations: >-
+        Canonical-semantic equivalence of the static row plus tombstones; not a
+        Data.db byte comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.tombstone_ttl.static_row.dropped_static_header_preserved
+    title: Dropped static column SerializationHeader byte parity
+    status: mirrored
+    capability: tombstone_ttl
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: serialization
+      relevance: high
+      files:
+        - SerializationHeaderTest.java
+        - DroppedColumnTest.java
+    cqlite:
+      coverage:
+        suite: schema_parity_serialization_header
+        tests:
+          - cqlite-core/tests/issue_1015_dropped_static_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstablemetadata emit Statistics.db.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1015_dropped_static_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/dropped-static-header-mismatch.log
+      normalization: >-
+        The dropped static column is preserved in the embedded SerializationHeader;
+        its name set and kind are compared byte-equal against the StaticColumns line
+        of the reference Statistics.db dump.
+      known_limitations: >-
+        The dropped static column metadata is asserted byte-for-byte from the
+        SerializationHeader; the dropped-cell data purge is covered separately.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}
+
+  - id: cass.compaction_merge.static_row.survives_tombstone_gc
+    title: Static row survives tombstone gc through compaction parity
+    status: mirrored
+    capability: compaction_merge
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compaction
+      relevance: high
+      files:
+        - StaticColumnsTest.java
+        - CompactionsPurgeTest.java
+    cqlite:
+      coverage:
+        suite: compaction_parity_tombstone_ttl
+        tests:
+          - cqlite-core/tests/issue_1015_dropped_static_parity.rs
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+    evidence:
+      type: canonical_semantic
+      strict: false
+      artifacts: [jsonl]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb]
+      fixture_generation_command: >-
+        bash test-data/scripts/generate-tomb-fixtures.sh && sstabledump <Data.db> > <Data.db>.jsonl
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --features "delta-scan write-support" --test issue_1015_dropped_static_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_tomb/static_with_tombstones-4cdb9780702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl
+      normalization: >-
+        After compaction purges expired clustered-row tombstones, the live static row
+        must survive; the post-compaction static_block liveness is compared against
+        Cassandra compaction semantics.
+      known_limitations: >-
+        Canonical-semantic equivalence of static-row survival through compaction; not
+        a byte-for-byte compaction output comparison.
+    ci:
+      tier: nightly_docker
+      workflow: .github/workflows/tombstone-ttl-parity.yml
+    scope: {}

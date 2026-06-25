@@ -1,0 +1,120 @@
+name: "CI: Tombstone / TTL Parity (Nightly Docker, Epic #972)"
+
+# Docker-regenerating nightly enforcement for the tombstone / TTL parity
+# scenarios (epic #972, issues #1010-#1015).
+#
+# Why this workflow is separate from the fast PR gate
+# ---------------------------------------------------
+# The six parity tests below depend on the test_tomb and test_deltas fixtures,
+# which are NOT in the published CI dataset bundle (test_tomb is brand-new;
+# test_deltas is pending issue #701). The fast PR gate
+# (sstabledump-parity-gate.yml) fetches only the published bundle, so running
+# these tests there would skip-clean and FALSE-PASS.
+#
+# Instead this workflow REGENERATES the fixtures from scratch in a Cassandra
+# 5.0.2 container (the generator scripts manage their own Docker container),
+# then runs the six tests with CQLITE_REQUIRE_FIXTURES=1. In strict mode the
+# tests PANIC (fail the job) instead of skipping when CQLITE_DATASETS_ROOT is
+# unset or a required fixture binary is absent — so a regeneration failure can
+# never be mistaken for a green parity run.
+#
+# GATING POLICY: runs on
+#   - workflow_dispatch (manual)
+#   - schedule (nightly)
+#   - pull_request touching the parity tests, manifest, fixture generators, or
+#     this workflow itself.
+#
+# Manual local run:
+#   bash test-data/scripts/generate-deltas.sh
+#   bash test-data/scripts/generate-tombstone-parity.sh
+#   env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+#     cargo test -p cqlite-core --features "delta-scan write-support" \
+#       --test issue_1010_deletion_markers_parity \
+#       --test issue_1011_ttl_local_deletion_parity \
+#       --test issue_1012_skipped_sstable_parity \
+#       --test issue_1013_rt_index_block_parity \
+#       --test issue_1014_resurrection_safety_parity \
+#       --test issue_1015_dropped_static_parity
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: 'Run cargo test with --nocapture'
+        type: boolean
+        default: true
+  schedule:
+    # Nightly at 04:17 UTC (offset to avoid the top-of-hour scheduler rush).
+    - cron: '17 4 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cqlite-core/tests/issue_101*_*.rs'
+      - 'test-data/cassandra-parity-manifest.yml'
+      - 'test-data/scripts/generate-tombstone-parity.sh'
+      - 'test-data/scripts/generate-deltas.sh'
+      - '.github/workflows/tombstone-ttl-parity.yml'
+
+env:
+  CASSANDRA_IMAGE: cassandra:5.0.2
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tombstone-ttl-parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  tombstone-ttl-parity:
+    name: Tombstone / TTL parity (regenerate + require-fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: tombstone-ttl-parity-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check Docker available
+        run: docker info
+
+      - name: Fetch published datasets (test_basic ttl_test_table, etc.)
+        # issue_1011 asserts test_basic/ttl_test_table Statistics.db, which is NOT
+        # produced by the Docker generators below. Under CQLITE_REQUIRE_FIXTURES=1
+        # the test panics if it is absent, so fetch the published bundle first.
+        run: bash test-data/scripts/fetch-datasets.sh
+
+      - name: Generate delta fixtures (test_deltas, issue #701)
+        run: bash test-data/scripts/generate-deltas.sh
+
+      - name: Generate tombstone / TTL fixtures (test_tomb, epic #972)
+        run: bash test-data/scripts/generate-tombstone-parity.sh
+
+      - name: Verify generated fixtures
+        run: |
+          echo "=== test_tomb Data.db files ==="
+          find "$CQLITE_DATASETS_ROOT/sstables/test_tomb" -name '*-Data.db' | sort
+          echo ""
+          echo "=== test_deltas Data.db files ==="
+          find "$CQLITE_DATASETS_ROOT/sstables/test_deltas" -name '*-Data.db' | sort
+
+      - name: Run tombstone / TTL parity tests (strict, require-fixtures)
+        run: |
+          env CQLITE_REQUIRE_FIXTURES=1 \
+            CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+            cargo test -p cqlite-core --features "delta-scan write-support" \
+              --test issue_1010_deletion_markers_parity \
+              --test issue_1011_ttl_local_deletion_parity \
+              --test issue_1012_skipped_sstable_parity \
+              --test issue_1013_rt_index_block_parity \
+              --test issue_1014_resurrection_safety_parity \
+              --test issue_1015_dropped_static_parity \
+              -- --nocapture
