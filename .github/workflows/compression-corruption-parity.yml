@@ -106,6 +106,13 @@ jobs:
       - name: Generate compression parity fixtures (test_comp, epic #970)
         run: bash test-data/scripts/generate-compression-parity.sh
 
+      - name: Generate BTI source fixtures (test_da/wide_table) for BTI corruption cases
+        # The corruption corpus's bti_partitions_footer_flip / bti_rows_truncation
+        # cases need a clean BTI (da) source. Without it the generator marks them
+        # `planned` and the verifier tests skip them — silently losing BTI
+        # corruption coverage in the strict lane (roborev #970). Materialize it.
+        run: OUT="$CQLITE_DATASETS_ROOT" bash test-data/scripts/gen-wide-bti.sh
+
       - name: Generate corruption corpus (test_comp_corrupt, issue #999)
         run: bash test-data/scripts/generate-corruption-corpus.sh
 
@@ -130,6 +137,15 @@ jobs:
             echo "FATAL: corruption corpus is empty — refusing to skip-clean." >&2
             exit 1
           fi
+          # BTI corruption coverage must be ACTIVE in the strict lane: the BTI
+          # source was generated above, so bti_partitions_footer_flip and
+          # bti_rows_truncation must have materialized corrupt dirs (not `planned`).
+          for bti in bti_partitions_footer_flip bti_rows_truncation; do
+            if [ ! -d "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt/$bti" ]; then
+              echo "FATAL: BTI corruption fixture '$bti' is missing/planned — BTI source generation must precede the corpus so it is active." >&2
+              exit 1
+            fi
+          done
 
       - name: Run compression / corruption parity tests (strict, fixtures present)
         run: |
