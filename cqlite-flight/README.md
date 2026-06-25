@@ -89,13 +89,6 @@ cargo run -p cqlite-flight -- \
   --data-dir /var/lib/cassandra/data \
   --listen 0.0.0.0:8815 \
   --batch-size 8192
-
-# container — published to GHCR on every release tag (multi-arch amd64/arm64).
-# Mount the Cassandra data dir read-only and point --data-dir at it.
-docker run --rm -p 8815:8815 \
-  -v /var/lib/cassandra:/var/lib/cassandra:ro \
-  ghcr.io/pmcfadin/cqlite-flight:latest \
-  --data-dir /var/lib/cassandra/data --listen 0.0.0.0:8815
 ```
 
 | Flag | Default | Description |
@@ -105,6 +98,73 @@ docker run --rm -p 8815:8815 \
 | `--batch-size` | `8192` | Max rows per Arrow record batch. |
 
 `RUST_LOG=info` enables logging (per-SSTable reads, etc.).
+
+## Container image (GHCR)
+
+The server is published as a multi-arch (`linux/amd64` + `linux/arm64`) image to
+the GitHub Container Registry on every release tag:
+
+```
+ghcr.io/pmcfadin/cqlite-flight
+```
+
+| Tag | Points at |
+|-----|-----------|
+| `vX.Y.Z` | An exact release (e.g. `v0.12.0`). |
+| `X.Y` | The latest patch on a minor line (e.g. `0.12`). |
+| `latest` | The most recent **stable** release (prereleases excluded). |
+| custom | One-off images cut via the manual workflow (see below). |
+
+The container exposes the Arrow Flight **gRPC** listener on `:8815` and reads
+SSTables from a directory you **mount at runtime** — it ships no data of its own.
+Run it co-located with a Cassandra node, mounting that node's data dir
+**read-only** and pointing `--data-dir` at it:
+
+```bash
+docker run --rm -p 8815:8815 \
+  -v /var/lib/cassandra:/var/lib/cassandra:ro \
+  -e RUST_LOG=info \
+  ghcr.io/pmcfadin/cqlite-flight:latest \
+  --data-dir /var/lib/cassandra/data --listen 0.0.0.0:8815
+```
+
+Notes:
+- **Read-only mount** (`:ro`) is recommended — the server never modifies the
+  SSTables, it merges them on the fly into Arrow batches.
+- Any directory laid out as `<keyspace>/<table>[-<uuid>]/` works as `--data-dir`;
+  it does not have to be a live Cassandra node (e.g. a snapshot or an exported
+  SSTable tree mounted from elsewhere).
+- The image runs as a non-root user (`uid 10001`); ensure the mounted path is
+  readable by that uid.
+- The Trino connector is **not** in this image — it ships separately as a Trino
+  plugin (see [`../trino-connector`](../trino-connector)).
+
+### Pulling a specific release
+
+```bash
+docker pull ghcr.io/pmcfadin/cqlite-flight:v0.12.0
+```
+
+### Cutting a one-off image (no release tag)
+
+Maintainers can build and push an image on demand without tagging a release:
+run the **“cqlite-flight image”** GitHub Actions workflow via *Run workflow*
+(`workflow_dispatch`) and supply an `image_tag` (e.g. `dev`). It publishes
+`ghcr.io/pmcfadin/cqlite-flight:<image_tag>`. The same workflow also runs
+automatically on every `v*` tag.
+
+To build locally instead (requires Docker Buildx and a GHCR login with
+`write:packages`):
+
+```bash
+# single-arch, load into the local docker daemon
+docker build -f cqlite-flight/Dockerfile -t cqlite-flight:dev .
+
+# multi-arch build + push to GHCR (run from the repo root)
+docker buildx build -f cqlite-flight/Dockerfile \
+  --platform linux/amd64,linux/arm64 \
+  -t ghcr.io/pmcfadin/cqlite-flight:dev --push .
+```
 
 ## Client example (Python / pyarrow)
 
