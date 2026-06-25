@@ -10,20 +10,20 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 55 |
-| `partial` | 12 |
+| `mirrored` | 89 |
+| `partial` | 17 |
 | `planned` | 6 |
 | `out_of_scope` | 8 |
-| **total** | **81** |
+| **total** | **120** |
 
 ## Evidence counts
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 18 |
-| `canonical_semantic` | 32 |
-| `smoke` | 5 |
-| `partial` | 18 |
+| `byte_for_byte` | 37 |
+| `canonical_semantic` | 46 |
+| `smoke` | 6 |
+| `partial` | 23 |
 | `out_of_scope` | 8 |
 
 ## ⚠️ P0 scenarios with weak evidence
@@ -34,6 +34,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compaction_merge.load_path_validity` — Compaction output load-path validity (Tier-1) (smoke)
 - `cass.compression_checksum.checksum_trailer_detection` — Inline checksum / Digest.crc32 corruption detection (partial)
 - `cass.corruption_verify.component_corruption_detection` — Component corruption detection, scrub, and verify (partial)
+- `cass.cql_types.boundaries.null_empty_text_blob` — Null / empty text vs blob boundary decode (partial)
 - `cass.delta_scan.tombstone_liveness_facts` — Delta-scan tombstone/TTL/liveness fact extraction (partial)
 - `cass.filter_db_bloom.serialization_no_false_negative` — Filter.db Bloom filter serialization with no false negatives (partial)
 - `cass.index_db.RowIndexEntryTest.promoted_index_entries` — BIG Index.db promoted-index (wide-partition) boundary metadata (partial)
@@ -63,6 +64,12 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.compression_checksum.checksum_trailer_detection` | compression_checksum | partial | partial | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.compression_checksum.chunk_offsets_and_crc` | compression_checksum | mirrored | canonical_semantic | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.corruption_verify.component_corruption_detection` | corruption_verify | planned | partial | `sstable_parity_corruption_verify` | p0_data_loss |
+| `cass.cql_types.boundaries.null_empty_text_blob` | cql_types | partial | partial | `—` | p1_correctness |
+| `cass.cql_types.jsonl.canonical_value_comparator` | cql_types | mirrored | canonical_semantic | `—` | tooling_only |
+| `cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare` | cql_types | mirrored | canonical_semantic | `—` | tooling_only |
+| `cass.cql_types.jsonl.manifest_report_generation` | cql_types | mirrored | canonical_semantic | `—` | tooling_only |
+| `cass.cql_types.jsonl.no_placeholder_references` | cql_types | mirrored | canonical_semantic | `—` | tooling_only |
+| `cass.cql_types.jsonl.schema_aware_normalization` | cql_types | mirrored | canonical_semantic | `—` | tooling_only |
 | `cass.data_db_decode.row_cell_flags_and_vint` | data_db_decode | mirrored | canonical_semantic | `sstable_parity_data_db_jsonl` | p1_correctness |
 | `cass.delta_scan.tombstone_liveness_facts` | delta_scan | partial | partial | `sstable_parity_delta_scan` | p1_correctness |
 | `cass.filter_db_bloom.serialization_no_false_negative` | filter_db_bloom | partial | partial | `sstable_parity_filter_db_bloom` | p0_data_loss |
@@ -78,6 +85,12 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.index_summary.summary_boundaries` | index_summary | partial | partial | `sstable_parity_summary_db_big` | p1_correctness |
 | `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` | schema_evolution | partial | partial | `sstable_parity_delta_scan` | p1_correctness |
 | `cass.schema_evolution.dropped_column.per_cell_purge` | schema_evolution | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p1_correctness |
+| `cass.schema_evolution.serialization_header.altered_column_type` | schema_evolution | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
+| `cass.schema_evolution.serialization_header.altered_then_dropped_column` | schema_evolution | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
+| `cass.schema_evolution.serialization_header.dropped_column_same_type` | schema_evolution | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
+| `cass.schema_evolution.serialization_header.frozen_multicell_collection_mismatch` | schema_evolution | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
+| `cass.schema_evolution.serialization_header.no_schema_change` | schema_evolution | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
+| `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` | schema_evolution | mirrored | byte_for_byte | `schema_parity_serialization_header` | p1_correctness |
 | `cass.sstable_format.descriptor_component_resolution` | sstable_format | mirrored | smoke | `sstable_parity_component_manifest` | p1_correctness |
 | `cass.sstable_format.toc_component_manifest` | sstable_format | mirrored | byte_for_byte | `sstable_parity_component_manifest` | p1_correctness |
 | `cass.sstable_io.reader.tombstone_only_partition` | data_db_decode | mirrored | canonical_semantic | `sstable_parity_delta_scan` | p0_data_loss |
@@ -119,6 +132,19 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 ## Byte-for-byte scenarios
 
+- `cass.cql_types.boundaries.length_prefix_edges` — Cell value length-prefix edge encoding parity
+- `cass.cql_types.collections.map_key_lookup_offsets` — Frozen-map key lookup offset codec vectors
+- `cass.cql_types.collections.map_key_range_offsets` — Frozen-map key range offset codec vectors
+- `cass.cql_types.collections.set_lookup_offsets` — Frozen-set element lookup offset codec vectors
+- `cass.cql_types.collections.set_range_offsets` — Frozen-set element range offset codec vectors
+- `cass.cql_types.collections.single_cell_multicell_equivalence` — Single-cell vs multicell collection equivalence vectors
+- `cass.cql_types.collections.vint_element_count_boundaries` — VInt element-count boundary codec vectors
+- `cass.cql_types.primitives.fixed_width_vectors` — Fixed-width primitive serializer codec vectors
+- `cass.cql_types.primitives.invalid_length_rejection` — Invalid-length primitive decode rejection
+- `cass.cql_types.primitives.temporal_vectors` — Date / time / timestamp serializer codec vectors
+- `cass.cql_types.primitives.text_blob_ascii_vectors` — Text / blob / ascii serializer codec vectors
+- `cass.cql_types.primitives.uuid_inet_vectors` — UUID / timeuuid / inet serializer codec vectors
+- `cass.cql_types.primitives.varint_decimal_duration_vectors` — Varint / decimal / duration serializer codec vectors
 - `cass.index_db.CorruptPrimaryIndexTest.big_primary_index_corruption` — Truncated BIG Index.db fails explicitly
 - `cass.index_db.RowIndexEntryTest.partition_offsets` — BIG Index.db partition data offsets vs Cassandra positions
   - Normalization: Index.db data offsets are relative to the Data.db data section while JSONL positions are absolute file offsets; the per-partition Data.db header is a constant only for uniform partition-key lengths without static blocks, so successive deltas (not absolute values) are compared in that case.
@@ -127,6 +153,12 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.index_db.big.raw_partition_keys_and_offsets` — BIG Index.db raw partition-key bytes and entry-byte parity
   - Normalization: JSONL single-column partition keys are decoded to their raw on-disk byte encoding (UUID text -> 16 bytes) before comparison; composite-key byte decoding is not attempted (those fixtures are covered by entry-byte + count + offset parity).
 - `cass.index_db.bti.index_component_discovery` — BTI index-component discovery and classification
+- `cass.schema_evolution.serialization_header.altered_column_type` — Serialization-header parity after ALTER column type
+- `cass.schema_evolution.serialization_header.altered_then_dropped_column` — Serialization-header parity after ALTER then DROP column
+- `cass.schema_evolution.serialization_header.dropped_column_same_type` — Serialization-header parity after DROP column (same type)
+- `cass.schema_evolution.serialization_header.frozen_multicell_collection_mismatch` — Serialization-header parity across frozen/multicell collection mismatch
+- `cass.schema_evolution.serialization_header.no_schema_change` — Serialization-header parity with no schema change
+- `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` — Serialization-header parity across static/regular column-kind mismatch
 - `cass.sstable_format.toc_component_manifest` — TOC.txt component manifest completeness
 - `cass.statistics_db.MetadataSerializerTest.metadata_components` — Statistics.db metadata-component TOC byte parity (count + ordered types)
 - `cass.statistics_db.SSTableMetadataTrackingTest.timestamp_and_ttl_metadata` — Statistics.db min timestamp / local-deletion-time / TTL byte parity
@@ -162,6 +194,34 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
   - Normalization: Tier-2 logical equivalence: merged partition/cell/timestamp/TTL/local deletion time/is_deleted facts compared against Cassandra compaction output; presentation/file layout ignored.
 - `cass.compression_checksum.chunk_offsets_and_crc` — CompressionInfo.db chunk decode and row-count parity
   - Normalization: Decompressed chunk payloads are decoded to rows and compared (row count and values) against sstabledump JSONL; chunk offset tables are used for positioning.
+- `cass.cql_types.boundaries.absent_vs_null_regular_columns` — Absent vs null regular column distinction
+  - Normalization: A regular column that was never written (absent) has no cell at all, a column written then deleted is a cell tombstone (null), and a column written with a zero-length value is a live empty cell; the three are mapped to distinct sstabledump JSONL facts (no cell / deletion_info / empty value) and compared.
+- `cass.cql_types.boundaries.empty_collections` — Empty collection vs null collection distinction
+  - Normalization: Empty multicell collections (no surviving cells) versus absent collections are mapped to the sstabledump JSONL cell-presence facts and compared so that an empty collection and a never-written collection are distinguished.
+- `cass.cql_types.complex.nested_frozen_collections` — Nested frozen collection decode parity
+  - Normalization: Nested frozen collections (list<frozen<map>>, etc.) are recursively decoded and mapped to the nested sstabledump JSONL value and compared structurally.
+- `cass.cql_types.complex.tuple_field_order` — Frozen tuple field-order decode parity
+  - Normalization: Frozen tuple field values are mapped in declared field order to the sstabledump JSONL tuple value and compared element-by-element.
+- `cass.cql_types.counters.canonical_jsonl_value` — Counter canonical JSONL final-value comparison
+  - Normalization: The merged counter final value is rendered to the canonical JSONL value model and compared against the sstabledump JSONL counter cell, independent of the SELECT sidecar.
+- `cass.cql_types.counters.compacted_final_value` — Compacted counter final value
+  - Normalization: After compaction merges all counter shards into one generation, the compacted final value is compared against the Cassandra SELECT counter sidecar and the post-compaction sstabledump JSONL.
+- `cass.cql_types.counters.deleted_counter_shadowing` — Deleted-counter shadowing final value
+  - Normalization: A deleted counter shadows older shards; the post-delete final value (counter absent / shadowed) is compared against the Cassandra SELECT counter sidecar and the sstabledump JSONL deletion fact.
+- `cass.cql_types.counters.multi_sstable_increment_decrement_merge` — Multi-SSTable counter increment/decrement merge final value
+  - Normalization: Counter shards across multiple SSTable generations are merged (increments and decrements) to one final value and compared against the Cassandra SELECT counter sidecar and the merged sstabledump JSONL.
+- `cass.cql_types.counters.single_sstable_context_decode` — Single-SSTable counter context final-value decode
+  - Normalization: The counter context (shard headers + local count) is decoded to a final scalar value and compared against the Cassandra SELECT counter sidecar and the sstabledump JSONL counter cell.
+- `cass.cql_types.jsonl.canonical_value_comparator` — Canonical JSONL value comparator self-test
+  - Normalization: The comparator parses a published sstabledump JSONL golden into a typed, ordered canonical value model and asserts an identical re-parse compares equal; type/order mismatches fail loud rather than coercing.
+- `cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare` — JSONL cell-path / timestamp / TTL / tombstone comparison self-test
+  - Normalization: Per-cell path, writetime/timestamp, TTL/local-deletion-time, and tombstone facts are extracted from the JSONL and compared field-by-field; presentation ordering and whitespace are ignored but typed facts must match.
+- `cass.cql_types.jsonl.manifest_report_generation` — Manifest report generation self-test
+  - Normalization: The canonical JSONL model feeds the manifest report generator; the comparator asserts the rendered report rows match the typed value model so report drift is caught against the published golden.
+- `cass.cql_types.jsonl.no_placeholder_references` — No-placeholder-reference enforcement self-test
+  - Normalization: The comparator refuses to treat placeholder or absent reference paths as a pass; a missing or empty reference JSONL fails loud, guaranteeing parity scenarios cannot false-pass on unpublished goldens.
+- `cass.cql_types.jsonl.schema_aware_normalization` — Schema-aware JSONL normalization self-test
+  - Normalization: Values are normalized against the declared schema type (not guessed) so that ascii vs text, frozen vs multicell, and numeric widths are compared with the correct typed model; ambiguous coercion is rejected.
 - `cass.data_db_decode.row_cell_flags_and_vint` — Data.db row/cell flags and VInt decode parity
   - Normalization: Rows and cells are normalized to the sstabledump JSONL fact model (partition key, clustering, cell name/value, liveness, deletion) and compared field-by-field; presentation ordering and whitespace ignored.
 - `cass.index_summary.big_index_offsets` — Index.db partition key digests and data offsets (BIG)
@@ -215,6 +275,7 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 
 - `cass.cli_reporting.parity_manifest_lint_and_report` — Parity manifest lint and report tooling
 - `cass.compaction_merge.load_path_validity` — Compaction output load-path validity (Tier-1)
+- `cass.data_db_decode.row_preamble_size_mismatch` — Malformed row-preamble size fails loud
 - `cass.schema_evolution.serialization_header_column_order` — Serialization-header column order across schema evolution
 - `cass.sstable_format.descriptor_component_resolution` — Descriptor and on-disk version/component resolution
 - `cass.write_load_path.cassandra_sstable_writer_fixtures` — CQLite-written SSTables load into Cassandra via sstableloader
@@ -224,6 +285,11 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compaction_merge.byte_for_byte_output` (planned): No gated byte-for-byte comparison of compaction output. → _Promote the debug byte tier in compaction-parity to a gated comparison once writer output is byte-stable._
 - `cass.compression_checksum.checksum_trailer_detection` (partial): No gated byte comparison of Digest.crc32 against the Cassandra reference. → _Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify suite._
 - `cass.corruption_verify.component_corruption_detection` (planned): No scrub/verify parity pass implemented. → _Implement a verify pass and compare detected-corruption outcomes against Cassandra VerifyTest/ScrubTest scenarios._
+- `cass.cql_types.boundaries.null_empty_text_blob` (partial): blocked by #1077 → _land bug #1077 (empty-value cell decodes by declared type: empty blob -> Blob([])), then un-#[ignore] the assertion and flip status to mirrored_
+- `cass.cql_types.complex.frozen_udt_value` (partial): blocked by #1080 → _land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and flip status to mirrored_
+- `cass.cql_types.complex.legacy_dropped_tuple_udt_fields` (partial): blocked by #1080 → _land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and flip status to mirrored_
+- `cass.cql_types.complex.multicell_udt_collection_paths` (partial): blocked by #1081 → _land bug #1081 (structured UDT decode), then un-#[ignore] the assertion and flip status to mirrored_
+- `cass.cql_types.complex.udt_field_order_null_empty` (partial): blocked by #1080 → _land bug #1080 (structured UDT decode), then un-#[ignore] the assertion and flip status to mirrored_
 - `cass.delta_scan.tombstone_liveness_facts` (partial): test_deltas dataset asset not published/enforced (#701). → _Publish and enforce the test_deltas dataset in delta-roundtrip CI._
 - `cass.filter_db_bloom.serialization_no_false_negative` (partial): No no-false-negative parity assertion against Cassandra Filter.db. → _Add a Filter.db serialization parity test asserting zero false negatives across the present-key set._
 - `cass.index_db.RowIndexEntryTest.promoted_index_entries` (partial): No committed BIG fixture triggers promoted-index emission (all partitions are below the column_index_size threshold). → _Generate a wide-partition BIG fixture (partition exceeding column_index_size_in_kb) and assert decoded promoted-index clustering boundaries against the Cassandra reference._
@@ -302,7 +368,40 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compression_checksum.checksum_trailer_detection` | fast_pr | — |
 | `cass.compression_checksum.chunk_offsets_and_crc` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.corruption_verify.component_corruption_detection` | manual_debug | — |
+| `cass.cql_types.boundaries.absent_vs_null_regular_columns` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.boundaries.empty_collections` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.boundaries.length_prefix_edges` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.boundaries.null_empty_text_blob` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.collections.map_key_lookup_offsets` | fast_pr | — |
+| `cass.cql_types.collections.map_key_range_offsets` | fast_pr | — |
+| `cass.cql_types.collections.set_lookup_offsets` | fast_pr | — |
+| `cass.cql_types.collections.set_range_offsets` | fast_pr | — |
+| `cass.cql_types.collections.single_cell_multicell_equivalence` | fast_pr | — |
+| `cass.cql_types.collections.vint_element_count_boundaries` | fast_pr | — |
+| `cass.cql_types.complex.frozen_udt_value` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.complex.legacy_dropped_tuple_udt_fields` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.complex.multicell_udt_collection_paths` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.complex.nested_frozen_collections` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.complex.tuple_field_order` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.complex.udt_field_order_null_empty` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.counters.canonical_jsonl_value` | nightly_docker | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.counters.compacted_final_value` | nightly_docker | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.counters.deleted_counter_shadowing` | nightly_docker | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.counters.multi_sstable_increment_decrement_merge` | nightly_docker | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.counters.single_sstable_context_decode` | nightly_docker | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.jsonl.canonical_value_comparator` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.jsonl.manifest_report_generation` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.jsonl.no_placeholder_references` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.jsonl.schema_aware_normalization` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.cql_types.primitives.fixed_width_vectors` | fast_pr | — |
+| `cass.cql_types.primitives.invalid_length_rejection` | fast_pr | — |
+| `cass.cql_types.primitives.temporal_vectors` | fast_pr | — |
+| `cass.cql_types.primitives.text_blob_ascii_vectors` | fast_pr | — |
+| `cass.cql_types.primitives.uuid_inet_vectors` | fast_pr | — |
+| `cass.cql_types.primitives.varint_decimal_duration_vectors` | fast_pr | — |
 | `cass.data_db_decode.row_cell_flags_and_vint` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.data_db_decode.row_preamble_size_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.delta_scan.tombstone_liveness_facts` | required_parity | .github/workflows/delta-roundtrip.yml |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | fast_pr | — |
 | `cass.filter_db_bloom.serialization_no_false_negative` | fast_pr | — |
@@ -323,6 +422,12 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.sai_sasi_query.secondary_index_out_of_scope` | fast_pr | — |
 | `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
 | `cass.schema_evolution.dropped_column.per_cell_purge` | nightly_docker | .github/workflows/tombstone-ttl-parity.yml |
+| `cass.schema_evolution.serialization_header.altered_column_type` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.schema_evolution.serialization_header.altered_then_dropped_column` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.schema_evolution.serialization_header.dropped_column_same_type` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.schema_evolution.serialization_header.frozen_multicell_collection_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.schema_evolution.serialization_header.no_schema_change` | required_parity | .github/workflows/cql-type-parity.yml |
+| `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` | required_parity | .github/workflows/cql-type-parity.yml |
 | `cass.schema_evolution.serialization_header_column_order` | fast_pr | — |
 | `cass.sstable_format.descriptor_component_resolution` | fast_pr | — |
 | `cass.sstable_format.toc_component_manifest` | fast_pr | — |
@@ -388,7 +493,40 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compression_checksum.checksum_trailer_detection` | da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32<br>_fail:_ target/cassandra-parity/checksum-mismatch.log |
 | `cass.compression_checksum.chunk_offsets_and_crc` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.corruption_verify.component_corruption_detection` | — | — |
+| `cass.cql_types.boundaries.absent_vs_null_regular_columns` | nb | test-data/datasets/sstables/test_types/nb_absent_vs_null_regular-4fa69860706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.boundaries.empty_collections` | nb | test-data/datasets/sstables/test_types/nb_empty_collections-4faf9910706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.boundaries.length_prefix_edges` | nb | test-data/datasets/sstables/test_types/nb_length_prefix_edges-4fba4770706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
+| `cass.cql_types.boundaries.null_empty_text_blob` | nb | test-data/datasets/sstables/test_types/nb_null_empty_text_blob-4f9b26b0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.collections.map_key_lookup_offsets` | nb | test-data/codec-vectors/collections.json<br>_fail:_ logs |
+| `cass.cql_types.collections.map_key_range_offsets` | nb | test-data/codec-vectors/collections.json<br>_fail:_ logs |
+| `cass.cql_types.collections.set_lookup_offsets` | nb | test-data/codec-vectors/collections.json<br>_fail:_ logs |
+| `cass.cql_types.collections.set_range_offsets` | nb | test-data/codec-vectors/collections.json<br>_fail:_ logs |
+| `cass.cql_types.collections.single_cell_multicell_equivalence` | nb | test-data/codec-vectors/collections.json<br>_fail:_ logs |
+| `cass.cql_types.collections.vint_element_count_boundaries` | nb | test-data/codec-vectors/collections.json<br>_fail:_ logs |
+| `cass.cql_types.complex.frozen_udt_value` | nb | test-data/datasets/sstables/test_types/cx_frozen_udt_value-4fd68200706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.complex.legacy_dropped_tuple_udt_fields` | nb | test-data/datasets/sstables/test_types/cx_legacy_dropped_tuple_udt-4ff5a2c0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.complex.multicell_udt_collection_paths` | nb | test-data/datasets/sstables/test_types/cx_multicell_udt_collection_paths-4feb6990706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.complex.nested_frozen_collections` | nb | test-data/datasets/sstables/test_types/cx_nested_frozen_collections-4fe21ac0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.complex.tuple_field_order` | nb | test-data/datasets/sstables/test_types/cx_tuple_field_order-4fc4f5d0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.complex.udt_field_order_null_empty` | nb | test-data/datasets/sstables/test_types/cx_udt_field_order_null_empty-4fcd8150706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.counters.canonical_jsonl_value` | nb | test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/ct_multi_sstable_merge.counter-select.txt |
+| `cass.cql_types.counters.compacted_final_value` | nb | test-data/datasets/sstables/test_types/ct_compacted_final_value-501f4ad0706211f197e20b846582ecc8/nb-3-big-Data.db.jsonl<br>test-data/datasets/sstables/test_types/ct_compacted_final_value-501f4ad0706211f197e20b846582ecc8/ct_compacted_final_value.counter-select.txt |
+| `cass.cql_types.counters.deleted_counter_shadowing` | nb | test-data/datasets/sstables/test_types/ct_deleted_counter_shadowing-50114110706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_types/ct_deleted_counter_shadowing-50114110706211f197e20b846582ecc8/ct_deleted_counter_shadowing.counter-select.txt |
+| `cass.cql_types.counters.multi_sstable_increment_decrement_merge` | nb | test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_types/ct_multi_sstable_merge-5007f240706211f197e20b846582ecc8/ct_multi_sstable_merge.counter-select.txt |
+| `cass.cql_types.counters.single_sstable_context_decode` | nb | test-data/datasets/sstables/test_types/ct_single_sstable-4fff8dd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_types/ct_single_sstable-4fff8dd0706211f197e20b846582ecc8/ct_single_sstable.counter-select.txt |
+| `cass.cql_types.jsonl.canonical_value_comparator` | — | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.jsonl.cell_path_timestamp_ttl_tombstone_compare` | — | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.jsonl.manifest_report_generation` | — | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.jsonl.no_placeholder_references` | — | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.jsonl.schema_aware_normalization` | — | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.cql_types.primitives.fixed_width_vectors` | nb | test-data/codec-vectors/primitives.json<br>_fail:_ logs |
+| `cass.cql_types.primitives.invalid_length_rejection` | nb | test-data/codec-vectors/primitives.json<br>_fail:_ logs |
+| `cass.cql_types.primitives.temporal_vectors` | nb | test-data/codec-vectors/primitives.json<br>_fail:_ logs |
+| `cass.cql_types.primitives.text_blob_ascii_vectors` | nb | test-data/codec-vectors/primitives.json<br>_fail:_ logs |
+| `cass.cql_types.primitives.uuid_inet_vectors` | nb | test-data/codec-vectors/primitives.json<br>_fail:_ logs |
+| `cass.cql_types.primitives.varint_decimal_duration_vectors` | nb | test-data/codec-vectors/primitives.json<br>_fail:_ logs |
 | `cass.data_db_decode.row_cell_flags_and_vint` | nb, oa | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
+| `cass.data_db_decode.row_preamble_size_mismatch` | nb | — |
 | `cass.delta_scan.tombstone_liveness_facts` | nb | test-data/datasets/sstables/test_deltas/collection_ops-2a5006f06c2a11f18135b3f5f7fa4418/nb-1-big-Data.db.jsonl |
 | `cass.distributed_consensus.paxos_accord_out_of_scope` | — | — |
 | `cass.filter_db_bloom.serialization_no_false_negative` | nb | — |
@@ -409,6 +547,12 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.sai_sasi_query.secondary_index_out_of_scope` | — | — |
 | `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` | nb | test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl |
 | `cass.schema_evolution.dropped_column.per_cell_purge` | nb | test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Data.db.jsonl<br>test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_tomb/dropped_regular_col-4cc79a50702011f1b8f419c9a388d558/nb-2-big-Statistics.db.txt |
+| `cass.schema_evolution.serialization_header.altered_column_type` | nb | test-data/datasets/sstables/test_types/se_altered_column_type-4f6856e0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_altered_column_type-4f6856e0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
+| `cass.schema_evolution.serialization_header.altered_then_dropped_column` | nb | test-data/datasets/sstables/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_altered_then_dropped_column-4f7cc940706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
+| `cass.schema_evolution.serialization_header.dropped_column_same_type` | nb | test-data/datasets/sstables/test_types/se_dropped_column_same_type-4f72b720706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_dropped_column_same_type-4f72b720706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
+| `cass.schema_evolution.serialization_header.frozen_multicell_collection_mismatch` | nb | test-data/datasets/sstables/test_types/se_frozen_multicell_collection_mismatch-4f913ba0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_frozen_multicell_collection_mismatch-4f913ba0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
+| `cass.schema_evolution.serialization_header.no_schema_change` | nb | test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_no_schema_change-4f5a4d20706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
+| `cass.schema_evolution.serialization_header.static_regular_kind_mismatch` | nb | test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Statistics.db.txt<br>test-data/datasets/sstables/test_types/se_static_regular_kind_mismatch-4f87ecd0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl<br>_fail:_ logs |
 | `cass.schema_evolution.serialization_header_column_order` | nb | — |
 | `cass.sstable_format.descriptor_component_resolution` | nb, oa, da | — |
 | `cass.sstable_format.toc_component_manifest` | nb, oa, da | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt<br>test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-TOC.txt<br>test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Digest.crc32<br>test-data/datasets/sstables/test_oa/simple_table-4b7cd05064e711f1bd3ac7dbf655c673/oa-2-big-Digest.crc32<br>_fail:_ panic diff: cqlite-recomputed Digest.crc32 payload vs Cassandra reference (bytes + decoded decimal + Data.db path) |

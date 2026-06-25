@@ -1,0 +1,126 @@
+name: "CI: CQL Type & Schema-Evolution Parity (Nightly Docker, Epic #971)"
+
+# Docker-regenerating nightly enforcement for the CQL type & schema-evolution
+# parity scenarios (epic #971, issues #1003-#1009).
+#
+# Why this workflow is separate from the fast PR gate
+# ---------------------------------------------------
+# The six fixture-backed parity tests below depend on the test_types fixtures
+# (se_*, nb_*, cx_*, ct_* tables), which are NOT in the published CI dataset
+# bundle (they are brand-new for epic #971). The fast PR gate
+# (sstabledump-parity-gate.yml) fetches only the published bundle, so running
+# these tests there would skip-clean and FALSE-PASS.
+#
+# Instead this workflow REGENERATES the fixtures from scratch in a Cassandra
+# 5.0.2 container (the generator script manages its own Docker container), then
+# runs the fixture-backed tests with CQLITE_REQUIRE_FIXTURES=1. In strict mode
+# the tests PANIC (fail the job) instead of skipping when CQLITE_DATASETS_ROOT
+# is unset or a required fixture binary is absent — so a regeneration failure
+# can never be mistaken for a green parity run.
+#
+# The no-fixture lanes (issue_1004 / issue_1005 hand-derived codec vectors and
+# issue_1009 comparator self-test) run unconditionally; they read committed
+# vectors / published goldens and do not need the Docker regeneration.
+#
+# GATING POLICY: runs on
+#   - workflow_dispatch (manual)
+#   - schedule (nightly)
+#   - pull_request touching the parity tests, manifest, fixture generator, or
+#     this workflow itself.
+#
+# Manual local run:
+#   bash test-data/scripts/generate-cql-type-parity.sh
+#   env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+#     cargo test -p cqlite-core --features delta-scan \
+#       --test issue_1003_schema_evolution_header_parity \
+#       --test issue_1006_null_empty_boundary_parity \
+#       --test issue_1007_complex_type_parity \
+#       --test issue_1008_counter_final_value_parity
+#   cargo test -p cqlite-core --features delta-scan \
+#     --test issue_1004_primitive_codec_vectors \
+#     --test issue_1005_collection_serializer_vectors \
+#     --test issue_1009_canonical_jsonl_comparator
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: 'Run cargo test with --nocapture'
+        type: boolean
+        default: true
+  schedule:
+    # Nightly at 04:31 UTC (offset to avoid the top-of-hour scheduler rush and
+    # the tombstone/TTL parity job at 04:17).
+    - cron: '31 4 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cqlite-core/tests/issue_1003_schema_evolution_header_parity.rs'
+      - 'cqlite-core/tests/issue_1004_primitive_codec_vectors.rs'
+      - 'cqlite-core/tests/issue_1005_collection_serializer_vectors.rs'
+      - 'cqlite-core/tests/issue_1006_null_empty_boundary_parity.rs'
+      - 'cqlite-core/tests/issue_1007_complex_type_parity.rs'
+      - 'cqlite-core/tests/issue_1008_counter_final_value_parity.rs'
+      - 'cqlite-core/tests/issue_1009_canonical_jsonl_comparator.rs'
+      - 'test-data/cassandra-parity-manifest.yml'
+      - 'test-data/scripts/generate-cql-type-parity.sh'
+      - 'test-data/codec-vectors/**'
+      - '.github/workflows/cql-type-parity.yml'
+
+env:
+  CASSANDRA_IMAGE: cassandra:5.0.2
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cql-type-parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  cql-type-parity:
+    name: CQL type & schema-evolution parity (regenerate + require-fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: cql-type-parity-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check Docker available
+        run: docker info
+
+      - name: Generate CQL type / schema-evolution fixtures (test_types, epic #971)
+        run: bash test-data/scripts/generate-cql-type-parity.sh
+
+      - name: Verify generated fixtures
+        run: |
+          echo "=== test_types Data.db files ==="
+          find "$CQLITE_DATASETS_ROOT/sstables/test_types" -name '*-Data.db' | sort
+
+      - name: Run fixture-backed CQL type / schema-evolution parity tests (strict)
+        run: |
+          env CQLITE_REQUIRE_FIXTURES=1 \
+            CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+            cargo test -p cqlite-core --features delta-scan \
+              --test issue_1003_schema_evolution_header_parity \
+              --test issue_1006_null_empty_boundary_parity \
+              --test issue_1007_complex_type_parity \
+              --test issue_1008_counter_final_value_parity \
+              -- --nocapture
+
+      - name: Run no-fixture codec-vector + comparator tests
+        run: |
+          cargo test -p cqlite-core --features delta-scan \
+            --test issue_1004_primitive_codec_vectors \
+            --test issue_1005_collection_serializer_vectors \
+            --test issue_1009_canonical_jsonl_comparator \
+            -- --nocapture
