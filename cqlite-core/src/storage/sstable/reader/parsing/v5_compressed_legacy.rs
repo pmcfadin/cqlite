@@ -5380,7 +5380,8 @@ impl V5CompressedLegacyParser {
                     offset += blob_len;
 
                     (udt_value, offset)
-                } else if let Some(ht) = header_type.filter(|ht| Self::header_type_is_user_type(ht))
+                } else if let Some(ht) =
+                    header_type.filter(|ht| Self::marshal_is_top_level_frozen_udt(ht))
                 {
                     // Issue #1080: NO UdtRegistry is wired and the supplied schema
                     // short form `frozen<person_type>` carries no field defs, but
@@ -5516,11 +5517,13 @@ impl V5CompressedLegacyParser {
             // which does NOT start with CQL `frozen<` and so misses the arm above.
             // Decode it structurally from that marshal type (same authoritative
             // path as the supplied-schema header fallback) instead of blobbing it.
-            // `header_type_is_user_type` keys on the fully-qualified marker, and a
+            // `marshal_is_top_level_frozen_udt` accepts ONLY a top-level
+            // `FrozenType(UserType(...))` (NOT a frozen collection that contains a
+            // UDT, e.g. `FrozenType(ListType(UserType(...)))` — roborev 1365), and a
             // non-frozen top-level UDT is routed to the complex branch by
             // `is_complex_column`, so reaching here means a single-cell frozen UDT
             // → wrap in `Value::Frozen` (consistent with the CQL `frozen<` arm).
-            _ if Self::header_type_is_user_type(&column.data_type) => {
+            _ if Self::marshal_is_top_level_frozen_udt(&column.data_type) => {
                 let (udt_value, new_offset) = self.decode_frozen_udt_from_header_type(
                     data,
                     offset,
@@ -5579,26 +5582,30 @@ impl V5CompressedLegacyParser {
         Ok((value, cell_timestamp, cell_expiration, offset))
     }
 
-    /// Issue #1080: does the on-disk SerializationHeader marshal type contain a
-    /// FULLY-QUALIFIED `org.apache.cassandra.db.marshal.UserType(` token
-    /// (case-insensitive)? When true, a `frozen<udt>` cell whose supplied schema
-    /// short form carries no field defs (and with no `UdtRegistry` wired) can be
-    /// decoded STRUCTURALLY from this authoritative header type.
+    /// Issue #1080: is this on-disk SerializationHeader marshal type a TOP-LEVEL
+    /// frozen (or bare) UDT — `FrozenType(UserType(...))` or `UserType(...)` — that
+    /// may be decoded as a single UDT blob via `decode_frozen_udt_from_header_type`?
     ///
-    /// We deliberately match ONLY the fully-qualified marshal form — that is the
-    /// single shape real Cassandra SerializationHeaders ever carry (preserved
-    /// verbatim by `convert_marshal_type_to_cql`), and the whole decode chain
-    /// (`parse_udt_type_definition` + `parse_cassandra_type_with_depth` for nested
-    /// fields) keys on the same qualified marker at every nesting level. Matching a
-    /// bare `UserType(` here would let the predicate accept a string the nested
-    /// decoder cannot fully resolve, re-triggering the Err→break trailing-column
-    /// loss this fix exists to prevent (roborev jobs 1359/1361).
-    fn header_type_is_user_type(header_type: &str) -> bool {
-        const NEEDLE: &[u8] = b"org.apache.cassandra.db.marshal.usertype(";
-        header_type
-            .as_bytes()
-            .windows(NEEDLE.len())
-            .any(|w| w.iter().zip(NEEDLE).all(|(a, b)| a.eq_ignore_ascii_case(b)))
+    /// Returns FALSE for a frozen COLLECTION that merely CONTAINS a UDT, e.g.
+    /// `FrozenType(ListType(UserType(...)))` or `FrozenType(MapType(...UserType...))`
+    /// — those must go through the collection decoders, NOT the scalar UDT path; a
+    /// substring `UserType(` test would misroute them and corrupt the value or break
+    /// the row loop, dropping trailing columns (roborev job 1365).
+    ///
+    /// We match ONLY the fully-qualified marshal form (the single shape real
+    /// SerializationHeaders carry, preserved verbatim by `convert_marshal_type_to_cql`)
+    /// and require `UserType(` to be the IMMEDIATE inner type, after an optional
+    /// single `FrozenType(` wrapper. The whole decode chain
+    /// (`parse_udt_type_definition` + `parse_cassandra_type_with_depth`) keys on the
+    /// same qualified marker at every nesting level (roborev jobs 1359/1361).
+    fn marshal_is_top_level_frozen_udt(marshal_type: &str) -> bool {
+        const FROZEN: &str = "org.apache.cassandra.db.marshal.frozentype(";
+        const USERTYPE: &str = "org.apache.cassandra.db.marshal.usertype(";
+        let lower = marshal_type.trim().to_lowercase();
+        // Strip at most one leading FrozenType( wrapper; then UserType( must be the
+        // immediate inner type (rejecting FrozenType(ListType(UserType(...))) etc.).
+        let inner = lower.strip_prefix(FROZEN).unwrap_or(&lower);
+        inner.starts_with(USERTYPE)
     }
 
     /// Issue #1080: decode a single-cell frozen UDT value using the AUTHORITATIVE
@@ -11721,7 +11728,7 @@ mod tests {
             hex("age"),
         );
         assert!(
-            V5CompressedLegacyParser::header_type_is_user_type(&header_type),
+            V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(&header_type),
             "header type must be recognized as a UserType"
         );
 
@@ -11796,42 +11803,53 @@ mod tests {
         );
     }
 
-    /// Issue #1080: `header_type_is_user_type` gates whether the frozen-UDT
-    /// header-type fallback fires at all. Lock in the case-insensitive match and
-    /// the negative cases so a non-UDT marshal type never triggers the fallback.
+    /// Issue #1080 / roborev jobs 1359/1361/1365: `marshal_is_top_level_frozen_udt`
+    /// gates whether the scalar frozen-UDT decode fires. It must accept ONLY a
+    /// top-level `FrozenType(UserType(...))` / `UserType(...)`, and REJECT frozen
+    /// collections that merely contain a UDT (which must use the collection
+    /// decoders), bare (unqualified) forms, and primitives.
     #[test]
-    fn test_regression_1080_header_type_is_user_type_predicate() {
-        // Positive: canonical marshal form and the FrozenType wrapper.
-        assert!(V5CompressedLegacyParser::header_type_is_user_type(
-            "org.apache.cassandra.db.marshal.UserType(ks,abcd)"
+    fn test_regression_1080_marshal_is_top_level_frozen_udt_predicate() {
+        let q = "org.apache.cassandra.db.marshal";
+        // Positive: top-level qualified UDT and FrozenType(UserType(...)).
+        assert!(V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.UserType(ks,abcd)")
         ));
-        assert!(V5CompressedLegacyParser::header_type_is_user_type(
-            "org.apache.cassandra.db.marshal.FrozenType(org.apache.cassandra.db.marshal.UserType(ks,abcd))"
+        assert!(V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.FrozenType({q}.UserType(ks,abcd))")
         ));
-        // Positive: case-insensitive on the qualified marker.
-        assert!(V5CompressedLegacyParser::header_type_is_user_type(
+        // Positive: case-insensitive.
+        assert!(V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
             "ORG.APACHE.CASSANDRA.DB.MARSHAL.USERTYPE(ks,abcd)"
         ));
-        // Negative: a BARE `UserType(` (no marshal namespace) must NOT match — the
-        // nested-field decoder only resolves the qualified form, so accepting bare
-        // here would risk blobbing nested UDT fields (roborev jobs 1359/1361). Real
-        // SerializationHeaders are always fully qualified.
-        assert!(!V5CompressedLegacyParser::header_type_is_user_type(
+        // Negative (roborev 1365): frozen COLLECTIONS containing a UDT must NOT
+        // match — they must go through the collection decoders, not the scalar path.
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.FrozenType({q}.ListType({q}.UserType(ks,abcd)))")
+        ));
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.FrozenType({q}.MapType({q}.UTF8Type,{q}.UserType(ks,abcd)))")
+        ));
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.SetType({q}.UserType(ks,abcd))")
+        ));
+        // Negative: bare (unqualified) forms — real headers are always qualified.
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
             "UserType(ks,abcd)"
         ));
-        assert!(!V5CompressedLegacyParser::header_type_is_user_type(
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
             "FrozenType(UserType(ks,abcd))"
         ));
-        // Negative: other complex/primitive marshal types must NOT match.
-        assert!(!V5CompressedLegacyParser::header_type_is_user_type(
-            "org.apache.cassandra.db.marshal.Int32Type"
+        // Negative: primitives / non-UDT.
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            &format!("{q}.Int32Type")
         ));
-        assert!(!V5CompressedLegacyParser::header_type_is_user_type(
-            "org.apache.cassandra.db.marshal.ListType(org.apache.cassandra.db.marshal.Int32Type)"
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            "user"
         ));
-        // Negative: shorter than the needle (no panic, returns false).
-        assert!(!V5CompressedLegacyParser::header_type_is_user_type("user"));
-        assert!(!V5CompressedLegacyParser::header_type_is_user_type(""));
+        assert!(!V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(
+            ""
+        ));
     }
 
     /// Issue #1080: `decode_frozen_udt_from_header_type` must return a clean
@@ -11908,7 +11926,7 @@ mod tests {
             hex("home"),
         );
         assert!(
-            V5CompressedLegacyParser::header_type_is_user_type(&header_type),
+            V5CompressedLegacyParser::marshal_is_top_level_frozen_udt(&header_type),
             "qualified nested frozen UDT header must be recognized"
         );
 
