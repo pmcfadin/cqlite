@@ -736,7 +736,7 @@ impl SSTableManager {
         Ok(None)
     }
 
-    /// Scan a range of keys from all SSTables with proper tombstone merging
+    /// Scan a range of keys from all SSTables for a table.
     ///
     /// # Arguments
     /// * `table_id` - The table to scan
@@ -746,81 +746,32 @@ impl SSTableManager {
     /// * `schema` - Optional table schema for schema-aware parsing. When provided,
     ///   enables accurate type detection and avoids heuristic-based parsing.
     ///   Strongly recommended for Cassandra 5.0+ formats.
-    #[cfg(feature = "tombstones")]
-    pub async fn scan(
-        &self,
-        table_id: &TableId,
-        start_key: Option<&RowKey>,
-        end_key: Option<&RowKey>,
-        limit: Option<usize>,
-        schema: Option<&crate::schema::TableSchema>,
-    ) -> Result<Vec<(RowKey, Value)>> {
-        let readers = self.readers.read().await;
-        let mut key_values = std::collections::HashMap::new();
-
-        // Collect results from all SSTables, grouping by key
-        for reader in readers.values() {
-            let results = reader
-                .scan(table_id, start_key, end_key, None, schema)
-                .await?;
-
-            for (row_key, value) in results {
-                let generation = reader.generation;
-                let write_time = reader.extract_write_time_from_entry(&row_key, &value);
-
-                let gen_value = GenerationValue {
-                    value,
-                    metadata: EntryMetadata {
-                        write_time,
-                        generation,
-                        ttl: None,
-                    },
-                };
-
-                key_values
-                    .entry(row_key)
-                    .or_insert_with(Vec::new)
-                    .push(gen_value);
-            }
-        }
-
-        // Merge values for each key using tombstone merger
-        let merger = TombstoneMerger::new();
-        let mut final_results = Vec::new();
-
-        for (row_key, values) in key_values {
-            if let Some(merged_value) = merger.merge_generations(values)? {
-                final_results.push((row_key, merged_value));
-            }
-        }
-
-        // Sort results by key
-        final_results.sort_by(|a, b| a.0.cmp(&b.0));
-
-        // Apply limit
-        if let Some(limit) = limit {
-            final_results.truncate(limit);
-        }
-
-        Ok(final_results)
-    }
-
-    /// Scan a range of keys from all SSTables (simple version without tombstone merging)
     ///
-    /// # Arguments
-    /// * `table_id` - The table to scan
-    /// * `start_key` - Optional start key for range scan
-    /// * `end_key` - Optional end key for range scan
-    /// * `limit` - Optional limit on number of results
-    /// * `schema` - Optional table schema for schema-aware parsing. When provided,
-    ///   enables accurate type detection and avoids heuristic-based parsing.
-    ///   Strongly recommended for Cassandra 5.0+ formats.
+    /// Cross-generation reconciliation (last-write-wins + tombstone shadowing) is
+    /// applied via the authoritative k-way merger when more than one SSTable
+    /// generation backs the table and `write-support` + a schema are available;
+    /// otherwise rows from each reader are concatenated. That concat fallback is
+    /// the documented multi-generation limitation (Issue #883) and is now
+    /// IDENTICAL across every feature build: the `tombstones` build takes exactly
+    /// this path too (it no longer runs its own partition-keyed merge). So no
+    /// build regresses relative to the default — a `tombstones`-without-
+    /// `write-support` multi-generation read behaves the same as the default
+    /// `not(tombstones)`-without-`write-support` build, and the prior `tombstones`
+    /// "merge" it replaces was the row-collapsing bug, not real reconciliation.
+    ///
+    /// Issue #1085: this is the SINGLE `scan` implementation for every feature
+    /// build. The former `#[cfg(feature = "tombstones")]` variant grouped per-row
+    /// results into a `HashMap` keyed on `RowKey` (which carries only the
+    /// partition-key bytes, no clustering) and ran `TombstoneMerger`, so it
+    /// collapsed all clustering rows of a partition into one — a full `SELECT *`
+    /// over a clustered table returned ~one row per partition. Concatenating
+    /// per-reader rows here (and reconciling only ACROSS generations) is correct
+    /// for clustered tables in every build.
     ///
     /// Lookup order (Issue #680):
     ///   1. Exact match on the full `table_id` string (e.g. `"test_basic.simple_table"`)
     ///   2. Unqualified table name (e.g. `"simple_table"`) — for backward compatibility
     ///      with flat/non-Cassandra directory layouts that have no keyspace parent.
-    #[cfg(not(feature = "tombstones"))]
     pub async fn scan(
         &self,
         table_id: &TableId,
@@ -954,10 +905,12 @@ impl SSTableManager {
     /// evaluation, so any over-inclusion (e.g. a BTI prefix-collision candidate) is
     /// filtered out downstream.
     ///
-    /// Gated on `not(tombstones)` to match the `scan` variant it parallels: the
-    /// `tombstones` build uses a structurally different reader map, so the method
-    /// is defined only for the default build (the executor falls back to a full
-    /// scan under `tombstones`).
+    /// Gated on `not(tombstones)` because the bloom/BTI prune fast path it relies
+    /// on ([`scan_partition_clustering`](reader::SSTableReader::scan_partition_clustering))
+    /// is itself `not(tombstones)`-only. Under `tombstones` the executor falls back
+    /// to a full [`scan`](Self::scan) + predicate filter (since #1085, `scan` is the
+    /// same correct implementation in both builds, so the fallback is correct — just
+    /// without the single-partition prune).
     ///
     /// `partition_key` is the raw on-disk partition-key bytes produced by
     /// [`encode_partition_key_columns`](crate::storage::partition_key_codec::encode_partition_key_columns),
@@ -1357,7 +1310,6 @@ impl SSTableManager {
     /// Shared by [`get`](Self::get), [`scan`](Self::scan), and
     /// [`scan_partition`](Self::scan_partition) so the resolution rule lives in
     /// one place and the targeted-lookup path can never drift from `scan`.
-    #[cfg(not(feature = "tombstones"))]
     fn resolve_reader_list<'a>(
         table_readers: &'a HashMap<String, Vec<Arc<reader::SSTableReader>>>,
         table_name: &str,
@@ -1399,7 +1351,7 @@ impl SSTableManager {
     /// full reconciled table (Issue #957). The range filter runs before `limit`, matching
     /// the per-reader scan order (range then limit). With `None`/`None` bounds the output
     /// is byte-for-byte the full reconciled set, unchanged from before.
-    #[cfg(all(not(feature = "tombstones"), feature = "write-support"))]
+    #[cfg(feature = "write-support")]
     async fn merge_generations_for_read(
         &self,
         reader_list: &[Arc<reader::SSTableReader>],

@@ -51,7 +51,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(fmt clippy core-tests integration-tests format-compat write-tests cli-tests python-bindings minimal-build smoke)
+COMPONENTS=(fmt clippy core-tests tombstones-scan integration-tests format-compat write-tests cli-tests python-bindings minimal-build smoke)
 ONLY=""
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
@@ -149,6 +149,12 @@ run_component fmt cargo fmt --all --check
 run_component clippy env RUSTFLAGS="-D warnings" cargo clippy --workspace --all-targets --all-features
 run_component core-tests cargo test --package cqlite-core --features cli-helpers -- \
   --skip test_legacy_format_allows_blob_fallback_with_feature
+# Issue #1085: the row-collapse bug lived in the `tombstones`-feature scan path,
+# which the default gate run (cli-helpers) never compiles. Run the full-scan
+# regression test under `tombstones` so a re-introduction can't ship green.
+run_component tombstones-scan cargo test --package cqlite-core \
+  --features write-support,cli-helpers,tombstones \
+  --test issue_1085_tombstones_full_scan_parity
 # Compile EVERY target in the package first (--no-run, whole package) so a
 # new/edited test file that doesn't compile can't hide behind the enumerated
 # run-list (issue #865); then execute the seven CI-enforced targets.
