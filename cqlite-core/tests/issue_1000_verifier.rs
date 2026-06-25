@@ -45,6 +45,27 @@ fn datasets_root() -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `true` when `CQLITE_REQUIRE_FIXTURES` is set to a truthy value ("1"/"true").
+/// In strict mode an unusable fixture set is a hard failure; otherwise it is a
+/// clean skip. Mirrors the sibling parity tests' doctrine (issue #1094).
+fn require_fixtures_strict() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Handle a fixture set that turned out to be unusable (e.g. directories are
+/// git-tracked but the Data.db binaries were not fetched in this lane). Hard
+/// failure under `CQLITE_REQUIRE_FIXTURES=1` (full-dataset CI / nightly), clean
+/// skip otherwise — so PR lanes that set `CQLITE_DATASETS_ROOT` without shipping
+/// the `test_comp` bundle do not fail spuriously (issue #1094).
+fn skip_or_require(what: &str, reason: &str) {
+    if require_fixtures_strict() {
+        panic!("CQLITE_REQUIRE_FIXTURES=1 but {what} unavailable: {reason}");
+    }
+    eprintln!("[SKIP] {what}: {reason}");
+}
+
 /// `true` when a directory looks like a materialized SSTable generation (has a
 /// `*-Data.db`). Used to skip-clean when binaries are not fetched.
 fn has_data_db(dir: &Path) -> bool {
@@ -83,12 +104,18 @@ async fn verify(dir: &Path, mode: VerifyMode) -> VerifyReport {
 #[tokio::test]
 async fn healthy_compressed_and_uncompressed_fixtures_pass_full_verification() {
     let Some(root) = datasets_root() else {
-        eprintln!("CQLITE_DATASETS_ROOT not set — skipping (clean skip)");
+        skip_or_require(
+            "issue_1000 verifier fixtures",
+            "CQLITE_DATASETS_ROOT not set",
+        );
         return;
     };
     let comp_dir = root.join("sstables/test_comp");
     if !comp_dir.exists() {
-        eprintln!("test_comp not present — skipping (clean skip)");
+        skip_or_require(
+            "test_comp healthy fixtures",
+            "test_comp directory not present",
+        );
         return;
     }
 
@@ -117,6 +144,16 @@ async fn healthy_compressed_and_uncompressed_fixtures_pass_full_verification() {
         checked += 1;
     }
 
+    if checked == 0 {
+        // test_comp dir is git-tracked (JSONL refs) but the Data.db binaries
+        // were not fetched in this lane — skip clean unless strict mode demands
+        // them. Avoids the per-PR failure reported in issue #1094.
+        skip_or_require(
+            "test_comp healthy fixtures",
+            "no Data.db present (binaries not fetched)",
+        );
+        return;
+    }
     assert!(
         checked >= 7,
         "expected at least 7 healthy test_comp fixtures with Data.db, found {checked}"
@@ -130,13 +167,19 @@ async fn healthy_compressed_and_uncompressed_fixtures_pass_full_verification() {
 #[tokio::test]
 async fn every_corrupt_fixture_fails_on_expected_component() {
     let Some(root) = datasets_root() else {
-        eprintln!("CQLITE_DATASETS_ROOT not set — skipping (clean skip)");
+        skip_or_require(
+            "issue_1000 verifier fixtures",
+            "CQLITE_DATASETS_ROOT not set",
+        );
         return;
     };
     let corrupt_root = root.join("corruption/test_comp_corrupt");
     let manifest_path = corrupt_root.join("corruption-manifest.yml");
     if !manifest_path.exists() {
-        eprintln!("corruption manifest not present — skipping (clean skip)");
+        skip_or_require(
+            "test_comp_corrupt active fixtures",
+            "corruption manifest not present",
+        );
         return;
     }
 
@@ -237,11 +280,18 @@ async fn every_corrupt_fixture_fails_on_expected_component() {
         checked += 1;
     }
 
-    assert!(
-        checked > 0,
-        "no active corrupt fixtures were verified (checked={checked}, skipped_planned={skipped_planned}); \
-         dataset present but fixtures unusable"
-    );
+    if checked == 0 {
+        // Manifest is git-tracked but the corrupt Data.db binaries were not
+        // fetched in this lane — skip clean unless strict mode demands them
+        // (issue #1094).
+        skip_or_require(
+            "test_comp_corrupt active fixtures",
+            &format!(
+                "no usable corrupt fixtures (skipped_planned={skipped_planned}); binaries not fetched"
+            ),
+        );
+        return;
+    }
     eprintln!("verified {checked} active corrupt fixtures ({skipped_planned} non-active skipped)");
 }
 
@@ -252,7 +302,10 @@ async fn every_corrupt_fixture_fails_on_expected_component() {
 #[tokio::test]
 async fn corrupt_big_index_is_not_a_silent_zero_row_success() {
     let Some(root) = datasets_root() else {
-        eprintln!("CQLITE_DATASETS_ROOT not set — skipping (clean skip)");
+        skip_or_require(
+            "issue_1000 verifier fixtures",
+            "CQLITE_DATASETS_ROOT not set",
+        );
         return;
     };
     let dir = root.join("corruption/test_comp_corrupt/index_db_bit_flip_big");
@@ -277,7 +330,10 @@ async fn corrupt_big_index_is_not_a_silent_zero_row_success() {
 #[tokio::test]
 async fn corrupt_bti_tries_are_not_a_silent_zero_row_success() {
     let Some(root) = datasets_root() else {
-        eprintln!("CQLITE_DATASETS_ROOT not set — skipping (clean skip)");
+        skip_or_require(
+            "issue_1000 verifier fixtures",
+            "CQLITE_DATASETS_ROOT not set",
+        );
         return;
     };
     let corrupt_root = root.join("corruption/test_comp_corrupt");
@@ -317,13 +373,19 @@ async fn corrupt_bti_tries_are_not_a_silent_zero_row_success() {
 #[tokio::test]
 async fn quick_mode_does_not_scan_rows_full_mode_does() {
     let Some(root) = datasets_root() else {
-        eprintln!("CQLITE_DATASETS_ROOT not set — skipping (clean skip)");
+        skip_or_require(
+            "issue_1000 verifier fixtures",
+            "CQLITE_DATASETS_ROOT not set",
+        );
         return;
     };
     // Pick a known-healthy compressed fixture.
     let comp_dir = root.join("sstables/test_comp");
     if !comp_dir.exists() {
-        eprintln!("test_comp not present — skipping (clean skip)");
+        skip_or_require(
+            "test_comp healthy fixtures",
+            "test_comp directory not present",
+        );
         return;
     }
     let Some(fixture) = std::fs::read_dir(&comp_dir)
