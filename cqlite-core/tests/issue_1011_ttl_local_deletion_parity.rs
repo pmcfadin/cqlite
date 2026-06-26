@@ -31,17 +31,18 @@
 //! (86400 / 86401 / 3600) and writetime (`tstamp`) ARE deterministic and asserted
 //! exactly.
 //!
-//! ## Known gap (reported, NOT hacked green)
+//! ## STATS max-LDT + tombstone-drop histogram (issue #1073 — gap closed)
 //!
-//! CQLite's minimal Statistics parser does NOT yet decode the STATS-component
-//! `SSTable max local deletion time` (it stores a placeholder equal to the min)
-//! nor the estimated-tombstone-drop-times histogram.  The two
-//! `statistics_metadata` scenarios that depend on those are therefore covered
-//! only for the DECODABLE half (EncodingStats min LDT / minTTL), and the
-//! still-undecoded fields are documented below as a partial.  We assert the
-//! reference dump carries those facts (so the lane proves it ran) and assert the
-//! current placeholder behaviour explicitly so a future fix that wires up the
-//! real decode trips this test.
+//! CQLite now decodes the STATS-component `SSTable max local deletion time`
+//! (the "no tombstones" sentinel normalizes to `i64::MAX`) and the
+//! estimated-tombstone-drop-times histogram (issue #1073).  The two
+//! `statistics_metadata` scenarios that depend on those are therefore asserted
+//! against the REAL decoded values: `timestamp_stats.max_deletion_time` equals
+//! the dump's parenthesised integer, and `tombstone_drop_times` reproduces the
+//! dump's histogram bucket cardinality and total count.  A focused parity test
+//! lives in `issue_1073_statistics_max_ldt_tombstone_histogram_parity.rs`; here
+//! we keep the assertions in the combined #1011 scenario so a regression in
+//! either source trips this lane too.
 //!
 //! ## Discipline
 //!
@@ -425,6 +426,18 @@ fn paren_int(line: &str) -> Option<i64> {
     let open = line.rfind('(')?;
     let close = line[open..].find(')')? + open;
     line[open + 1..close].trim().parse().ok()
+}
+
+/// The literal parenthesised integer on the `SSTable max local deletion time`
+/// line of a dump, including the "no tombstones (9223372036854775807)" sentinel
+/// (which equals `i64::MAX`).  Returns `None` if the line is absent.
+fn max_local_deletion_time_paren_int(txt: &Path) -> Option<i64> {
+    let content = fs::read_to_string(txt).ok()?;
+    content
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with("SSTable max local deletion time:"))
+        .and_then(paren_int)
 }
 
 /// Bare integer after the last colon, e.g. `TTL min: 0` or
@@ -907,14 +920,16 @@ async fn statistics_encoding_stats_local_deletion_parity() {
 //   Manifest: cass.statistics_metadata.tombstone_histogram.deletion_times
 //             cass.statistics_metadata.max_local_deletion_time.tombstones_ttl
 //
-//   KNOWN GAP: CQLite's minimal Statistics parser does NOT decode the STATS
-//   component, so neither the estimated-tombstone-drop-times histogram nor the
-//   real `SSTable max local deletion time` are available.  We:
-//     (a) prove the committed reference dump CARRIES those facts (so the lane
-//         demonstrably ran against real data), and
-//     (b) pin CQLite's CURRENT behaviour (max_deletion_time == min placeholder)
-//         so a future fix that wires up the real decode trips this test and the
-//         scenario can be upgraded from `partial` to `mirrored`.
+//   Issue #1073 closed the gap: CQLite now decodes the STATS-component
+//   `SSTable max local deletion time` (the "no tombstones" sentinel normalizes
+//   to i64::MAX) and the estimated-tombstone-drop-times histogram.  We assert
+//   the REAL decoded values against the committed reference dump:
+//     (a) `timestamp_stats.max_deletion_time` equals the dump's parenthesised
+//         integer (real max LDT for ttl_test_table; i64::MAX sentinel for
+//         tombstone_histogram), and
+//     (b) `tombstone_drop_times` reproduces the dump's histogram bucket
+//         cardinality and total count.
+//   We still fail loudly if the dump carries facts but CQLite matched zero.
 // ===========================================================================
 
 #[tokio::test]
@@ -959,24 +974,58 @@ async fn statistics_tombstone_histogram_and_max_ldt_reference_facts() {
             "{name}: histogram total count must be > 0 (got {total_count})"
         );
 
-        // GAP: CQLite does not decode the estimated-tombstone-drop-times histogram.
-        // SSTableStatistics has no such field, so there is nothing to compare yet.
-        // Assert the binary-decode path at least succeeds and exposes NO histogram,
-        // pinning the current state.
+        // Issue #1073: CQLite now decodes the estimated-tombstone-drop-times
+        // histogram into `tombstone_drop_times`. Assert it is non-empty and that
+        // its total count equals the dump's bucket-count total.
         if let Some(db) = find_statistics_db(&dir) {
             let bytes = fs::read(&db).unwrap();
             let (_, stats) = parse_statistics_with_fallback(&bytes, None)
                 .unwrap_or_else(|e| panic!("{name}: decode {} failed: {e:?}", db.display()));
-            // The minimal parser leaves row_size / partition histograms empty and
-            // does not expose a tombstone-drop histogram at all.
+            // Fail loudly: the dump carries histogram facts, so CQLite must too.
             assert!(
-                stats.row_stats.row_size_histogram.is_empty(),
-                "{name}: minimal parser unexpectedly populated a row-size histogram \
-                 — STATS-component decode may now exist; upgrade this scenario"
+                !stats.tombstone_drop_times.is_empty(),
+                "{name}: dump carries {bucket_count} drop-time bucket(s) (total {total_count}) \
+                 but CQLite decoded ZERO — histogram decode regressed (no silent pass)"
+            );
+            assert_eq!(
+                stats.tombstone_drop_times.len(),
+                bucket_count,
+                "{name}: drop-time bucket cardinality cqlite={} cassandra={bucket_count}",
+                stats.tombstone_drop_times.len()
+            );
+            let cqlite_total: i64 = stats
+                .tombstone_drop_times
+                .iter()
+                .map(|(_, c)| *c as i64)
+                .sum();
+            assert_eq!(
+                cqlite_total, total_count,
+                "{name}: drop-time total count cqlite={cqlite_total} cassandra={total_count}"
+            );
+
+            // Issue #1073: this fixture's dump reports
+            // `SSTable max local deletion time: no tombstones (9223372036854775807)`.
+            // Parse that literal integer from the dump and assert CQLite decoded
+            // the same value (it equals i64::MAX). Parsed, never hardcoded.
+            let sentinel = max_local_deletion_time_paren_int(&txt).unwrap_or_else(|| {
+                panic!("{name}: tombstone_histogram dump missing 'SSTable max local deletion time'")
+            });
+            assert_eq!(
+                sentinel,
+                i64::MAX,
+                "{name}: tombstone_histogram dump sentinel must be i64::MAX (got {sentinel})"
+            );
+            assert_eq!(
+                stats.timestamp_stats.max_deletion_time, sentinel,
+                "{name}: SSTable max local deletion time (no-tombstones sentinel) \
+                 cqlite={} cassandra={sentinel}",
+                stats.timestamp_stats.max_deletion_time
             );
             println!(
                 "[PASS] {name}: tombstone-drop histogram reference has {bucket_count} bucket(s), \
-                 total count {total_count}; CQLite decode succeeds (histogram not yet exposed — GAP)"
+                 total count {total_count}; CQLite decoded {} bucket(s), total {cqlite_total}; \
+                 max LDT sentinel == i64::MAX (issue #1073)",
+                stats.tombstone_drop_times.len()
             );
         } else {
             skip_or_panic(
@@ -1022,24 +1071,26 @@ async fn statistics_tombstone_histogram_and_max_ldt_reference_facts() {
             let bytes = fs::read(&db).unwrap();
             let (_, stats) = parse_statistics_with_fallback(&bytes, None)
                 .unwrap_or_else(|e| panic!("{name}: decode {} failed: {e:?}", db.display()));
-            // GAP: the minimal parser sets max_deletion_time = min_deletion_time
-            // (a placeholder), so it does NOT yet equal the reference max LDT.
-            // Pin the current behaviour: equal to the decoded MIN, and NOT the real
-            // reference MAX (which differs here: min=1759799525 max=1759799526).
+            // Issue #1073: CQLite now decodes the real STATS `SSTable max local
+            // deletion time`. Assert byte-parity against the dump's parenthesised
+            // integer (here min=1759799525 max=1759799526, so max != min proves a
+            // real decode, not a min placeholder). Parsed from the dump, never
+            // hardcoded.
             assert_eq!(
-                stats.timestamp_stats.max_deletion_time, stats.timestamp_stats.min_deletion_time,
-                "{name}: expected max_deletion_time placeholder == min; if these now differ \
-                 the real STATS decode landed — upgrade this scenario to a strict max-LDT assert"
-            );
-            assert_ne!(
                 stats.timestamp_stats.max_deletion_time, max_ldt,
-                "{name}: CQLite now decodes the REAL max LDT ({max_ldt}) — the gap is closed; \
-                 upgrade cass.statistics_metadata.max_local_deletion_time.tombstones_ttl to mirrored"
+                "{name}: SSTable max local deletion time cqlite={} cassandra={max_ldt}",
+                stats.timestamp_stats.max_deletion_time
+            );
+            // Cross-check this fixture exercises a real (non-placeholder) max: it
+            // differs from the decoded min baseline.
+            assert_ne!(
+                stats.timestamp_stats.max_deletion_time, stats.timestamp_stats.min_deletion_time,
+                "{name}: ttl_test_table must exercise max LDT != min (real decode, not placeholder)"
             );
             println!(
-                "[PASS] {name}: ttl_test_table reference max LDT={max_ldt} (min={}); \
-                 CQLite max_deletion_time placeholder={} (== min) — GAP confirmed, not hacked",
-                reference.enc_min_local_deletion_time, stats.timestamp_stats.max_deletion_time
+                "[PASS] {name}: ttl_test_table max LDT cqlite={} == cassandra={max_ldt} (min={}); \
+                 issue #1073 real decode",
+                stats.timestamp_stats.max_deletion_time, reference.enc_min_local_deletion_time
             );
         } else {
             skip_or_panic(

@@ -36,7 +36,8 @@ name: "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)"
 #       --test issue_998_inline_crc_trailers \
 #       --test issue_1000_verifier \
 #       --test issue_1001_reject_unknown_compression \
-#       --test issue_1082_deflate_zlib
+#       --test issue_1082_deflate_zlib \
+#       --test issue_1104_compaction_incompressible_chunks
 
 on:
   workflow_dispatch:
@@ -56,6 +57,7 @@ on:
       - 'cqlite-core/tests/issue_1000_verifier.rs'
       - 'cqlite-core/tests/issue_1001_reject_unknown_compression.rs'
       - 'cqlite-core/tests/issue_1082_deflate_zlib.rs'
+      - 'cqlite-core/tests/issue_1104_compaction_incompressible_chunks.rs'
       - 'test-data/cassandra-parity-manifest.yml'
       - 'test-data/scripts/generate-compression-parity.sh'
       - 'test-data/scripts/generate-corruption-corpus.sh'
@@ -157,4 +159,5 @@ jobs:
               --test issue_1000_verifier \
               --test issue_1001_reject_unknown_compression \
               --test issue_1082_deflate_zlib \
+              --test issue_1104_compaction_incompressible_chunks \
               -- --nocapture

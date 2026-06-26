@@ -327,6 +327,26 @@ impl<'a> Cursor<'a> {
         self.pos = end;
         Ok(i64::from_be_bytes(buf))
     }
+
+    fn read_u32(&mut self) -> Result<u32> {
+        let end = self.need(4)?;
+        let v = u32::from_be_bytes([
+            self.bytes[self.pos],
+            self.bytes[self.pos + 1],
+            self.bytes[self.pos + 2],
+            self.bytes[self.pos + 3],
+        ]);
+        self.pos = end;
+        Ok(v)
+    }
+
+    fn read_f64(&mut self) -> Result<f64> {
+        let end = self.need(8)?;
+        let mut buf = [0u8; 8];
+        buf.copy_from_slice(&self.bytes[self.pos..end]);
+        self.pos = end;
+        Ok(f64::from_be_bytes(buf))
+    }
 }
 
 /// Skip an `EstimatedHistogram`: `i32 count`, then `count` × (`i64 offset`,
@@ -450,9 +470,189 @@ pub fn parse_repair_metadata(input: &[u8], gates: Option<&VersionGates>) -> Resu
     })
 }
 
+/// Cassandra's canonical "no deletion" local-deletion-time sentinel,
+/// normalized to `i64` for both legacy (nb) and modern (oa/da) encodings.
+///
+/// `LivenessInfo.NO_DELETION_TIME` is `Cell.MAX_DELETION_TIME` =
+/// `Integer.MAX_VALUE` for legacy (signed `i32`) SSTables, and `0xFFFF_FFFF`
+/// (the `u32` saturation value) for modern SSTables that store the field as an
+/// unsigned 32-bit integer. `sstablemetadata` prints `Long.MAX_VALUE`
+/// (`9223372036854775807`) for "no tombstones"; we normalize to that here so
+/// the decoded `max_local_deletion_time` matches the reference tool's printed
+/// integer in BOTH cases.
+const NO_DELETION_TIME: i64 = i64::MAX;
+
+/// Additional STATS-component facts decoded by [`parse_stats_extras`] that are
+/// not part of the repair-coordination metadata: the SSTable's maximum local
+/// deletion time and the estimated tombstone-drop-times histogram.
+///
+/// Decoded best-effort: a `Statistics.db` that parses today must keep parsing,
+/// so callers treat an `Err` from [`parse_stats_extras`] as "leave the existing
+/// placeholders" rather than propagating it.
+#[derive(Debug, Clone)]
+pub struct StatsExtras {
+    /// SSTable `maxLocalDeletionTime`, normalized so that the version-specific
+    /// "no tombstones" sentinel (`i32::MAX` for nb, `0xFFFF_FFFF` for oa/da)
+    /// maps to [`NO_DELETION_TIME`] (`i64::MAX`); any real deletion time is the
+    /// seconds-since-epoch value as `i64`.
+    pub max_local_deletion_time: i64,
+    /// `estimatedTombstoneDropTime` histogram as `(point, count)` pairs. Empty
+    /// when the histogram carries no bins (the common case for SSTables with no
+    /// tombstones).
+    pub tombstone_drop_times: Vec<(i64, u64)>,
+}
+
+impl Default for StatsExtras {
+    /// The default reported when no STATS component is locatable: "no
+    /// tombstones" max-LDT ([`NO_DELETION_TIME`]) and an empty histogram.
+    fn default() -> Self {
+        StatsExtras {
+            max_local_deletion_time: NO_DELETION_TIME,
+            tombstone_drop_times: Vec::new(),
+        }
+    }
+}
+
+/// Decode the SSTable `maxLocalDeletionTime` and the estimated
+/// tombstone-drop-times histogram from a raw `Statistics.db` buffer.
+///
+/// This walks the same self-describing leading STATS fields as
+/// [`parse_repair_metadata`], but reads (rather than skips) field 5
+/// (min/maxLocalDeletionTime) and field 8 (the tombstone histogram).
+///
+/// When `gates` is `None`, the legacy (nb) encoding is assumed for BOTH the
+/// max-LDT sentinel comparison and the histogram entry width (nb-compatible
+/// default, matching the rest of the minimal Statistics parser and the
+/// `merge.rs` caller).
+///
+/// # Returns
+///
+/// * `Ok(StatsExtras::default())` — max-LDT = [`NO_DELETION_TIME`], empty
+///   histogram — when the buffer carries no STATS component (nothing to decode).
+/// * `Ok(extras)` with the decoded facts otherwise.
+///
+/// # Errors
+///
+/// Returns an error when the STATS component is present but its leading
+/// (self-describing) fields are truncated/corrupt or overrun the component's
+/// authoritative end bound. Best-effort callers must treat this as "leave the
+/// existing placeholders" and MUST NOT propagate it (a `Statistics.db` that
+/// parses today must keep parsing).
+pub fn parse_stats_extras(input: &[u8], gates: Option<&VersionGates>) -> Result<StatsExtras> {
+    let Some(bounds) = stats_component_bounds(input)? else {
+        // No STATS component → nothing to decode. Report the canonical
+        // "no tombstones" default rather than failing.
+        return Ok(StatsExtras::default());
+    };
+
+    let modern = gates.map(uses_modern_tombstone_histogram).unwrap_or(false);
+
+    // Bound the cursor over ONLY the STATS component slice (start..end, CRC and
+    // following components excluded). Any read past this slice fails closed.
+    let mut c = Cursor::new(&input[bounds.start..bounds.end]);
+
+    // 1-2. estimatedPartitionSize + estimatedCellPerPartitionCount.
+    skip_estimated_histogram(&mut c)?;
+    skip_estimated_histogram(&mut c)?;
+
+    // 3. commitLogUpperBound: i64 segmentId + i32 position.
+    c.skip(8 + 4)?;
+
+    // 4. minTimestamp, maxTimestamp.
+    c.skip(8 + 8)?;
+
+    // 5. min/maxLocalDeletionTime. Width is 4 bytes each in both encodings; the
+    //    signedness/sentinel differs by version (handled below).
+    let _min_ldt = c.read_u32()?;
+    let raw_max_ldt = c.read_u32()?;
+    let max_local_deletion_time = decode_max_local_deletion_time(raw_max_ldt, modern);
+
+    // 6. minTTL, maxTTL.
+    c.skip(4 + 4)?;
+
+    // 7. compressionRatio (f64).
+    c.read_f64()?;
+
+    // 8. estimatedTombstoneDropTime (TombstoneHistogram).
+    let tombstone_drop_times = read_tombstone_histogram(&mut c, modern)?;
+
+    Ok(StatsExtras {
+        max_local_deletion_time,
+        tombstone_drop_times,
+    })
+}
+
+/// Normalize a raw 4-byte `maxLocalDeletionTime` to a canonical `i64`.
+///
+/// * modern (oa/da): the field is an unsigned `u32`; the sentinel is
+///   `0xFFFF_FFFF`.
+/// * legacy (nb): the field is a signed `i32`; the sentinel is `i32::MAX`.
+///
+/// The version sentinel maps to [`NO_DELETION_TIME`] (`i64::MAX`); any real
+/// deletion time (always `< 2^31` seconds-since-epoch) is returned as its
+/// integer value.
+fn decode_max_local_deletion_time(raw: u32, modern: bool) -> i64 {
+    if modern {
+        if raw == u32::MAX {
+            NO_DELETION_TIME
+        } else {
+            raw as i64
+        }
+    } else {
+        let signed = raw as i32;
+        if signed == i32::MAX {
+            NO_DELETION_TIME
+        } else {
+            signed as i64
+        }
+    }
+}
+
+/// Read a `TombstoneHistogram` as `(point, count)` pairs.
+///
+/// Header: `i32 maxBinSize`, `i32 size` (bin count, must be `>= 0`). Each bin is
+/// `f64 point + i64 value` (16 bytes) for legacy (nb), or `i64 point + i32 value`
+/// (12 bytes) for modern (oa/da). The legacy `f64` point is cast to `i64`
+/// (Cassandra rounds drop-times to integer bucket boundaries, so the cast is
+/// exact). An empty histogram yields an empty `Vec`.
+fn read_tombstone_histogram(c: &mut Cursor, modern: bool) -> Result<Vec<(i64, u64)>> {
+    let _max_bin_size = c.read_i32()?;
+    let size = c.read_i32()?;
+    if size < 0 {
+        return Err(Error::Corruption(format!(
+            "negative TombstoneHistogram size {size}"
+        )));
+    }
+    // Bound the allocation by the bytes actually present BEFORE reserving:
+    // a corrupt Statistics.db can advertise a huge positive `size`, and
+    // `Vec::with_capacity(size)` would otherwise attempt a massive (or aborting)
+    // allocation. Each bin is `entry_width` bytes; validate that all bins fit in
+    // the remaining cursor span (fail-closed via `need`) so the reserve below is
+    // capped by real data, not the untrusted header.
+    let entry_width = if modern { 12usize } else { 16usize };
+    let required = (size as usize)
+        .checked_mul(entry_width)
+        .ok_or_else(|| Error::Corruption("TombstoneHistogram size overflow".to_string()))?;
+    c.need(required)?;
+    let mut out = Vec::with_capacity(size as usize);
+    for _ in 0..size {
+        if modern {
+            let point = c.read_i64()?;
+            let value = c.read_i32()?;
+            out.push((point, value as u64));
+        } else {
+            let point = c.read_f64()?;
+            let value = c.read_i64()?;
+            out.push((point as i64, value as u64));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::storage::sstable::version_gate::BigVersionGates;
 
     /// Build a minimal but valid STATS component (through `repairedAt`) plus a
     /// 4-component TOC pointing at it, so the decoder can be exercised in-memory
@@ -511,6 +711,192 @@ mod tests {
         out.extend_from_slice(&stats);
         out.extend_from_slice(&0u32.to_be_bytes()); // trailing metadata CRC
         out
+    }
+
+    /// Build a STATS component (through `repairedAt`) wrapped in a 4-component
+    /// TOC (STATS last), with caller-controlled `maxLocalDeletionTime` (raw
+    /// 4-byte field, written verbatim) and tombstone-histogram bins. The bins
+    /// are written using the legacy (16-byte: `f64 point + i64 value`) or
+    /// modern (12-byte: `i64 point + i32 value`) layout per `modern`.
+    fn synthetic_statistics_extras(modern: bool, raw_max_ldt: u32, bins: &[(i64, u64)]) -> Vec<u8> {
+        let mut stats = Vec::new();
+        // estimatedPartitionSize + estimatedCellPerPartitionCount (empty).
+        stats.extend_from_slice(&0i32.to_be_bytes());
+        stats.extend_from_slice(&0i32.to_be_bytes());
+        // commitLogUpperBound: i64 segmentId + i32 position.
+        stats.extend_from_slice(&(-1i64).to_be_bytes());
+        stats.extend_from_slice(&0i32.to_be_bytes());
+        // minTimestamp, maxTimestamp.
+        stats.extend_from_slice(&100i64.to_be_bytes());
+        stats.extend_from_slice(&200i64.to_be_bytes());
+        // minLocalDeletionTime (any), maxLocalDeletionTime (verbatim raw u32).
+        stats.extend_from_slice(&0u32.to_be_bytes());
+        stats.extend_from_slice(&raw_max_ldt.to_be_bytes());
+        // minTTL, maxTTL.
+        stats.extend_from_slice(&0i32.to_be_bytes());
+        stats.extend_from_slice(&0i32.to_be_bytes());
+        // compressionRatio (f64).
+        stats.extend_from_slice(&(-1.0f64).to_be_bytes());
+        // TombstoneHistogram: maxBinSize, size, then bins.
+        stats.extend_from_slice(&100i32.to_be_bytes()); // maxBinSize
+        stats.extend_from_slice(&(bins.len() as i32).to_be_bytes());
+        for &(point, value) in bins {
+            if modern {
+                stats.extend_from_slice(&point.to_be_bytes()); // i64 point
+                stats.extend_from_slice(&(value as i32).to_be_bytes()); // i32 value
+            } else {
+                stats.extend_from_slice(&(point as f64).to_be_bytes()); // f64 point
+                stats.extend_from_slice(&(value as i64).to_be_bytes()); // i64 value
+            }
+        }
+        // sstableLevel, repairedAt.
+        stats.extend_from_slice(&0i32.to_be_bytes());
+        stats.extend_from_slice(&0i64.to_be_bytes());
+
+        // TOC: 4 components, STATS (type 2) last by offset.
+        let toc_len = 4 + 4 + 4 * 8;
+        let comp0_off = toc_len;
+        let comp1_off = comp0_off + 1;
+        let comp3_off = comp1_off + 1;
+        let stats_off = comp3_off + 1;
+        let mut out = Vec::new();
+        out.extend_from_slice(&4u32.to_be_bytes());
+        out.extend_from_slice(&0u32.to_be_bytes());
+        for (ty, off) in [
+            (0u32, comp0_off as u32),
+            (1u32, comp1_off as u32),
+            (2u32, stats_off as u32),
+            (3u32, comp3_off as u32),
+        ] {
+            out.extend_from_slice(&ty.to_be_bytes());
+            out.extend_from_slice(&off.to_be_bytes());
+        }
+        out.extend_from_slice(&[0u8, 0u8, 0u8]);
+        debug_assert_eq!(out.len(), stats_off);
+        out.extend_from_slice(&stats);
+        out.extend_from_slice(&0u32.to_be_bytes()); // trailing CRC
+        out
+    }
+
+    fn nb_gates() -> VersionGates {
+        VersionGates::Big(BigVersionGates::from_version("nb").expect("nb gates"))
+    }
+
+    fn oa_gates() -> VersionGates {
+        VersionGates::Big(BigVersionGates::from_version("oa").expect("oa gates"))
+    }
+
+    #[test]
+    fn stats_extras_real_max_ldt_nb() {
+        // Real seconds-since-epoch deletion time, well under 2^31.
+        let bytes = synthetic_statistics_extras(false, 1_700_000_000, &[]);
+        let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(extras.max_local_deletion_time, 1_700_000_000);
+        assert!(extras.tombstone_drop_times.is_empty());
+    }
+
+    #[test]
+    fn stats_extras_nb_sentinel_maps_to_i64_max() {
+        // nb sentinel: i32::MAX → i64::MAX (NO_DELETION_TIME).
+        let bytes = synthetic_statistics_extras(false, i32::MAX as u32, &[]);
+        let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(extras.max_local_deletion_time, i64::MAX);
+        // gates == None also defaults to legacy → same result.
+        let extras_none = parse_stats_extras(&bytes, None).expect("decode");
+        assert_eq!(extras_none.max_local_deletion_time, i64::MAX);
+    }
+
+    #[test]
+    fn stats_extras_modern_sentinel_maps_to_i64_max() {
+        // modern sentinel: 0xFFFF_FFFF → i64::MAX (NO_DELETION_TIME).
+        let bytes = synthetic_statistics_extras(true, u32::MAX, &[]);
+        let extras = parse_stats_extras(&bytes, Some(&oa_gates())).expect("decode");
+        assert_eq!(extras.max_local_deletion_time, i64::MAX);
+    }
+
+    #[test]
+    fn stats_extras_modern_real_max_ldt() {
+        // A real deletion time above i32::MAX is representable as u32 on modern.
+        let raw: u32 = 3_000_000_000; // > i32::MAX, < u32::MAX
+        let bytes = synthetic_statistics_extras(true, raw, &[]);
+        let extras = parse_stats_extras(&bytes, Some(&oa_gates())).expect("decode");
+        assert_eq!(extras.max_local_deletion_time, raw as i64);
+    }
+
+    #[test]
+    fn stats_extras_histogram_nb_width() {
+        let bins = [(1_700_000_000i64, 3u64), (1_700_000_100i64, 7u64)];
+        let bytes = synthetic_statistics_extras(false, i32::MAX as u32, &bins);
+        let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
+        assert_eq!(
+            extras.tombstone_drop_times,
+            vec![(1_700_000_000, 3), (1_700_000_100, 7)]
+        );
+    }
+
+    #[test]
+    fn stats_extras_histogram_modern_width() {
+        let bins = [(1_700_000_000i64, 11u64), (1_700_000_500i64, 2u64)];
+        let bytes = synthetic_statistics_extras(true, u32::MAX, &bins);
+        let extras = parse_stats_extras(&bytes, Some(&oa_gates())).expect("decode");
+        assert_eq!(
+            extras.tombstone_drop_times,
+            vec![(1_700_000_000, 11), (1_700_000_500, 2)]
+        );
+    }
+
+    #[test]
+    fn stats_extras_empty_histogram() {
+        let bytes = synthetic_statistics_extras(false, i32::MAX as u32, &[]);
+        let extras = parse_stats_extras(&bytes, Some(&nb_gates())).expect("decode");
+        assert!(extras.tombstone_drop_times.is_empty());
+    }
+
+    #[test]
+    fn stats_extras_missing_component_returns_default() {
+        // TOC with no STATS entry → default (max = i64::MAX, empty histogram),
+        // not an error.
+        let mut out = Vec::new();
+        out.extend_from_slice(&1u32.to_be_bytes()); // 1 component
+        out.extend_from_slice(&0u32.to_be_bytes()); // marker
+        out.extend_from_slice(&3u32.to_be_bytes()); // type HEADER
+        out.extend_from_slice(&16u32.to_be_bytes()); // offset
+        let extras = parse_stats_extras(&out, None).expect("default");
+        assert_eq!(extras.max_local_deletion_time, i64::MAX);
+        assert!(extras.tombstone_drop_times.is_empty());
+    }
+
+    #[test]
+    fn stats_extras_truncated_fails_closed() {
+        // Two bins so the histogram region is large; truncate deep enough that
+        // the cursor runs off the end while still reading the histogram (the
+        // sstableLevel/repairedAt tail is not read by parse_stats_extras).
+        let mut bytes =
+            synthetic_statistics_extras(false, 1_700_000_000, &[(1i64, 1u64), (2i64, 2u64)]);
+        // Drop the trailing CRC + sstableLevel + repairedAt + one full bin
+        // (16 bytes legacy) + part of the next, so a histogram read overruns.
+        bytes.truncate(bytes.len() - (4 + 4 + 8 + 16 + 4));
+        assert!(
+            parse_stats_extras(&bytes, Some(&nb_gates())).is_err(),
+            "truncated STATS body must fail closed"
+        );
+    }
+
+    #[test]
+    fn tombstone_histogram_huge_size_fails_closed_without_allocating() {
+        // A corrupt header advertising a massive bin count must fail closed via
+        // the remaining-bytes precheck rather than attempting a huge (or
+        // aborting) `Vec::with_capacity` (roborev High finding, #1073).
+        for modern in [false, true] {
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&100i32.to_be_bytes()); // maxBinSize
+            buf.extend_from_slice(&i32::MAX.to_be_bytes()); // size = 2.1B bins, no body
+            let mut c = Cursor::new(&buf);
+            assert!(
+                read_tombstone_histogram(&mut c, modern).is_err(),
+                "huge histogram size (modern={modern}) must fail closed, not allocate"
+            );
+        }
     }
 
     #[test]
