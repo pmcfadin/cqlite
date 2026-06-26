@@ -84,7 +84,12 @@ gh release upload datasets-v3 "../$ASSET" "../$ASSET.sha256" --clobber
 ## 4. Repoint CI at the new asset (10 workflows)
 
 Use the finalizer — it replaces the asset filename + SHA256 across every
-workflow and verifies no stale reference remains:
+pinned workflow **and** `test-data/scripts/fetch-datasets.sh` (which carries its
+own `DATASET_ASSET`/`DATASET_SHA256`/`DATASET_TAG` defaults), then verifies no
+stale reference remains. With `--new-tag` it also rewrites the inline
+`gh release download <tag>` / `releases/download/<tag>/` literals (coverage.yml,
+m1-ci.yml). It never edits its own `OLD_*` defaults or this runbook, and prints
+any doc-only references (website docs) for you to update by hand:
 
 ```bash
 git switch -c chore/1099-bump-dataset-pin-v3.2
