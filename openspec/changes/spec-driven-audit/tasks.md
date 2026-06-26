@@ -34,8 +34,8 @@
 
 ## 5. Gate & review (done criteria)
 
-- [ ] 5.1 Run `scripts/agent-gate.sh`; paste the AGENT-GATE SUMMARY block. (Docs/
+- [x] 5.1 Run `scripts/agent-gate.sh`; paste the AGENT-GATE SUMMARY block. (Docs/
       agent-only change: confirm no code lanes regress.)
 - [ ] 5.2 roborev clean on the branch.
-- [ ] 5.3 Self-audit: run C against this change and confirm every requirement in
+- [x] 5.3 Self-audit: run C against this change and confirm every requirement in
       `specs/change-audit/spec.md` is `satisfied` with evidence (dogfood).
