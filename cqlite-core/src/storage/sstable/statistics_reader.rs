@@ -59,10 +59,16 @@ impl StatisticsReader {
         file.read_to_end(&mut buffer).await?;
 
         // Parse the statistics data using enhanced parser with fallback.
-        // Gates are not available at StatisticsReader construction time (the reader
-        // is opened before SSTableReader has gates). Pass None here; nb-compatible
-        // defaults apply. VG3 will wire gates through SSTableReader instead.
-        let statistics = match parse_statistics_with_fallback(&buffer, None) {
+        //
+        // Derive the format gates from the component filename (e.g.
+        // `da-1-bti-Statistics.db` vs `nb-1-big-Statistics.db`) so the best-effort
+        // STATS-extras decode (max local deletion time + tombstone-drop histogram,
+        // #1073) interprets the version-sensitive fields correctly: the modern
+        // (oa/da) `u32::MAX` no-deletion sentinel and the 12-byte modern histogram
+        // bin width differ from the legacy (nb) signed-i32 / 16-byte forms. When the
+        // filename does not parse, fall back to None (nb-compatible defaults).
+        let gates = crate::storage::sstable::version_gate::VersionGates::from_path(path).ok();
+        let statistics = match parse_statistics_with_fallback(&buffer, gates.as_ref()) {
             Ok((_, stats)) => stats,
             Err(e) => {
                 return Err(Error::corruption(format!(

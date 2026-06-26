@@ -2345,7 +2345,7 @@ pub fn parse_enhanced_statistics_file<'a>(
     match result {
         Ok((
             row_stats,
-            timestamp_stats,
+            mut timestamp_stats,
             table_stats,
             partition_stats,
             compression_stats,
@@ -2360,6 +2360,29 @@ pub fn parse_enhanced_statistics_file<'a>(
                 columns.len()
             );
 
+            // Best-effort STATS-extras decode over the FULL buffer (with TOC):
+            // recover the authoritative maxLocalDeletionTime (the inner parser
+            // leaves it as a placeholder equal to min_deletion_time) and the
+            // estimated tombstone-drop-times histogram (Issue #1073). This is
+            // strictly additive — a Statistics.db that parses today must keep
+            // parsing, so an Err here is logged and the placeholders are kept.
+            let tombstone_drop_times =
+                match crate::parser::repair_metadata::parse_stats_extras(input, gates) {
+                    Ok(extras) => {
+                        // Only set max_deletion_time. Do NOT touch min_deletion_time
+                        // (the EncodingStats min baseline consumed elsewhere).
+                        timestamp_stats.max_deletion_time = extras.max_local_deletion_time;
+                        extras.tombstone_drop_times
+                    }
+                    Err(e) => {
+                        log::debug!(
+                            "Best-effort STATS-extras decode failed; keeping placeholders: {:?}",
+                            e
+                        );
+                        vec![]
+                    }
+                };
+
             let statistics = SSTableStatistics {
                 header,
                 row_stats,
@@ -2372,6 +2395,7 @@ pub fn parse_enhanced_statistics_file<'a>(
                 serialization_header_columns: columns,
                 serialization_header_partition_keys: partition_columns,
                 serialization_header_clustering_keys: clustering_columns,
+                tombstone_drop_times,
             };
 
             Ok((remaining, statistics))
