@@ -346,3 +346,472 @@ async fn static_only_partition_survives_compaction() {
             .collect::<Vec<_>>()
     );
 }
+
+/// `pk int, ck int, stat_a text static, stat_b text static, row_col text` — a
+/// clustering table with TWO static columns and one regular column. Mirrors
+/// [`schema`] so tests that need a second static column don't have to mutate the
+/// shared single-static schema other tests depend on.
+fn schema_two_statics() -> TableSchema {
+    TableSchema {
+        keyspace: "test_ks".to_string(),
+        table: "static_write".to_string(),
+        partition_keys: vec![KeyColumn {
+            name: "pk".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+        }],
+        clustering_keys: vec![ClusteringColumn {
+            name: "ck".to_string(),
+            data_type: "int".to_string(),
+            position: 0,
+            order: ClusteringOrder::Asc,
+        }],
+        columns: vec![
+            Column {
+                name: "stat_a".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+            Column {
+                name: "stat_b".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: true,
+            },
+            Column {
+                name: "row_col".to_string(),
+                data_type: "text".to_string(),
+                nullable: true,
+                default: None,
+                is_static: false,
+            },
+        ],
+        comments: HashMap::new(),
+        dropped_columns: HashMap::new(),
+    }
+}
+
+/// HIGH — a static cell is decided by its OWN write timestamp under LWW, NOT by
+/// any clustering row's timestamp. The fix routes static reconciliation through
+/// the writer's schema-driven `collect_static_operations`, which keys LWW on the
+/// static cell's own mutation timestamp. Here the two generations carry
+/// conflicting `stat_col` writes at DISTINCT static timestamps, and each
+/// generation's clustering-row timestamp is deliberately interleaved/inverted
+/// relative to the static timestamps — so a clustering-row-driven tiebreak would
+/// pick the WRONG static value.
+#[tokio::test]
+async fn static_cell_keeps_own_write_timestamp_under_lww() {
+    let schema = schema();
+
+    // gen-1: static stat_col=OLD at a LOW static ts, but its clustering row is
+    // the NEWEST clustering row in the test. If statics were (wrongly) decided
+    // by the clustering row's timestamp, this OLD static would win.
+    let gen1 = vec![
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "stat_col".to_string(),
+                value: Value::Text("OLD".to_string()),
+            }],
+            1_000_000, // static ts: LOW
+            None,
+        ),
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(1))),
+            vec![CellOperation::Write {
+                column: "row_col".to_string(),
+                value: Value::Text("V1".to_string()),
+            }],
+            9_000_000, // clustering ts: HIGHEST in the test
+            None,
+        ),
+    ];
+    let (_dir_a, path_a) = write_sstable(&schema, 1, gen1).await;
+
+    // gen-2: static stat_col=NEW at a HIGH static ts (must win), but its
+    // clustering row is the OLDEST clustering row. A clustering-row tiebreak
+    // would pick gen-1's OLD static — the bug this test guards against.
+    let gen2 = vec![
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "stat_col".to_string(),
+                value: Value::Text("NEW".to_string()),
+            }],
+            5_000_000, // static ts: HIGHER than gen-1's static (1_000_000)
+            None,
+        ),
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(2))),
+            vec![CellOperation::Write {
+                column: "row_col".to_string(),
+                value: Value::Text("V2".to_string()),
+            }],
+            2_000_000, // clustering ts: LOWER than gen-1's clustering row
+            None,
+        ),
+    ];
+    let (_dir_b, path_b) = write_sstable(&schema, 2, gen2).await;
+
+    let out_dir = tempfile::TempDir::new().expect("out dir");
+    let report = compact_sstables(
+        vec![path_a, path_b],
+        out_dir.path(),
+        &schema,
+        3,
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("compaction must succeed");
+
+    let rows = collect_merge_rows(vec![report.output.data_path], &schema);
+
+    let static_rows: Vec<&DecodedRow> = rows
+        .iter()
+        .filter(|r| r.ck.is_none() && !r.is_tombstone && cell(r, "stat_col").is_some())
+        .collect();
+    assert_eq!(
+        static_rows.len(),
+        1,
+        "#1074: expected exactly ONE partition static row after compaction, got rows: {:?}",
+        rows.iter()
+            .map(|r| (r.ck.clone(), r.cells.clone(), r.is_tombstone))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cell(static_rows[0], "stat_col"),
+        Some("NEW"),
+        "#1074: the surviving static value must be decided by the static cell's OWN timestamp \
+         (gen-2 static ts=5_000_000 > gen-1 static ts=1_000_000), NOT by any clustering row's \
+         timestamp (gen-1's clustering row is the newest at 9_000_000). Got rows: {:?}",
+        rows.iter()
+            .map(|r| (r.ck.clone(), r.cells.clone(), r.is_tombstone))
+            .collect::<Vec<_>>()
+    );
+
+    // Both clustering rows survive and neither carries the static cell.
+    for ck in ["1", "2"] {
+        let row = rows
+            .iter()
+            .find(|r| r.ck.as_deref() == Some(ck) && !r.is_tombstone)
+            .unwrap_or_else(|| panic!("#1074: live ck={ck} clustering row must be present"));
+        assert!(
+            cell(row, "stat_col").is_none(),
+            "#1074: the static cell must NOT be folded into the ck={ck} clustering row"
+        );
+    }
+}
+
+/// HIGH — a static cell tombstone (`Delete` on a static column) is honored under
+/// LWW. First: a newer `Delete{stat_col}` removes an older `Write stat_col`.
+/// Then the reverse: a `Write stat_col` newer than the `Delete` resurrects it.
+#[tokio::test]
+async fn static_cell_tombstone_deletes_and_resurrects_under_lww() {
+    let schema = schema();
+
+    // --- Direction 1: newer Delete removes an older static Write. ---
+    let write_static = Mutation::new(
+        TableId::new("test_ks", "static_write"),
+        PartitionKey::single("pk", Value::Integer(1)),
+        None,
+        vec![CellOperation::Write {
+            column: "stat_col".to_string(),
+            value: Value::Text("S".to_string()),
+        }],
+        1_000_000,
+        None,
+    );
+    let (_dir_a, path_a) = write_sstable(&schema, 1, vec![write_static]).await;
+
+    let delete_static = Mutation::new(
+        TableId::new("test_ks", "static_write"),
+        PartitionKey::single("pk", Value::Integer(1)),
+        None,
+        vec![CellOperation::Delete {
+            column: "stat_col".to_string(),
+            local_deletion_time: None,
+        }],
+        2_000_000, // newer than the static Write
+        None,
+    );
+    let (_dir_b, path_b) = write_sstable(&schema, 2, vec![delete_static]).await;
+
+    let out_dir = tempfile::TempDir::new().expect("out dir");
+    let report = compact_sstables(
+        vec![path_a, path_b],
+        out_dir.path(),
+        &schema,
+        3,
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("compaction must succeed");
+    let compacted_path = report.output.data_path.clone();
+    let rows = collect_merge_rows(vec![report.output.data_path], &schema);
+
+    // `collect_merge_rows` filters Value::Tombstone, so a deleted static cell
+    // simply has no LIVE stat_col on any clustering=None static row. Assert the
+    // absence directly rather than trusting only the live-cell filter.
+    let live_static = rows
+        .iter()
+        .any(|r| !r.is_tombstone && cell(r, "stat_col") == Some("S"));
+    assert!(
+        !live_static,
+        "#1074: a newer Delete on stat_col MUST remove the static cell — no live stat_col=S \
+         should survive compaction. Got rows: {:?}",
+        rows.iter()
+            .map(|r| (r.ck.clone(), r.cells.clone(), r.is_tombstone))
+            .collect::<Vec<_>>()
+    );
+
+    // --- Direction 2: a Write newer than the Delete resurrects the static. ---
+    let resurrect = Mutation::new(
+        TableId::new("test_ks", "static_write"),
+        PartitionKey::single("pk", Value::Integer(1)),
+        None,
+        vec![CellOperation::Write {
+            column: "stat_col".to_string(),
+            value: Value::Text("R".to_string()),
+        }],
+        3_000_000, // newer than the Delete (2_000_000)
+        None,
+    );
+    let (_dir_c, path_c) = write_sstable(&schema, 4, vec![resurrect]).await;
+
+    let out_dir2 = tempfile::TempDir::new().expect("out dir 2");
+    let report2 = compact_sstables(
+        vec![compacted_path, path_c],
+        out_dir2.path(),
+        &schema,
+        5,
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("compaction must succeed");
+    let rows2 = collect_merge_rows(vec![report2.output.data_path], &schema);
+
+    let static_rows: Vec<&DecodedRow> = rows2
+        .iter()
+        .filter(|r| r.ck.is_none() && !r.is_tombstone && cell(r, "stat_col").is_some())
+        .collect();
+    assert_eq!(
+        static_rows.len(),
+        1,
+        "#1074: the resurrected static row must reappear exactly once, got rows: {:?}",
+        rows2
+            .iter()
+            .map(|r| (r.ck.clone(), r.cells.clone(), r.is_tombstone))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cell(static_rows[0], "stat_col"),
+        Some("R"),
+        "#1074: a static Write (ts=3_000_000) newer than the Delete (ts=2_000_000) must \
+         resurrect the static cell with the new value R. Got rows: {:?}",
+        rows2
+            .iter()
+            .map(|r| (r.ck.clone(), r.cells.clone(), r.is_tombstone))
+            .collect::<Vec<_>>()
+    );
+}
+
+/// MEDIUM — multiple static columns reconcile independently. Two static columns
+/// are written in one mutation; a later generation updates only one of them.
+/// Both must land in the clustering=None static row with their correct winning
+/// values, and neither must appear in any clustering row.
+#[tokio::test]
+async fn multiple_static_columns_reconcile_independently() {
+    let schema = schema_two_statics();
+
+    // gen-1: both statics written together, plus a clustering row.
+    let gen1 = vec![
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            None,
+            vec![
+                CellOperation::Write {
+                    column: "stat_a".to_string(),
+                    value: Value::Text("A1".to_string()),
+                },
+                CellOperation::Write {
+                    column: "stat_b".to_string(),
+                    value: Value::Text("B1".to_string()),
+                },
+            ],
+            1_000_000,
+            None,
+        ),
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(1))),
+            vec![CellOperation::Write {
+                column: "row_col".to_string(),
+                value: Value::Text("V".to_string()),
+            }],
+            1_000_000,
+            None,
+        ),
+    ];
+    let (_dir_a, path_a) = write_sstable(&schema, 1, gen1).await;
+
+    // gen-2: update only stat_a at a newer timestamp; stat_b unchanged.
+    let gen2 = vec![Mutation::new(
+        TableId::new("test_ks", "static_write"),
+        PartitionKey::single("pk", Value::Integer(1)),
+        None,
+        vec![CellOperation::Write {
+            column: "stat_a".to_string(),
+            value: Value::Text("A2".to_string()),
+        }],
+        2_000_000,
+        None,
+    )];
+    let (_dir_b, path_b) = write_sstable(&schema, 2, gen2).await;
+
+    let out_dir = tempfile::TempDir::new().expect("out dir");
+    let report = compact_sstables(
+        vec![path_a, path_b],
+        out_dir.path(),
+        &schema,
+        3,
+        None,
+        None,
+        true,
+    )
+    .await
+    .expect("compaction must succeed");
+    let rows = collect_merge_rows(vec![report.output.data_path], &schema);
+
+    // Exactly one static row carrying BOTH static columns with the winning values.
+    let static_rows: Vec<&DecodedRow> = rows
+        .iter()
+        .filter(|r| r.ck.is_none() && !r.is_tombstone)
+        .filter(|r| cell(r, "stat_a").is_some() || cell(r, "stat_b").is_some())
+        .collect();
+    assert_eq!(
+        static_rows.len(),
+        1,
+        "#1074: both static columns must land in ONE clustering=None static row, got rows: {:?}",
+        rows.iter()
+            .map(|r| (r.ck.clone(), r.cells.clone(), r.is_tombstone))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        cell(static_rows[0], "stat_a"),
+        Some("A2"),
+        "#1074: stat_a must take the newer value A2 (ts=2_000_000 > 1_000_000)"
+    );
+    assert_eq!(
+        cell(static_rows[0], "stat_b"),
+        Some("B1"),
+        "#1074: stat_b must keep B1 (only stat_a was updated in gen-2)"
+    );
+
+    // No clustering row may carry either static column.
+    for row in rows.iter().filter(|r| r.ck.is_some() && !r.is_tombstone) {
+        assert!(
+            cell(row, "stat_a").is_none() && cell(row, "stat_b").is_none(),
+            "#1074: static columns must NOT be folded into clustering row ck={:?}",
+            row.ck
+        );
+    }
+}
+
+/// MEDIUM — multiple clustering rows alongside a static. The partition has ck=1
+/// and ck=2 regular rows plus a static cell. NEITHER clustering row may carry
+/// the static cell, and there must be exactly ONE clustering=None static row
+/// carrying it. Guards against the old "fold the static into EVERY clustering
+/// row" regression that a single-clustering-row test cannot fully catch.
+#[tokio::test]
+async fn static_not_folded_into_any_of_multiple_clustering_rows() {
+    let schema = schema();
+
+    let mutations = vec![
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            None,
+            vec![CellOperation::Write {
+                column: "stat_col".to_string(),
+                value: Value::Text("S".to_string()),
+            }],
+            1_000_000,
+            None,
+        ),
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(1))),
+            vec![CellOperation::Write {
+                column: "row_col".to_string(),
+                value: Value::Text("V1".to_string()),
+            }],
+            1_000_000,
+            None,
+        ),
+        Mutation::new(
+            TableId::new("test_ks", "static_write"),
+            PartitionKey::single("pk", Value::Integer(1)),
+            Some(ClusteringKey::single("ck", Value::Integer(2))),
+            vec![CellOperation::Write {
+                column: "row_col".to_string(),
+                value: Value::Text("V2".to_string()),
+            }],
+            1_000_000,
+            None,
+        ),
+    ];
+    let (_dir, data_path) = write_sstable(&schema, 1, mutations).await;
+    let rows = collect_merge_rows(vec![data_path], &schema);
+
+    // Exactly one static row (clustering=None) carrying stat_col.
+    let static_rows: Vec<&DecodedRow> = rows
+        .iter()
+        .filter(|r| r.ck.is_none() && !r.is_tombstone && cell(r, "stat_col").is_some())
+        .collect();
+    assert_eq!(
+        static_rows.len(),
+        1,
+        "#1074: expected exactly ONE clustering=None static row carrying stat_col, got rows: {:?}",
+        rows.iter()
+            .map(|r| (r.ck.clone(), r.cells.clone(), r.is_tombstone))
+            .collect::<Vec<_>>()
+    );
+
+    // Both clustering rows present, each with its own row_col, NEITHER with stat_col.
+    for (ck, expected) in [("1", "V1"), ("2", "V2")] {
+        let row = rows
+            .iter()
+            .find(|r| r.ck.as_deref() == Some(ck) && !r.is_tombstone)
+            .unwrap_or_else(|| panic!("#1074: live ck={ck} clustering row must be present"));
+        assert_eq!(
+            cell(row, "row_col"),
+            Some(expected),
+            "#1074: ck={ck} clustering row must carry row_col={expected}"
+        );
+        assert!(
+            cell(row, "stat_col").is_none(),
+            "#1074: the static cell must NOT be folded into clustering row ck={ck} \
+             (the old bug folded it into EVERY clustering row)"
+        );
+    }
+}
