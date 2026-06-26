@@ -160,6 +160,42 @@ fn cell<'a>(row: &'a DecodedRow, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
+/// Count partition static rows (clustering = None) that carry a RETAINED cell
+/// tombstone for `column`. `collect_merge_rows` filters `Value::Tombstone` cells
+/// out of its `cells` view, so this drives the merger directly and inspects the
+/// raw cell values — letting a test assert that a static-cell tombstone is still
+/// PRESENT (not gc-purged) in a compacted output, which `collect_merge_rows`
+/// cannot distinguish from an absent cell.
+fn count_retained_static_cell_tombstones(
+    data_paths: Vec<std::path::PathBuf>,
+    schema: &TableSchema,
+    column: &str,
+) -> usize {
+    let mut merger = KWayMerger::new(data_paths, schema).expect("merger");
+    let mut count = 0;
+    loop {
+        match merger.step().expect("merge step") {
+            MergeStep::Complete => break,
+            MergeStep::Partition { rows, .. } => {
+                for row in rows {
+                    if row.clustering_key.is_some() {
+                        continue; // partition static row only
+                    }
+                    if let RowData::Live { cells } = &row.row_data {
+                        if cells
+                            .iter()
+                            .any(|c| c.column == column && matches!(c.value, Value::Tombstone(_)))
+                        {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
 /// The exact bug from the issue: a single mutation writing a static column plus
 /// a regular column at `ck=1` must surface the static cell in the PARTITION
 /// static row (clustering = None), NOT folded into the `ck=1` clustering row.
@@ -549,19 +585,42 @@ async fn static_cell_tombstone_deletes_and_resurrects_under_lww() {
     );
     let (_dir_b, path_b) = write_sstable(&schema, 2, vec![delete_static]).await;
 
+    // Pin a DETERMINISTIC gc_before cutoff of 0 so the static-cell tombstone is
+    // provably RETAINED through this overlap-safe (`purge_safe = true`) compaction,
+    // and the resurrection assertion below is guaranteed to test a newer Write over
+    // a RETAINED tombstone — not over an already-purged/empty output.
+    //
+    // The static-cell tombstone's `localDeletionTime` is timestamp-derived:
+    // 2_000_000 micros / 1_000_000 = 2s since epoch. A tombstone is purgeable only
+    // when `localDeletionTime < gcBefore`; with `gcBefore = 0` the cell (LDT = 2s)
+    // is NOT older than the cutoff, so it stays in scope. Passing an explicit cutoff
+    // rather than `None` keeps this independent of how the compaction path derives
+    // its default `now`/`gcBefore` — the retention this test depends on is pinned in
+    // the test, not implied by the caller's defaults.
     let out_dir = tempfile::TempDir::new().expect("out dir");
     let report = compact_sstables(
         vec![path_a, path_b],
         out_dir.path(),
         &schema,
         3,
-        None,
+        Some(0), // gc_before_secs: keep the LDT=2s tombstone within grace
         None,
         true,
     )
     .await
     .expect("compaction must succeed");
     let compacted_path = report.output.data_path.clone();
+
+    // The static-cell tombstone must be RETAINED in this intermediate output (gc
+    // grace pinned via `gc_before_secs = Some(0)`), so Direction 2 below provably
+    // resurrects over a retained tombstone rather than over an empty/purged output.
+    assert_eq!(
+        count_retained_static_cell_tombstones(vec![compacted_path.clone()], &schema, "stat_col"),
+        1,
+        "#1074: the static-cell tombstone must be RETAINED after the first compaction \
+         (within gc grace) so the resurrection below tests a retained tombstone"
+    );
+
     let rows = collect_merge_rows(vec![report.output.data_path], &schema);
 
     // `collect_merge_rows` filters Value::Tombstone, so a deleted static cell
@@ -593,13 +652,17 @@ async fn static_cell_tombstone_deletes_and_resurrects_under_lww() {
     );
     let (_dir_c, path_c) = write_sstable(&schema, 4, vec![resurrect]).await;
 
+    // Same `gc_before_secs = Some(0)` pin so the static-cell tombstone carried in
+    // `compacted_path` stays RETAINED here too: the assertion proves a newer Write
+    // (ts=3_000_000) resurrects the static cell over a RETAINED tombstone, not over
+    // a tombstone that gc-grace already purged.
     let out_dir2 = tempfile::TempDir::new().expect("out dir 2");
     let report2 = compact_sstables(
         vec![compacted_path, path_c],
         out_dir2.path(),
         &schema,
         5,
-        None,
+        Some(0), // gc_before_secs: keep the retained tombstone within grace
         None,
         true,
     )
