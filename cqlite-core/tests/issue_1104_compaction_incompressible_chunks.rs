@@ -29,6 +29,16 @@ use cqlite_core::{Config, Platform};
 
 const TABLE: &str = "incompressible_uncompressed_chunk";
 
+/// `CQLITE_REQUIRE_FIXTURES=1` turns a missing binary into a hard failure (the
+/// strict compression-parity CI lane that regenerates `test_comp`); otherwise a
+/// missing binary is a clean skip (ordinary lanes without the gitignored
+/// fixtures). Mirrors the convention in the other `test_comp` parity tests.
+fn require_fixtures_strict() -> bool {
+    std::env::var("CQLITE_REQUIRE_FIXTURES")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Locate the test_comp dataset directory, honoring CQLITE_DATASETS_ROOT.
 fn datasets_root() -> PathBuf {
     std::env::var("CQLITE_DATASETS_ROOT")
@@ -78,6 +88,13 @@ fn count_golden_rows(path: &Path) -> std::io::Result<usize> {
 #[tokio::test]
 async fn issue_1104_compaction_over_incompressible_chunks_succeeds() {
     let Some(data_db) = resolve_data_db(TABLE) else {
+        if require_fixtures_strict() {
+            panic!(
+                "CQLITE_REQUIRE_FIXTURES=1 but {} Data.db is absent under {} (run generate-compression-parity.sh)",
+                TABLE,
+                datasets_root().display()
+            );
+        }
         eprintln!(
             "SKIP[{}]: Data.db absent under {} (run generate-compression-parity.sh)",
             TABLE,
