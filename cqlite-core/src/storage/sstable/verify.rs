@@ -296,7 +296,7 @@ pub async fn verify_sstable(
     // walking Partitions.db; it is cross-checked against the Data.db scan in
     // FULL mode to catch a footer-flip that silently UNDER-counts partitions
     // (the trie still parses, just from the wrong root, yielding fewer keys).
-    let mut bti_partition_keys: Option<usize> = None;
+    let mut bti_partition_keys: Option<Vec<Vec<u8>>> = None;
     match components.format {
         SsTableFormat::Bti => {
             bti_partition_keys = check_bti_structure(dir, &components, &mut findings)?
@@ -341,23 +341,25 @@ pub async fn verify_sstable(
             // scan to exercise the decompression stitch path and surface Data.db
             // corruption that only manifests during decode.
             match full_row_scan_partitions(&components.data_path, config, platform).await {
-                Ok((rows, scan_partitions)) => {
+                Ok((rows, scan_partition_keys)) => {
                     rows_scanned = Some(rows);
-                    // BTI cross-check: the partition count recovered by walking
-                    // Partitions.db MUST match the distinct partitions decoded from
-                    // Data.db. A mismatch means the trie was traversed from a
-                    // corrupt root (footer flip) even though it parsed without
-                    // erroring — a silent under-count we must surface.
+                    // BTI cross-check: the partition KEY SET recovered by walking
+                    // Partitions.db MUST match the partition keys decoded from
+                    // Data.db — by IDENTITY, not just count (issue #1103). A
+                    // count-only check passes a corruption that walks a wrong
+                    // subtree yielding a different set of keys with the same leaf
+                    // count. We compare identities by re-deriving each Data.db raw
+                    // key's byte-comparable trie key and matching it against the
+                    // path-compressed trie keys.
                     if let Some(trie_keys) = bti_partition_keys {
-                        if trie_keys != scan_partitions {
+                        if let Some(detail) =
+                            bti_partition_key_identity_mismatch(&trie_keys, &scan_partition_keys)
+                        {
                             findings.push(VerifyFinding::new(
-                            VerifyErrorClass::BtiRootPointerCorrupt,
-                            "Partitions.db",
-                            format!(
-                                "Partitions.db trie yielded {} partition keys but Data.db decoded {} distinct partitions — the trie was walked from a corrupt root",
-                                trie_keys, scan_partitions
-                            ),
-                        ));
+                                VerifyErrorClass::BtiRootPointerCorrupt,
+                                "Partitions.db",
+                                detail,
+                            ));
                         }
                     }
                 }
@@ -709,7 +711,7 @@ fn check_bti_structure(
     dir: &Path,
     components: &ComponentSet,
     findings: &mut Vec<VerifyFinding>,
-) -> Result<Option<usize>> {
+) -> Result<Option<Vec<Vec<u8>>>> {
     use crate::storage::sstable::bti::parser::{
         iterate_partitions_in_bti_file, iterate_rows_for_partition, BtiPartitionLocation,
     };
@@ -783,8 +785,8 @@ fn check_bti_structure(
                 "Rows.db",
                 format!("cannot read Rows.db: {}", e),
             ));
-            // We can still report the partition count.
-            return Ok(Some(partitions.len()));
+            // We can still report the recovered trie partition keys.
+            return Ok(Some(partitions.into_iter().map(|(k, _)| k).collect()));
         }
     };
 
@@ -817,7 +819,10 @@ fn check_bti_structure(
         }
     }
 
-    Ok(Some(partitions.len()))
+    // Return the byte-comparable trie partition keys (path-compressed prefixes)
+    // recovered by walking Partitions.db. FULL-mode verification cross-checks
+    // these against the keys decoded from Data.db (issue #1103).
+    Ok(Some(partitions.into_iter().map(|(k, _)| k).collect()))
 }
 
 /// Check 4 (BIG): structurally validate `Index.db`.
@@ -1067,7 +1072,7 @@ async fn full_row_scan_partitions(
     data_path: &Path,
     config: &Config,
     platform: Arc<Platform>,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, Vec<Vec<u8>>)> {
     let reader = SSTableReader::open(data_path, config, platform).await?;
 
     // `rows` is the total decoded row/entry count (exercises the full
@@ -1075,15 +1080,83 @@ async fn full_row_scan_partitions(
     let entries = reader.get_all_entries().await?;
     let rows = entries.len();
 
-    // `distinct_partitions` is the true count of distinct PARTITION keys decoded
+    // `distinct_partition_keys` are the raw serialized PARTITION keys decoded
     // from Data.db — one per partition, NOT per row. Deduping `get_all_entries`
     // RowKeys would over-count a multi-row partition (those keys carry
     // clustering/column/static suffixes), which previously FALSE-FAILED the BTI
     // Partitions.db cross-check on healthy SSTables (issue #970). The reader
-    // counts at the partition boundary for both BIG (`nb`) and BTI (`da`).
-    let distinct_partitions = reader.distinct_partition_count().await?;
+    // dedups at the partition boundary for both BIG (`nb`) and BTI (`da`).
+    let partition_keys = reader.distinct_partition_keys().await?;
 
-    Ok((rows, distinct_partitions))
+    Ok((rows, partition_keys))
+}
+
+/// Cross-check BTI `Partitions.db` trie keys against the partition keys decoded
+/// from `Data.db` by IDENTITY (issue #1103). Returns `Some(detail)` describing
+/// the mismatch when the trie does not represent the same partition set as
+/// Data.db, or `None` when they agree.
+///
+/// The two sides use different on-disk encodings and are not directly
+/// comparable: a BTI trie key is the path-compressed (shortest-distinguishing)
+/// prefix of the byte-comparable `[0x40 ++ 8-byte murmur3 token]` key, while a
+/// Data.db key is the raw serialized partition key. We bridge them by re-deriving
+/// each Data.db raw key's byte-comparable trie key
+/// (`encode_partition_key_for_bti_trie`) and matching it against the trie keys by
+/// prefix. A healthy table is a total bijection; a wrong-root corruption that
+/// preserves leaf count but changes keys leaves a trie key that prefixes no
+/// Data.db key (and a Data.db key matched by none), which we surface.
+///
+/// Note: the byte-comparable encoding assumes `Murmur3Partitioner`, matching the
+/// rest of CQLite's BTI read path (issue #755).
+fn bti_partition_key_identity_mismatch(
+    trie_keys: &[Vec<u8>],
+    data_keys: &[Vec<u8>],
+) -> Option<String> {
+    use crate::storage::sstable::bti::parser::encode_partition_key_for_bti_trie;
+
+    let encoded: Vec<[u8; 9]> = data_keys
+        .iter()
+        .map(|k| encode_partition_key_for_bti_trie(k))
+        .collect();
+
+    if trie_keys.len() != encoded.len() {
+        return Some(format!(
+            "Partitions.db trie yielded {} partition keys but Data.db decoded {} distinct partitions — the trie was walked from a corrupt root",
+            trie_keys.len(),
+            encoded.len()
+        ));
+    }
+
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{:02x}", x)).collect::<String>();
+
+    // Greedily match each trie key to exactly one (still-unclaimed) Data.db key
+    // by prefix. Equal lengths + a one-to-one matching ⇒ identical partition sets.
+    let mut claimed = vec![false; encoded.len()];
+    for tk in trie_keys {
+        let matched: Vec<usize> = encoded
+            .iter()
+            .enumerate()
+            .filter(|(i, enc)| !claimed[*i] && enc.starts_with(tk.as_slice()))
+            .map(|(i, _)| i)
+            .collect();
+        match matched.as_slice() {
+            [idx] => claimed[*idx] = true,
+            [] => {
+                return Some(format!(
+                    "Partitions.db trie key {} matches no Data.db partition key — the trie was walked from a corrupt root (same leaf count, different keys)",
+                    hex(tk)
+                ));
+            }
+            _ => {
+                return Some(format!(
+                    "Partitions.db trie key {} is an ambiguous prefix of multiple Data.db partition keys — the trie does not match Data.db identities",
+                    hex(tk)
+                ));
+            }
+        }
+    }
+
+    None
 }
 
 /// Map an error surfaced by the inline-CRC / decompression path onto a stable
@@ -1201,5 +1274,81 @@ mod tests {
         assert_eq!(fail.primary_class(), Some(VerifyErrorClass::DigestMismatch));
         assert!(fail.summary_line().contains("VERIFY FAIL"));
         assert!(fail.summary_line().contains("DigestMismatch"));
+    }
+
+    // ---- BTI partition-key identity cross-check (issue #1103) --------------
+
+    use crate::storage::sstable::bti::parser::encode_partition_key_for_bti_trie;
+
+    /// Build the path-compressed trie key for a raw partition key: the
+    /// byte-comparable `[0x40 ++ token]` key truncated to its first `prefix_len`
+    /// bytes, mirroring how a real Patricia trie stores only the shortest
+    /// distinguishing prefix.
+    fn trie_key_prefix(raw: &[u8], prefix_len: usize) -> Vec<u8> {
+        encode_partition_key_for_bti_trie(raw)[..prefix_len].to_vec()
+    }
+
+    #[test]
+    fn identity_check_passes_for_matching_full_keys() {
+        // Trie keys == full 9-byte encoded keys (a key is a prefix of itself).
+        let data: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let trie: Vec<Vec<u8>> = data
+            .iter()
+            .map(|k| encode_partition_key_for_bti_trie(k).to_vec())
+            .collect();
+        assert_eq!(bti_partition_key_identity_mismatch(&trie, &data), None);
+    }
+
+    #[test]
+    fn identity_check_passes_for_path_compressed_prefixes() {
+        // Healthy table: trie stores only the first 2 bytes (`0x40` + 1 token
+        // byte), which is what `test_da/wide_table` actually does.
+        let data: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let trie: Vec<Vec<u8>> = data.iter().map(|k| trie_key_prefix(k, 2)).collect();
+        // Precondition: the 2-byte prefixes are distinct (true for pk=1,2,3).
+        let mut sorted = trie.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), trie.len(), "test prefixes must be distinct");
+        assert_eq!(bti_partition_key_identity_mismatch(&trie, &data), None);
+    }
+
+    #[test]
+    fn identity_check_detects_same_count_wrong_keys() {
+        // Data has partitions {1,2,3} but the trie was walked to {4,5,6}: same
+        // count, disjoint identities. MUST be flagged (the core of issue #1103).
+        let data: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let trie: Vec<Vec<u8>> = (4u32..=6)
+            .map(|i| trie_key_prefix(&i.to_be_bytes(), 2))
+            .collect();
+        let mismatch = bti_partition_key_identity_mismatch(&trie, &data);
+        assert!(
+            mismatch.is_some(),
+            "same-count wrong-key trie must be detected as a mismatch"
+        );
+    }
+
+    #[test]
+    fn identity_check_detects_one_swapped_key() {
+        // Two keys match, one is wrong — the minimal wrong-root that a count check
+        // cannot see.
+        let data: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let mut trie: Vec<Vec<u8>> = data.iter().map(|k| trie_key_prefix(k, 2)).collect();
+        trie[0] = trie_key_prefix(&99u32.to_be_bytes(), 2);
+        assert!(bti_partition_key_identity_mismatch(&trie, &data).is_some());
+    }
+
+    #[test]
+    fn identity_check_detects_count_mismatch() {
+        let data: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let trie: Vec<Vec<u8>> = data
+            .iter()
+            .take(2)
+            .map(|k| encode_partition_key_for_bti_trie(k).to_vec())
+            .collect();
+        let detail =
+            bti_partition_key_identity_mismatch(&trie, &data).expect("undercount must be flagged");
+        assert!(detail.contains("2 partition keys"));
+        assert!(detail.contains("3 distinct partitions"));
     }
 }
