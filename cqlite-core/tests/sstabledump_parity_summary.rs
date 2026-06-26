@@ -765,9 +765,9 @@ async fn save_summary_validation_artifacts(
 //   * Each entry's key bytes are reconstructed from the offset table and must
 //     byte-match `SummaryReader`'s entries; entries must be ordered by ascending
 //     offset and ascending (little-endian) Index.db position. The on-disk
-//     position is little-endian (proven against Index.db); the production
-//     `SummaryReader` currently returns it big-endian, so the reader's returned
-//     position is intentionally NOT asserted here (KNOWN LIMITATION #1054).
+//     position is little-endian (proven against Index.db); as of issue #1054 the
+//     production `SummaryReader` decodes it little-endian too, so the reader's
+//     returned position is asserted byte-for-byte against the LE on-disk value.
 //   * The trailing length-prefixed first/last decorated keys are decoded and
 //     byte-compared to `SummaryReader`, and the first summary sample's key must
 //     equal the SSTable's first key (Cassandra always samples partition 0).
@@ -806,10 +806,10 @@ mod strict {
     /// Index.db position as a **little-endian** u64 (verified byte-for-byte:
     /// the LE value lands exactly on the matching `Index.db` partition entry,
     /// while the big-endian interpretation produces an out-of-range offset).
-    /// Only the authoritative LE offset is retained and asserted against
-    /// `Index.db`; the production `SummaryReader` currently returns this field
-    /// big-endian (see KNOWN LIMITATION #1054 at the entry-parity assertion),
-    /// so the test deliberately does not assert the reader's returned position.
+    /// The authoritative LE offset is retained and asserted against `Index.db`;
+    /// as of issue #1054 the production `SummaryReader` returns this field
+    /// little-endian too, so the entry-parity assertion checks the reader's
+    /// returned position byte-for-byte against this value.
     struct RawEntry {
         key: Vec<u8>,
         /// Authoritative Index.db offset (little-endian, on-disk truth).
@@ -1167,10 +1167,17 @@ mod strict {
                     summary_path.display()
                 );
                 // The on-disk truth is the little-endian position, proven below
-                // by resolving it against Index.db. We deliberately do NOT assert
-                // the reader's returned position here.
-                // KNOWN LIMITATION (#1054): SummaryReader currently returns this
-                // field big-endian; when #1054 lands, assert entry.position == position_le.
+                // by resolving it against Index.db. As of issue #1054 the
+                // production `SummaryReader` decodes this field little-endian, so
+                // its returned position must byte-match the raw LE on-disk value.
+                assert_eq!(
+                    entry.position,
+                    raw_entry.position_le,
+                    "{}: entry[{i}] position mismatch reader={} raw_le={} (issue #1054)",
+                    summary_path.display(),
+                    entry.position,
+                    raw_entry.position_le
+                );
             }
 
             // Entry ordering: keys are stored in ascending offset order, so the
