@@ -2391,9 +2391,32 @@ impl SSTableReader {
         let mut broke = false;
 
         use crate::storage::sstable::compression::Compression;
+
+        // Incompressible-chunk fallback (Bug #639, epic #970, issue #1104):
+        // Cassandra stores a chunk RAW when its compressed length would meet or
+        // exceed `max_compressed_length`. This is the path the real k-way merge
+        // producer streams through, so it must honour the rule exactly like
+        // `stitch_all_chunks`/`stitch_and_parse_all_chunks_for_compaction`: when
+        // the (CRC-stripped) chunk length >= max_compressed_length, the bytes are
+        // already plaintext. Authority: CompressedSequentialWriter.java:160-177.
+        let max_compressed_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.max_compressed_length as usize)
+            .unwrap_or(usize::MAX);
+
         let mut chunk_count = 0;
         while let Some(compressed_chunk) = self.read_next_block(&cursor).await? {
-            let decompressed_chunk = if let Some(compression_reader) = &self.compression_reader {
+            let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
+                // Stored uncompressed by Cassandra — pass the raw bytes through.
+                log::debug!(
+                    "stream_all_partitions_for_compaction: chunk {} is incompressible (len={} >= max_compressed_length={}), using raw bytes",
+                    chunk_count,
+                    compressed_chunk.len(),
+                    max_compressed_length
+                );
+                compressed_chunk
+            } else if let Some(compression_reader) = &self.compression_reader {
                 let compression = Compression::new(*compression_reader.algorithm())?;
                 compression.decompress(&compressed_chunk).map_err(|e| {
                     Error::corruption(format!(
