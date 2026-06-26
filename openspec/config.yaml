@@ -1,0 +1,73 @@
+schema: spec-driven
+
+# Project context — shown to AI when creating OpenSpec artifacts.
+# Canonical doctrine lives at https://pmcfadin.github.io/cqlite/agents-developing/
+# (source: website/src/content/docs/agents-developing/). This block is the
+# distilled version; when it conflicts with the published docs, the docs win.
+context: |
+  CQLite — a Rust library + CLI for local, cluster-free read/write access to
+  Apache Cassandra 5.0 SSTables. Workspace crates: cqlite-core (parsing, query
+  engine, write/compaction), cqlite-cli, bindings/python (PyO3+maturin),
+  bindings/node (napi-rs), cqlite-flight (Arrow Flight + Trino). Planned: M6
+  WASM bindings, M7 perf validation + v1.0 API freeze.
+
+  Tech stack: Rust (edition 2021, MSRV 1.85+), tokio async, thiserror errors,
+  Arrow/Parquet export. Memory target <128MB for large files.
+
+  NON-NEGOTIABLE doctrine (every change must respect these):
+  1. No-heuristics mandate (issue #28): decode using AUTHORITATIVE metadata only
+     — the supplied schema, else Statistics.db serialization metadata. NEVER
+     infer types/formats from byte content. Legacy fallbacks live only behind
+     the `experimental` feature flag, off by default.
+  2. The gate is `scripts/agent-gate.sh` — the ONLY run that counts. Its
+     AGENT-GATE SUMMARY block must be pasted verbatim; ad-hoc cargo runs do not
+     count. The script is the authoritative component set — run
+     `scripts/agent-gate.sh --list` (do not enumerate components here, it drifts).
+     Clippy runs with RUSTFLAGS=-D warnings (zero warnings allowed).
+  3. Wiring evidence (issues #949/#963): a feature is done only when its PUBLIC
+     surface exercises it — name the surface + call chain + an end-to-end test
+     from that surface. Green helper-only unit tests are NOT sufficient.
+  4. Parity is truth: correctness is validated against Apache Cassandra
+     `sstabledump` JSONL goldens. Integration tests use REAL SSTable binaries
+     (gitignored; fetch with `bash test-data/scripts/fetch-datasets.sh`,
+     CQLITE_DATASETS_ROOT). Dataset-backed tests skip-clean when binaries are
+     absent but FAIL when present-but-wrong (no silent 0-row passes).
+  5. Code review via roborev must be clean before merge; work happens on a
+     branch/worktree off origin/main, squash-merged via PR.
+
+  ORACLE vs DESIGN — decide this per change and state it in the proposal:
+  - Oracle-driven work (SSTable parsing/decode, compaction byte-parity,
+    tombstone/TTL, type system) has an external source of truth (the Cassandra
+    format + sstabledump goldens). These usually do NOT need a full OpenSpec
+    proposal — a GitHub issue + a pinned parity test is the right container.
+  - Design-driven work (bindings/M6 WASM, query-engine surface, CLI/REPL UX,
+    perf targets/M7, the agent-team automation itself) has real latitude and NO
+    oracle — this is where OpenSpec changes add value.
+
+  Source map (where things live): SSTable parsers in
+  cqlite-core/src/storage/sstable/reader/; writers in .../writer/; query engine
+  in cqlite-core/src/query/; format spec in docs/sstables-definitive-guide/.
+
+# Per-artifact rules — tuned so artifacts are AUDITABLE (the workflow goal is to
+# automate spec-vs-implementation auditing). Keep requirements verifiable.
+rules:
+  proposal:
+    - State the target milestone (M6/M7/maintenance) and whether the work is
+      oracle-driven or design-driven (see context). Oracle-driven bugs usually
+      belong in a GitHub issue + pinned test, not a proposal.
+    - Always include a "Non-goals" section.
+    - Note any impact on the no-heuristics mandate, the public binding surfaces
+      (Python/Node/CLI), or the <128MB memory budget.
+  design:
+    - Record decisions that touch authoritative-metadata decoding, the gate, or
+      cross-binding parity, with rationale. Cite the relevant definitive-guide
+      chapter or GitHub issue.
+  spec:
+    - Every requirement MUST have at least one verifiable scenario (Given/When/
+      Then) that maps to a concrete test or sstabledump-parity check.
+    - Acceptance ties to the gate passing AND, for any user-facing feature, a
+      wiring-evidence end-to-end test from the public surface.
+  tasks:
+    - Each task names the public surface or test it exercises.
+    - Include explicit "run scripts/agent-gate.sh" and "roborev clean" steps
+      before the change is considered done.
