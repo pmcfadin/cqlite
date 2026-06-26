@@ -45,6 +45,25 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Serializes the counter-reading bound test against the counter-writing parity
+/// tests in THIS binary.
+///
+/// `work_counters::partitions_decoded()` is a process-global atomic shared with
+/// the read path (see `work_counters.rs`: "the global is shared with read-path
+/// code that any parallel test can drive"). The bound test
+/// (`within_sstable_seek_decodes_o1_partitions`) does `reset()` → seek →
+/// `partitions_decoded()`, but the two parity tests issue their own `WHERE id = ?`
+/// seeks that bump the SAME global counter. Cargo runs each test binary's tests
+/// in parallel threads, so a parity-test seek landing between the bound test's
+/// `reset()` and its read inflates the count (observed: 1 → 3 on CI, issue #1105;
+/// up to 51 — the parity probe budget — with a widened window).
+///
+/// A `RwLock` (not a plain `Mutex`) preserves the design intent that the two
+/// parity tests run concurrently with EACH OTHER: they take a shared read guard,
+/// while the bound test takes the exclusive write guard so no other test mutates
+/// the global counter while it measures. () payload — this gates timing only.
+static COUNTER_GATE: tokio::sync::RwLock<()> = tokio::sync::RwLock::const_new(());
+
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::QueryRow;
 use cqlite_core::storage::sstable::work_counters;
@@ -249,6 +268,10 @@ async fn find_seek_positive_key(
 /// process-global counter — two parallel `#[tokio::test]`s would race on it.
 #[tokio::test]
 async fn within_sstable_seek_decodes_o1_partitions() {
+    // Exclusive: no parity-test seek may mutate the process-global decode counter
+    // while this test measures it (issue #1105). Held for the whole test.
+    let _counter_guard = COUNTER_GATE.write().await;
+
     let mut checked_any = false;
 
     // ── BIG (`nb`) format: offset resolved via Index.db ─────────────────────────
@@ -351,6 +374,11 @@ async fn within_sstable_seek_decodes_o1_partitions() {
 /// key, for every partition. Does NOT read the counter, so it runs in parallel.
 #[tokio::test]
 async fn within_sstable_seek_matches_full_scan_big() {
+    // Shared with the BTI parity test (they may overlap), but excluded from the
+    // bound test's measurement window: this test's seeks bump the global decode
+    // counter (issue #1105).
+    let _counter_guard = COUNTER_GATE.read().await;
+
     let db = match setup("basic-types.cql", "/test_basic/").await {
         Ok(db) => db,
         Err(e) => {
@@ -404,6 +432,10 @@ async fn within_sstable_seek_matches_full_scan_big() {
 /// Byte-parity (BTI): same as above for the trie-resolved seek path.
 #[tokio::test]
 async fn within_sstable_seek_matches_full_scan_bti() {
+    // See `within_sstable_seek_matches_full_scan_big`: shared read guard keeps
+    // this test's seeks out of the bound test's counter window (issue #1105).
+    let _counter_guard = COUNTER_GATE.read().await;
+
     let db = match setup("da-test.cql", "/test_da/").await {
         Ok(db) => db,
         Err(e) => {
