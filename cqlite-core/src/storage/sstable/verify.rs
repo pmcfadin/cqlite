@@ -1239,11 +1239,15 @@ fn bti_partition_identity_mismatch(
     let mut leaf_keys: Vec<Vec<u8>> = Vec::with_capacity(leaves.len());
     for leaf in leaves {
         let raw_key = match &leaf.inline_raw_key {
-            // `RowsOffset` leaf: authoritative inline key. Cross-check that its
-            // recorded Data.db position resolves to the SAME raw key, so a payload
-            // tamper that desyncs the inline key from the position is caught.
-            Some(inline) => {
-                if let Some(by_pos) = pos_to_key.get(&leaf.data_position) {
+            // `RowsOffset` leaf: authoritative inline key. Its recorded Data.db
+            // position MUST resolve to a decoded partition start carrying the SAME
+            // raw key. A position that maps to a different key is a desync; a
+            // position that maps to NOTHING means the `Rows.db` entry's
+            // `data_position` is corrupt — a BTI read would seek to a non-partition
+            // offset in Data.db even though the inline key looks valid, so it is
+            // just as fatal as a corrupt `DataOffset` payload.
+            Some(inline) => match pos_to_key.get(&leaf.data_position) {
+                Some(by_pos) => {
                     if by_pos.as_slice() != inline.as_slice() {
                         return Some(format!(
                             "Partitions.db leaf (prefix {}) inline raw key {} disagrees with the key at its Data.db position {} ({}) — the leaf payload was tampered",
@@ -1253,9 +1257,17 @@ fn bti_partition_identity_mismatch(
                             hex(by_pos),
                         ));
                     }
+                    inline.clone()
                 }
-                inline.clone()
-            }
+                None => {
+                    return Some(format!(
+                        "Partitions.db leaf (prefix {}) inline raw key {} records Data.db position {} which is not a decoded partition start — the Rows.db entry's data position is corrupt (a BTI read would seek to the wrong partition)",
+                        hex(&leaf.prefix),
+                        hex(inline),
+                        leaf.data_position,
+                    ));
+                }
+            },
             // `DataOffset` leaf: resolve via the Data.db position map. A payload
             // flipped to a position that is not a partition start matches nothing.
             None => match pos_to_key.get(&leaf.data_position) {
@@ -1575,23 +1587,40 @@ mod tests {
     }
 
     #[test]
-    fn identity_check_detects_same_count_wrong_keys() {
-        // Data has partitions {1,2,3} but the leaves resolve to {4,5,6}: same
-        // count, disjoint identities. MUST be flagged (the core of issue #1103).
+    fn identity_check_detects_same_count_wrong_keys_via_multiset() {
+        // Same leaf count as Data.db and every leaf is individually well-formed
+        // (valid key, valid in-map position, consistent prefix) — but the trie
+        // resolves the SAME partition three times instead of {1,2,3}. Only the
+        // multiset comparison catches this; it is the core of issue #1103.
         let data_keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
         let data = data_partitions(&data_keys);
-        let leaf_keys: Vec<Vec<u8>> = (4u32..=6).map(|i| i.to_be_bytes().to_vec()).collect();
-        // Inline leaves whose prefix matches their (wrong) key, with positions that
-        // are NOT in the Data.db map (so the inline/position cross-check is inert).
-        let leaves: Vec<BtiResolvedLeaf> = leaf_keys
-            .iter()
-            .enumerate()
-            .map(|(i, k)| inline_leaf(k, 10_000 + i as u64))
-            .collect();
+        // Three leaves all resolving to partition 1 (key + position from data[0]).
+        let leaves: Vec<BtiResolvedLeaf> =
+            (0..3).map(|_| inline_leaf(&data[0].1, data[0].0)).collect();
+        let detail = bti_partition_identity_mismatch(&leaves, &data)
+            .expect("same-count wrong-identity must be flagged");
         assert!(
-            bti_partition_identity_mismatch(&leaves, &data).is_some(),
-            "same-count wrong-key leaves must be detected as a mismatch"
+            detail.contains("identities") || detail.contains("time(s)"),
+            "expected a multiset-identity mismatch, got: {detail}"
         );
+    }
+
+    #[test]
+    fn identity_check_detects_inline_leaf_with_corrupt_data_position() {
+        // Reviewer (roborev #1431): a `RowsOffset` leaf whose INLINE key is valid
+        // and present in Data.db but whose recorded Data.db position points at a
+        // non-partition offset must be flagged — a BTI read would seek to the wrong
+        // partition even though the inline key looks fine.
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        let mut leaves: Vec<BtiResolvedLeaf> =
+            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
+        // Keep the valid inline key; corrupt only the recorded Data.db position.
+        leaves[0].data_position = 9999; // not any partition start
+        let detail = bti_partition_identity_mismatch(&leaves, &data).expect(
+            "an inline leaf with a valid key but a non-partition data position must be flagged",
+        );
+        assert!(detail.contains("not a decoded partition start"));
     }
 
     #[test]
