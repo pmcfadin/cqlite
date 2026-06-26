@@ -2339,7 +2339,7 @@ impl SSTableReader {
     /// The stitch/parse strategy mirrors [`Self::distinct_partition_keys`]; only
     /// the parser entry point differs (it threads the partition-start offset).
     pub async fn distinct_partition_keys_with_positions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
-        use std::collections::HashMap;
+        use std::collections::HashSet;
 
         let cursor = self.new_scan_cursor().await?;
         let header_size = self.calculate_header_size();
@@ -2352,10 +2352,11 @@ impl SSTableReader {
         let effective_schema = self.get_table_schema(None);
         let parser = self.build_v5_parser();
 
-        // first_offset_for_key: data_position of the FIRST row seen for a partition
-        // (a partition spans contiguous rows, so the first row's offset is the
-        // partition start). result preserves first-seen order.
-        let mut first_offset_for_key: HashMap<Vec<u8>, u64> = HashMap::new();
+        // `seen` dedups partition keys; the recorded position is the FIRST row's
+        // offset for a partition (a partition spans contiguous rows, so the first
+        // row's offset is the partition start). `result` preserves first-seen
+        // order and is the only place the position is read back.
+        let mut seen: HashSet<Vec<u8>> = HashSet::new();
         let mut result: Vec<(u64, Vec<u8>)> = Vec::new();
         parser.parse_block_for_compaction_emit_with_offset(
             &whole,
@@ -2363,10 +2364,8 @@ impl SSTableReader {
             self,
             |partition_start, row| {
                 let k = row.key.as_bytes().to_vec();
-                if !first_offset_for_key.contains_key(&k) {
-                    let pos = partition_start as u64;
-                    first_offset_for_key.insert(k.clone(), pos);
-                    result.push((pos, k));
+                if seen.insert(k.clone()) {
+                    result.push((partition_start as u64, k));
                 }
                 Ok(std::ops::ControlFlow::Continue(()))
             },
