@@ -23,6 +23,10 @@
 #                      Set RUN_SLOW_TESTS=1 to also run the CLI-parity suite.
 #   minimal-build      cargo build -p cqlite-core --no-default-features --features all-compression
 #   smoke              bash test-data/scripts/smoke-test-all-tables.sh
+#   file-size          campsite-rule ratchet (epic #1116 / #1135): lists changed
+#                      .rs files over threshold (800 src / 1500 test, total lines)
+#                      and FAILs if a change makes an over-threshold file LARGER.
+#                      Override an unavoidable growth with CQLITE_ALLOW_FILE_GROWTH=1.
 #
 # The integration-tests --no-run sweep, the format-compat component, and the
 # python-bindings component close the three blind spots from issue #865: a
@@ -51,7 +55,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(fmt clippy core-tests tombstones-scan integration-tests format-compat write-tests cli-tests python-bindings minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan integration-tests format-compat write-tests cli-tests python-bindings minimal-build smoke)
 ONLY=""
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
@@ -130,6 +134,95 @@ run_python_bindings() {
   NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
   echo ">>> [$name] $status ($((end - start))s)"
 }
+
+# file-size: the campsite-rule ratchet (epic #1116 / #1135). Two parts:
+#   advisory  - list every changed .rs file currently over threshold, as a prompt
+#               to split it as part of this work.
+#   ratchet   - FAIL if a change makes an over-threshold file LARGER (or pushes a
+#               file over). You may edit big files freely; you just cannot grow
+#               them without either splitting or acknowledging via the override.
+# Metric is TOTAL line count (inline tests included) on purpose: the cost being
+# controlled is tokens-to-load when an agent reads the file before editing it.
+# Degrades to advisory-only (no ratchet) when the base ref can't be resolved.
+SRC_LIMIT=800
+TEST_LIMIT=1500
+run_file_size() {
+  local name=file-size
+  if [ -n "$ONLY" ] && ! grep -qw "$name" <<<"${ONLY//,/ }"; then
+    return 0
+  fi
+  local start end status=PASS
+  start=$(date +%s)
+
+  # Base ref: merge-base with the default branch. If none resolves, we can still
+  # do the advisory list but not the growth comparison.
+  local base="" ref
+  for ref in origin/main main origin/master master; do
+    if git rev-parse --verify -q "$ref" >/dev/null 2>&1; then
+      base=$(git merge-base HEAD "$ref" 2>/dev/null) && [ -n "$base" ] && break
+    fi
+  done
+
+  # Changed, non-deleted .rs files vs base (committed + working tree). With no
+  # base, fall back to changes vs HEAD (uncommitted only).
+  local files
+  if [ -n "$base" ]; then
+    files=$(git diff --name-only --diff-filter=d "$base" -- '*.rs' 2>/dev/null)
+  else
+    files=$(git diff --name-only --diff-filter=d HEAD -- '*.rs' 2>/dev/null)
+  fi
+
+  local -a over=() grew=()
+  local f cur lim base_n
+  while IFS= read -r f; do
+    [ -n "$f" ] && [ -f "$f" ] || continue
+    cur=$(wc -l <"$f" | tr -d ' ')
+    case "$f" in
+      *_test.rs|*_tests.rs|*/tests/*|tests/*|*/benches/*) lim=$TEST_LIMIT ;;
+      *) lim=$SRC_LIMIT ;;
+    esac
+    [ "$cur" -gt "$lim" ] || continue
+    over+=("$(printf '%5s/%-4s  %s' "$cur" "$lim" "$f")")
+    [ -n "$base" ] || continue
+    base_n=$(git show "$base:$f" 2>/dev/null | wc -l | tr -d ' ')
+    base_n=${base_n:-0}
+    if [ "$cur" -gt "$base_n" ]; then
+      grew+=("$(printf '%s: %s -> %s (limit %s)' "$f" "$base_n" "$cur" "$lim")")
+    fi
+  done <<<"$files"
+
+  echo ">>> [$name] thresholds: src=$SRC_LIMIT test=$TEST_LIMIT (total lines, inline tests included)"
+  if [ "${#over[@]}" -eq 0 ]; then
+    echo ">>> [$name] no changed .rs files over threshold"
+  else
+    echo "--- [$name] changed files over threshold (campsite rule — split per epic #1116 / #1135):"
+    printf '      %s\n' "${over[@]}"
+  fi
+
+  if [ -z "$base" ]; then
+    echo ">>> [$name] base ref unavailable — growth ratchet skipped (advisory only)"
+  elif [ "${#grew[@]}" -gt 0 ]; then
+    if [ "${CQLITE_ALLOW_FILE_GROWTH:-0}" = 1 ]; then
+      echo ">>> [$name] ${#grew[@]} over-threshold file(s) grew; ALLOWED via CQLITE_ALLOW_FILE_GROWTH=1:"
+      printf '      %s\n' "${grew[@]}"
+    else
+      status=FAIL
+      OVERALL=FAIL
+      echo "--- [$name] FAIL: change makes over-threshold file(s) larger."
+      echo "    Split per the campsite rule (epic #1116 source / #1135 tests), or, if a split"
+      echo "    is genuinely out of scope, re-run with CQLITE_ALLOW_FILE_GROWTH=1 to acknowledge:"
+      printf '      %s\n' "${grew[@]}"
+    fi
+  fi
+
+  end=$(date +%s)
+  NAMES+=("$name"); STATUSES+=("$status"); TIMES+=("$((end - start))s")
+  echo ">>> [$name] $status ($((end - start))s)"
+}
+
+# file-size runs first and needs no dataset, so it executes before the dataset
+# preflight (which exits early when data is missing).
+run_file_size
 
 # Dataset preflight: dataset-dependent components must FAIL loudly when data is
 # missing, never silently pass on a skipped suite (the #646 failure mode).

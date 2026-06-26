@@ -342,6 +342,21 @@ See canonical doctrine: [no-heuristics mandate](https://pmcfadin.github.io/cqlit
 - Use `thiserror` for errors
 - Memory target: <128MB for large files
 
+### File Size (Campsite Rule)
+Keep files small so they are cheap and accurate to read/edit — agentic context cost
+scales directly with file size (a file must be read before it can be edited).
+- **Targets** (total lines, inline tests included): source `~800`, test files `~1500`.
+- The agent gate runs a **file-size ratchet** (`file-size` component): it lists changed
+  `.rs` files over threshold (advisory) and **FAILs if your change makes an
+  over-threshold file larger** (or pushes one over).
+- **When you touch an over-threshold file**, split it by responsibility as part of your
+  work — see epic #1116 (source split doctrine: `foo.rs` → `foo/mod.rs` + concern
+  submodules with re-exports; tests follow their code) and #1135 (test files: extract
+  shared fixtures, split by scenario).
+- You may always edit a big file; you just cannot silently grow it. If a split is
+  genuinely out of scope or too risky for the current change, re-run with
+  `CQLITE_ALLOW_FILE_GROWTH=1` to acknowledge and leave a note linking #1116/#1135.
+
 ### Testing
 - Integration tests use real SSTable data only
 - Validate against sstabledump output
