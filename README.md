@@ -377,6 +377,20 @@ features), see [Limitations](https://pmcfadin.github.io/cqlite/user-docs/limitat
 
 CQLite is developed in the open as an Apache-licensed project. We welcome contributions from the Cassandra community!
 
+### Development Methodology
+
+CQLite uses a **spec-driven, agent-orchestrated, gate-enforced** workflow built on Claude Code. In short:
+
+- **Specs are the source of truth.** Requirements live in a durable [OpenSpec](https://github.com/Fission-AI/OpenSpec) spec under `openspec/specs/`; GitHub issues (epics + sub-issues) are the execution ledger, not the contract. *(spec layer rolling out in the v0.13 cycle.)*
+- **A Product-Manager orchestrator** (`/prioritize`, `/pm-status`, `/start-epic`) plans, prioritizes, and coordinates implementer agents — one stream per issue in an isolated git worktree.
+- **Every task passes a deterministic gate** (`scripts/agent-gate.sh`: `cargo fmt`, `clippy -D warnings`, tests, smoke) before it's "done" — enforced by a `TaskCompleted` hook, not the honor system.
+- **The author is never the reviewer.** Work is reviewed in a fresh context by roborev (a second model family) + `rust-reviewer`, and audited against the spec (`spec-auditor`) and for meaningful coverage (`coverage-reviewer`).
+- **Humans decide product, agents decide implementation.** Ambiguous scope and tradeoffs are escalated on a **NEEDS YOU** list, never guessed.
+
+**Definition of done:** gate passes · spec-auditor confirms acceptance criteria · coverage-reviewer confirms tests are meaningful · roborev is clean.
+
+📖 **Full workflow, lifecycle, and how to run it yourself:** [`docs/development/METHODOLOGY.md`](docs/development/METHODOLOGY.md)
+
 ### Development Setup
 
 ```bash

@@ -1,4 +1,8 @@
 {
+  "env": {
+    "ISSUE_GATE_TEST_CMD": "scripts/agent-gate.sh",
+    "ISSUE_GATE_COVERAGE_CMD": ""
+  },
   "permissions": {
     "allow": [
       "Bash(npx claude-flow:*)",
@@ -17,6 +21,7 @@
       "Bash(git branch:*)",
       "Bash(git checkout:*)",
       "Bash(git stash:*)",
+      "Bash(git rev-parse:*)",
       "Bash(jq:*)",
       "Bash(node:*)",
       "Bash(which:*)",
@@ -27,15 +32,34 @@
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo clippy)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build:*)",
       "Bash(env RUSTFLAGS=\"-D warnings\" cargo build)",
+      "Bash(gh issue view:*)",
       "Bash(gh issue list:*)",
+      "Bash(gh issue comment:*)",
+      "Bash(gh issue edit:*)",
+      "Bash(gh issue close:*)",
+      "Bash(gh issue reopen:*)",
       "Bash(cargo clippy:*)",
       "Bash(cargo test:*)",
-      "Bash(hexdump:*)"
+      "Bash(hexdump:*)",
+      "Bash(roborev:*)"
     ],
     "deny": [
       "Bash(rm -rf /)",
       "Bash(eval:*)"
     ]
   },
-  "includeCoAuthoredBy": false
+  "includeCoAuthoredBy": false,
+  "hooks": {
+    "TaskCompleted": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/issue-gate.sh\"",
+            "timeout": 600
+          }
+        ]
+      }
+    ]
+  }
 }

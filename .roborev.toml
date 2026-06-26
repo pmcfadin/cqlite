@@ -1,0 +1,227 @@
+# Default agent for this repo when no workflow-specific agent is set.
+agent = 'codex'
+# Default model for this repo when no workflow-specific model is set.
+model = 'gpt-5.5'
+# Backup agent for this repo if the primary agent fails.
+backup_agent = ''
+# Backup model for this repo if the primary model fails.
+backup_model = ''
+# Number of related reviews to include as context for this repo.
+review_context_count = 1
+# Extra review instructions added to prompts for this repo.
+review_guidelines = ''
+# Override the review job timeout in minutes for this repo.
+job_timeout_minutes = 0
+# Branches that should be skipped for automatic review in this repo.
+excluded_branches = []
+# Commit message substrings that should skip review for this repo.
+excluded_commit_patterns = []
+# Display name shown for this repo in the TUI and output.
+display_name = ''
+# Reasoning level for reviews in this repo: fast, standard, medium, thorough, or maximum.
+review_reasoning = ''
+# Reasoning level for refine in this repo: fast, standard, medium, thorough, or maximum.
+refine_reasoning = ''
+# Reasoning level for fix in this repo: fast, standard, medium, thorough, or maximum.
+fix_reasoning = ''
+# Minimum severity for fix in this repo: critical, high, medium, or low.
+fix_min_severity = ''
+# Minimum severity for refine in this repo: critical, high, medium, low.
+refine_min_severity = ''
+# Minimum severity for reviews in this repo: critical, high, medium, low.
+review_min_severity = ''
+# Filenames or glob patterns to exclude from review diffs for this repo.
+exclude_patterns = ['docs/**', '*.md']
+# Repo-local directory for temporary oversized diff snapshots.
+snapshot_dir = ''
+# Automatic post-commit review mode for this repo: commit or branch.
+post_commit_review = 'branch'
+reuse_review_session_lookback = 3
+# Agent override for standard review in this repo.
+review_agent = 'codex'
+# Agent override for fast review in this repo.
+review_agent_fast = ''
+# Agent override for standard review in this repo.
+review_agent_standard = ''
+# Agent override for medium review in this repo.
+review_agent_medium = ''
+# Agent override for thorough review in this repo.
+review_agent_thorough = ''
+# Agent override for maximum review in this repo.
+review_agent_maximum = ''
+# Agent override for refine in this repo.
+refine_agent = ''
+# Agent override for fast refine in this repo.
+refine_agent_fast = ''
+# Agent override for standard refine in this repo.
+refine_agent_standard = ''
+# Agent override for medium refine in this repo.
+refine_agent_medium = ''
+# Agent override for thorough refine in this repo.
+refine_agent_thorough = ''
+# Agent override for maximum refine in this repo.
+refine_agent_maximum = ''
+# Model override for standard review in this repo.
+review_model = 'gpt-5.5'
+# Model override for fast review in this repo.
+review_model_fast = ''
+# Model override for standard review in this repo.
+review_model_standard = ''
+# Model override for medium review in this repo.
+review_model_medium = ''
+# Model override for thorough review in this repo.
+review_model_thorough = ''
+# Model override for maximum review in this repo.
+review_model_maximum = ''
+# Model override for standard refine in this repo.
+refine_model = ''
+# Model override for fast refine in this repo.
+refine_model_fast = ''
+# Model override for standard refine in this repo.
+refine_model_standard = ''
+# Model override for medium refine in this repo.
+refine_model_medium = ''
+# Model override for thorough refine in this repo.
+refine_model_thorough = ''
+# Model override for maximum refine in this repo.
+refine_model_maximum = ''
+# Agent override for fix in this repo.
+fix_agent = ''
+# Agent override for fast fix in this repo.
+fix_agent_fast = ''
+# Agent override for standard fix in this repo.
+fix_agent_standard = ''
+# Agent override for medium fix in this repo.
+fix_agent_medium = ''
+# Agent override for thorough fix in this repo.
+fix_agent_thorough = ''
+# Agent override for maximum fix in this repo.
+fix_agent_maximum = ''
+# Model override for standard fix in this repo.
+fix_model = ''
+# Model override for fast fix in this repo.
+fix_model_fast = ''
+# Model override for standard fix in this repo.
+fix_model_standard = ''
+# Model override for medium fix in this repo.
+fix_model_medium = ''
+# Model override for thorough fix in this repo.
+fix_model_thorough = ''
+# Model override for maximum fix in this repo.
+fix_model_maximum = ''
+# Agent override for security review in this repo.
+security_agent = ''
+# Agent override for fast security review in this repo.
+security_agent_fast = ''
+# Agent override for standard security review in this repo.
+security_agent_standard = ''
+# Agent override for medium security review in this repo.
+security_agent_medium = ''
+# Agent override for thorough security review in this repo.
+security_agent_thorough = ''
+# Agent override for maximum security review in this repo.
+security_agent_maximum = ''
+# Model override for standard security review in this repo.
+security_model = ''
+# Model override for fast security review in this repo.
+security_model_fast = ''
+# Model override for standard security review in this repo.
+security_model_standard = ''
+# Model override for medium security review in this repo.
+security_model_medium = ''
+# Model override for thorough security review in this repo.
+security_model_thorough = ''
+# Model override for maximum security review in this repo.
+security_model_maximum = ''
+# Agent override for design review in this repo.
+design_agent = ''
+# Agent override for fast design review in this repo.
+design_agent_fast = ''
+# Agent override for standard design review in this repo.
+design_agent_standard = ''
+# Agent override for medium design review in this repo.
+design_agent_medium = ''
+# Agent override for thorough design review in this repo.
+design_agent_thorough = ''
+# Agent override for maximum design review in this repo.
+design_agent_maximum = ''
+# Model override for standard design review in this repo.
+design_model = ''
+# Model override for fast design review in this repo.
+design_model_fast = ''
+# Model override for standard design review in this repo.
+design_model_standard = ''
+# Model override for medium design review in this repo.
+design_model_medium = ''
+# Model override for thorough design review in this repo.
+design_model_thorough = ''
+# Model override for maximum design review in this repo.
+design_model_maximum = ''
+# Override classifier agent for this repo.
+classify_agent = ''
+# Override classifier model for this repo.
+classify_model = ''
+# Override classifier reasoning for this repo.
+classify_reasoning = ''
+# Override classifier backup agent for this repo.
+classify_backup_agent = ''
+# Override classifier backup model for this repo.
+classify_backup_model = ''
+# Backup agent for review in this repo.
+review_backup_agent = ''
+# Backup agent for refine in this repo.
+refine_backup_agent = ''
+# Backup agent for fix in this repo.
+fix_backup_agent = ''
+# Backup agent for security review in this repo.
+security_backup_agent = ''
+# Backup agent for design review in this repo.
+design_backup_agent = ''
+# Backup model for review in this repo.
+review_backup_model = ''
+# Backup model for refine in this repo.
+refine_backup_model = ''
+# Backup model for fix in this repo.
+fix_backup_model = ''
+# Backup model for security review in this repo.
+security_backup_model = ''
+# Backup model for design review in this repo.
+design_backup_model = ''
+# Automatically close reviews that pass with no findings in this repo.
+auto_close_passing_reviews = true
+hooks = []
+# Maximum prompt size for this repo before falling back to file paths.
+max_prompt_size = 0
+
+[ci]
+# Override the agents used by CI for this repo.
+agents = []
+# Override the review types used by CI for this repo.
+review_types = []
+# Named [review.panels.X] panel for CI.
+panel = ''
+# Override the CI reasoning level for this repo: fast, standard, medium, thorough, or maximum.
+reasoning = ''
+# Override the minimum CI severity included in synthesized output.
+min_severity = ''
+
+[auto_design_review]
+min_diff_lines = 0
+large_diff_lines = 0
+large_file_count = 0
+trigger_paths = []
+skip_paths = []
+trigger_message_patterns = []
+skip_message_patterns = []
+classifier_timeout_seconds = 0
+classifier_max_prompt_size = 0
+
+[review]
+default_panel = ''
+hook_review_panel = ''
+
+[kata_context]
+# Kata task context in review prompts: off | current | open (default off).
+mode = ''
+# Max bytes of kata context to include (default 50000).
+max_chars = 0

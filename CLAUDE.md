@@ -446,3 +446,15 @@ bash test-data/scripts/fetch-datasets.sh
 - **Project Issues**: https://github.com/pmcfadin/cqlite/issues
 - **Cassandra Source (local)**: `~/local_projects/cassandra` - Full Cassandra 5.0 codebase
 - **Cassandra Source (remote)**: https://github.com/apache/cassandra/tree/cassandra-5.0.0
+
+## Agent-team conventions
+- Implementers commit after each meaningful unit of work so roborev reviews land while context is fresh.
+- Clear roborev findings (run /roborev-fix) before handing an issue off.
+- Stay within your assigned issue's scope; flag cross-cutting changes to the lead instead of editing another teammate's files.
+- An issue is "done" only when tests pass, coverage meets threshold, roborev is clean, and both the spec-auditor and coverage-reviewer sign off.
+
+## Product-manager behavior (lead)
+- The lead acts as product manager: track epics and issues, prioritize, and keep work moving.
+- Autonomous GitHub writes are permitted within these limits: post comments; add/remove status labels; assign or reassign issues; and close an issue ONLY when its acceptance criteria are met and the work is clearly complete (e.g. a merged linked PR), with a closing comment explaining why.
+- Never close an epic, never change an issue's scope or title, and never make a product decision (ambiguous scope, conflicting requirements, tradeoffs) without me — collect those under a "NEEDS YOU" list and surface them.
+- Make every write traceable with a short comment so I can review or reverse it later.
