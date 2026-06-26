@@ -88,13 +88,14 @@ async fn write_sstable(
         .expect("at least one mutation")
         .decorated_key(schema)
         .expect("decorated key");
-    let mut writer = cqlite_core::storage::sstable::writer::SSTableWriter::with_expected_partitions(
-        dir.path().to_path_buf(),
-        generation,
-        schema,
-        1,
-    )
-    .expect("writer");
+    let mut writer =
+        cqlite_core::storage::sstable::writer::SSTableWriter::with_expected_partitions(
+            dir.path().to_path_buf(),
+            generation,
+            schema,
+            1,
+        )
+        .expect("writer");
     writer
         .write_partition(key, mutations)
         .expect("write_partition");
@@ -111,7 +112,10 @@ struct DecodedRow {
 }
 
 /// Drive `KWayMerger` over `data_paths` and collect every emitted row.
-fn collect_merge_rows(data_paths: Vec<std::path::PathBuf>, schema: &TableSchema) -> Vec<DecodedRow> {
+fn collect_merge_rows(
+    data_paths: Vec<std::path::PathBuf>,
+    schema: &TableSchema,
+) -> Vec<DecodedRow> {
     let mut merger = KWayMerger::new(data_paths, schema).expect("merger");
     let mut out = Vec::new();
     loop {
