@@ -42,6 +42,6 @@
       AGENT-GATE SUMMARY block) is therefore N/A here and intentionally skipped;
       this no-code-delta inspection IS the recorded evidence. Code changes under
       this workflow still require the full gate + pasted summary.
-- [ ] 5.2 roborev clean on the branch.
+- [x] 5.2 roborev clean on the branch.
 - [x] 5.3 Self-audit: run C against this change and confirm every requirement in
       `specs/change-audit/spec.md` is `satisfied` with evidence (dogfood).
