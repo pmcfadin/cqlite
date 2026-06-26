@@ -96,7 +96,8 @@ git switch -c chore/1099-bump-dataset-pin-v3.2
 test-data/scripts/bump-dataset-pin.sh --new-sha <sha256-from-step-2>
 # (add --new-tag <tag> if you cut a new release tag)
 
-git add .github/workflows
+# Stage everything the finalizer touched (workflows AND the fetch helper):
+git add .github/workflows test-data/scripts/fetch-datasets.sh
 git commit -m "ci: pin dataset asset to cassandra5-small-full-v3.2 (#1099)"
 git push -u origin chore/1099-bump-dataset-pin-v3.2
 gh pr create --base main --fill
@@ -105,6 +106,12 @@ gh pr create --base main --fill
 The 10 pinned workflows: `ci.yml`, `coverage.yml`, `docs-site.yml`,
 `m1-ci.yml`, `node-ci.yml`, `observability-gate.yml`, `perf-regression.yml`,
 `python-ci.yml`, `smoke-tests.yml`, `sstabledump-parity-gate.yml`.
+
+> **Cache note:** `coverage.yml`/`m1-ci.yml` restore the dataset cache and skip
+> the download when `test_basic/simple_table-*-Data.db` is already present.
+> Their dataset cache `restore-keys` are **SHA-scoped** (`datasets-v3-<sha>-`),
+> so a SHA bump can never warm-restore an older dataset version and silently
+> skip the re-download — the finalizer rewrites that SHA along with the rest.
 
 ## 5. Verify
 
