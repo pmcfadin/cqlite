@@ -49,6 +49,7 @@ use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::QueryRow;
 use cqlite_core::storage::sstable::work_counters;
 use cqlite_core::{Database, Value};
+use serial_test::serial;
 
 /// Upper bound on `partitions_decoded()` for a single-partition seek.
 ///
@@ -246,8 +247,14 @@ async fn find_seek_positive_key(
 /// THE seek gate (Issue #953): a single-partition read decodes O(1) partitions.
 ///
 /// Both formats are checked in one test because `partitions_decoded()` is a
-/// process-global counter — two parallel `#[tokio::test]`s would race on it.
+/// process-global counter. `#[serial(work_counters)]` additionally serializes
+/// this test against the parity tests in this binary: those run `WHERE id = ?`
+/// lookups that bump the same global counter, and `cargo test` runs a binary's
+/// tests as parallel threads in ONE process — so without the named serial lock a
+/// sibling could increment `partitions_decoded` between this test's `reset()` and
+/// its read, inflating the count (issue #1071).
 #[tokio::test]
+#[serial(work_counters)]
 async fn within_sstable_seek_decodes_o1_partitions() {
     let mut checked_any = false;
 
@@ -348,8 +355,12 @@ async fn within_sstable_seek_decodes_o1_partitions() {
 }
 
 /// Byte-parity (BIG): the seek result equals the full-scan result filtered to the
-/// key, for every partition. Does NOT read the counter, so it runs in parallel.
+/// key, for every partition. It does not READ the counter, but its `WHERE id = ?`
+/// lookups MUTATE the process-global `partitions_decoded`, so it carries
+/// `#[serial(work_counters)]` to stay off the decode-bound test's measurement
+/// window (issue #1071).
 #[tokio::test]
+#[serial(work_counters)]
 async fn within_sstable_seek_matches_full_scan_big() {
     let db = match setup("basic-types.cql", "/test_basic/").await {
         Ok(db) => db,
@@ -401,8 +412,11 @@ async fn within_sstable_seek_matches_full_scan_big() {
     println!("Issue #953 (BIG): seek == full-scan parity for {checked} partitions");
 }
 
-/// Byte-parity (BTI): same as above for the trie-resolved seek path.
+/// Byte-parity (BTI): same as above for the trie-resolved seek path. Carries
+/// `#[serial(work_counters)]` for the same reason as the BIG parity test: its
+/// lookups mutate the shared counter (issue #1071).
 #[tokio::test]
+#[serial(work_counters)]
 async fn within_sstable_seek_matches_full_scan_bti() {
     let db = match setup("da-test.cql", "/test_da/").await {
         Ok(db) => db,
