@@ -43,8 +43,8 @@
 - [x] 5.1 Confirm no code lanes regress (docs/agent-only: zero `*.rs`/`Cargo.*`/
       `.github/**`/`*.sh` files change → gate code lanes unaffected; full gate
       N/A, this inspection is the evidence).
-- [ ] 5.2 roborev clean on the branch.
-- [ ] 5.3 Self-audit with C: run `spec-auditor` against this change and confirm
+- [x] 5.2 roborev clean on the branch.
+- [x] 5.3 Self-audit with C: run `spec-auditor` against this change and confirm
       every `delivery-pipeline` requirement is `satisfied` with evidence
       (dogfood — and the first change run through the very pipeline it defines,
       once 2.x exist).
