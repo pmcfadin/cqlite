@@ -292,15 +292,17 @@ pub async fn verify_sstable(
     // Partitions.db/Rows.db tries, so a corrupt trie is likewise invisible to a
     // scan. We validate the index structurally here and hard-fail.
     //
-    // `bti_partition_keys` is the distinct partition-key set recovered by
-    // walking Partitions.db; it is cross-checked against the Data.db scan in
-    // FULL mode to catch a footer-flip that silently UNDER-counts partitions
-    // (the trie still parses, just from the wrong root, yielding fewer keys).
-    let mut bti_partition_keys: Option<usize> = None;
+    // `bti_leaves` is the set of partition-index leaves recovered by walking
+    // Partitions.db; it is cross-checked against the Data.db scan in FULL mode to
+    // catch a footer-flip that silently UNDER-counts partitions (the trie still
+    // parses, just from the wrong root) AND a same-count corruption that keeps a
+    // leaf's emitted prefix but rewrites its PAYLOAD to point at a different
+    // partition. Each leaf carries its emitted byte-comparable prefix plus its
+    // payload resolved back to a raw partition key by AUTHORITATIVE data (issue
+    // #1103).
+    let mut bti_leaves: Option<Vec<BtiResolvedLeaf>> = None;
     match components.format {
-        SsTableFormat::Bti => {
-            bti_partition_keys = check_bti_structure(dir, &components, &mut findings)?
-        }
+        SsTableFormat::Bti => bti_leaves = check_bti_structure(dir, &components, &mut findings)?,
         SsTableFormat::Big => check_big_index(dir, &components, &mut findings)?,
     }
 
@@ -343,21 +345,24 @@ pub async fn verify_sstable(
             match full_row_scan_partitions(&components.data_path, config, platform).await {
                 Ok((rows, scan_partitions)) => {
                     rows_scanned = Some(rows);
-                    // BTI cross-check: the partition count recovered by walking
-                    // Partitions.db MUST match the distinct partitions decoded from
-                    // Data.db. A mismatch means the trie was traversed from a
-                    // corrupt root (footer flip) even though it parsed without
-                    // erroring — a silent under-count we must surface.
-                    if let Some(trie_keys) = bti_partition_keys {
-                        if trie_keys != scan_partitions {
+                    // BTI cross-check: each Partitions.db leaf's PAYLOAD, resolved
+                    // back to a raw partition key by authoritative data, MUST match
+                    // the partition keys decoded from Data.db — by IDENTITY, not
+                    // just count (issue #1103). A count-only check passes a
+                    // corruption that walks a wrong subtree yielding a different set
+                    // of keys with the same leaf count; a prefix-only check passes a
+                    // corruption that keeps a leaf's emitted prefix but rewrites its
+                    // payload to a different partition. Resolving the payload closes
+                    // both gaps.
+                    if let Some(leaves) = bti_leaves {
+                        if let Some(detail) =
+                            bti_partition_identity_mismatch(&leaves, &scan_partitions)
+                        {
                             findings.push(VerifyFinding::new(
-                            VerifyErrorClass::BtiRootPointerCorrupt,
-                            "Partitions.db",
-                            format!(
-                                "Partitions.db trie yielded {} partition keys but Data.db decoded {} distinct partitions — the trie was walked from a corrupt root",
-                                trie_keys, scan_partitions
-                            ),
-                        ));
+                                VerifyErrorClass::BtiRootPointerCorrupt,
+                                "Partitions.db",
+                                detail,
+                            ));
                         }
                     }
                 }
@@ -688,30 +693,58 @@ fn check_compression_info(
     Ok(Some(info))
 }
 
-/// Check 4 (BTI): structurally validate the `Partitions.db` and `Rows.db`
-/// tries.
+/// One BTI `Partitions.db` leaf, with its PAYLOAD resolved back to a raw
+/// partition key using authoritative data (issue #1103).
 ///
-/// Returns `Some(n)` where `n` is the number of partition keys recovered by
-/// walking `Partitions.db`, so the caller can cross-check it against the Data.db
-/// scan (FULL mode). Returns `None` if `Partitions.db` could not be walked (a
-/// finding was recorded).
+/// The verifier resolves every leaf so a corruption that keeps the leaf's
+/// emitted byte-comparable prefix while rewriting its payload to point at a
+/// DIFFERENT partition is still caught (a same-count, wrong-IDENTITY
+/// corruption the prefix-only compare missed).
+struct BtiResolvedLeaf {
+    /// The path-compressed byte-comparable prefix emitted by the trie walk
+    /// (`[0x40 ++ token]` truncated to the shortest distinguishing prefix). Used
+    /// only for the prefix/payload-consistency assertion.
+    prefix: Vec<u8>,
+    /// The raw partition key this leaf's payload resolves to, when it could be
+    /// recovered directly (a `RowsOffset` leaf stores the raw key INLINE in
+    /// `Rows.db`). `None` for a `DataOffset` leaf, whose raw key is recovered via
+    /// the Data.db position map ([`Self::data_position`]).
+    inline_raw_key: Option<Vec<u8>>,
+    /// The decompressed-`Data.db` partition-start position the payload points at:
+    /// the `DataOffset` value directly, or the `data_position` recovered from the
+    /// `RowsOffset` row-index entry. Resolved to a raw key via the Data.db scan's
+    /// position map in [`bti_partition_identity_mismatch`].
+    data_position: u64,
+}
+
+/// Check 4 (BTI): structurally validate the `Partitions.db` and `Rows.db`
+/// tries, and resolve every partition-index leaf back to a raw partition key.
+///
+/// Returns `Some(leaves)` — one [`BtiResolvedLeaf`] per recovered partition —
+/// so the caller can cross-check them against the Data.db scan by IDENTITY
+/// (FULL mode). Returns `None` if `Partitions.db` could not be walked (a finding
+/// was recorded).
 ///
 /// * `Partitions.db` is walked with [`iterate_partitions_in_bti_file`], which
 ///   follows the trailing-8-byte footer root and DFS-collects every leaf. A
 ///   footer flip either makes the walk error (out-of-bounds root) or silently
-///   recover the wrong key set; the FULL-mode count cross-check catches the
+///   recover the wrong key set; the FULL-mode identity cross-check catches the
 ///   latter.
 /// * For every partition whose payload is a `RowsOffset`, the per-partition
-///   row-index entry is resolved from `Rows.db` via [`iterate_rows_for_partition`].
-///   A truncated `Rows.db` makes the referenced offset point past EOF or the
-///   row-trie read hit EOF.
+///   row-index entry is resolved from `Rows.db` via [`iterate_rows_for_partition`]
+///   (structural) and [`resolve_rows_db_entry`] (to recover the inline raw key
+///   and the partition's Data.db position). A truncated `Rows.db` makes the
+///   referenced offset point past EOF or the row-trie read hit EOF.
+/// * A `DataOffset` payload carries the partition's decompressed-Data.db
+///   position directly; its raw key is resolved later through the Data.db scan.
 fn check_bti_structure(
     dir: &Path,
     components: &ComponentSet,
     findings: &mut Vec<VerifyFinding>,
-) -> Result<Option<usize>> {
+) -> Result<Option<Vec<BtiResolvedLeaf>>> {
     use crate::storage::sstable::bti::parser::{
-        iterate_partitions_in_bti_file, iterate_rows_for_partition, BtiPartitionLocation,
+        iterate_partitions_in_bti_file, iterate_rows_for_partition, resolve_rows_db_entry,
+        BtiPartitionLocation,
     };
     use std::io::Cursor;
 
@@ -783,41 +816,116 @@ fn check_bti_structure(
                 "Rows.db",
                 format!("cannot read Rows.db: {}", e),
             ));
-            // We can still report the partition count.
-            return Ok(Some(partitions.len()));
+            // Rows.db is gone, so `RowsOffset` payloads cannot be resolved; only
+            // `DataOffset` leaves carry a self-contained position. Return what we
+            // can (the missing-component finding already fails verification).
+            let leaves = partitions
+                .into_iter()
+                .filter_map(|(prefix, location)| match location {
+                    BtiPartitionLocation::DataOffset(off) => Some(BtiResolvedLeaf {
+                        prefix,
+                        inline_raw_key: None,
+                        data_position: off,
+                    }),
+                    BtiPartitionLocation::RowsOffset(_) => None,
+                })
+                .collect();
+            return Ok(Some(leaves));
         }
     };
 
-    for (key, location) in &partitions {
-        if let BtiPartitionLocation::RowsOffset(off) = location {
-            let off = *off as usize;
-            if off >= rows_bytes.len() {
-                findings.push(VerifyFinding::new(
-                    VerifyErrorClass::BtiTrieCorrupt,
-                    "Rows.db",
-                    format!(
-                        "partition (key {} bytes) references Rows.db offset {} which is past EOF ({} bytes) — Rows.db is truncated/corrupt",
-                        key.len(),
-                        off,
-                        rows_bytes.len()
-                    ),
-                ));
-                continue;
+    // Resolve every leaf's PAYLOAD back to a raw partition key (issue #1103). A
+    // `RowsOffset` leaf stores the raw key INLINE in `Rows.db` as
+    // `[u16 key_length][key bytes]` at the offset (see `resolve_rows_db_entry`),
+    // so we extract it directly — no Data.db read. A `DataOffset` leaf carries the
+    // partition's decompressed-Data.db position directly; its raw key is resolved
+    // later through the Data.db scan's position map.
+    let mut leaves: Vec<BtiResolvedLeaf> = Vec::with_capacity(partitions.len());
+    for (prefix, location) in partitions {
+        match location {
+            BtiPartitionLocation::RowsOffset(off) => {
+                let off = off as usize;
+                if off + 2 > rows_bytes.len() {
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::BtiTrieCorrupt,
+                        "Rows.db",
+                        format!(
+                            "partition (trie prefix {} bytes) references Rows.db offset {} which is past EOF ({} bytes) — Rows.db is truncated/corrupt",
+                            prefix.len(),
+                            off,
+                            rows_bytes.len()
+                        ),
+                    ));
+                    continue;
+                }
+                if let Err(e) = iterate_rows_for_partition(&rows_bytes, off) {
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::BtiTrieCorrupt,
+                        "Rows.db",
+                        format!(
+                            "row-index trie for partition at Rows.db offset {} failed to parse (truncated/corrupt): {}",
+                            off, e
+                        ),
+                    ));
+                    continue;
+                }
+
+                // Inline raw partition key: [u16 key_length][key bytes] at `off`.
+                let key_length =
+                    u16::from_be_bytes([rows_bytes[off], rows_bytes[off + 1]]) as usize;
+                let key_start = off + 2;
+                let key_end = key_start + key_length;
+                if key_end > rows_bytes.len() {
+                    findings.push(VerifyFinding::new(
+                        VerifyErrorClass::BtiTrieCorrupt,
+                        "Rows.db",
+                        format!(
+                            "Rows.db entry at offset {} declares an inline key length {} that overruns the file ({} bytes)",
+                            off, key_length, rows_bytes.len()
+                        ),
+                    ));
+                    continue;
+                }
+                let inline_raw_key = rows_bytes[key_start..key_end].to_vec();
+
+                // Recover the partition's Data.db position too, so a leaf whose
+                // INLINE key and Data.db position disagree (a payload tamper) is
+                // still cross-checkable through the position map.
+                let data_position = match resolve_rows_db_entry(&rows_bytes, off) {
+                    Ok(hdr) => hdr.data_position,
+                    Err(e) => {
+                        findings.push(VerifyFinding::new(
+                            VerifyErrorClass::BtiTrieCorrupt,
+                            "Rows.db",
+                            format!(
+                                "Rows.db entry at offset {} failed to deserialize (truncated/corrupt): {}",
+                                off, e
+                            ),
+                        ));
+                        continue;
+                    }
+                };
+
+                leaves.push(BtiResolvedLeaf {
+                    prefix,
+                    inline_raw_key: Some(inline_raw_key),
+                    data_position,
+                });
             }
-            if let Err(e) = iterate_rows_for_partition(&rows_bytes, off) {
-                findings.push(VerifyFinding::new(
-                    VerifyErrorClass::BtiTrieCorrupt,
-                    "Rows.db",
-                    format!(
-                        "row-index trie for partition at Rows.db offset {} failed to parse (truncated/corrupt): {}",
-                        off, e
-                    ),
-                ));
+            BtiPartitionLocation::DataOffset(off) => {
+                leaves.push(BtiResolvedLeaf {
+                    prefix,
+                    inline_raw_key: None,
+                    data_position: off,
+                });
             }
         }
     }
 
-    Ok(Some(partitions.len()))
+    // Return the resolved leaves. FULL-mode verification cross-checks each leaf's
+    // resolved raw partition key against the keys decoded from Data.db, by
+    // IDENTITY (issue #1103).
+    Ok(Some(leaves))
 }
 
 /// Check 4 (BIG): structurally validate `Index.db`.
@@ -1061,13 +1169,14 @@ async fn check_statistics(
 }
 
 /// Check 7 (FULL): a complete row scan. Returns `(rows, distinct_partitions)`
-/// where `distinct_partitions` is the number of distinct partition keys decoded
-/// from `Data.db` (used for the BTI Partitions.db cross-check).
+/// where `distinct_partitions` is the set of distinct partition keys decoded
+/// from `Data.db`, each paired with its decompressed-Data.db partition-start
+/// position (used for the BTI Partitions.db identity cross-check, issue #1103).
 async fn full_row_scan_partitions(
     data_path: &Path,
     config: &Config,
     platform: Arc<Platform>,
-) -> Result<(usize, usize)> {
+) -> Result<(usize, Vec<(u64, Vec<u8>)>)> {
     let reader = SSTableReader::open(data_path, config, platform).await?;
 
     // `rows` is the total decoded row/entry count (exercises the full
@@ -1075,15 +1184,160 @@ async fn full_row_scan_partitions(
     let entries = reader.get_all_entries().await?;
     let rows = entries.len();
 
-    // `distinct_partitions` is the true count of distinct PARTITION keys decoded
-    // from Data.db — one per partition, NOT per row. Deduping `get_all_entries`
-    // RowKeys would over-count a multi-row partition (those keys carry
-    // clustering/column/static suffixes), which previously FALSE-FAILED the BTI
-    // Partitions.db cross-check on healthy SSTables (issue #970). The reader
-    // counts at the partition boundary for both BIG (`nb`) and BTI (`da`).
-    let distinct_partitions = reader.distinct_partition_count().await?;
+    // `distinct_partition_keys_with_positions` are the raw serialized PARTITION
+    // keys decoded from Data.db — one per partition, NOT per row — each tagged
+    // with its decompressed-Data.db partition-start position. Deduping
+    // `get_all_entries` RowKeys would over-count a multi-row partition (those keys
+    // carry clustering/column/static suffixes), which previously FALSE-FAILED the
+    // BTI Partitions.db cross-check on healthy SSTables (issue #970). The reader
+    // dedups at the partition boundary for both BIG (`nb`) and BTI (`da`); the
+    // position lets the verifier resolve a BTI leaf's payload back to its raw key.
+    let partitions = reader.distinct_partition_keys_with_positions().await?;
 
-    Ok((rows, distinct_partitions))
+    Ok((rows, partitions))
+}
+
+/// Cross-check BTI `Partitions.db` leaves against the partitions decoded from
+/// `Data.db` by IDENTITY (issue #1103). Returns `Some(detail)` describing the
+/// mismatch when the trie does not represent the same partition set as Data.db,
+/// or `None` when they agree.
+///
+/// Unlike a prefix-only compare (which only looks at the leaf's emitted
+/// byte-comparable transition bytes), this resolves each leaf's PAYLOAD back to a
+/// raw partition key using authoritative data and matches it against the Data.db
+/// keys. This closes a same-count, wrong-IDENTITY corruption that keeps the
+/// emitted prefix but rewrites the payload (`DataOffset` / `RowsOffset` →
+/// `data_position`) to point at a DIFFERENT partition:
+///
+/// * `RowsOffset` leaf: the raw key is stored INLINE in `Rows.db`
+///   ([`BtiResolvedLeaf::inline_raw_key`]); matched directly against Data.db.
+/// * `DataOffset` leaf: matched via its decompressed-Data.db
+///   [`BtiResolvedLeaf::data_position`], looked up in the Data.db scan's
+///   `position → raw_key` map.
+///
+/// We require an exact MULTISET equality between the resolved leaf keys and the
+/// Data.db keys, plus a per-leaf consistency check that the resolved raw key's
+/// byte-comparable encoding actually starts with the leaf's emitted prefix
+/// (catches a leaf whose path is inconsistent with its payload).
+///
+/// Note: the byte-comparable encoding assumes `Murmur3Partitioner`, matching the
+/// rest of CQLite's BTI read path (issue #755).
+fn bti_partition_identity_mismatch(
+    leaves: &[BtiResolvedLeaf],
+    data_partitions: &[(u64, Vec<u8>)],
+) -> Option<String> {
+    use crate::storage::sstable::bti::parser::encode_partition_key_for_bti_trie;
+    use std::collections::HashMap;
+
+    let hex = |b: &[u8]| b.iter().map(|x| format!("{:02x}", x)).collect::<String>();
+
+    // Data.db side: a position → raw_key map (to resolve `DataOffset` leaves) plus
+    // the raw-key multiset (to compare identities).
+    let pos_to_key: HashMap<u64, &Vec<u8>> = data_partitions.iter().map(|(p, k)| (*p, k)).collect();
+
+    // Resolve every leaf to a raw partition key.
+    let mut leaf_keys: Vec<Vec<u8>> = Vec::with_capacity(leaves.len());
+    for leaf in leaves {
+        let raw_key = match &leaf.inline_raw_key {
+            // `RowsOffset` leaf: authoritative inline key. Its recorded Data.db
+            // position MUST resolve to a decoded partition start carrying the SAME
+            // raw key. A position that maps to a different key is a desync; a
+            // position that maps to NOTHING means the `Rows.db` entry's
+            // `data_position` is corrupt — a BTI read would seek to a non-partition
+            // offset in Data.db even though the inline key looks valid, so it is
+            // just as fatal as a corrupt `DataOffset` payload.
+            Some(inline) => match pos_to_key.get(&leaf.data_position) {
+                Some(by_pos) => {
+                    if by_pos.as_slice() != inline.as_slice() {
+                        return Some(format!(
+                            "Partitions.db leaf (prefix {}) inline raw key {} disagrees with the key at its Data.db position {} ({}) — the leaf payload was tampered",
+                            hex(&leaf.prefix),
+                            hex(inline),
+                            leaf.data_position,
+                            hex(by_pos),
+                        ));
+                    }
+                    inline.clone()
+                }
+                None => {
+                    return Some(format!(
+                        "Partitions.db leaf (prefix {}) inline raw key {} records Data.db position {} which is not a decoded partition start — the Rows.db entry's data position is corrupt (a BTI read would seek to the wrong partition)",
+                        hex(&leaf.prefix),
+                        hex(inline),
+                        leaf.data_position,
+                    ));
+                }
+            },
+            // `DataOffset` leaf: resolve via the Data.db position map. A payload
+            // flipped to a position that is not a partition start matches nothing.
+            None => match pos_to_key.get(&leaf.data_position) {
+                Some(k) => (*k).clone(),
+                None => {
+                    return Some(format!(
+                        "Partitions.db leaf (prefix {}) payload points at Data.db position {} which is not a decoded partition start — the leaf payload is corrupt (same prefix, wrong partition)",
+                        hex(&leaf.prefix),
+                        leaf.data_position,
+                    ));
+                }
+            },
+        };
+
+        // Per-leaf path/payload consistency: the resolved raw key's
+        // byte-comparable encoding MUST start with the leaf's emitted prefix.
+        let encoded = encode_partition_key_for_bti_trie(&raw_key);
+        if !encoded.starts_with(leaf.prefix.as_slice()) {
+            return Some(format!(
+                "Partitions.db leaf prefix {} is inconsistent with its payload's partition key (encodes to {}) — the trie path does not match the leaf payload",
+                hex(&leaf.prefix),
+                hex(&encoded),
+            ));
+        }
+
+        leaf_keys.push(raw_key);
+    }
+
+    // Exact MULTISET equality between the resolved leaf keys and the Data.db keys.
+    let mut data_counts: HashMap<&[u8], i64> = HashMap::new();
+    for (_, k) in data_partitions {
+        *data_counts.entry(k.as_slice()).or_insert(0) += 1;
+    }
+    let mut leaf_counts: HashMap<&[u8], i64> = HashMap::new();
+    for k in &leaf_keys {
+        *leaf_counts.entry(k.as_slice()).or_insert(0) += 1;
+    }
+
+    if leaf_keys.len() != data_partitions.len() {
+        return Some(format!(
+            "Partitions.db trie yielded {} partition keys but Data.db decoded {} distinct partitions — the trie was walked from a corrupt root",
+            leaf_keys.len(),
+            data_partitions.len()
+        ));
+    }
+
+    for (k, &lc) in &leaf_counts {
+        let dc = data_counts.get(k).copied().unwrap_or(0);
+        if lc != dc {
+            return Some(format!(
+                "Partitions.db resolves partition key {} {} time(s) but Data.db decodes it {} time(s) — the trie does not match Data.db identities (same count, different keys)",
+                hex(k),
+                lc,
+                dc,
+            ));
+        }
+    }
+    for (k, &dc) in &data_counts {
+        let lc = leaf_counts.get(k).copied().unwrap_or(0);
+        if lc != dc {
+            return Some(format!(
+                "Data.db partition key {} appears {} time(s) but Partitions.db resolves it {} time(s) — the trie does not match Data.db identities",
+                hex(k),
+                dc,
+                lc,
+            ));
+        }
+    }
+
+    None
 }
 
 /// Map an error surfaced by the inline-CRC / decompression path onto a stable
@@ -1201,5 +1455,201 @@ mod tests {
         assert_eq!(fail.primary_class(), Some(VerifyErrorClass::DigestMismatch));
         assert!(fail.summary_line().contains("VERIFY FAIL"));
         assert!(fail.summary_line().contains("DigestMismatch"));
+    }
+
+    // ---- BTI partition identity cross-check (issue #1103) ------------------
+    //
+    // These exercise `bti_partition_identity_mismatch` over RESOLVED leaves: each
+    // leaf carries its emitted byte-comparable prefix plus a payload resolved back
+    // to a raw partition key (an inline raw key for a `RowsOffset` leaf, or a
+    // Data.db position for a `DataOffset` leaf). The Data.db side is the
+    // `(position, raw_key)` set from the scan.
+
+    use crate::storage::sstable::bti::parser::encode_partition_key_for_bti_trie;
+
+    /// Build the path-compressed trie key for a raw partition key: the
+    /// byte-comparable `[0x40 ++ token]` key truncated to its first `prefix_len`
+    /// bytes, mirroring how a real Patricia trie stores only the shortest
+    /// distinguishing prefix.
+    fn trie_key_prefix(raw: &[u8], prefix_len: usize) -> Vec<u8> {
+        encode_partition_key_for_bti_trie(raw)[..prefix_len].to_vec()
+    }
+
+    /// A `RowsOffset`-style leaf: authoritative inline raw key + matching Data.db
+    /// position, with a 2-byte emitted prefix (what `test_da/wide_table` does).
+    fn inline_leaf(raw: &[u8], data_position: u64) -> BtiResolvedLeaf {
+        BtiResolvedLeaf {
+            prefix: trie_key_prefix(raw, 2),
+            inline_raw_key: Some(raw.to_vec()),
+            data_position,
+        }
+    }
+
+    /// A `DataOffset`-style leaf: no inline key, resolved purely via its Data.db
+    /// position, with a 2-byte emitted prefix derived from the key it *should*
+    /// resolve to (so the prefix/payload-consistency check passes when healthy).
+    fn data_offset_leaf(prefix_from: &[u8], data_position: u64) -> BtiResolvedLeaf {
+        BtiResolvedLeaf {
+            prefix: trie_key_prefix(prefix_from, 2),
+            inline_raw_key: None,
+            data_position,
+        }
+    }
+
+    /// The Data.db scan side: distinct partition keys, each at a synthetic
+    /// monotonically-increasing position (0, 100, 200, ...).
+    fn data_partitions(keys: &[Vec<u8>]) -> Vec<(u64, Vec<u8>)> {
+        keys.iter()
+            .enumerate()
+            .map(|(i, k)| (i as u64 * 100, k.clone()))
+            .collect()
+    }
+
+    #[test]
+    fn identity_check_passes_for_inline_rows_leaves() {
+        // Healthy wide-table shape: every leaf resolves to its inline raw key,
+        // matching the Data.db key at the same position.
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        let leaves: Vec<BtiResolvedLeaf> =
+            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
+        assert_eq!(bti_partition_identity_mismatch(&leaves, &data), None);
+    }
+
+    #[test]
+    fn identity_check_passes_for_data_offset_leaves() {
+        // Healthy small-partition shape (`da-2-bti`): leaves carry only a Data.db
+        // position; the raw key is resolved through the position map.
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        let leaves: Vec<BtiResolvedLeaf> = data
+            .iter()
+            .map(|(pos, k)| data_offset_leaf(k, *pos))
+            .collect();
+        assert_eq!(bti_partition_identity_mismatch(&leaves, &data), None);
+    }
+
+    #[test]
+    fn identity_check_detects_inline_payload_pointing_at_wrong_partition() {
+        // The exact reviewer scenario for a `RowsOffset` leaf: the leaf's emitted
+        // prefix is unchanged but its INLINE raw key (the payload) is rewritten to
+        // a partition NOT present in Data.db. Same leaf count, wrong identity.
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        let mut leaves: Vec<BtiResolvedLeaf> =
+            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
+        // Keep the emitted prefix; rewrite the inline raw key to pk=99.
+        leaves[0].inline_raw_key = Some(99u32.to_be_bytes().to_vec());
+        assert!(
+            bti_partition_identity_mismatch(&leaves, &data).is_some(),
+            "an inline payload pointing at a partition absent from Data.db must be flagged"
+        );
+    }
+
+    #[test]
+    fn identity_check_detects_data_offset_payload_pointing_at_wrong_partition() {
+        // The reviewer scenario for a `DataOffset` leaf: the leaf's emitted prefix
+        // is unchanged but its Data.db position payload is rewritten to point at a
+        // DIFFERENT partition's start. The resolved key then no longer matches the
+        // partition the prefix encodes.
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        let mut leaves: Vec<BtiResolvedLeaf> = data
+            .iter()
+            .map(|(pos, k)| data_offset_leaf(k, *pos))
+            .collect();
+        // Leaf 0's prefix still encodes pk=1, but its position now points at pk=2.
+        leaves[0].data_position = data[1].0;
+        let detail = bti_partition_identity_mismatch(&leaves, &data)
+            .expect("a DataOffset payload pointing at the wrong partition must be flagged");
+        // It is caught by the prefix/payload-consistency check (the resolved key's
+        // encoding no longer starts with the leaf's prefix) OR the multiset compare.
+        assert!(
+            detail.contains("inconsistent") || detail.contains("identities"),
+            "unexpected detail: {detail}"
+        );
+    }
+
+    #[test]
+    fn identity_check_detects_data_offset_payload_pointing_at_non_partition() {
+        // A `DataOffset` flipped to a byte position that is NOT a partition start
+        // resolves to no key at all.
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        let mut leaves: Vec<BtiResolvedLeaf> = data
+            .iter()
+            .map(|(pos, k)| data_offset_leaf(k, *pos))
+            .collect();
+        leaves[0].data_position = 37; // not any partition start
+        let detail = bti_partition_identity_mismatch(&leaves, &data)
+            .expect("a DataOffset pointing at a non-partition position must be flagged");
+        assert!(detail.contains("not a decoded partition start"));
+    }
+
+    #[test]
+    fn identity_check_detects_same_count_wrong_keys_via_multiset() {
+        // Same leaf count as Data.db and every leaf is individually well-formed
+        // (valid key, valid in-map position, consistent prefix) — but the trie
+        // resolves the SAME partition three times instead of {1,2,3}. Only the
+        // multiset comparison catches this; it is the core of issue #1103.
+        let data_keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&data_keys);
+        // Three leaves all resolving to partition 1 (key + position from data[0]).
+        let leaves: Vec<BtiResolvedLeaf> =
+            (0..3).map(|_| inline_leaf(&data[0].1, data[0].0)).collect();
+        let detail = bti_partition_identity_mismatch(&leaves, &data)
+            .expect("same-count wrong-identity must be flagged");
+        assert!(
+            detail.contains("identities") || detail.contains("time(s)"),
+            "expected a multiset-identity mismatch, got: {detail}"
+        );
+    }
+
+    #[test]
+    fn identity_check_detects_inline_leaf_with_corrupt_data_position() {
+        // Reviewer (roborev #1431): a `RowsOffset` leaf whose INLINE key is valid
+        // and present in Data.db but whose recorded Data.db position points at a
+        // non-partition offset must be flagged — a BTI read would seek to the wrong
+        // partition even though the inline key looks fine.
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        let mut leaves: Vec<BtiResolvedLeaf> =
+            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
+        // Keep the valid inline key; corrupt only the recorded Data.db position.
+        leaves[0].data_position = 9999; // not any partition start
+        let detail = bti_partition_identity_mismatch(&leaves, &data).expect(
+            "an inline leaf with a valid key but a non-partition data position must be flagged",
+        );
+        assert!(detail.contains("not a decoded partition start"));
+    }
+
+    #[test]
+    fn identity_check_detects_one_swapped_key() {
+        // Two keys match, one is wrong — the minimal wrong-root that a count check
+        // cannot see.
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        let mut leaves: Vec<BtiResolvedLeaf> =
+            data.iter().map(|(pos, k)| inline_leaf(k, *pos)).collect();
+        // Replace leaf 0 with a key (pk=99) absent from Data.db, including its
+        // prefix, and a position that is not a partition start.
+        leaves[0] = inline_leaf(&99u32.to_be_bytes(), 10_000);
+        assert!(bti_partition_identity_mismatch(&leaves, &data).is_some());
+    }
+
+    #[test]
+    fn identity_check_detects_count_mismatch() {
+        let keys: Vec<Vec<u8>> = (1u32..=3).map(|i| i.to_be_bytes().to_vec()).collect();
+        let data = data_partitions(&keys);
+        // Only two leaves recovered from the trie (undercount).
+        let leaves: Vec<BtiResolvedLeaf> = data
+            .iter()
+            .take(2)
+            .map(|(pos, k)| inline_leaf(k, *pos))
+            .collect();
+        let detail =
+            bti_partition_identity_mismatch(&leaves, &data).expect("undercount must be flagged");
+        assert!(detail.contains("2 partition keys"));
+        assert!(detail.contains("3 distinct partitions"));
     }
 }
