@@ -69,6 +69,11 @@ pub struct SSTableStatistics {
     /// Clustering key definitions extracted from SerializationHeader (Issue #195)
     #[serde(default)]
     pub serialization_header_clustering_keys: Vec<super::header::ColumnInfo>,
+    /// Estimated tombstone-drop-times histogram as `(point, count)` pairs,
+    /// decoded best-effort from the STATS component (Issue #1073). Empty when
+    /// the SSTable carries no tombstones or the histogram could not be decoded.
+    #[serde(default)]
+    pub tombstone_drop_times: Vec<(i64, u64)>,
 }
 
 /// Row count and distribution statistics
@@ -251,6 +256,7 @@ pub fn parse_statistics_file(input: &[u8]) -> IResult<&[u8], SSTableStatistics> 
             serialization_header_columns: vec![], // Not available in legacy format
             serialization_header_partition_keys: vec![],
             serialization_header_clustering_keys: vec![],
+            tombstone_drop_times: vec![],
         },
     ))
 }
@@ -1473,6 +1479,7 @@ mod tests {
             serialization_header_columns: vec![],
             serialization_header_partition_keys: vec![],
             serialization_header_clustering_keys: vec![],
+            tombstone_drop_times: vec![],
         }
     }
 }

@@ -3642,7 +3642,7 @@ scenarios:
 
   - id: cass.statistics_metadata.max_local_deletion_time.tombstones_ttl
     title: Statistics.db max local deletion time for tombstone/TTL fixture
-    status: partial
+    status: mirrored
     capability: statistics_metadata
     priority: P0
     risk: p1_correctness
@@ -3656,43 +3656,50 @@ scenarios:
       coverage:
         suite: sstable_parity_statistics_db
         tests:
+          - cqlite-core/tests/issue_1073_statistics_max_ldt_tombstone_histogram_parity.rs
           - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
+        notes: >-
+          The STATS-component `SSTable max local deletion time` decoded from the
+          Statistics.db is asserted equal to the parenthesised integer in the
+          sstablemetadata dump (real max LDT 1759799526, distinct from the min
+          baseline 1759799525); the "no tombstones" sentinel normalizes to
+          i64::MAX (issue #1073).
     fixtures:
       references:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/regenerate-datasets.sh && sstablemetadata emit Statistics.db.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test issue_1073_statistics_max_ldt_tombstone_histogram_parity
+        statistics_max_ldt_and_tombstone_histogram_parity
       reference_paths:
         - test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/statistics-db-max-ldt-mismatch.log
       normalization: >-
-        The EncodingStats min local-deletion-time baseline decoded from the
-        Statistics.db is compared against the reference dump; the max local
-        deletion time is asserted to be the unparsed placeholder.
+        The STATS-component SSTable max local deletion time decoded by CQLite is
+        compared against the parenthesised integer parsed from the reference
+        dump; the "no tombstones" sentinel (9223372036854775807) is treated as
+        i64::MAX on both sides.
       known_limitations: >-
-        The minimal Statistics parser does not yet decode the STATS-component
-        SSTable max local deletion time, returning a placeholder equal to the min
-        baseline; only the min local-deletion-time baseline is asserted equal.
+        Resolved by issue #1073: CQLite now decodes the real STATS max local
+        deletion time rather than a min-baseline placeholder.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
-    scope:
-      gap: >-
-        CQLite's minimal Statistics parser does not decode the STATS-component
-        SSTable max local deletion time and returns a placeholder equal to the min
-        baseline.
-      next_step: >-
-        Decode the STATS max local-deletion-time field and assert it byte-equal to
-        the sstablemetadata reference; tracked by follow-up issue #1073.
+    scope: {}
 
   - id: cass.statistics_metadata.tombstone_histogram.deletion_times
     title: Statistics.db estimated tombstone-drop-times histogram parity
-    status: partial
+    status: mirrored
     capability: statistics_metadata
     priority: P0
     risk: p1_correctness
@@ -3706,37 +3713,46 @@ scenarios:
       coverage:
         suite: sstable_parity_statistics_db
         tests:
+          - cqlite-core/tests/issue_1073_statistics_max_ldt_tombstone_histogram_parity.rs
           - cqlite-core/tests/issue_1011_ttl_local_deletion_parity.rs
+        notes: >-
+          The estimated-tombstone-drop-times histogram decoded by CQLite into
+          `tombstone_drop_times` is asserted to reproduce the reference dump's
+          bucket cardinality, total bucket count, and (Cassandra-rounded) drop-time
+          points (issue #1073).
     fixtures:
       references:
         - test-data/datasets/sstables/test_tomb/tombstone_histogram-4ca1e9e0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
     evidence:
-      type: partial
+      type: byte_for_byte
+      strict: true
       artifacts: [bytes]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-tomb-fixtures.sh && sstablemetadata emit Statistics.db.txt
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test issue_1073_statistics_max_ldt_tombstone_histogram_parity
+        statistics_max_ldt_and_tombstone_histogram_parity
       reference_paths:
         - test-data/datasets/sstables/test_tomb/tombstone_histogram-4ca1e9e0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt
+      failure_artifacts:
+        - target/cassandra-parity/statistics-db-tombstone-histogram-mismatch.log
       normalization: >-
-        Statistics.db core min baselines are decoded and compared; the
-        estimated-tombstone-drop-times histogram buckets present in the reference
-        dump are not yet exposed by CQLite.
+        The estimated-tombstone-drop-times histogram buckets decoded by CQLite are
+        compared against the `Estimated tombstone drop times` rows parsed from the
+        reference dump (bucket cardinality, total count, and rounded drop-time
+        points).
       known_limitations: >-
-        The estimated-tombstone-drop-times histogram is not decoded or exposed by
-        the minimal Statistics parser, so histogram-bucket parity is not asserted.
+        Resolved by issue #1073: CQLite now decodes and exposes the
+        estimated-tombstone-drop-times histogram, so bucket-count and cardinality
+        parity are asserted.
     ci:
       tier: nightly_docker
       workflow: .github/workflows/tombstone-ttl-parity.yml
-    scope:
-      gap: >-
-        The estimated-tombstone-drop-times histogram in Statistics.db is not decoded
-        or exposed by CQLite.
-      next_step: >-
-        Decode the estimated-tombstone-drop-times histogram and assert bucket parity
-        against the sstablemetadata reference; tracked by follow-up issue #1073.
+    scope: {}
 
   # --- #1012 skipped-sstable / partition delete across generations ----------
   - id: cass.sstable_io.reader.tombstone_only_partition

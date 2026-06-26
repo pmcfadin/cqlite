@@ -991,6 +991,18 @@ mod tests {
         }
     }
 
+    /// `StatisticsReader::open` derives gates from the Statistics.db component
+    /// filename to decode the version-sensitive STATS extras (#1073). Confirm the
+    /// descriptor parses a non-Data.db component so modern (oa/da) gates are
+    /// available on that read path, not just for Data.db.
+    #[test]
+    fn test_version_gates_from_statistics_component_path() {
+        let nb = VersionGates::from_path(&PathBuf::from("nb-1-big-Statistics.db")).unwrap();
+        assert!(matches!(nb, VersionGates::Big(g) if g.version == "nb"));
+        let da = VersionGates::from_path(&PathBuf::from("da-1-bti-Statistics.db")).unwrap();
+        assert!(matches!(da, VersionGates::Bti(g) if g.version == "da"));
+    }
+
     /// Verify that UUID-based ids (corpus filenames) parse correctly into gates.
     #[test]
     fn test_version_gates_from_corpus_filename() {
