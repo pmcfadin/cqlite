@@ -174,3 +174,50 @@ async fn same_count_wrong_root_bti_is_detected() {
         report.findings
     );
 }
+
+/// (3) Every healthy `test_da/*` BTI table passes FULL verification — this
+/// exercises BOTH leaf-payload kinds against real fixtures with no false
+/// positive: the small-partition tables (`simple_table`, `collection_table`,
+/// `ttl_table`) use `DataOffset` leaves (resolved via the Data.db
+/// position→key map), while `wide_table` uses `RowsOffset` leaves (resolved via
+/// the inline Rows.db key). A DataOffset-position misalignment would surface
+/// here as a spurious BtiRootPointerCorrupt.
+#[tokio::test]
+async fn all_healthy_test_da_bti_tables_pass_full_verification() {
+    let Some(base) = datasets_root().map(|r| r.join("sstables/test_da")) else {
+        eprintln!("[SKIP] CQLITE_DATASETS_ROOT not set");
+        return;
+    };
+    let Ok(rd) = std::fs::read_dir(&base) else {
+        eprintln!("[SKIP] {} not present", base.display());
+        return;
+    };
+
+    let mut checked = 0;
+    for entry in rd.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() || !has_data_db(&dir) {
+            continue;
+        }
+        let report = verify(&dir, VerifyMode::Full).await;
+        assert!(
+            report.is_ok(),
+            "healthy BTI table {} must PASS full verification (no identity false-positive), got: {:?}",
+            dir.display(),
+            report.findings
+        );
+        assert!(
+            matches!(report.rows_scanned, Some(n) if n > 0),
+            "healthy BTI table {} FULL verify must scan a non-zero row count, got {:?}",
+            dir.display(),
+            report.rows_scanned
+        );
+        checked += 1;
+    }
+
+    if checked == 0 {
+        eprintln!("[SKIP] no materialized test_da BTI tables (Data.db absent)");
+    } else {
+        eprintln!("verified {checked} healthy test_da BTI tables (FULL)");
+    }
+}

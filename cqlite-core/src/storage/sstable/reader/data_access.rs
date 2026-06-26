@@ -2321,6 +2321,60 @@ impl SSTableReader {
         Ok(keys)
     }
 
+    /// Return the distinct raw partition keys decoded from `Data.db` together with
+    /// the byte offset at which each partition begins in the DECOMPRESSED data
+    /// section (issue #1103).
+    ///
+    /// Each tuple is `(data_position, raw_partition_key)`, where `data_position`
+    /// is exactly the value a BTI `Partitions.db` leaf encodes as
+    /// [`BtiPartitionLocation::DataOffset`](crate::storage::sstable::bti::parser::BtiPartitionLocation::DataOffset)
+    /// (and the `data_position` recovered from a `RowsOffset` entry via
+    /// [`resolve_rows_db_entry`](crate::storage::sstable::bti::parser::resolve_rows_db_entry)).
+    /// The verifier's BTI cross-check resolves each leaf PAYLOAD back to its raw
+    /// partition key through this map so it catches a corruption that keeps the
+    /// emitted trie prefix but rewrites the payload to point at a DIFFERENT
+    /// partition (a same-count wrong-IDENTITY corruption the prefix-only compare
+    /// missed).
+    ///
+    /// The stitch/parse strategy mirrors [`Self::distinct_partition_keys`]; only
+    /// the parser entry point differs (it threads the partition-start offset).
+    pub async fn distinct_partition_keys_with_positions(&self) -> Result<Vec<(u64, Vec<u8>)>> {
+        use std::collections::HashMap;
+
+        let cursor = self.new_scan_cursor().await?;
+        let header_size = self.calculate_header_size();
+        {
+            let mut file_guard = cursor.file.lock().await;
+            file_guard.seek(SeekFrom::Start(header_size as u64)).await?;
+        }
+        let whole = self.stitch_all_chunks(&cursor).await?;
+
+        let effective_schema = self.get_table_schema(None);
+        let parser = self.build_v5_parser();
+
+        // first_offset_for_key: data_position of the FIRST row seen for a partition
+        // (a partition spans contiguous rows, so the first row's offset is the
+        // partition start). result preserves first-seen order.
+        let mut first_offset_for_key: HashMap<Vec<u8>, u64> = HashMap::new();
+        let mut result: Vec<(u64, Vec<u8>)> = Vec::new();
+        parser.parse_block_for_compaction_emit_with_offset(
+            &whole,
+            effective_schema.as_ref(),
+            self,
+            |partition_start, row| {
+                let k = row.key.as_bytes().to_vec();
+                if !first_offset_for_key.contains_key(&k) {
+                    let pos = partition_start as u64;
+                    first_offset_for_key.insert(k.clone(), pos);
+                    result.push((pos, k));
+                }
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )?;
+
+        Ok(result)
+    }
+
     /// Streaming compaction read (issue #827): yield `(RowKey, Value, ts)`
     /// entries via `emit` one partition at a time, so peak memory is bounded by
     /// `max_partition_size + one_chunk` rather than by the total input size.

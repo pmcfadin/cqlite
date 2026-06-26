@@ -2198,6 +2198,90 @@ impl V5CompressedLegacyParser {
         Ok(())
     }
 
+    /// Like [`Self::parse_block_for_compaction_emit`] but also reports, for every
+    /// emitted [`CompactionRow`], the byte offset within `data` at which that
+    /// row's partition begins.
+    ///
+    /// `data` is the WHOLE decompressed Data.db data section (header stripped),
+    /// so the reported offset is the partition's absolute decompressed-Data.db
+    /// position — i.e. the value a BTI `Partitions.db` leaf encodes as
+    /// `BtiPartitionLocation::DataOffset`. The verifier uses this to resolve a
+    /// `DataOffset` payload back to its raw partition key by IDENTITY
+    /// (issue #1103), closing the same-count wrong-payload corruption gap.
+    pub fn parse_block_for_compaction_emit_with_offset<F>(
+        &self,
+        data: &[u8],
+        schema: Option<&TableSchema>,
+        reader: &super::super::types::SSTableReader,
+        mut emit: F,
+    ) -> Result<()>
+    where
+        F: FnMut(
+            usize,
+            crate::storage::sstable::reader::compaction_row::CompactionRow,
+        ) -> Result<std::ops::ControlFlow<()>>,
+    {
+        if data.is_empty() {
+            return Ok(());
+        }
+
+        let schema = schema.ok_or_else(|| {
+            Error::schema(format!(
+                "V5CompressedLegacy (compaction) format requires schema for {}.{}",
+                self.keyspace, self.table_name
+            ))
+        })?;
+
+        let mut offset = 0;
+        let mut skipped_partitions = 0;
+
+        let broke = std::cell::Cell::new(false);
+
+        while offset < data.len() {
+            // Capture the partition-start offset BEFORE parsing this partition so
+            // every row emitted for it is tagged with the same authoritative
+            // decompressed-Data.db position.
+            let partition_start = offset;
+            let mut tagging_emit = |row| -> Result<std::ops::ControlFlow<()>> {
+                let flow = emit(partition_start, row)?;
+                if matches!(flow, std::ops::ControlFlow::Break(())) {
+                    broke.set(true);
+                }
+                Ok(flow)
+            };
+
+            match self.parse_one_partition_for_compaction(
+                &data[offset..],
+                Some(schema),
+                reader,
+                true,
+                &mut tagging_emit,
+            )? {
+                ParseStep::Emitted(consumed) => {
+                    if consumed == 0 {
+                        skipped_partitions += 1;
+                        offset += 1;
+                    } else {
+                        offset += consumed;
+                    }
+                }
+                ParseStep::NeedMore | ParseStep::Done => break,
+            }
+            if broke.get() {
+                break;
+            }
+        }
+
+        if skipped_partitions > 0 {
+            log::warn!(
+                "V5CompressedLegacy (compaction): skipped {} malformed partitions",
+                skipped_partitions
+            );
+        }
+
+        Ok(())
+    }
+
     /// Per-element compaction counterpart of
     /// [`Self::parse_one_partition_with_timestamps`] (epic #899). Identical
     /// sliding-window / `ParseStep` / buffering semantics, but emits a
