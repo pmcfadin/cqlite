@@ -1,0 +1,65 @@
+SSTable: /data/test_tomb/dropped_static_col-4cd18560702011f1b8f419c9a388d558/nb-2-big
+Partitioner: org.apache.cassandra.dht.Murmur3Partitioner
+Bloom Filter FP chance: 0.01
+Minimum timestamp: 01/03/2021 00:00:00 (1609632000000000)
+Maximum timestamp: 01/03/2021 00:00:00 (1609632000000000)
+Duration: Days: 0 Hours: 0 Minutes: 0 Seconds: 0
+SSTable min local deletion time: no tombstones (9223372036854775807)
+SSTable max local deletion time: no tombstones (9223372036854775807)
+Compressor: org.apache.cassandra.io.compress.LZ4Compressor
+Compression ratio: 1.0526315789473684
+TTL min: 0
+TTL max: 0
+First token: -4069959284402364209 (1)
+Last token: -4069959284402364209 (1)
+Covered clusterings: [4, 4]
+Estimated droppable tombstones: 0.0
+SSTable Level: 0
+Repaired at: 0
+Originating host id: bc10a52e-0787-4df6-9cb0-d3c51766a151
+Pending repair: --
+Replay positions covered: {CommitLogPosition(segmentId=1782341859690, position=1157476)=CommitLogPosition(segmentId=1782341859690, position=1158323)}
+totalColumnsSet: 1
+totalRows: 1
+Estimated tombstone drop times: 
+   Drop Time | Count  (%)  Histogram 
+   Percentiles
+   50th      0 
+   75th      0 
+   95th      0 
+   98th      0 
+   99th      0 
+   Min       0 
+   Max       0 
+Partition Size: 
+   Size (bytes) | Count  (%)  Histogram 
+   42 (42 B)    |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      42 (42 B)
+   75th      42 (42 B)
+   95th      42 (42 B)
+   98th      42 (42 B)
+   99th      42 (42 B)
+   Min       36 (36 B)
+   Max       42 (42 B)
+Column Count: 
+   Columns | Count  (%)  Histogram 
+   1       |     1 (100) OOOOOOOOOOOOOOOOOOOOOOOOOOOOOO
+   Percentiles
+   50th      1
+   75th      1
+   95th      1
+   98th      1
+   99th      1
+   Min       0
+   Max       1
+Local token space coverage: NaN
+Estimated cardinality: 1
+EncodingStats minTTL: 0
+EncodingStats minLocalDeletionTime: 09/22/2015 00:00:00 (1442880000)
+EncodingStats minTimestamp: 01/03/2021 00:00:00 (1609632000000000)
+KeyType: org.apache.cassandra.db.marshal.Int32Type
+ClusteringTypes: [org.apache.cassandra.db.marshal.Int32Type]
+StaticColumns: 
+RegularColumns: row_col:org.apache.cassandra.db.marshal.UTF8Type
+IsTransient: false

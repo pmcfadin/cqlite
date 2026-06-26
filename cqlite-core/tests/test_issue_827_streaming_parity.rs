@@ -259,6 +259,8 @@ async fn test_streaming_parity_chunk_straddle_wide_partition() {
         CompactionRowData::Tombstone { .. } => false,
         // Issue #933: range-tombstone markers carry no inline cell values.
         CompactionRowData::RangeMarker { .. } => false,
+        // Issue #1072: partition tombstones carry no inline cell values.
+        CompactionRowData::PartitionDelete { .. } => false,
     });
     assert!(
         has_big,

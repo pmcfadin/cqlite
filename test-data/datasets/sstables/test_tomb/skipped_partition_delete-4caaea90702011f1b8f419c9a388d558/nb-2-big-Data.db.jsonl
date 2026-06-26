@@ -1,0 +1,2 @@
+{"table kind":"REGULAR","partition":{"key":["1"],"position":0,"deletion_info":{"marked_deleted":"2021-01-02T00:00:00Z","local_delete_time":"2026-06-24T22:59:14Z"}},"rows":[]}
+{"table kind":"REGULAR","partition":{"key":["2"],"position":19,"deletion_info":{"marked_deleted":"2021-01-02T00:00:00Z","local_delete_time":"2026-06-24T22:59:14Z"}},"rows":[]}

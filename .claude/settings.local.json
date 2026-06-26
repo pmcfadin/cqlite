@@ -1,4 +1,7 @@
 {
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+  },
   "permissions": {
     "allow": [
       "Bash(/tmp/count_lib_unwraps.sh:*)",
@@ -63,11 +66,13 @@
       "Bash(git branch:*)",
       "Bash(git fetch *)",
       "Bash(export WORKTREE=/Users/patrickmcfadin/local_projects/cqlite/.claude/worktrees/agent-af3e1992b9b0c2c48)",
-      "Bash(rg -n \"VG3\" cqlite-core/src/ --include=\"*.rs\")"
+      "Bash(rg -n \"VG3\" cqlite-core/src/ --include=\"*.rs\")",
+      "Bash(python3 -c ' *)"
     ],
     "deny": [],
     "ask": []
   },
+  "teammateMode": "tmux",
   "customCommands": {
     "code-quality": "/agent switch rust-code-reviewer && /review --scope changes --strict && /exec cargo fmt --all && /exec cargo clippy --workspace --all-targets --all-features -- -D warnings && /exec cargo check --workspace --all-features && /exec cargo test --workspace --all-features"
   }

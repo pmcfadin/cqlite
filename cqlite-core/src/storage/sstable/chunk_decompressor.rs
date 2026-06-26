@@ -280,6 +280,21 @@ impl ChunkDecompressor {
     }
 
     /// Decompress LZ4 chunk - Cassandra uses 4-byte little-endian length prefix
+    /// Upper bound on a single decompressed chunk: the configured uncompressed
+    /// chunk length (the final chunk is shorter, never larger). Used to bound the
+    /// streaming Deflate/Zstd decoders against decompression bombs. Falls back to
+    /// the 128MB global cap if chunk_length is unset/zero.
+    ///
+    /// Only the streaming Deflate/Zstd paths consume this bound, so the method is
+    /// gated to match its callers and stay dead-code-free under minimal builds.
+    #[cfg(any(feature = "deflate", feature = "zstd"))]
+    fn chunk_size_guard(&self) -> u64 {
+        match self.compression_info.chunk_length {
+            0 => 128 * 1024 * 1024,
+            n => n as u64,
+        }
+    }
+
     fn decompress_lz4_chunk(&self, compressed_data: &[u8], chunk_index: usize) -> Result<Vec<u8>> {
         let file_info = match &self.data_file_path {
             Some(path) => format!(" in file {}", path),
@@ -401,13 +416,25 @@ impl ChunkDecompressor {
     ) -> Result<Vec<u8>> {
         #[cfg(feature = "deflate")]
         {
-            use flate2::read::DeflateDecoder;
+            // Cassandra's DeflateCompressor uses java.util.zip.Deflater/Inflater,
+            // which emit zlib-wrapped streams (2-byte header 0x78 0x9c + Adler-32
+            // trailer), NOT raw DEFLATE. Decode with ZlibDecoder to match. (#1082)
+            use flate2::read::ZlibDecoder;
             use std::io::Read;
 
-            let mut decoder = DeflateDecoder::new(compressed_data);
+            // Decompression-bomb guard: a chunk decompresses to at most
+            // `chunk_length` bytes (the final chunk is shorter). Cap the reader at
+            // chunk_length + 1 so a crafted zlib stream cannot expand into an
+            // unbounded Vec before we validate the size (roborev).
+            let max_chunk = self.chunk_size_guard();
+            let mut decoder = ZlibDecoder::new(compressed_data).take(max_chunk + 1);
             let mut decompressed = Vec::new();
 
             match decoder.read_to_end(&mut decompressed) {
+                Ok(_) if decompressed.len() as u64 > max_chunk => Err(Error::InvalidFormat(format!(
+                    "Deflate chunk {} expands beyond chunk_length {} (decompression-bomb guard)",
+                    chunk_index, max_chunk
+                ))),
                 Ok(_) => Ok(decompressed),
                 Err(e) => Err(Error::InvalidFormat(format!(
                     "Deflate decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
@@ -434,8 +461,29 @@ impl ChunkDecompressor {
     fn decompress_zstd_chunk(&self, compressed_data: &[u8], chunk_index: usize) -> Result<Vec<u8>> {
         #[cfg(feature = "zstd")]
         {
-            match zstd::decode_all(compressed_data) {
-                Ok(decompressed) => Ok(decompressed),
+            use std::io::Read;
+            use zstd::stream::read::Decoder as ZstdDecoder;
+
+            // Decompression-bomb guard: stream through a reader capped at
+            // chunk_length + 1 rather than `decode_all`, which would pre-allocate
+            // whatever content size the frame declares (roborev).
+            let max_chunk = self.chunk_size_guard();
+            let mut decoder = match ZstdDecoder::new(compressed_data) {
+                Ok(d) => d.take(max_chunk + 1),
+                Err(e) => {
+                    return Err(Error::InvalidFormat(format!(
+                        "Zstd decoder init failed for chunk {}: {}",
+                        chunk_index, e
+                    )))
+                }
+            };
+            let mut decompressed = Vec::new();
+            match decoder.read_to_end(&mut decompressed) {
+                Ok(_) if decompressed.len() as u64 > max_chunk => Err(Error::InvalidFormat(format!(
+                    "Zstd chunk {} expands beyond chunk_length {} (decompression-bomb guard)",
+                    chunk_index, max_chunk
+                ))),
+                Ok(_) => Ok(decompressed),
                 Err(e) => Err(Error::InvalidFormat(format!(
                     "Zstd decompression failed for chunk {} at offset 0x{:x}: {}. No fallback allowed for modern formats.",
                     chunk_index,

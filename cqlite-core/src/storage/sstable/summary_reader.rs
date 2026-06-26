@@ -14,7 +14,7 @@
 //! +----------------------+
 //! | Offset table (LE)    |  ← Little-endian u32 offsets!
 //! +----------------------+
-//! | Entry data           |  ← key_data + be_u64 position
+//! | Entry data           |  ← key_data + le_u64 position
 //! +----------------------+
 //! | First key (prefixed) |  ← be_u32 size + key data
 //! +----------------------+
@@ -31,8 +31,8 @@
 //!
 //! ### Entry Format
 //! - No length prefix for keys - boundaries determined by offset differences
-//! - Entry = key_data (variable) + position (be_u64)
-//! - Position is offset in Index.db file
+//! - Entry = key_data (variable) + position (le_u64)
+//! - Position is offset in Index.db file (little-endian, issue #1054)
 //!
 //! ### Critical: Offset Table is LITTLE-ENDIAN
 //! Unlike all other Cassandra binary formats which use big-endian, the offset
@@ -362,7 +362,7 @@ pub(crate) fn parse_summary_header(input: &[u8]) -> IResult<&[u8], SummaryHeader
 
 /// Parse entries using offset table
 ///
-/// Each entry is: key_data (variable) + position (be_u64)
+/// Each entry is: key_data (variable) + position (le_u64)
 /// Key boundaries are determined by offset differences.
 fn parse_entries_from_offsets(
     entry_data: &[u8],
@@ -405,7 +405,7 @@ fn parse_entries_from_offsets(
 
         let entry_bytes = &entry_data[start..end];
 
-        // Entry format: key_data + be_u64 position
+        // Entry format: key_data + le_u64 position
         // Key length = entry length - 8 (for the position)
         if entry_bytes.len() < 8 {
             return Err(Error::corruption(format!(
@@ -418,9 +418,10 @@ fn parse_entries_from_offsets(
         let key_len = entry_bytes.len() - 8;
         let partition_key = entry_bytes[..key_len].to_vec();
 
-        // Parse position (last 8 bytes, big-endian)
+        // Parse position (last 8 bytes, little-endian — Cassandra serializes the
+        // trailing Index.db position as LE u64; see issue #1054).
         let position_bytes = &entry_bytes[key_len..];
-        let position = u64::from_be_bytes([
+        let position = u64::from_le_bytes([
             position_bytes[0],
             position_bytes[1],
             position_bytes[2],
@@ -526,7 +527,7 @@ mod tests {
     fn test_entry_parsing_from_offsets() {
         // Entry data with one entry:
         // - Key: 16 bytes (partition key digest)
-        // - Position: 8 bytes (be_u64)
+        // - Position: 8 bytes (le_u64)
         let key_bytes = vec![
             0xdc, 0x67, 0x26, 0xa6, 0x05, 0xc6, 0x48, 0x50, 0x86, 0xcd, 0x0f, 0xe3, 0x1b, 0x67,
             0x57, 0xaf,
@@ -551,9 +552,9 @@ mod tests {
         let key1 = vec![0xBB; 16];
 
         let mut entry_data = key0.clone();
-        entry_data.extend_from_slice(&0u64.to_be_bytes());
+        entry_data.extend_from_slice(&0u64.to_le_bytes());
         entry_data.extend_from_slice(&key1);
-        entry_data.extend_from_slice(&128u64.to_be_bytes());
+        entry_data.extend_from_slice(&128u64.to_le_bytes());
 
         let offsets = vec![8u32, 32u32];
         let entries = parse_entries_from_offsets(&entry_data, &offsets, 8, 56).unwrap();
@@ -651,10 +652,10 @@ mod tests {
         data.extend_from_slice(&key0);
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 
-        // Entry 1: 16-byte key + position 100
+        // Entry 1: 16-byte key + position 100 (little-endian u64)
         let key1: [u8; 16] = [0x02; 16];
         data.extend_from_slice(&key1);
-        data.extend_from_slice(&[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64]);
+        data.extend_from_slice(&[0x64, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
 
         // First key
         data.extend_from_slice(&[0x00, 0x00, 0x00, 0x10]);

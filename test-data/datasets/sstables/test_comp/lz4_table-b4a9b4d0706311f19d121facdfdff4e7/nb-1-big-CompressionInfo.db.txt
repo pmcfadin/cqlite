@@ -1,0 +1,26 @@
+algorithm: LZ4Compressor
+option_count: 0
+chunk_length: 16384
+max_compressed_length: 2147483647
+total_uncompressed_length: 195018
+chunk_count: 12
+data_db_size_bytes: 6979
+
+# Per-chunk map (on_disk_len = next_offset - offset; comp_len = on_disk_len - 4 CRC word)
+# raw_uncompressed = chunk_length for all but the last chunk; last = total_uncompressed_length - last_offset_uncompressed
+idx	offset	on_disk_len	comp_len	raw_uncompressed_len	raw_stored
+0	0	604	600	16384	False
+1	604	581	577	16384	False
+2	1185	589	585	16384	False
+3	1774	580	576	16384	False
+4	2354	581	577	16384	False
+5	2935	586	582	16384	False
+6	3521	581	577	16384	False
+7	4102	591	587	16384	False
+8	4693	580	576	16384	False
+9	5273	586	582	16384	False
+10	5859	588	584	16384	False
+11	6447	532	528	14794	False
+
+short_final_chunk: True  (last chunk covers 14794 uncompressed bytes vs chunk_length 16384)
+raw_stored_chunk_count: 0  indices: []

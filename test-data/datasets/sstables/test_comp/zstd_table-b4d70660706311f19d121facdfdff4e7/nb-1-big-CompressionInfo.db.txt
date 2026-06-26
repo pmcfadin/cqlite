@@ -1,0 +1,26 @@
+algorithm: ZstdCompressor
+option_count: 0
+chunk_length: 16384
+max_compressed_length: 2147483647
+total_uncompressed_length: 195018
+chunk_count: 12
+data_db_size_bytes: 3408
+
+# Per-chunk map (on_disk_len = next_offset - offset; comp_len = on_disk_len - 4 CRC word)
+# raw_uncompressed = chunk_length for all but the last chunk; last = total_uncompressed_length - last_offset_uncompressed
+idx	offset	on_disk_len	comp_len	raw_uncompressed_len	raw_stored
+0	0	309	305	16384	False
+1	309	280	276	16384	False
+2	589	289	285	16384	False
+3	878	284	280	16384	False
+4	1162	285	281	16384	False
+5	1447	283	279	16384	False
+6	1730	279	275	16384	False
+7	2009	283	279	16384	False
+8	2292	283	279	16384	False
+9	2575	290	286	16384	False
+10	2865	280	276	16384	False
+11	3145	263	259	14794	False
+
+short_final_chunk: True  (last chunk covers 14794 uncompressed bytes vs chunk_length 16384)
+raw_stored_chunk_count: 0  indices: []

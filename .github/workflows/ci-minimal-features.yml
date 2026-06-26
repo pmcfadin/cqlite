@@ -31,11 +31,13 @@ jobs:
 
       - name: Test with all compression support (lib only)
         run: |
-          # Run library tests only (integration tests have test data dependencies)
-          # This validates feature gating and minimal compilation works
+          # Run library tests only. This lane deliberately does NOT fetch the
+          # binary Data.db fixtures, so CQLITE_DATASETS_ROOT must stay unset:
+          # data-dependent unit tests (e.g. the #1080 regression tests) skip
+          # cleanly when it is unset, but hard-fail ("refusing to silently
+          # skip") if it points at a fixture-less directory. The lane's purpose
+          # is validating feature gating and minimal compilation, not data parity.
           cargo test --no-default-features --features=all-compression --quiet --lib
-        env:
-          CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
 
       - name: Build and test with parquet export feature (Epic #682)
         run: |

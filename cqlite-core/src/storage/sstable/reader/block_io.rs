@@ -346,6 +346,26 @@ async fn read_nb_format_chunk_data(
         )));
     }
 
+    // Bounds-check the chunk against the actual Data.db length BEFORE allocating.
+    // A corrupt CompressionInfo.db offset (e.g. an MSB-set value that survived
+    // the ascending check) makes `compressed_chunk_size` derive a multi-exabyte
+    // length from adjacent offsets; `vec![0u8; chunk_data_size]` below would then
+    // panic/OOM. Reject instead, so a corrupt offset surfaces as a recoverable
+    // error rather than crashing the reader/verifier (roborev #970).
+    let chunk_end = chunk_offset
+        .checked_add(header_offset)
+        .and_then(|abs| abs.checked_add(total_chunk_size));
+    match chunk_end {
+        Some(end) if end <= file_size => {}
+        _ => {
+            return Err(Error::InvalidFormat(format!(
+                "Chunk {} at offset 0x{:x} with size {} exceeds Data.db length {} \
+                 — corrupt CompressionInfo.db chunk offset",
+                chunk_idx, chunk_offset, total_chunk_size, file_size
+            )));
+        }
+    }
+
     // Chunk data size = total_chunk_size - 4 bytes for trailing CRC
     let chunk_data_size = (total_chunk_size - 4) as usize;
 

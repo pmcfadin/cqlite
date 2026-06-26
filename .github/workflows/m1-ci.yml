@@ -59,22 +59,26 @@ jobs:
           test-data/datasets/
         key: datasets-v3-f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v3-
+          datasets-v3-f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb-
 
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
-        JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
-        if [ "$JSONL_COUNT" -eq 0 ]; then
-          echo "📦 Downloading real Cassandra 5 datasets from release (datasets-v3, includes oa+da fixtures)..."
+        # Gate the download on the SSTable Data.db core fixture, NOT the JSONL
+        # reference count (#1097). A partial/stale cache can restore the 135 JSONL
+        # refs without the Data.db binaries; gating on JSONL count then skips the
+        # re-download and the #1080 no-silent-skip guard hard-fails mid-test.
+        CORE_FIXTURE_COUNT=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null | wc -l)
+        if [ "$CORE_FIXTURE_COUNT" -eq 0 ]; then
+          echo "📦 Core Data.db fixture missing — downloading real Cassandra 5 datasets from release (datasets-v3, includes oa+da fixtures)..."
           mkdir -p test-data
           gh release download datasets-v3 --pattern "cassandra5-small-full-v3.1.tar.gz" --dir /tmp
           echo "f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb  /tmp/cassandra5-small-full-v3.1.tar.gz" | sha256sum -c -
           rm -rf test-data/datasets
           tar -xzf /tmp/cassandra5-small-full-v3.1.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
-          JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
-          echo "✅ Downloaded $JSONL_COUNT reference files and SSTable data for M1 CI"
+          DATA_COUNT=$(find test-data/datasets/sstables -name '*-Data.db' 2>/dev/null | wc -l)
+          echo "✅ Downloaded datasets for M1 CI ($DATA_COUNT Data.db fixtures)"
         else
-          echo "✅ Using cached datasets ($JSONL_COUNT reference files)"
+          echo "✅ Using cached datasets (core Data.db fixture present)"
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -277,22 +281,26 @@ jobs:
           test-data/datasets/
         key: datasets-v3-f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb-${{ hashFiles('test-data/**/*.md') }}
         restore-keys: |
-          datasets-v3-
+          datasets-v3-f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb-
 
     - name: Download Cassandra 5 Datasets (if cache miss)
       run: |
-        JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
-        if [ "$JSONL_COUNT" -eq 0 ]; then
-          echo "📦 Downloading real Cassandra 5 datasets from release (datasets-v3, includes oa+da fixtures)..."
+        # Gate the download on the SSTable Data.db core fixture, NOT the JSONL
+        # reference count (#1097). A partial/stale cache can restore the 135 JSONL
+        # refs without the Data.db binaries; gating on JSONL count then skips the
+        # re-download and the #1080 no-silent-skip guard hard-fails mid-test.
+        CORE_FIXTURE_COUNT=$(find test-data/datasets/sstables/test_basic -path '*simple_table-*-Data.db' 2>/dev/null | wc -l)
+        if [ "$CORE_FIXTURE_COUNT" -eq 0 ]; then
+          echo "📦 Core Data.db fixture missing — downloading real Cassandra 5 datasets from release (datasets-v3, includes oa+da fixtures)..."
           mkdir -p test-data
           gh release download datasets-v3 --pattern "cassandra5-small-full-v3.1.tar.gz" --dir /tmp
           echo "f5fa0b6599a27c1c493d7c6c063194d55d031cab417396947313e7245afc5ceb  /tmp/cassandra5-small-full-v3.1.tar.gz" | sha256sum -c -
           rm -rf test-data/datasets
           tar -xzf /tmp/cassandra5-small-full-v3.1.tar.gz -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
-          JSONL_COUNT=$(find test-data -name '*.jsonl' 2>/dev/null | wc -l)
-          echo "✅ Downloaded $JSONL_COUNT reference files for parity validation"
+          DATA_COUNT=$(find test-data/datasets/sstables -name '*-Data.db' 2>/dev/null | wc -l)
+          echo "✅ Downloaded datasets for parity validation ($DATA_COUNT Data.db fixtures)"
         else
-          echo "✅ Using cached datasets ($JSONL_COUNT reference files)"
+          echo "✅ Using cached datasets (core Data.db fixture present)"
         fi
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

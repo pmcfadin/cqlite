@@ -79,26 +79,96 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 
-/// Count of candidate SSTables actually parsed by a partition-targeted lookup
-/// since the last [`reset`]. See module docs for the exact increment site.
-static SSTABLES_SCANNED: AtomicU64 = AtomicU64::new(0);
+/// The five read-work counters as one value.
+///
+/// Production code shares a single process-global instance ([`COUNTERS`]) reached
+/// through the free functions below; the increment sites and integration probes
+/// all operate on that instance. Bundling the atomics in a struct also lets a
+/// unit test exercise the add/get/reset contract against a *local* instance,
+/// immune to other tests concurrently mutating the global (issue #1071) — the
+/// global is shared with read-path code that any parallel test can drive.
+struct Counters {
+    /// Candidate SSTables actually parsed by a partition-targeted lookup.
+    sstables_scanned: AtomicU64,
+    /// Partitions a partition-targeted lookup has returned.
+    partitions_parsed: AtomicU64,
+    /// Partitions DECODED from `Data.db` by the single-candidate seek (Issue #953).
+    partitions_decoded: AtomicU64,
+    /// Compression chunks DECOMPRESSED by the single-candidate seek (Issue #953 / #951).
+    chunks_decompressed: AtomicU64,
+    /// Individual rows DECODED within a partition by the seek path (Issue #954).
+    rows_decoded: AtomicU64,
+}
 
-/// Count of partitions a partition-targeted lookup has returned since the last
-/// [`reset`]. See module docs for the exact increment site.
-static PARTITIONS_PARSED: AtomicU64 = AtomicU64::new(0);
+impl Counters {
+    const fn new() -> Self {
+        Self {
+            sstables_scanned: AtomicU64::new(0),
+            partitions_parsed: AtomicU64::new(0),
+            partitions_decoded: AtomicU64::new(0),
+            chunks_decompressed: AtomicU64::new(0),
+            rows_decoded: AtomicU64::new(0),
+        }
+    }
 
-/// Count of partitions actually DECODED from `Data.db` by the single-candidate
-/// seek path since the last [`reset`]. See module docs (Issue #953).
-static PARTITIONS_DECODED: AtomicU64 = AtomicU64::new(0);
+    #[cfg(not(feature = "tombstones"))]
+    fn add_sstables_scanned(&self, count: u64) {
+        self.sstables_scanned.fetch_add(count, Ordering::Relaxed);
+    }
 
-/// Count of compression chunks the single-candidate seek path has DECOMPRESSED
-/// since the last [`reset`]. See module docs (Issue #953 / #951).
-static CHUNKS_DECOMPRESSED: AtomicU64 = AtomicU64::new(0);
+    #[cfg(not(feature = "tombstones"))]
+    fn add_partitions_parsed(&self, count: u64) {
+        self.partitions_parsed.fetch_add(count, Ordering::Relaxed);
+    }
 
-/// Count of individual rows DECODED from `Data.db` within a partition by the
-/// single-candidate seek path since the last [`reset`]. See module docs (Issue
-/// #954).
-static ROWS_DECODED: AtomicU64 = AtomicU64::new(0);
+    #[cfg(not(feature = "tombstones"))]
+    fn add_partition_decoded(&self) {
+        self.partitions_decoded.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "tombstones"))]
+    fn add_chunk_decompressed(&self) {
+        self.chunks_decompressed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(not(feature = "tombstones"))]
+    fn add_rows_decoded(&self, count: u64) {
+        self.rows_decoded.fetch_add(count, Ordering::Relaxed);
+    }
+
+    fn sstables_scanned(&self) -> u64 {
+        self.sstables_scanned.load(Ordering::Relaxed)
+    }
+
+    fn partitions_parsed(&self) -> u64 {
+        self.partitions_parsed.load(Ordering::Relaxed)
+    }
+
+    fn partitions_decoded(&self) -> u64 {
+        self.partitions_decoded.load(Ordering::Relaxed)
+    }
+
+    fn chunks_decompressed(&self) -> u64 {
+        self.chunks_decompressed.load(Ordering::Relaxed)
+    }
+
+    fn rows_decoded(&self) -> u64 {
+        self.rows_decoded.load(Ordering::Relaxed)
+    }
+
+    fn reset(&self) {
+        self.sstables_scanned.store(0, Ordering::Relaxed);
+        self.partitions_parsed.store(0, Ordering::Relaxed);
+        self.partitions_decoded.store(0, Ordering::Relaxed);
+        self.chunks_decompressed.store(0, Ordering::Relaxed);
+        self.rows_decoded.store(0, Ordering::Relaxed);
+    }
+}
+
+/// The process-global counters every read-path increment site and integration
+/// probe shares. Unit tests that assert absolute values use a local
+/// [`Counters`] instead (issue #1071).
+static COUNTERS: Counters = Counters::new();
 
 /// Record that `count` candidate SSTables were parsed by a partition-targeted
 /// lookup. Called once per `scan_partition` invocation with the number of
@@ -111,13 +181,13 @@ static ROWS_DECODED: AtomicU64 = AtomicU64::new(0);
 /// [`reset`] remain available in every build for the test API.
 #[cfg(not(feature = "tombstones"))]
 pub(crate) fn add_sstables_scanned(count: u64) {
-    SSTABLES_SCANNED.fetch_add(count, Ordering::Relaxed);
+    COUNTERS.add_sstables_scanned(count);
 }
 
 /// Record that `count` partitions were returned by a partition-targeted lookup.
 #[cfg(not(feature = "tombstones"))]
 pub(crate) fn add_partitions_parsed(count: u64) {
-    PARTITIONS_PARSED.fetch_add(count, Ordering::Relaxed);
+    COUNTERS.add_partitions_parsed(count);
 }
 
 /// Record that one partition was DECODED from `Data.db` by the single-candidate
@@ -131,7 +201,7 @@ pub(crate) fn add_partitions_parsed(count: u64) {
 /// seeks, so the counter stays at 0 and the mutator would be dead code.
 #[cfg(not(feature = "tombstones"))]
 pub(crate) fn add_partition_decoded() {
-    PARTITIONS_DECODED.fetch_add(1, Ordering::Relaxed);
+    COUNTERS.add_partition_decoded();
 }
 
 /// Record that one compression chunk was DECOMPRESSED by the single-candidate
@@ -145,7 +215,7 @@ pub(crate) fn add_partition_decoded() {
 /// `tombstones` the full-scan fallback never seeks, so the counter stays 0.
 #[cfg(not(feature = "tombstones"))]
 pub(crate) fn add_chunk_decompressed() {
-    CHUNKS_DECOMPRESSED.fetch_add(1, Ordering::Relaxed);
+    COUNTERS.add_chunk_decompressed();
 }
 
 /// Record that one row was DECODED from `Data.db` within a partition by the
@@ -165,7 +235,7 @@ pub(crate) fn add_chunk_decompressed() {
 /// never seeks, so the counter stays 0.
 #[cfg(not(feature = "tombstones"))]
 pub(crate) fn add_rows_decoded(count: u64) {
-    ROWS_DECODED.fetch_add(count, Ordering::Relaxed);
+    COUNTERS.add_rows_decoded(count);
 }
 
 /// Number of candidate SSTables parsed by partition-targeted lookups since the
@@ -175,13 +245,13 @@ pub(crate) fn add_rows_decoded(count: u64) {
 /// (plus a small allowance for bloom false-positives) — so a regression that
 /// reopens every SSTable for a single-partition read fails CI.
 pub fn sstables_scanned() -> u64 {
-    SSTABLES_SCANNED.load(Ordering::Relaxed)
+    COUNTERS.sstables_scanned()
 }
 
 /// Number of partitions returned by partition-targeted lookups since the last
 /// [`reset`].
 pub fn partitions_parsed() -> u64 {
-    PARTITIONS_PARSED.load(Ordering::Relaxed)
+    COUNTERS.partitions_parsed()
 }
 
 /// Number of partitions DECODED from `Data.db` by the single-candidate seek path
@@ -191,7 +261,7 @@ pub fn partitions_parsed() -> u64 {
 /// hit — so a regression that reverts the single-candidate path to a full parse
 /// (decoding every partition in the SSTable, then retaining one) fails CI.
 pub fn partitions_decoded() -> u64 {
-    PARTITIONS_DECODED.load(Ordering::Relaxed)
+    COUNTERS.partitions_decoded()
 }
 
 /// Number of compression chunks DECOMPRESSED by the single-candidate seek path
@@ -203,7 +273,7 @@ pub fn partitions_decoded() -> u64 {
 /// including the whole tail of a large file for a head-of-file lookup) fails the
 /// `issue_953` bound, even though `partitions_decoded` would still read 1.
 pub fn chunks_decompressed() -> u64 {
-    CHUNKS_DECOMPRESSED.load(Ordering::Relaxed)
+    COUNTERS.chunks_decompressed()
 }
 
 /// Number of individual partition rows DECODED from `Data.db` by the
@@ -216,51 +286,56 @@ pub fn chunks_decompressed() -> u64 {
 /// (then post-filters) bumps this by the partition's full row count and fails
 /// the bound, even though `partitions_decoded` would still read 1.
 pub fn rows_decoded() -> u64 {
-    ROWS_DECODED.load(Ordering::Relaxed)
+    COUNTERS.rows_decoded()
 }
 
-/// Clear both counters. Tests call this before a query so a stale value from an
-/// earlier query cannot satisfy a later assertion. Because the probe is
-/// process-global, a test that asserts on it must run without a concurrent query
-/// on another thread (the integration tests serialize their own setup).
+/// Clear all five process-global counters. Integration tests call this before a
+/// query so a stale value from an earlier query cannot satisfy a later
+/// assertion. Because the global is shared, an integration test that asserts on
+/// it must run without a concurrent query on another thread (the integration
+/// tests serialize their own setup); the in-crate unit test sidesteps this
+/// entirely by asserting against a local [`Counters`] instance (issue #1071).
 pub fn reset() {
-    SSTABLES_SCANNED.store(0, Ordering::Relaxed);
-    PARTITIONS_PARSED.store(0, Ordering::Relaxed);
-    PARTITIONS_DECODED.store(0, Ordering::Relaxed);
-    CHUNKS_DECOMPRESSED.store(0, Ordering::Relaxed);
-    ROWS_DECODED.store(0, Ordering::Relaxed);
+    COUNTERS.reset();
 }
 
 #[cfg(all(test, not(feature = "tombstones")))]
 mod tests {
     use super::*;
 
+    // Exercises the add/get/reset contract against a *local* [`Counters`] rather
+    // than the process-global instance reached through the free functions. The
+    // global is shared with read-path increment sites that any concurrent test
+    // in this binary can drive, so absolute-value assertions on it race
+    // nondeterministically (issue #1071). A local instance is owned by this test
+    // alone, so the exact-equality checks below are deterministic.
     #[test]
     fn counters_round_trip() {
-        reset();
-        assert_eq!(sstables_scanned(), 0);
-        assert_eq!(partitions_parsed(), 0);
-        assert_eq!(partitions_decoded(), 0);
-        assert_eq!(chunks_decompressed(), 0);
-        assert_eq!(rows_decoded(), 0);
-        add_sstables_scanned(2);
-        add_partitions_parsed(5);
-        add_partition_decoded();
-        add_partition_decoded();
-        add_chunk_decompressed();
-        add_chunk_decompressed();
-        add_chunk_decompressed();
-        add_rows_decoded(7);
-        assert_eq!(sstables_scanned(), 2);
-        assert_eq!(partitions_parsed(), 5);
-        assert_eq!(partitions_decoded(), 2);
-        assert_eq!(chunks_decompressed(), 3);
-        assert_eq!(rows_decoded(), 7);
-        reset();
-        assert_eq!(sstables_scanned(), 0);
-        assert_eq!(partitions_parsed(), 0);
-        assert_eq!(partitions_decoded(), 0);
-        assert_eq!(chunks_decompressed(), 0);
-        assert_eq!(rows_decoded(), 0);
+        let c = Counters::new();
+        c.reset();
+        assert_eq!(c.sstables_scanned(), 0);
+        assert_eq!(c.partitions_parsed(), 0);
+        assert_eq!(c.partitions_decoded(), 0);
+        assert_eq!(c.chunks_decompressed(), 0);
+        assert_eq!(c.rows_decoded(), 0);
+        c.add_sstables_scanned(2);
+        c.add_partitions_parsed(5);
+        c.add_partition_decoded();
+        c.add_partition_decoded();
+        c.add_chunk_decompressed();
+        c.add_chunk_decompressed();
+        c.add_chunk_decompressed();
+        c.add_rows_decoded(7);
+        assert_eq!(c.sstables_scanned(), 2);
+        assert_eq!(c.partitions_parsed(), 5);
+        assert_eq!(c.partitions_decoded(), 2);
+        assert_eq!(c.chunks_decompressed(), 3);
+        assert_eq!(c.rows_decoded(), 7);
+        c.reset();
+        assert_eq!(c.sstables_scanned(), 0);
+        assert_eq!(c.partitions_parsed(), 0);
+        assert_eq!(c.partitions_decoded(), 0);
+        assert_eq!(c.chunks_decompressed(), 0);
+        assert_eq!(c.rows_decoded(), 0);
     }
 }

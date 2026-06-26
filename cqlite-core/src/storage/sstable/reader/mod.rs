@@ -827,17 +827,16 @@ impl SSTableReader {
         use tokio::fs::File;
         use tokio::io::AsyncReadExt;
 
-        // Try to find CompressionInfo.db in same directory
+        // Try to find CompressionInfo.db in same directory.
         let parent_dir = path.parent().unwrap_or(Path::new("."));
-        let base_name = path.file_stem().and_then(|s| s.to_str()).and_then(|s| {
-            // Extract base name: "nb-1-big-Data.db" -> "nb-1-big"
-            let parts: Vec<&str> = s.split('-').collect();
-            if parts.len() >= 4 {
-                Some(parts[0..3].join("-"))
-            } else {
-                None
-            }
-        });
+        // Derive the base name via the descriptor parser, which handles
+        // hyphenated-UUID ids (e.g. "da-00000000-0000-0000-0000-000000000001-bti").
+        // A fixed parts[0..3] split mangles those and looks for the wrong
+        // "*-CompressionInfo.db", silently treating compressed data as
+        // uncompressed (roborev #970).
+        let base_name = crate::storage::sstable::version_gate::SsTableDescriptor::parse(path)
+            .ok()
+            .map(|d| format!("{}-{}-{}", d.version, d.sstable_id, d.format.as_str()));
 
         if let Some(base) = base_name {
             let compression_info_path = parent_dir.join(format!("{}-CompressionInfo.db", base));
@@ -846,20 +845,26 @@ impl SSTableReader {
                 let mut buffer = Vec::new();
                 file.read_to_end(&mut buffer).await?;
 
-                match CompressionInfo::parse(&buffer) {
-                    Ok(info) => {
-                        log::debug!(
-                            "Loaded CompressionInfo: algorithm={}, chunk_length={}, chunks={}",
-                            info.algorithm,
-                            info.chunk_length,
-                            info.chunk_offsets.len()
-                        );
-                        return Ok(Some(info));
-                    }
-                    Err(e) => {
-                        log::warn!("Failed to parse CompressionInfo.db: {}", e);
-                    }
-                }
+                // Fail-fast (issue #1001): a CompressionInfo.db that is present but
+                // names an unknown/unsupported compressor (or is otherwise malformed)
+                // MUST hard-error at reader-open time, BEFORE any Data.db chunk is read —
+                // never silently fall back to the uncompressed path. The error carries
+                // the offending component path for diagnosis. A genuinely uncompressed
+                // SSTable has no CompressionInfo.db at all and returns Ok(None) below.
+                let info = CompressionInfo::parse(&buffer).map_err(|e| {
+                    Error::UnsupportedFormat(format!(
+                        "Failed to parse CompressionInfo.db at {}: {}",
+                        compression_info_path.display(),
+                        e
+                    ))
+                })?;
+                log::debug!(
+                    "Loaded CompressionInfo: algorithm={}, chunk_length={}, chunks={}",
+                    info.algorithm,
+                    info.chunk_length,
+                    info.chunk_offsets.len()
+                );
+                return Ok(Some(info));
             }
         }
 

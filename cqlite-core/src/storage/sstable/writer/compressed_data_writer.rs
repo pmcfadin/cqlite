@@ -115,10 +115,14 @@ impl DeflateCompressor {
 #[cfg(feature = "deflate")]
 impl Compressor for DeflateCompressor {
     fn compress(&self, data: &[u8]) -> Result<Vec<u8>> {
-        use flate2::write::DeflateEncoder;
+        use flate2::write::ZlibEncoder;
         use flate2::Compression;
 
-        let mut encoder = DeflateEncoder::new(Vec::new(), Compression::new(self.level));
+        // Cassandra's DeflateCompressor uses java.util.zip.Deflater, which emits a
+        // ZLIB-wrapped stream (2-byte header + DEFLATE body + Adler-32 trailer),
+        // NOT raw DEFLATE. Match it with ZlibEncoder so a CQLite-written chunk reads
+        // back through the zlib-aware decode path (#1082).
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::new(self.level));
         encoder
             .write_all(data)
             .map_err(|e| Error::Storage(format!("Deflate compression write failed: {}", e)))?;
@@ -442,15 +446,17 @@ mod tests {
     #[test]
     #[cfg(feature = "deflate")]
     fn test_deflate_compressor() {
-        use flate2::read::DeflateDecoder;
+        use flate2::read::ZlibDecoder;
         use std::io::Read;
 
         let compressor = DeflateCompressor::default();
         let data = b"Hello, World! Hello, World! Hello, World!";
         let compressed = compressor.compress(data).unwrap();
 
-        // Verify it can be decompressed
-        let mut decoder = DeflateDecoder::new(&compressed[..]);
+        // Cassandra-compatible output is ZLIB-wrapped (header 0x78), not raw
+        // DEFLATE (#1082); decode it back with ZlibDecoder.
+        assert_eq!(compressed[0], 0x78, "zlib stream must start with CMF 0x78");
+        let mut decoder = ZlibDecoder::new(&compressed[..]);
         let mut decompressed = Vec::new();
         decoder.read_to_end(&mut decompressed).unwrap();
         assert_eq!(decompressed, data);

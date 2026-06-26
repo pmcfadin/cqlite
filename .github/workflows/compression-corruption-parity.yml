@@ -1,0 +1,163 @@
+name: "CI: Compression / Corruption Parity (Nightly Docker, Epic #970)"
+
+# Docker-regenerating nightly enforcement for the compression / checksum /
+# corruption parity scenarios (epic #970, issues #996/#997/#998/#999/#1000/
+# #1001/#1082).
+#
+# Why this workflow is separate from the fast PR gate
+# ---------------------------------------------------
+# The byte-for-byte fixture matrix (test_comp) and the corruption corpus
+# (test_comp_corrupt) are regenerated from a Cassandra 5.0.2 container by the
+# generator scripts below. The fast PR gate (sstabledump-parity-gate.yml) only
+# fetches the published bundle, so the compression/corruption tests there
+# skip-clean when test_comp is absent and could FALSE-PASS.
+#
+# This workflow REGENERATES both fixture sets from scratch, then runs the
+# issue_* tests. Because the issue_* tests skip-clean when CQLITE_DATASETS_ROOT
+# is unset or the test_comp fixtures are absent, the "Assert fixtures present"
+# step below FAILS THE JOB if regeneration produced zero Data.db files — so a
+# regeneration failure can never be mistaken for a green parity run. (The
+# tombstone/TTL tests honour CQLITE_REQUIRE_FIXTURES=1 for panic-instead-of-skip
+# strict mode; the #970 issue_* tests do not yet read that env, so this workflow
+# enforces strictness by asserting non-empty fixture dirs before running.)
+#
+# GATING POLICY: runs on
+#   - workflow_dispatch (manual)
+#   - schedule (nightly)
+#   - pull_request touching the parity tests, manifest, fixture generators, or
+#     this workflow itself.
+#
+# Manual local run:
+#   bash test-data/scripts/generate-compression-parity.sh
+#   bash test-data/scripts/generate-corruption-corpus.sh
+#   env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets \
+#     cargo test -p cqlite-core \
+#       --test issue_997_compressioninfo_parity \
+#       --test issue_998_inline_crc_trailers \
+#       --test issue_1000_verifier \
+#       --test issue_1001_reject_unknown_compression \
+#       --test issue_1082_deflate_zlib \
+#       --test issue_1104_compaction_incompressible_chunks
+
+on:
+  workflow_dispatch:
+    inputs:
+      verbose:
+        description: 'Run cargo test with --nocapture'
+        type: boolean
+        default: true
+  schedule:
+    # Nightly at 05:23 UTC (offset from the tombstone/TTL nightly at 04:17).
+    - cron: '23 5 * * *'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'cqlite-core/tests/issue_997_compressioninfo_parity.rs'
+      - 'cqlite-core/tests/issue_998_inline_crc_trailers.rs'
+      - 'cqlite-core/tests/issue_1000_verifier.rs'
+      - 'cqlite-core/tests/issue_1001_reject_unknown_compression.rs'
+      - 'cqlite-core/tests/issue_1082_deflate_zlib.rs'
+      - 'cqlite-core/tests/issue_1104_compaction_incompressible_chunks.rs'
+      - 'test-data/cassandra-parity-manifest.yml'
+      - 'test-data/scripts/generate-compression-parity.sh'
+      - 'test-data/scripts/generate-corruption-corpus.sh'
+      - 'test-data/schemas/compression-parity.cql'
+      - '.github/workflows/compression-corruption-parity.yml'
+      # Production code the parity tests validate — a regression here must trip
+      # the STRICT (regenerate + require-fixtures) workflow, not only the
+      # continue-on-error PR gate (roborev).
+      - 'cqlite-core/src/storage/sstable/compression.rs'
+      - 'cqlite-core/src/storage/sstable/compression_info.rs'
+      - 'cqlite-core/src/storage/sstable/chunk_decompressor.rs'
+      - 'cqlite-core/src/storage/sstable/chunked_data_reader.rs'
+      - 'cqlite-core/src/storage/sstable/verify.rs'
+      - 'cqlite-core/src/storage/sstable/reader/**'
+      - 'cqlite-cli/src/commands/verify.rs'
+
+env:
+  CASSANDRA_IMAGE: cassandra:5.0.2
+  CQLITE_DATASETS_ROOT: ${{ github.workspace }}/test-data/datasets
+
+permissions:
+  contents: read
+
+concurrency:
+  group: compression-corruption-parity-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  compression-corruption-parity:
+    name: Compression / corruption parity (regenerate + require-fixtures)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: compression-corruption-parity-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Check Docker available
+        run: docker info
+
+      - name: Generate compression parity fixtures (test_comp, epic #970)
+        run: bash test-data/scripts/generate-compression-parity.sh
+
+      - name: Generate BTI source fixtures (test_da/wide_table) for BTI corruption cases
+        # The corruption corpus's bti_partitions_footer_flip / bti_rows_truncation
+        # cases need a clean BTI (da) source. Without it the generator marks them
+        # `planned` and the verifier tests skip them — silently losing BTI
+        # corruption coverage in the strict lane (roborev #970). Materialize it.
+        run: OUT="$CQLITE_DATASETS_ROOT" bash test-data/scripts/gen-wide-bti.sh
+
+      - name: Generate corruption corpus (test_comp_corrupt, issue #999)
+        run: bash test-data/scripts/generate-corruption-corpus.sh
+
+      - name: Assert fixtures present (strict — fail instead of skip-clean)
+        # The issue_* tests skip-clean when test_comp is absent. Enforce
+        # strictness by failing the job unless regeneration produced fixtures.
+        run: |
+          set -euo pipefail
+          comp_data=$(find "$CQLITE_DATASETS_ROOT/sstables/test_comp" -name '*-Data.db' 2>/dev/null | wc -l | tr -d ' ')
+          corrupt_dirs=$(find "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | wc -l | tr -d ' ')
+          echo "=== test_comp Data.db files ==="
+          find "$CQLITE_DATASETS_ROOT/sstables/test_comp" -name '*-Data.db' 2>/dev/null | sort || true
+          echo "test_comp Data.db count: $comp_data"
+          echo "=== corruption corpus cases ==="
+          find "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort || true
+          echo "corruption case dirs: $corrupt_dirs"
+          if [ "$comp_data" -eq 0 ]; then
+            echo "FATAL: no test_comp Data.db fixtures were generated — refusing to skip-clean." >&2
+            exit 1
+          fi
+          if [ "$corrupt_dirs" -eq 0 ]; then
+            echo "FATAL: corruption corpus is empty — refusing to skip-clean." >&2
+            exit 1
+          fi
+          # BTI corruption coverage must be ACTIVE in the strict lane: the BTI
+          # source was generated above, so bti_partitions_footer_flip and
+          # bti_rows_truncation must have materialized corrupt dirs (not `planned`).
+          for bti in bti_partitions_footer_flip bti_rows_truncation; do
+            if [ ! -d "$CQLITE_DATASETS_ROOT/corruption/test_comp_corrupt/$bti" ]; then
+              echo "FATAL: BTI corruption fixture '$bti' is missing/planned — BTI source generation must precede the corpus so it is active." >&2
+              exit 1
+            fi
+          done
+
+      - name: Run compression / corruption parity tests (strict, fixtures present)
+        run: |
+          env CQLITE_REQUIRE_FIXTURES=1 \
+            CQLITE_DATASETS_ROOT="$CQLITE_DATASETS_ROOT" \
+            cargo test -p cqlite-core --features write-support,cli-helpers \
+              --test issue_997_compressioninfo_parity \
+              --test issue_998_inline_crc_trailers \
+              --test issue_1000_verifier \
+              --test issue_1001_reject_unknown_compression \
+              --test issue_1082_deflate_zlib \
+              --test issue_1104_compaction_incompressible_chunks \
+              -- --nocapture

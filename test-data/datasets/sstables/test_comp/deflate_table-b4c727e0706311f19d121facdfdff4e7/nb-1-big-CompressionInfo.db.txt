@@ -1,0 +1,26 @@
+algorithm: DeflateCompressor
+option_count: 0
+chunk_length: 16384
+max_compressed_length: 2147483647
+total_uncompressed_length: 195018
+chunk_count: 12
+data_db_size_bytes: 5461
+
+# Per-chunk map (on_disk_len = next_offset - offset; comp_len = on_disk_len - 4 CRC word)
+# raw_uncompressed = chunk_length for all but the last chunk; last = total_uncompressed_length - last_offset_uncompressed
+idx	offset	on_disk_len	comp_len	raw_uncompressed_len	raw_stored
+0	0	473	469	16384	False
+1	473	449	445	16384	False
+2	922	460	456	16384	False
+3	1382	461	457	16384	False
+4	1843	461	457	16384	False
+5	2304	457	453	16384	False
+6	2761	448	444	16384	False
+7	3209	457	453	16384	False
+8	3666	461	457	16384	False
+9	4127	466	462	16384	False
+10	4593	451	447	16384	False
+11	5044	417	413	14794	False
+
+short_final_chunk: True  (last chunk covers 14794 uncompressed bytes vs chunk_length 16384)
+raw_stored_chunk_count: 0  indices: []

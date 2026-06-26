@@ -1210,4 +1210,175 @@ keyspaces:
     - column_name: value_column
       kind: regular
       type: bigint
+- name: test_comp
+  # Compression / chunk-format parity fixtures (epic #970, issue #996).
+  # Cassandra 5.0.2, storage_compatibility_mode: CASSANDRA_4 (nb BIG format).
+  # Generator: test-data/scripts/generate-compression-parity.sh
+  # Schema:    test-data/schemas/compression-parity.cql
+  # Generated with flush_compression: table so nb-1-big honors the schema
+  # compressor (the CASSANDRA_4 default flush_compression: fast would force LZ4).
+  tables:
+  - name: deflate_table
+    row_count: 600
+    columns:
+    - column_name: pk
+      kind: partition_key
+      type: int
+    - column_name: ck
+      kind: clustering
+      type: int
+    - column_name: body
+      kind: regular
+      type: text
+  - name: incompressible_uncompressed_chunk
+    row_count: 64
+    columns:
+    - column_name: pk
+      kind: partition_key
+      type: int
+    - column_name: ck
+      kind: clustering
+      type: int
+    - column_name: payload
+      kind: regular
+      type: blob
+  - name: lz4_table
+    row_count: 600
+    columns:
+    - column_name: pk
+      kind: partition_key
+      type: int
+    - column_name: ck
+      kind: clustering
+      type: int
+    - column_name: body
+      kind: regular
+      type: text
+  - name: short_final_chunk
+    row_count: 777
+    columns:
+    - column_name: pk
+      kind: partition_key
+      type: int
+    - column_name: ck
+      kind: clustering
+      type: int
+    - column_name: body
+      kind: regular
+      type: text
+  - name: snappy_table
+    row_count: 600
+    columns:
+    - column_name: pk
+      kind: partition_key
+      type: int
+    - column_name: ck
+      kind: clustering
+      type: int
+    - column_name: body
+      kind: regular
+      type: text
+  - name: uncompressed_table
+    row_count: 600
+    columns:
+    - column_name: pk
+      kind: partition_key
+      type: int
+    - column_name: ck
+      kind: clustering
+      type: int
+    - column_name: body
+      kind: regular
+      type: text
+  - name: zstd_table
+    row_count: 600
+    columns:
+    - column_name: pk
+      kind: partition_key
+      type: int
+    - column_name: ck
+      kind: clustering
+      type: int
+    - column_name: body
+      kind: regular
+      type: text
+
+# ---------------------------------------------------------------------------
+# Compression fixture matrix (epic #970, issue #996).
+# Per-scenario provenance: compressor class, explicit chunk_length_in_kb,
+# determinism inputs, and the on-disk algorithm string recorded in
+# CompressionInfo.db. Binary *.db are gitignored; the per-table
+# nb-1-big-CompressionInfo.db.txt sidecar carries the decoded chunk map.
+# ---------------------------------------------------------------------------
+fixture_matrix:
+  cassandra_version: "5.0.2"
+  storage_compatibility_mode: CASSANDRA_4
+  sstable_format: nb
+  sstable_prefix: nb-1-big
+  keyspace: test_comp
+  source_script: test-data/scripts/generate-compression-parity.sh
+  schema: test-data/schemas/compression-parity.cql
+  flush_compression: table   # required so nb-1-big honors the schema compressor
+  determinism:
+    writetime_micros: 1609459200000000   # 2021-01-01T00:00:00Z (USING TIMESTAMP)
+    prng_seed: 12648430                   # 0x00C0FFEE (incompressible BLOB bytes)
+  scenarios:
+    lz4:
+      table: lz4_table
+      compressor_class: LZ4Compressor
+      compression_options: {class: LZ4Compressor, chunk_length_in_kb: 16}
+      chunk_length_in_kb: 16
+      compressioninfo_algorithm: LZ4Compressor
+      max_compressed_length: 2147483647   # Integer.MAX_VALUE (min_compress_ratio=0)
+      component_dir_glob: sstables/test_comp/lz4_table-*
+    snappy:
+      table: snappy_table
+      compressor_class: SnappyCompressor
+      compression_options: {class: SnappyCompressor, chunk_length_in_kb: 16}
+      chunk_length_in_kb: 16
+      compressioninfo_algorithm: SnappyCompressor
+      max_compressed_length: 2147483647
+      component_dir_glob: sstables/test_comp/snappy_table-*
+    deflate:
+      table: deflate_table
+      compressor_class: DeflateCompressor
+      compression_options: {class: DeflateCompressor, chunk_length_in_kb: 16}
+      chunk_length_in_kb: 16
+      compressioninfo_algorithm: DeflateCompressor
+      max_compressed_length: 2147483647
+      component_dir_glob: sstables/test_comp/deflate_table-*
+    zstd_no_dictionary:
+      table: zstd_table
+      compressor_class: ZstdCompressor
+      compression_options: {class: ZstdCompressor, chunk_length_in_kb: 16}
+      chunk_length_in_kb: 16
+      compressioninfo_algorithm: ZstdCompressor
+      max_compressed_length: 2147483647
+      component_dir_glob: sstables/test_comp/zstd_table-*
+    uncompressed_table:
+      table: uncompressed_table
+      compressor_class: null
+      compression_options: {enabled: false}
+      chunk_length_in_kb: null
+      compressioninfo_present: false   # NO CompressionInfo.db; CRC.db present instead
+      component_dir_glob: sstables/test_comp/uncompressed_table-*
+    short_final_chunk:
+      table: short_final_chunk
+      compressor_class: LZ4Compressor
+      compression_options: {class: LZ4Compressor, chunk_length_in_kb: 4}
+      chunk_length_in_kb: 4
+      compressioninfo_algorithm: LZ4Compressor
+      max_compressed_length: 2147483647
+      invariant: final chunk covers fewer than 4096 uncompressed bytes
+      component_dir_glob: sstables/test_comp/short_final_chunk-*
+    incompressible_uncompressed_chunk:
+      table: incompressible_uncompressed_chunk
+      compressor_class: LZ4Compressor
+      compression_options: {class: LZ4Compressor, chunk_length_in_kb: 4, min_compress_ratio: 1.0}
+      chunk_length_in_kb: 4
+      min_compress_ratio: 1.0
+      compressioninfo_algorithm: LZ4Compressor
+      max_compressed_length: 4096   # chunk_length / min_compress_ratio -> raw-chunk fallback
+      invariant: at least one chunk stored RAW (compressed_len == raw_chunk_len == 4096)
+      component_dir_glob: sstables/test_comp/incompressible_uncompressed_chunk-*
 
