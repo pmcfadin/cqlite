@@ -474,8 +474,15 @@ bash test-data/scripts/fetch-datasets.sh
 - An OpenSpec change is "done" only when the gate passes, **C reports PASS** (every requirement `satisfied` with a public-surface test as evidence; an `unmet`/uncovered/unjustified-`partial` requirement blocks merge), and roborev is clean — then `openspec archive`.
 - superpowers vs OpenSpec: superpowers are *techniques* (brainstorming, TDD, receiving-code-review); OpenSpec is the *artifact system + lifecycle*. They nest — `brainstorming` is the method inside `explore`; the OpenSpec proposal/design/tasks ARE the plan (no parallel `plan.md`). See https://pmcfadin.github.io/cqlite/agents-developing/spec-driven-audit/.
 
+### Delivery pipeline (flow-lead)
+- The delivery lead is the **`flow-lead`** manager agent (the repo's default agent; `claude --agent flow-lead`). It orchestrates — it spawns and sequences the specialists (`sstable-developer`, `rust-reviewer`, `spec-auditor`/C, `test-validator`, `coverage-reviewer`) + roborev + `agent-gate.sh` — and does not write production code itself.
+- Pipeline verbs (skills): `flow-groom` → `flow-activate` (Seam 1: spec approval) → `flow-implement` (gate → C → roborev → PR) → `flow-address` → `flow-finalize` (archive + cleanup + close); `flow-board` surfaces the single next thing. Full doctrine: https://pmcfadin.github.io/cqlite/agents-developing/delivery-pipeline/.
+- **1:1:1:1**: one issue ↔ one worktree/branch `issue-<N>-<slug>` ↔ one OpenSpec change `<slug>` ↔ one PR. Backlog = issues + labels (one `P0`–`P3`, one `status:*`).
+- When spawning a subagent, pass an explicit accessible model (e.g. opus) — the pinned frontmatter model is not always accessible.
+
 ## Product-manager behavior (lead)
 - The lead acts as product manager: track epics and issues, prioritize, and keep work moving.
-- Autonomous GitHub writes are permitted within these limits: post comments; add/remove status labels; assign or reassign issues; and close an issue ONLY when its acceptance criteria are met and the work is clearly complete (e.g. a merged linked PR), with a closing comment explaining why.
+- **Autonomy — pre-authorized merge-on-green** (supersedes the looser merge/close reading below): by DEFAULT the lead opens a PR but does NOT merge or close it (merge is the owner's Seam 2). The lead MAY squash-merge + `flow-finalize` ONLY a set the owner has EXPLICITLY pre-authorized ("merge #X,#Y on green"), and only when `agent-gate.sh` PASS + C PASS + roborev clean all hold.
+- Autonomous GitHub writes still permitted within these limits: post comments; add/remove status labels; assign or reassign issues. Closing a fully-done non-epic issue with a merged linked PR (with a closing comment) is allowed; merging follows the model above.
 - Never close an epic, never change an issue's scope or title, and never make a product decision (ambiguous scope, conflicting requirements, tradeoffs) without me — collect those under a "NEEDS YOU" list and surface them.
 - Make every write traceable with a short comment so I can review or reverse it later.
