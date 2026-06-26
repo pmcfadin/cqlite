@@ -448,16 +448,13 @@ async fn run_parity(manifest_id: &str, table: &str, schema: TableSchema) {
 ///   (deleted) ; ck=4 both EMPTY ('' / 0x). `before_col` / `after_col` neighbour
 ///   every row so a mis-consumed target value would corrupt a neighbour.
 ///
-/// BUG (#1006-empty-blob): CQLite decodes an EMPTY-VALUE cell as
-/// `Value::Text("")` regardless of the column's declared type
-/// (v5_compressed_legacy.rs ~L4570), so an empty `blob` reads back as empty
-/// TEXT (`""`) instead of an empty BLOB (`0x`). The golden renders the empty
-/// blob as `"0x"`, so this comparison fails on `target_blob` at ck=4. The test
-/// is written to the CORRECT Cassandra behaviour and is `#[ignore]`d pending the
-/// fix. (Empty STRING, ABSENT, and NULL are all decoded correctly — verified by
-/// the absent_vs_null lane below, which passes.)
+/// Issue #1077 (FIXED): CQLite now decodes an EMPTY-VALUE cell as the empty
+/// value of the column's DECLARED type — an empty `blob` reads back as an empty
+/// BLOB (`Blob([])` → golden `"0x"`), an empty text/ascii/varchar as `Text("")`.
+/// The golden renders the empty blob as `"0x"` and this comparison verifies it
+/// (v5_compressed_legacy.rs HAS_EMPTY_VALUE path). Empty STRING, ABSENT, and NULL
+/// are all decoded distinctly (see the absent_vs_null lane below).
 #[tokio::test]
-#[ignore = "issue #1077: empty-value cell decodes as Text(\"\") regardless of declared type; empty blob should be Blob([]) => \"0x\". See v5_compressed_legacy.rs HAS_EMPTY_VALUE path."]
 async fn null_empty_text_blob_parity() {
     let s = schema(
         "nb_null_empty_text_blob",
