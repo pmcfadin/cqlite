@@ -51,8 +51,8 @@ bti_rows_truncation            da-2-bti-Rows.db     truncate     256       OK
 statistics_db_header_damage    nb-1-big-Statistics.db setbyte      0         OK
   statistics_db_header_damage:
       component        : nb-1-big-Statistics.db
-      clean   SHA256   : 40ae17779979141bbaea95ad1c91ccbc9cac4ad3c3c3611d128dd897aad6e0aa  (4847 bytes)
-      corrupt SHA256   : 28fb84c79f54c37d1d507aa7df9e36649bef2da634f954f67abde14f3046f1a4  (4847 bytes)
+      clean   SHA256   : 8c82891a646ded766c048c8fddbaf948222ffdb290097f1391d84db9c766511f  (4847 bytes)
+      corrupt SHA256   : 9e225cc2d2500249be98d06bf3c3814ab58ff470de9034449b7fbfac38e78a00  (4847 bytes)
       mutation         : setbyte @ 0  (orig=00 mut=ff)
       single-mutation  : OK
 summary_db_truncation          nb-1-big-Summary.db  truncate     16        OK
