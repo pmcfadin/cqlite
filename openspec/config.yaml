@@ -21,8 +21,9 @@ context: |
      the `experimental` feature flag, off by default.
   2. The gate is `scripts/agent-gate.sh` — the ONLY run that counts. Its
      AGENT-GATE SUMMARY block must be pasted verbatim; ad-hoc cargo runs do not
-     count. Components: fmt, clippy (RUSTFLAGS=-D warnings, zero warnings),
-     core-tests, integration-tests, write-tests, cli-tests, minimal-build, smoke.
+     count. The script is the authoritative component set — run
+     `scripts/agent-gate.sh --list` (do not enumerate components here, it drifts).
+     Clippy runs with RUSTFLAGS=-D warnings (zero warnings allowed).
   3. Wiring evidence (issues #949/#963): a feature is done only when its PUBLIC
      surface exercises it — name the surface + call chain + an end-to-end test
      from that surface. Green helper-only unit tests are NOT sufficient.
