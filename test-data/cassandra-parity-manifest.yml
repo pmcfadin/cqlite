@@ -5418,7 +5418,7 @@ scenarios:
   # ---- #1006 ----
   - id: cass.cql_types.boundaries.null_empty_text_blob
     title: Null / empty text vs blob boundary decode
-    status: partial
+    status: mirrored
     capability: cql_types
     priority: P0
     risk: p1_correctness
@@ -5437,29 +5437,29 @@ scenarios:
       references:
         - test-data/datasets/sstables/test_types/nb_null_empty_text_blob-4f9b26b0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
     evidence:
-      type: partial
+      type: canonical_semantic
+      strict: false
       artifacts: [jsonl]
       cassandra_version: "5.0.2"
       cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
       storage_format_version: [nb]
       fixture_generation_command: >-
         bash test-data/scripts/generate-cql-type-parity.sh
+      comparison_command: >-
+        env CQLITE_REQUIRE_FIXTURES=1 CQLITE_DATASETS_ROOT=$PWD/test-data/datasets
+        cargo test -p cqlite-core --features delta-scan --test
+        issue_1006_null_empty_boundary_parity
       reference_paths:
         - test-data/datasets/sstables/test_types/nb_null_empty_text_blob-4f9b26b0706211f197e20b846582ecc8/nb-1-big-Data.db.jsonl
-      known_limitations: >-
-        empty-value cell decodes as Text("") regardless of declared type; empty blob
-        should be Blob([]) / 0x — bug #1077; the parity assertion is written to
-        correct Cassandra behavior and #[ignore]-pinned pending the fix.
+      normalization: >-
+        Absent, null/tombstoned, empty-string, and empty-blob cells are decoded by
+        the column's declared type (empty blob -> Blob([]) -> "0x", empty text ->
+        "") and compared distinctly against the sstabledump JSONL value. Empty-value
+        typed decode landed in bug fix #1077.
     ci:
       tier: required_parity
       workflow: .github/workflows/cql-type-parity.yml
-    scope:
-      gap: >-
-        blocked by #1077
-      next_step: >-
-        land bug #1077 (empty-value cell decodes by declared type: empty blob ->
-        Blob([])), then un-#[ignore] the assertion and flip status to mirrored
-      target_issue: 1077
+    scope: {}
   - id: cass.cql_types.boundaries.absent_vs_null_regular_columns
     title: Absent vs null regular column distinction
     status: mirrored

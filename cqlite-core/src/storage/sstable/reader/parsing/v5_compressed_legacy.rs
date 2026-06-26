@@ -4664,14 +4664,25 @@ impl V5CompressedLegacyParser {
                 "V5CompressedLegacy: Cell '{}' has HAS_EMPTY_VALUE flag, returning empty value",
                 column.name
             );
-            // Return appropriate empty value for type
-            // For most types, empty = empty string or empty collection
-            return Ok((
-                Value::Text(String::new()),
-                cell_timestamp,
-                cell_expiration,
-                offset,
-            ));
+            // Issue #1077: the empty (zero-length) value MUST decode to the empty
+            // value of the column's DECLARED type — never blindly `Text("")`.
+            // An empty `blob` is `Blob([])` (sstabledump renders `"0x"`), an empty
+            // text/ascii/varchar is `Text("")`. Mirrors the clustering-key EMPTY
+            // handling above; fixed-width types should not normally carry an empty
+            // value, so treat that as NULL with a warning.
+            let empty_value = match column.data_type.to_lowercase().as_str() {
+                "text" | "varchar" | "ascii" => Value::Text(String::new()),
+                "blob" => Value::Blob(Vec::new()),
+                _ => {
+                    log::warn!(
+                        "V5CompressedLegacy: EMPTY value for cell '{}' (type {}), treating as NULL",
+                        column.name,
+                        column.data_type
+                    );
+                    Value::Null
+                }
+            };
+            return Ok((empty_value, cell_timestamp, cell_expiration, offset));
         }
 
         // At this point, we have a live cell with value data
