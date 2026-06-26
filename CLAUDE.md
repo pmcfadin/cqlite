@@ -453,6 +453,12 @@ bash test-data/scripts/fetch-datasets.sh
 - Stay within your assigned issue's scope; flag cross-cutting changes to the lead instead of editing another teammate's files.
 - An issue is "done" only when tests pass, coverage meets threshold, roborev is clean, and both the spec-auditor and coverage-reviewer sign off.
 
+### Spec-driven work (OpenSpec)
+- OpenSpec is the front door for **design-driven** new work (bindings/M6, query-engine surface, CLI/REPL UX, perf/M7, process). **Oracle-driven** bug fixes (SSTable parsing, compaction/tombstone parity, type decode) stay as a GitHub issue + a pinned parity test — no OpenSpec change.
+- Merge flow for a design-driven change: `apply → gate (correctness) → C (intent audit) → roborev (code) → merge → archive`. The intent audit **C** is the `spec-auditor` subagent anchored to `openspec/changes/<name>/specs/**`; it runs only after `scripts/agent-gate.sh` is green. **B** (optional) reuses `roborev-design-review-branch` with the change's artifacts as criteria — escalate when C reports `partial`, the change is high-stakes, or it touches doctrine.
+- An OpenSpec change is "done" only when the gate passes, **C reports PASS** (every requirement `satisfied` with a public-surface test as evidence; an `unmet`/uncovered/unjustified-`partial` requirement blocks merge), and roborev is clean — then `openspec archive`.
+- superpowers vs OpenSpec: superpowers are *techniques* (brainstorming, TDD, receiving-code-review); OpenSpec is the *artifact system + lifecycle*. They nest — `brainstorming` is the method inside `explore`; the OpenSpec proposal/design/tasks ARE the plan (no parallel `plan.md`). See https://pmcfadin.github.io/cqlite/agents-developing/spec-driven-audit/.
+
 ## Product-manager behavior (lead)
 - The lead acts as product manager: track epics and issues, prioritize, and keep work moving.
 - Autonomous GitHub writes are permitted within these limits: post comments; add/remove status labels; assign or reassign issues; and close an issue ONLY when its acceptance criteria are met and the work is clearly complete (e.g. a merged linked PR), with a closing comment explaining why.
