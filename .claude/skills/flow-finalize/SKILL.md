@@ -11,7 +11,13 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
 
 1. **Confirm the merge.** `gh pr view <pr> --json state,mergeCommit` → state MUST be `MERGED`. If not,
    stop — finalize only runs post-merge.
-2. **Update local main.** `git switch main && git fetch origin main -q && git merge --ff-only origin/main`.
+2. **Update the root checkout's main.** Do NOT `git switch main` from a worktree — `main` is checked out
+   in the repo root, so the switch is rejected. Operate on the root explicitly:
+   ```bash
+   git -C <repo-root> fetch origin main -q
+   git -C <repo-root> merge --ff-only origin/main   # only if the root is on main; else just the fetch
+   ```
+   (Archiving + cleanup below run from the worktree / repo root as noted; they don't require local main.)
 3. **Archive the OpenSpec change** (design-driven): `openspec archive <slug> --yes` (use `--skip-specs`
    only for a doc/infra change with no capability delta). This moves the change to
    `openspec/changes/archive/` and syncs its delta spec into `openspec/specs/<capability>/spec.md`.

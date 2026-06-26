@@ -14,10 +14,14 @@ OpenSpec change `<slug>` (design-driven only).
 ## Steps
 
 1. **Confirm precondition.** Design-driven: issue is `status:spec-review` AND owner approved (ask if you
-   can't confirm). Oracle-driven: a pinned parity/repro test exists or is written first. Flip the label:
+   can't confirm). Oracle-driven: a pinned parity/repro test exists or is written first. Set exactly one
+   lifecycle label — clear ALL `status:*` first so the issue never carries two (oracle issues arrive at
+   `status:ready`, design issues at `status:spec-review`):
    ```bash
-   gh issue edit <N> --remove-label status:spec-review --add-label status:in-progress
+   gh issue edit <N> --remove-label status:ready --remove-label status:spec-review \
+     --remove-label status:addressing --remove-label status:in-review --add-label status:in-progress
    ```
+   (`--remove-label` is a no-op for labels not present, so this is safe regardless of the starting state.)
 2. **Test data.** Worktrees lack the gitignored `Data.db` binaries — run the gate and tests with
    `CQLITE_DATASETS_ROOT` pointed at the MAIN repo's `test-data/datasets` (or `fetch-datasets.sh`).
 3. **Implement (TDD).** Spawn `sstable-developer` (explicit model, e.g. opus) to implement the tasks

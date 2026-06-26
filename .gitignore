@@ -190,6 +190,9 @@ cassandra5-small.tar.gz.sha256
 # Runtime locks
 .claude/scheduled_tasks.lock
 
+# flow-lead delivery-pipeline worktrees (1:1:1:1 per-issue worktrees, never committed)
+.claude/worktrees/
+
 # SSTable guide audit working artifacts (not committed)
 docs/cassandra-5.0-src/
 docs/sstable-guide-audit/
