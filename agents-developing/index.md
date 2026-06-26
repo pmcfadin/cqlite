@@ -23,6 +23,7 @@ Write for AI agents: terse, imperative, copy-pasteable commands. Skip the prose.
 | [Wiring evidence](/cqlite/agents-developing/wiring-evidence/) | Prove the public surface exercises a feature; reject helper-only implementations (issues #949/#963) |
 | [Format debugging workflow](/cqlite/agents-developing/format-debugging/) | Hex dumps, definitive-guide chapters, appendix F known limitations |
 | [Spec-driven audit](/cqlite/agents-developing/spec-driven-audit/) | OpenSpec as the front door for design-driven work; the intent audit (C) + roborev escalation (B); superpowers mapping |
+| [Delivery pipeline](/cqlite/agents-developing/delivery-pipeline/) | The `flow-lead` manager agent + `flow-*` pipeline; specialist roster; the two human seams + pre-authorized merge-on-green |
 
 ## Non-negotiable rules
 
