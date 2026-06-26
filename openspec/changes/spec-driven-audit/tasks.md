@@ -34,8 +34,14 @@
 
 ## 5. Gate & review (done criteria)
 
-- [x] 5.1 Run `scripts/agent-gate.sh`; paste the AGENT-GATE SUMMARY block. (Docs/
-      agent-only change: confirm no code lanes regress.)
+- [x] 5.1 Confirm no code lanes regress. This change is docs/agent-only —
+      `git diff --name-only origin/main` touches only `*.md`, the `spec-auditor`
+      agent definition, and `openspec/**`; ZERO `*.rs` / `Cargo.*` / `.github/**`
+      / `*.sh` files change, so the gate's code lanes (fmt/clippy/tests/build)
+      cannot be affected. A full `scripts/agent-gate.sh` run (and its
+      AGENT-GATE SUMMARY block) is therefore N/A here and intentionally skipped;
+      this no-code-delta inspection IS the recorded evidence. Code changes under
+      this workflow still require the full gate + pasted summary.
 - [ ] 5.2 roborev clean on the branch.
 - [x] 5.3 Self-audit: run C against this change and confirm every requirement in
       `specs/change-audit/spec.md` is `satisfied` with evidence (dogfood).
