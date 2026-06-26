@@ -2261,10 +2261,12 @@ impl V5CompressedLegacyParser {
                 Err(_) => return Ok(ParseStep::Emitted(1)),
             };
 
-        // Static cells are kept as the collapsed map so they can be folded into
-        // subsequent clustering rows, exactly like the legacy path. They are
-        // surfaced as simple cells on each emitted row.
-        let mut static_cells: HashMap<String, Value> = HashMap::new();
+        // Issue #1074: on the COMPACTION path the static row is emitted as its own
+        // partition-level `CompactionRow` (Cassandra's `Row.staticRow`), NOT folded
+        // into the clustering rows. The user-facing read paths
+        // (`parse_block_emit_*` / `parse_one_partition_with_timestamps`) still fold
+        // statics into each row so a `SELECT` surfaces the static columns per row;
+        // compaction must preserve the partition/clustering-row separation instead.
         let mut pending: Vec<CompactionRow> = Vec::new();
 
         // Issue #1072: a partition-level tombstone in this SSTable must shadow OLDER
@@ -2450,11 +2452,15 @@ impl V5CompressedLegacyParser {
                 Some(&mut complex_capture),
             ) {
                 Ok((
-                    mut cells,
+                    cells,
                     cell_meta,
                     row_header_opt,
                     next_offset,
-                    is_static,
+                    // Issue #1074: the on-disk static flag no longer changes the
+                    // emit path — static and clustering rows each become their own
+                    // `CompactionRow` (see below) and the writer decides static
+                    // placement from the schema, not from on-disk folding.
+                    _is_static,
                     _complex_meta,
                 )) => {
                     offset = next_offset;
@@ -2473,28 +2479,31 @@ impl V5CompressedLegacyParser {
                         .or_else(|| row_tombstone.map(|h| h.row_tombstone_deletion_time()))
                         .unwrap_or(0);
 
-                    if is_static {
-                        static_cells = cells;
-                    } else {
-                        for (k, v) in &static_cells {
-                            cells.entry(k.clone()).or_insert_with(|| v.clone());
-                        }
+                    // Issue #1074: emit BOTH static and clustering rows as their own
+                    // `CompactionRow`. A static row carries no clustering prefix, so
+                    // it decodes to the merge's `None` bucket and reconciles
+                    // independently of the clustering rows — a clustering-row delete
+                    // can no longer shadow the static cell, a static-only partition is
+                    // no longer dropped, and the static cell keeps its OWN write
+                    // timestamp (instead of inheriting a clustering row's). The merge
+                    // re-emits it as a `clustering_key: None` mutation and the writer
+                    // rebuilds the partition static prelude via
+                    // `collect_static_operations` (static-ness decided by the schema,
+                    // not by on-disk folding).
+                    let row_data = self.build_compaction_row_data(
+                        cells,
+                        cell_meta,
+                        complex_capture,
+                        &row_header_opt,
+                        row_ts,
+                        schema,
+                    );
 
-                        let row_data = self.build_compaction_row_data(
-                            cells,
-                            cell_meta,
-                            complex_capture,
-                            &row_header_opt,
-                            row_ts,
-                            schema,
-                        );
-
-                        pending.push(CompactionRow {
-                            key: partition_key.clone(),
-                            row_timestamp: row_ts,
-                            row_data,
-                        });
-                    }
+                    pending.push(CompactionRow {
+                        key: partition_key.clone(),
+                        row_timestamp: row_ts,
+                        row_data,
+                    });
 
                     if offset >= data.len() {
                         if at_final_chunk {
