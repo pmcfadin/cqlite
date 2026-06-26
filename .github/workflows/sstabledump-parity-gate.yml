@@ -108,6 +108,7 @@ jobs:
             --test sstable_parity_index_db_test \
             --test sstable_parity_statistics_db_strict_test \
             --test sstable_parity_compression_info_test \
+            --test sstable_parity_compression_info_db_strict_test \
             --test sstable_parity_filter_db_test \
             --test sstable_parity_repaired_metadata_test \
             --test issue_997_compressioninfo_parity \
@@ -173,12 +174,20 @@ jobs:
             --test sstable_parity_statistics_db_strict_test \
             -- --nocapture
 
-      - name: Run CompressionInfo.db strict parity tests
+      - name: Run CompressionInfo.db parity tests
         id: compression_info_parity
         continue-on-error: true
         run: |
           cargo test --package cqlite-core --features write-support \
             --test sstable_parity_compression_info_test \
+            -- --nocapture
+
+      - name: Run CompressionInfo.db strict parity tests
+        id: compression_info_strict_parity
+        continue-on-error: true
+        run: |
+          cargo test --package cqlite-core --features write-support \
+            --test sstable_parity_compression_info_db_strict_test \
             -- --nocapture
 
       - name: Run Filter.db strict parity tests
@@ -226,7 +235,8 @@ jobs:
           - TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}
           - Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}
           - Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}
-          - CompressionInfo.db (strict): ${{ steps.compression_info_parity.outcome }}
+          - CompressionInfo.db: ${{ steps.compression_info_parity.outcome }}
+          - CompressionInfo.db (strict): ${{ steps.compression_info_strict_parity.outcome }}
           - Filter.db (strict): ${{ steps.filter_db_parity.outcome }}
           - Repaired-metadata (strict): ${{ steps.repaired_metadata_parity.outcome }}
           - Compression/corruption parity (epic #970, informational): ${{ steps.compression_corruption_parity.outcome }}
@@ -251,7 +261,7 @@ jobs:
           retention-days: 30
 
       - name: Comment on PR (Success)
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success' && steps.toc_component_parity.outcome == 'success' && steps.index_db_strict_parity.outcome == 'success' && steps.statistics_db_strict_parity.outcome == 'success' && steps.compression_info_parity.outcome == 'success' && steps.filter_db_parity.outcome == 'success' && steps.repaired_metadata_parity.outcome == 'success'
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && steps.data_parity.outcome == 'success' && steps.index_parity.outcome == 'success' && steps.summary_parity.outcome == 'success' && steps.statistics_parity.outcome == 'success' && steps.toc_component_parity.outcome == 'success' && steps.index_db_strict_parity.outcome == 'success' && steps.statistics_db_strict_parity.outcome == 'success' && steps.compression_info_parity.outcome == 'success' && steps.compression_info_strict_parity.outcome == 'success' && steps.filter_db_parity.outcome == 'success' && steps.repaired_metadata_parity.outcome == 'success'
         uses: actions/github-script@v8
         with:
           script: |
@@ -266,6 +276,7 @@ jobs:
             - TOC/Digest.crc32 (strict): success
             - Index.db (strict): success
             - Statistics.db (strict): success
+            - CompressionInfo.db: success
             - CompressionInfo.db (strict): success
             - Filter.db (strict): success
             - Repaired-metadata (strict): success
@@ -280,7 +291,7 @@ jobs:
             });
 
       - name: Comment on PR (Failure)
-        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success')
+        if: always() && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.compression_info_strict_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success')
         uses: actions/github-script@v8
         with:
           script: |
@@ -295,7 +306,8 @@ jobs:
             - TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}
             - Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}
             - Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}
-            - CompressionInfo.db (strict): ${{ steps.compression_info_parity.outcome }}
+            - CompressionInfo.db: ${{ steps.compression_info_parity.outcome }}
+            - CompressionInfo.db (strict): ${{ steps.compression_info_strict_parity.outcome }}
             - Filter.db (strict): ${{ steps.filter_db_parity.outcome }}
             - Repaired-metadata (strict): ${{ steps.repaired_metadata_parity.outcome }}
 
@@ -311,6 +323,7 @@ jobs:
             cargo test --package cqlite-core --features write-support --test sstable_parity_index_db_test -- --nocapture
             cargo test --package cqlite-core --features write-support --test sstable_parity_statistics_db_strict_test -- --nocapture
             cargo test --package cqlite-core --features write-support --test sstable_parity_compression_info_test -- --nocapture
+            cargo test --package cqlite-core --features write-support --test sstable_parity_compression_info_db_strict_test -- --nocapture
             cargo test --package cqlite-core --features write-support --test sstable_parity_filter_db_test -- --nocapture
             cargo test --package cqlite-core --features write-support --test sstable_parity_repaired_metadata_test -- --nocapture
             \`\`\``;
@@ -323,7 +336,7 @@ jobs:
             });
 
       - name: Fail build on parity differences
-        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success')
+        if: always() && (steps.data_parity.outcome != 'success' || steps.index_parity.outcome != 'success' || steps.summary_parity.outcome != 'success' || steps.statistics_parity.outcome != 'success' || steps.toc_component_parity.outcome != 'success' || steps.index_db_strict_parity.outcome != 'success' || steps.statistics_db_strict_parity.outcome != 'success' || steps.compression_info_parity.outcome != 'success' || steps.compression_info_strict_parity.outcome != 'success' || steps.filter_db_parity.outcome != 'success' || steps.repaired_metadata_parity.outcome != 'success')
         run: |
           echo "❌ M5 parity gate failed"
           echo "Data.db: ${{ steps.data_parity.outcome }}"
@@ -333,7 +346,8 @@ jobs:
           echo "TOC/Digest.crc32 (strict): ${{ steps.toc_component_parity.outcome }}"
           echo "Index.db (strict): ${{ steps.index_db_strict_parity.outcome }}"
           echo "Statistics.db (strict): ${{ steps.statistics_db_strict_parity.outcome }}"
-          echo "CompressionInfo.db (strict): ${{ steps.compression_info_parity.outcome }}"
+          echo "CompressionInfo.db: ${{ steps.compression_info_parity.outcome }}"
+          echo "CompressionInfo.db (strict): ${{ steps.compression_info_strict_parity.outcome }}"
           echo "Filter.db (strict): ${{ steps.filter_db_parity.outcome }}"
           echo "Repaired-metadata (strict): ${{ steps.repaired_metadata_parity.outcome }}"
           exit 1

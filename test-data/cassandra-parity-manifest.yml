@@ -1780,8 +1780,11 @@ scenarios:
         and values) against sstabledump JSONL; chunk offset tables are used for
         positioning.
       known_limitations: >-
-        Validates decompressed content equivalence; a byte comparison of the
-        CompressionInfo.db chunk-offset table and per-chunk CRC is not gated.
+        Validates decompressed content equivalence (row count + values). The
+        byte-level CompressionInfo.db chunk-offset table and per-chunk inline-CRC
+        parity is gated separately by the strict lane below
+        (cass.compression_info.* / sstable_parity_compression_info_db_strict_test,
+        issue #986).
     ci:
       tier: required_parity
       workflow: .github/workflows/sstabledump-parity-gate.yml
@@ -2281,6 +2284,450 @@ scenarios:
       next_step: >-
         Generate a ZstdCompressor SSTable via regenerate-datasets.sh and let the
         existing test exercise it (the codec dispatch already handles it).
+
+  # ----------------------------------------------------------------------------
+  # compression_info (strict CompressionInfo.db + chunk byte parity, issue #986 / epic #968)
+  # ----------------------------------------------------------------------------
+  - id: cass.compression_info.CompressionMetadataTest.metadata_serialization.strict
+    title: CompressionInfo.db metadata byte-for-byte round-trip
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+        - CompressedSequentialWriterTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          compression_info_db_strict_byte_parity decodes every committed
+          compressed fixture's CompressionInfo.db and re-serialises the parsed
+          struct with the authoritative CompressionMetadata.java (>= "na") layout;
+          the bytes must reproduce the original file exactly (compressor name,
+          options, chunk_length, max_compressed_length, data_length, chunk_count,
+          and the chunk-offset table), across nb/oa/da fixtures.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
+        - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, offsets, component_files]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes CompressionInfo.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_compression_info_db_strict_test
+        compression_info_db_strict_byte_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+        - test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt
+        - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-TOC.txt
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-roundtrip-mismatch.log
+      known_limitations: >-
+        The committed *-TOC.txt manifests (always present, listing
+        CompressionInfo.db) drive the lane; the *-CompressionInfo.db binary is a
+        fetched fixture. When the binary is absent that fixture is skipped (never
+        a silent pass) and TOC reference presence is still enforced fail-closed.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets.strict
+    title: CompressionInfo.db chunk-offset table parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressedRandomAccessReaderTest.java
+        - CompressionMetadataTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          The decoded chunk-offset table is asserted strictly ascending, starting
+          at Data.db byte 0, with length >= ceil(data_length / chunk_length) — a
+          lower bound only, not equality and with no upper bound: a forced flush/close
+          can add chunks beyond the ceiling and even append empty trailing chunks (so
+          for tiny files chunk_count can exceed data_length). The exact total is
+          cross-checked end-to-end by decompressing every chunk and asserting the sum
+          equals data_length, which is what catches over-read metadata. A genuinely
+          multi-chunk fixture (data_length > chunk_length) is required so real offset
+          boundaries between addressable chunks are exercised, not just single-chunk.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [offsets, bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes CompressionInfo.db
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_compression_info_db_strict_test
+        compression_info_db_strict_byte_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+      failure_artifacts:
+        - target/cassandra-parity/compression-info-offsets-mismatch.log
+      known_limitations: >-
+        Offsets are validated as part of the full byte-for-byte round-trip; the
+        chunk-count invariant additionally cross-checks data_length / chunk_length.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries.strict
+    title: Compressed chunk boundary consistency with Data.db
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressedSequentialWriterTest.java
+        - CompressedSequentialWriterReopenTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          Every chunk-offset record (compressed payload + 4-byte inline CRC) is
+          read from the sibling Data.db and decompressed; the concatenated output
+          length equals the decoded data_length, proving chunk boundaries are
+          consistent end-to-end with the bytes Cassandra wrote.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [offsets, bytes, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes Data.db chunks
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_compression_info_db_strict_test
+        compression_info_db_strict_byte_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-chunk-boundary-mismatch.log
+      known_limitations: >-
+        Exercised only when the sibling Data.db binary is fetched; metadata-only
+        runs (CompressionInfo.db present, Data.db absent) skip the decompression
+        cross-check but never count it as a pass.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation.strict
+    title: Data.db inline per-chunk CRC32 trailer parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: checksum
+      relevance: high
+      files:
+        - DirectCompressedChunkReaderTest.java
+        - StandardCompressedChunkReaderTest.java
+        - ChecksummedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          Each compressed chunk's 4-byte big-endian inline CRC32 trailer in Data.db
+          is recomputed and validated during decompression. The corruption lane
+          (compression_info_db_strict_corruption_fails_closed) flips a chunk byte
+          and proves the CRC mismatch fails closed rather than returning garbage.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [checksums, bytes]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 writes inline chunk CRCs
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_compression_info_db_strict_test
+      reference_paths:
+        - test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl
+      failure_artifacts:
+        - target/cassandra-parity/compression-inline-crc-mismatch.log
+      known_limitations: >-
+        Inline CRCs are stored in Data.db (not CompressionInfo.db); validation runs
+        only when the Data.db binary is fetched.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection.strict
+    title: Corrupted CompressionInfo.db / truncated chunk fails closed
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p0_data_loss
+    cassandra:
+      category: checksum
+      relevance: high
+      files:
+        - CompressedInputStreamTest.java
+        - SSTableCorruptionDetectionTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          compression_info_db_strict_corruption_fails_closed mutates a fetched
+          fixture four ways — truncate below the header, zero chunk_length, bogus
+          compressor-name length prefix, and a flipped compressed-chunk byte — and
+          asserts each is rejected with an explicit error, never silently accepted.
+    fixtures:
+      references:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # mutated in-test from a clean fixture
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_compression_info_db_strict_test
+        compression_info_db_strict_corruption_fails_closed
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+      failure_artifacts:
+        - target/cassandra-parity/compression-corruption-accepted.log
+      known_limitations: >-
+        The flipped-chunk-byte case needs the sibling Data.db; the three
+        CompressionInfo.db mutations run whenever any CompressionInfo.db binary is
+        fetched.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.lz4.real_fixture_chunks.strict
+    title: LZ4 real-fixture CompressionInfo.db + chunk parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+        - CompressedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          The corpus contains real Cassandra LZ4Compressor SSTables; the strict
+          lane records compressor coverage and requires at least one of LZ4 /
+          Snappy to be decoded when binaries are present.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 default LZ4 tables
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_compression_info_db_strict_test
+        compression_info_db_strict_byte_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+      failure_artifacts:
+        - target/cassandra-parity/compression-lz4-mismatch.log
+      known_limitations: >-
+        Compressor coverage is asserted across the whole corpus (LZ4 or Snappy
+        required when binaries are present), not per-named-fixture.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.snappy.real_fixture_chunks.strict
+    title: Snappy real-fixture CompressionInfo.db + chunk parity
+    status: mirrored
+    capability: compression_checksum
+    priority: P0
+    risk: p1_correctness
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+        - CompressedRandomAccessReaderTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          The corpus contains real Cassandra SnappyCompressor SSTables (e.g. the
+          simple_table fixtures); the strict lane decodes and round-trips their
+          CompressionInfo.db and validates inline chunk CRCs against Data.db.
+    fixtures:
+      datasets:
+        - test-data/datasets/sstables
+    evidence:
+      type: byte_for_byte
+      strict: true
+      artifacts: [bytes, checksums]
+      cassandra_version: "5.0.2"
+      cassandra_git_sha: f278f6774fc76465c182041e081982105c3e7dbb
+      storage_format_version: [nb, oa, da]
+      fixture_generation_command: >-
+        bash test-data/scripts/regenerate-datasets.sh  # cassandra:5.0.2 Snappy-compressed tables
+      comparison_command: >-
+        env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
+        --test sstable_parity_compression_info_db_strict_test
+        compression_info_db_strict_byte_parity
+      reference_paths:
+        - test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt
+      failure_artifacts:
+        - target/cassandra-parity/compression-snappy-mismatch.log
+      known_limitations: >-
+        Compressor coverage is asserted across the whole corpus (LZ4 or Snappy
+        required when binaries are present), not per-named-fixture.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope: {}
+
+  - id: cass.compression_info.deflate.real_fixture_chunks.strict
+    title: Deflate real-fixture CompressionInfo.db + chunk parity
+    status: planned
+    capability: compression_checksum
+    priority: P0
+    risk: p2_coverage
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+        - CompressedInputStreamTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          The strict lane decodes DeflateCompressor fixtures if present, but the
+          committed corpus ships only LZ4/Snappy. A real Cassandra Deflate fixture
+          is required before Deflate chunk parity is claimed.
+    fixtures: {}
+    evidence:
+      type: partial
+      artifacts: [bytes, checksums]
+      known_limitations: >-
+        No real Cassandra Deflate-compressed SSTable in the corpus yet; the decoder
+        path exists but is unexercised by a fixture.
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      target_issue: 996
+      target_suite: sstable_parity_compression_info_chunks
+      gap: No real Cassandra Deflate-compressed fixture in the corpus.
+      next_step: >-
+        Generate a DeflateCompressor SSTable fixture via issue #996 (epic #970) and
+        add it to the dataset; the strict lane will then decode and round-trip it.
+
+  - id: cass.compression_info.zstd.real_fixture_chunks.strict
+    title: Zstd real-fixture CompressionInfo.db + chunk parity
+    status: planned
+    capability: compression_checksum
+    priority: P0
+    risk: p2_coverage
+    cassandra:
+      category: compression
+      relevance: high
+      files:
+        - CompressionMetadataTest.java
+        - CompressedInputStreamTest.java
+    cqlite:
+      coverage:
+        suite: sstable_parity_compression_info_chunks
+        tests:
+          - cqlite-core/tests/sstable_parity_compression_info_db_strict_test.rs
+        notes: >-
+          The strict lane decodes ZstdCompressor fixtures if present, but the
+          committed corpus ships only LZ4/Snappy. Zstd dictionary compression stays
+          out of scope (epic #970).
+    fixtures: {}
+    evidence:
+      type: partial
+      artifacts: [bytes, checksums]
+      known_limitations: >-
+        No real Cassandra Zstd-compressed SSTable in the corpus yet; Zstd
+        dictionary compression remains explicitly deferred (epic #970).
+    ci:
+      tier: required_parity
+      workflow: .github/workflows/sstabledump-parity-gate.yml
+    scope:
+      target_issue: 996
+      target_suite: sstable_parity_compression_info_chunks
+      gap: No real Cassandra Zstd-compressed fixture in the corpus (non-dictionary).
+      next_step: >-
+        Generate a non-dictionary ZstdCompressor SSTable fixture via issue #996
+        (epic #970); the strict lane will then decode and round-trip it.
 
   # ----------------------------------------------------------------------------
   # corruption_verify

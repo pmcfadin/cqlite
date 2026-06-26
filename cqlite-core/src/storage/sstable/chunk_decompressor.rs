@@ -128,6 +128,28 @@ impl ChunkDecompressor {
         Ok(chunk_data)
     }
 
+    /// Exact uncompressed size Cassandra wrote for chunk `chunk_index`, derived from
+    /// `data_length` and `chunk_length`.
+    ///
+    /// Cassandra lays chunks out so that random access works via
+    /// `position / chunk_length`: every chunk that holds data up to the final byte is
+    /// exactly `chunk_length`, the chunk containing the final byte is the partial
+    /// remainder, and any chunk whose start is at/after `data_length` is empty (some
+    /// flush/close paths append a degenerate trailing chunk — e.g. `system/local`:
+    /// data_length 708, chunk_length 16384, chunk 0 = 708 bytes, chunk 1 = 0). This is
+    /// the precise per-chunk invariant: stricter than `<= chunk_length` (it still
+    /// rejects a short chunk that has addressable data after it — corruption that would
+    /// also break Cassandra's own position→chunk mapping), but not the over-strict
+    /// `== chunk_length` that rejected valid partial/trailing chunks.
+    fn expected_decompressed_len(&self, chunk_index: usize) -> u64 {
+        let chunk_length = self.compression_info.chunk_length as u64;
+        let start = (chunk_index as u64).saturating_mul(chunk_length);
+        self.compression_info
+            .data_length
+            .saturating_sub(start)
+            .min(chunk_length)
+    }
+
     /// Decompress a specific chunk from the compressed data file
     fn decompress_chunk<R: Read + Seek>(
         &self,
@@ -208,6 +230,20 @@ impl ChunkDecompressor {
                 "Chunk {} is incompressible (compressed_len={} >= max_compressed_length={}), returning raw bytes",
                 chunk_index, compressed_len, max_compressed_length
             );
+            // A raw chunk's stored bytes ARE the uncompressed bytes, so they must match
+            // the exact size Cassandra wrote for this chunk index — the same invariant
+            // the compressed path checks below (see `expected_decompressed_len`).
+            let expected_size = self.expected_decompressed_len(chunk_index);
+            if compressed_data.len() as u64 != expected_size {
+                return Err(Error::InvalidFormat(format!(
+                    "Raw (incompressible) chunk {} size {} != expected {} (data_length {}, chunk_length {}) — corrupt or misdecoded",
+                    chunk_index,
+                    compressed_data.len(),
+                    expected_size,
+                    self.compression_info.data_length,
+                    self.compression_info.chunk_length,
+                )));
+            }
             return Ok(compressed_data);
         }
 
@@ -223,18 +259,21 @@ impl ChunkDecompressor {
             ))),
         }?;
 
-        // Validate decompressed data size matches expected chunk length
-        // (for all chunks except possibly the last one)
-        if chunk_index < self.compression_info.chunk_offsets.len() - 1 {
-            let expected_size = self.compression_info.chunk_length as usize;
-            if decompressed.len() != expected_size {
-                return Err(Error::InvalidFormat(format!(
-                    "Decompressed chunk {} size mismatch: expected {}, got {}",
-                    chunk_index,
-                    expected_size,
-                    decompressed.len()
-                )));
-            }
+        // Validate the decompressed chunk size against the exact size Cassandra wrote
+        // for this chunk index (see `expected_decompressed_len`). This handles full
+        // chunks, the partial final-data chunk, and degenerate empty trailing chunks,
+        // while still rejecting a short non-final chunk that has addressable data after
+        // it (corruption). The inline CRC above is the primary integrity guard.
+        let expected_size = self.expected_decompressed_len(chunk_index);
+        if decompressed.len() as u64 != expected_size {
+            return Err(Error::InvalidFormat(format!(
+                "Decompressed chunk {} size {} != expected {} (data_length {}, chunk_length {}) — corrupt or misdecoded",
+                chunk_index,
+                decompressed.len(),
+                expected_size,
+                self.compression_info.data_length,
+                self.compression_info.chunk_length,
+            )));
         }
 
         Ok(decompressed)
@@ -279,13 +318,12 @@ impl ChunkDecompressor {
             compressed_data[3],
         ]) as usize;
 
-        // Validate the decompressed length against expected chunk size
-        let expected_size = self.compression_info.chunk_length as usize;
-
-        // For all chunks except possibly the last one, decompressed length should match chunk_length
-        if chunk_index < self.compression_info.chunk_offsets.len() - 1
-            && decompressed_length != expected_size
-        {
+        // Validate the LZ4 length prefix against the exact size Cassandra wrote for
+        // this chunk index (full / partial-final / empty-trailing — see
+        // `expected_decompressed_len`). Fails fast on a misdecoded prefix before
+        // attempting decompression.
+        let expected_size = self.expected_decompressed_len(chunk_index) as usize;
+        if decompressed_length != expected_size {
             return Err(Error::InvalidFormat(format!(
                 "LZ4 length prefix mismatch for chunk {} at offset 0x{:x}: expected {}, got {} (first 4 bytes: {:02x} {:02x} {:02x} {:02x}){}",
                 chunk_index,
@@ -477,9 +515,32 @@ impl ChunkDecompressor {
         (self.chunk_cache.len(), self.max_cached_chunks)
     }
 
-    /// Read all data from the compressed file (for testing/debugging)
+    /// Read all data from the compressed file (for testing/debugging).
+    ///
+    /// Bounded by `data_length`, so it does NOT touch a degenerate empty trailing
+    /// chunk that holds no addressable data. To validate EVERY chunk record's inline
+    /// CRC (including such trailing chunks), iterate `chunk_count()` and call
+    /// `decompress_chunk_by_index`.
     pub fn read_all_data<R: Read + Seek>(&mut self, reader: &mut R) -> Result<Vec<u8>> {
         self.read_data(reader, 0, self.compression_info.data_length as usize)
+    }
+
+    /// Number of compressed chunk records (the CompressionInfo.db offset-table length).
+    pub fn chunk_count(&self) -> usize {
+        self.compression_info.chunk_offsets.len()
+    }
+
+    /// Decompress a single chunk by index, validating its inline CRC32 trailer.
+    ///
+    /// Exposed for strict per-chunk parity tests that must exercise every chunk record
+    /// — including degenerate trailing chunks that `read_all_data` (bounded by
+    /// `data_length`) never reads.
+    pub fn decompress_chunk_by_index<R: Read + Seek>(
+        &mut self,
+        reader: &mut R,
+        chunk_index: usize,
+    ) -> Result<Vec<u8>> {
+        self.get_decompressed_chunk(reader, chunk_index)
     }
 
     /// Get compression info

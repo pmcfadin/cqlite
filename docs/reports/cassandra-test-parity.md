@@ -10,17 +10,17 @@ Sources: [`docs/cassandra_test_index.md`](../../docs/cassandra_test_index.md) ·
 
 | Status | Scenarios |
 |---|---|
-| `mirrored` | 149 |
-| `partial` | 13 |
-| `planned` | 13 |
+| `mirrored` | 158 |
+| `partial` | 11 |
+| `planned` | 15 |
 | `out_of_scope` | 14 |
-| **total** | **189** |
+| **total** | **198** |
 
 ## Evidence counts
 
 | Evidence | Scenarios |
 |---|---|
-| `byte_for_byte` | 78 |
+| `byte_for_byte` | 87 |
 | `canonical_semantic` | 66 |
 | `smoke` | 7 |
 | `partial` | 22 |
@@ -33,6 +33,8 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compaction_merge.byte_for_byte_output` — Compaction byte-for-byte output parity (future) (partial)
 - `cass.compaction_merge.load_path_validity` — Compaction output load-path validity (Tier-1) (smoke)
 - `cass.compression_checksum.checksum_trailer_detection` — Inline checksum / Digest.crc32 corruption detection (partial)
+- `cass.compression_info.deflate.real_fixture_chunks.strict` — Deflate real-fixture CompressionInfo.db + chunk parity (partial)
+- `cass.compression_info.zstd.real_fixture_chunks.strict` — Zstd real-fixture CompressionInfo.db + chunk parity (partial)
 - `cass.corruption_verify.component_corruption_detection` — Component corruption detection, scrub, and verify (partial)
 - `cass.delta_scan.tombstone_liveness_facts` — Delta-scan tombstone/TTL/liveness fact extraction (partial)
 - `cass.filter_db_bloom.serialization_no_false_negative` — Filter.db Bloom filter serialization with no false negatives (partial)
@@ -41,8 +43,6 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.index_summary.summary_boundaries` — Summary.db sampling boundaries (BIG) (partial)
 - `cass.schema_evolution.dropped_column.empty_index_block_reverse_scan` — Dropped-column empty-index-block reverse-scan parity (partial)
 - `cass.sstable_format.descriptor_component_resolution` — Descriptor and on-disk version/component resolution (smoke)
-- `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` — Statistics.db max local deletion time for tombstone/TTL fixture (partial)
-- `cass.statistics_metadata.tombstone_histogram.deletion_times` — Statistics.db estimated tombstone-drop-times histogram parity (partial)
 - `cass.tombstone_ttl.range_tombstone_boundaries` — Range tombstone boundary and deletion-time parity (partial)
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` — Repaired vs unrepaired purge gate parity (partial)
 - `cass.write_load_path.cassandra_sstable_writer_fixtures` — CQLite-written SSTables load into Cassandra via sstableloader (smoke)
@@ -70,11 +70,17 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.compression_checksum.checksum_trailer_detection` | compression_checksum | partial | partial | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.compression_checksum.chunk_offsets_and_crc` | compression_checksum | mirrored | canonical_semantic | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
+| `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection.strict` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
+| `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets.strict` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
+| `cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries.strict` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.CompressionMetadataTest.metadata_serialization` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
+| `cass.compression_info.CompressionMetadataTest.metadata_serialization.strict` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
+| `cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation.strict` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.StandardCompressedChunkReaderTest.round_trip_chunk_bytes` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
+| `cass.compression_info.deflate.real_fixture_chunks.strict` | compression_checksum | planned | partial | `sstable_parity_compression_info_chunks` | p2_coverage |
 | `cass.compression_info.fields.algorithm_name` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.fields.chunk_length` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.fields.chunk_offsets` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
@@ -82,7 +88,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.compression_info.fields.max_compressed_length` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.fields.options` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
 | `cass.compression_info.lz4.real_fixture_chunks` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
+| `cass.compression_info.lz4.real_fixture_chunks.strict` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p1_correctness |
 | `cass.compression_info.snappy.real_fixture_chunks` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p0_data_loss |
+| `cass.compression_info.snappy.real_fixture_chunks.strict` | compression_checksum | mirrored | byte_for_byte | `sstable_parity_compression_info_chunks` | p1_correctness |
+| `cass.compression_info.zstd.real_fixture_chunks.strict` | compression_checksum | planned | partial | `sstable_parity_compression_info_chunks` | p2_coverage |
 | `cass.corruption.bti_partitions_footer_bit_flip` | corruption_verify | planned | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption.bti_rows_truncation` | corruption_verify | planned | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
 | `cass.corruption.compression_info.bad_offset` | corruption_verify | mirrored | byte_for_byte | `sstable_parity_corruption_verify` | p0_data_loss |
@@ -135,9 +144,9 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 | `cass.statistics_db.SSTableMetadataTrackingTest.timestamp_and_ttl_metadata` | tombstone_ttl | mirrored | byte_for_byte | `sstable_parity_statistics_db` | p1_correctness |
 | `cass.statistics_db.SerializationHeaderTest.schema_evolution_header` | schema_evolution | mirrored | byte_for_byte | `sstable_parity_statistics_db` | p1_correctness |
 | `cass.statistics_db.core_metadata_checksums` | statistics_metadata | mirrored | byte_for_byte | `sstable_parity_statistics_db` | p0_data_loss |
-| `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` | statistics_metadata | partial | partial | `sstable_parity_statistics_db` | p1_correctness |
+| `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` | statistics_metadata | mirrored | byte_for_byte | `sstable_parity_statistics_db` | p1_correctness |
 | `cass.statistics_metadata.serialization_header` | statistics_metadata | mirrored | canonical_semantic | `sstable_parity_statistics_db` | p1_correctness |
-| `cass.statistics_metadata.tombstone_histogram.deletion_times` | statistics_metadata | partial | partial | `sstable_parity_statistics_db` | p1_correctness |
+| `cass.statistics_metadata.tombstone_histogram.deletion_times` | statistics_metadata | mirrored | byte_for_byte | `sstable_parity_statistics_db` | p1_correctness |
 | `cass.summary_db.IndexSummaryTest.first_last_key_boundaries` | index_summary | mirrored | byte_for_byte | `sstable_parity_summary_db_big` | p1_correctness |
 | `cass.summary_db.IndexSummaryTest.offset_table_entries` | index_summary | mirrored | byte_for_byte | `sstable_parity_summary_db_big` | p1_correctness |
 | `cass.summary_db.IndexSummaryTest.serialization_round_trip` | index_summary | mirrored | byte_for_byte | `sstable_parity_summary_db_big` | p1_correctness |
@@ -182,10 +191,15 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compression.fixture_matrix.uncompressed_table` — Uncompressed table fixture — no CompressionInfo.db emitted
 - `cass.compression.fixture_matrix.zstd_no_dictionary` — Zstd (no dictionary) compression fixture — CompressionInfo.db parity
 - `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection` — Truncated compressed chunk fail-closed parity
+- `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection.strict` — Corrupted CompressionInfo.db / truncated chunk fails closed
 - `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets` — CompressionInfo.db ordered chunk-offset table parity
+- `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets.strict` — CompressionInfo.db chunk-offset table parity
 - `cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries` — Compressed chunk record boundaries vs Data.db parity
+- `cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries.strict` — Compressed chunk boundary consistency with Data.db
 - `cass.compression_info.CompressionMetadataTest.metadata_serialization` — CompressionInfo.db metadata byte-for-byte serialization parity
+- `cass.compression_info.CompressionMetadataTest.metadata_serialization.strict` — CompressionInfo.db metadata byte-for-byte round-trip
 - `cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation` — Inline per-chunk CRC32 trailer validation parity
+- `cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation.strict` — Data.db inline per-chunk CRC32 trailer parity
 - `cass.compression_info.StandardCompressedChunkReaderTest.round_trip_chunk_bytes` — Compressed chunk payload + CRC round-trip byte parity
 - `cass.compression_info.fields.algorithm_name` — CompressionInfo.db algorithm-name field parity
 - `cass.compression_info.fields.chunk_length` — CompressionInfo.db chunk_length field parity
@@ -195,7 +209,9 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compression_info.fields.options` — CompressionInfo.db compressor-options map parity
 - `cass.compression_info.layout.no_crc_fields` — CompressionInfo.db carries no per-chunk CRC (CRC lives inline in Data.db)
 - `cass.compression_info.lz4.real_fixture_chunks` — LZ4Compressor real-fixture chunk + CRC parity
+- `cass.compression_info.lz4.real_fixture_chunks.strict` — LZ4 real-fixture CompressionInfo.db + chunk parity
 - `cass.compression_info.snappy.real_fixture_chunks` — SnappyCompressor real-fixture chunk + CRC parity
+- `cass.compression_info.snappy.real_fixture_chunks.strict` — Snappy real-fixture CompressionInfo.db + chunk parity
 - `cass.corruption.bti_partitions_footer_bit_flip` — BTI Partitions.db footer bit flip is detected
 - `cass.corruption.bti_rows_truncation` — BTI Rows.db truncation is detected
 - `cass.corruption.compression_info.bad_offset` — CompressionInfo.db out-of-bounds chunk offset is detected
@@ -249,6 +265,10 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.statistics_db.SerializationHeaderTest.schema_evolution_header` — Statistics.db serialization-header column metadata byte parity
 - `cass.statistics_db.SerializationMirrorTest.column_ordering_metadata` — Statistics.db clustering-key ordering / ReversedType byte parity
 - `cass.statistics_db.core_metadata_checksums` — Statistics.db embedded CRC32 checksum byte parity
+- `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` — Statistics.db max local deletion time for tombstone/TTL fixture
+  - Normalization: The STATS-component SSTable max local deletion time decoded by CQLite is compared against the parenthesised integer parsed from the reference dump; the "no tombstones" sentinel (9223372036854775807) is treated as i64::MAX on both sides.
+- `cass.statistics_metadata.tombstone_histogram.deletion_times` — Statistics.db estimated tombstone-drop-times histogram parity
+  - Normalization: The estimated-tombstone-drop-times histogram buckets decoded by CQLite are compared against the `Estimated tombstone drop times` rows parsed from the reference dump (bucket cardinality, total count, and rounded drop-time points).
 - `cass.summary_db.IndexSummaryTest.first_last_key_boundaries` — Summary.db first/last decorated-key boundaries (BIG)
 - `cass.summary_db.IndexSummaryTest.offset_table_entries` — Summary.db little-endian offset table + entry ordering (BIG)
 - `cass.summary_db.IndexSummaryTest.serialization_round_trip` — Summary.db header + entry serialization round-trip (BIG)
@@ -410,7 +430,9 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.compaction_merge.byte_for_byte_output` (planned): No gated byte-for-byte comparison of compaction output. → _Promote the debug byte tier in compaction-parity to a gated comparison once writer output is byte-stable._
 - `cass.compression_checksum.checksum_trailer_detection` (partial): No gated byte comparison of Digest.crc32 against the Cassandra reference. → _Add a Digest.crc32 byte comparison to the sstable_parity_corruption_verify suite._
 - `cass.compression_info.deflate.real_fixture_chunks` (planned): No real DeflateCompressor CompressionInfo.db / Data.db fixture in the committed corpus, so chunk + CRC parity cannot be byte-compared. → _Generate a DeflateCompressor SSTable via regenerate-datasets.sh and let the existing test exercise it (the codec dispatch already handles it)._
+- `cass.compression_info.deflate.real_fixture_chunks.strict` (planned): No real Cassandra Deflate-compressed fixture in the corpus. → _Generate a DeflateCompressor SSTable fixture via issue #996 (epic #970) and add it to the dataset; the strict lane will then decode and round-trip it._
 - `cass.compression_info.zstd.real_fixture_chunks` (planned): No real ZstdCompressor CompressionInfo.db / Data.db fixture in the committed corpus, so chunk + CRC parity cannot be byte-compared. → _Generate a ZstdCompressor SSTable via regenerate-datasets.sh and let the existing test exercise it (the codec dispatch already handles it)._
+- `cass.compression_info.zstd.real_fixture_chunks.strict` (planned): No real Cassandra Zstd-compressed fixture in the corpus (non-dictionary). → _Generate a non-dictionary ZstdCompressor SSTable fixture via issue #996 (epic #970); the strict lane will then decode and round-trip it._
 - `cass.corruption.bti_partitions_footer_bit_flip` (planned): Clean BTI source (test_da/wide_table Partitions.db) is not git-tracked, so the corrupted fixture cannot be regenerated by CI. → _Commit the clean test_da/wide_table BTI components (or add them to the published dataset bundle) so generate-corruption-corpus.sh can emit the corrupted Partitions.db, then flip status to mirrored._
 - `cass.corruption.bti_rows_truncation` (planned): Clean BTI source (test_da/wide_table Rows.db) is not git-tracked, so the truncated fixture cannot be regenerated by CI. → _Commit the clean test_da/wide_table BTI components so generate-corruption-corpus.sh can emit the truncated Rows.db, then flip status to mirrored._
 - `cass.corruption_verify.component_corruption_detection` (planned): No scrub/verify parity pass implemented. → _Implement a verify pass and compare detected-corruption outcomes against Cassandra VerifyTest/ScrubTest scenarios._
@@ -428,8 +450,6 @@ These P0 scenarios are backed only by `smoke` or `partial` evidence and must not
 - `cass.statistics_db.SSTableMetadataTest.max_local_deletion_time` (planned): STATS-section max timestamp / max local-deletion-time not yet decoded. → _Decode the STATS MetadataType component and assert max timestamp / max local-deletion-time against the reference dump._
 - `cass.statistics_db.clustering_key_bounds` (planned): Covered-clustering min/max bounds not yet decoded from the STATS component. → _Decode the STATS-section clustering bounds and compare against the "Covered clusterings" reference line._
 - `cass.statistics_db.histograms_and_estimates` (planned): STATS-section histograms and partition/row estimates not yet decoded. → _Decode the STATS-section EstimatedHistograms and count estimates and compare bucket boundaries against the reference dump._
-- `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` (partial): CQLite's minimal Statistics parser does not decode the STATS-component SSTable max local deletion time and returns a placeholder equal to the min baseline. → _Decode the STATS max local-deletion-time field and assert it byte-equal to the sstablemetadata reference; tracked by follow-up issue #1073._
-- `cass.statistics_metadata.tombstone_histogram.deletion_times` (partial): The estimated-tombstone-drop-times histogram in Statistics.db is not decoded or exposed by CQLite. → _Decode the estimated-tombstone-drop-times histogram and assert bucket parity against the sstablemetadata reference; tracked by follow-up issue #1073._
 - `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` (planned): No downsampled (sampling_level < 128) Summary.db fixture exists. → _Publish a redistributed Summary.db fixture and extend the strict suite to assert downsampled offset tables and size_at_full_sampling > entry count._
 - `cass.tombstone_ttl.range_tombstone_boundaries` (partial): test_deltas dataset asset not published/enforced in CI (#701). → _Publish the test_deltas dataset and enforce scan_delta parity in CI._
 - `cass.tombstone_ttl.repaired_unrepaired_purge_gate` (partial): repairedAt / pendingRepair parsing is not implemented (gated on #968/#988), so the repaired-vs-unrepaired purge gate is only partially exercised. → _Parse repairedAt / pendingRepair from Statistics.db and gate purge on repair status (#968/#988)._
@@ -525,12 +545,18 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compression_checksum.checksum_trailer_detection` | fast_pr | — |
 | `cass.compression_checksum.chunk_offsets_and_crc` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.CompressionMetadataTest.metadata_serialization` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.compression_info.CompressionMetadataTest.metadata_serialization.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.StandardCompressedChunkReaderTest.round_trip_chunk_bytes` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.deflate.real_fixture_chunks` | manual_debug | — |
+| `cass.compression_info.deflate.real_fixture_chunks.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.fields.algorithm_name` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.compression_info.fields.chunk_length` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.compression_info.fields.chunk_offsets` | required_parity | .github/workflows/cassandra-parity.yml |
@@ -539,8 +565,11 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compression_info.fields.options` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.compression_info.layout.no_crc_fields` | required_parity | .github/workflows/cassandra-parity.yml |
 | `cass.compression_info.lz4.real_fixture_chunks` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.compression_info.lz4.real_fixture_chunks.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.snappy.real_fixture_chunks` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
+| `cass.compression_info.snappy.real_fixture_chunks.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.compression_info.zstd.real_fixture_chunks` | manual_debug | — |
+| `cass.compression_info.zstd.real_fixture_chunks.strict` | required_parity | .github/workflows/sstabledump-parity-gate.yml |
 | `cass.corruption.bti_partitions_footer_bit_flip` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.bti_rows_truncation` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
 | `cass.corruption.compression_info.bad_offset` | exhaustive_regeneration | .github/workflows/compression-corruption-parity.yml |
@@ -719,12 +748,18 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compression_checksum.checksum_trailer_detection` | da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Digest.crc32<br>_fail:_ target/cassandra-parity/checksum-mismatch.log |
 | `cass.compression_checksum.chunk_offsets_and_crc` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl |
 | `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-info-truncated-chunk.log |
+| `cass.compression_info.CompressedInputStreamTest.truncated_chunk_detection.strict` | nb, oa, da | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>_fail:_ target/cassandra-parity/compression-corruption-accepted.log |
 | `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-info-chunk-offsets-mismatch.log |
+| `cass.compression_info.CompressedRandomAccessReaderTest.chunk_offsets.strict` | nb, oa, da | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>_fail:_ target/cassandra-parity/compression-info-offsets-mismatch.log |
 | `cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-info-chunk-boundaries-mismatch.log |
+| `cass.compression_info.CompressedSequentialWriterTest.chunk_boundaries.strict` | nb, oa, da | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-chunk-boundary-mismatch.log |
 | `cass.compression_info.CompressionMetadataTest.metadata_serialization` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-info-metadata-mismatch.log |
+| `cass.compression_info.CompressionMetadataTest.metadata_serialization.strict` | nb, oa, da | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>test-data/datasets/sstables/test_oa/collection_table-4b892c6064e711f1bd3ac7dbf655c673/oa-2-big-TOC.txt<br>test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-TOC.txt<br>_fail:_ target/cassandra-parity/compression-info-roundtrip-mismatch.log |
 | `cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-info-chunk-crc-mismatch.log |
+| `cass.compression_info.DirectCompressedChunkReaderTest.inline_crc_validation.strict` | nb, oa, da | test-data/datasets/sstables/test_da/collection_table-de2c155064e711f19ad401a8c8227b11/da-2-bti-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-inline-crc-mismatch.log |
 | `cass.compression_info.StandardCompressedChunkReaderTest.round_trip_chunk_bytes` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-info-round-trip-mismatch.log |
 | `cass.compression_info.deflate.real_fixture_chunks` | — | — |
+| `cass.compression_info.deflate.real_fixture_chunks.strict` | — | — |
 | `cass.compression_info.fields.algorithm_name` | nb | test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>_fail:_ target/cassandra-parity/compressioninfo-algorithm_name.log |
 | `cass.compression_info.fields.chunk_length` | nb | test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>_fail:_ target/cassandra-parity/compressioninfo-chunk_length.log |
 | `cass.compression_info.fields.chunk_offsets` | nb | test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>_fail:_ target/cassandra-parity/compressioninfo-chunk_offsets.log |
@@ -733,8 +768,11 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.compression_info.fields.options` | nb | test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>_fail:_ target/cassandra-parity/compressioninfo-options.log |
 | `cass.compression_info.layout.no_crc_fields` | nb | test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt<br>_fail:_ target/cassandra-parity/compressioninfo-no_crc_fields.log |
 | `cass.compression_info.lz4.real_fixture_chunks` | nb | test-data/datasets/sstables/test_basic/compression_test_table-6ad6ad30a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-info-lz4-mismatch.log |
+| `cass.compression_info.lz4.real_fixture_chunks.strict` | nb, oa, da | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>_fail:_ target/cassandra-parity/compression-lz4-mismatch.log |
 | `cass.compression_info.snappy.real_fixture_chunks` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Data.db.jsonl<br>_fail:_ target/cassandra-parity/compression-info-snappy-mismatch.log |
+| `cass.compression_info.snappy.real_fixture_chunks.strict` | nb, oa, da | test-data/datasets/sstables/test_basic/composite_key_table-6ab56990a25111f0a3fef1a551383fb9/nb-1-big-TOC.txt<br>_fail:_ target/cassandra-parity/compression-snappy-mismatch.log |
 | `cass.compression_info.zstd.real_fixture_chunks` | — | — |
+| `cass.compression_info.zstd.real_fixture_chunks.strict` | — | — |
 | `cass.corruption.bti_partitions_footer_bit_flip` | da, bti | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>_fail:_ target/cassandra-parity/corruption-bti_partitions_footer_bit_flip.log |
 | `cass.corruption.bti_rows_truncation` | da, bti | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>_fail:_ target/cassandra-parity/corruption-bti_rows_truncation.log |
 | `cass.corruption.compression_info.bad_offset` | nb | test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml<br>test-data/datasets/corruption/test_comp_corrupt/corruption-sha256.txt<br>_fail:_ target/cassandra-parity/corruption-compression_info_bad_offset.log |
@@ -833,9 +871,9 @@ _Out of scope does not mean unimportant._ Node behaviors CQLite does not mirror:
 | `cass.statistics_db.clustering_key_bounds` | — | — |
 | `cass.statistics_db.core_metadata_checksums` | nb, oa, da | test-data/datasets/sstables/test_da/simple_table-de1be8b064e711f19ad401a8c8227b11/da-2-bti-Statistics.db.txt<br>_fail:_ target/cassandra-parity/statistics-db-crc-mismatch.log |
 | `cass.statistics_db.histograms_and_estimates` | — | — |
-| `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` | nb | test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt |
+| `cass.statistics_metadata.max_local_deletion_time.tombstones_ttl` | nb | test-data/datasets/sstables/test_basic/ttl_test_table-6af66a30a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt<br>_fail:_ target/cassandra-parity/statistics-db-max-ldt-mismatch.log |
 | `cass.statistics_metadata.serialization_header` | nb | test-data/datasets/sstables/test_basic/simple_table-6aa08200a25111f0a3fef1a551383fb9/nb-1-big-Statistics.db.txt |
-| `cass.statistics_metadata.tombstone_histogram.deletion_times` | nb | test-data/datasets/sstables/test_tomb/tombstone_histogram-4ca1e9e0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt |
+| `cass.statistics_metadata.tombstone_histogram.deletion_times` | nb | test-data/datasets/sstables/test_tomb/tombstone_histogram-4ca1e9e0702011f1b8f419c9a388d558/nb-1-big-Statistics.db.txt<br>_fail:_ target/cassandra-parity/statistics-db-tombstone-histogram-mismatch.log |
 | `cass.streaming_protocol.node_lifecycle_out_of_scope` | — | — |
 | `cass.summary_db.IndexSummaryManagerTest.memory_constrained_summary_reload` | — | — |
 | `cass.summary_db.IndexSummaryRedistributionTest.downsampled_summary_entries` | nb, oa, big | — |
