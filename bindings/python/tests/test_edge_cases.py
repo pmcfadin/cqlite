@@ -224,9 +224,12 @@ class TestConcurrentAccess:
     def test_concurrent_queries_from_threads(self):
         """Multiple threads should be able to query simultaneously without a warm-up.
 
-        Fixed in #805: SSTableReader.scan_mutex now serialises concurrent sequential
-        scans on the same reader, preventing interleaving of the shared file-position
-        and current_chunk_index state that previously caused 'Column not found: id'.
+        Originally fixed in #805 by serialising scans behind an SSTableReader
+        scan_mutex. #815 then removed that mutex and gave every scan its own
+        ScanCursor (an independent file handle + chunk index), so concurrent scans no
+        longer share the mutable file-position / chunk-index state that previously
+        caused 'Column not found: id' — they run in parallel rather than serialized,
+        and concurrent first-access stays safe.
         """
         if not DATASETS.exists():
             pytest.skip("Test data not found")
@@ -251,7 +254,8 @@ class TestConcurrentAccess:
                 with lock:
                     errors.append((thread_id, e))
 
-        # No warm-up required — fix #805 makes concurrent first-access safe.
+        # No warm-up required — per-scan ScanCursor (#815) makes concurrent
+        # first-access safe.
         with cqlite.open(DATASETS, schema=schema_file) as db:
             threads = []
             for i in range(10):

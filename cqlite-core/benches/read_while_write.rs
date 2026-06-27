@@ -106,115 +106,112 @@ fn bench_read_while_write(c: &mut Criterion) {
     // report raw per-iteration time and read the p99 from the printed line below.
     group.sample_size(10);
 
-    group.bench_function(
-        format!("readers{READERS}_writers{WRITERS}"),
-        |bch| {
-            bch.iter_custom(|iters| {
-                rt.block_on(async {
-                    let mut total = Duration::ZERO;
-                    for _ in 0..iters {
-                        // Writers run for the whole reader window; `stop` halts
-                        // them once the readers finish so a slow writer cannot
-                        // pin the iteration open.
-                        let stop = Arc::new(AtomicBool::new(false));
+    group.bench_function(format!("readers{READERS}_writers{WRITERS}"), |bch| {
+        bch.iter_custom(|iters| {
+            rt.block_on(async {
+                let mut total = Duration::ZERO;
+                for _ in 0..iters {
+                    // Writers run for the whole reader window; `stop` halts
+                    // them once the readers finish so a slow writer cannot
+                    // pin the iteration open.
+                    let stop = Arc::new(AtomicBool::new(false));
 
-                        // Spawn sustained-ingest writers, each on its own engine
-                        // + temp dir (WAL off → pure CPU/memtable allocation, the
-                        // contention surface, no fsync I/O noise).
-                        let mut writer_handles = Vec::with_capacity(WRITERS);
-                        for _ in 0..WRITERS {
-                            let stop = Arc::clone(&stop);
-                            writer_handles.push(tokio::task::spawn_blocking(move || {
-                                use rand::Rng;
-                                let tmp = tempfile::TempDir::new()
-                                    .expect("temp dir for read_while_write writer");
-                                let mut engine =
-                                    fixtures::open_write_engine_wal_off(tmp.path(), usize::MAX);
-                                let mut rng = fixtures::seeded_rng();
-                                let mut written = 0u64;
-                                while !stop.load(Ordering::Relaxed) {
-                                    let id = uuid::Uuid::from_u128(rng.gen());
-                                    let age: i32 = rng.gen_range(0..100);
-                                    let stmt = format!(
-                                        "INSERT INTO test_basic.simple_table \
+                    // Spawn sustained-ingest writers, each on its own engine
+                    // + temp dir (WAL off → pure CPU/memtable allocation, the
+                    // contention surface, no fsync I/O noise).
+                    let mut writer_handles = Vec::with_capacity(WRITERS);
+                    for _ in 0..WRITERS {
+                        let stop = Arc::clone(&stop);
+                        writer_handles.push(tokio::task::spawn_blocking(move || {
+                            use rand::Rng;
+                            let tmp = tempfile::TempDir::new()
+                                .expect("temp dir for read_while_write writer");
+                            let mut engine =
+                                fixtures::open_write_engine_wal_off(tmp.path(), usize::MAX);
+                            let mut rng = fixtures::seeded_rng();
+                            let mut written = 0u64;
+                            while !stop.load(Ordering::Relaxed) {
+                                let id = uuid::Uuid::from_u128(rng.gen());
+                                let age: i32 = rng.gen_range(0..100);
+                                let stmt = format!(
+                                    "INSERT INTO test_basic.simple_table \
                                          (id, name, age, active) \
                                          VALUES ({id}, 'rww-row', {age}, true)"
-                                    );
-                                    engine.execute(&stmt).expect("read_while_write ingest");
-                                    written += 1;
-                                }
-                                written
-                            }));
-                        }
-
-                        // Spawn the readers; each loops `SCANS_PER_READER` full
-                        // scans, recording per-scan latency.
-                        let mut reader_handles = Vec::with_capacity(READERS);
-                        for _ in 0..READERS {
-                            let loaded = Arc::clone(&loaded);
-                            let sql = Arc::clone(&sql);
-                            reader_handles.push(tokio::spawn(async move {
-                                let mut samples = Vec::with_capacity(SCANS_PER_READER);
-                                for _ in 0..SCANS_PER_READER {
-                                    let t0 = Instant::now();
-                                    let res = loaded
-                                        .db
-                                        .execute(&sql)
-                                        .await
-                                        .expect("read_while_write scan");
-                                    samples.push((t0.elapsed(), res.rows.len()));
-                                }
-                                samples
-                            }));
-                        }
-
-                        // Join readers, collect every scan latency.
-                        let mut latencies: Vec<Duration> =
-                            Vec::with_capacity(READERS * SCANS_PER_READER);
-                        for h in reader_handles {
-                            let samples = h.await.expect("reader task panicked");
-                            for (dur, rows) in samples {
-                                assert_eq!(
-                                    rows, expected_rows,
-                                    "read_while_write: scan row count drifted under write load \
-                                     (got {rows}, expected {expected_rows}) — a broken scan"
                                 );
-                                latencies.push(dur);
+                                engine.execute(&stmt).expect("read_while_write ingest");
+                                written += 1;
                             }
-                        }
-
-                        // Readers done: stop writers and confirm they ingested.
-                        stop.store(true, Ordering::Relaxed);
-                        let mut total_written = 0u64;
-                        for h in writer_handles {
-                            total_written += h.await.expect("writer task panicked");
-                        }
-                        assert!(
-                            total_written > 0,
-                            "read_while_write: writers ingested nothing — wedged writer path"
-                        );
-
-                        // Report the reader-side p99 of THIS iteration. Criterion
-                        // measures the per-iteration wall time (the sum over the
-                        // window), but the tail line we print is the signal #1143
-                        // cares about; it surfaces in the bench stdout for the
-                        // local regression guard.
-                        let p99 = percentile(&mut latencies, 99.0);
-                        let p50 = percentile(&mut latencies, 50.0);
-                        eprintln!(
-                            "read_while_write: readers={READERS} writers={WRITERS} \
-                             scans={} writes={total_written} p50={p50:?} p99={p99:?}",
-                            latencies.len()
-                        );
-
-                        total += latencies.iter().sum::<Duration>();
-                        black_box(p99);
+                            written
+                        }));
                     }
-                    total
-                })
-            });
-        },
-    );
+
+                    // Spawn the readers; each loops `SCANS_PER_READER` full
+                    // scans, recording per-scan latency.
+                    let mut reader_handles = Vec::with_capacity(READERS);
+                    for _ in 0..READERS {
+                        let loaded = Arc::clone(&loaded);
+                        let sql = Arc::clone(&sql);
+                        reader_handles.push(tokio::spawn(async move {
+                            let mut samples = Vec::with_capacity(SCANS_PER_READER);
+                            for _ in 0..SCANS_PER_READER {
+                                let t0 = Instant::now();
+                                let res = loaded
+                                    .db
+                                    .execute(&sql)
+                                    .await
+                                    .expect("read_while_write scan");
+                                samples.push((t0.elapsed(), res.rows.len()));
+                            }
+                            samples
+                        }));
+                    }
+
+                    // Join readers, collect every scan latency.
+                    let mut latencies: Vec<Duration> =
+                        Vec::with_capacity(READERS * SCANS_PER_READER);
+                    for h in reader_handles {
+                        let samples = h.await.expect("reader task panicked");
+                        for (dur, rows) in samples {
+                            assert_eq!(
+                                rows, expected_rows,
+                                "read_while_write: scan row count drifted under write load \
+                                     (got {rows}, expected {expected_rows}) — a broken scan"
+                            );
+                            latencies.push(dur);
+                        }
+                    }
+
+                    // Readers done: stop writers and confirm they ingested.
+                    stop.store(true, Ordering::Relaxed);
+                    let mut total_written = 0u64;
+                    for h in writer_handles {
+                        total_written += h.await.expect("writer task panicked");
+                    }
+                    assert!(
+                        total_written > 0,
+                        "read_while_write: writers ingested nothing — wedged writer path"
+                    );
+
+                    // Report the reader-side p99 of THIS iteration. Criterion
+                    // measures the per-iteration wall time (the sum over the
+                    // window), but the tail line we print is the signal #1143
+                    // cares about; it surfaces in the bench stdout for the
+                    // local regression guard.
+                    let p99 = percentile(&mut latencies, 99.0);
+                    let p50 = percentile(&mut latencies, 50.0);
+                    eprintln!(
+                        "read_while_write: readers={READERS} writers={WRITERS} \
+                             scans={} writes={total_written} p50={p50:?} p99={p99:?}",
+                        latencies.len()
+                    );
+
+                    total += latencies.iter().sum::<Duration>();
+                    black_box(p99);
+                }
+                total
+            })
+        });
+    });
 
     group.finish();
 }

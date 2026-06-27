@@ -2013,21 +2013,29 @@ impl SSTableReader {
         }
 
         if self.requires_chunk_stitching() {
-            // Stitch the (bounded) data section, then parse on a blocking thread,
-            // emitting one entry at a time. `blocking_send` provides backpressure
-            // so parsed Values are never all live at once.
-            let stitched = self.stitch_all_chunks(&cursor).await?;
-            let reader = std::sync::Arc::clone(&self);
-            let parse = tokio::task::spawn_blocking(move || {
-                reader.parse_stitched_stream(&stitched, schema.as_ref(), start_key, end_key, &tx)
-            })
-            .await;
-            match parse {
-                Ok(result) => result,
-                Err(join_err) => Err(Error::corruption(format!(
-                    "scan_stream: parse task failed: {join_err}"
-                ))),
-            }
+            // Issue #1143: SLIDING-WINDOW stitch+parse instead of stitching the
+            // ENTIRE Data.db into one growing `Vec<u8>` before parsing. The old
+            // path allocated an O(file) buffer per scan; with ~6 concurrent
+            // readers that meant ~6 multi-MB buffers thrashing the global
+            // allocator alongside writer allocation, blowing up the read-side p99
+            // tail under concurrent write load. Here we keep only a `window` of
+            // decompressed bytes bounded by `max_partition_size + one_chunk`:
+            // append one decompressed chunk, drain every CONFIRMED partition out
+            // of the front, and stop at NeedMore to await the next chunk (a
+            // partition/row/cell can straddle a 64 KiB chunk boundary). This is
+            // the SAME bounded driver the compaction read path already uses
+            // (`stream_all_partitions_for_compaction` / issue #827); the only
+            // difference is it emits user-facing `(RowKey, Value)` entries and
+            // applies the scan's key-range + tombstone filters.
+            //
+            // Parity: the per-partition parser
+            // (`parse_one_partition_with_timestamps`) is proven byte-identical to
+            // the whole-block parse by `test_issue_827_streaming_parity`; we drop
+            // the timestamp tuple element and reuse the IDENTICAL key-range /
+            // tombstone filters the previous `parse_stitched_stream` applied, so
+            // scan OUTPUT is unchanged — only memory staging differs.
+            self.run_scan_stream_windowed(table_id, start_key, end_key, schema, &cursor, &tx)
+                .await
         } else {
             // Non-stitching formats already read block-by-block; emit per block so
             // only one block's entries are live at a time.
@@ -2059,49 +2067,203 @@ impl SSTableReader {
         }
     }
 
-    /// Parse a stitched V5CompressedLegacy buffer, sending each filtered
-    /// `(RowKey, Value)` through `tx` with `blocking_send` for backpressure.
+    /// Sliding-window stitch+parse driver for the user-facing streaming scan
+    /// (issue #1143). The async counterpart of the compaction read path's
+    /// [`stream_all_partitions_for_compaction`](Self::stream_all_partitions_for_compaction):
+    /// it keeps a `window: Vec<u8>` of decompressed bytes, appends one
+    /// decompressed chunk at a time, drains every confirmed partition out of the
+    /// front via [`drain_scan_window`](Self::drain_scan_window), and stops at
+    /// `NeedMore` to await the next chunk (a partition/row/cell can straddle a
+    /// 64 KiB chunk boundary). Live heap is bounded by
+    /// `max_partition_size + one_chunk`, not O(file).
     ///
-    /// CPU-bound and synchronous: must be invoked via `spawn_blocking`, never on
-    /// an async worker thread (`blocking_send` would otherwise stall the runtime).
-    fn parse_stitched_stream(
+    /// Backpressure: each emitted `(RowKey, Value)` is forwarded via the bounded
+    /// `tx` (async `send().await`), so the consumer's lag pauses parsing exactly
+    /// as the previous whole-buffer path's `blocking_send` did. Because the parse
+    /// happens between `await` points on this async task (not in `spawn_blocking`)
+    /// the work is naturally yielding at chunk granularity.
+    ///
+    /// Precondition: `cursor`'s file is seeked to the start of the data section.
+    async fn run_scan_stream_windowed(
         &self,
-        stitched: &[u8],
-        schema: Option<&crate::schema::TableSchema>,
+        table_id: TableId,
         start_key: Option<RowKey>,
         end_key: Option<RowKey>,
+        schema: Option<crate::schema::TableSchema>,
+        cursor: &ScanCursor,
         tx: &mpsc::Sender<Result<(RowKey, Value)>>,
     ) -> Result<()> {
-        let parser = self.build_v5_parser();
-        let reader_schema;
-        let table_schema = if let Some(s) = schema {
-            Some(s)
-        } else {
-            reader_schema = self.get_table_schema(None);
-            reader_schema.as_ref()
-        };
+        use crate::storage::sstable::compression::Compression;
 
-        parser.parse_block_emit(stitched, table_schema, self, |(_table_id, key, value)| {
-            // Key-range filter (start/end inclusive), mirroring sequential_scan.
-            if let Some(ref start) = start_key {
-                if &key < start {
-                    return Ok(std::ops::ControlFlow::Continue(()));
+        // Resolve the schema the parser needs (cells lack column names on disk),
+        // matching the previous `parse_stitched_stream` resolution exactly.
+        let owned_schema = schema.or_else(|| self.get_table_schema(None));
+        let parser = self.build_v5_parser();
+
+        // Incompressible-chunk fallback (Bug #639, epic #970, issue #1104):
+        // Cassandra stores a chunk RAW when its compressed length would meet or
+        // exceed `max_compressed_length`. Honour the same rule as
+        // `stitch_all_chunks` so the windowed path decodes identically.
+        let max_compressed_length = self
+            .compression_info
+            .as_ref()
+            .map(|ci| ci.max_compressed_length as usize)
+            .unwrap_or(usize::MAX);
+
+        let mut window: Vec<u8> = Vec::new();
+        let mut broke = false;
+        let mut chunk_count = 0usize;
+
+        while let Some(compressed_chunk) = self.read_next_block(cursor).await? {
+            let decompressed_chunk = if compressed_chunk.len() >= max_compressed_length {
+                compressed_chunk
+            } else if let Some(compression_reader) = &self.compression_reader {
+                let compression = Compression::new(*compression_reader.algorithm())?;
+                compression.decompress(&compressed_chunk).map_err(|e| {
+                    Error::corruption(format!(
+                        "run_scan_stream_windowed: Failed to decompress chunk {}: {}",
+                        chunk_count, e
+                    ))
+                })?
+            } else {
+                compressed_chunk
+            };
+            window.extend_from_slice(&decompressed_chunk);
+            chunk_count += 1;
+
+            // Not the final chunk yet: drain confirmed partitions; NeedMore means
+            // "await more bytes" (a partition straddles this chunk boundary).
+            self.drain_scan_window(
+                &parser,
+                owned_schema.as_ref(),
+                &table_id,
+                start_key.as_ref(),
+                end_key.as_ref(),
+                &mut window,
+                false,
+                tx,
+                &mut broke,
+            )
+            .await?;
+            if broke {
+                return Ok(());
+            }
+        }
+
+        // EOF: final drain — a trailing partition with no END_OF_PARTITION marker
+        // is now terminal (Done), not a refill request that will never come.
+        if !broke {
+            self.drain_scan_window(
+                &parser,
+                owned_schema.as_ref(),
+                &table_id,
+                start_key.as_ref(),
+                end_key.as_ref(),
+                &mut window,
+                true,
+                tx,
+                &mut broke,
+            )
+            .await?;
+        }
+
+        log::debug!(
+            "run_scan_stream_windowed: drained {} chunks (final window {} bytes)",
+            chunk_count,
+            window.len()
+        );
+        Ok(())
+    }
+
+    /// Drain every confirmed partition from the front of the sliding `window`,
+    /// emitting each surviving `(RowKey, Value)` through `tx` (issue #1143).
+    ///
+    /// Mirrors [`drain_compaction_window`](Self::drain_compaction_window) but for
+    /// the user-facing scan: it drives [`parse_one_partition_with_timestamps`],
+    /// drops the per-row timestamp, and applies the SAME key-range + tombstone
+    /// filters the previous whole-buffer `parse_stitched_stream` applied so the
+    /// emitted set is byte-identical. After each `Emitted(consumed)` the consumed
+    /// prefix is removed, keeping the window's peak bounded by
+    /// `max_partition_size + one_chunk`. Stops at `NeedMore` / `Done` (await the
+    /// next chunk / genuine end) or when the consumer is dropped (`*broke`).
+    #[allow(clippy::too_many_arguments)]
+    async fn drain_scan_window(
+        &self,
+        parser: &crate::storage::sstable::reader::parsing::V5CompressedLegacyParser,
+        schema: Option<&crate::schema::TableSchema>,
+        table_id: &TableId,
+        start_key: Option<&RowKey>,
+        end_key: Option<&RowKey>,
+        window: &mut Vec<u8>,
+        at_final_chunk: bool,
+        tx: &mpsc::Sender<Result<(RowKey, Value)>>,
+        broke: &mut bool,
+    ) -> Result<()> {
+        use crate::storage::sstable::reader::parsing::ParseStep;
+
+        loop {
+            if *broke || window.is_empty() {
+                return Ok(());
+            }
+
+            // Buffer this partition's surviving entries, then forward them async
+            // AFTER the parser returns. `parse_one_partition_with_timestamps`
+            // takes a synchronous `FnMut` emit, so we cannot `.await` inside it;
+            // a partition's rows are bounded by `max_partition_size`, so this
+            // stays within the documented window bound.
+            let mut surviving: Vec<(RowKey, Value)> = Vec::new();
+            let step = parser.parse_one_partition_with_timestamps(
+                window.as_slice(),
+                schema,
+                self,
+                at_final_chunk,
+                &mut |(entry_table_id, key, value, _ts)| {
+                    // Same filters as the previous `parse_stitched_stream`.
+                    if !table_ids_match(&entry_table_id, table_id) {
+                        return Ok(std::ops::ControlFlow::Continue(()));
+                    }
+                    if let Some(start) = start_key {
+                        if &key < start {
+                            return Ok(std::ops::ControlFlow::Continue(()));
+                        }
+                    }
+                    if let Some(end) = end_key {
+                        if &key > end {
+                            return Ok(std::ops::ControlFlow::Continue(()));
+                        }
+                    }
+                    // Suppress row tombstones from user-facing scan output (#505).
+                    if !self.filter_tombstone(&value) {
+                        return Ok(std::ops::ControlFlow::Continue(()));
+                    }
+                    surviving.push((key, value));
+                    Ok(std::ops::ControlFlow::Continue(()))
+                },
+            )?;
+
+            match step {
+                ParseStep::Emitted(consumed) => {
+                    let take = if consumed == 0 { 1 } else { consumed };
+                    window.drain(0..take.min(window.len()));
+                    // Forward this partition's surviving entries with backpressure.
+                    for entry in surviving {
+                        if tx.send(Ok(entry)).await.is_err() {
+                            *broke = true; // consumer dropped
+                            return Ok(());
+                        }
+                    }
                 }
+                // NeedMore: the partition straddles this chunk boundary. The
+                // per-partition parser buffers a partition's rows internally and
+                // only invokes our emit closure on a CONFIRMED `Emitted` return,
+                // so on `NeedMore` our `surviving` buffer is empty — nothing was
+                // forwarded and nothing is dropped. The caller appends the next
+                // chunk and we re-parse this partition from its start, so no row
+                // is duplicated or lost across the boundary.
+                // Done: genuine end of partitions / terminal truncation.
+                ParseStep::NeedMore | ParseStep::Done => return Ok(()),
             }
-            if let Some(ref end) = end_key {
-                if &key > end {
-                    return Ok(std::ops::ControlFlow::Continue(()));
-                }
-            }
-            // Suppress row tombstones from user-facing scan output (Issue #505).
-            if !self.filter_tombstone(&value) {
-                return Ok(std::ops::ControlFlow::Continue(()));
-            }
-            match tx.blocking_send(Ok((key, value))) {
-                Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
-                Err(_) => Ok(std::ops::ControlFlow::Break(())), // consumer dropped
-            }
-        })
+        }
     }
 
     /// Stitch all compressed chunks and parse with per-row timestamps (for compaction).

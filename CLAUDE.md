@@ -321,9 +321,12 @@ details, see `bindings/node/lib/index.d.ts` and the issue backlog (#290, #296–
 
 ### Python/Node.js Thread Safety and Output Parity
 
-**Python thread safety** (Issue #311, #805): `Arc<Database>` + `AtomicBool`; GIL released
-during async ops; concurrent queries on the same database are safe without a warm-up
-(`SSTableReader.scan_mutex` serialises concurrent sequential scans — fix #805).
+**Python thread safety** (Issue #311, #805, #815): `Arc<Database>` + `AtomicBool`; GIL
+released during async ops; concurrent queries on the same database are safe without a
+warm-up. Full scans no longer share mutable file state: #815 removed the old
+`SSTableReader.scan_mutex` and gave every scan its own `ScanCursor` (independent
+file handle + chunk index), so N concurrent full scans run in parallel rather than
+serialized.
 
 **Python/CLI parity** (Issue #319): Python uses native types (datetime, UUID, bytes);
 CLI uses JSON strings. Normalization required for comparison — see
