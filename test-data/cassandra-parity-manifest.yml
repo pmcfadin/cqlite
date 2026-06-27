@@ -6767,8 +6767,8 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6782,8 +6782,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity lz4_table_compressioninfo_strict_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/compression-fixture-lz4.log
       known_limitations: >-
@@ -6818,8 +6818,8 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6833,8 +6833,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity snappy_table_compressioninfo_strict_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/compression-fixture-snappy.log
       known_limitations: >-
@@ -6868,8 +6868,8 @@ scenarios:
           - cqlite-core/tests/issue_1082_deflate_zlib.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6883,8 +6883,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity deflate_table_compressioninfo_strict_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/compression-fixture-deflate.log
       known_limitations: >-
@@ -6918,8 +6918,8 @@ scenarios:
           - cqlite-core/tests/issue_1082_deflate_zlib.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6933,8 +6933,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity zstd_table_compressioninfo_strict_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/compression-fixture-zstd.log
       known_limitations: >-
@@ -6968,7 +6968,7 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -6982,7 +6982,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity uncompressed_table_has_no_compressioninfo
       reference_paths:
-        - test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/compression-fixture-uncompressed.log
       known_limitations: >-
@@ -7015,8 +7015,8 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -7030,8 +7030,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity short_final_chunk_final_chunk_is_short
       reference_paths:
-        - test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/compression-fixture-short-final-chunk.log
       known_limitations: >-
@@ -7065,8 +7065,8 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -7080,8 +7080,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity incompressible_uncompressed_chunk_strict_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/compression-fixture-incompressible.log
       known_limitations: >-
@@ -7115,7 +7115,7 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -7129,10 +7129,10 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
         - target/cassandra-parity/compressioninfo-algorithm_name.log
       known_limitations: >-
@@ -7164,7 +7164,7 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -7178,8 +7178,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
         - target/cassandra-parity/compressioninfo-options.log
       known_limitations: >-
@@ -7210,7 +7210,7 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -7224,7 +7224,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
         - target/cassandra-parity/compressioninfo-chunk_length.log
       known_limitations: >-
@@ -7254,7 +7254,7 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -7268,7 +7268,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
         - target/cassandra-parity/compressioninfo-max_compressed_length.log
       known_limitations: >-
@@ -7299,7 +7299,7 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -7313,7 +7313,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
         - target/cassandra-parity/compressioninfo-data_length.log
       known_limitations: >-
@@ -7344,7 +7344,7 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -7358,8 +7358,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
         - target/cassandra-parity/compressioninfo-chunk_offsets.log
       known_limitations: >-
@@ -7391,7 +7391,7 @@ scenarios:
           - cqlite-core/tests/issue_998_inline_crc_trailers.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: byte_for_byte
       strict: true
@@ -7405,7 +7405,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_997_compressioninfo_parity
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
         - target/cassandra-parity/compressioninfo-no_crc_fields.log
       known_limitations: >-
@@ -7443,8 +7443,8 @@ scenarios:
           - cqlite-core/tests/issue_998_inline_crc_trailers.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -7458,8 +7458,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_998_inline_crc_trailers
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/inline-crc-valid_trailer.log
       known_limitations: >-
@@ -7494,8 +7494,8 @@ scenarios:
           - cqlite-core/tests/issue_998_inline_crc_trailers.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -7509,8 +7509,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_998_inline_crc_trailers
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/inline-crc-bad_trailer_rejected.log
       known_limitations: >-
@@ -7544,8 +7544,8 @@ scenarios:
           - cqlite-core/tests/issue_998_inline_crc_trailers.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -7559,8 +7559,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_998_inline_crc_trailers
       reference_paths:
-        - test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/short_final_chunk-b4f25690706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/short_final_chunk-25aef23071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/inline-crc-short_final_chunk.log
       known_limitations: >-
@@ -7594,8 +7594,8 @@ scenarios:
           - cqlite-core/tests/issue_998_inline_crc_trailers.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -7609,8 +7609,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_998_inline_crc_trailers
       reference_paths:
-        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-b50198d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/incompressible_uncompressed_chunk-25b8dd4071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       failure_artifacts:
         - target/cassandra-parity/inline-crc-incompressible_uncompressed_chunk.log
       known_limitations: >-
@@ -7644,8 +7644,8 @@ scenarios:
           - cqlite-core/tests/issue_998_inline_crc_trailers.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: byte_for_byte
       strict: true
@@ -7659,8 +7659,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_998_inline_crc_trailers
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
       failure_artifacts:
         - target/cassandra-parity/inline-crc-offset_delta_minus_crc_length.log
       known_limitations: >-
@@ -8202,7 +8202,7 @@ scenarios:
           - cqlite-core/tests/issue_1000_verifier.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8216,7 +8216,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1000_verifier
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The verifier runs a full row scan on a clean compressed SSTable; the
         decoded row count/values are compared against the sstabledump JSONL and
@@ -8250,7 +8250,7 @@ scenarios:
           - cqlite-core/tests/issue_1000_verifier.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8264,7 +8264,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1000_verifier
       reference_paths:
-        - test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         Full row scan on a clean uncompressed SSTable (no CompressionInfo.db);
         decoded rows compared against the sstabledump JSONL with a healthy pass.
@@ -8296,7 +8296,7 @@ scenarios:
           - cqlite-core/tests/issue_1000_verifier.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8310,7 +8310,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1000_verifier
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The verifier enumerates TOC.txt components and confirms each required
         component file is present; the toc_missing_component corruption case is
@@ -8345,7 +8345,7 @@ scenarios:
           - cqlite-core/tests/issue_1000_verifier.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8359,7 +8359,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1000_verifier
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The verifier recomputes the Data.db CRC and matches it against the
         recorded Digest.crc32 on a clean fixture (pass) and the
@@ -8394,7 +8394,7 @@ scenarios:
           - cqlite-core/tests/issue_998_inline_crc_trailers.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8408,7 +8408,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1000_verifier
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         During the verify scan each chunk's inline CRC32 trailer is checked; a
         clean fixture passes and a bit-flip case fails. Decoded rows compared to
@@ -8442,7 +8442,7 @@ scenarios:
           - cqlite-core/tests/issue_997_compressioninfo_parity.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8456,7 +8456,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1000_verifier
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The verifier loads the chunk-offset table from CompressionInfo.db and
         uses it to position chunk reads; a bad-offset corruption case must fail.
@@ -8489,7 +8489,7 @@ scenarios:
           - cqlite-core/tests/issue_1000_verifier.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8503,7 +8503,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1000_verifier
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The verifier scans every partition/row and the decoded row count and
         values are compared against the sstabledump JSONL golden.
@@ -8537,7 +8537,7 @@ scenarios:
     fixtures:
       references:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8552,7 +8552,7 @@ scenarios:
         --test issue_1000_verifier
       reference_paths:
         - test-data/datasets/corruption/test_comp_corrupt/corruption-manifest.yml
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         For every corruption-corpus case the verifier must surface an explicit
         error; returning an empty (zero-row) result on corrupted input is a
@@ -8590,7 +8590,7 @@ scenarios:
           - cqlite-core/tests/issue_1001_reject_unknown_compression.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: canonical_semantic
       strict: false
@@ -8604,8 +8604,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1001_reject_unknown_compression
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The LZ4Compressor class name from CompressionInfo.db resolves to the
         CQLite LZ4 decoder; the resolved decoder then decodes rows, which are
@@ -8639,7 +8639,7 @@ scenarios:
           - cqlite-core/tests/issue_1001_reject_unknown_compression.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: canonical_semantic
       strict: false
@@ -8653,8 +8653,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1001_reject_unknown_compression
       reference_paths:
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/snappy_table-b4b79780706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/snappy_table-2588f3a071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The SnappyCompressor class name resolves to the CQLite Snappy decoder;
         the resolved decoder decodes rows compared against the sstabledump JSONL.
@@ -8685,7 +8685,7 @@ scenarios:
           - cqlite-core/tests/issue_1001_reject_unknown_compression.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: canonical_semantic
       strict: false
@@ -8699,8 +8699,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1001_reject_unknown_compression
       reference_paths:
-        - test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/deflate_table-b4c727e0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/deflate_table-2592698071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The DeflateCompressor class name resolves to the CQLite zlib decoder;
         the resolved decoder decodes rows compared against the sstabledump JSONL.
@@ -8731,7 +8731,7 @@ scenarios:
           - cqlite-core/tests/issue_1001_reject_unknown_compression.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: canonical_semantic
       strict: false
@@ -8745,8 +8745,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1001_reject_unknown_compression
       reference_paths:
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/zstd_table-b4d70660706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/zstd_table-259ca2b071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         The ZstdCompressor class name resolves to the CQLite Zstd decoder;
         the resolved decoder decodes rows compared against the sstabledump JSONL.
@@ -8776,7 +8776,7 @@ scenarios:
           - cqlite-core/tests/issue_1001_reject_unknown_compression.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
     evidence:
       type: canonical_semantic
       strict: false
@@ -8790,7 +8790,7 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1001_reject_unknown_compression
       reference_paths:
-        - test-data/datasets/sstables/test_comp/uncompressed_table-b4e229f0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/uncompressed_table-25a5ca7071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         With no CompressionInfo.db present, the registry selects the uncompressed
         reader path; the decoded rows are compared against the sstabledump JSONL.
@@ -8821,7 +8821,7 @@ scenarios:
           - cqlite-core/tests/issue_1001_reject_unknown_compression.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: canonical_semantic
       strict: false
@@ -8835,8 +8835,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1001_reject_unknown_compression
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         A synthetic CompressionInfo.db blob naming an unknown compressor class
         must produce a fail-fast unsupported-algorithm error (#1001 prod fix),
@@ -8868,7 +8868,7 @@ scenarios:
           - cqlite-core/tests/issue_1001_reject_unknown_compression.rs
     fixtures:
       references:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
     evidence:
       type: canonical_semantic
       strict: false
@@ -8882,8 +8882,8 @@ scenarios:
         env CQLITE_DATASETS_ROOT=$PWD/test-data/datasets cargo test -p cqlite-core
         --test issue_1001_reject_unknown_compression
       reference_paths:
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-CompressionInfo.db.txt
-        - test-data/datasets/sstables/test_comp/lz4_table-b4a9b4d0706311f19d121facdfdff4e7/nb-1-big-Data.db.jsonl
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-CompressionInfo.db.txt
+        - test-data/datasets/sstables/test_comp/lz4_table-25801a0071a911f19b3225f9984c6a77/nb-1-big-Data.db.jsonl
       normalization: >-
         An options map the reader cannot honour produces an explicit error
         rather than a best-effort decode; the supported-options LZ4 fixture
