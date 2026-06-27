@@ -6,3 +6,4 @@ pub mod enums;
 pub mod lint;
 pub mod model;
 pub mod report;
+pub mod tier_contract;

@@ -1,0 +1,159 @@
+# Parity CI Tier Contracts
+
+> Source-of-truth contract for the five Cassandra parity CI tiers (epic #966 →
+> #974, issue #1022). Defines what each tier *promises*: purpose, accepted
+> evidence, skip/failure policy, artifact retention, and promotion rules.
+>
+> This contract is the reference that downstream gate work (#1023 claim lint,
+> #1024 gate hardening, #1025 nightly Docker, #1026 exhaustive regen) builds on.
+> See also the [release checklist](./parity-release-checklist.md) and the
+> [manifest reference](./cassandra-parity-manifest.md).
+>
+> **Doctrine cross-link:** this contract sits beside the
+> [gate contract](https://pmcfadin.github.io/cqlite/agents-developing/gate-contract/)
+> on the agent developer site; the local site mirror
+> (`website/src/content/docs/agents-developing/gate-contract.md`) carries a
+> "Parity CI tier contracts" section pointing back here.
+
+## The documented tier enum (machine-parseable)
+
+The cross-check (`cargo run -p cassandra-parity -- tier-contract-check`) parses
+the fenced block below as **the documented enum**. It MUST equal
+`enums::CI_TIER` in `tools/cassandra-parity/src/enums.rs` and the `ci.tier`
+enum in `test-data/cassandra-parity-manifest.schema.json`. Keep the block exact:
+one tier name per line, lowercase `snake_case`, no surrounding prose. Do not add
+list markers or commentary inside the fence.
+
+```parity-ci-tiers
+fast_pr
+required_parity
+nightly_docker
+exhaustive_regeneration
+manual_debug
+```
+
+## Gate-strength classification
+
+Every gate has a *strength* that bounds what it can prove. Strengths map to the
+`evidence.type` values already defined in the manifest schema:
+
+| Gate strength       | `evidence.type`       | What it proves |
+|---------------------|-----------------------|----------------|
+| smoke               | `smoke`               | CQLite parses/loads the artifact without error. **Not** byte parity and **not** value parity. |
+| canonical-semantic  | `canonical_semantic`  | Decoded values match Cassandra after a documented normalization (e.g. JSONL goldens). Proves *value* parity, not byte layout. |
+| byte-for-byte       | `byte_for_byte`       | CQLite output is byte-identical to Cassandra's (bytes/offsets/checksums/component files). The strongest claim. |
+
+The remaining two `evidence.type` values are **non-proving** and cannot back a
+parity claim on their own:
+
+- `partial` — partial coverage; requires `known_limitations` plus `scope.gap`
+  and `scope.next_step` in the manifest.
+- `out_of_scope` — explicitly excluded; requires a rationale, boundary, and a
+  safe-claim statement in the manifest.
+
+**P0 data-loss rule:** smoke evidence alone CANNOT satisfy a `P0` /
+`p0_data_loss` scenario. Such a scenario must either carry canonical-semantic or
+byte-for-byte evidence, or record an explicit `scope.gap` acknowledging the
+missing proof (enforced by `cassandra-parity lint`). A green smoke gate over a
+P0 data-loss path without a recorded gap is a contract violation.
+
+## Tier contracts
+
+### `fast_pr`
+
+- **Purpose.** The cheap, always-on PR gate. Static and structural checks that
+  run on every pull request with no heavy dependencies (no Docker, no live
+  Cassandra, no downloaded dataset binaries). The tier-contract cross-check
+  itself runs here.
+- **Allowed `evidence.type`.** `smoke`, `partial`, `out_of_scope`. (A scenario
+  may *also* have stronger evidence proven in a higher tier; `fast_pr` only
+  asserts the cheap checks.)
+- **Skip policy.** Must not skip on PRs that touch parity surfaces. Path-filtered
+  workflows may legitimately not trigger when no parity file changed; that is a
+  non-trigger, not a skip.
+- **Failure policy.** Blocking. A red `fast_pr` check blocks the PR.
+- **Artifact retention.** Logs only; default CI retention. No fixtures produced.
+- **Promotion.** A `fast_pr` scenario is promoted to `required_parity` once a
+  deterministic, dataset-backed comparison (canonical-semantic or byte-for-byte)
+  exists and is wired into a named workflow. Record the workflow path in
+  `ci.workflow` when promoting.
+
+### `required_parity`
+
+- **Purpose.** The blocking parity gate on PRs and `main`: deterministic
+  comparisons against committed reference goldens (JSONL, TOC, digests, byte
+  fixtures) that run without spinning up Cassandra.
+- **Allowed `evidence.type`.** `canonical_semantic`, `byte_for_byte` (the
+  proving strengths). `partial` is permitted only with a recorded `scope.gap`
+  and `scope.next_step`.
+- **Skip policy.** Must not skip on the release commit. A skipped
+  `required_parity` is treated as a failure for release purposes (see the
+  release checklist).
+- **Failure policy.** Blocking. Every `required_parity` scenario MUST name a
+  workflow (`ci.workflow`); a missing workflow is a lint error.
+- **Artifact retention.** On failure, retain the diff/failure artifacts named in
+  `evidence.failure_artifacts` long enough to triage (>= 14 days recommended).
+- **Promotion.** A `canonical_semantic` `required_parity` scenario is promoted
+  to `byte_for_byte` once byte/offset/checksum fixtures and a strict comparison
+  command exist. Heavy regeneration of those fixtures moves to `nightly_docker`
+  or `exhaustive_regeneration`.
+
+### `nightly_docker`
+
+- **Purpose.** Scheduled (nightly) verification that regenerates or re-validates
+  fixtures inside a real Cassandra Docker image — catching drift the committed
+  goldens cannot (version bumps, environment differences).
+- **Allowed `evidence.type`.** `canonical_semantic`, `byte_for_byte`.
+- **Skip policy.** May skip on ordinary PRs (it is scheduled, not per-PR). It
+  must run on its schedule; a chronically skipped/disabled nightly invalidates
+  the "recent nightly pass" release requirement.
+- **Failure policy.** Non-blocking for in-flight PRs, but a failure files/updates
+  a tracking issue and blocks release until resolved (see release checklist).
+- **Artifact retention.** Retain regenerated fixtures and logs for the comparison
+  window (>= 30 days recommended) so a release can cite a recent pass.
+- **Promotion.** Scenarios do not "promote" out of `nightly_docker`; rather, a
+  `required_parity` scenario whose fixtures need a live Cassandra to regenerate
+  is *attached* to the nightly so its goldens stay fresh.
+
+### `exhaustive_regeneration`
+
+- **Purpose.** The full, expensive regeneration of the entire fixture corpus
+  across the storage-format matrix (`nb`/`oa`/`da`/`big`/`bti`), run for release
+  candidates and major format work — the broadest proof the program offers.
+- **Allowed `evidence.type`.** `byte_for_byte`, `canonical_semantic`.
+- **Skip policy.** Not run per-PR. Required for release candidates; skipping it
+  for an RC means broad parity claims cannot ship (see release checklist).
+- **Failure policy.** Blocking for release candidates. A failure blocks the RC
+  until the corpus regenerates cleanly.
+- **Artifact retention.** Retain the full regenerated corpus + logs for the RC's
+  lifetime (>= 90 days recommended) as the citable evidence behind the release
+  claim.
+- **Promotion.** Terminal tier — it is the strongest, broadest gate. New
+  format-matrix scenarios are *added* here once their generation command exists.
+
+### `manual_debug`
+
+- **Purpose.** Investigative, human-run scenarios used to triage a specific
+  failure or explore a format question. Not an automated gate.
+- **Allowed `evidence.type`.** Any, including `partial` and `out_of_scope`,
+  because the tier itself proves nothing automatically.
+- **Skip policy.** Always "skipped" in automation — it never runs in CI by
+  design.
+- **Failure policy.** Non-gating. Findings feed back into a stronger tier or an
+  issue; they never block a PR or a release on their own.
+- **Artifact retention.** Ad hoc; attach artifacts to the relevant issue.
+- **Promotion.** A `manual_debug` scenario is promoted to `fast_pr` or
+  `required_parity` once it is made deterministic and dataset-free (for
+  `fast_pr`) or backed by committed goldens (for `required_parity`).
+
+## Promotion ladder (summary)
+
+```
+manual_debug ──▶ fast_pr ──▶ required_parity ──▶ nightly_docker / exhaustive_regeneration
+ (investigate)   (cheap,      (committed-golden    (live-Cassandra regen; RC-wide
+                  static)      comparison)          corpus regeneration)
+```
+
+A scenario is only as strong as the evidence backing it: moving up the ladder
+requires upgrading the `evidence.type` to a proving strength
+(`canonical_semantic` or `byte_for_byte`) and recording the gate's workflow.
