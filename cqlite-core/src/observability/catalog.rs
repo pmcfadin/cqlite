@@ -151,6 +151,17 @@ pub const READ_PARTITION_LOOKUP: &str = "cqlite.read.partition_lookup.total";
 /// [`READ_PARTITION_LOOKUP`] reveals the bloom false-positive rate.
 pub const READ_BLOOM_CHECKS: &str = "cqlite.read.bloom.checks";
 
+/// `cqlite.read.scan.window_refill` — counter `1`.
+///
+/// Incremented once each time the user-facing windowed streaming scan
+/// (issue #1143, `run_scan_stream_windowed`) stops at `ParseStep::NeedMore`
+/// because the trailing partition straddles a compression-chunk boundary and
+/// the driver must await the next decompressed chunk before re-parsing. A
+/// non-zero value proves the sliding-window stitch boundary path was actually
+/// exercised (a multi-chunk SSTable with a straddling partition); it stays
+/// zero for single-chunk SSTables. No high-cardinality attributes.
+pub const READ_SCAN_WINDOW_REFILL: &str = "cqlite.read.scan.window_refill";
+
 /// `cqlite.query.duration` — histogram `s`.
 ///
 /// Distribution of end-to-end query execution durations in seconds. Bounded

@@ -29,6 +29,16 @@ impl SSTableReader {
     /// happens between `await` points on this async task (not in `spawn_blocking`)
     /// the work is naturally yielding at chunk granularity.
     ///
+    /// Cooperative scheduling (issue #1143, finding #2): the old
+    /// `parse_stitched_stream` ran the whole-file parse under
+    /// `tokio::task::spawn_blocking`; this driver instead parses inline on the
+    /// async worker. We yield between partitions and between chunks for free
+    /// (the `tx.send().await` / `read_next_block().await` points), but a single
+    /// very wide partition can parse with neither point reached, so
+    /// [`drain_scan_window`](Self::drain_scan_window) adds an explicit
+    /// `tokio::task::yield_now().await` after each partition to keep one wide
+    /// partition from monopolizing a worker thread.
+    ///
     /// Precondition: `cursor`'s file is seeked to the start of the data section.
     pub(super) async fn run_scan_stream_windowed(
         &self,
@@ -126,10 +136,13 @@ impl SSTableReader {
     ///
     /// Mirrors [`drain_compaction_window`](Self::drain_compaction_window) but for
     /// the user-facing scan: it drives [`parse_one_partition_with_timestamps`],
-    /// drops the per-row timestamp, and applies the SAME key-range + tombstone
-    /// filters the previous whole-buffer `parse_stitched_stream` applied so the
-    /// emitted set is byte-identical. After each `Emitted(consumed)` the consumed
-    /// prefix is removed, keeping the window's peak bounded by
+    /// drops the per-row timestamp, and applies the same key-range + tombstone
+    /// filters the previous whole-buffer `parse_stitched_stream` applied. It
+    /// ADDITIONALLY applies a [`table_ids_match`] filter (consistent with the
+    /// non-stitching `scan_stream` branch in `data_access.rs`); that filter is a
+    /// no-op for a single-table SSTable, so for the single-table corpus the
+    /// emitted set is unchanged from the old path. After each `Emitted(consumed)`
+    /// the consumed prefix is removed, keeping the window's peak bounded by
     /// `max_partition_size + one_chunk`. Stops at `NeedMore` / `Done` (await the
     /// next chunk / genuine end) or when the consumer is dropped (`*broke`).
     #[allow(clippy::too_many_arguments)]
@@ -164,7 +177,10 @@ impl SSTableReader {
                 self,
                 at_final_chunk,
                 &mut |(entry_table_id, key, value, _ts)| {
-                    // Same filters as the previous `parse_stitched_stream`.
+                    // Key-range + tombstone filters match the previous
+                    // `parse_stitched_stream`; the `table_ids_match` guard is the
+                    // ADDITIONAL filter the non-stitching `scan_stream` branch
+                    // also applies (a no-op for single-table SSTables).
                     if !table_ids_match(&entry_table_id, table_id) {
                         return Ok(std::ops::ControlFlow::Continue(()));
                     }
@@ -198,6 +214,13 @@ impl SSTableReader {
                             return Ok(());
                         }
                     }
+                    // Cooperative yield (issue #1143, finding #2): a partition with
+                    // no surviving entries (all filtered/tombstoned) reaches no
+                    // `send().await`, and a very wide partition parses with no
+                    // intervening `await`, so yield explicitly after each partition
+                    // to avoid monopolizing a worker thread on a multi-thread
+                    // runtime. Cheap (no reschedule when the queue is empty).
+                    tokio::task::yield_now().await;
                 }
                 // NeedMore: the partition straddles this chunk boundary. The
                 // per-partition parser buffers a partition's rows internally and
@@ -205,9 +228,19 @@ impl SSTableReader {
                 // so on `NeedMore` our `surviving` buffer is empty — nothing was
                 // forwarded and nothing is dropped. The caller appends the next
                 // chunk and we re-parse this partition from its start, so no row
-                // is duplicated or lost across the boundary.
+                // is duplicated or lost across the boundary. Record the straddle
+                // (issue #1143) so the boundary re-parse path is observable; it is
+                // suppressed at the final chunk (parser collapses NeedMore→Done).
+                ParseStep::NeedMore => {
+                    crate::observability::add_counter(
+                        crate::observability::catalog::READ_SCAN_WINDOW_REFILL,
+                        1,
+                        &[],
+                    );
+                    return Ok(());
+                }
                 // Done: genuine end of partitions / terminal truncation.
-                ParseStep::NeedMore | ParseStep::Done => return Ok(()),
+                ParseStep::Done => return Ok(()),
             }
         }
     }
