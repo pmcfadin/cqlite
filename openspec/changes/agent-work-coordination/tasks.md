@@ -57,5 +57,5 @@
 - [x] 7.1 Confirm no code lanes regress (docs/agent/script-only: no `*.rs`/`Cargo.*`
       changes; if a setup `*.sh` is added, shellcheck it).
 - [ ] 7.2 roborev clean on the branch.
-- [ ] 7.3 Self-audit with C: every `work-coordination` requirement `satisfied` with
+- [x] 7.3 Self-audit with C: every `work-coordination` requirement `satisfied` with
       evidence (incl. the claim-race scenario reasoned through against the skill steps).
