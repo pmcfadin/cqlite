@@ -37,14 +37,27 @@ else
   exit 1
 fi
 
-echo "==> [2/3] Ensuring gh (GitHub CLI) is available"
-if command -v gh >/dev/null 2>&1; then
-  echo "    gh present: $(gh --version 2>/dev/null | head -n1)"
-else
+echo "==> [2/3] Ensuring gh (GitHub CLI) is available AND authenticated"
+if ! command -v gh >/dev/null 2>&1; then
   echo "error: gh CLI not found on PATH." >&2
   echo "       Install it (https://cli.github.com/) and authenticate before driving the pipeline." >&2
-  echo "       For the Project claim board, also grant the scope: gh auth refresh -s project" >&2
   exit 1
+fi
+echo "    gh present: $(gh --version 2>/dev/null | head -n1)"
+# Presence is not enough — the flow commands (issues, PRs, Projects) fail immediately
+# if gh is unauthenticated, so verify auth and fail loud rather than report ready (roborev).
+if ! auth_out="$(gh auth status 2>&1)"; then
+  echo "error: gh is not authenticated — flow-* (issues/PRs/Projects) will fail." >&2
+  printf '%s\n' "${auth_out}" >&2
+  echo "       Authenticate: gh auth login   (and for the claim board: gh auth refresh -s project)" >&2
+  exit 1
+fi
+# Report whether the 'project' scope is present (board) vs absent (label fallback).
+if printf '%s' "${auth_out}" | grep -q "'project'"; then
+  echo "    gh authenticated; 'project' scope present (claim board enabled)."
+else
+  echo "    gh authenticated; 'project' scope ABSENT — flow-* will use the status:* label fallback."
+  echo "    (Enable the board with: gh auth refresh -s project)"
 fi
 
 echo "==> [3/3] Fetching the test dataset (Data.db binaries) so the gate can run"
