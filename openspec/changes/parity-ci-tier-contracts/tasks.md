@@ -21,7 +21,7 @@
 - [x] 5.1 Cross-link the tier contract from `CLAUDE.md` and the website `agents-developing/` gate-contract page (same-change doctrine rule).
 
 ## 6. Quality gate (definition of done)
-- [ ] 6.1 Run `scripts/agent-gate.sh` (with `CQLITE_DATASETS_ROOT` → main repo `test-data/datasets`) and paste the AGENT-GATE SUMMARY block verbatim — must PASS.
+- [x] 6.1 Run `scripts/agent-gate.sh` (with `CQLITE_DATASETS_ROOT` → main repo `test-data/datasets`) and paste the AGENT-GATE SUMMARY block verbatim — must PASS. (RESULT: PASS on commit bb9c47c8.)
 - [ ] 6.2 Intent audit **C**: run `spec-auditor` anchored to `openspec/changes/parity-ci-tier-contracts/specs/**` — every requirement `satisfied` with public-surface evidence (the doc, the `tier-contract-check` tests, the CI step). Must report PASS.
 - [ ] 6.3 roborev: `/roborev-review-branch --base origin/main` clean (run `/roborev-fix` for findings).
 - [ ] 6.4 Push branch, open PR linking #1022; do NOT merge (owner's Seam 2).
