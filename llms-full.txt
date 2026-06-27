@@ -192,6 +192,48 @@ CQLite delivery is driven by a **manager agent, `flow-lead`**, that orchestrates
 * **1:1:1:1** — one issue ↔ one worktree/branch `issue-<N>-<slug>` ↔ one OpenSpec change `<slug>` ↔ one PR. Worktrees branch from `origin/main` and lack the gitignored `Data.db` binaries — run the gate with `CQLITE_DATASETS_ROOT` pointed at the main repo’s `test-data/datasets`.
 * The **definition of done** is the [spec-driven audit](/cqlite/agents-developing/spec-driven-audit/) one: `agent-gate.sh` PASS + C PASS + roborev clean.
 
+## The shared claim board
+
+[Section titled “The shared claim board”](#the-shared-claim-board)
+
+In-flight work is tracked on a shared **GitHub Project (v2)** with a single-select `Status` field (`Backlog → Ready → In Progress → In Review → Done`). It is the cross-session, cross-machine view — and the thing a human can also drive from mobile. `flow-board` renders it (`gh project item-list`) showing each item’s status, assignee, and priority; built-in server-side Project automations move items on GitHub-side events (PR merged / issue closed → `Done`, assigned → `In Progress`), so the board stays fresh even when an action came from the phone or web with no `flow-*` run.
+
+**One-time setup (the owner’s action):** Projects v2 needs the `project` token scope — `gh auth refresh -s project` — then run `test-data/scripts/setup-project-board.sh` to create + link the board and normalize the `Status` options. The built-in workflow automations (merge/close → `Done`, assigned → `In Progress`) cannot be set via CLI; the script prints the manual web-UI step for them.
+
+**Graceful degradation:** if the `project` scope or the board is absent, every `flow-*` skill falls back to the existing `status:*` label model (+ assignee) and never blocks — the Project is purely additive.
+
+## The claim protocol (no duplicate work)
+
+[Section titled “The claim protocol (no duplicate work)”](#the-claim-protocol-no-duplicate-work)
+
+Before working an item, a session claims it so no two sessions — **including two sessions authenticated as the same GitHub user on different machines** — work the same item. Because assignee `@me` is identical for the same user on two machines, the assignee is *not* the lock; the deciding lock is the **`issue-<N>-<slug>` branch pushed to origin** (server-side, per-machine-distinct, the natural 1:1:1:1 artifact).
+
+1. **Eligibility** — the item is `Ready` AND has **no** existing `issue-<N>-*` branch on origin (`git ls-remote --heads origin "issue-<N>-*"`).
+2. **Claim** — push the `issue-<N>-<slug>` branch to origin (the cross-machine lock), then set assignee `@me` + `Status=In Progress` for board visibility. `flow-activate` pushes the branch immediately — before any spec work — as the claim; oracle-driven issues claim in `flow-implement`.
+3. **Re-read** — confirm origin’s branch is your commit (you won the race) and proceed only if you hold it; otherwise back off and take the next eligible item.
+
+Another machine that finds an existing claim branch can `git fetch` it to **resume** that work instead of colliding. `flow-board` reaps **abandoned claims** — an `In Progress` item whose branch has had no recent commits (the claiming session died) is flagged as STALLED for reclaim or finish, so a crash never leaks a stuck item. `flow-finalize` releases the claim by deleting the origin branch on cleanup.
+
+## Concurrency model
+
+[Section titled “Concurrency model”](#concurrency-model)
+
+* **Default (recommended): one lead → subagents.** A single `flow-lead` spawns subagents and assigns each **disjoint** work — zero duplicate work by construction.
+* **Multiple independent sessions: the claim protocol is mandatory.** Each acquires work only through the claim protocol above.
+* **Agent Teams is optional, desktop-only.** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` gives a built-in file-locked shared task list for coordinated parallel sessions, but it is experimental and desktop/tmux -only (no `/resume`, one team per session). Use it if you want; it is not required.
+* **Never run N bare `flow-lead`s without the claim protocol** — independent leads with no claim each pick the same top `Ready` item and collide.
+
+## Driving from mobile / remote
+
+[Section titled “Driving from mobile / remote”](#driving-from-mobile--remote)
+
+The Claude Code mobile app cannot run the local pipeline itself (no local bash, skills, worktrees, or the dataset binaries). Two supported ways to still drive work from the phone:
+
+* **Remote Control (primary).** Run `claude remote-control` on the laptop and connect from the mobile app; the phone drives the **full local `flow-*` pipeline** (worktrees, `agent-gate.sh`, `gh`, `openspec`) in that local session. The laptop must stay online.
+* **Claude Code on the web (secondary, cloud).** A cloud session uses the repo-committed `.claude/` (skills/agents/hooks) but not user-scoped config or local data. Run the **cloud setup script** `test-data/scripts/cloud-setup.sh` first — it installs `openspec` + `gh` and fetches the dataset (`fetch-datasets.sh`) so `flow-implement` can run the gate in the cloud.
+
+The **two human seams are GitHub-mobile-native** regardless of how you drive: approve the spec in the session, and merge the PR from the GitHub mobile app / web UI (the merge automation then moves the board item to `Done`).
+
 # Format Debugging Workflow
 
 > Hex dumps, the definitive-guide chapters to consult, and appendix F for known limitations — how to debug SSTable binary format issues.
