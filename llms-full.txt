@@ -510,6 +510,12 @@ RESULT: PARTIAL
 ==== END AGENT-GATE SUMMARY ====
 ```
 
+## Parity CI tier contracts
+
+[Section titled “Parity CI tier contracts”](#parity-ci-tier-contracts)
+
+The agent gate proves a change is *correct*; the **parity CI tiers** define what each Cassandra-parity gate *promises*. The two are read together: see `docs/development/parity-ci-tiers.md` for the per-tier contract (purpose, accepted `evidence.type`, skip/failure policy, artifact retention, promotion rules) and the gate-strength classification — **smoke** vs **canonical-semantic** vs **byte-for-byte** — that bounds what a green gate can claim. Smoke alone cannot satisfy a P0 data-loss scenario without a recorded gap. Before publishing a broad public parity claim, run `docs/development/parity-release-checklist.md`. A fast-PR cross-check (`cargo run -p cassandra-parity -- tier-contract-check`) keeps the documented tier enum in sync with the code (`enums::CI_TIER`) and the manifest schema (issue #1022).
+
 ## CI parity
 
 [Section titled “CI parity”](#ci-parity)
