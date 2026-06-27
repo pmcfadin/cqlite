@@ -61,8 +61,17 @@ fi
 project_id="$(gh project view "${project_number}" --owner "${OWNER}" --format json | jq -r '.id')"
 
 echo "==> Linking project #${project_number} to repo ${REPO}"
-# link is idempotent; ignore "already linked" noise.
-gh project link "${project_number}" --owner "${OWNER}" --repo "${REPO}" >/dev/null 2>&1 || true
+# Tolerate ONLY the known "already linked" case; fail loud on any other error so
+# we never report success on an unlinked project (roborev).
+if ! link_out="$(gh project link "${project_number}" --owner "${OWNER}" --repo "${REPO}" 2>&1)"; then
+  if printf '%s' "${link_out}" | grep -qiE "already linked|already exists"; then
+    echo "    (already linked)"
+  else
+    echo "error: failed to link project #${project_number} to ${REPO}:" >&2
+    printf '%s\n' "${link_out}" >&2
+    exit 1
+  fi
+fi
 
 echo "==> Ensuring the 'Status' single-select field carries the canonical options"
 fields_json="$(gh project field-list "${project_number}" --owner "${OWNER}" --format json --limit 100)"
@@ -97,25 +106,17 @@ if [ -z "${status_field_id}" ]; then
     --single-select-options "${options_csv}" >/dev/null
   echo "    Created 'Status' with: ${options_csv}"
 elif [ "${#missing_options[@]}" -gt 0 ]; then
-  # Adding options to an existing single-select field is a GraphQL mutation; the
-  # gh CLI exposes it via `gh api graphql`. We must resend the FULL desired option
-  # set (the mutation replaces the option list), so build it from canonical order.
-  echo "    'Status' exists; missing options: ${missing_options[*]} — normalizing the full option set."
-  # Build the GraphQL options array in canonical order.
-  options_gql="$(
-    for opt in "${STATUS_OPTIONS[@]}"; do
-      printf '{name: "%s", color: GRAY, description: ""},' "${opt}"
-    done
-  )"
-  options_gql="[${options_gql%,}]"
-  gh api graphql -f query="
-    mutation {
-      updateProjectV2Field(input: {
-        fieldId: \"${status_field_id}\",
-        singleSelectOptions: ${options_gql}
-      }) { projectV2Field { ... on ProjectV2SingleSelectField { id name } } }
-    }" >/dev/null
-  echo "    Normalized 'Status' options to: ${STATUS_OPTIONS[*]}"
+  # NON-DESTRUCTIVE: a `gh api graphql updateProjectV2Field` with
+  # singleSelectOptions REPLACES the whole option list — resending only the
+  # canonical set would DROP any existing (incl. custom) options and could
+  # detach items already assigned to them. So we DO NOT rewrite the field;
+  # we warn and ask the owner to add the missing options in the web UI
+  # (adding options there is safe and non-destructive) — roborev.
+  echo "    WARNING: 'Status' field exists but is MISSING canonical option(s): ${missing_options[*]}"
+  echo "    Existing options are preserved — NOT rewriting (a rewrite would drop"
+  echo "    existing/custom options and detach assigned items)."
+  echo "    Add the missing option(s) in the web UI: Project -> Status field -> + add option."
+  echo "    (The flow-* skills' label fallback keeps working until then.)"
 else
   echo "    'Status' already carries all canonical options — nothing to do."
 fi
