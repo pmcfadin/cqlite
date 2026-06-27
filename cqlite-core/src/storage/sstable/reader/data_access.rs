@@ -2028,12 +2028,12 @@ impl SSTableReader {
             // difference is it emits user-facing `(RowKey, Value)` entries and
             // applies the scan's key-range + tombstone filters.
             //
-            // Parity: the per-partition parser
-            // (`parse_one_partition_with_timestamps`) is proven byte-identical to
-            // the whole-block parse by `test_issue_827_streaming_parity`; we drop
-            // the timestamp tuple element and reuse the IDENTICAL key-range /
-            // tombstone filters the previous `parse_stitched_stream` applied, so
-            // scan OUTPUT is unchanged — only memory staging differs.
+            // Parity: per-partition parse (`parse_one_partition_with_timestamps`)
+            // matches the whole-block parse (`test_issue_827_streaming_parity`);
+            // we drop the timestamp and reuse the same key-range / tombstone
+            // filters as `parse_stitched_stream`, ADDITIONALLY applying the
+            // `table_ids_match` guard the non-stitching branch below uses — a
+            // no-op for single-table SSTables, so scan OUTPUT is unchanged there.
             self.run_scan_stream_windowed(table_id, start_key, end_key, schema, &cursor, &tx)
                 .await
         } else {
