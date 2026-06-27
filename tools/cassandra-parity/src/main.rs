@@ -16,24 +16,29 @@ use anyhow::{bail, Context, Result};
 
 use cassandra_parity::lint::Level;
 use cassandra_parity::model::Manifest;
-use cassandra_parity::{coverage, enums, lint, report};
+use cassandra_parity::{coverage, enums, lint, report, tier_contract};
 
 const DEFAULT_MANIFEST: &str = "test-data/cassandra-parity-manifest.yml";
 const DEFAULT_OUTPUT: &str = "docs/reports/cassandra-test-parity.md";
+const DEFAULT_TIER_DOC: &str = "docs/development/parity-ci-tiers.md";
+const DEFAULT_SCHEMA: &str = "test-data/cassandra-parity-manifest.schema.json";
 
 const USAGE: &str = "\
 cassandra-parity — CQLite ↔ Cassandra parity manifest tooling
 
 USAGE:
-  cassandra-parity lint     [--manifest PATH]
-  cassandra-parity coverage [--manifest PATH] [--strict]
-  cassandra-parity report   [--manifest PATH] [--output PATH] [--check] [--json PATH]
+  cassandra-parity lint               [--manifest PATH]
+  cassandra-parity coverage           [--manifest PATH] [--strict]
+  cassandra-parity report             [--manifest PATH] [--output PATH] [--check] [--json PATH]
+  cassandra-parity tier-contract-check [--manifest PATH] [--tier-doc PATH] [--schema PATH]
 ";
 
 struct Args {
     manifest: PathBuf,
     output: PathBuf,
     json: Option<PathBuf>,
+    tier_doc: PathBuf,
+    schema: PathBuf,
     strict: bool,
     check: bool,
 }
@@ -43,6 +48,8 @@ fn parse_args(rest: &[String]) -> Result<Args> {
         manifest: PathBuf::from(DEFAULT_MANIFEST),
         output: PathBuf::from(DEFAULT_OUTPUT),
         json: None,
+        tier_doc: PathBuf::from(DEFAULT_TIER_DOC),
+        schema: PathBuf::from(DEFAULT_SCHEMA),
         strict: false,
         check: false,
     };
@@ -52,6 +59,8 @@ fn parse_args(rest: &[String]) -> Result<Args> {
             "--manifest" => args.manifest = PathBuf::from(next_val(&mut it, "--manifest")?),
             "--output" => args.output = PathBuf::from(next_val(&mut it, "--output")?),
             "--json" => args.json = Some(PathBuf::from(next_val(&mut it, "--json")?)),
+            "--tier-doc" => args.tier_doc = PathBuf::from(next_val(&mut it, "--tier-doc")?),
+            "--schema" => args.schema = PathBuf::from(next_val(&mut it, "--schema")?),
             "--strict" => args.strict = true,
             "--check" => args.check = true,
             other => bail!("unknown argument: {other}\n\n{USAGE}"),
@@ -106,6 +115,7 @@ fn run() -> Result<ExitCode> {
         "lint" => cmd_lint(&args),
         "coverage" => cmd_coverage(&args),
         "report" => cmd_report(&args),
+        "tier-contract-check" => cmd_tier_contract_check(&args),
         "-h" | "--help" | "help" => {
             println!("{USAGE}");
             Ok(ExitCode::SUCCESS)
@@ -138,6 +148,37 @@ fn cmd_lint(args: &Args) -> Result<ExitCode> {
         Ok(ExitCode::SUCCESS)
     } else {
         eprintln!("lint: FAILED — {errors} errors, {warns} warnings");
+        Ok(ExitCode::FAILURE)
+    }
+}
+
+/// Cross-check the documented tier enum (`docs/development/parity-ci-tiers.md`)
+/// against `enums::CI_TIER` and the manifest schema, and validate that every
+/// manifest `ci.tier` is a documented tier. No Docker/datasets/live Cassandra.
+fn cmd_tier_contract_check(args: &Args) -> Result<ExitCode> {
+    let doc = std::fs::read_to_string(&args.tier_doc)
+        .with_context(|| format!("reading tier doc {}", args.tier_doc.display()))?;
+    let schema = std::fs::read_to_string(&args.schema)
+        .with_context(|| format!("reading schema {}", args.schema.display()))?;
+    let manifest = std::fs::read_to_string(&args.manifest)
+        .with_context(|| format!("reading manifest {}", args.manifest.display()))?;
+
+    let report = tier_contract::check(&doc, &schema, enums::CI_TIER, &manifest)
+        .context("running tier-contract cross-check")?;
+
+    if report.ok() {
+        println!(
+            "tier-contract-check: OK — documented enum == code enum == schema enum, \
+             all manifest ci.tier values documented"
+        );
+        Ok(ExitCode::SUCCESS)
+    } else {
+        eprintln!("{}", report.render());
+        eprintln!(
+            "tier-contract-check: FAILED — {} enum divergence(s), {} unknown manifest tier(s)",
+            report.enum_divergences.len(),
+            report.unknown_manifest_tiers.len()
+        );
         Ok(ExitCode::FAILURE)
     }
 }
