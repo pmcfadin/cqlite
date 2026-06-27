@@ -76,7 +76,10 @@ project_id="$(gh project view "${project_number}" --owner "${OWNER}" --format js
 echo "==> Linking project #${project_number} to repo ${REPO}"
 # Tolerate ONLY the known "already linked" case; fail loud on any other error so
 # we never report success on an unlinked project (roborev).
-if ! link_out="$(gh project link "${project_number}" --owner "${OWNER}" --repo "${REPO}" 2>&1)"; then
+# `gh project link --repo` expects the BARE repo name for --owner (per its examples:
+# `--owner monalisa --repo my_repo`), so strip any "owner/" prefix from REPO.
+repo_name="${REPO##*/}"
+if ! link_out="$(gh project link "${project_number}" --owner "${OWNER}" --repo "${repo_name}" 2>&1)"; then
   if printf '%s' "${link_out}" | grep -qiE "already linked|already exists"; then
     echo "    (already linked)"
   else
