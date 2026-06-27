@@ -26,6 +26,13 @@ if ! command -v gh >/dev/null 2>&1; then
   echo "error: gh CLI not found on PATH" >&2
   exit 1
 fi
+# jq is used to parse every gh JSON response below — check it UP FRONT so we never
+# create/link a remote project and then die on a missing-jq parse, leaving partial
+# remote state (roborev).
+if ! command -v jq >/dev/null 2>&1; then
+  echo "error: jq not found on PATH — required to parse gh responses. Install jq and re-run." >&2
+  exit 1
+fi
 
 # The `project` scope is required for every Projects v2 read/write below.
 if ! gh auth status 2>&1 | grep -q "'project'"; then
