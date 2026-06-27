@@ -22,16 +22,28 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    only for a doc/infra change with no capability delta). This moves the change to
    `openspec/changes/archive/` and syncs its delta spec into `openspec/specs/<capability>/spec.md`.
    Commit the archive (and push / open a small PR per the repo's merge norms).
-4. **Remove the worktree + branch:**
+4. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
+   should already have moved the Project item to `Status=Done` (it fires even when you merge from the
+   phone/web — no `flow-*` run needed); if it hasn't, set it yourself, else flip the `status:*` label in
+   the fallback (the Project-vs-labels detection snippet is in `flow-board`):
+   ```bash
+   # gh project item-edit <item-id> --field Status --single-select-option-id <Done>   # when board present
+   gh issue edit <N> --remove-label status:in-review --add-label status:done 2>/dev/null || true
+   ```
+   Releasing the claim = removing the `issue-<N>-<slug>` branch from origin (the cross-machine lock); the
+   cleanup below does exactly that. After finalize, nothing for this issue may remain `In Progress`/`In
+   Review` and no `issue-<N>-*` branch may remain on origin.
+5. **Remove the worktree + branch (releases the claim lock):**
    ```bash
    git worktree remove .claude/worktrees/issue-<N>-<slug> --force
    git branch -D issue-<N>-<slug> 2>/dev/null
-   git push origin --delete issue-<N>-<slug> 2>/dev/null
+   git push origin --delete issue-<N>-<slug> 2>/dev/null   # deletes the origin claim lock
    ```
-5. **Close the issue** with a traceable comment referencing the merged PR + commit (only if its
+   Confirm the lock is gone: `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
+6. **Close the issue** with a traceable comment referencing the merged PR + commit (only if its
    acceptance criteria are fully met — never close an epic):
    ```bash
    gh issue close <N> --reason completed --comment "Merged via #<pr> (<commit>). <one-line why>."
    ```
-6. **Report** the closed issue, the live capability (if a spec was synced), and surface the next board
+7. **Report** the closed issue, the live capability (if a spec was synced), and surface the next board
    item.

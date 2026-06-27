@@ -22,12 +22,34 @@ OpenSpec change `<slug>` (design-driven only).
      --remove-label status:addressing --remove-label status:in-review --add-label status:in-progress
    ```
    (`--remove-label` is a no-op for labels not present, so this is safe regardless of the starting state.)
-2. **Ensure the worktree exists.** Design-driven issues already have one (created by `flow-activate`).
-   Oracle-driven issues skip `flow-activate`, so create the 1:1:1:1 worktree + branch here if absent:
+   Set the Project `Status=In Progress` too when the board is present (`gh project item-edit`); fall back
+   to the `status:*` label otherwise (the Project-vs-labels detection snippet is in `flow-board`).
+2. **Ensure the worktree exists — and that you hold the claim.** Design-driven issues already have a
+   pushed claim branch (established + re-read in `flow-activate`); reuse it. Oracle-driven issues skip
+   `flow-activate`, so they run the claim protocol (D2) HERE: eligibility = `Ready` AND **no**
+   `issue-<N>-*` branch on origin, then create + **push** the branch as the cross-machine lock, then
+   re-read and proceed only as holder:
    ```bash
    wt=".claude/worktrees/issue-<N>-<slug>"
-   git -C <repo-root> worktree list | grep -q "$wt" || \
+   git -C <repo-root> fetch origin -q
+   if git -C <repo-root> worktree list | grep -q "$wt"; then
+     :  # design-driven: worktree + pushed claim already exist (from flow-activate)
+   else
+     # oracle-driven: claim now. Refuse if another machine already holds the lock.
+     if git -C <repo-root> ls-remote --heads origin "issue-<N>-*" | grep -q .; then
+       echo "Already claimed on origin — do not work it; take the next item (or fetch to RESUME)."; exit 0
+     fi
      git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
+     # UNIQUE claim commit so a same-base race gets distinct SHAs (a bare identical-SHA
+     # push is a no-op success → both would win). Non-force push: colliding SHA is rejected.
+     git -C "$wt" commit --allow-empty -m "claim issue-<N> $(hostname -s)-${RANDOM}-$$"
+     git -C "$wt" push -u origin "issue-<N>-<slug>" || { echo "Push rejected — another holds the claim; back off."; exit 0; }
+     gh issue edit <N> --add-assignee @me
+     # re-read: proceed only if origin's branch tip is YOUR claim commit (you won the race)
+     git -C <repo-root> fetch origin -q
+     [ "$(git -C <repo-root> ls-remote --heads origin "issue-<N>-<slug>" | awk '{print $1}')" \
+       = "$(git -C "$wt" rev-parse HEAD)" ] || { echo "Lost the race — back off."; exit 0; }
+   fi
    ```
 3. **Test data.** Worktrees lack the gitignored `Data.db` binaries — run the gate and tests with
    `CQLITE_DATASETS_ROOT` pointed at the MAIN repo's `test-data/datasets` (or `fetch-datasets.sh`).
@@ -42,11 +64,13 @@ OpenSpec change `<slug>` (design-driven only).
 7. **Review.** roborev: `/roborev-review-branch --base origin/main` until clean (fix mechanical findings
    in the loop; escalate genuine decisions to the owner). Add `rust-reviewer` / `coverage-reviewer` /
    `test-validator` as the change warrants.
-8. **Open the PR** (do not merge):
+8. **Open the PR** (do not merge). The claim branch is already on origin (pushed in step 2); this push
+   just sends the implementation commits. Move the board to `In Review`:
    ```bash
    gh issue edit <N> --remove-label status:in-progress --add-label status:in-review
    git -C <worktree> push -u origin issue-<N>-<slug>
    gh pr create --base main --head issue-<N>-<slug> --fill
+   # Board: set Project Status=In Review when present (gh project item-edit); else the label above suffices.
    ```
 9. **Report** the PR + the gate/C/roborev results, and hand back to the owner (or, if this issue is in a
    set the owner explicitly pre-authorized for merge-on-green, proceed to merge-on-green per `flow-lead`'s
