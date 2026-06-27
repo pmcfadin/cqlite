@@ -26,6 +26,9 @@ mod integrity;
 mod key_digest;
 pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
+/// Sliding-window stitch+parse driver for the user-facing streaming scan
+/// (issue #1143); extracted from `data_access` per epic #1116.
+mod scan_stream_windowed;
 mod source;
 #[cfg(test)]
 mod tests;
