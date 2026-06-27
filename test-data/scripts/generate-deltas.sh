@@ -419,16 +419,20 @@ generate_sstabledump_jsonl() {
   log "Generating sstabledump JSONL golden files for test_deltas..."
   while IFS= read -r -d '' data_file; do
     local rel
+    # Path relative to the export root ($sstables_dir), mounted at /data in a
+    # fresh --rm container. We dump the EXPORTED file, not the live container's
+    # mutable data dir, so auto-compaction in the live container cannot delete
+    # the freshly-flushed generation out from under us (issue #1151).
     rel="${data_file#"$sstables_dir"/}"
-    # Strip "data/" prefix (the archive was created from /var/lib/cassandra)
-    local rel_sstabledump="${rel#data/}"
     local jsonl_file="${data_file%.db}.db.jsonl"
     log "  sstabledump: $rel"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-      echo "[dry-run] sstabledump $data_file > $jsonl_file"
+      echo "[dry-run] $ENGINE run --rm -v $sstables_dir:/data $CASSANDRA_IMAGE sstabledump /data/${rel} -l > $jsonl_file"
     else
-      $ENGINE exec "$CONTAINER_NAME" bash -lc \
-        "/opt/cassandra/tools/bin/sstabledump /var/lib/cassandra/data/${rel_sstabledump} -l" \
+      $ENGINE run --rm \
+        -v "$sstables_dir:/data" \
+        "$CASSANDRA_IMAGE" \
+        bash -lc "/opt/cassandra/tools/bin/sstabledump /data/${rel} -l" \
         | python3 -c "
 import json, sys
 try:
@@ -503,6 +507,11 @@ apply_schema "$ROOT/schemas/deltas.cql"
 
 # Insert all rows
 insert_deltas_rows
+
+# Disable autocompaction so the freshly-flushed nb-1-big generation cannot be
+# compacted away between export and the per-table sstabledump loop (issue #1151).
+log "Disabling autocompaction for test_deltas..."
+run $ENGINE exec "$CONTAINER_NAME" nodetool disableautocompaction "test_deltas"
 
 # Flush all tables to produce SSTables
 log "Flushing test_deltas keyspace to SSTables..."

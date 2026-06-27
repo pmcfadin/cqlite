@@ -552,15 +552,20 @@ generate_sstabledump_jsonl() {
   log "Generating sstabledump JSONL golden files for $KEYSPACE..."
   while IFS= read -r -d '' data_file; do
     local rel
+    # Path relative to the export root ($sstables_dir), mounted at /data in a
+    # fresh --rm container. We dump the EXPORTED file, not the live container's
+    # mutable data dir, so auto-compaction in the live container cannot delete
+    # the freshly-flushed generation out from under us (issue #1151).
     rel="${data_file#"$sstables_dir"/}"
-    local rel_sstabledump="${rel#data/}"
     local jsonl_file="${data_file%.db}.db.jsonl"
     log "  sstabledump: $rel"
     if [[ "$DRY_RUN" -eq 1 ]]; then
-      echo "[dry-run] sstabledump $data_file > $jsonl_file"
+      echo "[dry-run] $ENGINE run --rm -v $sstables_dir:/data $CASSANDRA_IMAGE sstabledump /data/${rel} -l > $jsonl_file"
     else
-      $ENGINE exec "$CONTAINER_NAME" bash -lc \
-        "/opt/cassandra/tools/bin/sstabledump /var/lib/cassandra/data/${rel_sstabledump} -l" \
+      $ENGINE run --rm \
+        -v "$sstables_dir:/data" \
+        "$CASSANDRA_IMAGE" \
+        bash -lc "/opt/cassandra/tools/bin/sstabledump /data/${rel} -l" \
         | python3 -c "
 import json, sys
 try:
@@ -639,6 +644,10 @@ apply_schema "$ROOT/schemas/tombstone-parity.cql"
 # Generation 1: live data + single-flush tombstone shapes.
 # ---------------------------------------------------------------------------
 run_gen1
+# Disable autocompaction so freshly-flushed generations cannot be compacted away
+# between export and the per-table sstabledump loop (issue #1151).
+log "Disabling autocompaction for $KEYSPACE..."
+run $ENGINE exec "$CONTAINER_NAME" nodetool disableautocompaction "$KEYSPACE"
 flush_generation "gen-1"
 
 # ---------------------------------------------------------------------------
