@@ -11,9 +11,9 @@
 >
 > **Doctrine cross-link:** this contract sits beside the
 > [gate contract](https://pmcfadin.github.io/cqlite/agents-developing/gate-contract/)
-> on the agent developer site. TODO: when the `agents-developing/` site mirror
-> gains a parity-tiers page, link it here (no local mirror exists under `docs/`
-> today).
+> on the agent developer site; the local site mirror
+> (`website/src/content/docs/agents-developing/gate-contract.md`) carries a
+> "Parity CI tier contracts" section pointing back here.
 
 ## The documented tier enum (machine-parseable)
 

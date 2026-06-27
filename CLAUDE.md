@@ -24,6 +24,7 @@ Key chapters:
 
 Full contributor doctrine is published at `https://pmcfadin.github.io/cqlite/agents-developing/`:
 - [Gate contract](https://pmcfadin.github.io/cqlite/agents-developing/gate-contract/) — `scripts/agent-gate.sh`, summary-block format
+  - Parity CI tier contracts: `docs/development/parity-ci-tiers.md` (what each Cassandra parity CI tier promises; gate-strength smoke/canonical-semantic/byte-for-byte) + `docs/development/parity-release-checklist.md` (gates public parity claims). Belongs alongside the gate-contract page on the `agents-developing/` site — mirror there when the site page lands (issue #1022).
 - [No-heuristics mandate](https://pmcfadin.github.io/cqlite/agents-developing/no-heuristics/) — authoritative metadata only (issue #28)
 - [Test data](https://pmcfadin.github.io/cqlite/agents-developing/test-data/) — fetching, dataset pins, CQLITE_DATASETS_ROOT
 - [Key source paths](https://pmcfadin.github.io/cqlite/agents-developing/source-map/) — parsers, writers, query engine, bindings

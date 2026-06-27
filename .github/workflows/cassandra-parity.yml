@@ -15,6 +15,7 @@ on:
       - 'tools/cassandra-parity/**'
       - 'docs/reports/cassandra-test-parity*.md'
       - 'docs/cassandra_test_index.md'
+      - 'docs/development/parity-ci-tiers.md'
       - '.github/workflows/cassandra-parity.yml'
   pull_request:
     branches: [ main ]
@@ -24,6 +25,7 @@ on:
       - 'tools/cassandra-parity/**'
       - 'docs/reports/cassandra-test-parity*.md'
       - 'docs/cassandra_test_index.md'
+      - 'docs/development/parity-ci-tiers.md'
       - '.github/workflows/cassandra-parity.yml'
 
 env:
@@ -53,6 +55,10 @@ jobs:
 
       - name: Lint manifest (schema + cross-field parity rules)
         run: cargo run -p cassandra-parity -- lint --manifest test-data/cassandra-parity-manifest.yml
+
+      - name: Tier contract is not drifted (doc == schema == code enum; #1022)
+        # Fast, dependency-free: reads only the tier doc, schema JSON, and manifest YAML.
+        run: cargo run -p cassandra-parity -- tier-contract-check --manifest test-data/cassandra-parity-manifest.yml
 
       - name: Report is not stale
         run: cargo run -p cassandra-parity -- report --manifest test-data/cassandra-parity-manifest.yml --output docs/reports/cassandra-test-parity.md --check
