@@ -46,8 +46,12 @@ fi
 echo "    gh present: $(gh --version 2>/dev/null | head -n1)"
 # Presence is not enough — the flow commands (issues, PRs, Projects) fail immediately
 # if gh is unauthenticated, so verify auth and fail loud rather than report ready (roborev).
-if ! auth_out="$(gh auth status 2>&1)"; then
-  echo "error: gh is not authenticated — flow-* (issues/PRs/Projects) will fail." >&2
+# Don't rely on `gh auth status` exit code — it returns nonzero when ANY configured
+# host has a bad token (e.g. a stale enterprise keyring entry) even though the host
+# we need is fine. Capture the output and check for a github.com login by string.
+auth_out="$(gh auth status 2>&1 || true)"
+if ! printf '%s' "${auth_out}" | grep -q "Logged in to github.com"; then
+  echo "error: gh is not authenticated to github.com — flow-* (issues/PRs/Projects) will fail." >&2
   printf '%s\n' "${auth_out}" >&2
   echo "       Authenticate: gh auth login   (and for the claim board: gh auth refresh -s project)" >&2
   exit 1
