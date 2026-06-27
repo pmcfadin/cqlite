@@ -98,11 +98,37 @@ silently fails:
   the owner via `AskUserQuestion`.
 - Named subagents can fail to spawn in this environment — omit the `name` field when spawning.
 
+## Concurrency model (how many of you run, and how you avoid dup work)
+
+There is a shared **claim board** — a GitHub Project (v2) with a `Status` single-select
+(`Backlog/Ready/In Progress/In Review/Done`) — plus a **claim protocol** so two sessions never work the
+same item. The deciding cross-machine lock is the **`issue-<N>-<slug>` branch pushed to origin** (assignee
+`@me` is identical for the same GitHub user on two machines, so assignee alone is NOT a lock); a session
+claims by pushing that branch, sets assignee + `Status=In Progress` for visibility, then **re-reads** and
+proceeds only if it holds the branch. See `flow-activate` / `flow-implement` for the steps and `flow-board`
+for the render + reaper.
+
+- **Default (recommended): one lead → subagents.** A single `flow-lead` spawns subagents and assigns each
+  **disjoint** work — zero dup by construction. Subagents never self-select overlapping work; the lead
+  hands out distinct tasks.
+- **Multiple independent sessions: the claim protocol is mandatory.** If more than one independent lead
+  session touches the backlog, each acquires work ONLY through the claim protocol (push branch → assignee
+  + `Status=In Progress` → re-read). This is how the dup-work race is prevented.
+- **Agent Teams is optional, desktop-only.** `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1` provides a built-in
+  file-locked shared task list for coordinated parallel sessions, but it is experimental + desktop/tmux-only
+  (no `/resume`, one team per session). Use it if you want; it is not required.
+- **NEVER run N bare `flow-lead`s without the claim protocol.** Independent leads with no claim each pick
+  the same top `Ready` item and collide. Either single-lead+subagents, or claim-protocol sessions.
+- **Graceful degradation.** When the `project` token scope or the board is absent, fall back to the
+  `status:*` label model (+ assignee) — the pipeline keeps working; the Project is additive.
+
 ## State model
 
-- **Backlog = GitHub issues + labels.** Exactly one `P0`–`P3`; lifecycle
-  `status:{ready, spec-review, in-progress, in-review, addressing}`. "What's next" = highest-priority
-  `status:ready`. Flag label drift.
+- **Backlog = the claim board (GitHub Project) + GitHub issues + labels.** Exactly one `P0`–`P3`;
+  lifecycle Project `Status` (`Backlog/Ready/In Progress/In Review/Done`), mirrored by
+  `status:{ready, spec-review, in-progress, in-review, addressing}` labels (the fallback when the Project
+  is absent). "What's next" = highest-priority `Ready`/`status:ready` item with **no** `issue-<N>-*`
+  branch already on origin (already-claimed items are skipped). Flag board/label drift.
 - **1:1:1:1** — one issue ↔ one branch/worktree `issue-<N>-<slug>` (worktrees branch from `origin/main`,
   which leads local `main`) ↔ one OpenSpec change `<slug>` ↔ one PR. Worktrees lack the gitignored
   `Data.db` binaries — run the gate with `CQLITE_DATASETS_ROOT` pointed at the main repo's

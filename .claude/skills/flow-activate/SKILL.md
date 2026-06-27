@@ -13,20 +13,47 @@ owner-approvable OpenSpec change on an isolated worktree. **STOP at approval —
 1. **Load the issue.** `gh issue view <N> --json number,title,body,labels`. Derive a kebab-case `slug`.
    If the issue is oracle-driven (per its body), say so and route to `flow-implement` instead — no
    OpenSpec.
-2. **Create the worktree + branch** (1:1:1:1) from up-to-date `origin/main`:
+2. **Check eligibility (claim protocol, D2).** An item is claimable only if it is `Ready` (Project
+   `Status=Ready`, or `status:ready` label in the fallback) AND **no** `issue-<N>-*` branch already
+   exists on origin. The origin branch — NOT the assignee — is the cross-machine lock (assignee `@me` is
+   identical for the same GitHub user on two machines):
    ```bash
-   git -C <repo-root> fetch origin
-   git -C <repo-root> worktree add ".claude/worktrees/issue-<N>-<slug>" -b "issue-<N>-<slug>" origin/main
+   git -C <repo-root> fetch origin -q
+   if git -C <repo-root> ls-remote --heads origin "issue-<N>-*" | grep -q .; then
+     echo "Already claimed (origin has an issue-<N>-* branch) — do not work it; take the next item."
+     # exit / pick a different item; another machine may `git fetch` that branch to RESUME instead.
+   fi
    ```
-   All spec work happens in that worktree.
-3. **Propose** with OpenSpec (use the `opsx:propose` skill / `openspec new change <slug>`): author
+   (For the Project-vs-labels detection snippet shared by all flow-* skills, see `flow-board`.)
+3. **Create the worktree + branch + PUSH it as the claim** (1:1:1:1) from up-to-date `origin/main`. The
+   branch is the lock, so push it to origin **immediately** — before any spec work — to establish the
+   claim:
+   ```bash
+   git -C <repo-root> worktree add ".claude/worktrees/issue-<N>-<slug>" -b "issue-<N>-<slug>" origin/main
+   # Push the claim branch FIRST (cross-machine lock). --no-verify keeps the empty claim push fast.
+   git -C ".claude/worktrees/issue-<N>-<slug>" push -u origin "issue-<N>-<slug>"
+   # Board visibility: assignee + Status=In Progress (or status:in-progress label in the fallback).
+   gh issue edit <N> --add-assignee @me
+   # Project: gh project item-edit ... --field Status --single-select-option-id <In Progress>
+   ```
+   Then **re-read** and proceed ONLY if you hold the claim — fetch origin again and confirm the branch on
+   origin points at YOUR commit (you won the race). If not, you lost: delete the local worktree/branch and
+   take the next eligible item.
+   ```bash
+   git -C <repo-root> fetch origin -q
+   remote_sha="$(git -C <repo-root> ls-remote --heads origin "issue-<N>-<slug>" | awk '{print $1}')"
+   local_sha="$(git -C ".claude/worktrees/issue-<N>-<slug>" rev-parse HEAD)"
+   [ "$remote_sha" = "$local_sha" ] || echo "Lost the race — back off and take the next item."
+   ```
+   All spec work happens in that worktree only after the claim holds.
+4. **Propose** with OpenSpec (use the `opsx:propose` skill / `openspec new change <slug>`): author
    `proposal.md` (state milestone + oracle/design + Non-goals + doctrine impact), `design.md`,
    `specs/<capability>/spec.md` (every requirement gets a verifiable `#### Scenario:`), `tasks.md`
    (each task names the surface it exercises; include gate + C + roborev steps). Consult specialists for
    facts where useful (e.g. a parity/format question → `test-validator` / `sstable-developer`), but
    **never decide a product/data-model question** — surface options to the owner.
-4. **Validate:** `openspec validate <slug> --strict` (must be clean). Commit the artifacts.
-5. **Render INLINE and STOP.** Show the owner, in the conversation:
+5. **Validate:** `openspec validate <slug> --strict` (must be clean). Commit the artifacts.
+6. **Render INLINE and STOP.** Show the owner, in the conversation:
    - the proposal summary + Non-goals,
    - the spec requirements + `#### Scenario:` blocks **verbatim**,
    - the recommended design (chosen + what it beat),
