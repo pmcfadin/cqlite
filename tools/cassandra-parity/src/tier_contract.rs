@@ -123,10 +123,17 @@ pub fn schema_tier_enum(schema_json: &str) -> Result<Vec<String>, TierContractEr
     let arr = v["$defs"]["scenario"]["properties"]["ci"]["properties"]["tier"]["enum"]
         .as_array()
         .ok_or_else(|| TierContractError::SchemaEnum("ci.tier.enum is not an array".to_string()))?;
-    let tiers: Vec<String> = arr
-        .iter()
-        .filter_map(|x| x.as_str().map(str::to_string))
-        .collect();
+    let mut tiers: Vec<String> = Vec::with_capacity(arr.len());
+    for x in arr {
+        match x.as_str() {
+            Some(s) => tiers.push(s.to_string()),
+            None => {
+                return Err(TierContractError::SchemaEnum(format!(
+                    "ci.tier enum contains a non-string entry: {x}"
+                )))
+            }
+        }
+    }
     if tiers.is_empty() {
         return Err(TierContractError::SchemaEnum(
             "ci.tier enum is empty".to_string(),

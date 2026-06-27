@@ -116,6 +116,28 @@ fn unknown_manifest_tier_fails_with_scenario_and_value() {
 }
 
 #[test]
+fn non_string_schema_enum_entry_is_an_error() {
+    // A widened/malformed schema enum mixing strings with a `null` and an
+    // integer must be rejected outright, not silently filtered down to the
+    // valid strings (which would defeat the doc<->schema<->code guarantee).
+    let bad_schema = GOOD_SCHEMA.replace(r#""manual_debug"]"#, r#""manual_debug", null, 42]"#);
+
+    // The low-level parser surfaces the schema-enum error directly.
+    let err = tier_contract::schema_tier_enum(&bad_schema).unwrap_err();
+    assert!(
+        matches!(err, TierContractError::SchemaEnum(_)),
+        "expected SchemaEnum error, got: {err:?}"
+    );
+
+    // And the full cross-check refuses to run rather than passing.
+    let result = tier_contract::check(GOOD_DOC, &bad_schema, enums::CI_TIER, "scenarios: []");
+    assert!(
+        matches!(result, Err(TierContractError::SchemaEnum(_))),
+        "cross-check must fail with SchemaEnum, got: {result:?}"
+    );
+}
+
+#[test]
 fn real_doc_schema_code_and_manifest_agree() {
     let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
