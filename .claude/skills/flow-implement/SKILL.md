@@ -22,8 +22,12 @@ OpenSpec change `<slug>` (design-driven only).
      --remove-label status:addressing --remove-label status:in-review --add-label status:in-progress
    ```
    (`--remove-label` is a no-op for labels not present, so this is safe regardless of the starting state.)
-   Set the Project `Status=In Progress` too when the board is present (`gh project item-edit`); fall back
-   to the `status:*` label otherwise (the Project-vs-labels detection snippet is in `flow-board`).
+   Set the Project `Status=In Progress` too. **Run the `flow-board` detection snippet FIRST** — it does
+   `gh auth switch --user "$project_account"` so the project-capable account is active (the EMU flip
+   otherwise makes `gh project item-edit` fail and the board write degrade to labels SILENTLY). If
+   `have_project=1`, `gh project item-edit ... Status=In Progress`; if `have_project=0`, the label above
+   is the fallback AND you MUST print the loud `⚠️ board unavailable …` warning so the owner knows the
+   board will not reflect this claim.
 2. **Ensure the worktree exists — and that you hold the claim.** Design-driven issues already have a
    pushed claim branch (established + re-read in `flow-activate`); reuse it. Oracle-driven issues skip
    `flow-activate`, so they run the claim protocol (D2) HERE: eligibility = `Ready` AND **no**
@@ -70,7 +74,10 @@ OpenSpec change `<slug>` (design-driven only).
    gh issue edit <N> --remove-label status:in-progress --add-label status:in-review
    git -C <worktree> push -u origin issue-<N>-<slug>
    gh pr create --base main --head issue-<N>-<slug> --fill
-   # Board: set Project Status=In Review when present (gh project item-edit); else the label above suffices.
+   # Board → In Review: GitHub's "Pull request linked to issue" built-in normally does this on PR open.
+   # Also set it directly as a belt-and-suspenders: run the flow-board detection snippet first (it
+   # switches to the project-capable account), then gh project item-edit ... Status=In Review when
+   # have_project=1; on have_project=0 the label above suffices but print the loud ⚠️ board-unavailable warning.
    ```
 9. **Report** the PR + the gate/C/roborev results, and hand back to the owner (or, if this issue is in a
    set the owner explicitly pre-authorized for merge-on-green, proceed to merge-on-green per `flow-lead`'s

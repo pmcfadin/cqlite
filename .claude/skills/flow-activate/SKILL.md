@@ -40,9 +40,12 @@ owner-approvable OpenSpec change on an isolated worktree. **STOP at approval —
    if ! git -C "$wt" push -u origin "issue-<N>-<slug>" 2>&1; then
      echo "Push rejected — another session holds the claim. Remove the worktree and take the next item."
    fi
-   # Board visibility: assignee + Status=In Progress (or status:in-progress label in the fallback).
+   # Board visibility: assignee + Status=In Progress. Run the flow-board detection snippet FIRST — it
+   # does `gh auth switch --user "$project_account"` so the project-capable account is active (the EMU
+   # account flip otherwise makes the board write fail and degrade to a label SILENTLY).
    gh issue edit <N> --add-assignee @me
-   # Project: gh project item-edit ... --field Status --single-select-option-id <In Progress>
+   # have_project=1: gh project item-edit ... --field Status --single-select-option-id <In Progress>
+   # have_project=0: status:in-progress label is the fallback — and print the loud ⚠️ board-unavailable warning.
    ```
    Then **re-read** and proceed ONLY if you hold the claim — the origin branch tip must equal YOUR
    claim-commit SHA. If the push was rejected OR the SHAs differ, you lost: remove the local

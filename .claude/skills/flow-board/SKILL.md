@@ -20,9 +20,16 @@ once and degrade gracefully to the `status:*` label model (D6) — never block:
 # project_owner / project_number identify the CQLite Delivery board (see setup-project-board.sh output).
 project_owner="${CQLITE_PROJECT_OWNER:-pmcfadin}"
 project_number="${CQLITE_PROJECT_NUMBER:-}"
+project_account="${CQLITE_PROJECT_ACCOUNT:-pmcfadin}"
+# CRITICAL: gh's active account silently flips to an EMU account (pmcfadin_sfemu) that lacks the
+# `project` scope. A grep of `gh auth status` is NOT enough — it matches ANY logged-in account, so it
+# reads true while the *active* account can't touch Projects, and every board write then degrades to
+# labels SILENTLY. Force the project-capable account active before any board op (idempotent):
+gh auth switch --user "$project_account" >/dev/null 2>&1 || true
+gh auth setup-git >/dev/null 2>&1 || true
 have_project=0
-if gh auth status 2>&1 | grep -q "'project'" \
-   && [ -n "$project_number" ] \
+# The real gate is whether the now-active account can actually read the board — not a scope grep.
+if [ -n "$project_number" ] \
    && gh project view "$project_number" --owner "$project_owner" >/dev/null 2>&1; then
   have_project=1
 fi
@@ -31,8 +38,11 @@ fi
 
 When `have_project=0`, every Project read below is replaced by `gh issue list --label "status:*"` and
 every Project write (`Status=...`) by the equivalent `status:*` label flip — the pipeline keeps working
-on labels alone. The one-time fix is the owner's: `gh auth refresh -s project` + run
-`test-data/scripts/setup-project-board.sh`.
+on labels alone. **But the fallback MUST be loud**, never silent: whenever `have_project=0`, print
+`⚠️ board unavailable (active gh account lacks 'project' scope) — using status:* labels; board will NOT
+reflect this claim` so the owner knows the board is stale. A silent degrade is the exact bug that let
+two machines collide. The one-time fix is the owner's: `gh auth refresh -s project` on the
+`$project_account` + run `test-data/scripts/setup-project-board.sh`.
 
 ## Steps
 

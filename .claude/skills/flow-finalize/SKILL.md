@@ -27,7 +27,9 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    phone/web — no `flow-*` run needed); if it hasn't, set it yourself, else flip the `status:*` label in
    the fallback (the Project-vs-labels detection snippet is in `flow-board`):
    ```bash
-   # gh project item-edit <item-id> --field Status --single-select-option-id <Done>   # when board present
+   # If you must set it yourself, run the flow-board detection snippet first (it switches to the
+   # project-capable account — the EMU flip otherwise makes this write fail silently):
+   # gh project item-edit <item-id> --field Status --single-select-option-id <Done>   # when have_project=1
    gh issue edit <N> --remove-label status:in-review --add-label status:done 2>/dev/null || true
    ```
    Releasing the claim = removing the `issue-<N>-<slug>` branch from origin (the cross-machine lock); the
