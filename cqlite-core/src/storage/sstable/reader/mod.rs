@@ -26,6 +26,9 @@ mod integrity;
 mod key_digest;
 pub(crate) mod parsing; // Needs to be accessible from row_cell_state_machine
 mod partition_lookup;
+/// Sliding-window stitch+parse driver for the user-facing streaming scan
+/// (issue #1143); extracted from `data_access` per epic #1116.
+mod scan_stream_windowed;
 mod source;
 #[cfg(test)]
 mod tests;
@@ -36,15 +39,12 @@ pub use types::{
     BlockMeta, CachedBlock, IntegrityCheckResult, IntegrityStatus, SSTableReader,
     SSTableReaderConfig, SSTableReaderHealthMetrics, SSTableReaderStats,
 };
-
 // Re-export the within-partition clustering-slice push-down spec (Issue #954).
 pub use data_access::ClusteringSlice;
-
 // Re-export the per-element compaction read contract (epic #899, Phase A).
 pub use compaction_row::{
     CompactionRow, CompactionRowData, ComplexColumn, ComplexElement, SimpleCell,
 };
-
 // Re-export V5CompressedLegacyParser for integration testing (Issue #166 regression tests)
 #[doc(hidden)]
 pub use parsing::PublicV5CompressedLegacyParser as V5CompressedLegacyParser;

@@ -178,7 +178,7 @@ pub(crate) static SCAN_FOR_KEY_CALLS: std::sync::atomic::AtomicU64 =
 /// - Dataset mode SSTables store qualified table_ids (e.g., "test_basic.simple_table")
 /// - Queries can use either qualified ("test_basic.simple_table") or unqualified ("simple_table") names
 /// - Production SSTables may use unqualified table_ids
-fn table_ids_match(entry_table_id: &TableId, query_table_id: &TableId) -> bool {
+pub(super) fn table_ids_match(entry_table_id: &TableId, query_table_id: &TableId) -> bool {
     let entry_name = entry_table_id.name();
     let query_name = query_table_id.name();
 
@@ -1927,7 +1927,7 @@ impl SSTableReader {
     /// statistics (EncodingStats), version gates, and UDT registry.
     ///
     /// [`V5CompressedLegacyParser`]: crate::storage::sstable::reader::parsing::V5CompressedLegacyParser
-    fn build_v5_parser(
+    pub(super) fn build_v5_parser(
         &self,
     ) -> crate::storage::sstable::reader::parsing::V5CompressedLegacyParser {
         let keyspace = self.header.keyspace.clone();
@@ -2013,21 +2013,29 @@ impl SSTableReader {
         }
 
         if self.requires_chunk_stitching() {
-            // Stitch the (bounded) data section, then parse on a blocking thread,
-            // emitting one entry at a time. `blocking_send` provides backpressure
-            // so parsed Values are never all live at once.
-            let stitched = self.stitch_all_chunks(&cursor).await?;
-            let reader = std::sync::Arc::clone(&self);
-            let parse = tokio::task::spawn_blocking(move || {
-                reader.parse_stitched_stream(&stitched, schema.as_ref(), start_key, end_key, &tx)
-            })
-            .await;
-            match parse {
-                Ok(result) => result,
-                Err(join_err) => Err(Error::corruption(format!(
-                    "scan_stream: parse task failed: {join_err}"
-                ))),
-            }
+            // Issue #1143: SLIDING-WINDOW stitch+parse instead of stitching the
+            // ENTIRE Data.db into one growing `Vec<u8>` before parsing. The old
+            // path allocated an O(file) buffer per scan; with ~6 concurrent
+            // readers that meant ~6 multi-MB buffers thrashing the global
+            // allocator alongside writer allocation, blowing up the read-side p99
+            // tail under concurrent write load. Here we keep only a `window` of
+            // decompressed bytes bounded by `max_partition_size + one_chunk`:
+            // append one decompressed chunk, drain every CONFIRMED partition out
+            // of the front, and stop at NeedMore to await the next chunk (a
+            // partition/row/cell can straddle a 64 KiB chunk boundary). This is
+            // the SAME bounded driver the compaction read path already uses
+            // (`stream_all_partitions_for_compaction` / issue #827); the only
+            // difference is it emits user-facing `(RowKey, Value)` entries and
+            // applies the scan's key-range + tombstone filters.
+            //
+            // Parity: per-partition parse (`parse_one_partition_with_timestamps`)
+            // matches the whole-block parse (`test_issue_827_streaming_parity`);
+            // we drop the timestamp and reuse the same key-range / tombstone
+            // filters as `parse_stitched_stream`, ADDITIONALLY applying the
+            // `table_ids_match` guard the non-stitching branch below uses — a
+            // no-op for single-table SSTables, so scan OUTPUT is unchanged there.
+            self.run_scan_stream_windowed(table_id, start_key, end_key, schema, &cursor, &tx)
+                .await
         } else {
             // Non-stitching formats already read block-by-block; emit per block so
             // only one block's entries are live at a time.
@@ -2057,51 +2065,6 @@ impl SSTableReader {
             }
             Ok(())
         }
-    }
-
-    /// Parse a stitched V5CompressedLegacy buffer, sending each filtered
-    /// `(RowKey, Value)` through `tx` with `blocking_send` for backpressure.
-    ///
-    /// CPU-bound and synchronous: must be invoked via `spawn_blocking`, never on
-    /// an async worker thread (`blocking_send` would otherwise stall the runtime).
-    fn parse_stitched_stream(
-        &self,
-        stitched: &[u8],
-        schema: Option<&crate::schema::TableSchema>,
-        start_key: Option<RowKey>,
-        end_key: Option<RowKey>,
-        tx: &mpsc::Sender<Result<(RowKey, Value)>>,
-    ) -> Result<()> {
-        let parser = self.build_v5_parser();
-        let reader_schema;
-        let table_schema = if let Some(s) = schema {
-            Some(s)
-        } else {
-            reader_schema = self.get_table_schema(None);
-            reader_schema.as_ref()
-        };
-
-        parser.parse_block_emit(stitched, table_schema, self, |(_table_id, key, value)| {
-            // Key-range filter (start/end inclusive), mirroring sequential_scan.
-            if let Some(ref start) = start_key {
-                if &key < start {
-                    return Ok(std::ops::ControlFlow::Continue(()));
-                }
-            }
-            if let Some(ref end) = end_key {
-                if &key > end {
-                    return Ok(std::ops::ControlFlow::Continue(()));
-                }
-            }
-            // Suppress row tombstones from user-facing scan output (Issue #505).
-            if !self.filter_tombstone(&value) {
-                return Ok(std::ops::ControlFlow::Continue(()));
-            }
-            match tx.blocking_send(Ok((key, value))) {
-                Ok(()) => Ok(std::ops::ControlFlow::Continue(())),
-                Err(_) => Ok(std::ops::ControlFlow::Break(())), // consumer dropped
-            }
-        })
     }
 
     /// Stitch all compressed chunks and parse with per-row timestamps (for compaction).

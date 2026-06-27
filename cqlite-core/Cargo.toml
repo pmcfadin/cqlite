@@ -172,6 +172,14 @@ harness = false
 name = "observability_overhead"
 harness = false
 
+# Read-while-write tail-latency guard (issue #1143). ADVISORY: deliberately
+# absent from benches/perf-gate.json — p99 tail statistics are runner-noisy, so
+# this is a local regression guard run under scripts/profile.sh, never a CI gate
+# (mirrors `concurrent_scan`).
+[[bench]]
+name = "read_while_write"
+harness = false
+
 [features]
 # M2+ production defaults: Full query engine + write path enabled.
 # write-support is a pure first-party code-gating flag (no extra dependencies),

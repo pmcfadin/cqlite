@@ -599,8 +599,8 @@ async fn run_scan_delta(
     let reader_arc = std::sync::Arc::clone(&reader);
 
     // The parse closure is synchronous; run it on a blocking thread so it can
-    // use `blocking_send` without stalling the async runtime (mirrors
-    // `parse_stitched_stream` in data_access.rs, issue #790).
+    // `blocking_send` without stalling the runtime. Delta-scan still materializes
+    // via `prepare_delta_scan`; streaming SELECT moved to a windowed driver (#1143).
     let parse_result = tokio::task::spawn_blocking(move || -> crate::Result<()> {
         parser.parse_block_emit_delta(
             &stitched,
