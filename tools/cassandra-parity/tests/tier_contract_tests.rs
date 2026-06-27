@@ -93,10 +93,8 @@ fn doc_vs_code_drift_fails_with_specific_tier() {
 #[test]
 fn doc_vs_schema_drift_fails() {
     // Schema has an extra tier the doc does not document.
-    let drifted_schema = GOOD_SCHEMA.replace(
-        r#""manual_debug"]"#,
-        r#""manual_debug", "rogue_tier"]"#,
-    );
+    let drifted_schema =
+        GOOD_SCHEMA.replace(r#""manual_debug"]"#, r#""manual_debug", "rogue_tier"]"#);
     let report = tier_contract::check(GOOD_DOC, &drifted_schema, enums::CI_TIER, "scenarios: []")
         .expect("check runs");
     assert!(!report.ok());

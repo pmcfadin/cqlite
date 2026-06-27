@@ -128,7 +128,9 @@ pub fn schema_tier_enum(schema_json: &str) -> Result<Vec<String>, TierContractEr
         .filter_map(|x| x.as_str().map(str::to_string))
         .collect();
     if tiers.is_empty() {
-        return Err(TierContractError::SchemaEnum("ci.tier enum is empty".to_string()));
+        return Err(TierContractError::SchemaEnum(
+            "ci.tier enum is empty".to_string(),
+        ));
     }
     Ok(tiers)
 }
