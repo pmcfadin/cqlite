@@ -29,20 +29,28 @@ owner-approvable OpenSpec change on an isolated worktree. **STOP at approval —
    branch is the lock, so push it to origin **immediately** — before any spec work — to establish the
    claim:
    ```bash
-   git -C <repo-root> worktree add ".claude/worktrees/issue-<N>-<slug>" -b "issue-<N>-<slug>" origin/main
-   # Push the claim branch FIRST (cross-machine lock). --no-verify keeps the empty claim push fast.
-   git -C ".claude/worktrees/issue-<N>-<slug>" push -u origin "issue-<N>-<slug>"
+   wt=".claude/worktrees/issue-<N>-<slug>"
+   git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
+   # UNIQUE claim commit: an empty commit identifying THIS session, so two sessions
+   # branching from the same origin/main base get DISTINCT SHAs (a bare push of an
+   # identical SHA would be a no-op "up-to-date" success → both would think they won).
+   git -C "$wt" commit --allow-empty -m "claim issue-<N> $(hostname -s)-${RANDOM}-$$"
+   # Non-force create: first push creates the ref; a colliding push of a different SHA
+   # is REJECTED as non-fast-forward → that session lost. Capture the result.
+   if ! git -C "$wt" push -u origin "issue-<N>-<slug>" 2>&1; then
+     echo "Push rejected — another session holds the claim. Remove the worktree and take the next item."
+   fi
    # Board visibility: assignee + Status=In Progress (or status:in-progress label in the fallback).
    gh issue edit <N> --add-assignee @me
    # Project: gh project item-edit ... --field Status --single-select-option-id <In Progress>
    ```
-   Then **re-read** and proceed ONLY if you hold the claim — fetch origin again and confirm the branch on
-   origin points at YOUR commit (you won the race). If not, you lost: delete the local worktree/branch and
-   take the next eligible item.
+   Then **re-read** and proceed ONLY if you hold the claim — the origin branch tip must equal YOUR
+   claim-commit SHA. If the push was rejected OR the SHAs differ, you lost: remove the local
+   worktree/branch and take the next eligible item.
    ```bash
    git -C <repo-root> fetch origin -q
    remote_sha="$(git -C <repo-root> ls-remote --heads origin "issue-<N>-<slug>" | awk '{print $1}')"
-   local_sha="$(git -C ".claude/worktrees/issue-<N>-<slug>" rev-parse HEAD)"
+   local_sha="$(git -C "$wt" rev-parse HEAD)"
    [ "$remote_sha" = "$local_sha" ] || echo "Lost the race — back off and take the next item."
    ```
    All spec work happens in that worktree only after the claim holds.

@@ -31,14 +31,20 @@ automatable, and the thing a human can also drive from mobile.
 A Project `Status` update is read-modify-write (not atomic), and **assignee is
 insufficient as a lock when both sessions authenticate as the SAME GitHub user on
 different machines** (assignee `@me` is identical on both). The cross-machine lock is
-therefore the **`issue-<N>-<slug>` branch pushed to origin**: a session claims by
-pushing that branch (the natural 1:1:1:1 artifact, server-side, per-machine-distinct),
-then sets assignee + `Status=In Progress` for board visibility, then **re-reads** and
-proceeds only if it holds the claim. Eligibility = `Ready` AND no existing
-`issue-<N>-*` branch on origin (`git ls-remote --heads origin`). Rationale: uses
-GitHub's own server-side state, no external service; the remote branch distinguishes
-machines that share a user; the re-read closes the residual TOCTOU window. Side benefit:
-another machine can `fetch` an existing claim's branch to RESUME it.
+therefore the **`issue-<N>-<slug>` branch pushed to origin** — but a bare push is NOT
+exclusive on its own: two sessions branching from the SAME base produce the same SHA, so
+the second push is a no-op "up-to-date" success and BOTH would think they won. The fix is
+a **unique claim commit**: each session makes an empty commit identifying itself
+(host + random token) before pushing, so the two SHAs differ; the first push creates the
+ref and the second is **rejected as non-fast-forward** (the ref exists at a different
+SHA). The session then sets assignee + `Status=In Progress` (visibility) and **re-reads**
+(origin tip == its own claim SHA) — proceed only if holder; push-reject or SHA-mismatch =
+lost → next item. Eligibility = `Ready` AND no `issue-<N>-*` branch on origin
+(`git ls-remote --heads origin`). Rationale: the unique commit + non-force push is the
+atomic create primitive (git rejects the colliding ref); uses GitHub's own server-side
+state, no external service; distinguishes machines that share a user AND sessions that
+share a base. Side benefit: another machine can `fetch` an existing claim's branch to
+RESUME it.
 
 ### D3 — Board freshness = server-side automations + flow-* transitions + flow-board reaper
 Three layers keep the board current so freshness never depends on an agent running:

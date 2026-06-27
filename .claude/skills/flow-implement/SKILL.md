@@ -40,9 +40,12 @@ OpenSpec change `<slug>` (design-driven only).
        echo "Already claimed on origin — do not work it; take the next item (or fetch to RESUME)."; exit 0
      fi
      git -C <repo-root> worktree add "$wt" -b "issue-<N>-<slug>" origin/main
-     git -C "$wt" push -u origin "issue-<N>-<slug>"      # push the claim branch FIRST (the lock)
+     # UNIQUE claim commit so a same-base race gets distinct SHAs (a bare identical-SHA
+     # push is a no-op success → both would win). Non-force push: colliding SHA is rejected.
+     git -C "$wt" commit --allow-empty -m "claim issue-<N> $(hostname -s)-${RANDOM}-$$"
+     git -C "$wt" push -u origin "issue-<N>-<slug>" || { echo "Push rejected — another holds the claim; back off."; exit 0; }
      gh issue edit <N> --add-assignee @me
-     # re-read: proceed only if origin's branch is YOUR commit (you won the race)
+     # re-read: proceed only if origin's branch tip is YOUR claim commit (you won the race)
      git -C <repo-root> fetch origin -q
      [ "$(git -C <repo-root> ls-remote --heads origin "issue-<N>-<slug>" | awk '{print $1}')" \
        = "$(git -C "$wt" rev-parse HEAD)" ] || { echo "Lost the race — back off."; exit 0; }

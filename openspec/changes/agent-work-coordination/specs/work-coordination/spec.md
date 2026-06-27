@@ -15,17 +15,24 @@ claimed and by whom.
 ### Requirement: Claim protocol prevents duplicate work across sessions and machines
 Before working an item, a session SHALL claim it so no two sessions work the same
 item — INCLUDING two sessions authenticated as the same GitHub user on different
-machines. The session SHALL consider only items that are `Ready` AND have no existing
-`issue-<N>-<slug>` branch on origin; it SHALL claim by **pushing the `issue-<N>-<slug>`
-branch to origin (the cross-machine lock)** and setting assignee + `Status=In Progress`
-(board visibility), then **re-read** and proceed ONLY if it holds the claim. If it lost
-the race it SHALL back off and select the next eligible item. (Because the branch is on
-origin, another machine MAY also resume an existing claim's work by fetching it.)
+machines AND two sessions branching from the same base commit. The session SHALL
+consider only items that are `Ready` AND have no existing `issue-<N>-<slug>` branch on
+origin; it SHALL claim by (a) creating a **unique claim commit** on the
+`issue-<N>-<slug>` branch (an empty commit identifying the claimant — host + a random
+token — so two sessions from the same base produce DISTINCT commit SHAs), (b) pushing
+that branch to origin as a **non-force create** (`git push` without `--force`), so the
+first push creates the ref and any later push of a different SHA is **REJECTED as
+non-fast-forward** — making the lock exclusive even from the same base, and (c) setting
+assignee + `Status=In Progress` (board visibility). It SHALL then **re-read** (the origin
+branch tip equals its own claim-commit SHA) and proceed ONLY if it holds the claim. If
+the push is rejected or the re-read shows a different SHA, it lost the race and SHALL
+back off to the next eligible item. (Because the branch is on origin, another machine MAY
+resume an existing claim's work by fetching it.)
 
-#### Scenario: Two sessions race for the same item
-- **WHEN** two sessions both attempt to claim the same `Ready` item
-- **THEN** exactly one successfully establishes the `issue-<N>-<slug>` branch on origin and proceeds
-- **AND** the other detects the branch already exists (or it is not the holder on re-read) and moves to the next item
+#### Scenario: Two sessions race for the same item (same base commit)
+- **WHEN** two sessions both branch the same `Ready` item from the same base and attempt to claim it
+- **THEN** each creates a distinct claim commit; the first push creates the origin ref and that session proceeds
+- **AND** the other's push is rejected as non-fast-forward (the ref already exists at a different SHA) and it moves to the next item
 
 #### Scenario: Same user on two machines
 - **WHEN** two sessions authenticated as the SAME GitHub user (on different machines) target the same item

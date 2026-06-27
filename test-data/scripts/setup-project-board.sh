@@ -112,11 +112,13 @@ elif [ "${#missing_options[@]}" -gt 0 ]; then
   # detach items already assigned to them. So we DO NOT rewrite the field;
   # we warn and ask the owner to add the missing options in the web UI
   # (adding options there is safe and non-destructive) — roborev.
-  echo "    WARNING: 'Status' field exists but is MISSING canonical option(s): ${missing_options[*]}"
-  echo "    Existing options are preserved — NOT rewriting (a rewrite would drop"
-  echo "    existing/custom options and detach assigned items)."
-  echo "    Add the missing option(s) in the web UI: Project -> Status field -> + add option."
-  echo "    (The flow-* skills' label fallback keeps working until then.)"
+  echo "    ERROR: 'Status' field exists but is MISSING canonical option(s): ${missing_options[*]}" >&2
+  echo "    Not rewriting (a rewrite would drop existing/custom options and detach assigned items)." >&2
+  echo "    Add the missing option(s) in the web UI (Project -> Status field -> + add option), then re-run." >&2
+  echo "    SETUP INCOMPLETE — the board is NOT reported ready, so flow-* keeps using the label fallback." >&2
+  # Fail nonzero: a partially-configured Status field would let flow-* detect the board
+  # as usable and then fail on writes to the missing options instead of falling back (roborev).
+  exit 1
 else
   echo "    'Status' already carries all canonical options — nothing to do."
 fi
