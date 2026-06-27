@@ -36,7 +36,13 @@ fi
 
 echo "==> Looking for an existing project titled '${TITLE}' (owner ${OWNER})"
 project_number=""
-existing_json="$(gh project list --owner "${OWNER}" --format json --limit 200 2>/dev/null || echo '{}')"
+# Fail loud on a read/API/auth error — DON'T swallow it to '{}', which would look
+# like "no such project" and wrongly proceed to create a duplicate (roborev).
+if ! existing_json="$(gh project list --owner "${OWNER}" --format json --limit 200 2>&1)"; then
+  echo "error: 'gh project list' failed (check the 'project' scope / auth / network):" >&2
+  printf '%s\n' "${existing_json}" >&2
+  exit 1
+fi
 project_number="$(
   printf '%s' "${existing_json}" \
     | jq -r --arg t "${TITLE}" '(.projects // [])[] | select(.title == $t) | .number' \
