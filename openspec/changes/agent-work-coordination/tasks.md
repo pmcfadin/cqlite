@@ -11,10 +11,21 @@
 ## 2. Claim protocol
 
 - [ ] 2.1 Add the claim step to `flow-activate` / `flow-implement` (and the
-      `flow-board` "next" pick): unassigned `Ready` only → `--add-assignee @me` +
-      `Status=In Progress` → re-read → proceed only if assignee; else next item.
+      `flow-board` "next" pick): eligibility = `Ready` AND no `issue-<N>-*` branch on
+      origin (`git ls-remote --heads origin`) → claim by **pushing the
+      `issue-<N>-<slug>` branch to origin** (cross-machine lock) + `--add-assignee @me`
+      + `Status=In Progress` → **re-read** → proceed only if holder; else next item.
 - [ ] 2.2 `flow-finalize`: set `Status=Done` (or rely on the merge automation) and
-      release the claim. Verify no item is left `In Progress` after finalize.
+      release the claim (branch removed on cleanup). Verify no item left `In Progress`.
+
+## 2b. Board freshness + reaper
+
+- [ ] 2b.1 Configure the Project's server-side workflows: PR merged / issue closed →
+      `Done`; assigned → `In Progress`; new item → `Backlog`. Verify a phone/web merge
+      moves the item to `Done` with no `flow-*` run.
+- [ ] 2b.2 `flow-board` reconciler/reaper: flag drift (merged PR still `In Progress`)
+      and abandoned claims (`In Progress` + `issue-<N>-*` branch with no recent commits)
+      for reclaim/finish.
 
 ## 3. Concurrency model
 

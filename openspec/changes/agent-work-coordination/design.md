@@ -27,20 +27,29 @@ Review/Done`) is the cross-session board (`gh project item-list` renders it;
 fallback when the `project` scope/board is absent. Rationale: a Project is visible,
 automatable, and the thing a human can also drive from mobile.
 
-### D2 — Claim = assignee (lock) + Status, then RE-READ (race guard)
-A Project `Status` update is read-modify-write, so it is NOT atomic — two sessions can
-both read `Ready` and both set `In Progress`. The lock is therefore the GitHub
-**assignee** (clear single-owner): claim with `--add-assignee @me` + `Status=In
-Progress`, then **re-read** the item; if the assignee is not us, we lost the race →
-back off and take the next `Ready` item. Only ever claim items that are currently
-**unassigned**. Rationale: cheap, uses GitHub's own data, no external service, and the
-re-read closes the TOCTOU window without true locking.
+### D2 — Claim lock = the pushed origin branch; assignee/Status = visibility; re-read = guard
+A Project `Status` update is read-modify-write (not atomic), and **assignee is
+insufficient as a lock when both sessions authenticate as the SAME GitHub user on
+different machines** (assignee `@me` is identical on both). The cross-machine lock is
+therefore the **`issue-<N>-<slug>` branch pushed to origin**: a session claims by
+pushing that branch (the natural 1:1:1:1 artifact, server-side, per-machine-distinct),
+then sets assignee + `Status=In Progress` for board visibility, then **re-reads** and
+proceeds only if it holds the claim. Eligibility = `Ready` AND no existing
+`issue-<N>-*` branch on origin (`git ls-remote --heads origin`). Rationale: uses
+GitHub's own server-side state, no external service; the remote branch distinguishes
+machines that share a user; the re-read closes the residual TOCTOU window. Side benefit:
+another machine can `fetch` an existing claim's branch to RESUME it.
 
-### D3 — Project workflow automations reduce manual bookkeeping
-Use the Project's built-in workflows (auto-set `In Progress` when an item is assigned;
-`Done` when its PR merges) so `flow-*` doesn't hand-juggle every transition and the
-board self-heals from drift. Rationale: less label-flipping code, fewer drift bugs (the
-kind roborev flagged in the flow-* skills).
+### D3 — Board freshness = server-side automations + flow-* transitions + flow-board reaper
+Three layers keep the board current so freshness never depends on an agent running:
+(1) **Project built-in workflows** (server-side) move items on GitHub-side events — PR
+merged / issue closed → `Done`, assigned → `In Progress` — so even a merge from the
+phone or web UI updates the board with no `flow-*` run; (2) **`flow-*` transitions** set
+Status at each stage when an agent drives; (3) **`flow-board` reconciles + reaps** —
+flags drift (merged PR still `In Progress`) and **abandoned claims** (an `In Progress`
+item whose branch has no recent commits — the claiming session died) for reclaim/finish.
+Rationale: layer 1 covers human/mobile actions, layer 3 covers crashed sessions; the
+"stuck In Progress" leak is the failure mode this prevents.
 
 ### D4 — Concurrency model: lead+subagents default; claim protocol for sessions; Agent Teams optional
 Default and recommended: **one `flow-lead` → subagents** (the lead assigns disjoint

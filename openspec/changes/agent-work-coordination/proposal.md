@@ -22,11 +22,17 @@ protocol, documents the concurrency model, and defines the mobile/remote path.
   in-flight issue across sessions. `flow-board` renders the project (`gh project
   item-list`); built-in project workflows auto-move items on assign / PR-merge.
 - **Claim protocol (the dup-work fix).** Before working an item a session: (a)
-  considers only **unassigned** `Ready` items; (b) atomically claims by
-  `--add-assignee @me` + `Status=In Progress`; (c) **re-reads** to confirm it owns
-  the item — if another session won the race, it backs off and takes the next item.
-  Assignee (single-owner) is the lock; the re-read closes the read-modify-write gap
-  in the Project `Status` field.
+  considers only `Ready` items with **no existing `issue-<N>-<slug>` branch on
+  origin**; (b) claims by **pushing that branch to origin** (the cross-machine lock,
+  since assignee `@me` is identical for the same user on two machines) plus assignee +
+  `Status=In Progress` for board visibility; (c) **re-reads** to confirm it holds the
+  claim — lost the race → next item. (Another machine can fetch an existing claim's
+  branch to RESUME it.)
+- **Board freshness + abandoned-claim recovery.** Server-side Project automations move
+  items on GitHub-side events (PR merged / issue closed → `Done`) so the board updates
+  even when you act from the phone/web; `flow-board` reconciles drift and **reaps
+  abandoned `In Progress` claims** (stale branch, no recent commits) so a crashed
+  session doesn't leak a stuck item.
 - **Document the concurrency model** in `flow-lead`: default is **one lead →
   subagents** (disjoint work assigned by the lead — zero dup by design); the claim
   protocol covers **independent sessions**; Agent Teams

@@ -12,21 +12,44 @@ claimed and by whom.
 - **THEN** it lists items by `Status` from the Project (`gh project item-list`)
 - **AND** each `In Progress` item shows its assignee (the claiming session/owner)
 
-### Requirement: Atomic-ish claim protocol prevents duplicate work
+### Requirement: Claim protocol prevents duplicate work across sessions and machines
 Before working an item, a session SHALL claim it so no two sessions work the same
-item: it SHALL consider only **unassigned** `Ready` items, claim by adding itself as
-assignee AND setting `Status` to `In Progress`, then **re-read** the item and proceed
-ONLY if it is the assignee. If it is not the assignee (lost the race), it SHALL back
-off and select the next `Ready` item.
+item — INCLUDING two sessions authenticated as the same GitHub user on different
+machines. The session SHALL consider only items that are `Ready` AND have no existing
+`issue-<N>-<slug>` branch on origin; it SHALL claim by **pushing the `issue-<N>-<slug>`
+branch to origin (the cross-machine lock)** and setting assignee + `Status=In Progress`
+(board visibility), then **re-read** and proceed ONLY if it holds the claim. If it lost
+the race it SHALL back off and select the next eligible item. (Because the branch is on
+origin, another machine MAY also resume an existing claim's work by fetching it.)
 
 #### Scenario: Two sessions race for the same item
-- **WHEN** two independent sessions both attempt to claim the same `Ready` item
-- **THEN** exactly one ends up as the assignee after the re-read
-- **AND** the other detects it is not the assignee and moves to the next `Ready` item
+- **WHEN** two sessions both attempt to claim the same `Ready` item
+- **THEN** exactly one successfully establishes the `issue-<N>-<slug>` branch on origin and proceeds
+- **AND** the other detects the branch already exists (or it is not the holder on re-read) and moves to the next item
+
+#### Scenario: Same user on two machines
+- **WHEN** two sessions authenticated as the SAME GitHub user (on different machines) target the same item
+- **THEN** the origin branch — not the shared assignee — is the deciding lock: only the machine whose branch is on origin proceeds
+- **AND** the other machine skips it (and MAY fetch the branch to resume that work instead)
 
 #### Scenario: Already-claimed work is skipped
-- **WHEN** a session selects the next item and the top `Ready` candidate is already assigned
-- **THEN** the session does not claim or work it and considers the next unassigned `Ready` item
+- **WHEN** a session selects the next candidate and an `issue-<N>-<slug>` branch already exists on origin (or the item is not `Ready`)
+- **THEN** the session does not claim or work it and considers the next eligible item
+
+### Requirement: Board freshness and abandoned-claim recovery
+The board SHALL stay current regardless of which client performed an action, and
+abandoned claims SHALL be recoverable. Server-side GitHub Project automations SHALL
+move items on GitHub-side events (e.g. PR merged or issue closed → `Done`). `flow-board`
+SHALL reconcile drift and surface abandoned `In Progress` claims (an item `In Progress`
+whose branch shows no recent progress) so they can be reclaimed or finished.
+
+#### Scenario: GitHub-side action updates the board without an agent
+- **WHEN** a PR is merged or its issue closed from the GitHub web/mobile UI (no `flow-*` run)
+- **THEN** the Project automation moves the item to `Done`
+
+#### Scenario: Abandoned claim is surfaced for recovery
+- **WHEN** an item is `In Progress` but its `issue-<N>-<slug>` branch has had no recent commits (the claiming session died)
+- **THEN** `flow-board` flags it as a stalled/abandoned claim so the owner can reclaim or finish it
 
 ### Requirement: Stated concurrency model
 The workflow SHALL document and follow a concurrency model: a single lead spawning
