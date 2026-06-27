@@ -35,7 +35,12 @@ if ! command -v jq >/dev/null 2>&1; then
 fi
 
 # The `project` scope is required for every Projects v2 read/write below.
-if ! gh auth status 2>&1 | grep -q "'project'"; then
+# Capture the output and string-match it — do NOT pipe `gh auth status` directly
+# under `set -o pipefail`: it exits nonzero when ANY configured host has a bad
+# token (e.g. a stale enterprise keyring entry), which would poison the pipeline
+# and make a present scope look missing.
+auth_status="$(gh auth status 2>&1 || true)"
+if ! printf '%s' "${auth_status}" | grep -q "'project'"; then
   echo "error: gh token is missing the 'project' scope." >&2
   echo "       Run: gh auth refresh -s project" >&2
   exit 1
