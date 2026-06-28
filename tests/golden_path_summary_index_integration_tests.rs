@@ -397,48 +397,80 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
     // load-sensitive and flaked under machine load (115µs/180µs after a heavy
     // compile) while passing cleanly when idle.
     //
-    // We assert the short-circuit *directly* through the existing public probe
-    // `SSTableReader::scan_for_key_call_count()` (the process-global
-    // `SCAN_FOR_KEY_CALLS` counter, issue #831): a bloom-pruned absent-key lookup
-    // never reaches `scan_for_key`, so the counter must not advance across the
-    // call. This is deterministic and immune to CPU load — a regression that
-    // stops the bloom filter from short-circuiting (e.g. always falls through to
-    // a sequential scan) bumps the counter and fails here, which the wall-clock
-    // threshold could only catch by luck. Timing is kept as a non-asserting
-    // diagnostic print only.
+    // We assert the short-circuit *directly*, with two complementary signals that
+    // are immune to CPU load (the wall-clock flake) AND to cross-test counter
+    // races (the only nondeterminism the counter probe would otherwise add):
+    //
+    //  1. STRUCTURAL (fully deterministic): the reader actually loaded a bloom
+    //     filter, so the bloom pre-check branch in `get()` is reachable. Without
+    //     this the "short-circuit" would be vacuous.
+    //
+    //  2. BEHAVIORAL: the existing public probe
+    //     `SSTableReader::scan_for_key_call_count()` (the process-global
+    //     `SCAN_FOR_KEY_CALLS` counter, issue #831) must NOT advance as a result
+    //     of an absent-key `get()`. Because the counter is process-global and the
+    //     integration-test binary runs its tests on multiple threads (other tests
+    //     here call `get()`/`scan()` and can bump it), a single before/after read
+    //     could observe a concurrent test's increment and false-fail. We make the
+    //     check race-immune by retrying: a genuine regression (bloom no longer
+    //     short-circuits) makes OUR `get()` fall through to `scan_for_key` on
+    //     EVERY attempt, so the delta is `>= 1` every time; a concurrent test's
+    //     scan is sporadic, so at least one attempt sees our call contribute zero.
+    //     Requiring a single zero-delta attempt therefore fails a real regression
+    //     while tolerating concurrent interference. Timing is kept as a
+    //     non-asserting diagnostic print only.
+    let health = reader.get_health_metrics().await?;
+    assert!(
+        health.bloom_filter_enabled,
+        "fixture SSTable must have a bloom filter loaded for the fast-path check to be meaningful"
+    );
+
     for key_str in &non_existent_keys {
         let test_key = RowKey::from(key_str.as_bytes());
 
-        let scans_before = SSTableReader::scan_for_key_call_count();
-        let start_time = Instant::now();
-        let result = reader.get(&table_id, &test_key).await?;
-        let lookup_duration = start_time.elapsed();
-        let scans_after = SSTableReader::scan_for_key_call_count();
+        // Retry to distinguish a true bloom-fast-path regression (our get() scans
+        // on every attempt) from a transient concurrent test bumping the global
+        // counter in our measurement window.
+        let mut observed_zero_delta = false;
+        let mut last_delta = u64::MAX;
+        let mut last_duration = std::time::Duration::ZERO;
+        let mut last_result_none = false;
+        for _ in 0..5 {
+            let scans_before = SSTableReader::scan_for_key_call_count();
+            let start_time = Instant::now();
+            let result = reader.get(&table_id, &test_key).await?;
+            last_duration = start_time.elapsed();
+            let scans_after = SSTableReader::scan_for_key_call_count();
 
-        // Should be None for non-existent keys
+            last_result_none = result.is_none();
+            last_delta = scans_after.saturating_sub(scans_before);
+            if last_delta == 0 {
+                observed_zero_delta = true;
+                break;
+            }
+        }
+
+        // Should be None for non-existent keys.
         assert!(
-            result.is_none(),
+            last_result_none,
             "Non-existent key should return None: {key_str}"
         );
 
-        // Bloom filter must short-circuit: the absent-key lookup returns without
-        // ever invoking the sequential scan fallback, so the global
-        // `scan_for_key` counter is unchanged across this `get()`.
-        assert_eq!(
-            scans_after,
-            scans_before,
+        // Bloom filter must short-circuit: at least one absent-key lookup returned
+        // without invoking the sequential scan fallback (counter delta 0). A
+        // regression that always falls through to scan_for_key never observes a
+        // zero delta and fails here.
+        assert!(
+            observed_zero_delta,
             "Bloom filter should short-circuit absent-key lookup before scan_for_key \
-             (counter advanced by {} for key {}); the bloom fast path regressed",
-            scans_after - scans_before,
-            key_str
+             for {key_str}; every attempt advanced scan_for_key (last delta {last_delta}), \
+             the bloom fast path regressed"
         );
 
         // Non-asserting diagnostic: the fast path is also expected to be quick,
         // but we no longer gate the test on an absolute wall-clock threshold
         // (issue #1149 — that assertion flaked under load).
-        println!(
-            "  absent-key '{key_str}' short-circuited in {lookup_duration:?} (no scan_for_key)"
-        );
+        println!("  absent-key '{key_str}' short-circuited in {last_duration:?} (no scan_for_key)");
     }
 
     println!(
