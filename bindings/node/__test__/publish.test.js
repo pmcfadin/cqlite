@@ -122,8 +122,12 @@ describe('npm Publishing Validation (Issue #314)', () => {
       expect(pkg.files).toContain('index.js');
     });
 
-    test('includes generated index.d.ts', () => {
-      expect(pkg.files).toContain('index.d.ts');
+    test('does not ship root index.d.ts stub (Issue #571)', () => {
+      // The root index.d.ts was a 0-byte stub; types resolve via the `types`
+      // field (lib/index.d.ts). It must not be listed in `files`, and must not
+      // exist at the package root.
+      expect(pkg.files).not.toContain('index.d.ts');
+      expect(fs.existsSync(path.join(BINDINGS_DIR, 'index.d.ts'))).toBe(false);
     });
 
     test('includes lib directory', () => {

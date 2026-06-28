@@ -12,6 +12,10 @@
 #   fmt                cargo fmt --all --check
 #   clippy             RUSTFLAGS="-D warnings" clippy --workspace --all-targets --all-features
 #   core-tests         cargo test -p cqlite-core --features cli-helpers (CI skip-list applied)
+#   scan-offload-guard cargo test -p cqlite-core --features cli-helpers,scan-offload-probe
+#                      --test issue_1143_scan_offload_thread (windowed-scan parse
+#                      runs off the async worker pool; probe is feature-gated so
+#                      the default core-tests run can't execute it — issue #1143)
 #   integration-tests  cargo test -p cqlite-integration-tests: compile ALL targets
 #                      (--no-run, whole package) then run the seven CI-enforced ones
 #   format-compat      cargo test -p format-compatibility-tests (the 'oa' format crate;
@@ -55,7 +59,7 @@ if ! command -v cargo >/dev/null 2>&1 && [ -d "$HOME/.cargo/bin" ]; then
 fi
 export CQLITE_DATASETS_ROOT="${CQLITE_DATASETS_ROOT:-$REPO_ROOT/test-data/datasets}"
 
-COMPONENTS=(file-size fmt clippy core-tests tombstones-scan integration-tests format-compat write-tests cli-tests python-bindings delivery-telemetry minimal-build smoke)
+COMPONENTS=(file-size fmt clippy core-tests tombstones-scan scan-offload-guard integration-tests format-compat write-tests cli-tests python-bindings delivery-telemetry minimal-build smoke)
 ONLY=""
 case "${1:-}" in
   --list) printf '%s\n' "${COMPONENTS[@]}"; exit 0 ;;
@@ -281,6 +285,15 @@ run_component core-tests cargo test --package cqlite-core --features cli-helpers
 run_component tombstones-scan cargo test --package cqlite-core \
   --features write-support,cli-helpers,tombstones \
   --test issue_1085_tombstones_full_scan_parity
+# Issue #1143: the thread-identity guard proves the windowed scan's
+# decompress+parse runs OFF the async worker pool. Its probe is gated behind the
+# non-default `scan-offload-probe` feature (so the instrumentation never ships in
+# normal builds), and the test only compiles under that feature — so the default
+# core-tests run never executes it. Run it here with the feature on; a guard that
+# doesn't run in CI is not a guard.
+run_component scan-offload-guard cargo test --package cqlite-core \
+  --features cli-helpers,scan-offload-probe \
+  --test issue_1143_scan_offload_thread
 # Compile EVERY target in the package first (--no-run, whole package) so a
 # new/edited test file that doesn't compile can't hide behind the enumerated
 # run-list (issue #865); then execute the seven CI-enforced targets.

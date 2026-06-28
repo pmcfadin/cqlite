@@ -20,6 +20,16 @@
 //!
 //! TODO: Implementation in M5.0-7 through M5.0-13
 
+// BIG vs BTI write-path split (issue #1128, epic #1116). `bti_state` holds the
+// BTI (`da`) deferred-payload state + Rows.db/Partitions.db serialization;
+// `finish` holds the format-aware finalization + component-path helpers. Both
+// are private submodules that extend `SSTableWriter` via `impl` blocks; the
+// public surface is re-exported from this `mod.rs` unchanged.
+#[cfg(feature = "write-support")]
+mod bti_state;
+#[cfg(feature = "write-support")]
+mod finish;
+
 #[cfg(feature = "write-support")]
 pub mod compressed_data_writer;
 #[cfg(feature = "write-support")]
@@ -79,7 +89,7 @@ use crate::schema::TableSchema;
 #[cfg(feature = "write-support")]
 use crate::schema::UdtRegistry;
 use crate::storage::write_engine::mutation::{DecoratedKey, Mutation};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// On-disk index format emitted by [`SSTableWriter`].
 ///
@@ -270,36 +280,8 @@ pub struct SSTableWriter {
     /// `TrieIndexEntry` position), so we defer the decision: each entry records
     /// the partition's raw key, its `Data.db` offset, and — for WIDE partitions
     /// (>= 2 column-index blocks) — the row-index blocks. `None` for BIG so that
-    /// path allocates nothing.
-    bti_pending: Option<Vec<PendingBtiPartition>>,
-}
-
-/// A deferred BTI partition payload (issue #910).
-///
-/// Narrow partitions (`row_index` is `None`) get a direct `Data.db` offset in
-/// the partition trie; wide partitions get a `Rows.db` `TrieIndexEntry` and a
-/// positive `RowsOffset` once `Rows.db` is serialized.
-#[cfg(feature = "write-support")]
-#[derive(Debug)]
-struct PendingBtiPartition {
-    /// Raw on-disk partition-key bytes.
-    raw_key: Vec<u8>,
-    /// Partition's absolute `Data.db` start offset.
-    data_offset: u64,
-    /// `Some` for a wide partition: its row-index blocks + partition deletion.
-    /// `None` for a narrow partition (direct `Data.db` offset).
-    row_index: Option<PendingRowIndex>,
-}
-
-/// The row-index payload of a wide BTI partition, queued for `Rows.db`.
-#[cfg(feature = "write-support")]
-#[derive(Debug)]
-struct PendingRowIndex {
-    /// Per-block OSS50 separators + within-partition offsets.
-    blocks: Vec<partitions_writer::RowIndexBlock>,
-    /// Partition-level deletion `(local_deletion_time, marked_for_delete_at)`,
-    /// or `None` for LIVE.
-    partition_deletion: Option<(i32, i64)>,
+    /// path allocates nothing. See [`bti_state::PendingBtiPartition`].
+    bti_pending: Option<Vec<bti_state::PendingBtiPartition>>,
 }
 
 #[cfg(feature = "write-support")]
@@ -757,61 +739,10 @@ impl SSTableWriter {
         }
 
         // BTI (issue #766 / #910): defer this partition's Partitions.db trie
-        // payload. The payload is a direct `Data.db` offset for a NARROW
-        // partition (< 2 column-index blocks) or a `Rows.db` `RowsOffset` for a
-        // WIDE partition (>= 2 blocks). The `RowsOffset` is only known after
-        // `Rows.db` is serialized in `finish()`, so we record the raw key, the
-        // Data.db offset, and — for wide partitions — the OSS50 row-index
-        // separators here, and finalize both tries at `finish()`. The wide gate
-        // (>= 2 blocks) mirrors `RowIndexEntry.create()` /
-        // `IndexWriter::add_partition_with_promoted` and guide ch.17.
-        if let Some(ref mut pending) = self.bti_pending {
-            let row_index = if promoted_blocks.len() >= 2 {
-                // Build OSS50-separator row-index blocks. A block lacking an
-                // OSS50 separator (marker-led, or no clustering key) cannot be
-                // placed in the trie; if ANY block lacks one we fall back to a
-                // direct Data.db offset for the whole partition rather than emit
-                // an unreadable separator (no-heuristics: never guess bytes).
-                let mut blocks = Vec::with_capacity(promoted_blocks.len());
-                let mut all_have_sep = true;
-                for b in &promoted_blocks {
-                    match &b.oss50_separator {
-                        Some(sep) if !sep.is_empty() => {
-                            blocks.push(partitions_writer::RowIndexBlock {
-                                separator_key: sep.clone(),
-                                block_offset: b.offset,
-                                open_marker: None,
-                            });
-                        }
-                        _ => {
-                            all_have_sep = false;
-                            break;
-                        }
-                    }
-                }
-                // Separators must be strictly ascending and unique for the trie.
-                let strictly_ascending = blocks
-                    .windows(2)
-                    .all(|w| w[0].separator_key < w[1].separator_key);
-                if all_have_sep && strictly_ascending && !blocks.is_empty() {
-                    let partition_deletion =
-                        partition_tombstone.map(|pt| (pt.local_deletion_time, pt.deletion_time));
-                    Some(PendingRowIndex {
-                        blocks,
-                        partition_deletion,
-                    })
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-            pending.push(PendingBtiPartition {
-                raw_key: key.key.clone(),
-                data_offset,
-                row_index,
-            });
-        }
+        // payload (a no-op for BIG). The wide/narrow gate, OSS50-separator
+        // construction, and the deferred-finalization rationale live in
+        // [`Self::queue_bti_partition`] (see `bti_state`).
+        self.queue_bti_partition(&key, data_offset, &promoted_blocks, partition_tombstone);
 
         // Track every partition for first_key / last_key / total_partition_count.
         // These fields must cover the full SSTable, not just sampled entries.
@@ -985,354 +916,6 @@ impl SSTableWriter {
         }
 
         (min_timestamp, min_ldt, min_ttl)
-    }
-
-    /// Finish writing all components and return SSTable information
-    ///
-    /// This method:
-    /// 1. Finalizes statistics metadata
-    /// 2. Writes all component files in the correct order
-    /// 3. Computes checksums
-    /// 4. Writes TOC.txt (publication barrier)
-    /// 5. Returns SSTableInfo with file paths and metadata
-    ///
-    /// # Returns
-    ///
-    /// SSTableInfo containing paths to all written files and metadata.
-    ///
-    /// # Errors
-    ///
-    /// Returns error if any component write fails.
-    ///
-    /// # Example
-    ///
-    /// ```rust,ignore
-    /// let info = writer.finish().await?;
-    /// println!("SSTable written to {}", info.data_path.display());
-    /// ```
-    #[tracing::instrument(name = "writer.finish", skip(self))]
-    pub async fn finish(mut self) -> Result<SSTableInfo> {
-        // Create keyspace/table subdirectory structure so the reader can
-        // extract the table name from the parent directory path. Owned clone so
-        // `finish_streaming()` can move `self.data_writer` out below.
-        let sstable_dir = self.sstable_dir.clone();
-        let sstable_dir = sstable_dir.as_path();
-        tokio::fs::create_dir_all(sstable_dir).await?;
-
-        // Finalize statistics metadata (normalize sentinel values)
-        self.stats.finalize();
-
-        // Capture format/generation up front so component paths can be computed
-        // after `self`'s writers are partially moved out by their `finish()` calls.
-        let format = self.format;
-        let generation = self.generation;
-        let is_bti = matches!(format, SSTableFormat::Bti);
-        let cpath =
-            |component: &str| Self::component_path_for(sstable_dir, generation, format, component);
-
-        // 1. Write Statistics.db (FIRST - provides delta baseline).
-        // BTI (`da`) requires the BtiFormat `StatsMetadata` layout (covered
-        // clustering Slice, uint deletion times, key range, token-space coverage)
-        // — Cassandra's sstabledump/sstablemetadata reject the legacy `nb` layout
-        // on a `da` descriptor (issue #911). BIG keeps the legacy layout.
-        let stats_path = cpath("Statistics.db");
-        let stats_writer = if is_bti {
-            StatisticsWriter::new_bti(stats_path.clone())
-        } else {
-            StatisticsWriter::new(stats_path.clone())
-        };
-        stats_writer.write(&self.stats, Some(&self.schema))?;
-
-        // 2. Finalize Data.db (Issue #492)
-        // The DataWriter has been streaming each partition to disk as it was
-        // written, so there is no whole-file buffer to write here. `finish_streaming`
-        // flushes and fsyncs the sink and returns the total byte size. If no
-        // partitions were written, lazily ensure an (empty) Data.db file exists so
-        // the downstream Digest CRC re-read and TOC publication remain valid.
-        //
-        // The BTI `Data.db` row/partition serialization is identical to BIG in
-        // Cassandra 5 (issue #908); only the filename descriptor differs.
-        let data_path = cpath("Data.db");
-        let data_size = self.data_writer.finish_streaming()?;
-        if data_size == 0 && !data_path.exists() {
-            tokio::fs::write(&data_path, b"").await?;
-        }
-
-        // 3. Finalize Index.db (Issue #753) — BIG only.
-        // For BIG, the IndexWriter has been streaming each entry to Index.db; we
-        // flush/sync it here. For BTI (issue #908) there is no Index.db: the
-        // IndexWriter ran in counting-only mode (no sink, no retained entry bytes)
-        // purely to compute offsets, so there is nothing to flush and we report no
-        // path. (Calling `finish_streaming` on a non-streaming writer is an error,
-        // so we skip it.)
-        let index_path = if is_bti {
-            None
-        } else {
-            let _index_size = self.index_writer.finish_streaming()?;
-            Some(cpath("Index.db"))
-        };
-
-        // 4. Write Filter.db (path already set in constructor using the
-        // format-aware component path).
-        // A disabled bloom filter (bloom_filter_fp_chance = 1.0, Cassandra's
-        // AlwaysPresentFilter) writes NO Filter.db component and must be omitted
-        // from the TOC to stay byte-faithful (Issue #852).
-        // `filter_path` is `Some` only when a concrete Filter.db is actually
-        // written. A disabled filter (AlwaysPresentFilter) yields `None`, so
-        // downstream consumers (compaction publish + byte accounting) skip the
-        // non-existent component instead of trying to rename a missing file.
-        let filter_path = match self.filter_writer {
-            Some(filter_writer) => {
-                let emitted = !filter_writer.is_disabled();
-                let path = filter_writer.path().to_path_buf();
-                filter_writer.finish().await?;
-                if emitted {
-                    Some(path)
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
-        let filter_emitted = filter_path.is_some();
-
-        // 5. Write Summary.db — BIG only.
-        // BTI (issue #908) has no Summary.db; partition sampling is replaced by
-        // the partition trie. We still drive `summary_writer.finish()` to keep its
-        // accounting consistent, but for BTI we discard the bytes and write no file.
-        let summary_bytes = self.summary_writer.finish()?;
-        let summary_path = if is_bti {
-            None
-        } else {
-            let path = cpath("Summary.db");
-            tokio::fs::write(&path, summary_bytes).await?;
-            Some(path)
-        };
-
-        // 5.25. Write Rows.db + Partitions.db (BTI, issue #766 / #908 / #910).
-        // Only emitted for SSTableFormat::Bti; for BIG both are None and nothing
-        // is written, keeping the default path byte-for-byte unchanged.
-        //
-        // Order matters: `Rows.db` is serialized FIRST so each wide partition's
-        // `TrieIndexEntry` offset (`RowsOffset`) is known, then the partition
-        // trie leaves store either that positive `RowsOffset` (wide) or the
-        // negative direct `Data.db` offset (narrow). Cassandra always emits a
-        // `Rows.db` component for a BTI SSTable, even a 0-byte one when no
-        // partition is wide (verified against the real
-        // `simple_table`/`collection_table`/`ttl_table` `da-2-bti-Rows.db`
-        // fixtures, all 0 bytes yet listed in the TOC).
-        //
-        // Finding 2 (roborev #908): an EMPTY BTI SSTable (no partitions) cannot
-        // produce a readable `Partitions.db` — a zero-byte trie has no 8-byte
-        // root footer, so the BTI reader rejects it, and a `da` SSTable that
-        // omits `Partitions.db` is unreadable. Rather than publish an
-        // unreadable artifact we REFUSE to finish an empty BTI SSTable with a
-        // clear error. (A narrow non-empty table still publishes a valid trie +
-        // a 0-byte `Rows.db`, matching Cassandra.)
-        let (partitions_path, rows_path) = if let Some(pending) = self.bti_pending.take() {
-            if pending.is_empty() {
-                return Err(Error::InvalidInput(
-                    "cannot publish an empty BTI SSTable: a `da` SSTable requires a readable \
-                     Partitions.db trie (with an 8-byte root footer), which has no valid \
-                     zero-partition form. Write at least one partition, or use the BIG format \
-                     for empty SSTables."
-                        .to_string(),
-                ));
-            }
-
-            // 1. Serialize Rows.db from the wide partitions, recovering each
-            //    wide partition's RowsOffset (in pending-order of wide entries).
-            let mut rows_writer = partitions_writer::RowsTrieWriter::new();
-            for p in &pending {
-                if let Some(ri) = &p.row_index {
-                    rows_writer.add_partition_row_index(
-                        &p.raw_key,
-                        p.data_offset,
-                        ri.blocks.clone(),
-                        ri.partition_deletion,
-                    );
-                }
-            }
-            let (rows_bytes, rows_offsets) = rows_writer.finish()?;
-
-            // 2. Build the partition trie: wide partitions get their positive
-            //    RowsOffset, narrow partitions keep the negative DataOffset.
-            let mut trie = self.partitions_trie.take().unwrap_or_default();
-            let mut wide_idx = 0usize;
-            for p in &pending {
-                if p.row_index.is_some() {
-                    let rows_offset = rows_offsets[wide_idx];
-                    wide_idx += 1;
-                    trie.add_partition_with_payload(
-                        &p.raw_key,
-                        partitions_writer::PartitionPayload::RowsOffset(rows_offset),
-                    );
-                } else {
-                    trie.add_partition_with_payload(
-                        &p.raw_key,
-                        partitions_writer::PartitionPayload::DataOffset(p.data_offset),
-                    );
-                }
-            }
-            let partitions_bytes = trie.finish()?;
-
-            // Partitions.db must be non-empty here (pending is non-empty).
-            let part_path = cpath("Partitions.db");
-            tokio::fs::write(&part_path, partitions_bytes).await?;
-
-            // Rows.db is ALWAYS emitted for BTI (possibly 0 bytes).
-            let rows_path = cpath("Rows.db");
-            tokio::fs::write(&rows_path, rows_bytes).await?;
-
-            (Some(part_path), Some(rows_path))
-        } else {
-            (None, None)
-        };
-
-        // 5.5. CompressionInfo.db is omitted for uncompressed data.
-        // Real Cassandra 5 SSTables do not include CompressionInfo.db when
-        // data is uncompressed. The compression_info_writer module is retained
-        // for future compressed SSTable support.
-
-        // 6. Write Digest.crc32 (compute CRC32 of Data.db)
-        let digest_path = cpath("Digest.crc32");
-        let digest_writer = DigestWriter::new(digest_path.clone());
-        let crc32_value = Self::compute_crc32(&data_path).await?;
-        digest_writer.write(crc32_value)?;
-
-        // 7. Write TOC.txt (LAST - publication barrier).
-        //
-        // The TOC lists exactly the component set actually written. BIG lists
-        // Index.db + Summary.db; BTI (issue #908 / #910) omits both and lists
-        // Partitions.db AND Rows.db instead (matching the real `da` fixtures,
-        // which list Rows.db even when it is 0 bytes). TocWriter self-references
-        // TOC.txt.
-        use crate::storage::sstable::directory::types::SSTableComponent;
-        let toc_path = cpath("TOC.txt");
-        let toc_writer = TocWriter::new(toc_path.clone());
-        let mut components = vec![ComponentEntry::new(SSTableComponent::Data)];
-        // Filter.db is omitted entirely for a disabled bloom filter
-        // (AlwaysPresentFilter), matching Cassandra (Issue #852).
-        if filter_emitted {
-            components.push(ComponentEntry::new(SSTableComponent::Filter));
-        }
-        components.extend([
-            ComponentEntry::new(SSTableComponent::Statistics),
-            ComponentEntry::new(SSTableComponent::Digest),
-        ]);
-        // BIG lists Index.db + Summary.db; BTI (issue #908) omits both.
-        if index_path.is_some() {
-            components.push(ComponentEntry::new(SSTableComponent::Index));
-        }
-        if summary_path.is_some() {
-            components.push(ComponentEntry::new(SSTableComponent::Summary));
-        }
-        // BTI (issue #766 / #908): list Partitions.db when the trie was emitted.
-        if partitions_path.is_some() {
-            components.push(ComponentEntry::new(SSTableComponent::Partitions));
-        }
-        // BTI (issue #910): list Rows.db when emitted (always for BTI).
-        if rows_path.is_some() {
-            components.push(ComponentEntry::new(SSTableComponent::Rows));
-        }
-        toc_writer.write(&components)?;
-
-        // Data.db bytes written by this SSTable writer (issue #1036). Counts
-        // flush and compaction output alike; finalize sums all components.
-        crate::observability::add_counter(
-            crate::observability::catalog::WRITE_BYTES,
-            data_size,
-            &[],
-        );
-
-        Ok(SSTableInfo {
-            data_path,
-            index_path,
-            filter_path,
-            summary_path,
-            stats_path,
-            compression_info_path: None,
-            partitions_path,
-            rows_path,
-            toc_path,
-            digest_path,
-            partition_count: self.partition_count,
-            data_size,
-        })
-    }
-
-    /// Build a component file path for a given on-disk `format`.
-    ///
-    /// The Cassandra filename pattern is `<version>-<id>-<format>-<component>`
-    /// (`SsTableDescriptor::parse`). BIG components use the `nb` version letter
-    /// and the `big` format segment (`nb-<gen>-big-<component>`); BTI components
-    /// use the `da` version letter and the `bti` format segment
-    /// (`da-<gen>-bti-<component>`). This is the single source of truth for
-    /// component naming so the version/format ordering stays consistent.
-    fn component_path_for(
-        output_dir: &Path,
-        generation: u64,
-        format: SSTableFormat,
-        component: &str,
-    ) -> PathBuf {
-        let (version, fmt) = match format {
-            SSTableFormat::Big => ("nb", "big"),
-            SSTableFormat::Bti => ("da", "bti"),
-        };
-        let filename = format!("{}-{}-{}-{}", version, generation, fmt, component);
-        output_dir.join(filename)
-    }
-
-    /// Resolve the table's `bloom_filter_fp_chance` (Issue #852).
-    ///
-    /// The value is read from `schema.comments["bloom_filter_fp_chance"]` when
-    /// present (the table-options bag carried on [`TableSchema`]). A value of
-    /// exactly `1.0` disables the bloom filter (Cassandra's
-    /// `AlwaysPresentFilter`); the [`FilterWriter`] then emits no `Filter.db`.
-    ///
-    /// When the schema does not carry a value, or it cannot be parsed, this
-    /// falls back to Cassandra's default of `0.01`. Out-of-range values
-    /// (outside `(0.0, 1.0]`) also fall back to the default so the writer never
-    /// produces an invalid filter; `FilterWriter::new` still enforces the
-    /// `(0.0, 1.0]` contract for explicitly supplied values.
-    fn bloom_filter_fp_chance(schema: &TableSchema) -> f64 {
-        const DEFAULT_FP_CHANCE: f64 = 0.01;
-        match schema.comments.get("bloom_filter_fp_chance") {
-            Some(raw) => match raw.trim().parse::<f64>() {
-                Ok(v) if v > 0.0 && v <= 1.0 => v,
-                _ => DEFAULT_FP_CHANCE,
-            },
-            None => DEFAULT_FP_CHANCE,
-        }
-    }
-
-    /// Compute CRC32 checksum of a file
-    /// Compute the CRC32 digest of a finished component by streaming it through
-    /// a fixed-size buffer.
-    ///
-    /// Reads the file in 64 KiB pieces rather than slurping the whole component
-    /// into one `Vec` (`tokio::fs::read`). For a multi-GB merge output the
-    /// digest pass would otherwise allocate a buffer the size of the entire
-    /// Data.db, making end-to-end compaction peak memory scale with the output
-    /// size — defeating the bounded compaction-read work of issue #827. The
-    /// CRC32 is order-sensitive but chunk-size-agnostic, so streaming yields the
-    /// identical digest.
-    async fn compute_crc32(file_path: &PathBuf) -> Result<u32> {
-        use tokio::io::AsyncReadExt;
-
-        const DIGEST_READ_BUFFER_BYTES: usize = 64 * 1024;
-
-        let mut file = tokio::fs::File::open(file_path).await?;
-        let mut hasher = crc32fast::Hasher::new();
-        let mut buffer = vec![0u8; DIGEST_READ_BUFFER_BYTES];
-        loop {
-            let n = file.read(&mut buffer).await?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buffer[..n]);
-        }
-        Ok(hasher.finalize())
     }
 }
 

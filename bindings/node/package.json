@@ -16,7 +16,6 @@
   },
   "files": [
     "index.js",
-    "index.d.ts",
     "lib",
     "*.node",
     "README.md",

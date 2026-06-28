@@ -298,5 +298,15 @@ delta-scan = []
 # adds overhead). See docs/profiling.md.
 dhat-heap = []
 
+# Scan-offload thread-identity probe (issue #1143 regression guard). TEST-ONLY,
+# NOT in defaults: gates the `scan_stream_windowed::probe` module, the pub
+# visibility of `scan_stream_windowed`, and the single `record_parse_thread()`
+# call-site in the windowed parse half. With this OFF, no probe code, statics, or
+# public surface compile into the build — verify with
+# `cargo build -p cqlite-core` that nothing probe-related is referenced. The
+# guard test (tests/issue_1143_scan_offload_thread.rs) only compiles under this
+# feature; the agent gate runs it via a dedicated component.
+scan-offload-probe = []
+
 [lints]
 workspace = true

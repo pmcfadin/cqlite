@@ -22,8 +22,10 @@
 //! ## Note on CRCs
 //!
 //! Per-chunk CRC32 checksums are stored INLINE in Data.db, not in CompressionInfo.db.
-//! Each compressed chunk in Data.db is followed by a 4-byte little-endian CRC32 of the
-//! compressed bytes. See: CompressedSequentialWriter.java:192.
+//! Each compressed chunk in Data.db is followed by a 4-byte big-endian CRC32 of the
+//! compressed bytes. See: CompressedSequentialWriter.java:192. The big-endian byte
+//! order was verified against 356 real Cassandra 5.0 inline trailers by the
+//! `sstable_parity_compression_info_test` parity test (issue #986 / #1086).
 //! There is NO trailing metadata CRC in CompressionInfo.db.
 
 use crate::{Error, Result};
