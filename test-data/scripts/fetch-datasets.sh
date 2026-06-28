@@ -18,7 +18,12 @@ elif command -v shasum >/dev/null 2>&1; then
   ACTUAL="$(shasum -a 256 /tmp/${ASSET} | awk '{print $1}')"
   test "${ACTUAL}" = "${SHA256_EXPECTED}" || { echo "SHA256 mismatch"; exit 1; }
 else
-  echo "Warning: no sha256 checker found; skipping verification" >&2
+  # Fail closed (issue #1024): a missing checksum tool must NOT let an
+  # unverified asset through. In CI an unverifiable dataset is a gate failure,
+  # not a warning — there is no safe way to admit the asset without confirming
+  # its provenance against the pinned SHA256.
+  echo "ERROR: no sha256 checker found (need sha256sum or shasum) — cannot verify dataset provenance" >&2
+  exit 1
 fi
 
 tar -xzf /tmp/${ASSET} -C . --exclude='*/._*' --exclude='._*' --exclude='*/.DS_Store' --exclude='.DS_Store'
