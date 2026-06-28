@@ -419,7 +419,7 @@ fn cql_table_names(cql: &str) -> std::collections::BTreeSet<String> {
         // Skip "if not exists" and whitespace; the next token is the table name.
         let tokens: Vec<&str> = rest.split_whitespace().collect();
         let mut idx = 0;
-        if tokens.get(0).map(|t| t.eq_ignore_ascii_case("if")) == Some(true) {
+        if tokens.first().map(|t| t.eq_ignore_ascii_case("if")) == Some(true) {
             idx = 3; // if not exists
         }
         if let Some(name) = tokens.get(idx) {
