@@ -386,12 +386,34 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
         "absent_data_coordination_test",
     ];
 
+    // Behavioral fast-path assertion (issue #1149).
+    //
+    // The fixture's SSTable is `nb` (BIG) format with a Filter.db, so a `get()`
+    // for an absent key runs the bloom pre-check in `SSTableReader::get`: when the
+    // filter reports the key as absent it returns `Ok(None)` immediately, BEFORE
+    // the summary/index lookup and WITHOUT falling through to the sequential
+    // `scan_for_key` path. The previous test asserted this short-circuit
+    // indirectly via an absolute `<100µs` wall-clock threshold, which is
+    // load-sensitive and flaked under machine load (115µs/180µs after a heavy
+    // compile) while passing cleanly when idle.
+    //
+    // We assert the short-circuit *directly* through the existing public probe
+    // `SSTableReader::scan_for_key_call_count()` (the process-global
+    // `SCAN_FOR_KEY_CALLS` counter, issue #831): a bloom-pruned absent-key lookup
+    // never reaches `scan_for_key`, so the counter must not advance across the
+    // call. This is deterministic and immune to CPU load — a regression that
+    // stops the bloom filter from short-circuiting (e.g. always falls through to
+    // a sequential scan) bumps the counter and fails here, which the wall-clock
+    // threshold could only catch by luck. Timing is kept as a non-asserting
+    // diagnostic print only.
     for key_str in &non_existent_keys {
         let test_key = RowKey::from(key_str.as_bytes());
 
+        let scans_before = SSTableReader::scan_for_key_call_count();
         let start_time = Instant::now();
         let result = reader.get(&table_id, &test_key).await?;
         let lookup_duration = start_time.elapsed();
+        let scans_after = SSTableReader::scan_for_key_call_count();
 
         // Should be None for non-existent keys
         assert!(
@@ -399,18 +421,28 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
             "Non-existent key should return None: {key_str}"
         );
 
-        // Bloom filter should make this extremely fast
-        // (should skip summary/index lookup entirely)
-        assert!(
-            lookup_duration.as_micros() < 100,
-            "Bloom filter should make non-existent key lookup very fast: {:?}μs for {}",
-            lookup_duration.as_micros(),
+        // Bloom filter must short-circuit: the absent-key lookup returns without
+        // ever invoking the sequential scan fallback, so the global
+        // `scan_for_key` counter is unchanged across this `get()`.
+        assert_eq!(
+            scans_after, scans_before,
+            "Bloom filter should short-circuit absent-key lookup before scan_for_key \
+             (counter advanced by {} for key {}); the bloom fast path regressed",
+            scans_after - scans_before,
             key_str
+        );
+
+        // Non-asserting diagnostic: the fast path is also expected to be quick,
+        // but we no longer gate the test on an absolute wall-clock threshold
+        // (issue #1149 — that assertion flaked under load).
+        println!(
+            "  absent-key '{}' short-circuited in {:?} (no scan_for_key)",
+            key_str, lookup_duration
         );
     }
 
     println!(
-        "✅ Bloom/summary/index coordination verified - all non-existent lookups were efficient"
+        "✅ Bloom/summary/index coordination verified - all non-existent lookups short-circuited the bloom fast path"
     );
 
     // Test with potentially existing keys (bloom might pass, then use summary/index)
