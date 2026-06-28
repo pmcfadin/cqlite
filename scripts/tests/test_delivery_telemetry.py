@@ -104,6 +104,47 @@ class RecordTests(unittest.TestCase):
             self.assertFalse(ledger.exists() and ledger.read_text().strip())
 
 
+    def test_record_refuses_duplicate_issue(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ledger = tmp / "ledger.jsonl"
+            base = ["record", "--ledger", str(ledger),
+                    "--issue", "42", "--pr", "7", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0", "--rework", "0",
+                    "--from-json", _from_json_file(tmp)]
+            self.assertEqual(dt.main(base), 0)
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                self.assertEqual(dt.main(base), 1)         # second stamp refused
+            self.assertIn("already has a ledger record", err.getvalue())
+            self.assertEqual(dt.main(base + ["--allow-duplicate"]), 0)  # explicit override
+            lines = [l for l in ledger.read_text().splitlines() if l.strip()]
+            self.assertEqual(len(lines), 2)
+
+    def test_routing_required_when_not_determinable(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp = Path(d)
+            ghfields = tmp / "ghfields.json"
+            ghfields.write_text(json.dumps({
+                "created_at": "2026-06-10T00:00:00Z",
+                "pr_opened_at": "2026-06-10T01:00:00Z",
+                "merged_at": "2026-06-10T03:00:00Z",
+                "closed_at": "2026-06-10T03:05:00Z",
+                "priority": "P2", "routing": None,    # neither label present
+            }))
+            with self.assertRaises(SystemExit):
+                dt.main([
+                    "record", "--ledger", str(tmp / "l.jsonl"),
+                    "--issue", "1", "--pr", "2", "--slug", "x",
+                    "--gate", "pass", "--gate-runs", "1",
+                    "--claim-collisions", "0", "--rebase-events", "0",
+                    "--roborev-findings", "0", "--rework", "0",
+                    "--from-json", str(ghfields),
+                ])
+
+
 class LintTests(unittest.TestCase):
     def test_clean_ledger_passes(self):
         rc = dt.main(["lint", "--ledger", str(FIXTURES / "sample-ledger.jsonl")])
@@ -120,6 +161,29 @@ class LintTests(unittest.TestCase):
                 rc = dt.main(["lint", "--ledger", str(ledger)])
             self.assertEqual(rc, 1)
             self.assertIn("date-time", err.getvalue())
+
+    def test_unknown_field_is_rejected(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            rec = json.loads((FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0])
+            rec["reworkk"] = 9    # typo'd field; intended 'rework' silently absent otherwise
+            ledger.write_text(json.dumps(rec) + "\n")
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+            self.assertIn("unknown field 'reworkk'", err.getvalue())
+
+    def test_duplicate_issue_is_flagged(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            line = (FIXTURES / "sample-ledger.jsonl").read_text().splitlines()[0]
+            ledger.write_text(line + "\n" + line + "\n")   # same issue twice
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)
+            self.assertIn("duplicate record for issue", err.getvalue())
 
     def test_malformed_line_fails_with_line_number(self):
         with tempfile.TemporaryDirectory() as d:

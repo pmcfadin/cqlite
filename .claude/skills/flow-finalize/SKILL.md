@@ -29,16 +29,17 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    values (a counter you did not observe is an error, never a fabricated `0`):
    ```bash
    python3 scripts/delivery-telemetry.py record \
-     --issue <N> --pr <pr> --slug <slug> \
+     --issue <N> --pr <pr> --slug <slug> --routing design|oracle \
      --gate pass --gate-runs <how many times you ran agent-gate.sh> \
      --claim-collisions <rejected claim pushes> --rebase-events <rebases/conflict resolutions> \
      --roborev-findings <roborev findings raised> --rework <re-open / re-review rounds>
    git -C <repo-root> add docs/reports/delivery-telemetry.jsonl
    git -C <repo-root> commit -m "telemetry(#<N>): stamp delivery ledger" && git -C <repo-root> push
    ```
-   (`routing`/`priority` default from the issue's labels; pass `--routing`/`--priority` to override. The
-   live ledger lives on `main`, so stamp it on the root checkout / via a tiny follow-up commit.) Confirm
-   with `python3 scripts/delivery-telemetry.py lint`.
+   `--routing` is required (it is never inferred); `--priority` defaults from the issue's `P?` label
+   (pass it to override). `record` refuses a second stamp for the same issue (pass `--allow-duplicate` to
+   override). The live ledger lives on `main`, so stamp it on the root checkout / via a tiny follow-up
+   commit. Confirm with `python3 scripts/delivery-telemetry.py lint`.
 5. **Set the board to Done + release the claim.** The PR-merged / issue-closed server-side automation
    should already have moved the Project item to `Status=Done` (it fires even when you merge from the
    phone/web — no `flow-*` run needed); if it hasn't, set it yourself, else flip the `status:*` label in

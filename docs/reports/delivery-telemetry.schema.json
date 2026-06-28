@@ -4,6 +4,7 @@
   "title": "Delivery telemetry ledger record (v1)",
   "description": "One record per completed delivery-pipeline issue. Authoritative data only: every field is an observed event (GitHub timestamp/label or a supplied run counter) or arithmetic over authoritative timestamps. No value is inferred, estimated, or guessed.",
   "type": "object",
+  "additionalProperties": false,
   "required": [
     "schema",
     "issue",
@@ -39,6 +40,7 @@
     "cycle_time_s": { "type": "integer", "minimum": 0, "description": "closed_at - created_at, in seconds (arithmetic over authoritative timestamps)." },
     "phase_s": {
       "type": "object",
+      "additionalProperties": false,
       "required": ["to_pr_s", "review_s"],
       "properties": {
         "to_pr_s": { "type": "integer", "minimum": 0, "description": "created_at -> pr_opened_at, seconds." },

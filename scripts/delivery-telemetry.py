@@ -102,10 +102,17 @@ def _validate(value, schema: dict, path: str, errors: list) -> None:
         except ValueError:
             errors.append(f"{path}: {value!r} is not a valid RFC-3339 date-time")
     if schema.get("type") == "object" and isinstance(value, dict):
+        props = schema.get("properties", {})
         for req in schema.get("required", []):
             if req not in value:
                 errors.append(f"{path}: missing required field '{req}'")
-        for key, subschema in schema.get("properties", {}).items():
+        # additionalProperties: false -> a typo'd/extra key (e.g. 'reworkk') is an error,
+        # not silently ignored (keeps the schema the source of truth).
+        if schema.get("additionalProperties") is False:
+            for key in value:
+                if key not in props:
+                    errors.append(f"{path}: unknown field '{key}' (not in schema)")
+        for key, subschema in props.items():
             if key in value:
                 _validate(value[key], subschema, f"{path}.{key}" if path else key, errors)
 
@@ -148,7 +155,15 @@ def _github_fields(issue: int, pr: int) -> dict:
         check=True, capture_output=True, text=True).stdout)
     labels = [l["name"] for l in issue_json.get("labels", [])]
     priority = next((l for l in labels if re.fullmatch(r"P[0-3]", l)), None)
-    routing = "oracle" if "oracle" in labels else "design"
+    # Routing is authoritative, not inferred: set it ONLY from an explicit label. If
+    # neither is present, leave it None so build_record requires --routing rather than
+    # silently guessing "design".
+    if "oracle" in labels:
+        routing = "oracle"
+    elif "design" in labels:
+        routing = "design"
+    else:
+        routing = None
     return {
         "created_at": issue_json["createdAt"],
         "closed_at": issue_json["closedAt"],
@@ -186,6 +201,9 @@ def build_record(args, gh_fields: dict) -> dict:
     routing = args.routing or gh_fields.get("routing")
     if priority is None:
         raise SystemExit("error: priority not found on the issue and not supplied via --priority")
+    if routing is None:
+        raise SystemExit("error: routing not determinable from labels and not supplied via "
+                         "--routing {design|oracle} (authoritative-data-only: never inferred)")
 
     return {
         "schema": 1,
@@ -229,6 +247,22 @@ def cmd_record(args) -> int:
         return 1
 
     ledger = Path(args.ledger)
+    # Idempotency: one record per completed issue. A re-run / double finalize must not
+    # append a second record (which would double-count that issue in retro). Refuse
+    # unless --allow-duplicate is given.
+    if ledger.exists():
+        for raw in ledger.read_text().splitlines():
+            if not raw.strip():
+                continue
+            try:
+                existing = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
+            if existing.get("issue") == record["issue"] and not args.allow_duplicate:
+                print(f"error: issue #{record['issue']} already has a ledger record "
+                      f"(pass --allow-duplicate to override)", file=sys.stderr)
+                return 1
+
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a") as fh:
         fh.write(json.dumps(record, sort_keys=True) + "\n")
@@ -246,6 +280,7 @@ def cmd_lint(args) -> int:
         return 1
 
     bad = 0
+    seen_issues: dict = {}
     for lineno, raw in enumerate(ledger.read_text().splitlines(), start=1):
         if not raw.strip():
             continue
@@ -260,6 +295,14 @@ def cmd_lint(args) -> int:
             bad += 1
             for e in errors:
                 print(f"line {lineno}: {e}", file=sys.stderr)
+        # one record per completed issue — a duplicate 'issue' skews retro
+        issue = record.get("issue")
+        if issue in seen_issues:
+            bad += 1
+            print(f"line {lineno}: duplicate record for issue #{issue} "
+                  f"(first seen line {seen_issues[issue]})", file=sys.stderr)
+        elif issue is not None:
+            seen_issues[issue] = lineno
 
     if bad:
         print(f"FAIL: {bad} malformed record(s)", file=sys.stderr)
@@ -299,13 +342,21 @@ def _retro_marker(category: str) -> str:
     return f"<!-- RETRO:{category} -->"
 
 
+_FLOW_META_LIMIT = 500
+
+
 def _open_flow_meta_issues(args) -> list:
     if args.open_issues_json:
         return json.loads(Path(args.open_issues_json).read_text())
-    return json.loads(subprocess.run(
+    issues = json.loads(subprocess.run(
         ["gh", "issue", "list", "--label", "flow-meta", "--state", "open",
-         "--json", "number,title,body", "--limit", "200"],
+         "--json", "number,title,body", "--limit", str(_FLOW_META_LIMIT)],
         check=True, capture_output=True, text=True).stdout)
+    # No silent cap: if the lookup hit the limit, dedupe may be incomplete — say so loudly.
+    if len(issues) >= _FLOW_META_LIMIT:
+        print(f"warning: open flow-meta lookup hit the {_FLOW_META_LIMIT}-issue cap — "
+              f"dedupe may miss an existing tracker beyond it", file=sys.stderr)
+    return issues
 
 
 def cmd_retro(args) -> int:
@@ -395,6 +446,8 @@ def build_parser() -> argparse.ArgumentParser:
     rec.add_argument("--rework", type=int, default=None)
     rec.add_argument("--from-json", dest="from_json", default=None,
                      help="inject GitHub-derived fields from a JSON file (else pull via gh)")
+    rec.add_argument("--allow-duplicate", dest="allow_duplicate", action="store_true",
+                     help="append even if the issue already has a record (default: refuse)")
     rec.set_defaults(func=cmd_record)
 
     lint = sub.add_parser("lint", aliases=["validate"], help="schema-validate the ledger")
