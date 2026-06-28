@@ -438,7 +438,6 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
         let mut observed_zero_delta = false;
         let mut last_delta = u64::MAX;
         let mut last_duration = std::time::Duration::ZERO;
-        let mut last_result_none = false;
         for _ in 0..5 {
             let scans_before = SSTableReader::scan_for_key_call_count();
             let start_time = Instant::now();
@@ -446,19 +445,20 @@ async fn test_golden_path_bloom_summary_index_coordination() -> Result<()> {
             last_duration = start_time.elapsed();
             let scans_after = SSTableReader::scan_for_key_call_count();
 
-            last_result_none = result.is_none();
+            // Should be None for non-existent keys — checked on EVERY attempt, not
+            // just the last, so a spurious `Some` from any retry can't be masked by
+            // a later `None` (a `Some` here would be a real correctness bug).
+            assert!(
+                result.is_none(),
+                "Non-existent key should return None: {key_str}"
+            );
+
             last_delta = scans_after.saturating_sub(scans_before);
             if last_delta == 0 {
                 observed_zero_delta = true;
                 break;
             }
         }
-
-        // Should be None for non-existent keys.
-        assert!(
-            last_result_none,
-            "Non-existent key should return None: {key_str}"
-        );
 
         // Bloom filter must short-circuit: at least one absent-key lookup returned
         // without invoking the sequential scan fallback (counter delta 0). A
