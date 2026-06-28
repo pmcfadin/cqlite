@@ -53,7 +53,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::{Arc, Barrier};
 use std::thread::ThreadId;
-use std::time::Duration;
 
 use cqlite_core::ingestion::{ingest, IngestionConfig};
 use cqlite_core::query::result::StreamingConfig;
@@ -206,9 +205,12 @@ async fn streaming_scan_parse_runs_off_async_worker_pool() {
     // then read back the thread that ran the parse.
     scan_offload_probe::arm();
     let rows = drain_one_scan(&db, &sql).await;
-    // Small settle: the parse task records its thread just before the stream
-    // closes; ensure the record is visible before we read it.
-    tokio::time::sleep(Duration::from_millis(20)).await;
+    // No settle sleep needed: `record_parse_thread()` stores the ThreadId under
+    // the probe Mutex strictly BEFORE the parse closure drops its output sender,
+    // and `drain_one_scan` returns only after the stream ends — which is observed
+    // only once every sender (including that one) has dropped. That channel-close
+    // happens-before ordering already guarantees the recorded thread is visible
+    // to this read (issue #1143 finding 3).
     let parse_thread = scan_offload_probe::recorded_parse_thread();
     scan_offload_probe::disarm();
 
