@@ -307,7 +307,8 @@ def cmd_record(args) -> int:
                 print(f"warning: existing ledger line {lineno} is unparseable — run `lint`",
                       file=sys.stderr)
                 continue
-            if existing.get("issue") == record["issue"] and not args.allow_duplicate:
+            if (isinstance(existing, dict) and existing.get("issue") == record["issue"]
+                    and not args.allow_duplicate):
                 print(f"error: issue #{record['issue']} already has a ledger record "
                       f"(pass --allow-duplicate to override)", file=sys.stderr)
                 return 1
@@ -344,9 +345,10 @@ def cmd_lint(args) -> int:
             bad += 1
             for e in errors:
                 print(f"line {lineno}: {e}", file=sys.stderr)
-        # one record per completed issue — a duplicate 'issue' skews retro
-        issue = record.get("issue")
-        if issue in seen_issues:
+        # one record per completed issue — a duplicate 'issue' skews retro. A non-object
+        # line already produced a type error above; skip the bookkeeping (no .get crash).
+        issue = record.get("issue") if isinstance(record, dict) else None
+        if issue is not None and issue in seen_issues:
             bad += 1
             print(f"line {lineno}: duplicate record for issue #{issue} "
                   f"(first seen line {seen_issues[issue]})", file=sys.stderr)

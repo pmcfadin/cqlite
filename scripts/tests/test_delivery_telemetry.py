@@ -242,6 +242,15 @@ class LintTests(unittest.TestCase):
             self.assertEqual(rc, 1)
             self.assertIn("duplicate record for issue", err.getvalue())
 
+    def test_non_object_line_is_clean_error_not_crash(self):
+        with tempfile.TemporaryDirectory() as d:
+            ledger = Path(d) / "ledger.jsonl"
+            ledger.write_text("[1, 2, 3]\n42\nnull\n")  # valid JSON, not objects
+            err = io.StringIO()
+            with contextlib.redirect_stderr(err):
+                rc = dt.main(["lint", "--ledger", str(ledger)])
+            self.assertEqual(rc, 1)                 # clean failure, no traceback
+
     def test_malformed_line_fails_with_line_number(self):
         with tempfile.TemporaryDirectory() as d:
             ledger = Path(d) / "ledger.jsonl"
