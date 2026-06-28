@@ -35,14 +35,16 @@
 #     [--dry-run]                   (print actions, change nothing)
 #
 # --dry-run previews the destructive git actions but STILL honors the refusal
-# guards: a dirty/unpushed worktree or an unmerged tip aborts with exit 3/4 even
-# in dry-run, since those are the conditions worth surfacing before any real run.
+# guards: a dirty/unpushed worktree, an unmerged tip, or a remote-query failure
+# aborts with exit 3/4/5 even in dry-run — those are the conditions worth
+# surfacing before any real run.
 #
 # EXIT CODES
 #   0  cleanup completed (or nothing to do)
 #   2  refused: >1 lock for the issue (1:1:1:1 violation)
 #   3  refused: target worktree is dirty / has unpushed commits
 #   4  refused: target branch tip not contained in main (use --confirm-unmerged)
+#   5  refused: remote query (ls-remote) failed — fail closed, changed nothing
 #   64 usage error
 #
 set -euo pipefail
@@ -96,7 +98,13 @@ git_root() { git -C "$REPO_ROOT" "$@"; }
 
 run() {
   if [ "$DRY_RUN" -eq 1 ]; then
-    echo "DRY-RUN: $*" >&2
+    # Render the internal git_root wrapper as the real command for an honest preview.
+    if [ "${1:-}" = "git_root" ]; then
+      shift
+      echo "DRY-RUN: git -C $REPO_ROOT $*" >&2
+    else
+      echo "DRY-RUN: $*" >&2
+    fi
   else
     "$@"
   fi
@@ -106,11 +114,11 @@ run() {
 # Guard 2: exactly one issue-<N>-* lock on origin (1:1:1:1).
 # FAIL CLOSED: a remote query error (auth/network/rate-limit) must NOT look like
 # "0 locks" — that would bypass the very guard the #1143 incident created. Capture
-# ls-remote in a checked statement and refuse (exit 3) on failure.
+# ls-remote in a checked statement and refuse (exit 5) on failure.
 # ---------------------------------------------------------------------------
 if ! locks_raw="$(git_root ls-remote --heads "$REMOTE" "issue-${ISSUE}-*" 2>/dev/null)"; then
   echo "$prog: REFUSED — cannot query $REMOTE for 'issue-${ISSUE}-*' locks (remote error). Failing closed." >&2
-  exit 3
+  exit 5
 fi
 # bash 3.2 compatible (no `mapfile`)
 LOCKS=()
@@ -152,7 +160,7 @@ done < <(git_root worktree list --porcelain)
 # else a blip would read as "branch already deleted, nothing to do".
 if ! merged_raw="$(git_root ls-remote --heads "$REMOTE" "$MERGED_BRANCH" 2>/dev/null)"; then
   echo "$prog: REFUSED — cannot query $REMOTE for '$MERGED_BRANCH' (remote error). Failing closed." >&2
-  exit 3
+  exit 5
 fi
 remote_sha="$(printf '%s\n' "$merged_raw" | awk 'NF{print $1}')"
 remote_has_branch=0

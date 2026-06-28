@@ -259,9 +259,28 @@ add_branch_worktree "$WORK" "issue-1213-feature" "$T/wt" ""
 rc=0
 bash "$CLEANUP" --issue 1213 --merged-branch issue-1213-feature --remote no-such-remote \
   --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
-[ "$rc" -eq 3 ] && ok "exit 3 — fail closed on remote query error" || fail "expected exit 3, got $rc"
+[ "$rc" -eq 5 ] && ok "exit 5 — fail closed on remote query error" || fail "expected exit 5, got $rc"
 [ -d "$T/wt" ] && ok "worktree intact (no fail-open mutation)" || fail "worktree removed on remote error"
 remote_branches "$WORK" | grep -qx "issue-1213-feature" && ok "origin branch intact" || fail "branch deleted on remote error"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 16: ff/merge-commit path (tip in main) → cleanup WITHOUT --confirm-unmerged"
+# ===========================================================================
+# Exercises the tip_in_main=1 / local -d branch that the squash tests never hit.
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1214-feature" "$T/wt" ""
+( cd "$WORK" || exit 1
+  g fetch -q origin issue-1214-feature
+  g merge -q --no-ff -m "merge 1214" origin/issue-1214-feature
+  g push -q origin main )   # origin tip now contained in main
+rc=0
+bash "$CLEANUP" --issue 1214 --merged-branch issue-1214-feature \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 0 ] && ok "exit 0 on merged tip without --confirm-unmerged" || fail "expected exit 0, got $rc"
+[ ! -d "$T/wt" ] && ok "worktree removed" || fail "worktree not removed"
+remote_branches "$WORK" | grep -qx "issue-1214-feature" && fail "origin branch not deleted" || ok "origin branch deleted"
+g -C "$WORK" show-ref --verify --quiet refs/heads/issue-1214-feature && fail "local branch not deleted" || ok "local branch deleted (-d)"
 rm -rf "$T"
 
 echo ""
