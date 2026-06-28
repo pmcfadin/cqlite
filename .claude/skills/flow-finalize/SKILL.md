@@ -9,8 +9,13 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
 
 ## Steps
 
-1. **Confirm the merge.** `gh pr view <pr> --json state,mergeCommit` → state MUST be `MERGED`. If not,
-   stop — finalize only runs post-merge.
+1. **Confirm the merge + capture the merged branch.** state MUST be `MERGED`; the cleanup in step 5 keys
+   off the merged PR's **`headRefName`** (NOT a `issue-<N>-*` glob — see the #1162 guardrails below):
+   ```bash
+   gh pr view <pr> --json state,mergeCommit,headRefName
+   # state MUST be MERGED; record headRefName as <merged-branch> for step 5.
+   ```
+   If not merged, stop — finalize only runs post-merge.
 2. **Update the root checkout's main.** Do NOT `git switch main` from a worktree — `main` is checked out
    in the repo root, so the switch is rejected. Operate on the root explicitly:
    ```bash
@@ -35,13 +40,22 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    Releasing the claim = removing the `issue-<N>-<slug>` branch from origin (the cross-machine lock); the
    cleanup below does exactly that. After finalize, nothing for this issue may remain `In Progress`/`In
    Review` and no `issue-<N>-*` branch may remain on origin.
-5. **Remove the worktree + branch (releases the claim lock):**
+5. **Remove the worktree + branch via the guarded cleanup (releases the claim lock).** Do NOT hand-glob
+   `issue-<N>-*` or blindly `--force` — that destroyed an unrelated active claim on 2026-06-27 (the #1143
+   incident: PR merged from `issue-1143-read-p99-regression`, glob also matched + deleted the separate
+   active `issue-1143-scan-window-offload`). Use the guardrailed script instead — it targets ONLY the
+   merged PR's branch, refuses on >1 lock for the issue (1:1:1:1 violation), and refuses to remove a
+   dirty/unpushed worktree:
    ```bash
-   git worktree remove .claude/worktrees/issue-<N>-<slug> --force
-   git branch -D issue-<N>-<slug> 2>/dev/null
-   git push origin --delete issue-<N>-<slug> 2>/dev/null   # deletes the origin claim lock
+   # --confirm-unmerged: a squash-merge leaves the branch tip out of `main`; step 1
+   # already verified PR state=MERGED, which IS the authority the flag stands for.
+   scripts/flow/finalize-cleanup.sh --issue <N> --merged-branch <merged-branch> --confirm-unmerged
+   # Add --dry-run first to preview. Exit codes: 0 ok · 2 multi-lock · 3 dirty/unpushed · 4 unmerged tip.
    ```
-   Confirm the lock is gone: `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
+   On a non-zero exit the script changed nothing and surfaced why — resolve the 1:1:1:1 violation or the
+   dirty worktree by hand; never force past it. Confirm the lock is gone afterward:
+   `git ls-remote --heads origin "issue-<N>-*"` returns nothing.
+   (Regression coverage: `scripts/flow/tests/finalize-cleanup.test.sh` encodes the #1143 scenario.)
 6. **Close the issue** with a traceable comment referencing the merged PR + commit (only if its
    acceptance criteria are fully met — never close an epic):
    ```bash
