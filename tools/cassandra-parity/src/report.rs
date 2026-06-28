@@ -277,6 +277,12 @@ fn render_evidence_group(
                 line(&format!("  - Normalization: {norm}"));
             }
         }
+        // delta_scan canonical-semantic scenarios are JSONL parity only; surface
+        // that byte-for-byte Data.db backing is still a follow-up so the report
+        // does not read as byte parity (issue #995, AC3/AC7).
+        if x.capability == "delta_scan" {
+            line("  - Byte-for-byte: not yet — needs Data.db backing (follow-up under epic #969).");
+        }
     }
     line("");
 }
