@@ -110,10 +110,19 @@ describe('Platform loader (Issue #571)', () => {
     test('reports linux-<arch>-musl on a musl host (no gnu/musl contradiction)', () => {
       // Force the musl branch by faking the libc probe used by isMusl():
       // process.report.getReport().header.glibcVersionRuntime === undefined.
+      //
+      // `process.report` is a getter-only accessor, so a plain
+      // `process.report = {...}` assignment is SILENTLY IGNORED — on a glibc
+      // host (e.g. ubuntu CI on Node 20) the real report still reports a
+      // defined glibcVersionRuntime, isMusl() returns false, and no musl error
+      // is thrown (the #1178 regression: green on a musl-less macOS host but
+      // red in CI). Redefine the property with Object.defineProperty so the
+      // fake actually takes effect on every Node version.
       const preamble = `
-        process.report = {
-          getReport: () => ({ header: {} }),
-        };
+        Object.defineProperty(process, 'report', {
+          value: { getReport: () => ({ header: {} }) },
+          configurable: true,
+        });
       `;
       const { threw, stderr } = loadUnderFakePlatform('linux', 'x64', preamble);
       expect(threw).toBe(true);
