@@ -25,7 +25,7 @@ build_sandbox() {
   local root="$1"
   mkdir -p "$root"
   g init --bare -q "$root/origin.git"
-  g clone -q "$root/origin.git" "$root/work"
+  g clone -q "$root/origin.git" "$root/work" 2>/dev/null
   ( cd "$root/work" || exit 1
     echo seed > seed.txt
     g add seed.txt
@@ -113,12 +113,13 @@ bash "$CLEANUP" --issue 1202 --merged-branch issue-1202-feature \
 rm -rf "$T"
 
 # ===========================================================================
-echo "TEST 5: happy path (squash-merge semantics) → worktree + origin lock removed"
+echo "TEST 5: happy path (squash-merge, --confirm-unmerged) → worktree + origin lock removed"
 # ===========================================================================
 T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
 add_branch_worktree "$WORK" "issue-1203-feature" "$T/wt" ""
-# clean worktree, branch pushed; tip NOT in main (squash). Confirmed-merged via --merged-branch.
-bash "$CLEANUP" --issue 1203 --merged-branch issue-1203-feature \
+# clean worktree, branch pushed; tip NOT in main (squash). flow-finalize passes
+# --confirm-unmerged after verifying PR state=MERGED.
+bash "$CLEANUP" --issue 1203 --merged-branch issue-1203-feature --confirm-unmerged \
   --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1; rc=$?
 [ "$rc" -eq 0 ] && ok "exit 0 on happy path" || fail "expected exit 0, got $rc"
 [ ! -d "$T/wt" ] && ok "clean worktree removed" || fail "worktree not removed"
@@ -139,6 +140,46 @@ bash "$CLEANUP" --issue 1204 --merged-branch issue-1204-merged \
   --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
 [ "$rc" -eq 2 ] && ok "exit 2 — ambiguous pair refused, not guessed" || fail "expected exit 2, got $rc"
 [ -d "$T/wt-x" ] && ok "active sibling worktree survives" || fail "sibling worktree removed"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 7: no upstream + no origin branch + HEAD ahead of main → refuse (exit 3)"
+# ===========================================================================
+# The blind-spot case: a branch created locally, committed, but never pushed
+# (no @{u}, no origin branch). The script must NOT silently remove it.
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+( cd "$WORK" || exit 1
+  g worktree add -q -b issue-1205-local-only "$T/wt" main
+  ( cd "$T/wt" || exit 1; echo x > f.txt; g add f.txt; g commit -qm "local only, never pushed" )
+)
+rc=0
+bash "$CLEANUP" --issue 1205 --merged-branch issue-1205-local-only \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 3 ] && ok "exit 3 — no-upstream unpushed work refused" || fail "expected exit 3, got $rc"
+[ -d "$T/wt" ] && ok "local-only worktree survives" || fail "local-only worktree removed — REGRESSION"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 8: origin branch, unmerged tip, no --confirm-unmerged → refuse (exit 4)"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1206-feature" "$T/wt" ""
+rc=0
+bash "$CLEANUP" --issue 1206 --merged-branch issue-1206-feature \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1 || rc=$?
+[ "$rc" -eq 4 ] && ok "exit 4 — unmerged origin tip refused without confirmation" || fail "expected exit 4, got $rc"
+remote_branches "$WORK" | grep -qx "issue-1206-feature" && ok "origin branch survives (Guard 4)" || fail "origin branch deleted without confirmation"
+rm -rf "$T"
+
+# ===========================================================================
+echo "TEST 9: same as 8 but with --confirm-unmerged → deletes (exit 0)"
+# ===========================================================================
+T=$(mktemp -d); build_sandbox "$T"; WORK="$T/work"
+add_branch_worktree "$WORK" "issue-1207-feature" "$T/wt" ""
+bash "$CLEANUP" --issue 1207 --merged-branch issue-1207-feature --confirm-unmerged \
+  --repo-root "$WORK" --worktrees-dir "$T" >/dev/null 2>&1; rc=$?
+[ "$rc" -eq 0 ] && ok "exit 0 with --confirm-unmerged" || fail "expected exit 0, got $rc"
+remote_branches "$WORK" | grep -qx "issue-1207-feature" && fail "origin branch NOT deleted" || ok "origin branch deleted with confirmation"
 rm -rf "$T"
 
 echo ""

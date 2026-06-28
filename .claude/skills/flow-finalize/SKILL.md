@@ -47,8 +47,10 @@ You are the CQLite delivery lead. The PR for issue `#N` is **merged**. Close the
    merged PR's branch, refuses on >1 lock for the issue (1:1:1:1 violation), and refuses to remove a
    dirty/unpushed worktree:
    ```bash
-   scripts/flow/finalize-cleanup.sh --issue <N> --merged-branch <merged-branch>   # <merged-branch> from step 1
-   # Add --dry-run first to preview. Exit codes: 0 ok · 2 multi-lock refused · 3 dirty/unpushed refused.
+   # --confirm-unmerged: a squash-merge leaves the branch tip out of `main`; step 1
+   # already verified PR state=MERGED, which IS the authority the flag stands for.
+   scripts/flow/finalize-cleanup.sh --issue <N> --merged-branch <merged-branch> --confirm-unmerged
+   # Add --dry-run first to preview. Exit codes: 0 ok · 2 multi-lock · 3 dirty/unpushed · 4 unmerged tip.
    ```
    On a non-zero exit the script changed nothing and surfaced why — resolve the 1:1:1:1 violation or the
    dirty worktree by hand; never force past it. Confirm the lock is gone afterward:
