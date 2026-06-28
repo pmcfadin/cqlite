@@ -41,6 +41,30 @@
 //! Nothing buffers the whole file; live heap stays `window +
 //! RAW_CHUNK_CHANNEL_CAP` chunks.
 //!
+//! ## Cancellation (issue #1143 finding 2)
+//!
+//! The outer scan runs inside the `tokio::spawn` in `scan_stream`; if that task
+//! is dropped/cancelled at an `await`, the parse task's `JoinHandle` (held in
+//! `run_scan_stream_windowed`) is dropped too. Dropping a `spawn_blocking`
+//! `JoinHandle` DETACHES the task — it does NOT abort it (there is no portable
+//! way to interrupt a running blocking thread). The detached parse task keeps
+//! running: `raw_rx.blocking_recv()` observes the dropped `raw_tx`, and because a
+//! clean cancellation leaves `io_failed == false`, it proceeds to a final drain
+//! and `tx.blocking_send`s into `out_tx`.
+//!
+//! This is harmless in practice and needs no abort machinery: on cancellation
+//! the consumer drops the `mpsc::Receiver` (`rx`) returned by `scan_stream`, so
+//! the very first `tx.blocking_send` fails (`*broke = true`), the parse loop
+//! returns immediately, and the task — and the `reader: Arc<Self>` it holds —
+//! are released. The only window in which it can still emit is when a chunk was
+//! already in flight AND the consumer's `rx` has not yet dropped, i.e. the
+//! consumer is still reading; those rows are valid scan output, not garbage.
+//! Worst case the task lingers for one partition's parse before its
+//! `blocking_send` fails, keeping `Arc<Self>` alive only that long. Pre-#1156
+//! the parse ran inline on the cancellable async task, so this detach window is
+//! new to the offload split; it is bounded and self-terminating, so we document
+//! it rather than add abort plumbing.
+//!
 //! ## Parity
 //!
 //! The emitted set/order is byte-identical to the prior inline driver: same
