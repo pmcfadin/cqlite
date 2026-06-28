@@ -452,6 +452,11 @@ fn cql_table_names(cql: &str) -> std::collections::BTreeSet<String> {
             idx = 3; // if not exists
         }
         if let Some(name) = tokens.get(idx) {
+            // Assumes unqualified table names (deltas.cql uses `USE test_deltas;`
+            // + bare `CREATE TABLE [IF NOT EXISTS] <name>`). The alphanumeric/'_'
+            // scan stops at the first '.', so a keyspace-qualified name
+            // (`keyspace.table`) would yield the keyspace, not the table — strip a
+            // leading `keyspace.` prefix here if deltas.cql ever switches to it.
             let clean: String = name
                 .chars()
                 .take_while(|c| c.is_alphanumeric() || *c == '_')
