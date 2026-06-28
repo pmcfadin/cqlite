@@ -334,9 +334,28 @@ pub fn peek_block_count(payload: &[u8]) -> Result<u32> {
         ));
     }
     let input = &input[NB_DELETION_TIME_SIZE..];
-    let (_consumed, count_u64) = decode_vuint(input, "count")?;
-    u32::try_from(count_u64)
-        .map_err(|_| Error::Corruption("promoted index: count too large".to_string()))
+    let (consumed, count_u64) = decode_vuint(input, "count")?;
+    let count = u32::try_from(count_u64)
+        .map_err(|_| Error::Corruption("promoted index: count too large".to_string()))?;
+
+    // Apply the SAME untrusted-`count` sanity bound as `decode_promoted_index`: the
+    // count is read straight from on-disk Index.db bytes, so a corrupt payload could
+    // declare an implausible value. Every IndexInfo block consumes at least 1 byte of
+    // body plus a 4-byte trailing offset, so the remaining payload can hold at most
+    // `remaining` blocks. Surfacing a bogus `count` here would otherwise leak into
+    // `block_count()` callers (stats `total_promoted_entries`, the parity validator)
+    // even though `decode_promoted_index` would reject the same payload. Fail closed
+    // to keep the trust posture consistent (still never panics).
+    let remaining = &input[consumed..];
+    if count as usize > remaining.len() {
+        return Err(Error::Corruption(format!(
+            "promoted index: declared block count {count} exceeds remaining payload \
+             length {} bytes (corrupt: each block needs >= 1 byte plus a 4-byte \
+             trailing offset entry)",
+            remaining.len()
+        )));
+    }
+    Ok(count)
 }
 
 #[cfg(test)]
@@ -563,6 +582,29 @@ mod tests {
         assert_eq!(peek_block_count(&payload).unwrap(), 2);
         // Truncated header → Err, not panic.
         assert!(peek_block_count(&payload[..2]).is_err());
+    }
+
+    #[test]
+    fn test_peek_block_count_huge_count_short_body_returns_err() {
+        // A corrupt payload declaring a gigantic block count but carrying almost no
+        // body. peek_block_count must apply the same "count <= remaining payload"
+        // bound as decode_promoted_index and return Err (never surface the bogus
+        // count to block_count() callers).
+        let mut payload = Vec::new();
+        encode_unsigned(18, &mut payload); // headerLength
+        payload.extend_from_slice(&i32::MAX.to_be_bytes()); // LIVE ldt
+        payload.extend_from_slice(&i64::MIN.to_be_bytes()); // LIVE mfda
+        encode_unsigned(u32::MAX as u64, &mut payload); // count = ~4 billion (untrusted)
+        payload.extend_from_slice(&[0x00, 0x01, 0x02]); // tiny body, far short of count
+
+        let res = peek_block_count(&payload);
+        match res {
+            Err(Error::Corruption(msg)) => assert!(
+                msg.contains("exceeds remaining payload"),
+                "expected bound-check corruption message, got: {msg}"
+            ),
+            other => panic!("expected Error::Corruption, got {other:?}"),
+        }
     }
 
     #[test]
